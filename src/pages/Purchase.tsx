@@ -94,6 +94,9 @@ export default function PurchasePage() {
     const [historyLogs, setHistoryLogs] = useState<any[]>([]);
     const [historyLoading, setHistoryLoading] = useState(false);
 
+    // ⏳ State cho loading data (suppliers & products)
+    const [loadingData, setLoadingData] = useState(false);
+
     // Ref cho trường màu sắc để tự động focus
     const colorSelectRef = useRef<any>(null);
     // Ref cho trường chọn sản phẩm để tự động focus sau khi thêm
@@ -133,11 +136,16 @@ export default function PurchasePage() {
     const loadSuppliers = async () => {
         try {
             const result = await window.electronAPI.suppliers.getAll();
+            console.log('🏢 Suppliers API result:', result);
             if (result.success && result.data) {
+                console.log('🏢 Loaded suppliers:', result.data.length, 'items');
+                console.log('🏢 First supplier:', result.data[0]);
                 setSuppliers(result.data);
+            } else {
+                console.error('❌ Suppliers load failed:', result.error);
             }
         } catch (error) {
-            console.error('Error loading suppliers:', error);
+            console.error('❌ Error loading suppliers:', error);
         }
     };
 
@@ -174,7 +182,7 @@ export default function PurchasePage() {
         }
     };
 
-    const handleAdd = () => {
+    const handleAdd = async () => {
         setEditingPurchase(null);
         setPurchaseItems([]);
         setSelectedProductVariants([]);
@@ -188,6 +196,24 @@ export default function PurchasePage() {
                 createdBy: currentUser, // 👤 Mặc định là user đang đăng nhập
             });
         }, 0);
+
+        // ✨ Reload suppliers và products để đảm bảo data luôn fresh
+        console.log('🔄 Reloading suppliers and products...');
+        setLoadingData(true);
+        try {
+            await Promise.all([
+                loadSuppliers(),
+                loadProducts()
+            ]);
+            console.log('✅ Data loaded successfully!');
+            console.log('   Suppliers:', suppliers.length);
+            console.log('   Products:', products.length);
+        } catch (error) {
+            console.error('❌ Error loading data:', error);
+            message.error('Lỗi khi tải dữ liệu nhà cung cấp và sản phẩm');
+        } finally {
+            setLoadingData(false);
+        }
 
         setModalVisible(true);
     };
@@ -718,7 +744,13 @@ export default function PurchasePage() {
                     >
                         Lịch sử ({historyLogs.length})
                     </Button>
-                    <Button type="primary" icon={<PlusOutlined />} size="large" onClick={handleAdd}>
+                    <Button
+                        type="primary"
+                        icon={<PlusOutlined />}
+                        size="large"
+                        onClick={handleAdd}
+                        loading={loadingData}
+                    >
                         Tạo phiếu nhập
                     </Button>
                 </Space>

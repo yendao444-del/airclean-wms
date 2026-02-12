@@ -2650,7 +2650,7 @@ ipcMain.handle('update:check', async () => {
     }
 });
 
-// Tải và cài đặt bản cập nhật
+// Tải và cài đặt bản cập nhật (OPTIMIZED VERSION)
 ipcMain.handle('update:download', async (event, downloadUrl) => {
     try {
         const appPath = path.join(__dirname, '..');
@@ -2662,7 +2662,9 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
         if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true });
         fs.mkdirSync(tempDir, { recursive: true });
 
-        // Download file zip
+        console.log('⬇️ Starting download from:', downloadUrl);
+
+        // Download file zip với progress tracking
         await new Promise((resolve, reject) => {
             const downloadFile = (url) => {
                 https.get(url, {
@@ -2670,6 +2672,7 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
                 }, (res) => {
                     // Follow redirects
                     if (res.statusCode === 302 || res.statusCode === 301) {
+                        console.log('↪️ Following redirect to:', res.headers.location);
                         downloadFile(res.headers.location);
                         return;
                     }
@@ -2677,39 +2680,79 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
                         reject(new Error(`Download failed: ${res.statusCode}`));
                         return;
                     }
+
+                    const totalBytes = parseInt(res.headers['content-length'], 10);
+                    let downloadedBytes = 0;
+                    const startTime = Date.now();
+
+                    console.log(`📦 File size: ${(totalBytes / 1024 / 1024).toFixed(2)} MB`);
+
                     const file = fs.createWriteStream(zipPath);
+                    
+                    res.on('data', (chunk) => {
+                        downloadedBytes += chunk.length;
+                        const percent = ((downloadedBytes / totalBytes) * 100).toFixed(1);
+                        const elapsed = (Date.now() - startTime) / 1000;
+                        const speed = (downloadedBytes / 1024 / 1024) / elapsed;
+                        
+                        // Log mỗi 10%
+                        if (downloadedBytes % Math.floor(totalBytes / 10) < chunk.length) {
+                            console.log(`⬇️ Downloaded: ${percent}% (${speed.toFixed(2)} MB/s)`);
+                        }
+                    });
+
                     res.pipe(file);
-                    file.on('finish', () => { file.close(); resolve(); });
+                    file.on('finish', () => { 
+                        file.close(); 
+                        const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+                        console.log(`✅ Download complete in ${totalTime}s`);
+                        resolve(); 
+                    });
                     file.on('error', reject);
                 }).on('error', reject);
             };
             downloadFile(downloadUrl);
         });
 
-        // Giải nén bằng PowerShell
-        const { execSync } = require('child_process');
-        execSync(`powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${extractDir}' -Force"`, { timeout: 120000 });
+        // Giải nén bằng adm-zip (NHANH HƠN PowerShell)
+        console.log('📂 Extracting...');
+        const AdmZip = require('adm-zip');
+        const zip = new AdmZip(zipPath);
+        zip.extractAllTo(extractDir, true);
+        console.log('✅ Extraction complete');
 
-        // Copy đè vào thư mục app (trừ .env)
+        // Copy đè vào thư mục app (trừ .env và database)
+        console.log('📋 Copying files...');
         const copyRecursive = (src, dest) => {
             const entries = fs.readdirSync(src, { withFileTypes: true });
             if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
+            
+            let copiedCount = 0;
             for (const entry of entries) {
                 const srcPath = path.join(src, entry.name);
                 const destPath = path.join(dest, entry.name);
-                if (entry.name === '.env') continue; // Không đè .env
+                
+                // Skip files that shouldn't be overwritten
+                if (entry.name === '.env') continue;
+                if (entry.name === 'dev.db') continue; // Không đè database
+                if (entry.name === 'Backups') continue; // Không đè backups
+                
                 if (entry.isDirectory()) {
                     copyRecursive(srcPath, destPath);
                 } else {
                     fs.copyFileSync(srcPath, destPath);
+                    copiedCount++;
+                    if (copiedCount % 100 === 0) {
+                        console.log(`   Copied ${copiedCount} files...`);
+                    }
                 }
             }
         };
         copyRecursive(extractDir, appPath);
+        console.log('✅ Files copied successfully');
 
         // Lưu lịch sử update
         const history = getUpdateHistory();
-        // Lấy version mới từ package.json vừa update
         let newVersion = 'unknown';
         try {
             const newPkg = JSON.parse(fs.readFileSync(path.join(appPath, 'package.json'), 'utf8'));
@@ -2721,16 +2764,17 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
             date: new Date().toISOString(),
             status: 'success',
         });
-        // Giữ tối đa 50 bản ghi
         if (history.length > 50) history.length = 50;
         saveUpdateHistory(history);
 
         // Dọn dẹp
+        console.log('🧹 Cleaning up...');
         fs.rmSync(tempDir, { recursive: true });
 
+        console.log(`🎉 Update to v${newVersion} completed successfully!`);
         return { success: true, data: { version: newVersion } };
     } catch (error) {
-        console.error('Update error:', error);
+        console.error('❌ Update error:', error);
         return { success: false, error: error.message };
     }
 });
