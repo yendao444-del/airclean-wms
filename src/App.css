@@ -1,0 +1,264 @@
+.app {
+    width: 100%;
+    height: 100%;
+}
+
+/* ============= SIDEBAR COLLAPSE BUTTON ============= */
+.ant-layout-sider-trigger {
+    background: linear-gradient(135deg, #00ab56 0%, #00d66c 100%) !important;
+    color: #fff !important;
+    font-size: 18px !important;
+    border-top: 1px solid rgba(255, 255, 255, 0.2) !important;
+    transition: all 0.3s ease !important;
+    box-shadow: 0 -2px 8px rgba(0, 171, 86, 0.2) !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+
+.ant-layout-sider-trigger:hover {
+    background: linear-gradient(135deg, #00c964 0%, #00e87a 100%) !important;
+    color: #fff !important;
+    box-shadow: 0 -4px 12px rgba(0, 171, 86, 0.4) !important;
+    transform: scale(1.05) !important;
+}
+
+/* Icon của collapse button */
+.ant-layout-sider-trigger .anticon {
+    font-size: 16px !important;
+    font-weight: bold !important;
+}
+
+
+/* Light Theme Customizations */
+.ant-menu-item-selected {
+    background: linear-gradient(135deg, #00ab56 0%, #00d66c 100%) !important;
+    color: #fff !important;
+    border-radius: 8px !important;
+}
+
+.ant-menu-item-selected .ant-menu-item-icon,
+.ant-menu-item-selected span {
+    color: #fff !important;
+}
+
+.ant-menu-item {
+    margin: 4px 8px !important;
+    width: calc(100% - 16px) !important;
+    border-radius: 8px !important;
+    transition: all 0.3s !important;
+}
+
+.ant-menu-item:hover {
+    background: rgba(0, 171, 86, 0.08) !important;
+    color: #00ab56 !important;
+}
+
+.ant-menu-submenu-selected>.ant-menu-submenu-title {
+    color: #00ab56 !important;
+}
+
+.ant-btn-primary {
+    background: linear-gradient(135deg, #00ab56 0%, #00d66c 100%) !important;
+    border: none !important;
+    box-shadow: 0 2px 8px rgba(0, 171, 86, 0.3) !important;
+}
+
+.ant-btn-primary:hover {
+    background: linear-gradient(135deg, #00c964 0%, #00e87a 100%) !important;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0, 171, 86, 0.4) !important;
+}
+
+/* Status Row Colors - Bold & Vibrant */
+/* Increase specificity to override Ant Design */
+
+/* Pending - Đang xử lý */
+.ant-table-tbody>tr.status-row-pending>td {
+    background-color: #fff3cd !important;
+    /* Vàng đậm */
+}
+
+.ant-table-tbody>tr.status-row-pending:hover>td {
+    background-color: #ffecb5 !important;
+}
+
+/* Completed - Hoàn thành */
+.ant-table-tbody>tr.status-row-completed>td {
+    background-color: #d4edda !important;
+    /* Xanh lá đậm */
+}
+
+.ant-table-tbody>tr.status-row-completed:hover>td {
+    background-color: #c3e6cb !important;
+}
+
+/* Customer not returned - Khách chưa hoàn */
+.ant-table-tbody>tr.status-row-customer-not-returned>td {
+    background-color: #f8d7da !important;
+    /* Đỏ đậm */
+}
+
+.ant-table-tbody>tr.status-row-customer-not-returned:hover>td {
+    background-color: #f5c6cb !important;
+}
+
+/* Refunded - Hoàn tiền luôn */
+.ant-table-tbody>tr.status-row-refunded>td {
+    background-color: #cfe2ff !important;
+    /* Xanh dương đậm */
+}
+
+.ant-table-tbody>tr.status-row-refunded:hover>td {
+    background-color: #b6d4fe !important;
+}
+
+/* Additional dynamic statuses */
+.ant-table-tbody>tr.status-row-processing>td {
+    background-color: #fff3cd !important;
+    /* Vàng đậm - Đang xử lý */
+}
+
+.ant-table-tbody>tr.status-row-processing:hover>td {
+    background-color: #ffecb5 !important;
+}
+
+.status-row-approved {
+    background-color: #d4edda !important;
+}
+
+.status-row-approved:hover {
+    background-color: #c3e6cb !important;
+}
+
+.status-row-rejected {
+    background-color: #f8d7da !important;
+}
+
+.status-row-rejected:hover {
+    background-color: #f5c6cb !important;
+}
+
+/* Vietnamese status names (if added dynamically) - HIGH SPECIFICITY */
+.ant-table-tbody>tr.status-row-dang-xu-ly>td,
+.ant-table-tbody>tr.status-row-đang-xử-lý>td {
+    background-color: #fff3cd !important;
+    /* Vàng đậm */
+}
+
+.ant-table-tbody>tr.status-row-dang-xu-ly:hover>td,
+.ant-table-tbody>tr.status-row-đang-xử-lý:hover>td {
+    background-color: #ffecb5 !important;
+}
+
+.ant-table-tbody>tr.status-row-hoan-thanh>td,
+.ant-table-tbody>tr.status-row-hoàn-thành>td {
+    background-color: #d4edda !important;
+    /* Xanh lá đậm */
+}
+
+.ant-table-tbody>tr.status-row-hoan-thanh:hover>td,
+.ant-table-tbody>tr.status-row-hoàn-thành:hover>td {
+    background-color: #c3e6cb !important;
+}
+
+.ant-table-tbody>tr.status-row-khach-chua-hoan>td,
+.ant-table-tbody>tr.status-row-khách-chưa-hoàn>td {
+    background-color: #f8d7da !important;
+    /* Đỏ đậm */
+}
+
+.ant-table-tbody>tr.status-row-khach-chua-hoan:hover>td,
+.ant-table-tbody>tr.status-row-khách-chưa-hoàn:hover>td {
+    background-color: #f5c6cb !important;
+}
+
+.ant-table-tbody>tr.status-row-hoan-tien-luon>td,
+.ant-table-tbody>tr.status-row-hoàn-tiền-luôn>td {
+    background-color: #cfe2ff !important;
+    /* Xanh dương đậm */
+}
+
+.ant-table-tbody>tr.status-row-hoan-tien-luon:hover>td,
+.ant-table-tbody>tr.status-row-hoàn-tiền-luôn:hover>td {
+    background-color: #b6d4fe !important;
+}
+
+/* Multi-SKU Row Highlight - Đơn hàng nhiều sản phẩm */
+.ant-table-tbody>tr.multi-sku-row>td {
+    background-color: #fff9e6 !important;
+    /* Vàng nhạt */
+    border-left: 3px solid #faad14 !important;
+}
+
+.ant-table-tbody>tr.multi-sku-row:hover>td {
+    background-color: #fff4d6 !important;
+}
+
+/* ============= RESPONSIVE UTILITIES ============= */
+
+/* Tablet và nhỏ hơn */
+@media (max-width: 1024px) {
+
+    /* Giảm margin cho Content */
+    .ant-layout-content {
+        margin: 16px !important;
+    }
+
+    /* Giảm padding cho header */
+    .ant-layout-header {
+        padding: 0 16px !important;
+    }
+
+    /* Đảm bảo table có thể scroll */
+    .ant-table-wrapper {
+        overflow-x: auto;
+    }
+}
+
+/* Mobile */
+@media (max-width: 768px) {
+
+    /* Giảm margin Content xuống còn 12px */
+    .ant-layout-content {
+        margin: 12px !important;
+    }
+
+    /* Compact header */
+    .ant-layout-header {
+        padding: 0 12px !important;
+    }
+
+    /* Responsive table */
+    .ant-table {
+        font-size: 13px;
+    }
+
+    .ant-table-thead>tr>th {
+        padding: 8px !important;
+    }
+
+    .ant-table-tbody>tr>td {
+        padding: 8px !important;
+    }
+}
+
+/* Extra small mobile */
+@media (max-width: 480px) {
+    .ant-layout-content {
+        margin: 8px !important;
+    }
+
+    .ant-btn-lg {
+        padding: 8px 12px !important;
+        font-size: 14px !important;
+    }
+
+    h2.ant-typography {
+        font-size: 20px !important;
+    }
+
+    h4.ant-typography {
+        font-size: 16px !important;
+    }
+}

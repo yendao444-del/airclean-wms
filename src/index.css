@@ -1,0 +1,53 @@
+body {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+    overflow: hidden;
+}
+
+#root {
+    width: 100vw;
+    height: 100vh;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+/* Status Row Colors for Returns Table */
+.status-row-pending {
+    background-color: #e6fffb !important;
+    /* Cyan tint */
+}
+
+.status-row-pending:hover {
+    background-color: #b5f5ec !important;
+}
+
+.status-row-completed {
+    background-color: #f6ffed !important;
+    /* Green tint */
+}
+
+.status-row-completed:hover {
+    background-color: #d9f7be !important;
+}
+
+.status-row-customer-not-returned {
+    background-color: #fff7e6 !important;
+    /* Orange tint */
+}
+
+.status-row-customer-not-returned:hover {
+    background-color: #ffe7ba !important;
+}
+
+.status-row-refunded {
+    background-color: #fff0f6 !important;
+    /* Magenta tint */
+}
+
+.status-row-refunded:hover {
+    background-color: #ffd6e7 !important;
+}

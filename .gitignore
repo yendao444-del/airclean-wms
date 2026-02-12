@@ -1,0 +1,11 @@
+node_modules
+.env
+dist
+release
+release2
+release3
+release4
+release*
+*.zip
+/src/generated/prisma
+/prisma/dev.db

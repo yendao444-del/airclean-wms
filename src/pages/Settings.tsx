@@ -1,0 +1,691 @@
+import { useState, useEffect } from 'react';
+import {
+  Button,
+  Card,
+  Modal,
+  message,
+
+  Space,
+  Typography,
+  Divider,
+  Alert,
+  Table,
+  Popconfirm,
+  Tabs,
+  Row,
+  Col,
+  Statistic
+} from 'antd';
+import {
+  ExportOutlined,
+  ImportOutlined,
+  DatabaseOutlined,
+  WarningOutlined,
+
+  ReloadOutlined,
+  DeleteOutlined,
+  CloudUploadOutlined,
+  FolderOpenOutlined,
+  FileZipOutlined,
+
+  ClockCircleOutlined
+} from '@ant-design/icons';
+import dayjs from 'dayjs';
+
+const { Title, Text, Paragraph } = Typography;
+
+interface BackupFile {
+  filename: string;
+  path: string;
+  size: number;
+  createdAt: Date;
+  modifiedAt: Date;
+}
+
+const Settings = () => {
+  const [loading, setLoading] = useState(false);
+  const [backupLoading, setBackupLoading] = useState(false);
+  const [backups, setBackups] = useState<BackupFile[]>([]);
+
+  // Load danh sách backups khi component mount
+  useEffect(() => {
+    loadBackups();
+  }, []);
+
+  const loadBackups = async () => {
+    try {
+      const result = await window.electronAPI.system.listBackups();
+      if (result.success && result.data) {
+        setBackups(result.data);
+      }
+    } catch (error: any) {
+      console.error('Error loading backups:', error);
+    }
+  };
+
+  const handleBackup = async () => {
+    try {
+      setBackupLoading(true);
+      message.loading({ content: 'Đang sao lưu hệ thống...', key: 'backup', duration: 0 });
+
+      const result = await window.electronAPI.system.backup();
+
+      if (result.success && result.data) {
+        const sizeMB = (result.data.size / 1024 / 1024).toFixed(2);
+        message.success({
+          content: `✅ Sao lưu thành công! File: ${result.data.filename} (${sizeMB} MB)`,
+          key: 'backup',
+          duration: 5
+        });
+        await loadBackups();
+      } else {
+        message.error({ content: `Lỗi: ${result.error}`, key: 'backup' });
+      }
+    } catch (error: any) {
+      message.error({ content: `Lỗi không mong đợi: ${error.message}`, key: 'backup' });
+    } finally {
+      setBackupLoading(false);
+    }
+  };
+
+  const handleRestore = (backupPath: string, filename: string) => {
+    Modal.confirm({
+      title: 'Xác nhận khôi phục hệ thống',
+      icon: <WarningOutlined style={{ color: '#ff4d4f' }} />,
+      content: (
+        <div>
+          <Alert
+            message="Cảnh báo nghiêm trọng"
+            description={
+              <div>
+                <p><strong>Hành động này sẽ:</strong></p>
+                <ul style={{ paddingLeft: 20 }}>
+                  <li>Ghi đè toàn bộ dữ liệu hiện tại</li>
+                  <li>Khôi phục về trạng thái: <strong>{filename}</strong></li>
+                  <li>Yêu cầu khởi động lại ứng dụng</li>
+                </ul>
+                <p style={{ marginTop: 12, color: '#ff4d4f' }}>
+                  <strong>Khuyến nghị: Tạo backup hiện tại trước khi khôi phục!</strong>
+                </p>
+              </div>
+            }
+            type="error"
+            showIcon
+            style={{ marginTop: 16, marginBottom: 16 }}
+          />
+          <Text>Bạn có chắc chắn muốn tiếp tục?</Text>
+        </div>
+      ),
+      okText: 'Khôi phục',
+      cancelText: 'Hủy',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          setBackupLoading(true);
+          message.loading({ content: 'Đang khôi phục hệ thống...', key: 'restore', duration: 0 });
+
+          const result = await window.electronAPI.system.restore(backupPath);
+
+          if (result.success) {
+            Modal.success({
+              title: 'Khôi phục thành công!',
+              content: (
+                <div>
+                  <p>{result.data?.message}</p>
+                  <Alert
+                    message="Vui lòng đóng và mở lại ứng dụng để áp dụng thay đổi."
+                    type="info"
+                    showIcon
+                    style={{ marginTop: 12 }}
+                  />
+                </div>
+              )
+            });
+            message.destroy('restore');
+          } else {
+            message.error({ content: `Lỗi: ${result.error}`, key: 'restore' });
+          }
+        } catch (error: any) {
+          message.error({ content: `Lỗi: ${error.message}`, key: 'restore' });
+        } finally {
+          setBackupLoading(false);
+        }
+      }
+    });
+  };
+
+  const handleDeleteBackup = async (backupPath: string, filename: string) => {
+    try {
+      const result = await window.electronAPI.system.deleteBackup(backupPath);
+      if (result.success) {
+        message.success(`Đã xóa backup: ${filename}`);
+        await loadBackups();
+      } else {
+        message.error(`Lỗi: ${result.error}`);
+      }
+    } catch (error: any) {
+      message.error(`Lỗi: ${error.message}`);
+    }
+  };
+
+  const handleBrowseAndRestore = async () => {
+    try {
+      const browseResult = await window.electronAPI.system.browseAndRestore();
+
+      if (!browseResult.success || !browseResult.data) {
+        if (browseResult.error !== 'User cancelled') {
+          message.error(browseResult.error || 'Lỗi khi chọn file');
+        }
+        return;
+      }
+
+      const filePath = browseResult.data.filePath;
+      const fileName = filePath.split('\\').pop() || filePath.split('/').pop() || 'backup.zip';
+
+      Modal.confirm({
+        title: 'Xác nhận khôi phục từ file',
+        icon: <WarningOutlined style={{ color: '#ff4d4f' }} />,
+        content: (
+          <div>
+            <Alert
+              message="Cảnh báo nghiêm trọng"
+              description={
+                <div>
+                  <p><strong>File đã chọn:</strong> {fileName}</p>
+                  <p><strong>Hành động này sẽ:</strong></p>
+                  <ul style={{ paddingLeft: 20 }}>
+                    <li>Tự động tạo backup an toàn của dữ liệu hiện tại</li>
+                    <li>Kiểm tra tính hợp lệ của file backup</li>
+                    <li>Ghi đè toàn bộ dữ liệu hiện tại</li>
+                    <li>Yêu cầu khởi động lại ứng dụng</li>
+                  </ul>
+                  <p style={{ marginTop: 12, color: '#52c41a' }}>
+                    ✅ Dữ liệu hiện tại sẽ được backup tự động trước khi khôi phục
+                  </p>
+                </div>
+              }
+              type="error"
+              showIcon
+              style={{ marginTop: 16, marginBottom: 16 }}
+            />
+            <Text>Bạn có chắc chắn muốn tiếp tục?</Text>
+          </div>
+        ),
+        okText: 'Khôi phục',
+        cancelText: 'Hủy',
+        okButtonProps: { danger: true },
+        onOk: async () => {
+          try {
+            setBackupLoading(true);
+            message.loading({ content: 'Đang khôi phục hệ thống...', key: 'restore', duration: 0 });
+
+            const result = await window.electronAPI.system.restore(filePath);
+
+            if (result.success && result.data) {
+              Modal.success({
+                title: 'Khôi phục thành công!',
+                content: (
+                  <div>
+                    <p>✅ Đã khôi phục {result.data.filesRestored} files/folders</p>
+                    <p>💾 Backup an toàn: {result.data.safetyBackup}</p>
+                    <Alert
+                      message="Vui lòng đóng và mở lại ứng dụng ngay để áp dụng thay đổi."
+                      type="warning"
+                      showIcon
+                      style={{ marginTop: 12 }}
+                    />
+                  </div>
+                )
+              });
+              message.destroy('restore');
+              await loadBackups();
+            } else {
+              message.error({ content: `Lỗi: ${result.error}`, key: 'restore' });
+            }
+          } catch (error: any) {
+            message.error({ content: `Lỗi: ${error.message}`, key: 'restore' });
+          } finally {
+            setBackupLoading(false);
+          }
+        }
+      });
+    } catch (error: any) {
+      message.error(`Lỗi: ${error.message}`);
+    }
+  };
+
+  const handleInspectBackup = async (backupPath: string) => {
+    try {
+      const result = await window.electronAPI.system.inspectBackup(backupPath);
+
+      if (result.success && result.data) {
+        const info = result.data;
+
+        Modal.info({
+          title: `🔍 Thông tin chi tiết Backup`,
+          width: 800,
+          content: (
+            <div style={{ maxHeight: '70vh', overflowY: 'auto' }}>
+              <div style={{ marginBottom: 20 }}>
+                <Text strong style={{ fontSize: 16 }}>📁 Thông tin file</Text>
+                <div style={{ marginTop: 8, paddingLeft: 12 }}>
+                  <p><strong>Tên file:</strong> {info.filename}</p>
+                  <p><strong>Kích thước:</strong> {info.fileSizeMB} MB</p>
+                  <p><strong>Ngày tạo:</strong> {dayjs(info.created).format('DD/MM/YYYY HH:mm:ss')}</p>
+                  <p><strong>Tỉ lệ nén:</strong> {info.compressionRatio}%</p>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <Text strong style={{ fontSize: 16 }}>✅ Kiểm tra tính hợp lệ</Text>
+                <div style={{ marginTop: 8 }}>
+                  {info.isValid ? (
+                    <Alert message="File backup hợp lệ và có thể khôi phục" type="success" showIcon />
+                  ) : (
+                    <Alert message="Cảnh báo: File backup thiếu các thành phần quan trọng!" type="error" showIcon />
+                  )}
+                  <div style={{ marginTop: 12, paddingLeft: 12 }}>
+                    <p>✅ src/: {info.validation.hasSrc ? '✅ Có' : '❌ Không'}</p>
+                    <p>✅ electron/: {info.validation.hasElectron ? '✅ Có' : '❌ Không'}</p>
+                    <p>✅ prisma/: {info.validation.hasPrisma ? '✅ Có' : '❌ Không'}</p>
+                    <p>✅ package.json: {info.validation.hasPackageJson ? '✅ Có' : '❌ Không'}</p>
+                    <p>✅ node_modules/: {info.validation.hasNodeModules ? '✅ Có' : '❌ Không'}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <Text strong style={{ fontSize: 16 }}>📊 Thống kê nội dung</Text>
+                <div style={{ marginTop: 8, paddingLeft: 12 }}>
+                  <p><strong>Tổng số files:</strong> {info.totalFiles.toLocaleString()}</p>
+                  <p><strong>Tổng số folders:</strong> {info.totalFolders.toLocaleString()}</p>
+                  <p><strong>Dung lượng giải nén:</strong> {info.uncompressedSizeMB} MB</p>
+                </div>
+              </div>
+
+              {info.mainFolders && info.mainFolders.length > 0 && (
+                <div style={{ marginBottom: 20 }}>
+                  <Text strong style={{ fontSize: 16 }}>📂 Cấu trúc thư mục chính</Text>
+                  <div style={{ marginTop: 8, paddingLeft: 12 }}>
+                    {info.mainFolders.map((folder: string) => (
+                      <p key={folder}>📁 {folder}</p>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {info.largestFiles && info.largestFiles.length > 0 && (
+                <div>
+                  <Text strong style={{ fontSize: 16 }}>💾 Top 10 files lớn nhất</Text>
+                  <div style={{ marginTop: 8, paddingLeft: 12 }}>
+                    {info.largestFiles.map((file: any, idx: number) => (
+                      <p key={idx} style={{ fontSize: 12 }}>
+                        {idx + 1}. {file.name} ({file.sizeMB} MB)
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          ),
+          okText: 'Đóng'
+        });
+      } else {
+        message.error(result.error || 'Không thể đọc thông tin backup');
+      }
+    } catch (error: any) {
+      message.error(`Lỗi: ${error.message}`);
+    }
+  };
+
+  const handleExport = async () => {
+    try {
+      setLoading(true);
+      const result = await window.electronAPI.database.exportAll();
+      setLoading(false);
+
+      if (result.success && result.data) {
+        message.success({
+          content: `Xuất dữ liệu thành công! File đã được lưu tại: ${result.data}`,
+          duration: 5
+        });
+      } else {
+        if (result.error === 'User cancelled') {
+          message.info('Đã hủy xuất dữ liệu');
+        } else {
+          message.error(`Lỗi khi xuất dữ liệu: ${result.error}`);
+        }
+      }
+    } catch (error: any) {
+      setLoading(false);
+      message.error(`Lỗi không mong đợi: ${error.message}`);
+    }
+  };
+
+  const handleImport = () => {
+    Modal.confirm({
+      title: 'Xác nhận nhập dữ liệu',
+      icon: <WarningOutlined style={{ color: '#faad14' }} />,
+      content: (
+        <div>
+          <Alert
+            message="Cảnh báo quan trọng"
+            description="Dữ liệu hiện tại sẽ được cập nhật hoặc ghi đè bởi dữ liệu từ file Excel. Hệ thống sẽ tự động xử lý trường hợp trùng lặp ID."
+            type="warning"
+            showIcon
+            style={{ marginTop: 16, marginBottom: 16 }}
+          />
+          <Text>Bạn có chắc chắn muốn tiếp tục?</Text>
+        </div>
+      ),
+      okText: 'Tiếp tục',
+      cancelText: 'Hủy',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          setLoading(true);
+          const result = await window.electronAPI.database.importAll();
+          setLoading(false);
+
+          if (result.success && result.data) {
+            const stats = result.data;
+            Modal.success({
+              title: 'Nhập dữ liệu thành công!',
+              content: (
+                <div style={{ marginTop: 16 }}>
+                  <Text>Đã nhập thành công:</Text>
+                  <ul style={{ marginTop: 8, marginBottom: 0 }}>
+                    <li>{stats.categories} danh mục sản phẩm</li>
+                    <li>{stats.products} sản phẩm</li>
+                    <li>{stats.suppliers} nhà cung cấp</li>
+                    <li>{stats.purchases} đơn nhập hàng</li>
+                    <li>{stats.customers} khách hàng</li>
+                    <li>{stats.orders} đơn bán hàng</li>
+                    <li>{stats.expenses} khoản chi phí</li>
+                  </ul>
+                </div>
+              )
+            });
+          } else {
+            if (result.error === 'No file selected') {
+              message.info('Đã hủy nhập dữ liệu');
+            } else {
+              message.error(`Lỗi khi nhập dữ liệu: ${result.error}`);
+            }
+          }
+        } catch (error: any) {
+          setLoading(false);
+          message.error(`Lỗi không mong đợi: ${error.message}`);
+        }
+      }
+    });
+  };
+
+  const backupColumns = [
+    {
+      title: '📁 Tên file',
+      dataIndex: 'filename',
+      key: 'filename',
+      ellipsis: true,
+    },
+    {
+      title: '📊 Kích thước',
+      dataIndex: 'size',
+      key: 'size',
+      width: 120,
+      render: (size: number) => `${(size / 1024 / 1024).toFixed(2)} MB`,
+    },
+    {
+      title: '📅 Ngày tạo',
+      dataIndex: 'createdAt',
+      key: 'createdAt',
+      width: 180,
+      render: (date: Date) => dayjs(date).format('DD/MM/YYYY HH:mm:ss'),
+    },
+    {
+      title: '⚙️ Thao tác',
+      key: 'actions',
+      width: 250,
+      render: (_: any, record: BackupFile) => (
+        <Space size="small">
+          <Button
+            icon={<WarningOutlined />}
+            size="small"
+            onClick={() => handleInspectBackup(record.path)}
+          >
+            Chi tiết
+          </Button>
+          <Button
+            type="primary"
+            icon={<ReloadOutlined />}
+            size="small"
+            onClick={() => handleRestore(record.path, record.filename)}
+          >
+            Khôi phục
+          </Button>
+          <Popconfirm
+            title="Xác nhận xóa backup"
+            description={`Bạn có chắc muốn xóa "${record.filename}"?`}
+            onConfirm={() => handleDeleteBackup(record.path, record.filename)}
+            okText="Xóa"
+            cancelText="Hủy"
+            okButtonProps={{ danger: true }}
+          >
+            <Button
+              danger
+              icon={<DeleteOutlined />}
+              size="small"
+            />
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
+
+  // TAB ITEMS
+  const tabItems = [
+    {
+      key: 'backup',
+      label: (
+        <span>
+          <FileZipOutlined /> Sao lưu Hệ thống
+        </span>
+      ),
+      children: (
+        <div>
+          {/* Stats Row */}
+          <Row gutter={16} style={{ marginBottom: 24 }}>
+            <Col span={8}>
+              <Card>
+                <Statistic
+                  title="Tổng Backups"
+                  value={backups.length}
+                  prefix={<FolderOpenOutlined />}
+                  valueStyle={{ color: '#3f8600' }}
+                />
+              </Card>
+            </Col>
+            <Col span={8}>
+              <Card>
+                <Statistic
+                  title="Backup gần nhất"
+                  value={backups.length > 0 ? dayjs(backups[0].createdAt).fromNow() : 'Chưa có'}
+                  prefix={<ClockCircleOutlined />}
+                  valueStyle={{ color: '#1890ff' }}
+                />
+              </Card>
+            </Col>
+            <Col span={8}>
+              <Card>
+                <Statistic
+                  title="Tổng dung lượng"
+                  value={backups.reduce((sum, b) => sum + b.size, 0) / 1024 / 1024}
+                  precision={2}
+                  suffix="MB"
+                  prefix={<DatabaseOutlined />}
+                  valueStyle={{ color: '#cf1322' }}
+                />
+              </Card>
+            </Col>
+          </Row>
+
+          {/* Actions */}
+          <Row gutter={16} style={{ marginBottom: 24 }}>
+            <Col span={12}>
+              <Button
+                type="primary"
+                icon={<CloudUploadOutlined />}
+                onClick={handleBackup}
+                size="large"
+                loading={backupLoading}
+                block
+                style={{ height: 80, backgroundColor: '#52c41a', borderColor: '#52c41a' }}
+              >
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                  <Text strong style={{ color: 'white', fontSize: 16 }}>Tạo Backup Mới</Text>
+                  <Text style={{ color: 'rgba(255, 255, 255, 0.85)', fontSize: 12 }}>
+                    Nén toàn bộ ứng dụng thành ZIP
+                  </Text>
+                </div>
+              </Button>
+            </Col>
+            <Col span={12}>
+              <Button
+                icon={<ImportOutlined />}
+                onClick={handleBrowseAndRestore}
+                size="large"
+                loading={backupLoading}
+                block
+                style={{ height: 80 }}
+              >
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                  <Text strong style={{ fontSize: 16 }}>Khôi phục từ File</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    Chọn file ZIP từ bất kỳ đâu
+                  </Text>
+                </div>
+              </Button>
+            </Col>
+          </Row>
+
+          <Divider>Danh sách Backup ({backups.length})</Divider>
+
+          {backups.length > 0 ? (
+            <Table
+              columns={backupColumns}
+              dataSource={backups}
+              rowKey="path"
+              pagination={{ pageSize: 10 }}
+              size="small"
+            />
+          ) : (
+            <Alert
+              message="Chưa có backup nào"
+              description="Nhấn nút 'Tạo Backup Mới' để tạo backup đầu tiên."
+              type="info"
+              showIcon
+              icon={<FileZipOutlined />}
+            />
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'data',
+      label: (
+        <span>
+          <DatabaseOutlined /> Dữ liệu Excel
+        </span>
+      ),
+      children: (
+        <div>
+          <Alert
+            message="Xuất/Nhập dữ liệu Excel"
+            description="Sao lưu và đồng bộ dữ liệu giữa các máy tính bằng file Excel. Phù hợp cho việc chuyển dữ liệu hoặc backup nhanh."
+            type="info"
+            showIcon
+            style={{ marginBottom: 24 }}
+          />
+
+          <Row gutter={16}>
+            <Col span={12}>
+              <Card
+                hoverable
+                style={{ height: '100%' }}
+                onClick={handleExport}
+              >
+                <div style={{ textAlign: 'center', padding: '20px 0' }}>
+                  <ExportOutlined style={{ fontSize: 48, color: '#1890ff', marginBottom: 16 }} />
+                  <Title level={4}>Xuất Dữ liệu</Title>
+                  <Paragraph type="secondary">
+                    Tạo file Excel chứa toàn bộ dữ liệu (sản phẩm, đơn hàng, khách hàng...)
+                  </Paragraph>
+                  <Button type="primary" size="large" disabled={loading}>
+                    Xuất Excel
+                  </Button>
+                </div>
+              </Card>
+            </Col>
+            <Col span={12}>
+              <Card
+                hoverable
+                style={{ height: '100%' }}
+                onClick={handleImport}
+              >
+                <div style={{ textAlign: 'center', padding: '20px 0' }}>
+                  <ImportOutlined style={{ fontSize: 48, color: '#52c41a', marginBottom: 16 }} />
+                  <Title level={4}>Nhập Dữ liệu</Title>
+                  <Paragraph type="secondary">
+                    Đọc file Excel và cập nhật dữ liệu vào hệ thống
+                  </Paragraph>
+                  <Button type="primary" size="large" style={{ backgroundColor: '#52c41a', borderColor: '#52c41a' }} disabled={loading}>
+                    Nhập Excel
+                  </Button>
+                </div>
+              </Card>
+            </Col>
+          </Row>
+
+          <Divider />
+
+          <Alert
+            message="Lưu ý quan trọng"
+            description={
+              <ul style={{ marginBottom: 0, paddingLeft: 20 }}>
+                <li>File Excel sẽ chứa nhiều sheets tương ứng với các bảng dữ liệu khác nhau</li>
+                <li>Dữ liệu nhạy cảm (mật khẩu người dùng) sẽ KHÔNG được xuất ra file</li>
+                <li>Khi nhập dữ liệu, hệ thống sẽ tự động xử lý trùng lặp bằng cách cập nhật thay vì tạo mới</li>
+                <li>Đảm bảo đóng tất cả ứng dụng Excel trước khi xuất/nhập để tránh lỗi file đang được mở</li>
+              </ul>
+            }
+            type="warning"
+            showIcon
+          />
+        </div>
+      ),
+    },
+  ];
+
+  return (
+    <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
+      <div style={{ marginBottom: 24 }}>
+        <Title level={2}>
+          <DatabaseOutlined style={{ marginRight: 8 }} />
+          Cài đặt Hệ thống
+        </Title>
+        <Paragraph type="secondary">
+          Quản lý backup, sao lưu và khôi phục dữ liệu hệ thống
+        </Paragraph>
+      </div>
+
+      <Tabs
+        defaultActiveKey="backup"
+        items={tabItems}
+        size="large"
+        tabBarStyle={{ marginBottom: 24 }}
+      />
+    </div>
+  );
+};
+
+export default Settings;

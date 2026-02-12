@@ -1,0 +1,186 @@
+/* Updated CSS for better scrolling in expanded rows */
+.variant-scroll-container {
+    display: flex;
+    gap: 16px;
+    overflow-x: scroll;
+    overflow-y: hidden;
+    padding-bottom: 8px;
+}
+
+/* =================RESPONSIVE PAGE CONTAINER================= */
+/* Đảm bảo không có overflow horizontal trên page */
+body {
+    overflow-x: hidden;
+}
+
+/* Ant Design table responsive */
+.ant-table-wrapper {
+    overflow-x: auto;
+}
+
+.ant-card {
+    overflow-x: auto;
+}
+
+
+.variant-scroll-container::-webkit-scrollbar {
+    height: 8px;
+}
+
+.variant-scroll-container::-webkit-scrollbar-track {
+    background: #f0f0f0;
+    border-radius: 4px;
+}
+
+.variant-scroll-container::-webkit-scrollbar-thumb {
+    background: #00ab56;
+    border-radius: 4px;
+}
+
+.variant-scroll-container::-webkit-scrollbar-thumb:hover {
+    background: #009647;
+}
+
+.variant-card {
+    flex: 0 0 auto;
+    border-radius: 12px;
+    border: 2px solid #e8e8e8;
+    background: #fff;
+    transition: all 0.3s;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.variant-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 6px 16px rgba(0, 171, 86, 0.2);
+    border-color: #00ab56;
+}
+
+/* Responsive card sizes based on variant count */
+.variant-card-small {
+    min-width: 150px;
+}
+
+.variant-card-medium {
+    min-width: 180px;
+}
+
+.variant-card-large {
+    min-width: 220px;
+}
+
+/* Nested variant table styling */
+.variant-nested-table .ant-table {
+    background: transparent !important;
+}
+
+.variant-nested-table .ant-table-tbody>tr {
+    background: #f8f9fa !important;
+    border-bottom: 1px solid #e8e8e8 !important;
+}
+
+.variant-nested-table .ant-table-tbody>tr:hover {
+    background: #f0f5ff !important;
+}
+
+.variant-nested-table .ant-table-cell {
+    padding: 10px 16px !important;
+    border: none !important;
+}
+
+/* Ensure alignment with parent table */
+.variant-nested-table .ant-table-wrapper {
+    margin: 0 !important;
+}
+
+/* Highlight expanded parent row */
+.ant-table-row.expanded-row-highlight {
+    background: linear-gradient(135deg, #e6f7ff 0%, #d6f0ff 100%) !important;
+    box-shadow: inset 0 0 0 2px #1890ff;
+    position: relative;
+}
+
+.ant-table-row.expanded-row-highlight td {
+    background: transparent !important;
+    font-weight: 600;
+    color: #096dd9;
+}
+
+/* Animation cho expand/collapse */
+.ant-table-row.expanded-row-highlight {
+    animation: expandHighlight 0.3s ease-out;
+}
+
+@keyframes expandHighlight {
+    from {
+        background: #fff;
+    }
+
+    to {
+        background: linear-gradient(135deg, #e6f7ff 0%, #d6f0ff 100%);
+    }
+}
+
+/* ========== RESPONSIVE UTILITIES ========== */
+
+/* Ẩn text trên màn hình nhỏ (< 768px) */
+.show-on-small {
+    display: none;
+}
+
+/* Hiển thị chỉ trên màn hình nhỏ */
+@media (max-width: 767px) {
+    .hide-on-small {
+        display: none !important;
+    }
+
+    .show-on-small {
+        display: inline !important;
+    }
+
+    /* Variant grid chuyển sang responsive layout */
+    .variant-header-grid,
+    .variant-form-grid {
+        grid-template-columns: 1fr !important;
+        gap: 12px !important;
+    }
+
+    /* Tăng spacing cho form trên mobile */
+    .variant-form-grid>* {
+        width: 100% !important;
+    }
+
+    /* Tối ưu expanded row scrolling */
+    .ant-table-expanded-row>td {
+        padding: 8px !important;
+    }
+}
+
+/* Tablet breakpoint (768px - 1024px) */
+@media (max-width: 1024px) and (min-width: 768px) {
+
+    /* Variant grid chuyển sang 2 columns trên tablet */
+    .variant-form-grid {
+        grid-template-columns: 1fr 1fr !important;
+    }
+}
+
+/* Tối ưu cho màn hình nhỏ hơn */
+@media (max-width: 480px) {
+
+    /* Giảm font size cho mobile */
+    .ant-table {
+        font-size: 12px;
+    }
+
+    /* Compact padding cho các nút */
+    .ant-btn-lg {
+        padding: 6px 12px !important;
+        font-size: 14px !important;
+    }
+
+    /* Tối ưu Title */
+    .ant-typography h2 {
+        font-size: 20px !important;
+    }
+}

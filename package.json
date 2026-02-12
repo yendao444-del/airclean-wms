@@ -1,0 +1,81 @@
+{
+  "name": "quan-ly-ban-hang-desktop",
+  "version": "1.0.0",
+  "description": "Hệ thống quản lý bán hàng - Desktop App",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron:build": "npm run build && electron-builder"
+  },
+  "keywords": [
+    "pos",
+    "inventory",
+    "sales"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/react": "^19.2.10",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.3",
+    "better-sqlite3": "^12.6.2",
+    "concurrently": "^9.2.1",
+    "electron": "^40.1.0",
+    "electron-builder": "^26.7.0",
+    "electron-is-dev": "^3.0.1",
+    "prisma": "5.22.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "wait-on": "^9.0.3"
+  },
+  "build": {
+    "appId": "com.airclean.quanlypos",
+    "productName": "QuanLyPOS",
+    "directories": {
+      "output": "release4"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "node_modules/@prisma/**/*",
+      "node_modules/.prisma/**/*",
+      "node_modules/dotenv/**/*",
+      "node_modules/xlsx/**/*",
+      "node_modules/adm-zip/**/*",
+      "node_modules/archiver/**/*",
+      "node_modules/glob/**/*",
+      ".env"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/.prisma",
+        "to": "node_modules/.prisma"
+      }
+    ],
+    "win": {
+      "target": "dir",
+      "icon": null,
+      "signAndEditExecutable": false
+    },
+    "asar": false
+  },
+  "dependencies": {
+    "@prisma/client": "5.22.0",
+    "dotenv": "^17.2.3",
+    "@ant-design/icons": "^6.1.0",
+    "adm-zip": "^0.5.16",
+    "antd": "^6.2.3",
+    "archiver": "^7.0.1",
+    "glob": "^13.0.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-hook-form": "^7.71.1",
+    "recharts": "^3.7.0",
+    "sqlite3": "^5.1.7",
+    "xlsx": "^0.18.5",
+    "zod": "^4.3.6",
+    "zustand": "^5.0.11"
+  }
+}
