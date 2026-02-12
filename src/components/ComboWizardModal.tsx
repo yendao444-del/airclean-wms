@@ -42,6 +42,7 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
     const [customSku, setCustomSku] = useState('');
     const [customName, setCustomName] = useState('');
     const [customPrice, setCustomPrice] = useState<number | null>(null);
+    const [searchText, setSearchText] = useState('');
 
     useEffect(() => {
         if (visible) {
@@ -53,11 +54,15 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
                 setCustomSku('');
                 setCustomName('');
                 setCustomPrice(null);
+                setSearchText('');
 
-                // Pre-select product nếu có
+                // Pre-select product nếu có → nhảy thẳng bước 2
                 if (preSelectedProductId) {
                     const product = products.find(p => p.id === preSelectedProductId);
-                    if (product) setSelectedProduct(product);
+                    if (product) {
+                        setSelectedProduct(product);
+                        setStep(2);
+                    }
                 }
             } else {
                 // Load data khi edit
@@ -106,10 +111,15 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
         const selected = Object.entries(quantities).filter(([, qty]) => qty > 0);
 
         if (selected.length === 0) return '';
+
+        // Timestamp unique 6 chữ số cuối để tránh trùng SKU
+        const timestamp = Date.now().toString().slice(-6);
+
         if (selected.length === 1) {
             const [idx, qty] = selected[0];
             const variant = variants[parseInt(idx)];
-            return `${qty}-${variant.sku}`;
+            // VD: "10-5DUNICARE-TRANG-234567"
+            return `${qty}-${variant.sku}-${timestamp}`;
         }
 
         // Mix combo - remove diacritics from color names
@@ -118,7 +128,9 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
             const shortSku = removeDiacritics(variant.color).toUpperCase().replace(/\s+/g, '');
             return `${qty}${shortSku}`;
         });
-        return `CB-${parts.join('-')}`;
+
+        // VD: "CB-10DEN-10TRANG-234567"
+        return `CB-${parts.join('-')}-${timestamp}`;
     };
 
     const generateName = (): string => {
@@ -225,24 +237,51 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
                 {/* Step 1: Product Selection */}
                 {step === 1 && (
                     <div className="step-content active">
-                        <div className="section-title">Chọn sản phẩm gốc</div>
-                        <div className="section-subtitle">Click vào sản phẩm bạn muốn tạo combo</div>
-                        <div className="product-grid">
-                            {products.filter(p => p.variants).map(product => {
-                                const variantCount = product.variants ? JSON.parse(product.variants).length : 0;
-                                return (
-                                    <div
-                                        key={product.id}
-                                        className={`product-card ${selectedProduct?.id === product.id ? 'selected' : ''}`}
-                                        onClick={() => setSelectedProduct(product)}
-                                    >
-                                        <div className="product-icon">📦</div>
-                                        <div className="product-name">{product.name}</div>
-                                        <div className="product-sku">{product.sku}</div>
-                                        <div className="product-meta">{variantCount} màu sắc</div>
-                                    </div>
-                                );
-                            })}
+                        <div className="step1-header">
+                            <div className="section-title">Chọn sản phẩm gốc</div>
+                            <div className="search-bar-wrapper">
+                                <Input
+                                    placeholder="Tìm tên sản phẩm hoặc SKU..."
+                                    allowClear
+                                    prefix={<span style={{ color: '#a0aec0' }}>&#128269;</span>}
+                                    value={searchText}
+                                    onChange={(e) => setSearchText(e.target.value)}
+                                    className="combo-search-input"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="product-grid-compact">
+                            {products
+                                .filter(p => p.variants)
+                                .filter(p => {
+                                    if (!searchText) return true;
+                                    const search = searchText.toLowerCase();
+                                    return (
+                                        p.name.toLowerCase().includes(search) ||
+                                        p.sku.toLowerCase().includes(search)
+                                    );
+                                })
+                                .map(product => {
+                                    const variantCount = product.variants ? JSON.parse(product.variants).length : 0;
+                                    return (
+                                        <div
+                                            key={product.id}
+                                            className={`product-card-compact ${selectedProduct?.id === product.id ? 'selected' : ''}`}
+                                            onClick={() => {
+                                                setSelectedProduct(product);
+                                                setTimeout(() => setStep(2), 150);
+                                            }}
+                                        >
+                                            <div className="pcc-icon">📦</div>
+                                            <div className="pcc-info">
+                                                <div className="pcc-name">{product.name}</div>
+                                                <div className="pcc-sku">{product.sku}</div>
+                                            </div>
+                                            <div className="pcc-badge">{variantCount} màu</div>
+                                        </div>
+                                    );
+                                })}
                         </div>
                     </div>
                 )}
@@ -262,9 +301,28 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
                                     </div>
                                     <div className="variant-price">{new Intl.NumberFormat('vi-VN').format(variant.cost)}₫</div>
                                     <div className="qty-control">
-                                        <button className="qty-btn" onClick={() => setQuantities({ ...quantities, [idx]: Math.max(0, (quantities[idx] || 0) - 1) })}>−</button>
-                                        <div className="qty-value">{quantities[idx] || 0}</div>
-                                        <button className="qty-btn" onClick={() => setQuantities({ ...quantities, [idx]: (quantities[idx] || 0) + 1 })}>+</button>
+                                        <InputNumber
+                                            min={0}
+                                            value={quantities[idx] || 0}
+                                            onChange={(value) => setQuantities({ ...quantities, [idx]: value || 0 })}
+                                            style={{ width: 120 }}
+                                            addonBefore={
+                                                <button
+                                                    style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: '0 8px' }}
+                                                    onClick={() => setQuantities({ ...quantities, [idx]: Math.max(0, (quantities[idx] || 0) - 1) })}
+                                                >
+                                                    −
+                                                </button>
+                                            }
+                                            addonAfter={
+                                                <button
+                                                    style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: '0 8px' }}
+                                                    onClick={() => setQuantities({ ...quantities, [idx]: (quantities[idx] || 0) + 1 })}
+                                                >
+                                                    +
+                                                </button>
+                                            }
+                                        />
                                     </div>
                                 </div>
                             ))}
