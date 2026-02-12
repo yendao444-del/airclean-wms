@@ -135,30 +135,40 @@ export default function PurchasePage() {
 
     const loadSuppliers = async () => {
         try {
+            if (!window.electronAPI?.suppliers?.getAll) {
+                console.error('❌ suppliers API not available - cần cập nhật app!');
+                message.error('Phiên bản app quá cũ! Vui lòng cập nhật để sử dụng tính năng Nhập hàng.');
+                return;
+            }
             const result = await window.electronAPI.suppliers.getAll();
-            console.log('🏢 Suppliers API result:', result);
             if (result.success && result.data) {
-                console.log('🏢 Loaded suppliers:', result.data.length, 'items');
-                console.log('🏢 First supplier:', result.data[0]);
                 setSuppliers(result.data);
             } else {
                 console.error('❌ Suppliers load failed:', result.error);
+                message.error(`Lỗi tải nhà cung cấp: ${result.error || 'Không kết nối được database'}`);
             }
-        } catch (error) {
+        } catch (error: any) {
             console.error('❌ Error loading suppliers:', error);
+            message.error(`Lỗi tải nhà cung cấp: ${error.message}`);
         }
     };
 
     const loadProducts = async () => {
         try {
+            if (!window.electronAPI?.products?.getAll) {
+                console.error('❌ products API not available - cần cập nhật app!');
+                return;
+            }
             const result = await window.electronAPI.products.getAll();
             if (result.success && result.data) {
-                console.log('📦 Loaded products:', result.data.length, 'items');
-                console.log('📦 First product:', result.data[0]);
                 setProducts(result.data);
+            } else {
+                console.error('❌ Products load failed:', result.error);
+                message.error(`Lỗi tải sản phẩm: ${result.error || 'Không kết nối được database'}`);
             }
-        } catch (error) {
+        } catch (error: any) {
             console.error('Error loading products:', error);
+            message.error(`Lỗi tải sản phẩm: ${error.message}`);
         }
     };
 

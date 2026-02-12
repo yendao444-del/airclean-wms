@@ -64,10 +64,21 @@ ipcMain.handle('update:check', async () => {
     }
 });
 
+// Cache để tránh bị rate limit
+let releaseCache = null;
+let releaseCacheTime = 0;
+const CACHE_DURATION = 5 * 60 * 1000; // 5 phút
+
 /**
  * Fetch latest release từ GitHub API
  */
 function fetchLatestRelease() {
+    // Trả cache nếu còn hạn
+    if (releaseCache && (Date.now() - releaseCacheTime < CACHE_DURATION)) {
+        console.log('   Using cached release data');
+        return Promise.resolve(releaseCache);
+    }
+
     return new Promise((resolve, reject) => {
         const options = {
             hostname: 'api.github.com',
@@ -90,25 +101,30 @@ function fetchLatestRelease() {
                 if (res.statusCode === 200) {
                     try {
                         const release = JSON.parse(data);
+                        // Lưu cache
+                        releaseCache = release;
+                        releaseCacheTime = Date.now();
                         resolve(release);
                     } catch (err) {
                         reject(new Error('Invalid JSON response'));
                     }
                 } else if (res.statusCode === 404) {
-                    reject(new Error('Không tìm thấy release nào trên GitHub'));
+                    reject(new Error('Không tìm thấy release nào. Kiểm tra repo có public và có release không.'));
+                } else if (res.statusCode === 403) {
+                    reject(new Error('GitHub API bị giới hạn (rate limit). Vui lòng thử lại sau vài phút.'));
                 } else {
-                    reject(new Error(`GitHub API error: ${res.statusCode}`));
+                    reject(new Error(`GitHub API lỗi: ${res.statusCode}`));
                 }
             });
         });
 
         req.on('error', (err) => {
-            reject(new Error(`Network error: ${err.message}`));
+            reject(new Error(`Lỗi kết nối mạng: ${err.message}`));
         });
 
-        req.setTimeout(10000, () => {
+        req.setTimeout(15000, () => {
             req.destroy();
-            reject(new Error('Request timeout'));
+            reject(new Error('Hết thời gian kết nối. Kiểm tra mạng internet.'));
         });
 
         req.end();
