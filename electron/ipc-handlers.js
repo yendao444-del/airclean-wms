@@ -1,92 +1,81 @@
 const { ipcMain, dialog, shell, app } = require('electron');
 const path = require('path');
 
-// Load .env BEFORE Prisma
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+// ✅ PRODUCTION CONFIG - Không cần .env nữa
+const config = require('./config');
+
+// Set environment variables từ config
+process.env.DATABASE_URL = config.DATABASE_URL;
+process.env.DIRECT_URL = config.DIRECT_URL;
 
 const { PrismaClient } = require('@prisma/client');
 const fs = require('fs');
 const XLSX = require('xlsx');
 const https = require('https');
 
-// Simple Prisma Client - sẽ đọc config từ prisma.config.ts
+// ========================================
+// PRISMA CLIENT - BẮT BUỘC SUPABASE
+// ========================================
+
 let prisma;
 
 try {
     console.log('🔄 Initializing Prisma Client...');
-    console.log('   🆕 CODE VERSION: 2.0 (Fixed datasources issue)');
-    console.log('   DATABASE_URL:', process.env.DATABASE_URL || 'NOT SET');
-    console.log('   __dirname:', __dirname);
+    console.log('   🆕 CODE VERSION: 3.0 (Production with embedded config)');
+    console.log('   APP:', config.APP_NAME, config.APP_VERSION);
+    console.log('   ENVIRONMENT:', config.ENVIRONMENT);
+    console.log('   DATABASE_URL:', config.DATABASE_URL.split('@')[1] || 'Invalid'); // Chỉ log domain, không log password
 
-    // Prisma 7.x automatically reads DATABASE_URL from .env
     prisma = new PrismaClient({
-        log: ['error', 'warn']
+        log: ['error', 'warn'],
+        datasources: {
+            db: {
+                url: config.DATABASE_URL
+            }
+        }
     });
     console.log('✅ Prisma Client initialized successfully');
 
-    // Test connection
+    // Test connection - REQUIRED
     prisma.$connect()
-        .then(() => console.log('✅ Prisma connected to database'))
+        .then(() => {
+            console.log('✅ Connected to Supabase PostgreSQL');
+        })
         .catch(err => {
-            console.error('❌ Prisma connection failed:', err.message);
-            prisma = null;
+            console.error('❌ CRITICAL: Database connection failed!');
+            console.error('   Error:', err.message);
+            console.error('   Stack:', err.stack);
+
+            // Show error dialog to user
+            const { dialog } = require('electron');
+            dialog.showErrorBox(
+                'Lỗi kết nối Database',
+                `Không thể kết nối đến database.\n\nChi tiết: ${err.message}\n\nVui lòng kiểm tra kết nối internet và thử lại.`
+            );
+
+            // Exit app if can't connect to database
+            app.quit();
         });
 } catch (error) {
-    console.error('❌ Prisma Client init error:', error.message);
+    console.error('❌ CRITICAL: Prisma Client initialization failed!');
+    console.error('   Error:', error.message);
     console.error('   Stack:', error.stack);
-    // Fallback: không có Prisma thì dùng array tạm
-    prisma = null;
+
+    // Show error dialog
+    const { dialog } = require('electron');
+    dialog.showErrorBox(
+        'Lỗi khởi tạo Database',
+        `Không thể khởi tạo kết nối database.\n\nChi tiết: ${error.message}\n\nỨng dụng sẽ thoát.`
+    );
+
+    // Exit app
+    app.quit();
 }
 
 // ========================================
-// MOCK DATA (fallback nếu Prisma fail)
+// NO MOCK DATA - 100% ONLINE DATABASE
 // ========================================
-
-let mockCategories = [
-    { id: 1, name: 'Khẩu Trang' },
-];
-
-let mockProducts = [
-    // ⭐ Khẩu trang với variants - ĐẶT ĐẦU TIÊN
-    {
-        id: 16,
-        sku: 'KT001',
-        barcode: '8934567893500',
-        name: 'Khẩu trang 5D UNICARE',
-        categoryId: 4,
-        category: { name: 'Phụ kiện' },
-        price: 50000,
-        cost: 25000,
-        stock: 250,
-        minStock: 50,
-        unit: 'Hộp',
-        status: 'active',
-        variants: JSON.stringify([
-            { color: 'Đen', sku: 'KT001-BLACK', stock: 60, price: 50000 },
-            { color: 'Trắng', sku: 'KT001-WHITE', stock: 80, price: 50000 },
-            { color: 'Xanh dương', sku: 'KT001-BLUE', stock: 45, price: 50000 },
-            { color: 'Vàng', sku: 'KT001-YELLOW', stock: 35, price: 50000 },
-            { color: 'Hồng', sku: 'KT001-PINK', stock: 30, price: 50000 },
-        ])
-    },
-    { id: 1, sku: 'SP001', barcode: '8934567890123', name: 'Áo thun nam basic trắng', categoryId: 1, category: { name: 'Áo' }, price: 120000, cost: 50000, stock: 45, minStock: 10, unit: 'Cái', status: 'active' },
-    { id: 2, sku: 'SP002', barcode: '8934567890456', name: 'Áo thun nam basic đen', categoryId: 1, category: { name: 'Áo' }, price: 120000, cost: 50000, stock: 38, minStock: 10, unit: 'Cái', status: 'active' },
-    { id: 3, sku: 'SP003', barcode: '8934567890789', name: 'Áo polo nam cao cấp', categoryId: 1, category: { name: 'Áo' }, price: 250000, cost: 120000, stock: 25, minStock: 10, unit: 'Cái', status: 'active' },
-    { id: 4, sku: 'SP004', barcode: '8934567891011', name: 'Quần jean nam slim fit', categoryId: 2, category: { name: 'Quần' }, price: 350000, cost: 180000, stock: 30, minStock: 10, unit: 'Cái', status: 'active' },
-    { id: 5, sku: 'SP005', barcode: '8934567891213', name: 'Quần jean nữ skinny', categoryId: 2, category: { name: 'Quần' }, price: 380000, cost: 200000, stock: 22, minStock: 10, unit: 'Cái', status: 'active' },
-    { id: 6, sku: 'SP006', barcode: '8934567891415', name: 'Quần kaki nam', categoryId: 2, category: { name: 'Quần' }, price: 280000, cost: 140000, stock: 8, minStock: 10, unit: 'Cái', status: 'active' },
-    { id: 7, sku: 'SP007', barcode: '8934567891617', name: 'Giày sneaker trắng nam', categoryId: 3, category: { name: 'Giày dép' }, price: 500000, cost: 250000, stock: 15, minStock: 10, unit: 'Đôi', status: 'active' },
-    { id: 8, sku: 'SP008', barcode: '8934567891819', name: 'Giày sneaker đen nữ', categoryId: 3, category: { name: 'Giày dép' }, price: 520000, cost: 260000, stock: 5, minStock: 10, unit: 'Đôi', status: 'active' },
-    { id: 9, sku: 'SP009', barcode: '8934567892021', name: 'Dép lê unisex', categoryId: 3, category: { name: 'Giày dép' }, price: 150000, cost: 70000, stock: 50, minStock: 15, unit: 'Đôi', status: 'active' },
-    { id: 10, sku: 'SP010', barcode: '8934567892223', name: 'Túi xách nữ da PU', categoryId: 5, category: { name: 'Túi xách' }, price: 420000, cost: 200000, stock: 12, minStock: 10, unit: 'Cái', status: 'active' },
-    { id: 11, sku: 'SP011', barcode: '8934567892425', name: 'Túi đeo chéo nam', categoryId: 5, category: { name: 'Túi xách' }, price: 350000, cost: 180000, stock: 18, minStock: 10, unit: 'Cái', status: 'active' },
-    { id: 12, sku: 'SP012', barcode: '8934567892627', name: 'Mũ lưỡi trai unisex', categoryId: 4, category: { name: ' Phụ kiện' }, price: 120000, cost: 60000, stock: 35, minStock: 15, unit: 'Cái', status: 'active' },
-    { id: 13, sku: 'SP013', barcode: '8934567892829', name: 'Khăn choàng cổ len', categoryId: 4, category: { name: 'Phụ kiện' }, price: 180000, cost: 90000, stock: 20, minStock: 10, unit: 'Cái', status: 'active' },
-    { id: 14, sku: 'SP014', barcode: '8934567893031', name: 'Thắt lưng da nam', categoryId: 4, category: { name: 'Phụ kiện' }, price: 220000, cost: 110000, stock: 3, minStock: 10, unit: 'Cái', status: 'active' },
-    { id: 15, sku: 'SP015', barcode: '8934567893233', name: 'Ví da nam cao cấp', categoryId: 4, category: { name: 'Phụ kiện' }, price: 280000, cost: 140000, stock: 7, minStock: 10, unit: 'Cái', status: 'active' },
-];
-
-// Mock data kept as fallback only
+// All data MUST come from Supabase. No fallback mock data.
 
 // ========================================
 // PRODUCTS
@@ -95,8 +84,7 @@ let mockProducts = [
 ipcMain.handle('products:getAll', async () => {
     try {
         if (!prisma) {
-            console.log('⚠️  Prisma not available, using mock data');
-            return { success: true, data: mockProducts };
+            throw new Error('Database chưa được khởi tạo. Vui lòng khởi động lại ứng dụng.');
         }
 
         const products = await prisma.product.findMany({
@@ -106,12 +94,11 @@ ipcMain.handle('products:getAll', async () => {
             orderBy: { createdAt: 'desc' }
         });
 
-        console.log(`✅ Loaded ${products.length} products from database`);
+        console.log(`✅ Loaded ${products.length} products from Supabase`);
         return { success: true, data: products };
     } catch (error) {
-        console.error('❌ Error getAll products:', error.message);
-        console.log('⚠️  Fallback to mock data');
-        return { success: true, data: mockProducts };
+        console.error('❌ Error loading products:', error.message);
+        return { success: false, error: error.message };
     }
 });
 
@@ -228,8 +215,7 @@ ipcMain.handle('products:delete', async (event, id) => {
 ipcMain.handle('categories:getAll', async () => {
     try {
         if (!prisma) {
-            // Fallback to mock if Prisma not available
-            return { success: true, data: mockCategories };
+            throw new Error('Database chưa được khởi tạo.');
         }
 
         const categories = await prisma.category.findMany({
@@ -245,13 +231,7 @@ ipcMain.handle('categories:getAll', async () => {
 ipcMain.handle('categories:create', async (event, data) => {
     try {
         if (!prisma) {
-            // Fallback to mock if Prisma not available
-            const newCategory = {
-                ...data,
-                id: mockCategories.length + 1,
-            };
-            mockCategories.push(newCategory);
-            return { success: true, data: newCategory };
+            throw new Error('Database chưa được khởi tạo.');
         }
 
         const newCategory = await prisma.category.create({
@@ -271,13 +251,7 @@ ipcMain.handle('categories:create', async (event, data) => {
 ipcMain.handle('categories:update', async (event, id, data) => {
     try {
         if (!prisma) {
-            // Fallback to mock if Prisma not available
-            const index = mockCategories.findIndex(c => c.id === id);
-            if (index === -1) {
-                return { success: false, error: 'Danh mục không tồn tại' };
-            }
-            mockCategories[index] = { ...mockCategories[index], ...data };
-            return { success: true, data: mockCategories[index] };
+            throw new Error('Database chưa được khởi tạo.');
         }
 
         const updatedCategory = await prisma.category.update({
@@ -298,13 +272,7 @@ ipcMain.handle('categories:update', async (event, id, data) => {
 ipcMain.handle('categories:delete', async (event, id) => {
     try {
         if (!prisma) {
-            // Fallback to mock if Prisma not available
-            const index = mockCategories.findIndex(c => c.id === id);
-            if (index === -1) {
-                return { success: false, error: 'Danh mục không tồn tại' };
-            }
-            mockCategories.splice(index, 1);
-            return { success: true };
+            throw new Error('Database chưa được khởi tạo.');
         }
 
         // Check if category is being used by any products
@@ -709,47 +677,7 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
         console.log(`📦 Update stock: SKU=${sku}, Qty=${quantity}, Add=${isAdd}`);
 
         if (!prisma) {
-            console.warn('⚠️  Prisma not available, using mockProducts');
-
-            // Fallback to mockProducts
-            let product = mockProducts.find(p => p.sku === sku);
-            let isVariant = false;
-            let variantIndex = -1;
-
-            if (!product) {
-                for (let p of mockProducts) {
-                    if (p.variants) {
-                        try {
-                            const variants = JSON.parse(p.variants);
-                            const idx = variants.findIndex(v => v.sku === sku);
-                            if (idx >= 0) {
-                                product = p;
-                                isVariant = true;
-                                variantIndex = idx;
-                                break;
-                            }
-                        } catch { }
-                    }
-                }
-            }
-
-            if (!product) {
-                return { success: false, error: `Không tìm thấy SKU: ${sku}` };
-            }
-
-            if (isVariant) {
-                const variants = JSON.parse(product.variants);
-                const oldStock = variants[variantIndex].stock;
-                variants[variantIndex].stock = isAdd ? oldStock + quantity : oldStock - quantity;
-                product.variants = JSON.stringify(variants);
-                console.log(`✅ Updated variant ${sku}: ${oldStock} → ${variants[variantIndex].stock}`);
-            } else {
-                const oldStock = product.stock;
-                product.stock = isAdd ? oldStock + quantity : oldStock - quantity;
-                console.log(`✅ Updated product ${sku}: ${oldStock} → ${product.stock}`);
-            }
-
-            return { success: true, data: product };
+            throw new Error('Database chưa được khởi tạo.');
         }
 
         // 🎁 CHECK IF SKU IS A COMBO
@@ -2688,13 +2616,13 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
                     console.log(`📦 File size: ${(totalBytes / 1024 / 1024).toFixed(2)} MB`);
 
                     const file = fs.createWriteStream(zipPath);
-                    
+
                     res.on('data', (chunk) => {
                         downloadedBytes += chunk.length;
                         const percent = ((downloadedBytes / totalBytes) * 100).toFixed(1);
                         const elapsed = (Date.now() - startTime) / 1000;
                         const speed = (downloadedBytes / 1024 / 1024) / elapsed;
-                        
+
                         // Log mỗi 10%
                         if (downloadedBytes % Math.floor(totalBytes / 10) < chunk.length) {
                             console.log(`⬇️ Downloaded: ${percent}% (${speed.toFixed(2)} MB/s)`);
@@ -2702,11 +2630,11 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
                     });
 
                     res.pipe(file);
-                    file.on('finish', () => { 
-                        file.close(); 
+                    file.on('finish', () => {
+                        file.close();
                         const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
                         console.log(`✅ Download complete in ${totalTime}s`);
-                        resolve(); 
+                        resolve();
                     });
                     file.on('error', reject);
                 }).on('error', reject);
@@ -2726,17 +2654,17 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
         const copyRecursive = (src, dest) => {
             const entries = fs.readdirSync(src, { withFileTypes: true });
             if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
-            
+
             let copiedCount = 0;
             for (const entry of entries) {
                 const srcPath = path.join(src, entry.name);
                 const destPath = path.join(dest, entry.name);
-                
+
                 // Skip files that shouldn't be overwritten
                 if (entry.name === '.env') continue;
                 if (entry.name === 'dev.db') continue; // Không đè database
                 if (entry.name === 'Backups') continue; // Không đè backups
-                
+
                 if (entry.isDirectory()) {
                     copyRecursive(srcPath, destPath);
                 } else {
