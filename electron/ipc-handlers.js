@@ -2722,5 +2722,10 @@ ipcMain.handle('update:getHistory', async () => {
     }
 });
 
+// ========================================
+// AUTO UPDATE HANDLERS
+// ========================================
+require('./update-handlers');
+
 module.exports = { prisma };
 
