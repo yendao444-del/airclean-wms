@@ -198,34 +198,31 @@ export default function PurchasePage() {
         setSelectedProductVariants([]);
         form.resetFields();
 
-        // Set values sau khi reset, bao gồm cả createdBy
+        // Mở modal ngay lập tức
+        setModalVisible(true);
+
+        // Set values sau khi reset
         setTimeout(() => {
             form.setFieldsValue({
                 purchaseDate: dayjs(),
                 status: 'completed',
-                createdBy: currentUser, // 👤 Mặc định là user đang đăng nhập
+                createdBy: currentUser,
             });
         }, 0);
 
-        // ✨ Reload suppliers và products để đảm bảo data luôn fresh
-        console.log('🔄 Reloading suppliers and products...');
+        // Load data sau khi modal đã mở
         setLoadingData(true);
         try {
             await Promise.all([
                 loadSuppliers(),
                 loadProducts()
             ]);
-            console.log('✅ Data loaded successfully!');
-            console.log('   Suppliers:', suppliers.length);
-            console.log('   Products:', products.length);
         } catch (error) {
             console.error('❌ Error loading data:', error);
             message.error('Lỗi khi tải dữ liệu nhà cung cấp và sản phẩm');
         } finally {
             setLoadingData(false);
         }
-
-        setModalVisible(true);
     };
 
     const handleEdit = (purchase: Purchase) => {
@@ -870,12 +867,12 @@ export default function PurchasePage() {
             )}
 
             <Modal
-                key={`purchase-modal-${products.length}`} // Force re-mount khi products load
                 title={editingPurchase ? '✏️ Sửa phiếu nhập' : '➕ Tạo phiếu nhập mới'}
                 open={modalVisible}
                 onCancel={() => setModalVisible(false)}
                 footer={null}
                 width={900}
+                destroyOnClose
             >
                 <Form
                     form={form}
