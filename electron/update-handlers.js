@@ -3,7 +3,7 @@
 // ========================================
 
 const https = require('https');
-const { app } = require('electron');
+const { app, ipcMain, shell } = require('electron');
 
 // GitHub repository info
 const GITHUB_OWNER = 'yendao444-del';
@@ -155,3 +155,37 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
         };
     }
 });
+
+/**
+ * Get current version
+ */
+ipcMain.handle('update:getCurrentVersion', async () => {
+    try {
+        const packageJson = require('../package.json');
+        return { success: true, data: packageJson.version };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+/**
+ * Restart app
+ */
+ipcMain.handle('update:restart', async () => {
+    app.relaunch();
+    app.exit(0);
+});
+
+/**
+ * Get update history
+ */
+ipcMain.handle('update:getHistory', async () => {
+    try {
+        // TODO: Implement update history tracking
+        // For now, return empty array
+        return { success: true, data: [] };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
