@@ -25,7 +25,11 @@
       "Bash(gh:*)",
       "Bash(git init:*)",
       "Bash(git commit:*)",
-      "Bash(git config:*)"
+      "Bash(git config:*)",
+      "Bash(where:*)",
+      "Bash(\"/c/Program Files/GitHub CLI/gh.exe\" repo create airclean-wms --private --source . --push)",
+      "Bash(\"/c/Program Files/GitHub CLI/gh.exe\" repo edit yendao444-del/airclean-wms --visibility public)",
+      "Bash(\"/c/Program Files/GitHub CLI/gh.exe\" repo edit yendao444-del/airclean-wms --visibility public --accept-visibility-change-consequences)"
     ]
   }
 }

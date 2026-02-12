@@ -1,4 +1,4 @@
-const { ipcMain, dialog, shell } = require('electron');
+const { ipcMain, dialog, shell, app } = require('electron');
 const path = require('path');
 
 // Load .env BEFORE Prisma
@@ -2573,6 +2573,179 @@ ipcMain.handle('shell:openExternal', async (event, url) => {
         return { success: true };
     } catch (error) {
         console.error('❌ Error opening external URL:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// ==================== AUTO UPDATE ====================
+
+const GITHUB_REPO = 'yendao444-del/airclean-wms';
+const UPDATE_HISTORY_FILE = path.join(app.getPath('userData'), 'update-history.json');
+
+function getUpdateHistory() {
+    try {
+        if (fs.existsSync(UPDATE_HISTORY_FILE)) {
+            return JSON.parse(fs.readFileSync(UPDATE_HISTORY_FILE, 'utf8'));
+        }
+    } catch { }
+    return [];
+}
+
+function saveUpdateHistory(history) {
+    fs.writeFileSync(UPDATE_HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8');
+}
+
+// Lấy version hiện tại từ package.json
+ipcMain.handle('update:getCurrentVersion', async () => {
+    try {
+        const pkgPath = path.join(__dirname, '..', 'package.json');
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        return { success: true, data: pkg.version };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Kiểm tra bản cập nhật mới
+ipcMain.handle('update:check', async () => {
+    try {
+        const pkgPath = path.join(__dirname, '..', 'package.json');
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        const currentVersion = pkg.version;
+
+        // Gọi GitHub API
+        const data = await new Promise((resolve, reject) => {
+            https.get(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
+                headers: { 'User-Agent': 'AircleanWMS' }
+            }, (res) => {
+                let body = '';
+                res.on('data', chunk => body += chunk);
+                res.on('end', () => {
+                    if (res.statusCode === 200) {
+                        resolve(JSON.parse(body));
+                    } else {
+                        reject(new Error(`GitHub API error: ${res.statusCode}`));
+                    }
+                });
+            }).on('error', reject);
+        });
+
+        const latestVersion = data.tag_name.replace('v', '');
+        const hasUpdate = latestVersion !== currentVersion;
+
+        return {
+            success: true,
+            data: {
+                currentVersion,
+                latestVersion,
+                hasUpdate,
+                releaseNotes: data.body || data.name || '',
+                publishedAt: data.published_at,
+                downloadUrl: data.assets && data.assets[0] ? data.assets[0].browser_download_url : null,
+                downloadSize: data.assets && data.assets[0] ? data.assets[0].size : 0,
+            }
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Tải và cài đặt bản cập nhật
+ipcMain.handle('update:download', async (event, downloadUrl) => {
+    try {
+        const appPath = path.join(__dirname, '..');
+        const tempDir = path.join(app.getPath('temp'), 'airclean-update');
+        const zipPath = path.join(tempDir, 'update.zip');
+        const extractDir = path.join(tempDir, 'extracted');
+
+        // Tạo thư mục tạm
+        if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true });
+        fs.mkdirSync(tempDir, { recursive: true });
+
+        // Download file zip
+        await new Promise((resolve, reject) => {
+            const downloadFile = (url) => {
+                https.get(url, {
+                    headers: { 'User-Agent': 'AircleanWMS' }
+                }, (res) => {
+                    // Follow redirects
+                    if (res.statusCode === 302 || res.statusCode === 301) {
+                        downloadFile(res.headers.location);
+                        return;
+                    }
+                    if (res.statusCode !== 200) {
+                        reject(new Error(`Download failed: ${res.statusCode}`));
+                        return;
+                    }
+                    const file = fs.createWriteStream(zipPath);
+                    res.pipe(file);
+                    file.on('finish', () => { file.close(); resolve(); });
+                    file.on('error', reject);
+                }).on('error', reject);
+            };
+            downloadFile(downloadUrl);
+        });
+
+        // Giải nén bằng PowerShell
+        const { execSync } = require('child_process');
+        execSync(`powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${extractDir}' -Force"`, { timeout: 120000 });
+
+        // Copy đè vào thư mục app (trừ .env)
+        const copyRecursive = (src, dest) => {
+            const entries = fs.readdirSync(src, { withFileTypes: true });
+            if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
+            for (const entry of entries) {
+                const srcPath = path.join(src, entry.name);
+                const destPath = path.join(dest, entry.name);
+                if (entry.name === '.env') continue; // Không đè .env
+                if (entry.isDirectory()) {
+                    copyRecursive(srcPath, destPath);
+                } else {
+                    fs.copyFileSync(srcPath, destPath);
+                }
+            }
+        };
+        copyRecursive(extractDir, appPath);
+
+        // Lưu lịch sử update
+        const history = getUpdateHistory();
+        // Lấy version mới từ package.json vừa update
+        let newVersion = 'unknown';
+        try {
+            const newPkg = JSON.parse(fs.readFileSync(path.join(appPath, 'package.json'), 'utf8'));
+            newVersion = newPkg.version;
+        } catch { }
+
+        history.unshift({
+            version: newVersion,
+            date: new Date().toISOString(),
+            status: 'success',
+        });
+        // Giữ tối đa 50 bản ghi
+        if (history.length > 50) history.length = 50;
+        saveUpdateHistory(history);
+
+        // Dọn dẹp
+        fs.rmSync(tempDir, { recursive: true });
+
+        return { success: true, data: { version: newVersion } };
+    } catch (error) {
+        console.error('Update error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// Restart app
+ipcMain.handle('update:restart', async () => {
+    app.relaunch();
+    app.exit(0);
+});
+
+// Lấy lịch sử update
+ipcMain.handle('update:getHistory', async () => {
+    try {
+        return { success: true, data: getUpdateHistory() };
+    } catch (error) {
         return { success: false, error: error.message };
     }
 });

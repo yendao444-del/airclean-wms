@@ -96,4 +96,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     shell: {
         openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
     },
+
+    // Auto Update
+    update: {
+        getCurrentVersion: () => ipcRenderer.invoke('update:getCurrentVersion'),
+        check: () => ipcRenderer.invoke('update:check'),
+        download: (downloadUrl) => ipcRenderer.invoke('update:download', downloadUrl),
+        restart: () => ipcRenderer.invoke('update:restart'),
+        getHistory: () => ipcRenderer.invoke('update:getHistory'),
+    },
 });

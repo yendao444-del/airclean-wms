@@ -213,6 +213,13 @@ export interface ElectronAPI {
         update: (id: number, data: Partial<ComboProduct>) => Promise<{ success: boolean; data?: ComboProduct; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
     };
+    update: {
+        getCurrentVersion: () => Promise<{ success: boolean; data?: string; error?: string }>;
+        check: () => Promise<{ success: boolean; data?: { currentVersion: string; latestVersion: string; hasUpdate: boolean; releaseNotes: string; publishedAt: string; downloadUrl: string | null; downloadSize: number }; error?: string }>;
+        download: (downloadUrl: string) => Promise<{ success: boolean; data?: { version: string }; error?: string }>;
+        restart: () => Promise<void>;
+        getHistory: () => Promise<{ success: boolean; data?: Array<{ version: string; date: string; status: string }>; error?: string }>;
+    };
 }
 
 declare global {

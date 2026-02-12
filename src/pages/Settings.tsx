@@ -28,7 +28,12 @@ import {
   FolderOpenOutlined,
   FileZipOutlined,
 
-  ClockCircleOutlined
+  ClockCircleOutlined,
+  CloudDownloadOutlined,
+  CheckCircleOutlined,
+  SyncOutlined,
+  HistoryOutlined,
+  RocketOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 
@@ -42,15 +47,141 @@ interface BackupFile {
   modifiedAt: Date;
 }
 
+interface UpdateInfo {
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  releaseNotes: string;
+  publishedAt: string;
+  downloadUrl: string | null;
+  downloadSize: number;
+}
+
+interface UpdateHistoryItem {
+  version: string;
+  date: string;
+  status: string;
+}
+
 const Settings = () => {
   const [loading, setLoading] = useState(false);
   const [backupLoading, setBackupLoading] = useState(false);
   const [backups, setBackups] = useState<BackupFile[]>([]);
 
-  // Load danh sách backups khi component mount
+  // Update states
+  const [currentVersion, setCurrentVersion] = useState('...');
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [updateHistory, setUpdateHistory] = useState<UpdateHistoryItem[]>([]);
+
+  // Load danh sách backups + version + update history khi component mount
   useEffect(() => {
     loadBackups();
+    loadCurrentVersion();
+    loadUpdateHistory();
+    // Auto check update
+    handleCheckUpdate(true);
   }, []);
+
+  const loadCurrentVersion = async () => {
+    try {
+      const result = await window.electronAPI.update.getCurrentVersion();
+      if (result.success && result.data) {
+        setCurrentVersion(result.data);
+      }
+    } catch { }
+  };
+
+  const loadUpdateHistory = async () => {
+    try {
+      const result = await window.electronAPI.update.getHistory();
+      if (result.success && result.data) {
+        setUpdateHistory(result.data);
+      }
+    } catch { }
+  };
+
+  const handleCheckUpdate = async (silent = false) => {
+    try {
+      setCheckingUpdate(true);
+      const result = await window.electronAPI.update.check();
+      if (result.success && result.data) {
+        setUpdateInfo(result.data);
+        setCurrentVersion(result.data.currentVersion);
+        if (!silent) {
+          if (result.data.hasUpdate) {
+            message.info(`Có bản cập nhật mới: v${result.data.latestVersion}`);
+          } else {
+            message.success('Bạn đang dùng phiên bản mới nhất!');
+          }
+        }
+      } else if (!silent) {
+        message.error(`Lỗi kiểm tra: ${result.error}`);
+      }
+    } catch (error: any) {
+      if (!silent) message.error(`Lỗi: ${error.message}`);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
+  const handleDownloadUpdate = async () => {
+    if (!updateInfo?.downloadUrl) {
+      message.error('Không tìm thấy link tải!');
+      return;
+    }
+
+    Modal.confirm({
+      title: 'Cập nhật phần mềm',
+      icon: <CloudDownloadOutlined style={{ color: '#1890ff' }} />,
+      content: (
+        <div>
+          <p>Cập nhật từ <strong>v{updateInfo.currentVersion}</strong> lên <strong>v{updateInfo.latestVersion}</strong></p>
+          {updateInfo.releaseNotes && (
+            <Alert
+              message="Ghi chú thay đổi"
+              description={updateInfo.releaseNotes}
+              type="info"
+              showIcon
+              style={{ marginTop: 12 }}
+            />
+          )}
+          <Alert
+            message="Ứng dụng sẽ tự động khởi động lại sau khi cập nhật."
+            type="warning"
+            showIcon
+            style={{ marginTop: 12 }}
+          />
+        </div>
+      ),
+      okText: 'Cập nhật ngay',
+      cancelText: 'Hủy',
+      onOk: async () => {
+        try {
+          setDownloading(true);
+          message.loading({ content: 'Đang tải bản cập nhật...', key: 'update', duration: 0 });
+
+          const result = await window.electronAPI.update.download(updateInfo.downloadUrl!);
+
+          if (result.success && result.data) {
+            message.success({ content: `Cập nhật thành công v${result.data.version}! Đang khởi động lại...`, key: 'update', duration: 3 });
+            await loadUpdateHistory();
+            // Restart sau 2 giây
+            setTimeout(async () => {
+              await window.electronAPI.update.restart();
+            }, 2000);
+          } else {
+            message.error({ content: `Lỗi cập nhật: ${result.error}`, key: 'update' });
+          }
+        } catch (error: any) {
+          message.error({ content: `Lỗi: ${error.message}`, key: 'update' });
+        } finally {
+          setDownloading(false);
+        }
+      }
+    });
+  };
 
   const loadBackups = async () => {
     try {
@@ -482,8 +613,180 @@ const Settings = () => {
     },
   ];
 
+  const updateHistoryColumns = [
+    {
+      title: 'Phiên bản',
+      dataIndex: 'version',
+      key: 'version',
+      width: 120,
+      render: (v: string) => <Text strong>v{v}</Text>,
+    },
+    {
+      title: 'Thời gian',
+      dataIndex: 'date',
+      key: 'date',
+      width: 200,
+      render: (d: string) => dayjs(d).format('DD/MM/YYYY HH:mm:ss'),
+    },
+    {
+      title: 'Trạng thái',
+      dataIndex: 'status',
+      key: 'status',
+      width: 120,
+      render: (s: string) => (
+        <span style={{ color: s === 'success' ? '#52c41a' : '#ff4d4f' }}>
+          {s === 'success' ? <><CheckCircleOutlined /> Thành công</> : <><WarningOutlined /> Lỗi</>}
+        </span>
+      ),
+    },
+  ];
+
   // TAB ITEMS
   const tabItems = [
+    {
+      key: 'update',
+      label: (
+        <span>
+          <RocketOutlined /> Cập nhật phần mềm
+          {updateInfo?.hasUpdate && (
+            <span style={{
+              marginLeft: 8,
+              background: '#ff4d4f',
+              color: '#fff',
+              borderRadius: 10,
+              padding: '1px 8px',
+              fontSize: 11,
+            }}>NEW</span>
+          )}
+        </span>
+      ),
+      children: (
+        <div>
+          {/* Current version + check */}
+          <Row gutter={16} style={{ marginBottom: 24 }}>
+            <Col span={8}>
+              <Card>
+                <Statistic
+                  title="Phiên bản hiện tại"
+                  value={`v${currentVersion}`}
+                  prefix={<RocketOutlined />}
+                  valueStyle={{ color: '#1890ff' }}
+                />
+              </Card>
+            </Col>
+            <Col span={8}>
+              <Card>
+                <Statistic
+                  title="Phiên bản mới nhất"
+                  value={updateInfo ? `v${updateInfo.latestVersion}` : 'Chưa kiểm tra'}
+                  prefix={<CloudDownloadOutlined />}
+                  valueStyle={{ color: updateInfo?.hasUpdate ? '#52c41a' : '#8c8c8c' }}
+                />
+              </Card>
+            </Col>
+            <Col span={8}>
+              <Card>
+                <Statistic
+                  title="Số lần cập nhật"
+                  value={updateHistory.length}
+                  prefix={<HistoryOutlined />}
+                  valueStyle={{ color: '#722ed1' }}
+                />
+              </Card>
+            </Col>
+          </Row>
+
+          {/* Update status */}
+          {updateInfo?.hasUpdate ? (
+            <Alert
+              message={`Có bản cập nhật mới: v${updateInfo.latestVersion}`}
+              description={
+                <div>
+                  {updateInfo.releaseNotes && <p>{updateInfo.releaseNotes}</p>}
+                  <p>Ngày phát hành: {dayjs(updateInfo.publishedAt).format('DD/MM/YYYY HH:mm')}</p>
+                  {updateInfo.downloadSize > 0 && (
+                    <p>Kích thước: {(updateInfo.downloadSize / 1024 / 1024).toFixed(1)} MB</p>
+                  )}
+                </div>
+              }
+              type="success"
+              showIcon
+              icon={<CheckCircleOutlined />}
+              style={{ marginBottom: 24 }}
+              action={
+                <Button
+                  type="primary"
+                  icon={<CloudDownloadOutlined />}
+                  onClick={handleDownloadUpdate}
+                  loading={downloading}
+                  size="large"
+                >
+                  Cập nhật ngay
+                </Button>
+              }
+            />
+          ) : updateInfo && !updateInfo.hasUpdate ? (
+            <Alert
+              message="Bạn đang dùng phiên bản mới nhất!"
+              type="info"
+              showIcon
+              icon={<CheckCircleOutlined />}
+              style={{ marginBottom: 24 }}
+            />
+          ) : null}
+
+          {/* Actions */}
+          <Row gutter={16} style={{ marginBottom: 24 }}>
+            <Col span={12}>
+              <Button
+                type="primary"
+                icon={<SyncOutlined spin={checkingUpdate} />}
+                onClick={() => handleCheckUpdate(false)}
+                size="large"
+                loading={checkingUpdate}
+                block
+                style={{ height: 60 }}
+              >
+                Kiểm tra cập nhật
+              </Button>
+            </Col>
+            <Col span={12}>
+              <Button
+                icon={<CloudDownloadOutlined />}
+                onClick={handleDownloadUpdate}
+                size="large"
+                loading={downloading}
+                block
+                style={{ height: 60 }}
+              >
+                Tải và cập nhật thủ công
+              </Button>
+            </Col>
+          </Row>
+
+          {/* Update history */}
+          <Divider>Lịch sử cập nhật ({updateHistory.length})</Divider>
+
+          {updateHistory.length > 0 ? (
+            <Table
+              columns={updateHistoryColumns}
+              dataSource={updateHistory}
+              rowKey={(r) => r.date}
+              pagination={{ pageSize: 10 }}
+              size="small"
+            />
+          ) : (
+            <Alert
+              message="Chưa có lịch sử cập nhật"
+              description="Lịch sử cập nhật sẽ được ghi lại mỗi khi bạn cập nhật phần mềm."
+              type="info"
+              showIcon
+              icon={<HistoryOutlined />}
+            />
+          )}
+        </div>
+      ),
+    },
     {
       key: 'backup',
       label: (
@@ -679,7 +982,7 @@ const Settings = () => {
       </div>
 
       <Tabs
-        defaultActiveKey="backup"
+        defaultActiveKey="update"
         items={tabItems}
         size="large"
         tabBarStyle={{ marginBottom: 24 }}
