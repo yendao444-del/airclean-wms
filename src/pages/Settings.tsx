@@ -127,60 +127,87 @@ const Settings = () => {
   };
 
   const handleDownloadUpdate = async () => {
-    if (!updateInfo?.downloadUrl) {
-      message.error('Không tìm thấy link tải!');
-      return;
-    }
+    // Kiểm tra update mới trước
+    try {
+      setCheckingUpdate(true);
+      const result = await window.electronAPI.update.check();
+      setCheckingUpdate(false);
 
-    Modal.confirm({
-      title: 'Cập nhật phần mềm',
-      icon: <CloudDownloadOutlined style={{ color: '#1890ff' }} />,
-      content: (
-        <div>
-          <p>Cập nhật từ <strong>v{updateInfo.currentVersion}</strong> lên <strong>v{updateInfo.latestVersion}</strong></p>
-          {updateInfo.releaseNotes && (
+      if (!result.success || !result.data) {
+        message.error('Không thể kiểm tra phiên bản mới nhất!');
+        return;
+      }
+
+      const latestUpdateInfo = result.data;
+      setUpdateInfo(latestUpdateInfo);
+      setCurrentVersion(latestUpdateInfo.currentVersion);
+
+      // Nếu không có update, thông báo
+      if (!latestUpdateInfo.hasUpdate) {
+        message.info('Bạn đang dùng phiên bản mới nhất!');
+        return;
+      }
+
+      // Nếu không có link download
+      if (!latestUpdateInfo.downloadUrl) {
+        message.error('Không tìm thấy link tải!');
+        return;
+      }
+
+      // Hiển thị modal xác nhận
+      Modal.confirm({
+        title: 'Cập nhật phần mềm',
+        icon: <CloudDownloadOutlined style={{ color: '#1890ff' }} />,
+        content: (
+          <div>
+            <p>Cập nhật từ <strong>v{latestUpdateInfo.currentVersion}</strong> lên <strong>v{latestUpdateInfo.latestVersion}</strong></p>
+            {latestUpdateInfo.releaseNotes && (
+              <Alert
+                message="Ghi chú thay đổi"
+                description={latestUpdateInfo.releaseNotes}
+                type="info"
+                showIcon
+                style={{ marginTop: 12 }}
+              />
+            )}
             <Alert
-              message="Ghi chú thay đổi"
-              description={updateInfo.releaseNotes}
-              type="info"
+              message="Ứng dụng sẽ tự động khởi động lại sau khi cập nhật."
+              type="warning"
               showIcon
               style={{ marginTop: 12 }}
             />
-          )}
-          <Alert
-            message="Ứng dụng sẽ tự động khởi động lại sau khi cập nhật."
-            type="warning"
-            showIcon
-            style={{ marginTop: 12 }}
-          />
-        </div>
-      ),
-      okText: 'Cập nhật ngay',
-      cancelText: 'Hủy',
-      onOk: async () => {
-        try {
-          setDownloading(true);
-          message.loading({ content: 'Đang tải bản cập nhật...', key: 'update', duration: 0 });
+          </div>
+        ),
+        okText: 'Cập nhật ngay',
+        cancelText: 'Hủy',
+        onOk: async () => {
+          try {
+            setDownloading(true);
+            message.loading({ content: 'Đang tải bản cập nhật...', key: 'update', duration: 0 });
 
-          const result = await window.electronAPI.update.download(updateInfo.downloadUrl!);
+            const downloadResult = await window.electronAPI.update.download(latestUpdateInfo.downloadUrl!);
 
-          if (result.success && result.data) {
-            message.success({ content: `Cập nhật thành công v${result.data.version}! Đang khởi động lại...`, key: 'update', duration: 3 });
-            await loadUpdateHistory();
-            // Restart sau 2 giây
-            setTimeout(async () => {
-              await window.electronAPI.update.restart();
-            }, 2000);
-          } else {
-            message.error({ content: `Lỗi cập nhật: ${result.error}`, key: 'update' });
+            if (downloadResult.success && downloadResult.data) {
+              message.success({ content: `Cập nhật thành công v${downloadResult.data.version}! Đang khởi động lại...`, key: 'update', duration: 3 });
+              await loadUpdateHistory();
+              // Restart sau 2 giây
+              setTimeout(async () => {
+                await window.electronAPI.update.restart();
+              }, 2000);
+            } else {
+              message.error({ content: `Lỗi cập nhật: ${downloadResult.error}`, key: 'update' });
+            }
+          } catch (error: any) {
+            message.error({ content: `Lỗi: ${error.message}`, key: 'update' });
+          } finally {
+            setDownloading(false);
           }
-        } catch (error: any) {
-          message.error({ content: `Lỗi: ${error.message}`, key: 'update' });
-        } finally {
-          setDownloading(false);
         }
-      }
-    });
+      });
+    } catch (error: any) {
+      setCheckingUpdate(false);
+      message.error(`Lỗi: ${error.message}`);
+    }
   };
 
   const loadBackups = async () => {
