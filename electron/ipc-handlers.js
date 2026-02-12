@@ -1049,7 +1049,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
 });
 
 // Update purchase
-ipcMain.handle('purchases:update', async (event, id, data) => {
+ipcMain.handle('purchases:update', async (event, { id, data }) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
 

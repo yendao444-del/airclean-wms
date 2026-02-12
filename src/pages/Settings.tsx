@@ -134,7 +134,7 @@ const Settings = () => {
       setCheckingUpdate(false);
 
       if (!result.success || !result.data) {
-        message.error('Không thể kiểm tra phiên bản mới nhất!');
+        message.error(result.error || 'Không thể kiểm tra phiên bản mới nhất!');
         return;
       }
 
