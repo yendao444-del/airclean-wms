@@ -14,6 +14,7 @@ import {
     DatePicker,
     Tag,
     Timeline,
+    Alert,
 } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, EyeOutlined, HistoryOutlined, ClockCircleOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -134,21 +135,30 @@ export default function PurchasePage() {
     };
 
     const loadSuppliers = async () => {
+        console.log('🔵 [DEBUG] loadSuppliers() called');
+        alert('DEBUG: loadSuppliers() được gọi');
         try {
             if (!window.electronAPI?.suppliers?.getAll) {
                 console.error('❌ suppliers API not available - cần cập nhật app!');
+                alert('LỖI: suppliers API không tồn tại!');
                 message.error('Phiên bản app quá cũ! Vui lòng cập nhật để sử dụng tính năng Nhập hàng.');
                 return;
             }
+            console.log('🔵 [DEBUG] Calling suppliers.getAll()...');
             const result = await window.electronAPI.suppliers.getAll();
+            console.log('🔵 [DEBUG] suppliers.getAll() result:', result);
+            alert(`DEBUG: Nhận được ${result?.data?.length || 0} nhà cung cấp`);
             if (result.success && result.data) {
                 setSuppliers(result.data);
+                console.log('✅ [DEBUG] setSuppliers() với', result.data.length, 'items');
             } else {
                 console.error('❌ Suppliers load failed:', result.error);
+                alert(`LỖI: ${result.error}`);
                 message.error(`Lỗi tải nhà cung cấp: ${result.error || 'Không kết nối được database'}`);
             }
         } catch (error: any) {
             console.error('❌ Error loading suppliers:', error);
+            alert(`LỖI EXCEPTION: ${error.message}`);
             message.error(`Lỗi tải nhà cung cấp: ${error.message}`);
         }
     };
@@ -198,25 +208,25 @@ export default function PurchasePage() {
         setSelectedProductVariants([]);
         form.resetFields();
 
-        // Mở modal ngay lập tức
-        setModalVisible(true);
-
-        // Set values sau khi reset
-        setTimeout(() => {
-            form.setFieldsValue({
-                purchaseDate: dayjs(),
-                status: 'completed',
-                createdBy: currentUser,
-            });
-        }, 0);
-
-        // Load data sau khi modal đã mở
+        // ⚡ QUAN TRỌNG: Load data TRƯỚC
         setLoadingData(true);
         try {
             await Promise.all([
                 loadSuppliers(),
                 loadProducts()
             ]);
+
+            // ✅ Chỉ mở modal SAU KHI data đã load xong
+            setModalVisible(true);
+
+            // Set values sau khi reset
+            setTimeout(() => {
+                form.setFieldsValue({
+                    purchaseDate: dayjs(),
+                    status: 'completed',
+                    createdBy: currentUser,
+                });
+            }, 0);
         } catch (error) {
             console.error('❌ Error loading data:', error);
             message.error('Lỗi khi tải dữ liệu nhà cung cấp và sản phẩm');
@@ -874,6 +884,32 @@ export default function PurchasePage() {
                 width={900}
                 destroyOnClose
             >
+                {suppliers.length === 0 && products.length === 0 && !loadingData && (
+                    <Alert
+                        message="Không tải được dữ liệu"
+                        description="Nhà cung cấp và sản phẩm không load được. Vui lòng đóng modal và thử lại, hoặc kiểm tra kết nối mạng."
+                        type="error"
+                        showIcon
+                        style={{ marginBottom: 16 }}
+                        action={
+                            <Button size="small" onClick={async () => {
+                                setLoadingData(true);
+                                await Promise.all([loadSuppliers(), loadProducts()]);
+                                setLoadingData(false);
+                            }}>
+                                Thử lại
+                            </Button>
+                        }
+                    />
+                )}
+                {loadingData && (
+                    <Alert
+                        message="Đang tải dữ liệu nhà cung cấp và sản phẩm..."
+                        type="info"
+                        showIcon
+                        style={{ marginBottom: 16 }}
+                    />
+                )}
                 <Form
                     form={form}
                     layout="vertical"
@@ -881,13 +917,14 @@ export default function PurchasePage() {
                 >
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                         <Form.Item
-                            label="Nhà cung cấp"
+                            label={`Nhà cung cấp ${suppliers.length > 0 ? `(${suppliers.length})` : ''}`}
                             name="supplierId"
                             rules={[{ required: true, message: 'Vui lòng chọn nhà cung cấp!' }]}
                         >
                             <Select
-                                placeholder="Chọn nhà cung cấp"
+                                placeholder={suppliers.length === 0 ? 'Đang tải...' : 'Chọn nhà cung cấp'}
                                 size="large"
+                                loading={loadingData}
                                 dropdownRender={(menu) => (
                                     <>
                                         {menu}
@@ -912,71 +949,77 @@ export default function PurchasePage() {
                                     </>
                                 )}
                             >
-                                {suppliers.map((supplier) => (
-                                    <Select.Option key={supplier.id} value={supplier.id}>
-                                        <div style={{
-                                            display: 'flex',
-                                            justifyContent: 'space-between',
-                                            alignItems: 'center',
-                                            width: '100%'
-                                        }}>
-                                            <span>{supplier.name}</span>
-                                            <div
-                                                className="supplier-actions"
-                                                style={{
-                                                    display: 'flex',
-                                                    gap: 4,
-                                                }}
-                                            >
-                                                <Button
-                                                    type="text"
-                                                    size="small"
-                                                    icon={<EditOutlined />}
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        setEditingSupplier(supplier);
-                                                        supplierForm.setFieldsValue(supplier);
-                                                        setSupplierModalVisible(true);
+                                {(() => {
+                                    console.log('🟢 [RENDER] Dropdown đang render với suppliers:', suppliers.length);
+                                    if (suppliers.length === 0) {
+                                        alert('⚠️ RENDER: suppliers.length = 0!');
+                                    }
+                                    return suppliers.map((supplier) => (
+                                        <Select.Option key={supplier.id} value={supplier.id}>
+                                            <div style={{
+                                                display: 'flex',
+                                                justifyContent: 'space-between',
+                                                alignItems: 'center',
+                                                width: '100%'
+                                            }}>
+                                                <span>{supplier.name}</span>
+                                                <div
+                                                    className="supplier-actions"
+                                                    style={{
+                                                        display: 'flex',
+                                                        gap: 4,
                                                     }}
-                                                    style={{ padding: '0 4px', color: '#1890ff' }}
-                                                    title="Sửa nhà cung cấp"
-                                                />
-                                                <Button
-                                                    type="text"
-                                                    size="small"
-                                                    danger
-                                                    icon={<DeleteOutlined />}
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        Modal.confirm({
-                                                            title: 'Xác nhận xóa',
-                                                            content: `Bạn có chắc muốn xóa "${supplier.name}"?`,
-                                                            okText: 'Xóa',
-                                                            okType: 'danger',
-                                                            cancelText: 'Hủy',
-                                                            onOk: async () => {
-                                                                try {
-                                                                    const result = await window.electronAPI.suppliers.delete(supplier.id);
-                                                                    if (result.success) {
-                                                                        message.success('Đã xóa nhà cung cấp!');
-                                                                        form.setFieldsValue({ supplierId: undefined });
-                                                                        loadSuppliers();
-                                                                    } else {
-                                                                        message.error(result.error || 'Lỗi khi xóa');
+                                                >
+                                                    <Button
+                                                        type="text"
+                                                        size="small"
+                                                        icon={<EditOutlined />}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setEditingSupplier(supplier);
+                                                            supplierForm.setFieldsValue(supplier);
+                                                            setSupplierModalVisible(true);
+                                                        }}
+                                                        style={{ padding: '0 4px', color: '#1890ff' }}
+                                                        title="Sửa nhà cung cấp"
+                                                    />
+                                                    <Button
+                                                        type="text"
+                                                        size="small"
+                                                        danger
+                                                        icon={<DeleteOutlined />}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            Modal.confirm({
+                                                                title: 'Xác nhận xóa',
+                                                                content: `Bạn có chắc muốn xóa "${supplier.name}"?`,
+                                                                okText: 'Xóa',
+                                                                okType: 'danger',
+                                                                cancelText: 'Hủy',
+                                                                onOk: async () => {
+                                                                    try {
+                                                                        const result = await window.electronAPI.suppliers.delete(supplier.id);
+                                                                        if (result.success) {
+                                                                            message.success('Đã xóa nhà cung cấp!');
+                                                                            form.setFieldsValue({ supplierId: undefined });
+                                                                            loadSuppliers();
+                                                                        } else {
+                                                                            message.error(result.error || 'Lỗi khi xóa');
+                                                                        }
+                                                                    } catch (error) {
+                                                                        message.error('Lỗi khi xóa nhà cung cấp');
                                                                     }
-                                                                } catch (error) {
-                                                                    message.error('Lỗi khi xóa nhà cung cấp');
-                                                                }
-                                                            },
-                                                        });
-                                                    }}
-                                                    style={{ padding: '0 4px' }}
-                                                    title="Xóa nhà cung cấp"
-                                                />
+                                                                },
+                                                            });
+                                                        }}
+                                                        style={{ padding: '0 4px' }}
+                                                        title="Xóa nhà cung cấp"
+                                                    />
+                                                </div>
                                             </div>
-                                        </div>
-                                    </Select.Option>
-                                ))}
+                                        </Select.Option>
+                                    ))
+                                })()}
                             </Select>
                         </Form.Item>
 
@@ -1026,14 +1069,15 @@ export default function PurchasePage() {
                         </Title>
 
                         <div style={{ display: 'grid', gridTemplateColumns: '2.5fr 1.5fr 0.8fr 1fr 1.2fr auto', gap: 12, alignItems: 'end' }}>
-                            <Form.Item label="Sản phẩm" name="tempProductId" style={{ marginBottom: 0 }}>
+                            <Form.Item label={`Sản phẩm ${products.length > 0 ? `(${products.length})` : ''}`} name="tempProductId" style={{ marginBottom: 0 }}>
                                 <Select
                                     ref={productSelectRef}
-                                    placeholder="Chọn sản phẩm"
+                                    placeholder={products.length === 0 ? 'Đang tải...' : 'Chọn sản phẩm'}
                                     size="large"
                                     onChange={handleProductSelect}
                                     showSearch
                                     optionFilterProp="children"
+                                    loading={loadingData}
                                 >
                                     {products.map((p) => (
                                         <Select.Option key={p.id} value={p.id}>

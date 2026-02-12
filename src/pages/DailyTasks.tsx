@@ -508,12 +508,16 @@ const DailyTasks = () => {
     const handleAddTask = (categoryKey?: string) => {
         setEditingTask(null);
         taskForm.resetFields();
+
+        // ⚡ Set data TRƯỚC
         taskForm.setFieldsValue({
             priority: 'normal',
             category: categoryKey || categories[0]?.key || 'Sàn TMDT',
             status: 'pending',
             dueDate: dayjs().hour(20).minute(0).second(0) // Default 20:00 hôm nay
         });
+
+        // ✅ Mở modal SAU
         setTaskModalVisible(true);
     };
 
