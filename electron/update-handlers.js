@@ -3,6 +3,10 @@
 // ========================================
 
 const https = require('https');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const { app, ipcMain, shell } = require('electron');
 
 // GitHub repository info
@@ -151,24 +155,211 @@ function compareVersions(v1, v2) {
 }
 
 /**
- * Download update file
+ * Download file với hỗ trợ redirect (GitHub dùng 302)
+ */
+function downloadFile(url, destPath, onProgress) {
+    return new Promise((resolve, reject) => {
+        const makeRequest = (currentUrl, redirectCount = 0) => {
+            if (redirectCount > 10) {
+                reject(new Error('Quá nhiều redirect'));
+                return;
+            }
+
+            const protocol = currentUrl.startsWith('https') ? https : http;
+
+            protocol.get(currentUrl, {
+                headers: { 'User-Agent': 'QuanLyPOS-Desktop-App' }
+            }, (res) => {
+                // Handle redirects
+                if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307) {
+                    const redirectUrl = res.headers.location;
+                    console.log(`   ↪ Redirect ${redirectCount + 1}`);
+                    makeRequest(redirectUrl, redirectCount + 1);
+                    return;
+                }
+
+                if (res.statusCode !== 200) {
+                    reject(new Error(`Download thất bại: HTTP ${res.statusCode}`));
+                    return;
+                }
+
+                const totalBytes = parseInt(res.headers['content-length'], 10);
+                let downloadedBytes = 0;
+                let lastPercent = -1;
+
+                const file = fs.createWriteStream(destPath);
+
+                res.on('data', (chunk) => {
+                    downloadedBytes += chunk.length;
+                    if (onProgress && totalBytes) {
+                        const percent = Math.round((downloadedBytes / totalBytes) * 100);
+                        if (percent !== lastPercent && percent % 5 === 0) {
+                            lastPercent = percent;
+                            onProgress(downloadedBytes, totalBytes, percent);
+                        }
+                    }
+                });
+
+                res.pipe(file);
+
+                file.on('finish', () => {
+                    file.close(() => resolve(destPath));
+                });
+
+                file.on('error', (err) => {
+                    fs.unlink(destPath, () => { });
+                    reject(err);
+                });
+            }).on('error', (err) => {
+                reject(new Error(`Lỗi kết nối: ${err.message}`));
+            });
+        };
+
+        makeRequest(url);
+    });
+}
+
+/**
+ * Download + cài đặt bản cập nhật tự động
  */
 ipcMain.handle('update:download', async (event, downloadUrl) => {
     try {
-        console.log('📥 Downloading update from:', downloadUrl);
+        console.log('📥 ========================================');
+        console.log('📥 BẮT ĐẦU CẬP NHẬT TỰ ĐỘNG');
+        console.log('📥 ========================================');
+        console.log('   URL:', downloadUrl);
 
-        // TODO: Implement download logic
-        // For now, just open the download URL in browser
-        shell.openExternal(downloadUrl);
+        // 1. Tạo thư mục tạm
+        const tempDir = path.join(os.tmpdir(), `QuanLyPOS-update-${Date.now()}`);
+        fs.mkdirSync(tempDir, { recursive: true });
 
-        return { success: true };
+        const zipPath = path.join(tempDir, 'update.zip');
+        const extractDir = path.join(tempDir, 'extracted');
+
+        console.log('📁 Thư mục tạm:', tempDir);
+
+        // 2. Tải file ZIP từ GitHub
+        console.log('⬇️  Đang tải bản cập nhật...');
+
+        await downloadFile(downloadUrl, zipPath, (downloaded, total, percent) => {
+            const dlMB = (downloaded / 1024 / 1024).toFixed(1);
+            const totalMB = (total / 1024 / 1024).toFixed(1);
+            console.log(`   ⏳ ${percent}% (${dlMB}/${totalMB} MB)`);
+        });
+
+        const zipStats = fs.statSync(zipPath);
+        console.log(`✅ Tải xong: ${(zipStats.size / 1024 / 1024).toFixed(1)} MB`);
+
+        // 3. Giải nén ZIP
+        console.log('📦 Đang giải nén...');
+        const AdmZip = require('adm-zip');
+        const zip = new AdmZip(zipPath);
+        fs.mkdirSync(extractDir, { recursive: true });
+        zip.extractAllTo(extractDir, true);
+        console.log('✅ Giải nén xong');
+
+        // 4. Xác định thư mục gốc ứng dụng
+        const appRoot = path.join(__dirname, '..');
+
+        // 5. Tìm thư mục nội dung thực trong ZIP
+        //    (ZIP có thể chứa 1 folder cấp cao hoặc files trực tiếp)
+        let sourceDir = extractDir;
+        const extractedItems = fs.readdirSync(extractDir);
+        if (extractedItems.length === 1) {
+            const singleItem = path.join(extractDir, extractedItems[0]);
+            if (fs.statSync(singleItem).isDirectory()) {
+                if (fs.existsSync(path.join(singleItem, 'package.json'))) {
+                    sourceDir = singleItem;
+                }
+            }
+        }
+
+        console.log('📂 Nguồn:', sourceDir);
+        console.log('📂 Đích: ', appRoot);
+
+        // 6. Đọc version mới
+        let newVersion = 'unknown';
+        const pkgPath = path.join(sourceDir, 'package.json');
+        if (fs.existsSync(pkgPath)) {
+            try {
+                const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+                newVersion = pkg.version || 'unknown';
+            } catch (e) { }
+        }
+        console.log('🏷️  Version mới:', newVersion);
+
+        // 7. Tạo script cập nhật (.bat)
+        //    Script chạy sau khi app đóng: copy files mới → khởi động lại
+        const batPath = path.join(tempDir, 'update.bat');
+        const exePath = process.execPath;
+
+        const batContent = `@echo off
+chcp 65001 >nul
+title QuanLyPOS - Cap nhat v${newVersion}
+echo.
+echo ========================================
+echo   QuanLyPOS - Dang cap nhat v${newVersion}
+echo ========================================
+echo.
+echo [1/4] Doi ung dung dong...
+timeout /t 3 /nobreak >nul
+echo [2/4] Dang cap nhat files...
+xcopy "${sourceDir.replace(/\\/g, '\\')}\\*" "${appRoot.replace(/\\/g, '\\')}\\" /E /Y /I /Q >nul 2>&1
+if %errorlevel% neq 0 (
+    echo.
+    echo LOI: Khong the cap nhat files!
+    echo Vui long thu lai hoac cap nhat thu cong.
+    pause
+    exit /b 1
+)
+echo [3/4] Cap nhat thanh cong!
+echo.
+echo ========================================
+echo   Da cap nhat len v${newVersion}
+echo ========================================
+echo.
+echo [4/4] Dang khoi dong lai...
+timeout /t 2 /nobreak >nul
+start "" "${exePath.replace(/\\/g, '\\')}"
+timeout /t 10 /nobreak >nul
+rmdir /S /Q "${tempDir.replace(/\\/g, '\\')}" 2>nul
+exit
+`;
+
+        fs.writeFileSync(batPath, batContent);
+        console.log('📝 Tạo script cập nhật:', batPath);
+
+        // 8. Chạy script cập nhật (chạy độc lập, tách khỏi process chính)
+        console.log('🚀 Chạy script cập nhật...');
+        const { spawn } = require('child_process');
+        const child = spawn('cmd.exe', ['/c', 'start', '""', batPath], {
+            detached: true,
+            stdio: 'ignore',
+            shell: true
+        });
+        child.unref();
+
+        // Trả kết quả cho frontend trước khi thoát
+        const result = {
+            success: true,
+            data: {
+                version: newVersion,
+                message: `Đang cập nhật lên v${newVersion}...`
+            }
+        };
+
+        // 9. Thoát app sau 2 giây (đợi IPC response gửi xong)
+        setTimeout(() => {
+            console.log('👋 Đóng ứng dụng để cập nhật...');
+            app.quit();
+        }, 2000);
+
+        return result;
 
     } catch (error) {
-        console.error('❌ Error downloading update:', error.message);
-        return {
-            success: false,
-            error: error.message
-        };
+        console.error('❌ Lỗi cập nhật tự động:', error);
+        console.error('   Stack:', error.stack);
+        return { success: false, error: error.message };
     }
 });
 

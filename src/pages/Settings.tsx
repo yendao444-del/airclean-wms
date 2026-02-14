@@ -111,7 +111,10 @@ const Settings = () => {
         setCurrentVersion(result.data.currentVersion);
         if (!silent) {
           if (result.data.hasUpdate) {
-            message.info(`Có bản cập nhật mới: v${result.data.latestVersion}`);
+            message.info(`Phát hiện bản cập nhật mới: v${result.data.latestVersion}`);
+            setCheckingUpdate(false);
+            handleDownloadUpdate();
+            return;
           } else {
             message.success('Bạn đang dùng phiên bản mới nhất!');
           }
@@ -183,23 +186,23 @@ const Settings = () => {
         onOk: async () => {
           try {
             setDownloading(true);
-            message.loading({ content: 'Đang tải bản cập nhật...', key: 'update', duration: 0 });
+            message.loading({ content: 'Đang tải bản cập nhật... Vui lòng chờ', key: 'update', duration: 0 });
 
             const downloadResult = await window.electronAPI.update.download(latestUpdateInfo.downloadUrl!);
 
             if (downloadResult.success && downloadResult.data) {
-              message.success({ content: `Cập nhật thành công v${downloadResult.data.version}! Đang khởi động lại...`, key: 'update', duration: 3 });
-              await loadUpdateHistory();
-              // Restart sau 2 giây
-              setTimeout(async () => {
-                await window.electronAPI.update.restart();
-              }, 2000);
+              message.success({
+                content: `✅ Tải xong v${downloadResult.data.version}! Ứng dụng sẽ tự khởi động lại...`,
+                key: 'update',
+                duration: 10
+              });
+              // App sẽ tự đóng và khởi động lại qua script cập nhật
             } else {
               message.error({ content: `Lỗi cập nhật: ${downloadResult.error}`, key: 'update' });
+              setDownloading(false);
             }
           } catch (error: any) {
             message.error({ content: `Lỗi: ${error.message}`, key: 'update' });
-          } finally {
             setDownloading(false);
           }
         }
