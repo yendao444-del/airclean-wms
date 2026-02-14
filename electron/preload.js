@@ -259,6 +259,15 @@ window.addEventListener('DOMContentLoaded', () => {
 
         // Capture trigger element từ mousedown
         document.addEventListener('mousedown', (e) => {
+            // ⚠️ QUAN TRỌNG: Nếu click vào BÊN TRONG popup (chọn option) → KHÔNG can thiệp
+            // Để Ant Design tự xử lý selection
+            const clickedInsidePopup = e.target.closest &&
+                e.target.closest('.ant-select-dropdown, .ant-picker-dropdown, .ant-cascader-dropdown, .ant-picker-panel');
+            if (clickedInsidePopup) {
+                console.log('[preload-fix] Click inside popup — letting Ant Design handle it');
+                return; // Không làm gì cả
+            }
+
             const el = e.target.closest && (
                 e.target.closest('.ant-select') ||
                 e.target.closest('.ant-picker') ||
@@ -266,8 +275,8 @@ window.addEventListener('DOMContentLoaded', () => {
             );
 
             if (el) {
-                // Kiểm tra: có popup đang hiển thị on-screen không?
-                // Nếu có → đang click để ĐÓNG dropdown → ẩn popup trước rồi mới xóa fix
+                // Click vào trigger element (Select box)
+                // Kiểm tra: có popup đang hiển thị không?
                 const visiblePopups = document.querySelectorAll(POPUP_SEL);
                 let hasVisibleFixedPopup = false;
                 visiblePopups.forEach(p => {
@@ -278,10 +287,9 @@ window.addEventListener('DOMContentLoaded', () => {
                 });
 
                 if (hasVisibleFixedPopup) {
-                    // ĐÓNG dropdown: ẩn popup ngay lập tức bằng CSS để tránh flash
+                    // ĐÓNG dropdown: click vào trigger khi đã mở → đóng lại
                     console.log('[preload-fix] Closing dropdown — hiding popups immediately');
                     dynamicStyle.textContent = `${POPUP_SEL} { display: none !important; }`;
-                    // Xóa sạch sau khi Ant Design đã xử lý xong
                     setTimeout(() => {
                         clearAllFixes();
                         triggerSnapshot = null;

@@ -252,7 +252,7 @@ const DailyTasks = () => {
     const [loading, setLoading] = useState(false);
 
     // Assignee management
-    const [assigneeList, setAssigneeList] = useState<string[]>(['Khánh', 'Toàn', 'Phượng']);
+    const [assigneeList, setAssigneeList] = useState<string[]>([]);
     const [newAssigneeName, setNewAssigneeName] = useState('');
 
     // Load assignee list from database on mount
@@ -262,6 +262,11 @@ const DailyTasks = () => {
                 const result = await window.electronAPI.appConfig.get('dailyTasksAssigneeList');
                 if (result.success && result.data) {
                     setAssigneeList(result.data);
+                } else {
+                    // Chỉ dùng default khi DB chưa có dữ liệu
+                    const defaults = ['Khánh', 'Toàn', 'Phượng'];
+                    setAssigneeList(defaults);
+                    await window.electronAPI.appConfig.set('dailyTasksAssigneeList', defaults);
                 }
             } catch (error) {
                 console.error('Error loading assignee list:', error);

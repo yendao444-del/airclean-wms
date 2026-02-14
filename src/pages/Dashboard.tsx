@@ -1,4 +1,4 @@
-import { Card, Row, Col, Statistic, Typography, Divider, Spin } from 'antd';
+import { Card, Row, Col, Statistic, Typography, Spin, Tag, Table, Progress, Timeline, Divider } from 'antd';
 import {
     DollarOutlined,
     ShoppingOutlined,
@@ -6,284 +6,546 @@ import {
     WarningOutlined,
     ArrowUpOutlined,
     ArrowDownOutlined,
+    ImportOutlined,
+    ExportOutlined,
+    RollbackOutlined,
+    SwapOutlined,
+    CheckCircleOutlined,
+    RocketOutlined,
+    CalculatorOutlined,
+    ClockCircleOutlined,
 } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import dayjs from 'dayjs';
 
 const { Title, Text } = Typography;
 
-interface DashboardStats {
-    todayRevenue: number;
-    todayOrders: number;
-    totalProducts: number;
-    lowStockProducts: number;
-    yesterdayRevenue: number;
-    yesterdayOrders: number;
+// ===== INTERFACES =====
+interface Product {
+    id: number; name: string; sku: string; stock: number; price: number; cost: number;
+    minStock: number; variants?: string;
 }
-
-interface TopProduct {
-    id: string;
-    name: string;
-    sold: number;
+interface ExportOrder {
+    id: number; exportDate: string; customer: string; status: string;
+    totalAmount: number; items: string; createdAt: string;
 }
-
-interface RecentActivity {
-    time: string;
-    action: string;
-    user: string;
-    module: string;
+interface EcommerceExport {
+    id: number; customerName: string; ecommerceExportDate: string; status: string;
+    totalAmount: number; items: string; orderNumber?: string; createdAt: string;
+}
+interface Purchase {
+    id: number; supplierId: number; supplierName?: string; purchaseDate: string;
+    totalAmount: number; status: string; items: string; createdAt: string;
+}
+interface ReturnItem {
+    id: number; complaintCode?: string; orderNumber?: string; productName?: string;
+    complaintDate?: string; status: string; reason?: string; createdAt?: string;
+}
+interface Refund {
+    id: number; customerName: string; refundCode?: string; orderNumber?: string;
+    refundDate: string; totalAmount: number; status: string; items: string; createdAt?: string;
+}
+interface StockBalanceRecord {
+    id: number; date: string; adjustedBy: string; items: string; notes?: string;
+}
+interface DailyTask {
+    id: number; title: string; assignee: string; status: string; dueDate: string;
+    completedAt?: string; priority: string; category: string;
 }
 
 export default function DashboardPage() {
     const [loading, setLoading] = useState(true);
-    const [stats, setStats] = useState<DashboardStats>({
-        todayRevenue: 0,
-        todayOrders: 0,
-        totalProducts: 0,
-        lowStockProducts: 0,
-        yesterdayRevenue: 0,
-        yesterdayOrders: 0,
-    });
-    const [topProducts, setTopProducts] = useState<TopProduct[]>([]);
-    const [recentActivities, setRecentActivities] = useState<RecentActivity[]>([]);
+    const [products, setProducts] = useState<Product[]>([]);
+    const [exports, setExports] = useState<ExportOrder[]>([]);
+    const [ecomExports, setEcomExports] = useState<EcommerceExport[]>([]);
+    const [purchases, setPurchases] = useState<Purchase[]>([]);
+    const [returns, setReturns] = useState<ReturnItem[]>([]);
+    const [refunds, setRefunds] = useState<Refund[]>([]);
+    const [stockBalances, setStockBalances] = useState<StockBalanceRecord[]>([]);
+    const [tasks, setTasks] = useState<DailyTask[]>([]);
 
-    useEffect(() => {
-        loadDashboardData();
-    }, []);
+    useEffect(() => { loadAllData(); }, []);
 
-    const loadDashboardData = async () => {
+    const loadAllData = async () => {
         try {
             setLoading(true);
-
-            // TODO: Fix API calls khi đã triển khai đúng API
-            // Tạm thời sử dụng dữ liệu demo
-
-            // ⚡ Giảm simulate loading xuống 100ms
-            await new Promise(resolve => setTimeout(resolve, 100));
-
-            // Demo stats
-            setStats({
-                todayRevenue: 0,
-                todayOrders: 0,
-                totalProducts: 0,
-                lowStockProducts: 0,
-                yesterdayRevenue: 0,
-                yesterdayOrders: 0,
-            });
-
-            setTopProducts([]);
-            setRecentActivities([]);
-
-        } catch (error) {
-            console.error('Error loading dashboard data:', error);
+            const api = (window as any).electronAPI;
+            const [pRes, exRes, ecRes, puRes, rtRes, rfRes, sbRes, tkRes] = await Promise.all([
+                api.products.getAll(),
+                api.exportOrders.getAll(),
+                api.ecommerceExports.getAll(),
+                api.purchases.getAll(),
+                api.returns.getAll(),
+                api.refunds.getAll(),
+                api.stockBalance.getAll(),
+                api.dailyTasks.list({}),
+            ]);
+            if (pRes.success) setProducts(pRes.data || []);
+            if (exRes.success) setExports(exRes.data || []);
+            if (ecRes.success) setEcomExports(ecRes.data || []);
+            if (puRes.success) setPurchases(puRes.data || []);
+            if (rtRes.success) setReturns(rtRes.data || []);
+            if (rfRes.success) setRefunds(rfRes.data || []);
+            if (sbRes.success) setStockBalances(sbRes.data || []);
+            if (tkRes.success) setTasks(tkRes.data || []);
+        } catch (e) {
+            console.error('Dashboard load error:', e);
         } finally {
             setLoading(false);
         }
     };
 
-    const calculatePercentChange = (current: number, previous: number) => {
-        if (previous === 0) return current > 0 ? 100 : 0;
-        return ((current - previous) / previous * 100).toFixed(1);
-    };
+    // ===== COMPUTED DATA =====
+    const today = dayjs().startOf('day');
+    const yesterday = today.subtract(1, 'day');
+    const monthStart = today.startOf('month');
 
-    const revenueChange = calculatePercentChange(stats.todayRevenue, stats.yesterdayRevenue);
-    const ordersChange = calculatePercentChange(stats.todayOrders, stats.yesterdayOrders);
+    const isToday = (d: string) => dayjs(d).isAfter(today);
+    const isYesterday = (d: string) => { const dd = dayjs(d); return dd.isAfter(yesterday) && dd.isBefore(today); };
+    const isThisMonth = (d: string) => dayjs(d).isAfter(monthStart);
 
-    const productColors = ['#faad14', '#8c8c8c', '#00ab56', '#1890ff', '#52c41a'];
+    // Revenue
+    const todayExports = exports.filter(e => isToday(e.exportDate || e.createdAt));
+    const todayEcom = ecomExports.filter(e => isToday(e.ecommerceExportDate || e.createdAt));
+    const todayRevenue = todayExports.reduce((s, e) => s + (e.totalAmount || 0), 0) + todayEcom.reduce((s, e) => s + (e.totalAmount || 0), 0);
+    const yesterdayRevenue = exports.filter(e => isYesterday(e.exportDate || e.createdAt)).reduce((s, e) => s + (e.totalAmount || 0), 0) + ecomExports.filter(e => isYesterday(e.ecommerceExportDate || e.createdAt)).reduce((s, e) => s + (e.totalAmount || 0), 0);
+    const todayOrders = todayExports.length + todayEcom.length;
+    const yesterdayOrders = exports.filter(e => isYesterday(e.exportDate || e.createdAt)).length + ecomExports.filter(e => isYesterday(e.ecommerceExportDate || e.createdAt)).length;
+
+    // Inventory
+    const totalStock = products.reduce((s, p) => {
+        let stock = p.stock || 0;
+        if (p.variants) { try { const v = JSON.parse(p.variants); stock = v.reduce((a: number, vi: any) => a + (vi.stock || 0), 0); } catch { } }
+        return s + stock;
+    }, 0);
+    const lowStockProducts = products.filter(p => {
+        if (p.variants) { try { const v = JSON.parse(p.variants); return v.some((vi: any) => (vi.stock || 0) <= (p.minStock || 10)); } catch { } }
+        return (p.stock || 0) <= (p.minStock || 10);
+    });
+    const outOfStock = products.filter(p => {
+        if (p.variants) { try { const v = JSON.parse(p.variants); return v.some((vi: any) => (vi.stock || 0) === 0); } catch { } }
+        return (p.stock || 0) === 0;
+    });
+
+    // Returns + Refunds
+    const pendingReturns = returns.filter(r => r.status !== 'completed' && r.status !== 'Hoàn thành');
+    const pendingRefunds = refunds.filter(r => r.status !== 'completed' && r.status !== 'Hoàn thành');
+
+    // Monthly
+    const monthRevenue = exports.filter(e => isThisMonth(e.exportDate || e.createdAt)).reduce((s, e) => s + (e.totalAmount || 0), 0) + ecomExports.filter(e => isThisMonth(e.ecommerceExportDate || e.createdAt)).reduce((s, e) => s + (e.totalAmount || 0), 0);
+    const monthPurchases = purchases.filter(p => isThisMonth(p.purchaseDate || p.createdAt)).reduce((s, p) => s + (p.totalAmount || 0), 0);
+    const monthProfit = monthRevenue - monthPurchases;
+
+    // Today purchases & ecom
+    const todayPurchases = purchases.filter(p => isToday(p.purchaseDate || p.createdAt));
+    const todayPurchaseAmount = todayPurchases.reduce((s, p) => s + (p.totalAmount || 0), 0);
+
+    // Daily Tasks
+    const todayTasks = tasks.filter(t => dayjs(t.dueDate).isSame(today, 'day') || dayjs(t.dueDate).isAfter(today));
+    const completedTasks = todayTasks.filter(t => t.status === 'completed');
+
+    // Stock Balance
+    const recentBalances = [...stockBalances].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 3);
+
+    // Percent change
+    const pctChange = (cur: number, prev: number) => { if (prev === 0) return cur > 0 ? 100 : 0; return +((cur - prev) / prev * 100).toFixed(1); };
+    const revChange = pctChange(todayRevenue, yesterdayRevenue);
+    const ordChange = pctChange(todayOrders, yesterdayOrders);
+
+    // 7-day data for chart
+    const last7 = Array.from({ length: 7 }, (_, i) => today.subtract(6 - i, 'day'));
+    const dailyRevenue = last7.map(d => {
+        const de = exports.filter(e => dayjs(e.exportDate || e.createdAt).isSame(d, 'day')).reduce((s, e) => s + (e.totalAmount || 0), 0);
+        const dc = ecomExports.filter(e => dayjs(e.ecommerceExportDate || e.createdAt).isSame(d, 'day')).reduce((s, e) => s + (e.totalAmount || 0), 0);
+        return de + dc;
+    });
+    const dailyExpense = last7.map(d => purchases.filter(p => dayjs(p.purchaseDate || p.createdAt).isSame(d, 'day')).reduce((s, p) => s + (p.totalAmount || 0), 0));
+    const maxRev = Math.max(...dailyRevenue, 1);
+    const maxCF = Math.max(...dailyRevenue, ...dailyExpense, 1);
+
+    const fmt = (n: number) => n.toLocaleString('vi-VN');
+    const fmtShort = (n: number) => n >= 1000000 ? (n / 1000000).toFixed(1) + 'tr' : n >= 1000 ? (n / 1000).toFixed(0) + 'k' : n.toString();
 
     if (loading) {
-        return (
-            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '400px' }}>
-                <Spin size="large" tip="Đang tải dữ liệu..." />
-            </div>
-        );
+        return (<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '400px' }}><Spin size="large" tip="Đang tải dữ liệu..." /></div>);
     }
 
+    // ===== CARD STYLES =====
+    const cardStyle = (bg: string, shadow: string): React.CSSProperties => ({
+        background: bg, borderRadius: 14, boxShadow: `0 4px 14px ${shadow}`,
+        transition: 'transform 0.2s', cursor: 'default',
+    });
+
     return (
-        <div>
-            <Title level={2} style={{ marginBottom: 24, color: '#262626' }}>
+        <div style={{ maxWidth: 1440 }}>
+            <Title level={3} style={{ marginBottom: 20, color: '#1a1a2e', display: 'flex', alignItems: 'center', gap: 8 }}>
                 📊 Tổng quan
+                <Text style={{ fontSize: 12, color: '#8c8c8c', marginLeft: 8 }}>
+                    {dayjs().format('DD/MM/YYYY • HH:mm')}
+                </Text>
             </Title>
 
-            <Row gutter={[16, 16]}>
+            {/* ===== ROW 1: 4 MAIN STAT CARDS ===== */}
+            <Row gutter={[14, 14]}>
                 <Col xs={24} sm={12} lg={6}>
-                    <Card
-                        bordered={false}
-                        style={{
-                            background: 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)',
-                            borderRadius: 12,
-                            boxShadow: '0 4px 12px rgba(0, 171, 86, 0.2)',
-                        }}
-                    >
-                        <Statistic
-                            title={<span style={{ color: 'rgba(255,255,255,0.95)', fontWeight: 600, fontSize: 14 }}>Doanh thu hôm nay</span>}
-                            value={stats.todayRevenue}
-                            precision={0}
-                            valueStyle={{ color: '#fff', fontSize: 32, fontWeight: 700 }}
-                            prefix={<DollarOutlined />}
-                            suffix="đ"
-                        />
-                        <div style={{ marginTop: 12, color: 'rgba(255,255,255,0.95)', fontSize: 13, fontWeight: 500 }}>
-                            {Number(revenueChange) >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
-                            {Math.abs(Number(revenueChange))}% so với hôm qua
+                    <Card bordered={false} style={cardStyle('linear-gradient(135deg, #00ab56, #00d66c)', 'rgba(0,171,86,0.2)')}>
+                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>💰 Doanh thu hôm nay</span>}
+                            value={todayRevenue} precision={0} suffix="đ"
+                            valueStyle={{ color: '#fff', fontSize: 24, fontWeight: 800 }} />
+                        <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
+                            {revChange >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />} {Math.abs(revChange)}% so với hôm qua
                         </div>
                     </Card>
                 </Col>
-
                 <Col xs={24} sm={12} lg={6}>
-                    <Card
-                        bordered={false}
-                        style={{
-                            background: 'linear-gradient(135deg, #1890ff 0%, #36cfc9 100%)',
-                            borderRadius: 12,
-                            boxShadow: '0 4px 12px rgba(24, 144, 255, 0.2)',
-                        }}
-                    >
-                        <Statistic
-                            title={<span style={{ color: 'rgba(255,255,255,0.95)', fontWeight: 600, fontSize: 14 }}>Đơn hàng hôm nay</span>}
-                            value={stats.todayOrders}
-                            valueStyle={{ color: '#fff', fontSize: 32, fontWeight: 700 }}
-                            prefix={<ShoppingOutlined />}
-                        />
-                        <div style={{ marginTop: 12, color: 'rgba(255,255,255,0.95)', fontSize: 13, fontWeight: 500 }}>
-                            {Number(ordersChange) >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
-                            {Math.abs(Number(ordersChange))}% so với hôm qua
+                    <Card bordered={false} style={cardStyle('linear-gradient(135deg, #1890ff, #36cfc9)', 'rgba(24,144,255,0.2)')}>
+                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>📦 Đơn hàng hôm nay</span>}
+                            value={todayOrders} suffix="đơn"
+                            valueStyle={{ color: '#fff', fontSize: 24, fontWeight: 800 }} />
+                        <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
+                            {ordChange >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />} {Math.abs(ordChange)}% • {todayExports.length} POS + {todayEcom.length} TMDT
                         </div>
                     </Card>
                 </Col>
-
                 <Col xs={24} sm={12} lg={6}>
-                    <Card
-                        bordered={false}
-                        style={{
-                            background: 'linear-gradient(135deg, #52c41a 0%, #95de64 100%)',
-                            borderRadius: 12,
-                            boxShadow: '0 4px 12px rgba(82, 196, 26, 0.2)',
-                        }}
-                    >
-                        <Statistic
-                            title={<span style={{ color: 'rgba(255,255,255,0.95)', fontWeight: 600, fontSize: 14 }}>Tổng sản phẩm</span>}
-                            value={stats.totalProducts}
-                            valueStyle={{ color: '#fff', fontSize: 32, fontWeight: 700 }}
-                            prefix={<InboxOutlined />}
-                        />
-                        <div style={{ marginTop: 12, color: 'rgba(255,255,255,0.95)', fontSize: 13, fontWeight: 500 }}>
-                            Trong kho
+                    <Card bordered={false} style={cardStyle('linear-gradient(135deg, #722ed1, #b37feb)', 'rgba(114,46,209,0.2)')}>
+                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>🏭 Tổng tồn kho</span>}
+                            value={totalStock} suffix="SP" prefix={<InboxOutlined />}
+                            valueStyle={{ color: '#fff', fontSize: 24, fontWeight: 800 }} />
+                        <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
+                            {products.length} SKU • {outOfStock.length} hết hàng
                         </div>
                     </Card>
                 </Col>
-
                 <Col xs={24} sm={12} lg={6}>
-                    <Card
-                        bordered={false}
-                        style={{
-                            background: 'linear-gradient(135deg, #faad14 0%, #ffc53d 100%)',
-                            borderRadius: 12,
-                            boxShadow: '0 4px 12px rgba(250, 173, 20, 0.2)',
-                        }}
-                    >
-                        <Statistic
-                            title={<span style={{ color: 'rgba(255,255,255,0.95)', fontWeight: 600, fontSize: 14 }}>Sản phẩm sắp hết</span>}
-                            value={stats.lowStockProducts}
-                            valueStyle={{ color: '#fff', fontSize: 32, fontWeight: 700 }}
-                            prefix={<WarningOutlined />}
-                        />
-                        <div style={{ marginTop: 12, color: 'rgba(255,255,255,0.95)', fontSize: 13, fontWeight: 500 }}>
-                            Cần nhập hàng
+                    <Card bordered={false} style={cardStyle('linear-gradient(135deg, #fa541c, #ffa940)', 'rgba(250,84,28,0.2)')}>
+                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>⚠️ Hoàn / Trả hàng</span>}
+                            value={returns.length + refunds.length} suffix="phiếu" prefix={<WarningOutlined />}
+                            valueStyle={{ color: '#fff', fontSize: 24, fontWeight: 800 }} />
+                        <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
+                            {pendingReturns.length + pendingRefunds.length} đang chờ xử lý
                         </div>
                     </Card>
                 </Col>
             </Row>
 
-            <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-                <Col xs={24} lg={12}>
-                    <Card
-                        title={<span style={{ fontSize: 16, fontWeight: 600, color: '#262626' }}>🔥 Top 5 sản phẩm bán chạy</span>}
-                        bordered={false}
-                        style={{ borderRadius: 12, boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}
-                    >
-                        {topProducts.length > 0 ? topProducts.map((item, idx) => (
-                            <div key={item.id}>
-                                <div
-                                    style={{
-                                        padding: '16px 0',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        justifyContent: 'space-between',
-                                    }}
-                                >
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-                                        <div
-                                            style={{
-                                                width: 40,
-                                                height: 40,
-                                                borderRadius: '50%',
-                                                background: productColors[idx],
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                justifyContent: 'center',
-                                                color: '#fff',
-                                                fontWeight: 700,
-                                                fontSize: 18,
-                                                boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
-                                            }}
-                                        >
-                                            {idx + 1}
-                                        </div>
-                                        <div>
-                                            <div style={{ fontWeight: 600, fontSize: 15, color: '#262626' }}>{item.name}</div>
-                                            <div style={{ fontSize: 13, color: '#8c8c8c', marginTop: 4 }}>
-                                                {item.sold} sản phẩm đã bán
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div style={{ color: '#00ab56', fontWeight: 700, fontSize: 16 }}>
-                                        {item.sold} sp
-                                    </div>
-                                </div>
-                                {idx < topProducts.length - 1 && <Divider style={{ margin: 0 }} />}
-                            </div>
-                        )) : (
-                            <div style={{ textAlign: 'center', padding: '40px 0', color: '#8c8c8c' }}>
-                                Chưa có dữ liệu
-                            </div>
-                        )}
+            {/* ===== ROW 2: 4 MORE STATS ===== */}
+            <Row gutter={[14, 14]} style={{ marginTop: 14 }}>
+                <Col xs={24} sm={12} lg={6}>
+                    <Card bordered={false} style={cardStyle('linear-gradient(135deg, #13c2c2, #87e8de)', 'rgba(19,194,194,0.2)')}>
+                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>📥 Nhập hàng hôm nay</span>}
+                            value={todayPurchases.length} suffix="phiếu" prefix={<ImportOutlined />}
+                            valueStyle={{ color: '#fff', fontSize: 24, fontWeight: 800 }} />
+                        <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
+                            Tổng: {fmt(todayPurchaseAmount)}đ
+                        </div>
                     </Card>
                 </Col>
+                <Col xs={24} sm={12} lg={6}>
+                    <Card bordered={false} style={cardStyle('linear-gradient(135deg, #eb2f96, #ff85c0)', 'rgba(235,47,150,0.2)')}>
+                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>🚀 TMDT hôm nay</span>}
+                            value={todayEcom.length} suffix="đơn" prefix={<RocketOutlined />}
+                            valueStyle={{ color: '#fff', fontSize: 24, fontWeight: 800 }} />
+                        <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
+                            Tổng: {fmt(todayEcom.reduce((s, e) => s + (e.totalAmount || 0), 0))}đ
+                        </div>
+                    </Card>
+                </Col>
+                <Col xs={24} sm={12} lg={6}>
+                    <Card bordered={false} style={cardStyle('linear-gradient(135deg, #faad14, #ffd666)', 'rgba(250,173,20,0.2)')}>
+                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>✅ Công việc hôm nay</span>}
+                            value={`${completedTasks.length}/${todayTasks.length}`} suffix="xong" prefix={<CheckCircleOutlined />}
+                            valueStyle={{ color: '#fff', fontSize: 24, fontWeight: 800 }} />
+                        <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
+                            {todayTasks.length > 0 ? ((completedTasks.length / todayTasks.length) * 100).toFixed(0) : 0}% hoàn thành
+                        </div>
+                    </Card>
+                </Col>
+                <Col xs={24} sm={12} lg={6}>
+                    <Card bordered={false} style={cardStyle('linear-gradient(135deg, #2f54eb, #85a5ff)', 'rgba(47,84,235,0.2)')}>
+                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>⚖️ Cân bằng kho</span>}
+                            value={stockBalances.length} suffix="lần" prefix={<SwapOutlined />}
+                            valueStyle={{ color: '#fff', fontSize: 24, fontWeight: 800 }} />
+                        <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
+                            {recentBalances[0] ? `Gần nhất: ${dayjs(recentBalances[0].date).format('DD/MM')}` : 'Chưa có'}
+                        </div>
+                    </Card>
+                </Col>
+            </Row>
 
+            {/* ===== ROW 3: FINANCE BAR ===== */}
+            <Card bordered={false} style={{ borderRadius: 14, marginTop: 14 }}>
+                <Row gutter={24}>
+                    <Col xs={24} sm={8} style={{ textAlign: 'center', borderRight: '1px solid #f0f0f0' }}>
+                        <Text style={{ fontSize: 11, fontWeight: 600, color: '#8c8c8c', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Doanh thu tháng {today.month() + 1}</Text>
+                        <div style={{ fontSize: 22, fontWeight: 800, color: '#00ab56', marginTop: 4 }}>{fmt(monthRevenue)}đ</div>
+                    </Col>
+                    <Col xs={24} sm={8} style={{ textAlign: 'center', borderRight: '1px solid #f0f0f0' }}>
+                        <Text style={{ fontSize: 11, fontWeight: 600, color: '#8c8c8c', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Chi nhập hàng tháng {today.month() + 1}</Text>
+                        <div style={{ fontSize: 22, fontWeight: 800, color: '#f5222d', marginTop: 4 }}>{fmt(monthPurchases)}đ</div>
+                        <Text style={{ fontSize: 10, color: '#8c8c8c' }}>{purchases.filter(p => isThisMonth(p.purchaseDate || p.createdAt)).length} phiếu nhập</Text>
+                    </Col>
+                    <Col xs={24} sm={8} style={{ textAlign: 'center' }}>
+                        <Text style={{ fontSize: 11, fontWeight: 600, color: '#8c8c8c', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Lợi nhuận ước tính</Text>
+                        <div style={{ fontSize: 22, fontWeight: 800, color: monthProfit >= 0 ? '#00ab56' : '#f5222d', marginTop: 4 }}>{fmt(monthProfit)}đ</div>
+                        <Text style={{ fontSize: 10, color: '#8c8c8c' }}>
+                            📈 Biên LN: {monthRevenue > 0 ? ((monthProfit / monthRevenue) * 100).toFixed(1) : 0}%
+                        </Text>
+                    </Col>
+                </Row>
+            </Card>
+
+            {/* ===== ROW 4: REVENUE CHART + CASH FLOW ===== */}
+            <Row gutter={[14, 14]} style={{ marginTop: 14 }}>
                 <Col xs={24} lg={12}>
-                    <Card
-                        title={<span style={{ fontSize: 16, fontWeight: 600, color: '#262626' }}>📋 Hoạt động gần đây</span>}
-                        bordered={false}
-                        style={{ borderRadius: 12, boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}
-                    >
-                        {recentActivities.length > 0 ? recentActivities.map((activity, idx) => (
-                            <div key={idx}>
-                                <div style={{ padding: '14px 0' }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                                        <span
-                                            style={{
-                                                color: '#00ab56',
-                                                fontWeight: 700,
-                                                fontSize: 13,
-                                                background: 'rgba(0, 171, 86, 0.08)',
-                                                padding: '4px 10px',
-                                                borderRadius: 6,
-                                            }}
-                                        >
-                                            {activity.time}
-                                        </span>
-                                        <span style={{ color: '#8c8c8c', fontSize: 13 }}>• {activity.user}</span>
+                    <Card title={<span style={{ fontSize: 14, fontWeight: 700 }}>📈 Doanh thu 7 ngày</span>} bordered={false} style={{ borderRadius: 14 }}
+                        extra={<Tag color="green">Tháng {today.month() + 1}</Tag>}>
+                        <div style={{ height: 200 }}>
+                            <svg viewBox="0 0 500 200" style={{ width: '100%', height: '100%' }} preserveAspectRatio="none">
+                                <defs>
+                                    <linearGradient id="areaG" x1="0" y1="0" x2="0" y2="1">
+                                        <stop offset="0%" stopColor="#00ab56" stopOpacity={0.3} />
+                                        <stop offset="100%" stopColor="#00ab56" stopOpacity={0.02} />
+                                    </linearGradient>
+                                </defs>
+                                {[40, 80, 120, 160].map(y => <line key={y} x1="0" y1={y} x2="480" y2={y} stroke="#f5f5f5" strokeWidth="1" />)}
+                                {/* Area + Line */}
+                                {(() => {
+                                    const pts = dailyRevenue.map((v, i) => ({ x: i * 80, y: 180 - (v / maxRev) * 160 }));
+                                    const line = pts.map(p => `${p.x},${p.y}`).join(' ');
+                                    const area = `${pts[0].x},180 ${line} ${pts[pts.length - 1].x},180`;
+                                    return (<>
+                                        <polygon points={area} fill="url(#areaG)" />
+                                        <polyline points={line} fill="none" stroke="#00ab56" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                                        {pts.map((p, i) => <circle key={i} cx={p.x} cy={p.y} r="4" fill="#fff" stroke="#00ab56" strokeWidth="2" />)}
+                                        {pts.map((p, i) => <text key={'t' + i} x={p.x} y="198" fontSize="10" fill="#8c8c8c" textAnchor="middle">{last7[i].format('DD')}</text>)}
+                                        {pts.map((p, i) => dailyRevenue[i] > 0 ? <text key={'v' + i} x={p.x} y={p.y - 10} fontSize="9" fill="#00ab56" textAnchor="middle" fontWeight="700">{fmtShort(dailyRevenue[i])}</text> : null)}
+                                    </>);
+                                })()}
+                            </svg>
+                        </div>
+                    </Card>
+                </Col>
+                <Col xs={24} lg={12}>
+                    <Card title={<span style={{ fontSize: 14, fontWeight: 700 }}>💵 Dòng tiền Thu/Chi</span>} bordered={false} style={{ borderRadius: 14 }}
+                        extra={<Tag color="blue">7 ngày</Tag>}>
+                        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 10, height: 160, padding: '0 4px' }}>
+                            {last7.map((d, i) => (
+                                <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                                    <div style={{ display: 'flex', gap: 2, alignItems: 'flex-end', height: 120 }}>
+                                        <div style={{ width: 14, borderRadius: '3px 3px 0 0', background: 'linear-gradient(180deg, #00d66c, #00ab56)', height: Math.max(4, (dailyRevenue[i] / maxCF) * 110) }} title={`Thu: ${fmt(dailyRevenue[i])}`} />
+                                        <div style={{ width: 14, borderRadius: '3px 3px 0 0', background: 'linear-gradient(180deg, #ff7a7a, #f5222d)', height: Math.max(4, (dailyExpense[i] / maxCF) * 110) }} title={`Chi: ${fmt(dailyExpense[i])}`} />
                                     </div>
-                                    <div style={{ color: '#262626', fontSize: 14, fontWeight: 500 }}>{activity.action}</div>
+                                    <span style={{ fontSize: 10, fontWeight: 600, color: '#8c8c8c' }}>{d.format('DD')}</span>
                                 </div>
-                                {idx < recentActivities.length - 1 && <Divider style={{ margin: 0 }} />}
+                            ))}
+                        </div>
+                        <div style={{ display: 'flex', gap: 16, justifyContent: 'center', marginTop: 10 }}>
+                            <span style={{ fontSize: 11, color: '#595959', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                <span style={{ width: 8, height: 8, borderRadius: 2, background: '#00ab56', display: 'inline-block' }} /> Thu (Xuất)
+                            </span>
+                            <span style={{ fontSize: 11, color: '#595959', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                <span style={{ width: 8, height: 8, borderRadius: 2, background: '#f5222d', display: 'inline-block' }} /> Chi (Nhập)
+                            </span>
+                        </div>
+                    </Card>
+                </Col>
+            </Row>
+
+            {/* ===== ROW 5: NHẬP HÀNG + XUẤT HÀNG ===== */}
+            <Row gutter={[14, 14]} style={{ marginTop: 14 }}>
+                <Col xs={24} lg={12}>
+                    <Card title={<span style={{ fontSize: 14, fontWeight: 700 }}><ImportOutlined /> Nhập hàng gần đây</span>} bordered={false} style={{ borderRadius: 14 }}
+                        extra={<Tag color="orange">{purchases.filter(p => isThisMonth(p.purchaseDate || p.createdAt)).length} phiếu tháng này</Tag>}>
+                        <Table size="small" dataSource={[...purchases].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 5)}
+                            rowKey="id" pagination={false}
+                            columns={[
+                                { title: 'Mã', dataIndex: 'id', width: 60, render: (id: number) => <Text strong>#{id}</Text> },
+                                { title: 'NCC', dataIndex: 'supplierName', ellipsis: true },
+                                { title: 'Tổng', dataIndex: 'totalAmount', width: 110, render: (v: number) => <Text strong style={{ color: '#f5222d' }}>{fmt(v)}đ</Text> },
+                                { title: 'Ngày', dataIndex: 'purchaseDate', width: 70, render: (d: string) => <Text type="secondary" style={{ fontSize: 11 }}>{dayjs(d).format('DD/MM')}</Text> },
+                            ]} />
+                    </Card>
+                </Col>
+                <Col xs={24} lg={12}>
+                    <Card title={<span style={{ fontSize: 14, fontWeight: 700 }}><ExportOutlined /> Xuất hàng / Bán hàng</span>} bordered={false} style={{ borderRadius: 14 }}
+                        extra={<Tag color="green">{todayExports.length} đơn hôm nay</Tag>}>
+                        <Table size="small" dataSource={[...exports].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 5)}
+                            rowKey="id" pagination={false}
+                            columns={[
+                                { title: 'Mã', dataIndex: 'id', width: 60, render: (id: number) => <Text strong>#{id}</Text> },
+                                { title: 'Khách', dataIndex: 'customer', ellipsis: true },
+                                { title: 'Tổng', dataIndex: 'totalAmount', width: 110, render: (v: number) => <Text strong style={{ color: '#00ab56' }}>{fmt(v)}đ</Text> },
+                                { title: 'TT', dataIndex: 'status', width: 80, render: (s: string) => <Tag color={s === 'completed' ? 'green' : 'orange'}>{s === 'completed' ? 'Xong' : 'Đang...'}</Tag> },
+                                { title: 'Ngày', dataIndex: 'exportDate', width: 60, render: (d: string) => <Text type="secondary" style={{ fontSize: 11 }}>{dayjs(d).format('DD/MM')}</Text> },
+                            ]} />
+                    </Card>
+                </Col>
+            </Row>
+
+            {/* ===== ROW 6: TMDT + TỒN KHO ===== */}
+            <Row gutter={[14, 14]} style={{ marginTop: 14 }}>
+                <Col xs={24} lg={12}>
+                    <Card title={<span style={{ fontSize: 14, fontWeight: 700 }}><RocketOutlined /> Xuất hàng TMDT</span>} bordered={false} style={{ borderRadius: 14 }}
+                        extra={<Tag color="blue">{todayEcom.length} đơn hôm nay</Tag>}>
+                        <Table size="small" dataSource={[...ecomExports].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 5)}
+                            rowKey="id" pagination={false}
+                            columns={[
+                                { title: 'Sàn', dataIndex: 'customerName', width: 80, render: (n: string) => <Tag color={n?.includes('Shopee') ? 'orange' : n?.includes('TikTok') ? 'default' : 'blue'}>{n || '-'}</Tag> },
+                                { title: 'Mã đơn', dataIndex: 'orderNumber', ellipsis: true, render: (v: string) => <Text style={{ fontSize: 11 }}>{v || '-'}</Text> },
+                                { title: 'Tổng', dataIndex: 'totalAmount', width: 100, render: (v: number) => <Text strong>{fmt(v)}đ</Text> },
+                                { title: 'TT', dataIndex: 'status', width: 60, render: (s: string) => <Tag color={s === 'completed' ? 'green' : 'orange'}>{s === 'completed' ? '✓' : '⏳'}</Tag> },
+                            ]} />
+                    </Card>
+                </Col>
+                <Col xs={24} lg={12}>
+                    <Card title={<span style={{ fontSize: 14, fontWeight: 700 }}><InboxOutlined /> Tồn kho - Sắp hết</span>} bordered={false} style={{ borderRadius: 14 }}
+                        extra={<>
+                            <Tag color="green">{products.length - lowStockProducts.length} còn</Tag>
+                            <Tag color="orange">{lowStockProducts.length - outOfStock.length} sắp hết</Tag>
+                            <Tag color="red">{outOfStock.length} hết</Tag>
+                        </>}>
+                        <Table size="small" dataSource={lowStockProducts.slice(0, 6)} rowKey="id" pagination={false}
+                            columns={[
+                                { title: 'Sản phẩm', dataIndex: 'name', ellipsis: true, render: (n: string) => <Text strong style={{ fontSize: 12 }}>{n}</Text> },
+                                { title: 'SKU', dataIndex: 'sku', width: 100, render: (s: string) => <Text type="secondary" style={{ fontSize: 11 }}>{s}</Text> },
+                                { title: 'Tồn', dataIndex: 'stock', width: 70, render: (s: number) => <Tag color={s === 0 ? 'red' : s <= 10 ? 'orange' : 'green'}>{s === 0 ? '⚠ 0' : `⚡ ${s}`}</Tag> },
+                            ]} />
+                    </Card>
+                </Col>
+            </Row>
+
+            {/* ===== ROW 7: TRẢ HÀNG + HÀNG HOÀN ===== */}
+            <Row gutter={[14, 14]} style={{ marginTop: 14 }}>
+                <Col xs={24} lg={12}>
+                    <Card title={<span style={{ fontSize: 14, fontWeight: 700 }}>↩️ Trả hàng gần đây</span>} bordered={false} style={{ borderRadius: 14 }}
+                        extra={<Tag color="red">{returns.length} phiếu</Tag>}>
+                        {[...returns].sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()).slice(0, 5).map((r, i) => (
+                            <div key={r.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 0', borderBottom: i < 4 ? '1px solid #fafafa' : 'none' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                    <div style={{ width: 32, height: 32, borderRadius: 8, background: '#fff1f0', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>↩️</div>
+                                    <div>
+                                        <div style={{ fontSize: 12, fontWeight: 600 }}>{r.complaintCode || `#KN-${r.id}`}</div>
+                                        <div style={{ fontSize: 10, color: '#8c8c8c' }}>{r.productName || r.orderNumber || '-'} • {r.reason || ''}</div>
+                                    </div>
+                                </div>
+                                <div style={{ textAlign: 'right' }}>
+                                    <Tag color={r.status === 'completed' || r.status === 'Hoàn thành' ? 'green' : r.status === 'pending' ? 'blue' : 'orange'}>
+                                        {r.status === 'completed' || r.status === 'Hoàn thành' ? 'Xong' : r.status === 'pending' ? 'Chờ' : 'Đang XL'}
+                                    </Tag>
+                                    <div style={{ fontSize: 10, color: '#bfbfbf' }}>{r.complaintDate ? dayjs(r.complaintDate).format('DD/MM') : ''}</div>
+                                </div>
                             </div>
-                        )) : (
-                            <div style={{ textAlign: 'center', padding: '40px 0', color: '#8c8c8c' }}>
-                                Chưa có hoạt động
+                        ))}
+                        {returns.length === 0 && <div style={{ textAlign: 'center', padding: 20, color: '#8c8c8c' }}>Chưa có phiếu trả</div>}
+                    </Card>
+                </Col>
+                <Col xs={24} lg={12}>
+                    <Card title={<span style={{ fontSize: 14, fontWeight: 700 }}>🔄 Hàng hoàn gần đây</span>} bordered={false} style={{ borderRadius: 14 }}
+                        extra={<Tag color="orange">{refunds.length} phiếu</Tag>}>
+                        {[...refunds].sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()).slice(0, 5).map((r, i) => (
+                            <div key={r.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 0', borderBottom: i < 4 ? '1px solid #fafafa' : 'none' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                    <div style={{ width: 32, height: 32, borderRadius: 8, background: '#fff7e6', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>🔄</div>
+                                    <div>
+                                        <div style={{ fontSize: 12, fontWeight: 600 }}>{r.refundCode || `#HH-${r.id}`}</div>
+                                        <div style={{ fontSize: 10, color: '#8c8c8c' }}>{r.customerName} • {fmt(r.totalAmount)}đ</div>
+                                    </div>
+                                </div>
+                                <div style={{ textAlign: 'right' }}>
+                                    <Tag color={r.status === 'completed' || r.status === 'Hoàn thành' ? 'green' : 'orange'}>
+                                        {r.status === 'completed' || r.status === 'Hoàn thành' ? 'Xong' : 'Đang XL'}
+                                    </Tag>
+                                    <div style={{ fontSize: 10, color: '#bfbfbf' }}>{dayjs(r.refundDate).format('DD/MM')}</div>
+                                </div>
                             </div>
+                        ))}
+                        {refunds.length === 0 && <div style={{ textAlign: 'center', padding: 20, color: '#8c8c8c' }}>Chưa có phiếu hoàn</div>}
+                    </Card>
+                </Col>
+            </Row>
+
+            {/* ===== ROW 8: CÂN BẰNG KHO + CÔNG VIỆC + TÍNH PHÍ ===== */}
+            <Row gutter={[14, 14]} style={{ marginTop: 14 }}>
+                <Col xs={24} lg={8}>
+                    <Card title={<span style={{ fontSize: 14, fontWeight: 700 }}><SwapOutlined /> Cân bằng kho</span>} bordered={false} style={{ borderRadius: 14 }}
+                        extra={<Tag color="blue">{stockBalances.length} lần</Tag>}>
+                        {recentBalances.map((sb, i) => {
+                            let items: any[] = [];
+                            try { items = JSON.parse(sb.items || '[]'); } catch { }
+                            const plus = items.filter((it: any) => it.difference > 0).length;
+                            const minus = items.filter((it: any) => it.difference < 0).length;
+                            return (
+                                <div key={sb.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 0', borderBottom: i < 2 ? '1px solid #fafafa' : 'none' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                        <div style={{ width: 32, height: 32, borderRadius: 8, background: '#e6f7ff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>⚖️</div>
+                                        <div>
+                                            <div style={{ fontSize: 12, fontWeight: 600 }}>CB #{sb.id}</div>
+                                            <div style={{ fontSize: 10, color: '#8c8c8c' }}>{items.length} SKU • {sb.adjustedBy}</div>
+                                        </div>
+                                    </div>
+                                    <div style={{ textAlign: 'right' }}>
+                                        <span style={{ fontSize: 12, fontWeight: 700 }}>
+                                            <span style={{ color: '#00ab56' }}>+{plus}</span> / <span style={{ color: '#f5222d' }}>-{minus}</span>
+                                        </span>
+                                        <div style={{ fontSize: 10, color: '#bfbfbf' }}>{dayjs(sb.date).format('DD/MM')}</div>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                        {stockBalances.length === 0 && <div style={{ textAlign: 'center', padding: 20, color: '#8c8c8c' }}>Chưa cân bằng</div>}
+                    </Card>
+                </Col>
+                <Col xs={24} lg={8}>
+                    <Card title={<span style={{ fontSize: 14, fontWeight: 700 }}><CheckCircleOutlined /> Công việc hôm nay</span>} bordered={false} style={{ borderRadius: 14 }}
+                        extra={<Tag color="green">{completedTasks.length}/{todayTasks.length}</Tag>}>
+                        {todayTasks.length > 0 && (
+                            <Progress percent={todayTasks.length > 0 ? Math.round((completedTasks.length / todayTasks.length) * 100) : 0}
+                                strokeColor={{ from: '#00ab56', to: '#52c41a' }} size="small" style={{ marginBottom: 12 }} />
                         )}
+                        {todayTasks.slice(0, 6).map(t => (
+                            <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid #fafafa' }}>
+                                <div style={{
+                                    width: 18, height: 18, borderRadius: '50%',
+                                    border: t.status === 'completed' ? 'none' : '2px solid #d9d9d9',
+                                    background: t.status === 'completed' ? '#00ab56' : 'transparent',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    color: '#fff', fontSize: 10, flexShrink: 0,
+                                }}>{t.status === 'completed' ? '✓' : ''}</div>
+                                <div style={{ flex: 1 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 600, textDecoration: t.status === 'completed' ? 'line-through' : 'none', color: t.status === 'completed' ? '#8c8c8c' : '#262626' }}>
+                                        {t.title}
+                                    </div>
+                                    <div style={{ fontSize: 10, color: '#8c8c8c' }}>{t.assignee}</div>
+                                </div>
+                            </div>
+                        ))}
+                        {todayTasks.length === 0 && <div style={{ textAlign: 'center', padding: 20, color: '#8c8c8c' }}>Không có công việc</div>}
+                    </Card>
+                </Col>
+                <Col xs={24} lg={8}>
+                    <Card title={<span style={{ fontSize: 14, fontWeight: 700 }}><CalculatorOutlined /> Tổng hợp giá</span>} bordered={false} style={{ borderRadius: 14 }}
+                        extra={<Tag color="orange">Thống kê</Tag>}>
+                        {products.slice(0, 3).map(p => (
+                            <div key={p.id} style={{ background: '#fafafa', borderRadius: 10, padding: 12, marginBottom: 8 }}>
+                                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>{p.name}</div>
+                                <div style={{ display: 'flex', gap: 12 }}>
+                                    <div>
+                                        <div style={{ fontSize: 10, color: '#8c8c8c' }}>Giá vốn</div>
+                                        <div style={{ fontSize: 12, fontWeight: 700, color: '#f5222d' }}>{fmt(p.cost || 0)}đ</div>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: 10, color: '#8c8c8c' }}>Giá bán</div>
+                                        <div style={{ fontSize: 12, fontWeight: 700, color: '#00ab56' }}>{fmt(p.price || 0)}đ</div>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: 10, color: '#8c8c8c' }}>Lãi/SP</div>
+                                        <div style={{ fontSize: 12, fontWeight: 700, color: '#1890ff' }}>{fmt((p.price || 0) - (p.cost || 0))}đ</div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                        {products.length === 0 && <div style={{ textAlign: 'center', padding: 20, color: '#8c8c8c' }}>Chưa có sản phẩm</div>}
                     </Card>
                 </Col>
             </Row>
