@@ -4,12 +4,12 @@ import AntAppProvider from './components/AntAppProvider';
 import {
     DashboardOutlined,
     ShoppingCartOutlined,
-    FileTextOutlined,
+
     InboxOutlined,
     ImportOutlined,
     ExportOutlined,
     DatabaseOutlined,
-    BarChartOutlined,
+
     SettingOutlined,
     ScanOutlined,
     ToolOutlined,
@@ -113,10 +113,7 @@ function AppContent() {
             items.push(createMenuItem('Bán hàng', 'pos', <ShoppingCartOutlined />));
         }
 
-        // Orders
-        if (accessibleKeys.includes('orders')) {
-            items.push(createMenuItem('Đơn hàng', 'orders', <FileTextOutlined />));
-        }
+
 
         // Tools submenu
         const toolsChildren: MenuItem[] = [];
@@ -169,10 +166,7 @@ function AppContent() {
             items.push(createMenuItem('Bàn giao TMDT', 'ecommerce-menu', <ShoppingOutlined />, ecommerceChildren));
         }
 
-        // Reports
-        if (accessibleKeys.includes('reports')) {
-            items.push(createMenuItem('Báo cáo', 'reports', <BarChartOutlined />));
-        }
+
 
         // Daily Tasks
         items.push(createMenuItem('Công việc hàng ngày', 'daily-tasks', <CheckCircleOutlined />));
