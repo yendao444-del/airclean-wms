@@ -1,5 +1,6 @@
 import { useState, useEffect, lazy, Suspense } from 'react';
 import { Layout, Menu, Button, Typography, ConfigProvider, Space, Spin } from 'antd';
+import AntAppProvider from './components/AntAppProvider';
 import {
     DashboardOutlined,
     ShoppingCartOutlined,
@@ -281,111 +282,113 @@ function AppContent() {
                 },
             }}
         >
-            <Layout style={{ minHeight: '100vh', background: '#f0f2f5' }}>
-                <Sider
-                    collapsible
-                    collapsed={collapsed}
-                    onCollapse={setCollapsed}
-                    width={260}
-                    breakpoint="lg"
-                    collapsedWidth={80}
-                    style={{
-                        overflow: 'auto',
-                        height: '100vh',
-                        position: 'fixed',
-                        left: 0,
-                        top: 0,
-                        bottom: 0,
-                        background: '#fff',
-                        boxShadow: '2px 0 8px rgba(0,0,0,0.06)',
-                    }}
-                >
-                    <div
+            <AntAppProvider>
+                <Layout style={{ minHeight: '100vh', background: '#f0f2f5' }}>
+                    <Sider
+                        collapsible
+                        collapsed={collapsed}
+                        onCollapse={setCollapsed}
+                        width={260}
+                        breakpoint="lg"
+                        collapsedWidth={80}
                         style={{
-                            height: 64,
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontSize: collapsed ? '20px' : '22px',
-                            fontWeight: 700,
-                            color: '#00ab56',
-                            borderBottom: '1px solid #f0f0f0',
-                            background: '#fafafa',
-                        }}
-                    >
-                        {collapsed ? '📦' : '📦 AIRCLEAN WMS'}
-                    </div>
-                    <Menu
-                        defaultSelectedKeys={['dashboard']}
-                        selectedKeys={[selectedKey]}
-                        mode="inline"
-                        items={menuItems}
-                        onClick={handleMenuClick}
-                        style={{ borderRight: 0 }}
-                    />
-                </Sider>
-
-                <Layout style={{ marginLeft: collapsed ? 80 : 260, transition: 'all 0.2s' }}>
-                    <Header
-                        style={{
-                            padding: '0 24px',
-                            background: '#fff',
-                            borderBottom: '1px solid #f0f0f0',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            position: 'sticky',
+                            overflow: 'auto',
+                            height: '100vh',
+                            position: 'fixed',
+                            left: 0,
                             top: 0,
-                            zIndex: 1,
-                            boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+                            bottom: 0,
+                            background: '#fff',
+                            boxShadow: '2px 0 8px rgba(0,0,0,0.06)',
                         }}
                     >
-                        <Title level={4} style={{ margin: 0, color: '#262626' }}>
-                            {getMenuLabel(selectedKey)}
-                        </Title>
-                        <Space size={16}>
-                            <Text strong>{user?.username || 'User'}</Text>
-                            <Text type="secondary">
-                                {user?.role === 'admin' ? '👑 Quản trị viên' :
-                                    user?.role === 'manager' ? '📊 Quản lý' :
-                                        user?.role === 'staff' ? '👤 Nhân viên' : '👁️ Chỉ xem'}
-                            </Text>
-                            <Button
-                                type="primary"
-                                danger
-                                icon={<LogoutOutlined />}
-                                onClick={logout}
-                            >
-                                Đăng xuất
-                            </Button>
-                        </Space>
-                    </Header>
-
-                    <Content
-                        style={{
-                            margin: 24,
-                            padding: 0,
-                            minHeight: 280,
-                            maxHeight: 'calc(100vh - 112px)',
-                            overflowY: 'auto',
-                            overflowX: 'auto', // ✨ Cho phép scroll ngang khi cần
-                        }}
-                    >
-                        <Suspense fallback={
-                            <div style={{
+                        <div
+                            style={{
+                                height: 64,
                                 display: 'flex',
-                                justifyContent: 'center',
                                 alignItems: 'center',
-                                minHeight: '400px'
-                            }}>
-                                <Spin size="large" tip="Đang tải..." />
-                            </div>
-                        }>
-                            {renderContent()}
-                        </Suspense>
-                    </Content>
+                                justifyContent: 'center',
+                                fontSize: collapsed ? '20px' : '22px',
+                                fontWeight: 700,
+                                color: '#00ab56',
+                                borderBottom: '1px solid #f0f0f0',
+                                background: '#fafafa',
+                            }}
+                        >
+                            {collapsed ? '📦' : '📦 AIRCLEAN WMS'}
+                        </div>
+                        <Menu
+                            defaultSelectedKeys={['dashboard']}
+                            selectedKeys={[selectedKey]}
+                            mode="inline"
+                            items={menuItems}
+                            onClick={handleMenuClick}
+                            style={{ borderRight: 0 }}
+                        />
+                    </Sider>
+
+                    <Layout style={{ marginLeft: collapsed ? 80 : 260, transition: 'all 0.2s' }}>
+                        <Header
+                            style={{
+                                padding: '0 24px',
+                                background: '#fff',
+                                borderBottom: '1px solid #f0f0f0',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                position: 'sticky',
+                                top: 0,
+                                zIndex: 1,
+                                boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+                            }}
+                        >
+                            <Title level={4} style={{ margin: 0, color: '#262626' }}>
+                                {getMenuLabel(selectedKey)}
+                            </Title>
+                            <Space size={16}>
+                                <Text strong>{user?.username || 'User'}</Text>
+                                <Text type="secondary">
+                                    {user?.role === 'admin' ? '👑 Quản trị viên' :
+                                        user?.role === 'manager' ? '📊 Quản lý' :
+                                            user?.role === 'staff' ? '👤 Nhân viên' : '👁️ Chỉ xem'}
+                                </Text>
+                                <Button
+                                    type="primary"
+                                    danger
+                                    icon={<LogoutOutlined />}
+                                    onClick={logout}
+                                >
+                                    Đăng xuất
+                                </Button>
+                            </Space>
+                        </Header>
+
+                        <Content
+                            style={{
+                                margin: 24,
+                                padding: 0,
+                                minHeight: 280,
+                                maxHeight: 'calc(100vh - 112px)',
+                                overflowY: 'auto',
+                                overflowX: 'auto', // ✨ Cho phép scroll ngang khi cần
+                            }}
+                        >
+                            <Suspense fallback={
+                                <div style={{
+                                    display: 'flex',
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                    minHeight: '400px'
+                                }}>
+                                    <Spin size="large" tip="Đang tải..." />
+                                </div>
+                            }>
+                                {renderContent()}
+                            </Suspense>
+                        </Content>
+                    </Layout>
                 </Layout>
-            </Layout>
+            </AntAppProvider>
         </ConfigProvider>
     );
 }
