@@ -175,7 +175,7 @@ window.addEventListener('DOMContentLoaded', () => {
     // 3. State
     let triggerSnapshot = null;
     let fixIdCounter = 0;
-    const POPUP_SEL = '.ant-select-dropdown, .ant-picker-dropdown, .ant-cascader-dropdown';
+    const POPUP_SEL = '.ant-select-dropdown, .ant-picker-dropdown, .ant-cascader-dropdown, .ant-dropdown';
 
     // Xóa tất cả fix cũ
     function clearAllFixes() {
@@ -262,7 +262,7 @@ window.addEventListener('DOMContentLoaded', () => {
             // ⚠️ QUAN TRỌNG: Nếu click vào BÊN TRONG popup (chọn option) → KHÔNG can thiệp
             // Để Ant Design tự xử lý selection
             const clickedInsidePopup = e.target.closest &&
-                e.target.closest('.ant-select-dropdown, .ant-picker-dropdown, .ant-cascader-dropdown, .ant-picker-panel');
+                e.target.closest('.ant-select-dropdown, .ant-picker-dropdown, .ant-cascader-dropdown, .ant-picker-panel, .ant-dropdown, .ant-dropdown-menu');
             if (clickedInsidePopup) {
                 console.log('[preload-fix] Click inside popup — letting Ant Design handle it');
                 return; // Không làm gì cả
@@ -271,7 +271,8 @@ window.addEventListener('DOMContentLoaded', () => {
             const el = e.target.closest && (
                 e.target.closest('.ant-select') ||
                 e.target.closest('.ant-picker') ||
-                e.target.closest('.ant-cascader')
+                e.target.closest('.ant-cascader') ||
+                e.target.closest('.ant-dropdown-trigger')
             );
 
             if (el) {
