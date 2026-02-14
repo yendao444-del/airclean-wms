@@ -203,7 +203,7 @@ export default function PurchasePage() {
         } catch (error) {
             message.error('Lỗi khi tải dữ liệu nhà cung cấp và sản phẩm');
             setLoadingData(false);
-            return; // Không mở modal nếu load data thất bại
+            return;
         }
 
         // ✅ Tắt loading TRƯỚC

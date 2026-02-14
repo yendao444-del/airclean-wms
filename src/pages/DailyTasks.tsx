@@ -360,7 +360,6 @@ const DailyTasks = () => {
                                 style={{ width: '100%' }}
                                 size="large"
                                 virtual={false}
-                                getPopupContainer={() => document.body}
                                 dropdownStyle={{ zIndex: 2100 }}
                                 onChange={(value) => { selectedVerifier = value; }}
                                 defaultValue={task.verifier || undefined}
@@ -1344,7 +1343,6 @@ const DailyTasks = () => {
                             placeholder="Chọn người thực hiện"
                             optionLabelProp="label"
                             virtual={false}
-                            getPopupContainer={() => document.body}
                             dropdownStyle={{ zIndex: 2000 }}
                             dropdownRender={(menu) => (
                                 <>
