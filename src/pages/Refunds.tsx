@@ -110,10 +110,9 @@ export default function RefundsPage() {
     const loadRefunds = async () => {
         setLoading(true);
         try {
-            // Load from localStorage
-            const stored = localStorage.getItem('refunds');
-            if (stored) {
-                setRefunds(JSON.parse(stored));
+            const result = await window.electronAPI.refunds.getAll();
+            if (result.success && result.data) {
+                setRefunds(result.data);
             }
         } catch (error) {
             message.error('Lỗi khi tải dữ liệu');
@@ -122,9 +121,9 @@ export default function RefundsPage() {
         }
     };
 
-    const saveRefunds = (newRefunds: Refund[]) => {
-        localStorage.setItem('refunds', JSON.stringify(newRefunds));
-        setRefunds(newRefunds);
+    const saveRefunds = (_newRefunds: Refund[]) => {
+        // Data is now saved via individual API calls
+        loadRefunds();
     };
 
     const loadProducts = async () => {
@@ -185,9 +184,9 @@ export default function RefundsPage() {
             okText: 'Xóa',
             okType: 'danger',
             cancelText: 'Hủy',
-            onOk: () => {
-                const updatedRefunds = refunds.filter(r => r.id !== refundRecord.id);
-                saveRefunds(updatedRefunds);
+            onOk: async () => {
+                await window.electronAPI.refunds.delete(refundRecord.id);
+                await loadRefunds();
                 message.success('Đã xóa phiếu hoàn!');
             },
         });
@@ -222,8 +221,8 @@ export default function RefundsPage() {
             width: 600,
             onOk: async () => {
                 try {
-                    const updatedRefunds = refunds.filter(r => !selectedRowKeys.includes(r.id));
-                    saveRefunds(updatedRefunds);
+                    await window.electronAPI.refunds.bulkDelete(selectedRowKeys);
+                    await loadRefunds();
 
                     message.success(`Đã xóa ${selectedRowKeys.length} phiếu hoàn!`);
                     setSelectedRowKeys([]);
@@ -235,7 +234,7 @@ export default function RefundsPage() {
     };
 
     // 📦 Xử lý quét mã vận đơn
-    const handleScan = (code: string) => {
+    const handleScan = async (code: string) => {
         const trimmed = code.trim();
         if (!trimmed) return;
 
@@ -249,12 +248,13 @@ export default function RefundsPage() {
 
         if (foundRefund) {
             // Cập nhật trạng thái thành "Đã hoàn"
+            await window.electronAPI.refunds.update(foundRefund.id, { status: 'completed' });
             const updatedRefunds = refunds.map(r =>
                 r.id === foundRefund.id
                     ? { ...r, status: 'completed' }
                     : r
             );
-            saveRefunds(updatedRefunds);
+            setRefunds(updatedRefunds);
 
             playSuccess(); // 📊 Âm thanh thành công
             setScanStatus({
@@ -395,12 +395,9 @@ export default function RefundsPage() {
 
             const totalAmount = refundItems.reduce((sum, item) => sum + item.total, 0);
 
-            let updatedRefunds: Refund[];
-
             if (editingRefund) {
                 // EDIT MODE
-                const updatedRefund: Refund = {
-                    ...editingRefund,
+                const updatedData = {
                     customerName: values.customerName,
                     refundCode: values.refundCode,
                     orderNumber: values.orderNumber,
@@ -411,18 +408,10 @@ export default function RefundsPage() {
                     items: JSON.stringify(refundItems),
                     totalAmount,
                 };
-
-                updatedRefunds = refunds.map(r =>
-                    r.id === editingRefund.id ? updatedRefund : r
-                );
+                await window.electronAPI.refunds.update(editingRefund.id, updatedData);
             } else {
                 // CREATE MODE
-                const newId = refunds.length > 0
-                    ? Math.max(...refunds.map(r => r.id)) + 1
-                    : 1;
-
-                const newRefund: Refund = {
-                    id: newId,
+                const newRefund = {
                     customerName: values.customerName,
                     refundCode: values.refundCode,
                     orderNumber: values.orderNumber,
@@ -432,14 +421,12 @@ export default function RefundsPage() {
                     notes: values.notes,
                     items: JSON.stringify(refundItems),
                     totalAmount,
-                    createdAt: new Date(),
                 };
-
-                updatedRefunds = [newRefund, ...refunds];
+                await window.electronAPI.refunds.create(newRefund);
             }
 
-            // Save to localStorage
-            saveRefunds(updatedRefunds);
+            // Reload from database
+            await loadRefunds();
 
             // TODO: Update stock - Hàng hoàn sẽ CỘNG vào tồn kho
 
@@ -508,7 +495,7 @@ export default function RefundsPage() {
     const handleImportExcel = (file: File) => {
         const reader = new FileReader();
 
-        reader.onload = (e) => {
+        reader.onload = async (e) => {
             try {
                 const data = e.target?.result;
                 const workbook = XLSX.read(data, { type: 'binary' });
@@ -662,8 +649,19 @@ export default function RefundsPage() {
                     return;
                 }
 
-                const updatedRefunds = [...newRefunds, ...refunds];
-                saveRefunds(updatedRefunds);
+                // Save to database using bulkCreate
+                await window.electronAPI.refunds.bulkCreate(newRefunds.map(r => ({
+                    customerName: r.customerName,
+                    refundCode: r.refundCode,
+                    orderNumber: r.orderNumber,
+                    refundReason: r.refundReason,
+                    refundDate: r.refundDate,
+                    status: r.status,
+                    notes: r.notes,
+                    items: r.items,
+                    totalAmount: r.totalAmount,
+                })));
+                await loadRefunds();
 
                 const source = isTikTok ? 'TikTok' : 'Shopee';
                 message.success(`✅ Đã import ${newRefunds.length} phiếu hoàn từ ${source}!`);

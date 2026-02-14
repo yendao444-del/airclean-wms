@@ -22,46 +22,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const [user, setUser] = useState<User | null>(null);
 
     // Helper function to ensure admin user exists
-    const ensureAdminExists = () => {
-        const defaultAdmin = {
-            id: 1,
-            username: 'admin',
-            fullName: 'Quản trị viên',
-            email: 'admin@example.com',
-            role: 'admin' as const,
-            isActive: true,
-            password: 'admin',
-            createdAt: new Date().toISOString(),
-        };
-
+    const ensureAdminExists = async () => {
         try {
-            const usersStr = localStorage.getItem('users');
-
-            // Case 1: No users at all - initialize with admin
-            if (!usersStr) {
-                localStorage.setItem('users', JSON.stringify([defaultAdmin]));
-                console.log('✅ Initialized default admin user');
-                return;
-            }
-
-            // Case 2: Users exist - check if there's at least one active admin
-            const users: (User & { password: string })[] = JSON.parse(usersStr);
-
-            // Check if there's at least one active admin
-            const hasActiveAdmin = users.some(u => u.role === 'admin' && u.isActive);
-
-            if (!hasActiveAdmin) {
-                // No active admin found - add default admin
-                const maxId = users.length > 0 ? Math.max(...users.map(u => u.id)) : 0;
-                const newAdmin = { ...defaultAdmin, id: maxId + 1 };
-                users.push(newAdmin);
-                localStorage.setItem('users', JSON.stringify(users));
-                console.log('⚠️ No active admin found - restored default admin');
-            }
+            await window.electronAPI.users.ensureAdmin();
+            console.log('✅ Admin user ensured via database');
         } catch (error) {
-            // Case 3: Data is corrupted - reset with default admin
-            console.error('❌ Error checking users, resetting to default admin:', error);
-            localStorage.setItem('users', JSON.stringify([defaultAdmin]));
+            console.error('❌ Error ensuring admin user:', error);
         }
     };
 
@@ -69,7 +35,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Always ensure admin exists on app startup
         ensureAdminExists();
 
-        // Check if user is already logged in
+        // Check if user is already logged in (session-based)
         const sessionUser = sessionStorage.getItem('currentUser');
         if (sessionUser) {
             setUser(JSON.parse(sessionUser));
@@ -78,30 +44,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const login = async (username: string, password: string): Promise<boolean> => {
         try {
-            // Get users from localStorage
-            const usersStr = localStorage.getItem('users');
-            if (!usersStr) {
+            const result = await window.electronAPI.users.login(username, password);
+
+            if (!result.success || !result.data) {
                 return false;
             }
 
-            const users: (User & { password: string })[] = JSON.parse(usersStr);
+            const foundUser = result.data;
 
-            // Find user by username and check if active
-            const foundUser = users.find(u =>
-                u.username === username &&
-                u.isActive
-            );
-
-            if (!foundUser) {
-                return false;
-            }
-
-            // Check password (in production, you should hash passwords!)
-            if (foundUser.password !== password) {
-                return false;
-            }
-
-            // Remove password before saving to session (security best practice)
+            // Remove password before saving to session
             const { password: _, ...userWithoutPassword } = foundUser;
 
             // Save to session

@@ -159,11 +159,11 @@ export default function StockBalancePage() {
         });
     };
 
-    const loadBalanceRecords = () => {
+    const loadBalanceRecords = async () => {
         try {
-            const stored = localStorage.getItem('stockBalanceRecords');
-            if (stored) {
-                setBalanceRecords(JSON.parse(stored));
+            const result = await window.electronAPI.stockBalance.getAll();
+            if (result.success && result.data) {
+                setBalanceRecords(result.data);
             }
         } catch (error) {
             console.error('Error loading balance records:', error);
@@ -228,19 +228,15 @@ export default function StockBalancePage() {
                     }
 
                     // Lưu lịch sử cân bằng kho
-                    const newRecord: StockBalanceRecord = {
-                        id: balanceRecords.length > 0
-                            ? Math.max(...balanceRecords.map(r => r.id)) + 1
-                            : 1,
+                    const newRecord = {
                         date: dayjs().format('YYYY-MM-DD HH:mm:ss'),
                         adjustedBy: 'Admin',
                         items: itemsToAdjust,
                         notes: form.getFieldValue('notes') || '',
                     };
 
-                    const updatedRecords = [newRecord, ...balanceRecords];
-                    localStorage.setItem('stockBalanceRecords', JSON.stringify(updatedRecords));
-                    setBalanceRecords(updatedRecords);
+                    await window.electronAPI.stockBalance.create(newRecord);
+                    await loadBalanceRecords();
 
                     if (successCount > 0) {
                         message.success(`✅ Đã cân bằng ${successCount} sản phẩm!`);
@@ -316,19 +312,15 @@ export default function StockBalancePage() {
                             difference,
                         };
 
-                        const newRecord: StockBalanceRecord = {
-                            id: balanceRecords.length > 0
-                                ? Math.max(...balanceRecords.map(r => r.id)) + 1
-                                : 1,
+                        const newRecord = {
                             date: dayjs().format('YYYY-MM-DD HH:mm:ss'),
                             adjustedBy: 'Admin',
                             items: [adjustedItem],
                             notes: values.notes || 'Cân bằng nhanh',
                         };
 
-                        const updatedRecords = [newRecord, ...balanceRecords];
-                        localStorage.setItem('stockBalanceRecords', JSON.stringify(updatedRecords));
-                        setBalanceRecords(updatedRecords);
+                        await window.electronAPI.stockBalance.create(newRecord);
+                        await loadBalanceRecords();
 
                         message.success(`✅ Đã cân bằng ${quickBalanceItem.sku}!`);
 

@@ -325,6 +325,126 @@ model Expense {
 }
 
 // ========================================
+// ECOMMERCE EXPORTS / XUẤT HÀNG TMDT
+// ========================================
+
+model EcommerceExport {
+  id                    Int      @id @default(autoincrement())
+  customerName          String   // Shopee, TikTok, etc.
+  ecommerceExportCode   String?  // Mã phiếu xuất
+  orderNumber           String?  // Mã đơn hàng / Mã vận đơn
+  ecommerceExportReason String?  // Lý do xuất
+  ecommerceExportDate   DateTime // Ngày xuất
+  items                 String   // JSON array of items
+  totalAmount           Float    @default(0)
+  notes                 String?
+  status                String   @default("processing") // processing, completed
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  createdBy             String?
+
+  @@index([status])
+  @@index([customerName])
+  @@index([ecommerceExportDate])
+}
+
+// ========================================
+// EXPORT ORDERS / XUẤT HÀNG POS
+// ========================================
+
+model ExportOrder {
+  id          Int      @id @default(autoincrement())
+  exportDate  DateTime // Ngày xuất
+  customer    String   // Tên khách hàng
+  status      String   @default("processing") // processing, completed
+  totalAmount Float    @default(0)
+  notes       String?
+  items       String   // JSON array of ExportItem
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdBy   String?
+
+  @@index([status])
+  @@index([exportDate])
+}
+
+// ========================================
+// RETURNS / TRẢ HÀNG
+// ========================================
+
+model Return {
+  id            Int      @id @default(autoincrement())
+  customerName  String   // Tên khách hàng
+  returnCode    String?  // Mã phiếu trả
+  orderNumber   String?  // Mã đơn hàng gốc
+  returnReason  String?  // Lý do trả
+  returnDate    DateTime // Ngày trả
+  items         String   // JSON array of items
+  totalAmount   Float    @default(0)
+  notes         String?
+  status        String   @default("pending") // pending, approved, completed, rejected
+  packer        String?  // Người đóng gói
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  createdBy     String?
+
+  @@index([status])
+  @@index([returnDate])
+  @@index([customerName])
+}
+
+// ========================================
+// REFUNDS / HÀNG HOÀN
+// ========================================
+
+model Refund {
+  id            Int      @id @default(autoincrement())
+  customerName  String   // Tên khách hàng / Sàn
+  refundCode    String?  // Mã phiếu hoàn
+  orderNumber   String?  // Mã đơn hàng / Mã vận đơn
+  refundReason  String?  // Lý do hoàn
+  refundDate    DateTime // Ngày hoàn
+  items         String   // JSON array of items
+  totalAmount   Float    @default(0)
+  notes         String?
+  status        String   @default("processing") // processing, completed
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  createdBy     String?
+
+  @@index([status])
+  @@index([refundDate])
+  @@index([orderNumber])
+}
+
+// ========================================
+// STOCK BALANCE / CÂN BẰNG KHO
+// ========================================
+
+model StockBalance {
+  id          Int      @id @default(autoincrement())
+  date        DateTime // Ngày cân bằng
+  adjustedBy  String   // Người thực hiện
+  items       String   // JSON array of StockBalanceItem
+  notes       String?
+  createdAt   DateTime @default(now())
+
+  @@index([date])
+}
+
+// ========================================
+// APP CONFIG / CẤU HÌNH ỨNG DỤNG
+// ========================================
+
+model AppConfig {
+  id    Int    @id @default(autoincrement())
+  key   String @unique // e.g. 'packerList', 'statusList', 'assigneeList', 'feesConfig', 'configVersion'
+  value String // JSON value
+  
+  updatedAt DateTime @updatedAt
+}
+
+// ========================================
 // DAILY TASKS / CÔNG VIỆC HÀNG NGÀY
 // ========================================
 

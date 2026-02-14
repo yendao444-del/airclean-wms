@@ -102,18 +102,18 @@ export default function ExportOrdersPage() {
 
     const loadExports = async () => {
         try {
-            const stored = localStorage.getItem('exports');
-            if (stored) {
-                setExports(JSON.parse(stored));
+            const result = await window.electronAPI.exportOrders.getAll();
+            if (result.success && result.data) {
+                setExports(result.data);
             }
         } catch (error) {
             console.error('Error loading exports:', error);
         }
     };
 
-    const saveExports = (newExports: ExportOrder[]) => {
-        localStorage.setItem('exports', JSON.stringify(newExports));
-        setExports(newExports);
+    const saveExports = (_newExports: ExportOrder[]) => {
+        // Data is now saved via individual API calls
+        loadExports();
     };
 
     const handleAdd = async () => {
@@ -208,12 +208,9 @@ export default function ExportOrdersPage() {
                 unitPrice: values.unitPrice,
             };
 
-            let updatedExports: ExportOrder[];
-
             if (editingExport) {
-                // EDIT MODE - Update existing
-                const updatedExport: ExportOrder = {
-                    ...editingExport,
+                // EDIT MODE - Update in database
+                const updatedExport = {
                     customer: values.customer,
                     exportDate: values.exportDate.format('YYYY-MM-DD HH:mm:ss'),
                     status: values.status,
@@ -221,18 +218,10 @@ export default function ExportOrdersPage() {
                     totalAmount,
                     items: [exportItem],
                 };
-
-                updatedExports = exports.map(e =>
-                    e.id === editingExport.id ? updatedExport : e
-                );
+                await window.electronAPI.exportOrders.update(editingExport.id, updatedExport);
             } else {
-                // CREATE MODE - Add new
-                const newId = exports.length > 0
-                    ? Math.max(...exports.map(e => e.id)) + 1
-                    : 1;
-
-                const newExport: ExportOrder = {
-                    id: newId,
+                // CREATE MODE - Save to database
+                const newExport = {
                     customer: values.customer,
                     exportDate: values.exportDate.format('YYYY-MM-DD HH:mm:ss'),
                     status: values.status,
@@ -240,12 +229,11 @@ export default function ExportOrdersPage() {
                     totalAmount,
                     items: [exportItem],
                 };
-
-                updatedExports = [newExport, ...exports];
+                await window.electronAPI.exportOrders.create(newExport);
             }
 
-            // Save to localStorage
-            saveExports(updatedExports);
+            // Reload from database
+            await loadExports();
 
             // ========================================
             // UPDATE STOCK
@@ -376,8 +364,9 @@ export default function ExportOrdersPage() {
             okType: 'danger',
             cancelText: 'Hủy',
             onOk: async () => {
-                const updatedExports = exports.filter(e => e.id !== record.id);
-                saveExports(updatedExports);
+                // Delete from database
+                await window.electronAPI.exportOrders.delete(record.id);
+                await loadExports();
 
                 // Hoàn lại stock
                 const item = record.items[0];
@@ -534,13 +523,8 @@ export default function ExportOrdersPage() {
                         sum + (item.quantity * item.unitPrice), 0
                     );
 
-                    // Generate new ID
-                    const newId = exports.length > 0
-                        ? Math.max(...exports.map(e => e.id)) + 1
-                        : 1;
-
-                    const newExport: ExportOrder = {
-                        id: newId,
+                    // Save to database
+                    const newExport = {
                         customer: 'Khách lẻ',
                         exportDate: dayjs().format('YYYY-MM-DD HH:mm:ss'),
                         status: 'completed',
@@ -548,10 +532,8 @@ export default function ExportOrdersPage() {
                         totalAmount,
                         items: posItems,
                     };
-
-                    // Save to localStorage
-                    const updatedExports = [newExport, ...exports];
-                    saveExports(updatedExports);
+                    await window.electronAPI.exportOrders.create(newExport);
+                    await loadExports();
 
                     // Update stock cho từng item
                     for (const item of posItems) {

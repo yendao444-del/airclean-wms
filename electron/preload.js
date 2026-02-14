@@ -21,16 +21,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
         delete: (id) => ipcRenderer.invoke('categories:delete', id),
     },
 
-    // Pickup - Quét mã vận đơn
-    pickup: {
-        selectFolder: () => ipcRenderer.invoke('pickup:selectFolder'),
-        loadData: (folderPath) => ipcRenderer.invoke('pickup:loadData', folderPath),
-        scan: (trackingNumber) => ipcRenderer.invoke('pickup:scan', trackingNumber),
-        getHistory: (limit) => ipcRenderer.invoke('pickup:getHistory', limit),
-        getStats: () => ipcRenderer.invoke('pickup:getStats'),
-        sendTelegram: (data) => ipcRenderer.invoke('pickup:sendTelegram', data),
-        exportPickup: () => ipcRenderer.invoke('pickup:exportPickup'),
-    },
 
     // Activity Log
     activityLog: {
@@ -86,10 +76,65 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getStats: (filters) => ipcRenderer.invoke('dailyTasks:stats', filters),
     },
 
-    // Ecommerce Export
-    ecommerceExport: {
+    // Ecommerce Export (XUẤT HÀNG TMDT)
+    ecommerceExports: {
+        getAll: () => ipcRenderer.invoke('ecommerceExports:getAll'),
+        create: (data) => ipcRenderer.invoke('ecommerceExports:create', data),
+        update: (id, data) => ipcRenderer.invoke('ecommerceExports:update', id, data),
+        delete: (id) => ipcRenderer.invoke('ecommerceExports:delete', id),
+        bulkDelete: (ids) => ipcRenderer.invoke('ecommerceExports:bulkDelete', ids),
+        bulkCreate: (records) => ipcRenderer.invoke('ecommerceExports:bulkCreate', records),
         selectFolder: () => ipcRenderer.invoke('ecommerceExport:selectFolder'),
         loadExcelFiles: (folderPath) => ipcRenderer.invoke('ecommerceExport:loadExcelFiles', folderPath),
+    },
+
+    // Export Orders (XUẤT HÀNG POS)
+    exportOrders: {
+        getAll: () => ipcRenderer.invoke('exportOrders:getAll'),
+        create: (data) => ipcRenderer.invoke('exportOrders:create', data),
+        update: (id, data) => ipcRenderer.invoke('exportOrders:update', id, data),
+        delete: (id) => ipcRenderer.invoke('exportOrders:delete', id),
+    },
+
+    // Returns (TRẢ HÀNG)
+    returns: {
+        getAll: () => ipcRenderer.invoke('returns:getAll'),
+        create: (data) => ipcRenderer.invoke('returns:create', data),
+        update: (id, data) => ipcRenderer.invoke('returns:update', id, data),
+        delete: (id) => ipcRenderer.invoke('returns:delete', id),
+        bulkCreate: (records) => ipcRenderer.invoke('returns:bulkCreate', records),
+    },
+
+    // Refunds (HÀNG HOÀN)
+    refunds: {
+        getAll: () => ipcRenderer.invoke('refunds:getAll'),
+        create: (data) => ipcRenderer.invoke('refunds:create', data),
+        update: (id, data) => ipcRenderer.invoke('refunds:update', id, data),
+        delete: (id) => ipcRenderer.invoke('refunds:delete', id),
+        bulkDelete: (ids) => ipcRenderer.invoke('refunds:bulkDelete', ids),
+        bulkCreate: (records) => ipcRenderer.invoke('refunds:bulkCreate', records),
+    },
+
+    // Stock Balance (CÂN BẰNG KHO)
+    stockBalance: {
+        getAll: () => ipcRenderer.invoke('stockBalance:getAll'),
+        create: (data) => ipcRenderer.invoke('stockBalance:create', data),
+    },
+
+    // App Config (CẤU HÌNH)
+    appConfig: {
+        get: (key) => ipcRenderer.invoke('appConfig:get', key),
+        set: (key, value) => ipcRenderer.invoke('appConfig:set', key, value),
+    },
+
+    // Users (NGƯỜI DÙNG / PHÂN QUYỀN)
+    users: {
+        getAll: () => ipcRenderer.invoke('users:getAll'),
+        create: (data) => ipcRenderer.invoke('users:create', data),
+        update: (id, data) => ipcRenderer.invoke('users:update', id, data),
+        delete: (id) => ipcRenderer.invoke('users:delete', id),
+        login: (username, password) => ipcRenderer.invoke('users:login', username, password),
+        ensureAdmin: () => ipcRenderer.invoke('users:ensureAdmin'),
     },
 
     // Shell - Open external links in browser
