@@ -94,8 +94,8 @@ export default function EcommerceExportPage() {
     // ⚙️ State cho Settings Telegram
     const [settingsModalVisible, setSettingsModalVisible] = useState(false);
     const [telegramSettings, setTelegramSettings] = useState({
-        chatId: localStorage.getItem('telegramChatId') || '',
-        apiToken: localStorage.getItem('telegramApiToken') || '',
+        chatId: '',
+        apiToken: '',
     });
     const [settingsForm] = Form.useForm();
 
@@ -106,6 +106,20 @@ export default function EcommerceExportPage() {
 
         loadEcommerceExports();
         loadProducts();
+
+        // Load telegram settings from database
+        (async () => {
+            try {
+                const chatIdResult = await window.electronAPI.appConfig.get('telegramChatId');
+                const apiTokenResult = await window.electronAPI.appConfig.get('telegramApiToken');
+                setTelegramSettings({
+                    chatId: chatIdResult.success && chatIdResult.data ? chatIdResult.data : '',
+                    apiToken: apiTokenResult.success && apiTokenResult.data ? apiTokenResult.data : '',
+                });
+            } catch (error) {
+                console.error('Error loading telegram settings:', error);
+            }
+        })();
     }, []);
 
     // 📊 Hàm phát âm thanh - clone mỗi lần để quét nhanh không bị chồng
@@ -123,22 +137,9 @@ export default function EcommerceExportPage() {
     const loadEcommerceExports = async () => {
         setLoading(true);
         try {
-            // Load from localStorage
-            const stored = localStorage.getItem('ecommerceExports');
-            if (stored) {
-                const data = JSON.parse(stored);
-
-                // 🔄 MIGRATION: Convert old format "Khách Shopee" → "Shopee", "Khách TikTok" → "TikTok"
-                const migrated = data.map((item: EcommerceExport) => ({
-                    ...item,
-                    customerName: item.customerName
-                        .replace('Khách Shopee', 'Shopee')
-                        .replace('Khách TikTok', 'TikTok')
-                }));
-
-                // Lưu lại dữ liệu đã migrate
-                localStorage.setItem('ecommerceExports', JSON.stringify(migrated));
-                setEcommerceExports(migrated);
+            const result = await window.electronAPI.ecommerceExports.getAll();
+            if (result.success && result.data) {
+                setEcommerceExports(result.data);
             }
         } catch (error) {
             message.error('Lỗi khi tải dữ liệu');
@@ -147,9 +148,10 @@ export default function EcommerceExportPage() {
         }
     };
 
-    const saveEcommerceExports = (newEcommerceExports: EcommerceExport[]) => {
-        localStorage.setItem('ecommerceExports', JSON.stringify(newEcommerceExports));
-        setEcommerceExports(newEcommerceExports);
+    const saveEcommerceExports = (_newEcommerceExports: EcommerceExport[]) => {
+        // Data is now saved via individual API calls (create/update/delete)
+        // This function just reloads from database
+        loadEcommerceExports();
     };
 
     const loadProducts = async () => {
@@ -288,10 +290,11 @@ export default function EcommerceExportPage() {
             // Lấy tracking number
             const trackingNumber = ecommerceExport.notes?.match(/Tracking: ([^|]+)/)?.[1]?.trim() || 'N/A';
 
-            // Đếm số thứ tự (số lượng đơn đã quét từ localStorage hoặc state)
-            let orderCounter = parseInt(localStorage.getItem('telegramOrderCounter') || '0');
+            // Đếm số thứ tự
+            const counterResult = await window.electronAPI.appConfig.get('telegramOrderCounter');
+            let orderCounter = counterResult.success && counterResult.data ? parseInt(counterResult.data) : 0;
             orderCounter++;
-            localStorage.setItem('telegramOrderCounter', orderCounter.toString());
+            await window.electronAPI.appConfig.set('telegramOrderCounter', orderCounter.toString());
 
             // Thời gian hiện tại
             const currentTime = dayjs().format('YYYY-MM-DD HH:mm:ss');
@@ -604,7 +607,7 @@ Thời gian: ${currentTime}`;
                 }
             }
 
-            // Save to localStorage
+            // Save to database
             saveEcommerceExports(updatedEcommerceExports);
 
             const successMsg = editingEcommerceExport
@@ -1928,10 +1931,10 @@ Thời gian: ${currentTime}`;
                 open={settingsModalVisible}
                 onCancel={() => setSettingsModalVisible(false)}
                 onOk={() => {
-                    settingsForm.validateFields().then(values => {
-                        // Lưu vào localStorage
-                        localStorage.setItem('telegramChatId', values.chatId || '');
-                        localStorage.setItem('telegramApiToken', values.apiToken || '');
+                    settingsForm.validateFields().then(async (values) => {
+                        // Lưu vào database
+                        await window.electronAPI.appConfig.set('telegramChatId', values.chatId || '');
+                        await window.electronAPI.appConfig.set('telegramApiToken', values.apiToken || '');
 
                         // Cập nhật state
                         setTelegramSettings({

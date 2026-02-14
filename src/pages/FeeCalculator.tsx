@@ -48,37 +48,44 @@ export default function FeeCalculator() {
     const [editingFee, setEditingFee] = useState<any>(null);
 
     useEffect(() => {
-        const savedVersion = localStorage.getItem('config_version');
+        (async () => {
+            try {
+                const savedVersion = await window.electronAPI.appConfig.get('config_version');
+                const version = savedVersion.success ? savedVersion.data : null;
 
-        if (savedVersion !== CONFIG_VERSION) {
-            console.log('🔄 Phát hiện version mới, reset về config mặc định');
-            localStorage.setItem('config_version', CONFIG_VERSION);
-            localStorage.setItem('fees_config', JSON.stringify(DEFAULT_FEES));
-            setFees(DEFAULT_FEES);
-        } else {
-            const savedFees = localStorage.getItem('fees_config');
-            if (savedFees) {
-                setFees(JSON.parse(savedFees));
+                if (version !== CONFIG_VERSION) {
+                    console.log('🔄 Phát hiện version mới, reset về config mặc định');
+                    await window.electronAPI.appConfig.set('config_version', CONFIG_VERSION);
+                    await window.electronAPI.appConfig.set('fees_config', DEFAULT_FEES);
+                    setFees(DEFAULT_FEES);
+                } else {
+                    const savedFees = await window.electronAPI.appConfig.get('fees_config');
+                    if (savedFees.success && savedFees.data) {
+                        setFees(savedFees.data);
+                    }
+                }
+
+                const savedInputs = await window.electronAPI.appConfig.get('calculator_inputs');
+                if (savedInputs.success && savedInputs.data) {
+                    const inputs = savedInputs.data;
+                    setDoanhThu(inputs.doanhThu || 0);
+                    setGiaNhap(inputs.giaNhap || 0);
+                    setVatRate(inputs.vatRate !== undefined ? inputs.vatRate : 8);
+                    setVatEnabled(inputs.vatEnabled !== undefined ? inputs.vatEnabled : false);
+                }
+            } catch (error) {
+                console.error('Error loading fee config:', error);
             }
-        }
-
-        const savedInputs = localStorage.getItem('calculator_inputs');
-        if (savedInputs) {
-            const inputs = JSON.parse(savedInputs);
-            setDoanhThu(inputs.doanhThu || 0);
-            setGiaNhap(inputs.giaNhap || 0);
-            setVatRate(inputs.vatRate !== undefined ? inputs.vatRate : 8);
-            setVatEnabled(inputs.vatEnabled !== undefined ? inputs.vatEnabled : false);
-        }
+        })();
     }, []);
 
     useEffect(() => {
         const inputs = { doanhThu, giaNhap, vatRate, vatEnabled };
-        localStorage.setItem('calculator_inputs', JSON.stringify(inputs));
+        window.electronAPI.appConfig.set('calculator_inputs', inputs);
     }, [doanhThu, giaNhap, vatRate, vatEnabled]);
 
-    const saveFees = (newFees: any[]) => {
-        localStorage.setItem('fees_config', JSON.stringify(newFees));
+    const saveFees = async (newFees: any[]) => {
+        await window.electronAPI.appConfig.set('fees_config', newFees);
         setFees(newFees);
     };
 

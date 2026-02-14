@@ -70,37 +70,25 @@ export default function PermissionsPage() {
         loadUsers();
     }, []);
 
-    const loadUsers = () => {
+    const loadUsers = async () => {
         setLoading(true);
         try {
-            const stored = localStorage.getItem('users');
-            if (stored) {
-                setUsers(JSON.parse(stored));
-            } else {
-                // Default admin user
-                const defaultUsers: User[] = [
-                    {
-                        id: 1,
-                        username: 'admin',
-                        fullName: 'Quản trị viên',
-                        email: 'admin@example.com',
-                        role: 'admin',
-                        isActive: true,
-                        password: 'admin', // Default password
-                        createdAt: new Date().toISOString(),
-                    },
-                ];
-                setUsers(defaultUsers);
-                localStorage.setItem('users', JSON.stringify(defaultUsers));
+            // Ensure admin exists
+            await window.electronAPI.users.ensureAdmin();
+            const result = await window.electronAPI.users.getAll();
+            if (result.success && result.data) {
+                setUsers(result.data);
             }
+        } catch (error) {
+            console.error('Error loading users:', error);
         } finally {
             setLoading(false);
         }
     };
 
-    const saveUsers = (updatedUsers: User[]) => {
-        localStorage.setItem('users', JSON.stringify(updatedUsers));
-        setUsers(updatedUsers);
+    const saveUsers = (_updatedUsers: User[]) => {
+        // Data is now saved via individual API calls
+        loadUsers();
     };
 
     const handleAdd = () => {
@@ -136,24 +124,22 @@ export default function PermissionsPage() {
             okText: 'Xóa',
             okType: 'danger',
             cancelText: 'Hủy',
-            onOk: () => {
-                const updatedUsers = users.filter(u => u.id !== user.id);
-                saveUsers(updatedUsers);
+            onOk: async () => {
+                await window.electronAPI.users.delete(user.id);
+                await loadUsers();
                 message.success('Đã xóa người dùng!');
             },
         });
     };
 
-    const handleToggleActive = (user: User) => {
+    const handleToggleActive = async (user: User) => {
         if (user.role === 'admin' && users.filter(u => u.role === 'admin' && u.isActive).length === 1) {
             message.error('Không thể vô hiệu hóa admin duy nhất!');
             return;
         }
 
-        const updatedUsers = users.map(u =>
-            u.id === user.id ? { ...u, isActive: !u.isActive } : u
-        );
-        saveUsers(updatedUsers);
+        await window.electronAPI.users.update(user.id, { isActive: !user.isActive });
+        await loadUsers();
         message.success(user.isActive ? 'Đã vô hiệu hóa!' : 'Đã kích hoạt!');
     };
 
@@ -163,26 +149,21 @@ export default function PermissionsPage() {
 
             if (editingUser) {
                 // Update
-                const updatedUsers = users.map(u =>
-                    u.id === editingUser.id
-                        ? { ...u, ...values }
-                        : u
-                );
-                saveUsers(updatedUsers);
+                await window.electronAPI.users.update(editingUser.id, values);
+                await loadUsers();
                 message.success('Đã cập nhật người dùng!');
             } else {
                 // Create
-                const newUser: User = {
-                    id: users.length > 0 ? Math.max(...users.map(u => u.id)) + 1 : 1,
+                const newUser = {
                     username: values.username,
-                    fullName: ROLES[values.role as keyof typeof ROLES].label, // Auto set fullName = role label
+                    fullName: ROLES[values.role as keyof typeof ROLES].label,
                     email: undefined,
                     role: values.role,
-                    isActive: true, // Always active by default
-                    password: values.password, // Save password
-                    createdAt: new Date().toISOString(),
+                    isActive: true,
+                    password: values.password,
                 };
-                saveUsers([...users, newUser]);
+                await window.electronAPI.users.create(newUser);
+                await loadUsers();
                 message.success('Đã thêm người dùng mới!');
             }
 
@@ -203,13 +184,9 @@ export default function PermissionsPage() {
         try {
             const values = await passwordForm.validateFields();
 
-            // Simple localStorage update (since system uses localStorage)
-            const updatedUsers = users.map(u =>
-                u.id === changingPasswordUser!.id
-                    ? { ...u, password: values.newPassword }
-                    : u
-            );
-            saveUsers(updatedUsers);
+            // Update password via API
+            await window.electronAPI.users.update(changingPasswordUser!.id, { password: values.newPassword });
+            await loadUsers();
 
             message.success('Đã đổi mật khẩu thành công!');
             setPasswordModalVisible(false);

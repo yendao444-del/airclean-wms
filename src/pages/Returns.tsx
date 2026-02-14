@@ -89,16 +89,16 @@ export default function ReturnsPage() {
         loadStatusList();
     }, []);
 
-    const loadPackerList = () => {
+    const loadPackerList = async () => {
         try {
-            const stored = localStorage.getItem('packerList');
-            if (stored) {
-                setPackerList(JSON.parse(stored));
+            const result = await window.electronAPI.appConfig.get('packerList');
+            if (result.success && result.data) {
+                setPackerList(result.data);
             } else {
                 // Default packers
                 const defaultPackers = ['Ngô Minh Toàn', 'Nguyễn Văn A', 'Trần Thị B'];
                 setPackerList(defaultPackers);
-                localStorage.setItem('packerList', JSON.stringify(defaultPackers));
+                await window.electronAPI.appConfig.set('packerList', defaultPackers);
             }
         } catch (error) {
             console.error('Error loading packer list:', error);
@@ -106,20 +106,20 @@ export default function ReturnsPage() {
         }
     };
 
-    const savePackerList = (list: string[]) => {
+    const savePackerList = async (list: string[]) => {
         try {
-            localStorage.setItem('packerList', JSON.stringify(list));
+            await window.electronAPI.appConfig.set('packerList', list);
             setPackerList(list);
         } catch (error) {
             console.error('Error saving packer list:', error);
         }
     };
 
-    const loadStatusList = () => {
+    const loadStatusList = async () => {
         try {
-            const stored = localStorage.getItem('statusList');
-            if (stored) {
-                setStatusList(JSON.parse(stored));
+            const result = await window.electronAPI.appConfig.get('statusList');
+            if (result.success && result.data) {
+                setStatusList(result.data);
             } else {
                 // Default statuses
                 const defaultStatuses = [
@@ -127,7 +127,7 @@ export default function ReturnsPage() {
                     { value: 'completed', label: 'Hoàn thành', color: 'green' },
                 ];
                 setStatusList(defaultStatuses);
-                localStorage.setItem('statusList', JSON.stringify(defaultStatuses));
+                await window.electronAPI.appConfig.set('statusList', defaultStatuses);
             }
         } catch (error) {
             console.error('Error loading status list:', error);
@@ -135,9 +135,9 @@ export default function ReturnsPage() {
         }
     };
 
-    const saveStatusList = (list: Array<{ value: string; label: string; color: string }>) => {
+    const saveStatusList = async (list: Array<{ value: string; label: string; color: string }>) => {
         try {
-            localStorage.setItem('statusList', JSON.stringify(list));
+            await window.electronAPI.appConfig.set('statusList', list);
             setStatusList(list);
         } catch (error) {
             console.error('Error saving status list:', error);
@@ -147,9 +147,9 @@ export default function ReturnsPage() {
     const loadReturns = async () => {
         setLoading(true);
         try {
-            const stored = localStorage.getItem('returns');
-            if (stored) {
-                setReturns(JSON.parse(stored));
+            const result = await window.electronAPI.returns.getAll();
+            if (result.success && result.data) {
+                setReturns(result.data);
             }
         } catch (error) {
             message.error('Lỗi khi tải dữ liệu');
@@ -158,9 +158,9 @@ export default function ReturnsPage() {
         }
     };
 
-    const saveReturns = (newReturns: Return[]) => {
-        localStorage.setItem('returns', JSON.stringify(newReturns));
-        setReturns(newReturns);
+    const saveReturns = (_newReturns: Return[]) => {
+        // Data is now saved via individual API calls
+        loadReturns();
     };
 
     const handleAdd = () => {
@@ -630,12 +630,13 @@ export default function ReturnsPage() {
                         value={packer || undefined}
                         placeholder="Chọn nhân viên..."
                         disabled={isInHistory}
-                        onChange={(value) => {
+                        onChange={async (value) => {
+                            // Update in database
+                            await window.electronAPI.returns.update(record.id, { packer: value });
                             const updated = returns.map(r =>
                                 r.id === record.id ? { ...r, packer: value } : r
                             );
                             setReturns(updated);
-                            localStorage.setItem('returns', JSON.stringify(updated));
                             message.success('Đã cập nhật nhân viên đóng gói!');
                         }}
                         style={{ width: '100%' }}

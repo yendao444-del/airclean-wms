@@ -252,15 +252,26 @@ const DailyTasks = () => {
     const [loading, setLoading] = useState(false);
 
     // Assignee management
-    const [assigneeList, setAssigneeList] = useState<string[]>(() => {
-        const stored = localStorage.getItem('dailyTasksAssigneeList');
-        return stored ? JSON.parse(stored) : ['Khánh', 'Toàn', 'Phượng'];
-    });
+    const [assigneeList, setAssigneeList] = useState<string[]>(['Khánh', 'Toàn', 'Phượng']);
     const [newAssigneeName, setNewAssigneeName] = useState('');
 
-    const saveAssigneeList = (list: string[]) => {
+    // Load assignee list from database on mount
+    useEffect(() => {
+        (async () => {
+            try {
+                const result = await window.electronAPI.appConfig.get('dailyTasksAssigneeList');
+                if (result.success && result.data) {
+                    setAssigneeList(result.data);
+                }
+            } catch (error) {
+                console.error('Error loading assignee list:', error);
+            }
+        })();
+    }, []);
+
+    const saveAssigneeList = async (list: string[]) => {
         setAssigneeList(list);
-        localStorage.setItem('dailyTasksAssigneeList', JSON.stringify(list));
+        await window.electronAPI.appConfig.set('dailyTasksAssigneeList', list);
     };
 
     // History state
@@ -294,10 +305,9 @@ const DailyTasks = () => {
 
     const loadHistory = async () => {
         try {
-            // Use localStorage since API not yet implemented
-            const stored = localStorage.getItem('dailyTasksHistory');
-            if (stored) {
-                setHistory(JSON.parse(stored));
+            const result = await window.electronAPI.appConfig.get('dailyTasksHistory');
+            if (result.success && result.data) {
+                setHistory(result.data);
             }
         } catch (error) {
             console.error('Error loading history:', error);
@@ -316,9 +326,9 @@ const DailyTasks = () => {
                 description: `${action === 'completed' ? 'Đã hoàn thành' : 'Đã hủy hoàn thành'} công việc: "${task.title}"`
             };
 
-            // Save to localStorage
+            // Save to database via appConfig
             const newHistory = [historyEntry, ...history];
-            localStorage.setItem('dailyTasksHistory', JSON.stringify(newHistory));
+            await window.electronAPI.appConfig.set('dailyTasksHistory', newHistory);
             setHistory(newHistory);
         } catch (error) {
             console.error('Error adding to history:', error);

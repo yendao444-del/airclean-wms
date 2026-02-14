@@ -1769,15 +1769,9 @@ ipcMain.handle('database:importAll', async () => {
 // Change password (user changes their own password)
 ipcMain.handle('users:changePassword', async (event, { userId, oldPassword, newPassword }) => {
     try {
-        // Note: LocalStorage based system - just update the password directly
-        const stored = localStorage.getItem('users');
-        if (!stored) {
-            return { success: false, error: 'Không tìm thấy dữ liệu người dùng' };
-        }
+        if (!prisma) throw new Error('Prisma not available');
 
-        const users = JSON.parse(stored);
-        const user = users.find(u => u.id === userId);
-
+        const user = await prisma.user.findUnique({ where: { id: userId } });
         if (!user) {
             return { success: false, error: 'Người dùng không tồn tại' };
         }
@@ -1788,8 +1782,10 @@ ipcMain.handle('users:changePassword', async (event, { userId, oldPassword, newP
         }
 
         // Update password
-        user.password = newPassword;
-        localStorage.setItem('users', JSON.stringify(users));
+        await prisma.user.update({
+            where: { id: userId },
+            data: { password: newPassword }
+        });
 
         console.log(`✅ Changed password for user: ${user.username}`);
         return { success: true };
@@ -1802,22 +1798,18 @@ ipcMain.handle('users:changePassword', async (event, { userId, oldPassword, newP
 // Reset password (admin resets another user's password)
 ipcMain.handle('users:resetPassword', async (event, { userId, newPassword }) => {
     try {
-        // Note: LocalStorage based system - just update the password directly
-        const stored = localStorage.getItem('users');
-        if (!stored) {
-            return { success: false, error: 'Không tìm thấy dữ liệu người dùng' };
-        }
+        if (!prisma) throw new Error('Prisma not available');
 
-        const users = JSON.parse(stored);
-        const user = users.find(u => u.id === userId);
-
+        const user = await prisma.user.findUnique({ where: { id: userId } });
         if (!user) {
             return { success: false, error: 'Người dùng không tồn tại' };
         }
 
         // Update password
-        user.password = newPassword;
-        localStorage.setItem('users', JSON.stringify(users));
+        await prisma.user.update({
+            where: { id: userId },
+            data: { password: newPassword }
+        });
 
         console.log(`✅ Reset password for user: ${user.username}`);
         return { success: true };
@@ -2524,6 +2516,668 @@ function getUpdateHistory() {
 // AUTO UPDATE HANDLERS
 // ========================================
 require('./update-handlers');
+
+// ========================================
+// ECOMMERCE EXPORTS HANDLERS (XUẤT HÀNG TMDT)
+// ========================================
+
+ipcMain.handle('ecommerceExports:getAll', async () => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const exports = await prisma.ecommerceExport.findMany({
+            orderBy: { createdAt: 'desc' }
+        });
+        // Format dates for frontend
+        const formatted = exports.map(e => ({
+            ...e,
+            ecommerceExportDate: e.ecommerceExportDate.toISOString().split('T')[0],
+            items: e.items // Already JSON string
+        }));
+        return { success: true, data: formatted };
+    } catch (error) {
+        console.error('❌ Get ecommerce exports error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('ecommerceExports:create', async (event, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const record = await prisma.ecommerceExport.create({
+            data: {
+                customerName: data.customerName,
+                ecommerceExportCode: data.ecommerceExportCode || null,
+                orderNumber: data.orderNumber || null,
+                ecommerceExportReason: data.ecommerceExportReason || null,
+                ecommerceExportDate: new Date(data.ecommerceExportDate),
+                items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
+                totalAmount: data.totalAmount || 0,
+                notes: data.notes || null,
+                status: data.status || 'processing',
+                createdBy: data.createdBy || null
+            }
+        });
+        console.log(`✅ Created ecommerce export #${record.id}`);
+        return { success: true, data: record };
+    } catch (error) {
+        console.error('❌ Create ecommerce export error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const record = await prisma.ecommerceExport.update({
+            where: { id },
+            data: {
+                customerName: data.customerName,
+                ecommerceExportCode: data.ecommerceExportCode || null,
+                orderNumber: data.orderNumber || null,
+                ecommerceExportReason: data.ecommerceExportReason || null,
+                ecommerceExportDate: data.ecommerceExportDate ? new Date(data.ecommerceExportDate) : undefined,
+                items: data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : undefined,
+                totalAmount: data.totalAmount,
+                notes: data.notes || null,
+                status: data.status
+            }
+        });
+        console.log(`✅ Updated ecommerce export #${record.id}`);
+        return { success: true, data: record };
+    } catch (error) {
+        console.error('❌ Update ecommerce export error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('ecommerceExports:delete', async (event, id) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        await prisma.ecommerceExport.delete({ where: { id } });
+        console.log(`✅ Deleted ecommerce export #${id}`);
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Delete ecommerce export error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const result = await prisma.ecommerceExport.deleteMany({
+            where: { id: { in: ids } }
+        });
+        console.log(`✅ Bulk deleted ${result.count} ecommerce exports`);
+        return { success: true, data: result.count };
+    } catch (error) {
+        console.error('❌ Bulk delete ecommerce exports error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const created = [];
+        for (const data of records) {
+            const record = await prisma.ecommerceExport.create({
+                data: {
+                    customerName: data.customerName,
+                    ecommerceExportCode: data.ecommerceExportCode || null,
+                    orderNumber: data.orderNumber || null,
+                    ecommerceExportReason: data.ecommerceExportReason || null,
+                    ecommerceExportDate: new Date(data.ecommerceExportDate),
+                    items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
+                    totalAmount: data.totalAmount || 0,
+                    notes: data.notes || null,
+                    status: data.status || 'processing',
+                    createdBy: data.createdBy || null
+                }
+            });
+            created.push(record);
+        }
+        console.log(`✅ Bulk created ${created.length} ecommerce exports`);
+        return { success: true, data: created };
+    } catch (error) {
+        console.error('❌ Bulk create ecommerce exports error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// ========================================
+// EXPORT ORDERS HANDLERS (XUẤT HÀNG POS)
+// ========================================
+
+ipcMain.handle('exportOrders:getAll', async () => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const orders = await prisma.exportOrder.findMany({
+            orderBy: { createdAt: 'desc' }
+        });
+        const formatted = orders.map(o => ({
+            ...o,
+            exportDate: o.exportDate.toISOString().split('T')[0],
+            items: typeof o.items === 'string' ? JSON.parse(o.items) : o.items
+        }));
+        return { success: true, data: formatted };
+    } catch (error) {
+        console.error('❌ Get export orders error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('exportOrders:create', async (event, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const record = await prisma.exportOrder.create({
+            data: {
+                exportDate: new Date(data.exportDate),
+                customer: data.customer,
+                status: data.status || 'processing',
+                totalAmount: data.totalAmount || 0,
+                notes: data.notes || null,
+                items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
+                createdBy: data.createdBy || null
+            }
+        });
+        console.log(`✅ Created export order #${record.id}`);
+        return { success: true, data: record };
+    } catch (error) {
+        console.error('❌ Create export order error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('exportOrders:update', async (event, id, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const record = await prisma.exportOrder.update({
+            where: { id },
+            data: {
+                exportDate: data.exportDate ? new Date(data.exportDate) : undefined,
+                customer: data.customer,
+                status: data.status,
+                totalAmount: data.totalAmount,
+                notes: data.notes || null,
+                items: data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : undefined
+            }
+        });
+        console.log(`✅ Updated export order #${record.id}`);
+        return { success: true, data: record };
+    } catch (error) {
+        console.error('❌ Update export order error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('exportOrders:delete', async (event, id) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        await prisma.exportOrder.delete({ where: { id } });
+        console.log(`✅ Deleted export order #${id}`);
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Delete export order error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// ========================================
+// RETURNS HANDLERS (TRẢ HÀNG)
+// ========================================
+
+ipcMain.handle('returns:getAll', async () => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const returns = await prisma.return.findMany({
+            orderBy: { createdAt: 'desc' }
+        });
+        const formatted = returns.map(r => ({
+            ...r,
+            returnDate: r.returnDate.toISOString().split('T')[0]
+        }));
+        return { success: true, data: formatted };
+    } catch (error) {
+        console.error('❌ Get returns error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('returns:create', async (event, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const record = await prisma.return.create({
+            data: {
+                customerName: data.customerName,
+                returnCode: data.returnCode || null,
+                orderNumber: data.orderNumber || null,
+                returnReason: data.returnReason || null,
+                returnDate: new Date(data.returnDate),
+                items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
+                totalAmount: data.totalAmount || 0,
+                notes: data.notes || null,
+                status: data.status || 'pending',
+                packer: data.packer || null,
+                createdBy: data.createdBy || null
+            }
+        });
+        console.log(`✅ Created return #${record.id}`);
+        return { success: true, data: record };
+    } catch (error) {
+        console.error('❌ Create return error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('returns:update', async (event, id, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const record = await prisma.return.update({
+            where: { id },
+            data: {
+                customerName: data.customerName,
+                returnCode: data.returnCode || null,
+                orderNumber: data.orderNumber || null,
+                returnReason: data.returnReason || null,
+                returnDate: data.returnDate ? new Date(data.returnDate) : undefined,
+                items: data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : undefined,
+                totalAmount: data.totalAmount,
+                notes: data.notes || null,
+                status: data.status,
+                packer: data.packer || null
+            }
+        });
+        console.log(`✅ Updated return #${record.id}`);
+        return { success: true, data: record };
+    } catch (error) {
+        console.error('❌ Update return error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('returns:delete', async (event, id) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        await prisma.return.delete({ where: { id } });
+        console.log(`✅ Deleted return #${id}`);
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Delete return error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('returns:bulkCreate', async (event, records) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const created = [];
+        for (const data of records) {
+            const record = await prisma.return.create({
+                data: {
+                    customerName: data.customerName,
+                    returnCode: data.returnCode || null,
+                    orderNumber: data.orderNumber || null,
+                    returnReason: data.returnReason || null,
+                    returnDate: new Date(data.returnDate),
+                    items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
+                    totalAmount: data.totalAmount || 0,
+                    notes: data.notes || null,
+                    status: data.status || 'pending',
+                    packer: data.packer || null,
+                    createdBy: data.createdBy || null
+                }
+            });
+            created.push(record);
+        }
+        console.log(`✅ Bulk created ${created.length} returns`);
+        return { success: true, data: created };
+    } catch (error) {
+        console.error('❌ Bulk create returns error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// ========================================
+// REFUNDS HANDLERS (HÀNG HOÀN)
+// ========================================
+
+ipcMain.handle('refunds:getAll', async () => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const refunds = await prisma.refund.findMany({
+            orderBy: { createdAt: 'desc' }
+        });
+        const formatted = refunds.map(r => ({
+            ...r,
+            refundDate: r.refundDate.toISOString().split('T')[0]
+        }));
+        return { success: true, data: formatted };
+    } catch (error) {
+        console.error('❌ Get refunds error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('refunds:create', async (event, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const record = await prisma.refund.create({
+            data: {
+                customerName: data.customerName,
+                refundCode: data.refundCode || null,
+                orderNumber: data.orderNumber || null,
+                refundReason: data.refundReason || null,
+                refundDate: new Date(data.refundDate),
+                items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
+                totalAmount: data.totalAmount || 0,
+                notes: data.notes || null,
+                status: data.status || 'processing',
+                createdBy: data.createdBy || null
+            }
+        });
+        console.log(`✅ Created refund #${record.id}`);
+        return { success: true, data: record };
+    } catch (error) {
+        console.error('❌ Create refund error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('refunds:update', async (event, id, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const record = await prisma.refund.update({
+            where: { id },
+            data: {
+                customerName: data.customerName,
+                refundCode: data.refundCode || null,
+                orderNumber: data.orderNumber || null,
+                refundReason: data.refundReason || null,
+                refundDate: data.refundDate ? new Date(data.refundDate) : undefined,
+                items: data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : undefined,
+                totalAmount: data.totalAmount,
+                notes: data.notes || null,
+                status: data.status
+            }
+        });
+        console.log(`✅ Updated refund #${record.id}`);
+        return { success: true, data: record };
+    } catch (error) {
+        console.error('❌ Update refund error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('refunds:delete', async (event, id) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        await prisma.refund.delete({ where: { id } });
+        console.log(`✅ Deleted refund #${id}`);
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Delete refund error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('refunds:bulkDelete', async (event, ids) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const result = await prisma.refund.deleteMany({
+            where: { id: { in: ids } }
+        });
+        console.log(`✅ Bulk deleted ${result.count} refunds`);
+        return { success: true, data: result.count };
+    } catch (error) {
+        console.error('❌ Bulk delete refunds error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('refunds:bulkCreate', async (event, records) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const created = [];
+        for (const data of records) {
+            const record = await prisma.refund.create({
+                data: {
+                    customerName: data.customerName,
+                    refundCode: data.refundCode || null,
+                    orderNumber: data.orderNumber || null,
+                    refundReason: data.refundReason || null,
+                    refundDate: new Date(data.refundDate),
+                    items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
+                    totalAmount: data.totalAmount || 0,
+                    notes: data.notes || null,
+                    status: data.status || 'processing',
+                    createdBy: data.createdBy || null
+                }
+            });
+            created.push(record);
+        }
+        console.log(`✅ Bulk created ${created.length} refunds`);
+        return { success: true, data: created };
+    } catch (error) {
+        console.error('❌ Bulk create refunds error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// ========================================
+// STOCK BALANCE HANDLERS (CÂN BẰNG KHO)
+// ========================================
+
+ipcMain.handle('stockBalance:getAll', async () => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const records = await prisma.stockBalance.findMany({
+            orderBy: { createdAt: 'desc' }
+        });
+        const formatted = records.map(r => ({
+            ...r,
+            date: r.date.toISOString().split('T')[0],
+            items: typeof r.items === 'string' ? JSON.parse(r.items) : r.items
+        }));
+        return { success: true, data: formatted };
+    } catch (error) {
+        console.error('❌ Get stock balance records error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('stockBalance:create', async (event, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const record = await prisma.stockBalance.create({
+            data: {
+                date: new Date(data.date),
+                adjustedBy: data.adjustedBy,
+                items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
+                notes: data.notes || null
+            }
+        });
+        console.log(`✅ Created stock balance record #${record.id}`);
+        return { success: true, data: record };
+    } catch (error) {
+        console.error('❌ Create stock balance error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// ========================================
+// APP CONFIG HANDLERS (CẤU HÌNH ỨNG DỤNG)
+// ========================================
+
+ipcMain.handle('appConfig:get', async (event, key) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const config = await prisma.appConfig.findUnique({
+            where: { key }
+        });
+        if (config) {
+            return { success: true, data: JSON.parse(config.value) };
+        }
+        return { success: true, data: null };
+    } catch (error) {
+        console.error(`❌ Get config "${key}" error:`, error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('appConfig:set', async (event, key, value) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const config = await prisma.appConfig.upsert({
+            where: { key },
+            update: { value: JSON.stringify(value) },
+            create: { key, value: JSON.stringify(value) }
+        });
+        console.log(`✅ Set config "${key}"`);
+        return { success: true, data: config };
+    } catch (error) {
+        console.error(`❌ Set config "${key}" error:`, error);
+        return { success: false, error: error.message };
+    }
+});
+
+// ========================================
+// USERS HANDLERS (NGƯỜI DÙNG / PHÂN QUYỀN)
+// ========================================
+
+ipcMain.handle('users:getAll', async () => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const users = await prisma.user.findMany({
+            orderBy: { id: 'asc' }
+        });
+        // Format for frontend - map DB fields to frontend fields
+        const formatted = users.map(u => ({
+            id: u.id,
+            username: u.username,
+            fullName: u.fullName,
+            email: u.email,
+            role: u.role,
+            isActive: u.status === 'active',
+            password: u.password, // Frontend needs this for login check
+            createdAt: u.createdAt.toISOString()
+        }));
+        return { success: true, data: formatted };
+    } catch (error) {
+        console.error('❌ Get users error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('users:create', async (event, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const user = await prisma.user.create({
+            data: {
+                username: data.username,
+                password: data.password,
+                fullName: data.fullName,
+                email: data.email || null,
+                role: data.role || 'staff',
+                status: data.isActive !== false ? 'active' : 'inactive'
+            }
+        });
+        console.log(`✅ Created user: ${user.username}`);
+        return { success: true, data: { ...user, isActive: user.status === 'active' } };
+    } catch (error) {
+        console.error('❌ Create user error:', error);
+        if (error.code === 'P2002') {
+            return { success: false, error: 'Tên đăng nhập đã tồn tại!' };
+        }
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('users:update', async (event, id, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const updateData = {};
+        if (data.username !== undefined) updateData.username = data.username;
+        if (data.fullName !== undefined) updateData.fullName = data.fullName;
+        if (data.email !== undefined) updateData.email = data.email;
+        if (data.role !== undefined) updateData.role = data.role;
+        if (data.password !== undefined) updateData.password = data.password;
+        if (data.isActive !== undefined) updateData.status = data.isActive ? 'active' : 'inactive';
+
+        const user = await prisma.user.update({
+            where: { id },
+            data: updateData
+        });
+        console.log(`✅ Updated user: ${user.username}`);
+        return { success: true, data: { ...user, isActive: user.status === 'active' } };
+    } catch (error) {
+        console.error('❌ Update user error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('users:delete', async (event, id) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        await prisma.user.delete({ where: { id } });
+        console.log(`✅ Deleted user #${id}`);
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Delete user error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('users:login', async (event, username, password) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const user = await prisma.user.findUnique({
+            where: { username }
+        });
+        if (!user || user.status !== 'active') {
+            return { success: false, error: 'Tài khoản không tồn tại hoặc đã bị vô hiệu hóa' };
+        }
+        if (user.password !== password) {
+            return { success: false, error: 'Mật khẩu không đúng' };
+        }
+        // Return user without password
+        const { password: _, ...userWithoutPassword } = user;
+        return { success: true, data: { ...userWithoutPassword, isActive: user.status === 'active' } };
+    } catch (error) {
+        console.error('❌ Login error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('users:ensureAdmin', async () => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        // Check if any active admin exists
+        const adminCount = await prisma.user.count({
+            where: { role: 'admin', status: 'active' }
+        });
+        if (adminCount === 0) {
+            // Create default admin
+            await prisma.user.upsert({
+                where: { username: 'admin' },
+                update: { status: 'active', role: 'admin' },
+                create: {
+                    username: 'admin',
+                    password: 'admin',
+                    fullName: 'Quản trị viên',
+                    email: 'admin@example.com',
+                    role: 'admin',
+                    status: 'active'
+                }
+            });
+            console.log('✅ Ensured default admin exists');
+        }
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Ensure admin error:', error);
+        return { success: false, error: error.message };
+    }
+});
 
 module.exports = { prisma };
 

@@ -259,7 +259,12 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
         console.log('✅ Giải nén xong');
 
         // 4. Xác định thư mục gốc ứng dụng
-        const appRoot = path.join(__dirname, '..');
+        //    ZIP chứa nội dung của win-unpacked/ (QuanLyPOS.exe, resources/, ...)
+        //    → cần copy vào thư mục chứa QuanLyPOS.exe
+        const appRoot = path.dirname(process.execPath);
+        console.log('📂 App install dir:', appRoot);
+        console.log('📂 __dirname:', __dirname);
+        console.log('📂 execPath:', process.execPath);
 
         // 5. Tìm thư mục nội dung thực trong ZIP
         //    (ZIP có thể chứa 1 folder cấp cao hoặc files trực tiếp)
@@ -278,13 +283,21 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
         console.log('📂 Đích: ', appRoot);
 
         // 6. Đọc version mới
+        //    Trong ZIP, package.json nằm tại resources/app/package.json
         let newVersion = 'unknown';
-        const pkgPath = path.join(sourceDir, 'package.json');
-        if (fs.existsSync(pkgPath)) {
-            try {
-                const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-                newVersion = pkg.version || 'unknown';
-            } catch (e) { }
+        const pkgPaths = [
+            path.join(sourceDir, 'resources', 'app', 'package.json'),
+            path.join(sourceDir, 'package.json')
+        ];
+        for (const pkgPath of pkgPaths) {
+            if (fs.existsSync(pkgPath)) {
+                try {
+                    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+                    newVersion = pkg.version || 'unknown';
+                    console.log('📦 Tìm thấy package.json tại:', pkgPath);
+                    break;
+                } catch (e) { }
+            }
         }
         console.log('🏷️  Version mới:', newVersion);
 

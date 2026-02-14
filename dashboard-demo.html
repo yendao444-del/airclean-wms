@@ -1,0 +1,1374 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AIRCLEAN WMS - Tổng quan Demo</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #f0f2f5;
+            color: #262626;
+            min-height: 100vh
+        }
+
+        .layout {
+            display: flex;
+            min-height: 100vh
+        }
+
+        .sidebar {
+            width: 250px;
+            background: #fff;
+            box-shadow: 2px 0 12px rgba(0, 0, 0, .06);
+            position: fixed;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            z-index: 100;
+            overflow-y: auto
+        }
+
+        .sidebar-logo {
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            font-weight: 800;
+            color: #00ab56;
+            border-bottom: 1px solid #f0f0f0;
+            background: #fafafa
+        }
+
+        .menu-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 20px;
+            font-size: 13px;
+            font-weight: 500;
+            color: #595959;
+            cursor: pointer;
+            transition: .2s
+        }
+
+        .menu-item:hover {
+            background: #f6ffed;
+            color: #00ab56
+        }
+
+        .menu-item.active {
+            background: linear-gradient(90deg, #f6ffed, #fff);
+            color: #00ab56;
+            font-weight: 700;
+            border-right: 3px solid #00ab56
+        }
+
+        .menu-group {
+            padding: 14px 20px 4px;
+            font-size: 10px;
+            font-weight: 700;
+            color: #bfbfbf;
+            text-transform: uppercase;
+            letter-spacing: 1px
+        }
+
+        .main {
+            margin-left: 250px;
+            flex: 1
+        }
+
+        .header {
+            height: 56px;
+            background: #fff;
+            border-bottom: 1px solid #f0f0f0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+            position: sticky;
+            top: 0;
+            z-index: 50;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, .04)
+        }
+
+        .content {
+            padding: 20px 24px;
+            max-width: 1440px
+        }
+
+        .page-title {
+            font-size: 22px;
+            font-weight: 800;
+            color: #1a1a2e;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 8px
+        }
+
+        .page-title .sub {
+            font-size: 12px;
+            font-weight: 500;
+            color: #8c8c8c;
+            margin-left: 8px
+        }
+
+        .row {
+            display: grid;
+            gap: 16px;
+            margin-bottom: 16px
+        }
+
+        .row-4 {
+            grid-template-columns: repeat(4, 1fr)
+        }
+
+        .row-3 {
+            grid-template-columns: repeat(3, 1fr)
+        }
+
+        .row-2 {
+            grid-template-columns: 1fr 1fr
+        }
+
+        .row-2-1 {
+            grid-template-columns: 2fr 1fr
+        }
+
+        /* STAT CARDS */
+        .sc {
+            border-radius: 14px;
+            padding: 18px 20px;
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, .08);
+            transition: transform .2s
+        }
+
+        .sc:hover {
+            transform: translateY(-2px)
+        }
+
+        .sc::after {
+            content: '';
+            position: absolute;
+            top: -30px;
+            right: -30px;
+            width: 90px;
+            height: 90px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, .1)
+        }
+
+        .sc .lb {
+            color: rgba(255, 255, 255, .92);
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 6px
+        }
+
+        .sc .vl {
+            color: #fff;
+            font-size: 24px;
+            font-weight: 800
+        }
+
+        .sc .ch {
+            margin-top: 8px;
+            font-size: 11px;
+            font-weight: 600;
+            color: rgba(255, 255, 255, .85)
+        }
+
+        .bg1 {
+            background: linear-gradient(135deg, #00ab56, #00d66c)
+        }
+
+        .bg2 {
+            background: linear-gradient(135deg, #1890ff, #36cfc9)
+        }
+
+        .bg3 {
+            background: linear-gradient(135deg, #722ed1, #b37feb)
+        }
+
+        .bg4 {
+            background: linear-gradient(135deg, #fa541c, #ffa940)
+        }
+
+        .bg5 {
+            background: linear-gradient(135deg, #13c2c2, #87e8de)
+        }
+
+        .bg6 {
+            background: linear-gradient(135deg, #eb2f96, #ff85c0)
+        }
+
+        .bg7 {
+            background: linear-gradient(135deg, #faad14, #ffd666)
+        }
+
+        .bg8 {
+            background: linear-gradient(135deg, #2f54eb, #85a5ff)
+        }
+
+        /* CARDS */
+        .card {
+            background: #fff;
+            border-radius: 14px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, .04);
+            border: 1px solid #f0f0f0;
+            overflow: hidden
+        }
+
+        .card-h {
+            padding: 14px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid #fafafa
+        }
+
+        .card-h h3 {
+            font-size: 14px;
+            font-weight: 700;
+            color: #262626
+        }
+
+        .badge {
+            font-size: 10px;
+            padding: 2px 10px;
+            border-radius: 20px;
+            font-weight: 700
+        }
+
+        .bg-g {
+            background: #f6ffed;
+            color: #00ab56
+        }
+
+        .bg-b {
+            background: #e6f7ff;
+            color: #1890ff
+        }
+
+        .bg-o {
+            background: #fff7e6;
+            color: #fa8c16
+        }
+
+        .bg-r {
+            background: #fff1f0;
+            color: #f5222d
+        }
+
+        .card-b {
+            padding: 16px 20px
+        }
+
+        /* FINANCE BAR */
+        .fbar {
+            background: #fff;
+            border-radius: 14px;
+            padding: 16px 24px;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            margin-bottom: 16px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, .04);
+            border: 1px solid #f0f0f0
+        }
+
+        .fi {
+            text-align: center;
+            position: relative
+        }
+
+        .fi:not(:last-child)::after {
+            content: '';
+            position: absolute;
+            right: -10px;
+            top: 10%;
+            height: 80%;
+            width: 1px;
+            background: #f0f0f0
+        }
+
+        .fi .fl {
+            font-size: 11px;
+            font-weight: 600;
+            color: #8c8c8c;
+            text-transform: uppercase;
+            letter-spacing: .5px;
+            margin-bottom: 4px
+        }
+
+        .fi .fv {
+            font-size: 20px;
+            font-weight: 800
+        }
+
+        .fi .fs {
+            font-size: 10px;
+            color: #8c8c8c;
+            margin-top: 3px
+        }
+
+        .fg {
+            color: #00ab56
+        }
+
+        .fr {
+            color: #f5222d
+        }
+
+        .fb {
+            color: #1890ff
+        }
+
+        .pbar {
+            margin-top: 6px;
+            height: 5px;
+            background: #f0f0f0;
+            border-radius: 3px;
+            overflow: hidden
+        }
+
+        .pbar-fill {
+            height: 100%;
+            border-radius: 3px
+        }
+
+        /* TABLES */
+        table {
+            width: 100%;
+            border-collapse: collapse
+        }
+
+        th {
+            font-size: 10px;
+            font-weight: 700;
+            color: #8c8c8c;
+            text-transform: uppercase;
+            letter-spacing: .5px;
+            text-align: left;
+            padding: 7px 10px;
+            border-bottom: 2px solid #f0f0f0
+        }
+
+        td {
+            padding: 8px 10px;
+            font-size: 12px;
+            border-bottom: 1px solid #fafafa
+        }
+
+        tr:hover {
+            background: #fafafa
+        }
+
+        .tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 10px;
+            font-weight: 700
+        }
+
+        .t-y {
+            background: #fff7e6;
+            color: #fa8c16
+        }
+
+        .t-g {
+            background: #f6ffed;
+            color: #00ab56
+        }
+
+        .t-b {
+            background: #e6f7ff;
+            color: #1890ff
+        }
+
+        .t-r {
+            background: #fff1f0;
+            color: #f5222d
+        }
+
+        /* CASHFLOW */
+        .cf {
+            display: flex;
+            align-items: flex-end;
+            gap: 10px;
+            height: 140px;
+            padding: 0 4px
+        }
+
+        .cf-d {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px
+        }
+
+        .cf-bs {
+            display: flex;
+            gap: 2px;
+            align-items: flex-end;
+            height: 110px
+        }
+
+        .cf-b {
+            width: 14px;
+            border-radius: 3px 3px 0 0;
+            transition: .3s;
+            cursor: pointer
+        }
+
+        .cf-b:hover {
+            opacity: .8
+        }
+
+        .cf-b.inc {
+            background: linear-gradient(180deg, #00d66c, #00ab56)
+        }
+
+        .cf-b.exp {
+            background: linear-gradient(180deg, #ff7a7a, #f5222d)
+        }
+
+        .cf-lb {
+            font-size: 10px;
+            font-weight: 600;
+            color: #8c8c8c
+        }
+
+        .legend {
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            margin-top: 10px
+        }
+
+        .legend span {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            color: #595959
+        }
+
+        .legend i {
+            width: 8px;
+            height: 8px;
+            border-radius: 2px;
+            display: inline-block
+        }
+
+        /* DONUT */
+        .donut-w {
+            position: relative;
+            width: 110px;
+            height: 110px;
+            margin: 0 auto
+        }
+
+        .donut-c {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center
+        }
+
+        .donut-c .n {
+            font-size: 18px;
+            font-weight: 800;
+            color: #262626
+        }
+
+        .donut-c .t {
+            font-size: 9px;
+            color: #8c8c8c;
+            font-weight: 600
+        }
+
+        .inv-leg {
+            display: flex;
+            gap: 12px;
+            justify-content: center;
+            margin-top: 10px
+        }
+
+        .inv-leg span {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            color: #595959
+        }
+
+        .inv-leg i {
+            width: 8px;
+            height: 8px;
+            border-radius: 2px;
+            display: inline-block
+        }
+
+        /* TASKS */
+        .task {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 0;
+            border-bottom: 1px solid #fafafa
+        }
+
+        .task:last-child {
+            border-bottom: none
+        }
+
+        .task-check {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            border: 2px solid #d9d9d9;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            cursor: pointer
+        }
+
+        .task-check.done {
+            background: #00ab56;
+            border-color: #00ab56;
+            color: #fff
+        }
+
+        .task-info {
+            flex: 1
+        }
+
+        .task-name {
+            font-size: 12px;
+            font-weight: 600;
+            color: #262626
+        }
+
+        .task-meta {
+            font-size: 10px;
+            color: #8c8c8c;
+            margin-top: 1px
+        }
+
+        .task-name.crossed {
+            text-decoration: line-through;
+            color: #8c8c8c
+        }
+
+        /* LIST ITEMS */
+        .li {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #fafafa
+        }
+
+        .li:last-child {
+            border-bottom: none
+        }
+
+        .li-left {
+            display: flex;
+            align-items: center;
+            gap: 10px
+        }
+
+        .li-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px
+        }
+
+        .li-name {
+            font-size: 12px;
+            font-weight: 600;
+            color: #262626
+        }
+
+        .li-sub {
+            font-size: 10px;
+            color: #8c8c8c;
+            margin-top: 1px
+        }
+
+        .li-right {
+            text-align: right
+        }
+
+        .li-val {
+            font-size: 13px;
+            font-weight: 700
+        }
+
+        .li-time {
+            font-size: 10px;
+            color: #bfbfbf
+        }
+
+        /* ANIM */
+        @keyframes fiu {
+            from {
+                opacity: 0;
+                transform: translateY(12px)
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0)
+            }
+        }
+
+        .row {
+            animation: fiu .4s ease forwards
+        }
+
+        @media(max-width:1200px) {
+            .row-4 {
+                grid-template-columns: repeat(2, 1fr)
+            }
+
+            .row-2,
+            .row-2-1 {
+                grid-template-columns: 1fr
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="layout">
+        <aside class="sidebar">
+            <div class="sidebar-logo">📦 AIRCLEAN WMS</div>
+            <div class="menu-item active"><span>📊</span> Tổng quan</div>
+            <div class="menu-item"><span>🛒</span> Bán hàng</div>
+            <div class="menu-group">Quản lý kho</div>
+            <div class="menu-item"><span>📥</span> Nhập hàng</div>
+            <div class="menu-item"><span>📤</span> Xuất hàng</div>
+            <div class="menu-item"><span>↩️</span> Trả hàng</div>
+            <div class="menu-item"><span>🔄</span> Hàng hoàn</div>
+            <div class="menu-item"><span>⚖️</span> Cân bằng kho</div>
+            <div class="menu-group">TMDT</div>
+            <div class="menu-item"><span>🚀</span> Xuất hàng TMDT</div>
+            <div class="menu-group">Công cụ</div>
+            <div class="menu-item"><span>🧮</span> Tính phí sản</div>
+            <div class="menu-item"><span>✅</span> Công việc hàng ngày</div>
+        </aside>
+
+        <div class="main">
+            <header class="header">
+                <div style="font-size:16px;font-weight:700">Tổng quan</div>
+                <div style="display:flex;align-items:center;gap:10px;font-size:12px">
+                    <span style="font-weight:600">admin</span>
+                    <span style="color:#8c8c8c">👑 Quản trị viên</span>
+                </div>
+            </header>
+
+            <div class="content">
+                <div class="page-title">📊 Tổng quan <span class="sub">14/02/2026 • 18:45</span></div>
+
+                <!-- ROW 1: 4 STAT CARDS -->
+                <div class="row row-4">
+                    <div class="sc bg1">
+                        <div class="lb">💰 Doanh thu hôm nay</div>
+                        <div class="vl">12,450,000đ</div>
+                        <div class="ch">▲ 15.2% so với hôm qua</div>
+                    </div>
+                    <div class="sc bg2">
+                        <div class="lb">📦 Đơn xuất hôm nay</div>
+                        <div class="vl">24 đơn</div>
+                        <div class="ch">▲ 8.3% • 18 POS + 6 TMDT</div>
+                    </div>
+                    <div class="sc bg3">
+                        <div class="lb">🏭 Tổng tồn kho</div>
+                        <div class="vl">1,856 SP</div>
+                        <div class="ch">42 SKU • 4 hết hàng</div>
+                    </div>
+                    <div class="sc bg4">
+                        <div class="lb">⚠️ Hoàn / Trả hàng</div>
+                        <div class="vl">12 phiếu</div>
+                        <div class="ch">▼ 5 đang chờ xử lý</div>
+                    </div>
+                </div>
+
+                <!-- ROW 2: 4 MORE STATS -->
+                <div class="row row-4">
+                    <div class="sc bg5">
+                        <div class="lb">📥 Nhập hàng hôm nay</div>
+                        <div class="vl">3 phiếu</div>
+                        <div class="ch">Tổng: 8,200,000đ</div>
+                    </div>
+                    <div class="sc bg6">
+                        <div class="lb">🚀 TMDT hôm nay</div>
+                        <div class="vl">6 đơn</div>
+                        <div class="ch">Tổng: 4,800,000đ</div>
+                    </div>
+                    <div class="sc bg7">
+                        <div class="lb">✅ Công việc hôm nay</div>
+                        <div class="vl">5/8 xong</div>
+                        <div class="ch">62.5% hoàn thành</div>
+                    </div>
+                    <div class="sc bg8">
+                        <div class="lb">⚖️ Cân bằng kho</div>
+                        <div class="vl">2 lần</div>
+                        <div class="ch">Lần cuối: 13/02/2026</div>
+                    </div>
+                </div>
+
+                <!-- ROW 3: FINANCE BAR -->
+                <div class="fbar">
+                    <div class="fi">
+                        <div class="fl">Doanh thu tháng 2</div>
+                        <div class="fv fg">186,500,000đ</div>
+                        <div class="fs">🎯 74.6% mục tiêu</div>
+                        <div class="pbar">
+                            <div class="pbar-fill"
+                                style="width:74.6%;background:linear-gradient(90deg,#00ab56,#36cfc9)"></div>
+                        </div>
+                    </div>
+                    <div class="fi">
+                        <div class="fl">Chi nhập hàng tháng 2</div>
+                        <div class="fv fr">124,200,000đ</div>
+                        <div class="fs">28 phiếu nhập</div>
+                        <div class="pbar">
+                            <div class="pbar-fill" style="width:66%;background:linear-gradient(90deg,#f5222d,#ff7a7a)">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="fi">
+                        <div class="fl">Lợi nhuận ước tính</div>
+                        <div class="fv fg">62,300,000đ</div>
+                        <div class="fs">📈 Biên LN: 33.4%</div>
+                        <div class="pbar">
+                            <div class="pbar-fill"
+                                style="width:33.4%;background:linear-gradient(90deg,#00ab56,#52c41a)"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ROW 4: REVENUE CHART + CASHFLOW -->
+                <div class="row row-2">
+                    <div class="card">
+                        <div class="card-h">
+                            <h3>📈 Doanh thu 7 ngày</h3><span class="badge bg-g">Tháng 2</span>
+                        </div>
+                        <div class="card-b">
+                            <svg viewBox="0 0 500 180" style="width:100%;height:180px" preserveAspectRatio="none">
+                                <defs>
+                                    <linearGradient id="ag" x1="0" y1="0" x2="0" y2="1">
+                                        <stop offset="0%" stop-color="#00ab56" stop-opacity=".3" />
+                                        <stop offset="100%" stop-color="#00ab56" stop-opacity=".02" />
+                                    </linearGradient>
+                                </defs>
+                                <line x1="0" y1="40" x2="500" y2="40" stroke="#f5f5f5" />
+                                <line x1="0" y1="80" x2="500" y2="80" stroke="#f5f5f5" />
+                                <line x1="0" y1="120" x2="500" y2="120" stroke="#f5f5f5" />
+                                <path
+                                    d="M0,130 C40,120 60,90 80,80 C100,70 130,50 160,45 C180,38 210,65 240,75 C260,82 290,35 320,25 C350,15 370,45 400,55 C420,65 450,20 470,18 L500,40 L500,170 L0,170Z"
+                                    fill="url(#ag)" />
+                                <path
+                                    d="M0,130 C40,120 60,90 80,80 C100,70 130,50 160,45 C180,38 210,65 240,75 C260,82 290,35 320,25 C350,15 370,45 400,55 C420,65 450,20 470,18 L500,40"
+                                    fill="none" stroke="#00ab56" stroke-width="2.5" />
+                                <circle cx="0" cy="130" r="3.5" fill="#fff" stroke="#00ab56" stroke-width="2" />
+                                <circle cx="80" cy="80" r="3.5" fill="#fff" stroke="#00ab56" stroke-width="2" />
+                                <circle cx="160" cy="45" r="3.5" fill="#fff" stroke="#00ab56" stroke-width="2" />
+                                <circle cx="240" cy="75" r="3.5" fill="#fff" stroke="#00ab56" stroke-width="2" />
+                                <circle cx="320" cy="25" r="3.5" fill="#fff" stroke="#00ab56" stroke-width="2" />
+                                <circle cx="400" cy="55" r="3.5" fill="#fff" stroke="#00ab56" stroke-width="2" />
+                                <circle cx="500" cy="40" r="3.5" fill="#fff" stroke="#00ab56" stroke-width="2" />
+                                <text x="0" y="170" font-size="10" fill="#8c8c8c">08/02</text><text x="80" y="170"
+                                    font-size="10" fill="#8c8c8c" text-anchor="middle">09</text><text x="160" y="170"
+                                    font-size="10" fill="#8c8c8c" text-anchor="middle">10</text><text x="240" y="170"
+                                    font-size="10" fill="#8c8c8c" text-anchor="middle">11</text><text x="320" y="170"
+                                    font-size="10" fill="#8c8c8c" text-anchor="middle">12</text><text x="400" y="170"
+                                    font-size="10" fill="#8c8c8c" text-anchor="middle">13</text><text x="490" y="170"
+                                    font-size="10" fill="#8c8c8c" text-anchor="end">14</text>
+                            </svg>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-h">
+                            <h3>💵 Dòng tiền Thu/Chi</h3><span class="badge bg-b">7 ngày</span>
+                        </div>
+                        <div class="card-b">
+                            <div class="cf">
+                                <div class="cf-d">
+                                    <div class="cf-bs">
+                                        <div class="cf-b inc" style="height:60px"></div>
+                                        <div class="cf-b exp" style="height:42px"></div>
+                                    </div>
+                                    <div class="cf-lb">08</div>
+                                </div>
+                                <div class="cf-d">
+                                    <div class="cf-bs">
+                                        <div class="cf-b inc" style="height:78px"></div>
+                                        <div class="cf-b exp" style="height:34px"></div>
+                                    </div>
+                                    <div class="cf-lb">09</div>
+                                </div>
+                                <div class="cf-d">
+                                    <div class="cf-bs">
+                                        <div class="cf-b inc" style="height:95px"></div>
+                                        <div class="cf-b exp" style="height:72px"></div>
+                                    </div>
+                                    <div class="cf-lb">10</div>
+                                </div>
+                                <div class="cf-d">
+                                    <div class="cf-bs">
+                                        <div class="cf-b inc" style="height:68px"></div>
+                                        <div class="cf-b exp" style="height:25px"></div>
+                                    </div>
+                                    <div class="cf-lb">11</div>
+                                </div>
+                                <div class="cf-d">
+                                    <div class="cf-bs">
+                                        <div class="cf-b inc" style="height:110px"></div>
+                                        <div class="cf-b exp" style="height:58px"></div>
+                                    </div>
+                                    <div class="cf-lb">12</div>
+                                </div>
+                                <div class="cf-d">
+                                    <div class="cf-bs">
+                                        <div class="cf-b inc" style="height:85px"></div>
+                                        <div class="cf-b exp" style="height:46px"></div>
+                                    </div>
+                                    <div class="cf-lb">13</div>
+                                </div>
+                                <div class="cf-d">
+                                    <div class="cf-bs">
+                                        <div class="cf-b inc" style="height:100px"></div>
+                                        <div class="cf-b exp" style="height:38px"></div>
+                                    </div>
+                                    <div class="cf-lb">14</div>
+                                </div>
+                            </div>
+                            <div class="legend"><span><i style="background:#00ab56"></i> Thu (Xuất)</span><span><i
+                                        style="background:#f5222d"></i> Chi (Nhập)</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ROW 5: NHẬP HÀNG + XUẤT HÀNG -->
+                <div class="row row-2">
+                    <div class="card">
+                        <div class="card-h">
+                            <h3>📥 Nhập hàng gần đây</h3><span class="badge bg-o">28 phiếu tháng này</span>
+                        </div>
+                        <div class="card-b">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Mã</th>
+                                        <th>NCC</th>
+                                        <th>Tổng tiền</th>
+                                        <th>Trạng thái</th>
+                                        <th>Ngày</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td style="font-weight:600">#NH-042</td>
+                                        <td>Cty ABC</td>
+                                        <td style="font-weight:700;color:#f5222d">3,200,000đ</td>
+                                        <td><span class="tag t-g">Đã nhận</span></td>
+                                        <td style="color:#8c8c8c">14/02</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="font-weight:600">#NH-041</td>
+                                        <td>Cty XYZ</td>
+                                        <td style="font-weight:700;color:#f5222d">2,800,000đ</td>
+                                        <td><span class="tag t-g">Đã nhận</span></td>
+                                        <td style="color:#8c8c8c">14/02</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="font-weight:600">#NH-040</td>
+                                        <td>Cty DEF</td>
+                                        <td style="font-weight:700;color:#f5222d">2,200,000đ</td>
+                                        <td><span class="tag t-y">Đang giao</span></td>
+                                        <td style="color:#8c8c8c">13/02</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="font-weight:600">#NH-039</td>
+                                        <td>Cty ABC</td>
+                                        <td style="font-weight:700;color:#f5222d">5,100,000đ</td>
+                                        <td><span class="tag t-g">Đã nhận</span></td>
+                                        <td style="color:#8c8c8c">12/02</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-h">
+                            <h3>📤 Xuất hàng / Bán hàng gần đây</h3><span class="badge bg-g">24 đơn hôm nay</span>
+                        </div>
+                        <div class="card-b">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Mã</th>
+                                        <th>Khách</th>
+                                        <th>Tổng tiền</th>
+                                        <th>Trạng thái</th>
+                                        <th>Ngày</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td style="font-weight:600">#XH-186</td>
+                                        <td>Nguyễn Văn A</td>
+                                        <td style="font-weight:700;color:#00ab56">1,450,000đ</td>
+                                        <td><span class="tag t-g">Hoàn thành</span></td>
+                                        <td style="color:#8c8c8c">14/02</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="font-weight:600">#XH-185</td>
+                                        <td>Trần Thị B</td>
+                                        <td style="font-weight:700;color:#00ab56">820,000đ</td>
+                                        <td><span class="tag t-g">Hoàn thành</span></td>
+                                        <td style="color:#8c8c8c">14/02</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="font-weight:600">#XH-184</td>
+                                        <td>Lê Văn C</td>
+                                        <td style="font-weight:700;color:#00ab56">2,100,000đ</td>
+                                        <td><span class="tag t-y">Đang giao</span></td>
+                                        <td style="color:#8c8c8c">14/02</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="font-weight:600">#XH-183</td>
+                                        <td>Phạm D</td>
+                                        <td style="font-weight:700;color:#00ab56">650,000đ</td>
+                                        <td><span class="tag t-g">Hoàn thành</span></td>
+                                        <td style="color:#8c8c8c">13/02</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ROW 6: TMDT + INVENTORY -->
+                <div class="row row-2">
+                    <div class="card">
+                        <div class="card-h">
+                            <h3>🚀 Xuất hàng TMDT gần đây</h3><span class="badge bg-b">6 đơn hôm nay</span>
+                        </div>
+                        <div class="card-b">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Mã đơn</th>
+                                        <th>Sàn</th>
+                                        <th>Sản phẩm</th>
+                                        <th>Tổng</th>
+                                        <th>TT</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td style="font-weight:600">SPXVN20240214...</td>
+                                        <td><span class="tag t-y">Shopee</span></td>
+                                        <td>KT 4D Premium x2</td>
+                                        <td style="font-weight:700">380,000đ</td>
+                                        <td><span class="tag t-g">✓</span></td>
+                                    </tr>
+                                    <tr>
+                                        <td style="font-weight:600">TK24021400123</td>
+                                        <td><span class="tag t-b">TikTok</span></td>
+                                        <td>KT 3D Trắng x5</td>
+                                        <td style="font-weight:700">625,000đ</td>
+                                        <td><span class="tag t-g">✓</span></td>
+                                    </tr>
+                                    <tr>
+                                        <td style="font-weight:600">LAZADA-VN-98...</td>
+                                        <td><span class="tag t-r">Lazada</span></td>
+                                        <td>KT Y Tế x10</td>
+                                        <td style="font-weight:700">1,200,000đ</td>
+                                        <td><span class="tag t-y">⏳</span></td>
+                                    </tr>
+                                    <tr>
+                                        <td style="font-weight:600">SPXVN20240214...</td>
+                                        <td><span class="tag t-y">Shopee</span></td>
+                                        <td>KT N95 x3</td>
+                                        <td style="font-weight:700">540,000đ</td>
+                                        <td><span class="tag t-g">✓</span></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-h">
+                            <h3>🏭 Tình trạng tồn kho</h3><span class="badge bg-g">42 SKU</span>
+                        </div>
+                        <div class="card-b" style="display:flex;gap:20px;align-items:start">
+                            <div>
+                                <div class="donut-w">
+                                    <svg viewBox="0 0 36 36" width="110" height="110">
+                                        <circle cx="18" cy="18" r="14" fill="none" stroke="#f0f0f0" stroke-width="3" />
+                                        <circle cx="18" cy="18" r="14" fill="none" stroke="#00ab56" stroke-width="3"
+                                            stroke-dasharray="75 25" stroke-dashoffset="25" />
+                                        <circle cx="18" cy="18" r="14" fill="none" stroke="#faad14" stroke-width="3"
+                                            stroke-dasharray="15 85" stroke-dashoffset="50" />
+                                        <circle cx="18" cy="18" r="14" fill="none" stroke="#f5222d" stroke-width="3"
+                                            stroke-dasharray="10 90" stroke-dashoffset="35" />
+                                    </svg>
+                                    <div class="donut-c">
+                                        <div class="n">1,856</div>
+                                        <div class="t">Tổng SP</div>
+                                    </div>
+                                </div>
+                                <div class="inv-leg" style="flex-direction:column;align-items:start;margin-top:10px">
+                                    <span><i style="background:#00ab56"></i> Còn hàng (32)</span>
+                                    <span><i style="background:#faad14"></i> Sắp hết (6)</span>
+                                    <span><i style="background:#f5222d"></i> Hết hàng (4)</span>
+                                </div>
+                            </div>
+                            <div style="flex:1">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>SP sắp hết</th>
+                                            <th>SKU</th>
+                                            <th>Tồn</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td style="font-weight:600">KT 4D Premium Đen</td>
+                                            <td style="color:#8c8c8c;font-size:11px">KT4D-BK</td>
+                                            <td><span class="tag t-r">⚠ 0</span></td>
+                                        </tr>
+                                        <tr>
+                                            <td style="font-weight:600">KT 3D Trắng M</td>
+                                            <td style="color:#8c8c8c;font-size:11px">KT3D-WH</td>
+                                            <td><span class="tag t-r">⚠ 2</span></td>
+                                        </tr>
+                                        <tr>
+                                            <td style="font-weight:600">KT Y Tế Xanh</td>
+                                            <td style="color:#8c8c8c;font-size:11px">KTYT-BL</td>
+                                            <td><span class="tag t-y">⚡ 5</span></td>
+                                        </tr>
+                                        <tr>
+                                            <td style="font-weight:600">KT N95 Trắng</td>
+                                            <td style="color:#8c8c8c;font-size:11px">KTN95</td>
+                                            <td><span class="tag t-y">⚡ 8</span></td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ROW 7: RETURNS + REFUNDS -->
+                <div class="row row-2">
+                    <div class="card">
+                        <div class="card-h">
+                            <h3>↩️ Trả hàng gần đây</h3><span class="badge bg-r">7 phiếu</span>
+                        </div>
+                        <div class="card-b">
+                            <div class="li">
+                                <div class="li-left">
+                                    <div class="li-icon" style="background:#fff1f0">↩️</div>
+                                    <div>
+                                        <div class="li-name">Đơn #KN2402-001</div>
+                                        <div class="li-sub">KT 4D Premium • Sai size</div>
+                                    </div>
+                                </div>
+                                <div class="li-right"><span class="tag t-y">Đang xử lý</span>
+                                    <div class="li-time">2h trước</div>
+                                </div>
+                            </div>
+                            <div class="li">
+                                <div class="li-left">
+                                    <div class="li-icon" style="background:#fff1f0">↩️</div>
+                                    <div>
+                                        <div class="li-name">Đơn #KN2402-002</div>
+                                        <div class="li-sub">KT 3D Trắng • Lỗi SP</div>
+                                    </div>
+                                </div>
+                                <div class="li-right"><span class="tag t-b">Chờ duyệt</span>
+                                    <div class="li-time">3h trước</div>
+                                </div>
+                            </div>
+                            <div class="li">
+                                <div class="li-left">
+                                    <div class="li-icon" style="background:#fff1f0">↩️</div>
+                                    <div>
+                                        <div class="li-name">Đơn #KN2402-003</div>
+                                        <div class="li-sub">KT Y Tế • Giao nhầm</div>
+                                    </div>
+                                </div>
+                                <div class="li-right"><span class="tag t-g">Hoàn thành</span>
+                                    <div class="li-time">5h trước</div>
+                                </div>
+                            </div>
+                            <div class="li">
+                                <div class="li-left">
+                                    <div class="li-icon" style="background:#fff1f0">↩️</div>
+                                    <div>
+                                        <div class="li-name">Đơn #KN2402-004</div>
+                                        <div class="li-sub">KT N95 • Khách đổi ý</div>
+                                    </div>
+                                </div>
+                                <div class="li-right"><span class="tag t-g">Hoàn thành</span>
+                                    <div class="li-time">Hôm qua</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-h">
+                            <h3>🔄 Hàng hoàn gần đây</h3><span class="badge bg-o">5 phiếu</span>
+                        </div>
+                        <div class="card-b">
+                            <div class="li">
+                                <div class="li-left">
+                                    <div class="li-icon" style="background:#fff7e6">🔄</div>
+                                    <div>
+                                        <div class="li-name">Phiếu #HH-031</div>
+                                        <div class="li-sub">KT 4D Đen x3 • 570,000đ</div>
+                                    </div>
+                                </div>
+                                <div class="li-right"><span class="tag t-y">Đang xử lý</span>
+                                    <div class="li-time">1h trước</div>
+                                </div>
+                            </div>
+                            <div class="li">
+                                <div class="li-left">
+                                    <div class="li-icon" style="background:#fff7e6">🔄</div>
+                                    <div>
+                                        <div class="li-name">Phiếu #HH-030</div>
+                                        <div class="li-sub">KT 3D Hồng x5 • 625,000đ</div>
+                                    </div>
+                                </div>
+                                <div class="li-right"><span class="tag t-g">Hoàn thành</span>
+                                    <div class="li-time">4h trước</div>
+                                </div>
+                            </div>
+                            <div class="li">
+                                <div class="li-left">
+                                    <div class="li-icon" style="background:#fff7e6">🔄</div>
+                                    <div>
+                                        <div class="li-name">Phiếu #HH-029</div>
+                                        <div class="li-sub">KT Y Tế x10 • 1,200,000đ</div>
+                                    </div>
+                                </div>
+                                <div class="li-right"><span class="tag t-b">Chờ duyệt</span>
+                                    <div class="li-time">Hôm qua</div>
+                                </div>
+                            </div>
+                            <div class="li">
+                                <div class="li-left">
+                                    <div class="li-icon" style="background:#fff7e6">🔄</div>
+                                    <div>
+                                        <div class="li-name">Phiếu #HH-028</div>
+                                        <div class="li-sub">KT N95 x2 • 360,000đ</div>
+                                    </div>
+                                </div>
+                                <div class="li-right"><span class="tag t-g">Hoàn thành</span>
+                                    <div class="li-time">Hôm qua</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ROW 8: STOCK BALANCE + DAILY TASKS + FEE -->
+                <div class="row row-3">
+                    <div class="card">
+                        <div class="card-h">
+                            <h3>⚖️ Cân bằng kho gần đây</h3><span class="badge bg-b">2 lần</span>
+                        </div>
+                        <div class="card-b">
+                            <div class="li">
+                                <div class="li-left">
+                                    <div class="li-icon" style="background:#e6f7ff">⚖️</div>
+                                    <div>
+                                        <div class="li-name">Cân bằng #CB-015</div>
+                                        <div class="li-sub">12 SKU kiểm tra • admin</div>
+                                    </div>
+                                </div>
+                                <div class="li-right">
+                                    <div class="li-val fg">+3 / <span style="color:#f5222d">-2</span></div>
+                                    <div class="li-time">13/02</div>
+                                </div>
+                            </div>
+                            <div class="li">
+                                <div class="li-left">
+                                    <div class="li-icon" style="background:#e6f7ff">⚖️</div>
+                                    <div>
+                                        <div class="li-name">Cân bằng #CB-014</div>
+                                        <div class="li-sub">8 SKU kiểm tra • staff1</div>
+                                    </div>
+                                </div>
+                                <div class="li-right">
+                                    <div class="li-val fg">+1 / <span style="color:#f5222d">-5</span></div>
+                                    <div class="li-time">10/02</div>
+                                </div>
+                            </div>
+                            <div class="li">
+                                <div class="li-left">
+                                    <div class="li-icon" style="background:#e6f7ff">⚖️</div>
+                                    <div>
+                                        <div class="li-name">Cân bằng #CB-013</div>
+                                        <div class="li-sub">15 SKU kiểm tra • admin</div>
+                                    </div>
+                                </div>
+                                <div class="li-right">
+                                    <div class="li-val fg">+0 / <span style="color:#f5222d">-1</span></div>
+                                    <div class="li-time">06/02</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-h">
+                            <h3>✅ Công việc hôm nay</h3><span class="badge bg-g">5/8</span>
+                        </div>
+                        <div class="card-b">
+                            <div class="pbar" style="margin-bottom:12px;height:8px">
+                                <div class="pbar-fill"
+                                    style="width:62.5%;background:linear-gradient(90deg,#00ab56,#52c41a)"></div>
+                            </div>
+                            <div class="task">
+                                <div class="task-check done">✓</div>
+                                <div class="task-info">
+                                    <div class="task-name crossed">Kiểm tra hàng tồn kho</div>
+                                    <div class="task-meta">admin • 08:30</div>
+                                </div>
+                            </div>
+                            <div class="task">
+                                <div class="task-check done">✓</div>
+                                <div class="task-info">
+                                    <div class="task-name crossed">Xử lý đơn hoàn Shopee</div>
+                                    <div class="task-meta">admin • 09:15</div>
+                                </div>
+                            </div>
+                            <div class="task">
+                                <div class="task-check done">✓</div>
+                                <div class="task-info">
+                                    <div class="task-name crossed">Nhập hàng từ NCC ABC</div>
+                                    <div class="task-meta">staff1 • 10:00</div>
+                                </div>
+                            </div>
+                            <div class="task">
+                                <div class="task-check done">✓</div>
+                                <div class="task-info">
+                                    <div class="task-name crossed">Đóng gói đơn TMDT</div>
+                                    <div class="task-meta">staff2 • 11:30</div>
+                                </div>
+                            </div>
+                            <div class="task">
+                                <div class="task-check done">✓</div>
+                                <div class="task-info">
+                                    <div class="task-name crossed">Cân bằng kho cuối ngày</div>
+                                    <div class="task-meta">admin • 14:00</div>
+                                </div>
+                            </div>
+                            <div class="task">
+                                <div class="task-check">○</div>
+                                <div class="task-info">
+                                    <div class="task-name">Gửi báo cáo doanh thu</div>
+                                    <div class="task-meta">admin • Chưa làm</div>
+                                </div>
+                            </div>
+                            <div class="task">
+                                <div class="task-check">○</div>
+                                <div class="task-info">
+                                    <div class="task-name">Liên hệ NCC XYZ báo giá</div>
+                                    <div class="task-meta">admin • Chưa làm</div>
+                                </div>
+                            </div>
+                            <div class="task">
+                                <div class="task-check">○</div>
+                                <div class="task-info">
+                                    <div class="task-name">Kiểm tra đơn trả hàng</div>
+                                    <div class="task-meta">staff1 • Chưa làm</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-h">
+                            <h3>🧮 Tính phí nhanh</h3><span class="badge bg-o">Công cụ</span>
+                        </div>
+                        <div class="card-b">
+                            <div style="background:#fafafa;border-radius:10px;padding:14px;margin-bottom:12px">
+                                <div style="font-size:11px;font-weight:600;color:#8c8c8c;margin-bottom:6px">SP phổ biến
+                                    nhất</div>
+                                <div style="font-size:14px;font-weight:700">KT 4D Premium</div>
+                                <div style="display:flex;gap:12px;margin-top:8px">
+                                    <div>
+                                        <div style="font-size:10px;color:#8c8c8c">Giá vốn</div>
+                                        <div style="font-size:13px;font-weight:700;color:#f5222d">85,000đ</div>
+                                    </div>
+                                    <div>
+                                        <div style="font-size:10px;color:#8c8c8c">Giá bán</div>
+                                        <div style="font-size:13px;font-weight:700;color:#00ab56">190,000đ</div>
+                                    </div>
+                                    <div>
+                                        <div style="font-size:10px;color:#8c8c8c">Phí sàn</div>
+                                        <div style="font-size:13px;font-weight:700;color:#fa8c16">15,200đ</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div style="background:#f6ffed;border-radius:10px;padding:14px">
+                                <div style="font-size:11px;font-weight:600;color:#8c8c8c;margin-bottom:6px">Lợi nhuận
+                                    ước tính</div>
+                                <div style="font-size:20px;font-weight:800;color:#00ab56">89,800đ</div>
+                                <div style="font-size:11px;color:#8c8c8c;margin-top:2px">Biên LN: 47.3% • Sau phí ship +
+                                    sàn</div>
+                            </div>
+                            <div style="margin-top:12px;display:flex;gap:8px">
+                                <div style="flex:1;background:#fafafa;border-radius:8px;padding:10px;text-align:center">
+                                    <div style="font-size:10px;color:#8c8c8c">Shopee</div>
+                                    <div style="font-size:12px;font-weight:700;color:#fa8c16">6.5%</div>
+                                </div>
+                                <div style="flex:1;background:#fafafa;border-radius:8px;padding:10px;text-align:center">
+                                    <div style="font-size:10px;color:#8c8c8c">TikTok</div>
+                                    <div style="font-size:12px;font-weight:700;color:#262626">5.0%</div>
+                                </div>
+                                <div style="flex:1;background:#fafafa;border-radius:8px;padding:10px;text-align:center">
+                                    <div style="font-size:10px;color:#8c8c8c">Lazada</div>
+                                    <div style="font-size:12px;font-weight:700;color:#2f54eb">5.5%</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

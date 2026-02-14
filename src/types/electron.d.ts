@@ -44,67 +44,9 @@ export interface Category {
     updatedAt: Date;
 }
 
-export interface PickupStats {
-    totalOrders: number;
-    shopeeCount: number;
-    tiktokCount: number;
-    scannedCount: number;
-    remaining: number;
-    fileCount?: number;
-}
 
-export interface PickupScanResult {
-    trackingNumber: string;
-    source: string;
-    sourceRaw: string;
-    file: string;
-    scannedAt: string;
-    orderNumber: number;
-}
 
-export interface PickupHistoryItem {
-    trackingNumber: string;
-    orderNumber?: string;      // 📦 Order ID từ file
-    source: string;            // Nguồn đơn hàng (TikTok/Shopee)
-    file: string;
-    scannedAt: string;
-    items?: string;            // 📦 JSON string của items
-    shippingProvider?: string; // 📦 Đơn vị vận chuyển
-    totalAmount?: number;      // 📦 Tổng tiền
-    status?: string;           // 📦 Trạng thái (scanned/pending)
-}
 
-export interface PickupTelegramPayload {
-    token: string;
-    chatId: string;
-    message: string;
-}
-
-export interface ElectronAPI {
-    products: {
-        getAll: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
-        getById: (id: number) => Promise<{ success: boolean; data?: Product; error?: string }>;
-        create: (data: Partial<Product>) => Promise<{ success: boolean; data?: Product; error?: string }>;
-        update: (id: number, data: Partial<Product>) => Promise<{ success: boolean; data?: Product; error?: string }>;
-        delete: (id: number) => Promise<{ success: boolean; error?: string }>;
-        updateStock: (data: { sku: string; quantity: number; isAdd?: boolean }) => Promise<{ success: boolean; data?: Product; error?: string }>;
-    };
-    categories: {
-        getAll: () => Promise<{ success: boolean; data?: Category[]; error?: string }>;
-        create: (data: Partial<Category>) => Promise<{ success: boolean; data?: Category; error?: string }>;
-        update: (id: number, data: Partial<Category>) => Promise<{ success: boolean; data?: Category; error?: string }>;
-        delete: (id: number) => Promise<{ success: boolean; error?: string }>;
-    };
-    pickup: {
-        selectFolder: () => Promise<{ success: boolean; data?: string; error?: string }>;
-        loadData: (folderPath: string) => Promise<{ success: boolean; data?: PickupStats; error?: string }>;
-        scan: (trackingNumber: string) => Promise<{ success: boolean; data?: PickupScanResult; error?: string; errorType?: string }>;
-        getHistory: (limit?: number) => Promise<{ success: boolean; data?: PickupHistoryItem[]; error?: string }>;
-        getStats: () => Promise<{ success: boolean; data?: PickupStats; error?: string }>;
-        sendTelegram: (payload: PickupTelegramPayload) => Promise<{ success: boolean; error?: string }>;
-        exportPickup: () => Promise<{ success: boolean; data?: string; error?: string }>;
-    };
-}
 
 export interface ActivityLog {
     id: number;
@@ -162,15 +104,7 @@ export interface ElectronAPI {
         update: (id: number, data: Partial<Category>) => Promise<{ success: boolean; data?: Category; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
     };
-    pickup: {
-        selectFolder: () => Promise<{ success: boolean; data?: string; error?: string }>;
-        loadData: (folderPath: string) => Promise<{ success: boolean; data?: PickupStats; error?: string }>;
-        scan: (trackingNumber: string) => Promise<{ success: boolean; data?: PickupScanResult; error?: string; errorType?: string }>;
-        getHistory: (limit?: number) => Promise<{ success: boolean; data?: PickupHistoryItem[]; error?: string }>;
-        getStats: () => Promise<{ success: boolean; data?: PickupStats; error?: string }>;
-        sendTelegram: (payload: PickupTelegramPayload) => Promise<{ success: boolean; error?: string }>;
-        exportPickup: () => Promise<{ success: boolean; data?: string; error?: string }>;
-    };
+
     activityLog: {
         getAll: (filters?: ActivityLogFilters) => Promise<{ success: boolean; data?: ActivityLog[]; error?: string }>;
         create: (data: Partial<ActivityLog>) => Promise<{ success: boolean; data?: ActivityLog; error?: string }>;
@@ -185,6 +119,9 @@ export interface ElectronAPI {
     };
     suppliers: {
         getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        delete: (id: number) => Promise<{ success: boolean; error?: string }>;
     };
     database: {
         exportAll: () => Promise<{ success: boolean; data?: string; error?: string }>;
@@ -206,6 +143,53 @@ export interface ElectronAPI {
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         getStats: (filters?: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     };
+    ecommerceExports: {
+        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        delete: (id: number) => Promise<{ success: boolean; error?: string }>;
+        bulkDelete: (ids: number[]) => Promise<{ success: boolean; data?: number; error?: string }>;
+        bulkCreate: (records: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        selectFolder: () => Promise<{ success: boolean; data?: string; error?: string }>;
+        loadExcelFiles: (folderPath: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+    };
+    exportOrders: {
+        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        delete: (id: number) => Promise<{ success: boolean; error?: string }>;
+    };
+    returns: {
+        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        delete: (id: number) => Promise<{ success: boolean; error?: string }>;
+        bulkCreate: (records: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    };
+    refunds: {
+        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        delete: (id: number) => Promise<{ success: boolean; error?: string }>;
+        bulkDelete: (ids: number[]) => Promise<{ success: boolean; data?: number; error?: string }>;
+        bulkCreate: (records: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    };
+    stockBalance: {
+        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+    };
+    appConfig: {
+        get: (key: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+        set: (key: string, value: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+    };
+    users: {
+        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        delete: (id: number) => Promise<{ success: boolean; error?: string }>;
+        login: (username: string, password: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+        ensureAdmin: () => Promise<{ success: boolean; error?: string }>;
+    };
     combos: {
         getAll: () => Promise<{ success: boolean; data?: ComboProduct[]; error?: string }>;
         getById: (id: number) => Promise<{ success: boolean; data?: ComboProduct; error?: string }>;
@@ -219,6 +203,9 @@ export interface ElectronAPI {
         download: (downloadUrl: string) => Promise<{ success: boolean; data?: { version: string }; error?: string }>;
         restart: () => Promise<void>;
         getHistory: () => Promise<{ success: boolean; data?: Array<{ version: string; date: string; status: string }>; error?: string }>;
+    };
+    shell: {
+        openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
     };
 }
 
