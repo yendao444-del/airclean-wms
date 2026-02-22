@@ -2909,26 +2909,38 @@ ipcMain.handle('returns:delete', async (event, id) => {
 ipcMain.handle('returns:bulkCreate', async (event, records) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
+        console.log(`📦 returns:bulkCreate called with ${records.length} records`);
         const created = [];
-        for (const data of records) {
-            const record = await prisma.return.create({
-                data: {
-                    customerName: data.customerName,
-                    returnCode: data.returnCode || null,
-                    orderNumber: data.orderNumber || null,
-                    returnReason: data.returnReason || null,
-                    returnDate: new Date(data.returnDate),
-                    items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
-                    totalAmount: data.totalAmount || 0,
-                    notes: data.notes || null,
-                    status: data.status || 'pending',
-                    packer: data.packer || null,
-                    createdBy: data.createdBy || null
+        for (let i = 0; i < records.length; i++) {
+            const data = records[i];
+            try {
+                // 🔧 Safe date parsing
+                let returnDate = new Date(data.returnDate);
+                if (isNaN(returnDate.getTime())) {
+                    console.warn(`⚠️ Record ${i}: Invalid returnDate: "${data.returnDate}", using current date`);
+                    returnDate = new Date();
                 }
-            });
-            created.push(record);
+                const record = await prisma.return.create({
+                    data: {
+                        customerName: data.customerName || 'N/A',
+                        returnCode: data.returnCode || null,
+                        orderNumber: data.orderNumber || null,
+                        returnReason: data.returnReason || null,
+                        returnDate: returnDate,
+                        items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items || []),
+                        totalAmount: data.totalAmount || 0,
+                        notes: data.notes || null,
+                        status: data.status || 'pending',
+                        packer: data.packer || null,
+                        createdBy: data.createdBy || null
+                    }
+                });
+                created.push(record);
+            } catch (recordError) {
+                console.error(`❌ Record ${i} failed:`, recordError.message, 'Data:', JSON.stringify(data));
+            }
         }
-        console.log(`✅ Bulk created ${created.length} returns`);
+        console.log(`✅ Bulk created ${created.length}/${records.length} returns`);
         return { success: true, data: created };
     } catch (error) {
         console.error('❌ Bulk create returns error:', error);
@@ -2960,14 +2972,20 @@ ipcMain.handle('refunds:getAll', async () => {
 ipcMain.handle('refunds:create', async (event, data) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
+        // 🔧 Safe date parsing
+        let refundDate = new Date(data.refundDate);
+        if (isNaN(refundDate.getTime())) {
+            console.warn(`⚠️ Invalid refundDate: "${data.refundDate}", using current date`);
+            refundDate = new Date();
+        }
         const record = await prisma.refund.create({
             data: {
-                customerName: data.customerName,
+                customerName: data.customerName || 'N/A',
                 refundCode: data.refundCode || null,
                 orderNumber: data.orderNumber || null,
                 refundReason: data.refundReason || null,
-                refundDate: new Date(data.refundDate),
-                items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
+                refundDate: refundDate,
+                items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items || []),
                 totalAmount: data.totalAmount || 0,
                 notes: data.notes || null,
                 status: data.status || 'processing',
@@ -2985,19 +3003,22 @@ ipcMain.handle('refunds:create', async (event, data) => {
 ipcMain.handle('refunds:update', async (event, id, data) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
+        // 🔧 FIX: Chỉ update các field được gửi lên, KHÔNG overwrite field không có
+        const updateData = {};
+        if (data.customerName !== undefined) updateData.customerName = data.customerName;
+        if (data.refundCode !== undefined) updateData.refundCode = data.refundCode || null;
+        if (data.orderNumber !== undefined) updateData.orderNumber = data.orderNumber || null;
+        if (data.refundReason !== undefined) updateData.refundReason = data.refundReason || null;
+        if (data.refundDate !== undefined) updateData.refundDate = new Date(data.refundDate);
+        if (data.items !== undefined) updateData.items = typeof data.items === 'string' ? data.items : JSON.stringify(data.items);
+        if (data.totalAmount !== undefined) updateData.totalAmount = data.totalAmount;
+        if (data.notes !== undefined) updateData.notes = data.notes || null;
+        if (data.status !== undefined) updateData.status = data.status;
+
+        console.log(`📝 Updating refund #${id} with fields:`, Object.keys(updateData));
         const record = await prisma.refund.update({
             where: { id },
-            data: {
-                customerName: data.customerName,
-                refundCode: data.refundCode || null,
-                orderNumber: data.orderNumber || null,
-                refundReason: data.refundReason || null,
-                refundDate: data.refundDate ? new Date(data.refundDate) : undefined,
-                items: data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : undefined,
-                totalAmount: data.totalAmount,
-                notes: data.notes || null,
-                status: data.status
-            }
+            data: updateData
         });
         console.log(`✅ Updated refund #${record.id}`);
         return { success: true, data: record };
@@ -3036,25 +3057,45 @@ ipcMain.handle('refunds:bulkDelete', async (event, ids) => {
 ipcMain.handle('refunds:bulkCreate', async (event, records) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
+        console.log(`📦 refunds:bulkCreate called with ${records.length} records`);
         const created = [];
-        for (const data of records) {
-            const record = await prisma.refund.create({
-                data: {
-                    customerName: data.customerName,
-                    refundCode: data.refundCode || null,
-                    orderNumber: data.orderNumber || null,
-                    refundReason: data.refundReason || null,
-                    refundDate: new Date(data.refundDate),
-                    items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
-                    totalAmount: data.totalAmount || 0,
-                    notes: data.notes || null,
-                    status: data.status || 'processing',
-                    createdBy: data.createdBy || null
+        for (let i = 0; i < records.length; i++) {
+            const data = records[i];
+            try {
+                // 🔧 Safe date parsing
+                let refundDate;
+                try {
+                    refundDate = new Date(data.refundDate);
+                    if (isNaN(refundDate.getTime())) {
+                        console.warn(`⚠️ Invalid refundDate for record ${i}: "${data.refundDate}", using current date`);
+                        refundDate = new Date();
+                    }
+                } catch {
+                    refundDate = new Date();
                 }
-            });
-            created.push(record);
+
+                const record = await prisma.refund.create({
+                    data: {
+                        customerName: data.customerName || 'N/A',
+                        refundCode: data.refundCode || null,
+                        orderNumber: data.orderNumber || null,
+                        refundReason: data.refundReason || null,
+                        refundDate: refundDate,
+                        items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items || []),
+                        totalAmount: data.totalAmount || 0,
+                        notes: data.notes || null,
+                        status: data.status || 'processing',
+                        createdBy: data.createdBy || null
+                    }
+                });
+                created.push(record);
+            } catch (itemError) {
+                console.error(`❌ Error creating refund record ${i}:`, itemError.message);
+                console.error(`   Data:`, JSON.stringify(data).substring(0, 200));
+                // Continue with other records
+            }
         }
-        console.log(`✅ Bulk created ${created.length} refunds`);
+        console.log(`✅ Bulk created ${created.length}/${records.length} refunds`);
         return { success: true, data: created };
     } catch (error) {
         console.error('❌ Bulk create refunds error:', error);
@@ -3278,4 +3319,72 @@ ipcMain.handle('users:ensureAdmin', async () => {
 });
 
 module.exports = { prisma };
+
+// ===== REFUNDS: Import từ thư mục =====
+ipcMain.handle('refunds:importFromFolder', async () => {
+    try {
+        // 1. Mở dialog chọn thư mục
+        const result = await dialog.showOpenDialog({
+            properties: ['openDirectory'],
+            title: 'Chọn thư mục chứa file Excel hàng hoàn',
+        });
+
+        if (result.canceled || result.filePaths.length === 0) {
+            return { success: false, error: 'cancelled' };
+        }
+
+        const folderPath = result.filePaths[0];
+        console.log(`📂 Selected folder: ${folderPath}`);
+
+        // 2. Tìm tất cả file .xlsx / .xls trong thư mục
+        const allFiles = fs.readdirSync(folderPath);
+        const excelFiles = allFiles.filter(f => {
+            const ext = path.extname(f).toLowerCase();
+            return ext === '.xlsx' || ext === '.xls';
+        });
+
+        if (excelFiles.length === 0) {
+            return { success: false, error: 'Không tìm thấy file Excel (.xlsx/.xls) trong thư mục!' };
+        }
+
+        console.log(`📊 Found ${excelFiles.length} Excel files:`, excelFiles);
+
+        // 3. Đọc dữ liệu từ tất cả file — TÁCH RIÊNG từng file
+        const filesData = [];
+        const fileResults = [];
+        let totalRows = 0;
+
+        for (const fileName of excelFiles) {
+            try {
+                const filePath = path.join(folderPath, fileName);
+                const workbook = XLSX.readFile(filePath);
+                const sheetName = workbook.SheetNames[0];
+                const worksheet = workbook.Sheets[sheetName];
+                const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+                console.log(`  📄 ${fileName}: ${jsonData.length} rows`);
+                filesData.push({ name: fileName, data: jsonData });
+                fileResults.push({ name: fileName, rows: jsonData.length, success: true });
+                totalRows += jsonData.length;
+            } catch (fileError) {
+                console.error(`  ❌ ${fileName}: ${fileError.message}`);
+                fileResults.push({ name: fileName, rows: 0, success: false, error: fileError.message });
+            }
+        }
+
+        console.log(`✅ Total: ${totalRows} rows from ${excelFiles.length} files`);
+
+        return {
+            success: true,
+            filesData,
+            folderPath,
+            fileResults,
+            totalFiles: excelFiles.length,
+            totalRows,
+        };
+    } catch (error) {
+        console.error('❌ Import from folder error:', error);
+        return { success: false, error: error.message };
+    }
+});
 

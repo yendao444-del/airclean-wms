@@ -174,6 +174,7 @@ export interface ElectronAPI {
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         bulkDelete: (ids: number[]) => Promise<{ success: boolean; data?: number; error?: string }>;
         bulkCreate: (records: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        importFromFolder: () => Promise<{ success: boolean; data?: any[]; error?: string; folderPath?: string; fileResults?: any[]; totalFiles?: number; totalRows?: number }>;
     };
     stockBalance: {
         getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;

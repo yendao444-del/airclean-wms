@@ -15,6 +15,7 @@ import {
     Upload,
     Dropdown,
     Tabs,
+    Spin,
 } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, UploadOutlined, FormOutlined, FileExcelOutlined, MoreOutlined, SettingOutlined, BarcodeOutlined, ScanOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -47,6 +48,7 @@ export default function ReturnsPage() {
     const currentUser = useCurrentUser();
     const [returns, setReturns] = useState<Return[]>([]);
     const [loading, setLoading] = useState(false);
+    const [importLoading, setImportLoading] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
     const [methodModalVisible, setMethodModalVisible] = useState(false);
     const [inputMethod, setInputMethod] = useState<'manual' | 'excel'>('manual');
@@ -389,6 +391,10 @@ export default function ReturnsPage() {
     };
 
     const handleImportExcel = (file: File) => {
+        // 🔧 Bật loading NGAY khi chọn file
+        setImportLoading(true);
+        const hideLoading = message.loading('⏳ Đang import dữ liệu...', 0);
+
         const reader = new FileReader();
 
         reader.onload = async (e) => {
@@ -400,21 +406,45 @@ export default function ReturnsPage() {
                 const jsonData = XLSX.utils.sheet_to_json(worksheet);
 
                 console.log('📊 Raw Excel data:', jsonData);
+                console.log(`📊 Tổng số dòng trong Excel: ${jsonData.length}`);
+
+                // 🔍 DEBUG: Log tất cả tên cột của row đầu tiên
+                if (jsonData.length > 0) {
+                    const firstRow = jsonData[0] as any;
+                    const columnNames = Object.keys(firstRow);
+                    console.log('📋 TẤT CẢ TÊN CỘT trong Excel:', columnNames);
+                    console.log('📋 Row đầu tiên:', JSON.stringify(firstRow, null, 2));
+                }
 
                 const newReturns: Return[] = [];
                 let startId = returns.length > 0 ? Math.max(...returns.map(r => r.id)) + 1 : 1;
+                let skippedCount = 0;
 
-                jsonData.forEach((row: any) => {
-                    const complaintCode = row['Mã số khiếu nại'] || row['Ma so khieu nai'] || row['Return Order ID'] || `AUTO-${Date.now()}`;
-                    const orderNumber = row['Mã đơn hàng'] || row['Ma don hang'] || row['Order ID'] || '';
-                    const productName = row['Tên sản phẩm'] || row['Ten san pham'] || row['Product Name'] || '';
-                    const complaintDate = row['Thời gian khiếu nại'] || row['Thoi gian khieu nai'] || row['Time Requested'] || '';
-                    const status = row['Trạng thái Trả hàng/Hoàn tiền'] || row['Trang thai Tra hang/Hoan tien'] || row['Return Status'] || 'pending';
-                    const reason = row['Lí do Trả hàng/Hoàn tiền'] || row['Li do Tra hang/Hoan tien'] || row['Buyer Note'] || row['Return Reason'] || '';
+                jsonData.forEach((row: any, index: number) => {
+                    const complaintCode = row['Mã số khiếu nại'] || row['Ma so khieu nai'] || row['Return Order ID'] || row['Return/Refund ID'] || `AUTO-${Date.now()}-${index}`;
+                    const orderNumber = row['Mã đơn hàng'] || row['Ma don hang'] || row['Order ID'] || row['Related Order ID'] || '';
+                    const productName = row['Tên sản phẩm'] || row['Ten san pham'] || row['Product Name'] || row['Item Name'] || '';
+                    const complaintDate = row['Thời gian khiếu nại'] || row['Thoi gian khieu nai'] || row['Time Requested'] || row['Request Time'] || row['Created Time'] || '';
+                    const status = row['Trạng thái Trả hàng/Hoàn tiền'] || row['Trang thai Tra hang/Hoan tien'] || row['Return Status'] || row['Status'] || row['Resolution Status'] || 'pending';
+                    const reason = row['Lí do Trả hàng/Hoàn tiền'] || row['Li do Tra hang/Hoan tien'] || row['Buyer Note'] || row['Return Reason'] || row['Reason'] || row['Return Type'] || '';
+
+                    // 🔍 DEBUG: Log chi tiết cho 3 row đầu
+                    if (index < 3) {
+                        console.log(`🔍 Row ${index}: complaintCode="${complaintCode}", orderNumber="${orderNumber}", productName="${productName}", date="${complaintDate}", status="${status}"`);
+                    }
 
                     if (!productName) {
-                        console.warn('⚠️ Skip row: missing product name', row);
+                        skippedCount++;
+                        if (skippedCount <= 5) {
+                            console.warn(`⚠️ Skip row ${index}: missing product name. Keys:`, Object.keys(row));
+                        }
                         return;
+                    }
+
+                    // 🔧 Safe date parsing
+                    let parsedDate = dayjs(complaintDate);
+                    if (!parsedDate.isValid()) {
+                        parsedDate = dayjs(); // Fallback to today
                     }
 
                     const newReturn: Return = {
@@ -422,14 +452,16 @@ export default function ReturnsPage() {
                         complaintCode,
                         orderNumber,
                         productName,
-                        complaintDate: complaintDate ? dayjs(complaintDate).format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD'),
-                        status: status.includes('Hoàn thành') || status.includes('Hoan thanh') || status.includes('Refund rejected') || status.includes('Complete') ? 'completed' : 'pending',
+                        complaintDate: parsedDate.format('YYYY-MM-DD'),
+                        status: status.includes('Hoàn thành') || status.includes('Hoan thanh') || status.includes('Refund rejected') || status.includes('Complete') || status.includes('Completed') ? 'completed' : 'pending',
                         reason,
                         createdAt: new Date(),
                     };
 
                     newReturns.push(newReturn);
                 });
+
+                console.log(`📊 Kết quả parse: ${newReturns.length} hợp lệ, ${skippedCount} bị skip (thiếu tên SP)`);
 
                 if (newReturns.length === 0) {
                     message.warning('Không tìm thấy dữ liệu hợp lệ trong file Excel!');
@@ -485,6 +517,9 @@ export default function ReturnsPage() {
             } catch (error) {
                 console.error('Import error:', error);
                 message.error('Lỗi khi đọc file Excel!');
+            } finally {
+                hideLoading();
+                setImportLoading(false);
             }
         };
 
@@ -960,99 +995,64 @@ export default function ReturnsPage() {
     const displayedReturns = activeTab === 'active' ? activeReturns : historyReturns;
 
     return (
-        <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-                <Title level={2} style={{ color: '#262626', margin: 0 }}>
-                    🔄 Trả hàng
-                    {selectedRowKeys.length > 0 && (
-                        <span style={{ fontSize: 14, fontWeight: 400, color: '#ff4d4f', marginLeft: 12 }}>
-                            ({selectedRowKeys.length} phiếu đã chọn)
-                        </span>
-                    )}
-                </Title>
-                <Space>
-                    {selectedRowKeys.length > 0 && (
+        <Spin spinning={loading || importLoading} tip="⏳ Đang xử lý..." size="large">
+            <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+                    <Title level={2} style={{ color: '#262626', margin: 0 }}>
+                        🔄 Trả hàng
+                        {selectedRowKeys.length > 0 && (
+                            <span style={{ fontSize: 14, fontWeight: 400, color: '#ff4d4f', marginLeft: 12 }}>
+                                ({selectedRowKeys.length} phiếu đã chọn)
+                            </span>
+                        )}
+                    </Title>
+                    <Space>
+                        {selectedRowKeys.length > 0 && (
+                            <Button
+                                danger
+                                icon={<DeleteOutlined />}
+                                onClick={handleBulkDelete}
+                                size="large"
+                            >
+                                Xóa đã chọn ({selectedRowKeys.length})
+                            </Button>
+                        )}
                         <Button
-                            danger
-                            icon={<DeleteOutlined />}
-                            onClick={handleBulkDelete}
-                            size="large"
+                            icon={<ReloadOutlined />}
+                            onClick={loadReturns}
+                            loading={loading}
                         >
-                            Xóa đã chọn ({selectedRowKeys.length})
+                            Tải lại
                         </Button>
-                    )}
-                    <Button
-                        icon={<ReloadOutlined />}
-                        onClick={loadReturns}
-                        loading={loading}
-                    >
-                        Tải lại
-                    </Button>
-                    <Button type="primary" danger icon={<PlusOutlined />} size="large" onClick={handleAdd}>
-                        Tạo phiếu trả
-                    </Button>
-                </Space>
-            </div>
+                        <Button type="primary" danger icon={<PlusOutlined />} size="large" onClick={handleAdd}>
+                            Tạo phiếu trả
+                        </Button>
+                    </Space>
+                </div>
 
-            <Card>
-                <Tabs
-                    activeKey={activeTab}
-                    onChange={(key) => {
-                        setActiveTab(key as 'active' | 'history');
-                        setSelectedRowKeys([]); // Clear selection when switching tabs
-                    }}
-                    items={[
-                        {
-                            key: 'active',
-                            label: (
-                                <span style={{ fontSize: 14, fontWeight: 600 }}>
-                                    📦 Đang xử lý ({activeReturns.length})
-                                </span>
-                            ),
-                            children: (
-                                <Table
-                                    columns={columns}
-                                    dataSource={activeReturns}
-                                    rowKey="id"
-                                    loading={loading}
-                                    scroll={{ x: 1400 }}
-                                    rowSelection={{
-                                        selectedRowKeys,
-                                        onChange: (selectedKeys) => {
-                                            setSelectedRowKeys(selectedKeys as number[]);
-                                        },
-                                        columnWidth: 50,
-                                        getCheckboxProps: (record) => ({
-                                            name: record.complaintCode,
-                                        }),
-                                    }}
-                                    rowClassName={(record) => {
-                                        return record.status ? `status-row-${record.status}` : '';
-                                    }}
-                                    pagination={{
-                                        pageSize: 25,
-                                        showSizeChanger: true,
-                                        showTotal: (total) => `Tổng ${total} phiếu`,
-                                    }}
-                                />
-                            ),
-                        },
-                        {
-                            key: 'history',
-                            label: (
-                                <span style={{ fontSize: 14, fontWeight: 600 }}>
-                                    📜 Lịch sử ({historyReturns.length})
-                                </span>
-                            ),
-                            children: (
-                                <Table
-                                    columns={columns}
-                                    dataSource={historyReturns}
-                                    rowKey="id"
-                                    loading={loading}
-                                    scroll={{ x: 1400 }}
-                                    rowSelection={
-                                        currentUser?.toLowerCase() === 'admin' ? {
+                <Card>
+                    <Tabs
+                        activeKey={activeTab}
+                        onChange={(key) => {
+                            setActiveTab(key as 'active' | 'history');
+                            setSelectedRowKeys([]); // Clear selection when switching tabs
+                        }}
+                        items={[
+                            {
+                                key: 'active',
+                                label: (
+                                    <span style={{ fontSize: 14, fontWeight: 600 }}>
+                                        📦 Đang xử lý ({activeReturns.length})
+                                    </span>
+                                ),
+                                children: (
+                                    <Table
+                                        columns={columns}
+                                        dataSource={activeReturns}
+                                        rowKey="id"
+                                        loading={loading}
+                                        scroll={{ x: 1400 }}
+                                        rowSelection={{
                                             selectedRowKeys,
                                             onChange: (selectedKeys) => {
                                                 setSelectedRowKeys(selectedKeys as number[]);
@@ -1061,468 +1061,505 @@ export default function ReturnsPage() {
                                             getCheckboxProps: (record) => ({
                                                 name: record.complaintCode,
                                             }),
-                                        } : undefined
-                                    }
-                                    rowClassName={(record) => {
-                                        return record.status ? `status-row-${record.status}` : '';
-                                    }}
-                                    pagination={{
-                                        pageSize: 25,
-                                        showSizeChanger: true,
-                                        showTotal: (total) => `Tổng ${total} phiếu (Đã hoàn thành)`,
-                                    }}
-                                />
-                            ),
-                        },
-                    ]}
-                />
-            </Card>
-
-            {/* Method Selection Modal */}
-            <Modal
-                title="📝 Chọn phương thức nhập liệu"
-                open={methodModalVisible}
-                onCancel={() => setMethodModalVisible(false)}
-                footer={null}
-                width={500}
-            >
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, padding: '20px 0' }}>
-                    <Card
-                        hoverable
-                        onClick={() => handleMethodSelect('manual')}
-                        style={{ textAlign: 'center', cursor: 'pointer' }}
-                    >
-                        <FormOutlined style={{ fontSize: 48, color: '#1890ff', marginBottom: 16 }} />
-                        <Title level={4}>Nhập thủ công</Title>
-                        <Text type="secondary">Nhập từng phiếu một</Text>
-                    </Card>
-
-                    <Card
-                        hoverable
-                        onClick={() => handleMethodSelect('excel')}
-                        style={{ textAlign: 'center', cursor: 'pointer' }}
-                    >
-                        <FileExcelOutlined style={{ fontSize: 48, color: '#52c41a', marginBottom: 16 }} />
-                        <Title level={4}>Import Excel</Title>
-                        <Text type="secondary">Upload file hàng loạt</Text>
-                    </Card>
-                </div>
-            </Modal>
-
-            {/* Manual Input Modal */}
-            <Modal
-                title={
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: 40 }}>
-                        <span>{editingReturn ? '✏️ Sửa phiếu trả' : '➕ Tạo phiếu trả mới'}</span>
-                        <Button
-                            icon={<SettingOutlined />}
-                            onClick={() => setSettingsVisible(true)}
-                            size="small"
-                        >
-                            Cài đặt
-                        </Button>
-                    </div>
-                }
-                open={modalVisible}
-                onCancel={() => {
-                    setModalVisible(false);
-                    setEditingReturn(null);
-                }}
-                footer={null}
-                width={700}
-            >
-                <Form
-                    form={form}
-                    layout="vertical"
-                    onFinish={handleSubmit}
-                >
-                    {/* ✨ UPDATED LAYOUT - COMPACT FORM */}
-                    {/* Row 1: Mã khiếu nại + Thời gian khiếu nại */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                        <Form.Item
-                            label="Mã số khiếu nại"
-                            name="complaintCode"
-                            rules={[{ required: true, message: 'Vui lòng nhập mã khiếu nại!' }]}
-                        >
-                            <Input placeholder="Nhập mã số khiếu nại" size="large" />
-                        </Form.Item>
-
-                        <Form.Item
-                            label="Thời gian khiếu nại"
-                            name="complaintDate"
-                            rules={[{ required: true, message: 'Vui lòng chọn ngày!' }]}
-                        >
-                            <DatePicker style={{ width: '100%' }} size="large" format="DD/MM/YYYY" />
-                        </Form.Item>
-                    </div>
-
-                    {/* Row 2: Mã đơn hàng + Lí do */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                        <Form.Item
-                            label="Mã đơn hàng"
-                            name="orderNumber"
-                            rules={[{ required: true, message: 'Vui lòng nhập mã đơn!' }]}
-                        >
-                            <Input placeholder="Mã đơn hàng" size="large" />
-                        </Form.Item>
-
-                        <Form.Item
-                            label="Lí do Trả hàng/Hoàn tiền"
-                            name="reason"
-                            rules={[{ required: true, message: 'Vui lòng nhập lý do!' }]}
-                        >
-                            <Select size="large" placeholder="Chọn lý do">
-                                <Select.Option value="Lỗi sản phẩm">Lỗi sản phẩm</Select.Option>
-                                <Select.Option value="Không đúng mô tả">Không đúng mô tả</Select.Option>
-                                <Select.Option value="Giao nhầm">Giao nhầm</Select.Option>
-                                <Select.Option value="Khách đổi ý">Khách đổi ý</Select.Option>
-                                <Select.Option value="Khác">Khác</Select.Option>
-                            </Select>
-                        </Form.Item>
-                    </div>
-
-                    <Form.Item
-                        label="Tên sản phẩm"
-                        name="productName"
-                        rules={[{ required: true, message: 'Vui lòng nhập tên sản phẩm!' }]}
-                    >
-                        <Input placeholder="Tên sản phẩm" size="large" />
-                    </Form.Item>
-
-                    {/* Row 3: Trạng thái + Nhân viên */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                        <Form.Item
-                            label="Trạng thái"
-                            name="status"
-                            initialValue="pending"
-                        >
-                            <Select size="large" placeholder="Chọn trạng thái...">
-                                {statusList.map(status => (
-                                    <Select.Option key={status.value} value={status.value}>
-                                        <Tag color={status.color}>{status.label}</Tag>
-                                    </Select.Option>
-                                ))}
-                            </Select>
-                        </Form.Item>
-
-                        <Form.Item label="Nhân viên đóng gói" name="packer">
-                            <Select size="large" placeholder="Chọn nhân viên..." showSearch allowClear>
-                                {packerList.map(name => (
-                                    <Select.Option key={name} value={name}>
-                                        👤 {name}
-                                    </Select.Option>
-                                ))}
-                            </Select>
-                        </Form.Item>
-                    </div>
-
-                    {/* Process Notes Timeline */}
-                    <div style={{ marginTop: 24, padding: 16, background: '#f5f5f5', borderRadius: 8 }}>
-                        <Title level={5} style={{ marginTop: 0, marginBottom: 16 }}>
-                            📝 GHI CHÚ XỬ LÝ
-                        </Title>
-
-                        {/* Timeline List */}
-                        {processLogs.length > 0 && (
-                            <div style={{ marginBottom: 16, maxHeight: 200, overflowY: 'auto' }}>
-                                {processLogs.map((log, index) => (
-                                    <div
-                                        key={index}
-                                        style={{
-                                            display: 'flex',
-                                            gap: 12,
-                                            padding: '8px 12px',
-                                            background: 'white',
-                                            borderRadius: 6,
-                                            marginBottom: 8,
-                                            border: '1px solid #d9d9d9',
                                         }}
-                                    >
-                                        <Tag color="blue" style={{ alignSelf: 'flex-start' }}>
-                                            {log.timestamp}
-                                        </Tag>
-                                        <div style={{ flex: 1, fontSize: 14 }}>{log.note}</div>
-                                        <Button
-                                            type="text"
-                                            danger
-                                            size="small"
-                                            icon={<DeleteOutlined />}
-                                            onClick={() => handleRemoveLog(index)}
-                                        />
-                                    </div>
-                                ))}
-                            </div>
-                        )}
+                                        rowClassName={(record) => {
+                                            return record.status ? `status-row-${record.status}` : '';
+                                        }}
+                                        pagination={{
+                                            pageSize: 25,
+                                            showSizeChanger: true,
+                                            showTotal: (total) => `Tổng ${total} phiếu`,
+                                        }}
+                                    />
+                                ),
+                            },
+                            {
+                                key: 'history',
+                                label: (
+                                    <span style={{ fontSize: 14, fontWeight: 600 }}>
+                                        📜 Lịch sử ({historyReturns.length})
+                                    </span>
+                                ),
+                                children: (
+                                    <Table
+                                        columns={columns}
+                                        dataSource={historyReturns}
+                                        rowKey="id"
+                                        loading={loading}
+                                        scroll={{ x: 1400 }}
+                                        rowSelection={
+                                            currentUser?.toLowerCase() === 'admin' ? {
+                                                selectedRowKeys,
+                                                onChange: (selectedKeys) => {
+                                                    setSelectedRowKeys(selectedKeys as number[]);
+                                                },
+                                                columnWidth: 50,
+                                                getCheckboxProps: (record) => ({
+                                                    name: record.complaintCode,
+                                                }),
+                                            } : undefined
+                                        }
+                                        rowClassName={(record) => {
+                                            return record.status ? `status-row-${record.status}` : '';
+                                        }}
+                                        pagination={{
+                                            pageSize: 25,
+                                            showSizeChanger: true,
+                                            showTotal: (total) => `Tổng ${total} phiếu (Đã hoàn thành)`,
+                                        }}
+                                    />
+                                ),
+                            },
+                        ]}
+                    />
+                </Card>
 
-                        {/* Add Log Input */}
-                        <div style={{ display: 'flex', gap: 8 }}>
-                            <Input.TextArea
-                                rows={2}
-                                placeholder="Nhập nội dung ghi chú xử lý..."
-                                value={tempNote}
-                                onChange={(e) => setTempNote(e.target.value)}
-                                onPressEnter={(e) => {
-                                    if (e.shiftKey) return;
-                                    e.preventDefault();
-                                    handleAddLog();
-                                }}
-                            />
+                {/* Method Selection Modal */}
+                <Modal
+                    title="📝 Chọn phương thức nhập liệu"
+                    open={methodModalVisible}
+                    onCancel={() => setMethodModalVisible(false)}
+                    footer={null}
+                    width={500}
+                >
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, padding: '20px 0' }}>
+                        <Card
+                            hoverable
+                            onClick={() => handleMethodSelect('manual')}
+                            style={{ textAlign: 'center', cursor: 'pointer' }}
+                        >
+                            <FormOutlined style={{ fontSize: 48, color: '#1890ff', marginBottom: 16 }} />
+                            <Title level={4}>Nhập thủ công</Title>
+                            <Text type="secondary">Nhập từng phiếu một</Text>
+                        </Card>
+
+                        <Card
+                            hoverable
+                            onClick={() => handleMethodSelect('excel')}
+                            style={{ textAlign: 'center', cursor: 'pointer' }}
+                        >
+                            <FileExcelOutlined style={{ fontSize: 48, color: '#52c41a', marginBottom: 16 }} />
+                            <Title level={4}>Import Excel</Title>
+                            <Text type="secondary">Upload file hàng loạt</Text>
+                        </Card>
+                    </div>
+                </Modal>
+
+                {/* Manual Input Modal */}
+                <Modal
+                    title={
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: 40 }}>
+                            <span>{editingReturn ? '✏️ Sửa phiếu trả' : '➕ Tạo phiếu trả mới'}</span>
                             <Button
-                                type="primary"
-                                icon={<PlusOutlined />}
-                                onClick={handleAddLog}
-                                style={{ height: 'auto' }}
+                                icon={<SettingOutlined />}
+                                onClick={() => setSettingsVisible(true)}
+                                size="small"
                             >
-                                Thêm
+                                Cài đặt
                             </Button>
                         </div>
-
-                        <div style={{ marginTop: 8, fontSize: 12, color: '#8c8c8c' }}>
-                            💡 Timestamp sẽ tự động thêm khi bạn click "Thêm". Press Enter để thêm nhanh.
-                        </div>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
-                        <Button onClick={() => setModalVisible(false)} size="large">
-                            Hủy
-                        </Button>
-                        <Button type="primary" danger htmlType="submit" size="large">
-                            {editingReturn ? 'Cập nhật' : 'Tạo phiếu trả'}
-                        </Button>
-                    </div>
-                </Form>
-            </Modal>
-
-            {/* Excel Import Modal */}
-            <Modal
-                title="📊 Import Excel - Trả hàng"
-                open={inputMethod === 'excel' && !modalVisible}
-                onCancel={() => setInputMethod('manual')}
-                footer={null}
-                width={700}
-            >
-                <div style={{ marginBottom: 24 }}>
-                    <Title level={5}>📋 Các cột cần có trong file Excel:</Title>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 16px', fontSize: 13, color: '#595959' }}>
-                        <div>• <strong>Mã số khiếu nại</strong> / Return Order ID</div>
-                        <div>• <strong>Tên sản phẩm</strong> / Product Name <Tag color="red">Bắt buộc</Tag></div>
-                        <div>• <strong>Mã đơn hàng</strong> / Order ID</div>
-                        <div>• <strong>Thời gian khiếu nại</strong> / Time Requested</div>
-                        <div>• <strong>Trạng thái Trả hàng/Hoàn tiền</strong> / Return Status</div>
-                        <div>• <strong>Lí do Trả hàng/Hoàn tiền</strong> / Return Reason</div>
-                    </div>
-                </div>
-
-                <Upload.Dragger
-                    accept=".xlsx,.xls"
-                    beforeUpload={handleImportExcel}
-                    maxCount={1}
-                    showUploadList={false}
+                    }
+                    open={modalVisible}
+                    onCancel={() => {
+                        setModalVisible(false);
+                        setEditingReturn(null);
+                    }}
+                    footer={null}
+                    width={700}
                 >
-                    <p className="ant-upload-drag-icon">
-                        <UploadOutlined style={{ fontSize: 48, color: '#52c41a' }} />
-                    </p>
-                    <p className="ant-upload-text">Click hoặc kéo file Excel vào đây</p>
-                    <p className="ant-upload-hint">
-                        Hỗ trợ file .xlsx và .xls
-                    </p>
-                </Upload.Dragger>
+                    <Form
+                        form={form}
+                        layout="vertical"
+                        onFinish={handleSubmit}
+                    >
+                        {/* ✨ UPDATED LAYOUT - COMPACT FORM */}
+                        {/* Row 1: Mã khiếu nại + Thời gian khiếu nại */}
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                            <Form.Item
+                                label="Mã số khiếu nại"
+                                name="complaintCode"
+                                rules={[{ required: true, message: 'Vui lòng nhập mã khiếu nại!' }]}
+                            >
+                                <Input placeholder="Nhập mã số khiếu nại" size="large" />
+                            </Form.Item>
 
+                            <Form.Item
+                                label="Thời gian khiếu nại"
+                                name="complaintDate"
+                                rules={[{ required: true, message: 'Vui lòng chọn ngày!' }]}
+                            >
+                                <DatePicker style={{ width: '100%' }} size="large" format="DD/MM/YYYY" />
+                            </Form.Item>
+                        </div>
 
-                <div style={{ marginTop: 16, padding: 12, background: '#fff7e6', borderRadius: 8, border: '1px dashed #ffa940' }}>
-                    <p style={{ margin: 0, fontSize: 13, color: '#ad6800' }}>
-                        💡 <strong>Lưu ý:</strong> File sẽ tự động tạo phiếu trả cho mỗi dòng dữ liệu hợp lệ.
-                        Các phiếu mới sẽ được thêm vào đầu danh sách.
-                    </p>
-                </div>
-            </Modal>
+                        {/* Row 2: Mã đơn hàng + Lí do */}
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                            <Form.Item
+                                label="Mã đơn hàng"
+                                name="orderNumber"
+                                rules={[{ required: true, message: 'Vui lòng nhập mã đơn!' }]}
+                            >
+                                <Input placeholder="Mã đơn hàng" size="large" />
+                            </Form.Item>
 
-            {/* Settings Modal */}
-            <Modal
-                title="⚙️ Cài đặt danh sách"
-                open={settingsVisible}
-                onCancel={() => setSettingsVisible(false)}
-                footer={[
-                    <Button key="close" type="primary" onClick={() => setSettingsVisible(false)}>
-                        Đóng
-                    </Button>
-                ]}
-                width={600}
-            >
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-                    {/* Status Management */}
-                    <div>
-                        <Title level={5}>📊 Quản lý Trạng thái</Title>
-                        <div style={{ padding: '16px', background: '#fafafa', borderRadius: 8 }}>
-                            {/* Add new status */}
-                            <div style={{ marginBottom: 16 }}>
-                                <Text strong style={{ fontSize: 13, color: '#595959' }}>➕ Thêm trạng thái mới</Text>
-                                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                                    <Input
-                                        placeholder="Tên trạng thái mới..."
-                                        value={newStatusLabel}
-                                        onChange={(e) => setNewStatusLabel(e.target.value)}
-                                        onPressEnter={() => {
-                                            if (newStatusLabel.trim()) {
-                                                const newValue = newStatusLabel.trim().toLowerCase().replace(/\\s+/g, '-');
-                                                const exists = statusList.some(s => s.value === newValue);
-                                                if (!exists) {
-                                                    const colors = ['blue', 'purple', 'red', 'volcano', 'gold', 'lime', 'geekblue', 'cyan', 'green', 'orange', 'magenta'];
-                                                    const randomColor = colors[Math.floor(Math.random() * colors.length)];
-                                                    const updated = [...statusList, {
-                                                        value: newValue,
-                                                        label: newStatusLabel.trim(),
-                                                        color: randomColor
-                                                    }];
-                                                    saveStatusList(updated);
-                                                    setNewStatusLabel('');
-                                                    message.success('Đã thêm trạng thái mới!');
-                                                } else {
-                                                    message.warning('Trạng thái này đã tồn tại!');
-                                                }
-                                            }
-                                        }}
-                                    />
-                                    <Button
-                                        type="primary"
-                                        icon={<PlusOutlined />}
-                                        onClick={() => {
-                                            if (newStatusLabel.trim()) {
-                                                const newValue = newStatusLabel.trim().toLowerCase().replace(/\\s+/g, '-');
-                                                const exists = statusList.some(s => s.value === newValue);
-                                                if (!exists) {
-                                                    const colors = ['blue', 'purple', 'red', 'volcano', 'gold', 'lime', 'geekblue', 'cyan', 'green', 'orange', 'magenta'];
-                                                    const randomColor = colors[Math.floor(Math.random() * colors.length)];
-                                                    const updated = [...statusList, {
-                                                        value: newValue,
-                                                        label: newStatusLabel.trim(),
-                                                        color: randomColor
-                                                    }];
-                                                    saveStatusList(updated);
-                                                    setNewStatusLabel('');
-                                                    message.success('Đã thêm trạng thái mới!');
-                                                } else {
-                                                    message.warning('Trạng thái này đã tồn tại!');
-                                                }
-                                            }
-                                        }}
-                                    >
-                                        Thêm
-                                    </Button>
-                                </div>
-                            </div>
+                            <Form.Item
+                                label="Lí do Trả hàng/Hoàn tiền"
+                                name="reason"
+                                rules={[{ required: true, message: 'Vui lòng nhập lý do!' }]}
+                            >
+                                <Select size="large" placeholder="Chọn lý do">
+                                    <Select.Option value="Lỗi sản phẩm">Lỗi sản phẩm</Select.Option>
+                                    <Select.Option value="Không đúng mô tả">Không đúng mô tả</Select.Option>
+                                    <Select.Option value="Giao nhầm">Giao nhầm</Select.Option>
+                                    <Select.Option value="Khách đổi ý">Khách đổi ý</Select.Option>
+                                    <Select.Option value="Khác">Khác</Select.Option>
+                                </Select>
+                            </Form.Item>
+                        </div>
 
-                            {/* List existing statuses */}
-                            <div>
-                                <Text strong style={{ fontSize: 13, color: '#595959' }}>📋 Danh sách hiện tại ({statusList.length})</Text>
-                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                        <Form.Item
+                            label="Tên sản phẩm"
+                            name="productName"
+                            rules={[{ required: true, message: 'Vui lòng nhập tên sản phẩm!' }]}
+                        >
+                            <Input placeholder="Tên sản phẩm" size="large" />
+                        </Form.Item>
+
+                        {/* Row 3: Trạng thái + Nhân viên */}
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                            <Form.Item
+                                label="Trạng thái"
+                                name="status"
+                                initialValue="pending"
+                            >
+                                <Select size="large" placeholder="Chọn trạng thái...">
                                     {statusList.map(status => (
-                                        <Tag
-                                            key={status.value}
-                                            closable
-                                            onClose={(e) => {
-                                                e.preventDefault();
-                                                Modal.confirm({
-                                                    title: 'Xóa trạng thái?',
-                                                    content: `Bạn có chắc muốn xóa "${status.label}" khỏi danh sách?`,
-                                                    okText: 'Xóa',
-                                                    cancelText: 'Hủy',
-                                                    okButtonProps: { danger: true },
-                                                    onOk: () => {
-                                                        const updated = statusList.filter(s => s.value !== status.value);
-                                                        saveStatusList(updated);
-                                                        message.success(`Đã xóa "${status.label}"!`);
-                                                    },
-                                                });
-                                            }}
-                                            color={status.color}
-                                            style={{ fontSize: 13 }}
-                                        >
-                                            {status.label}
-                                        </Tag>
+                                        <Select.Option key={status.value} value={status.value}>
+                                            <Tag color={status.color}>{status.label}</Tag>
+                                        </Select.Option>
                                     ))}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                                </Select>
+                            </Form.Item>
 
-                    {/* Packer Management */}
-                    <div>
-                        <Title level={5}>👤 Quản lý Nhân viên đóng gói</Title>
-                        <div style={{ padding: '16px', background: '#fafafa', borderRadius: 8 }}>
-                            {/* Add new packer */}
-                            <div style={{ marginBottom: 16 }}>
-                                <Text strong style={{ fontSize: 13, color: '#595959' }}>➕ Thêm nhân viên mới</Text>
-                                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                                    <Input
-                                        placeholder="Tên nhân viên mới..."
-                                        value={newPackerName}
-                                        onChange={(e) => setNewPackerName(e.target.value)}
-                                        onPressEnter={() => {
-                                            if (newPackerName.trim() && !packerList.includes(newPackerName.trim())) {
-                                                const updated = [...packerList, newPackerName.trim()];
-                                                savePackerList(updated);
-                                                setNewPackerName('');
-                                                message.success('Đã thêm nhân viên mới!');
-                                            } else if (packerList.includes(newPackerName.trim())) {
-                                                message.warning('Nhân viên này đã tồn tại!');
-                                            }
-                                        }}
-                                    />
-                                    <Button
-                                        type="primary"
-                                        icon={<PlusOutlined />}
-                                        onClick={() => {
-                                            if (newPackerName.trim() && !packerList.includes(newPackerName.trim())) {
-                                                const updated = [...packerList, newPackerName.trim()];
-                                                savePackerList(updated);
-                                                setNewPackerName('');
-                                                message.success('Đã thêm nhân viên mới!');
-                                            } else if (packerList.includes(newPackerName.trim())) {
-                                                message.warning('Nhân viên này đã tồn tại!');
-                                            }
-                                        }}
-                                    >
-                                        Thêm
-                                    </Button>
-                                </div>
-                            </div>
-
-                            {/* List existing packers */}
-                            <div>
-                                <Text strong style={{ fontSize: 13, color: '#595959' }}>📋 Danh sách hiện tại ({packerList.length})</Text>
-                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                            <Form.Item label="Nhân viên đóng gói" name="packer">
+                                <Select size="large" placeholder="Chọn nhân viên..." showSearch allowClear>
                                     {packerList.map(name => (
-                                        <Tag
-                                            key={name}
-                                            closable
-                                            onClose={(e) => {
-                                                e.preventDefault();
-                                                Modal.confirm({
-                                                    title: 'Xóa nhân viên?',
-                                                    content: `Bạn có chắc muốn xóa "${name}" khỏi danh sách?`,
-                                                    okText: 'Xóa',
-                                                    cancelText: 'Hủy',
-                                                    okButtonProps: { danger: true },
-                                                    onOk: () => {
-                                                        const updated = packerList.filter(n => n !== name);
-                                                        savePackerList(updated);
-                                                        message.success(`Đã xóa "${name}"!`);
-                                                    },
-                                                });
-                                            }}
-                                            color="blue"
-                                            style={{ fontSize: 13 }}
-                                        >
+                                        <Select.Option key={name} value={name}>
                                             👤 {name}
-                                        </Tag>
+                                        </Select.Option>
                                     ))}
+                                </Select>
+                            </Form.Item>
+                        </div>
+
+                        {/* Process Notes Timeline */}
+                        <div style={{ marginTop: 24, padding: 16, background: '#f5f5f5', borderRadius: 8 }}>
+                            <Title level={5} style={{ marginTop: 0, marginBottom: 16 }}>
+                                📝 GHI CHÚ XỬ LÝ
+                            </Title>
+
+                            {/* Timeline List */}
+                            {processLogs.length > 0 && (
+                                <div style={{ marginBottom: 16, maxHeight: 200, overflowY: 'auto' }}>
+                                    {processLogs.map((log, index) => (
+                                        <div
+                                            key={index}
+                                            style={{
+                                                display: 'flex',
+                                                gap: 12,
+                                                padding: '8px 12px',
+                                                background: 'white',
+                                                borderRadius: 6,
+                                                marginBottom: 8,
+                                                border: '1px solid #d9d9d9',
+                                            }}
+                                        >
+                                            <Tag color="blue" style={{ alignSelf: 'flex-start' }}>
+                                                {log.timestamp}
+                                            </Tag>
+                                            <div style={{ flex: 1, fontSize: 14 }}>{log.note}</div>
+                                            <Button
+                                                type="text"
+                                                danger
+                                                size="small"
+                                                icon={<DeleteOutlined />}
+                                                onClick={() => handleRemoveLog(index)}
+                                            />
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+
+                            {/* Add Log Input */}
+                            <div style={{ display: 'flex', gap: 8 }}>
+                                <Input.TextArea
+                                    rows={2}
+                                    placeholder="Nhập nội dung ghi chú xử lý..."
+                                    value={tempNote}
+                                    onChange={(e) => setTempNote(e.target.value)}
+                                    onPressEnter={(e) => {
+                                        if (e.shiftKey) return;
+                                        e.preventDefault();
+                                        handleAddLog();
+                                    }}
+                                />
+                                <Button
+                                    type="primary"
+                                    icon={<PlusOutlined />}
+                                    onClick={handleAddLog}
+                                    style={{ height: 'auto' }}
+                                >
+                                    Thêm
+                                </Button>
+                            </div>
+
+                            <div style={{ marginTop: 8, fontSize: 12, color: '#8c8c8c' }}>
+                                💡 Timestamp sẽ tự động thêm khi bạn click "Thêm". Press Enter để thêm nhanh.
+                            </div>
+                        </div>
+
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
+                            <Button onClick={() => setModalVisible(false)} size="large">
+                                Hủy
+                            </Button>
+                            <Button type="primary" danger htmlType="submit" size="large">
+                                {editingReturn ? 'Cập nhật' : 'Tạo phiếu trả'}
+                            </Button>
+                        </div>
+                    </Form>
+                </Modal>
+
+                {/* Excel Import Modal */}
+                <Modal
+                    title="📊 Import Excel - Trả hàng"
+                    open={inputMethod === 'excel' && !modalVisible}
+                    onCancel={() => setInputMethod('manual')}
+                    footer={null}
+                    width={700}
+                >
+                    <div style={{ marginBottom: 24 }}>
+                        <Title level={5}>📋 Các cột cần có trong file Excel:</Title>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 16px', fontSize: 13, color: '#595959' }}>
+                            <div>• <strong>Mã số khiếu nại</strong> / Return Order ID</div>
+                            <div>• <strong>Tên sản phẩm</strong> / Product Name <Tag color="red">Bắt buộc</Tag></div>
+                            <div>• <strong>Mã đơn hàng</strong> / Order ID</div>
+                            <div>• <strong>Thời gian khiếu nại</strong> / Time Requested</div>
+                            <div>• <strong>Trạng thái Trả hàng/Hoàn tiền</strong> / Return Status</div>
+                            <div>• <strong>Lí do Trả hàng/Hoàn tiền</strong> / Return Reason</div>
+                        </div>
+                    </div>
+
+                    <Upload.Dragger
+                        accept=".xlsx,.xls"
+                        beforeUpload={handleImportExcel}
+                        maxCount={1}
+                        showUploadList={false}
+                    >
+                        <p className="ant-upload-drag-icon">
+                            <UploadOutlined style={{ fontSize: 48, color: '#52c41a' }} />
+                        </p>
+                        <p className="ant-upload-text">Click hoặc kéo file Excel vào đây</p>
+                        <p className="ant-upload-hint">
+                            Hỗ trợ file .xlsx và .xls
+                        </p>
+                    </Upload.Dragger>
+
+
+                    <div style={{ marginTop: 16, padding: 12, background: '#fff7e6', borderRadius: 8, border: '1px dashed #ffa940' }}>
+                        <p style={{ margin: 0, fontSize: 13, color: '#ad6800' }}>
+                            💡 <strong>Lưu ý:</strong> File sẽ tự động tạo phiếu trả cho mỗi dòng dữ liệu hợp lệ.
+                            Các phiếu mới sẽ được thêm vào đầu danh sách.
+                        </p>
+                    </div>
+                </Modal>
+
+                {/* Settings Modal */}
+                <Modal
+                    title="⚙️ Cài đặt danh sách"
+                    open={settingsVisible}
+                    onCancel={() => setSettingsVisible(false)}
+                    footer={[
+                        <Button key="close" type="primary" onClick={() => setSettingsVisible(false)}>
+                            Đóng
+                        </Button>
+                    ]}
+                    width={600}
+                >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+                        {/* Status Management */}
+                        <div>
+                            <Title level={5}>📊 Quản lý Trạng thái</Title>
+                            <div style={{ padding: '16px', background: '#fafafa', borderRadius: 8 }}>
+                                {/* Add new status */}
+                                <div style={{ marginBottom: 16 }}>
+                                    <Text strong style={{ fontSize: 13, color: '#595959' }}>➕ Thêm trạng thái mới</Text>
+                                    <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                                        <Input
+                                            placeholder="Tên trạng thái mới..."
+                                            value={newStatusLabel}
+                                            onChange={(e) => setNewStatusLabel(e.target.value)}
+                                            onPressEnter={() => {
+                                                if (newStatusLabel.trim()) {
+                                                    const newValue = newStatusLabel.trim().toLowerCase().replace(/\\s+/g, '-');
+                                                    const exists = statusList.some(s => s.value === newValue);
+                                                    if (!exists) {
+                                                        const colors = ['blue', 'purple', 'red', 'volcano', 'gold', 'lime', 'geekblue', 'cyan', 'green', 'orange', 'magenta'];
+                                                        const randomColor = colors[Math.floor(Math.random() * colors.length)];
+                                                        const updated = [...statusList, {
+                                                            value: newValue,
+                                                            label: newStatusLabel.trim(),
+                                                            color: randomColor
+                                                        }];
+                                                        saveStatusList(updated);
+                                                        setNewStatusLabel('');
+                                                        message.success('Đã thêm trạng thái mới!');
+                                                    } else {
+                                                        message.warning('Trạng thái này đã tồn tại!');
+                                                    }
+                                                }
+                                            }}
+                                        />
+                                        <Button
+                                            type="primary"
+                                            icon={<PlusOutlined />}
+                                            onClick={() => {
+                                                if (newStatusLabel.trim()) {
+                                                    const newValue = newStatusLabel.trim().toLowerCase().replace(/\\s+/g, '-');
+                                                    const exists = statusList.some(s => s.value === newValue);
+                                                    if (!exists) {
+                                                        const colors = ['blue', 'purple', 'red', 'volcano', 'gold', 'lime', 'geekblue', 'cyan', 'green', 'orange', 'magenta'];
+                                                        const randomColor = colors[Math.floor(Math.random() * colors.length)];
+                                                        const updated = [...statusList, {
+                                                            value: newValue,
+                                                            label: newStatusLabel.trim(),
+                                                            color: randomColor
+                                                        }];
+                                                        saveStatusList(updated);
+                                                        setNewStatusLabel('');
+                                                        message.success('Đã thêm trạng thái mới!');
+                                                    } else {
+                                                        message.warning('Trạng thái này đã tồn tại!');
+                                                    }
+                                                }
+                                            }}
+                                        >
+                                            Thêm
+                                        </Button>
+                                    </div>
+                                </div>
+
+                                {/* List existing statuses */}
+                                <div>
+                                    <Text strong style={{ fontSize: 13, color: '#595959' }}>📋 Danh sách hiện tại ({statusList.length})</Text>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                                        {statusList.map(status => (
+                                            <Tag
+                                                key={status.value}
+                                                closable
+                                                onClose={(e) => {
+                                                    e.preventDefault();
+                                                    Modal.confirm({
+                                                        title: 'Xóa trạng thái?',
+                                                        content: `Bạn có chắc muốn xóa "${status.label}" khỏi danh sách?`,
+                                                        okText: 'Xóa',
+                                                        cancelText: 'Hủy',
+                                                        okButtonProps: { danger: true },
+                                                        onOk: () => {
+                                                            const updated = statusList.filter(s => s.value !== status.value);
+                                                            saveStatusList(updated);
+                                                            message.success(`Đã xóa "${status.label}"!`);
+                                                        },
+                                                    });
+                                                }}
+                                                color={status.color}
+                                                style={{ fontSize: 13 }}
+                                            >
+                                                {status.label}
+                                            </Tag>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Packer Management */}
+                        <div>
+                            <Title level={5}>👤 Quản lý Nhân viên đóng gói</Title>
+                            <div style={{ padding: '16px', background: '#fafafa', borderRadius: 8 }}>
+                                {/* Add new packer */}
+                                <div style={{ marginBottom: 16 }}>
+                                    <Text strong style={{ fontSize: 13, color: '#595959' }}>➕ Thêm nhân viên mới</Text>
+                                    <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                                        <Input
+                                            placeholder="Tên nhân viên mới..."
+                                            value={newPackerName}
+                                            onChange={(e) => setNewPackerName(e.target.value)}
+                                            onPressEnter={() => {
+                                                if (newPackerName.trim() && !packerList.includes(newPackerName.trim())) {
+                                                    const updated = [...packerList, newPackerName.trim()];
+                                                    savePackerList(updated);
+                                                    setNewPackerName('');
+                                                    message.success('Đã thêm nhân viên mới!');
+                                                } else if (packerList.includes(newPackerName.trim())) {
+                                                    message.warning('Nhân viên này đã tồn tại!');
+                                                }
+                                            }}
+                                        />
+                                        <Button
+                                            type="primary"
+                                            icon={<PlusOutlined />}
+                                            onClick={() => {
+                                                if (newPackerName.trim() && !packerList.includes(newPackerName.trim())) {
+                                                    const updated = [...packerList, newPackerName.trim()];
+                                                    savePackerList(updated);
+                                                    setNewPackerName('');
+                                                    message.success('Đã thêm nhân viên mới!');
+                                                } else if (packerList.includes(newPackerName.trim())) {
+                                                    message.warning('Nhân viên này đã tồn tại!');
+                                                }
+                                            }}
+                                        >
+                                            Thêm
+                                        </Button>
+                                    </div>
+                                </div>
+
+                                {/* List existing packers */}
+                                <div>
+                                    <Text strong style={{ fontSize: 13, color: '#595959' }}>📋 Danh sách hiện tại ({packerList.length})</Text>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                                        {packerList.map(name => (
+                                            <Tag
+                                                key={name}
+                                                closable
+                                                onClose={(e) => {
+                                                    e.preventDefault();
+                                                    Modal.confirm({
+                                                        title: 'Xóa nhân viên?',
+                                                        content: `Bạn có chắc muốn xóa "${name}" khỏi danh sách?`,
+                                                        okText: 'Xóa',
+                                                        cancelText: 'Hủy',
+                                                        okButtonProps: { danger: true },
+                                                        onOk: () => {
+                                                            const updated = packerList.filter(n => n !== name);
+                                                            savePackerList(updated);
+                                                            message.success(`Đã xóa "${name}"!`);
+                                                        },
+                                                    });
+                                                }}
+                                                color="blue"
+                                                style={{ fontSize: 13 }}
+                                            >
+                                                👤 {name}
+                                            </Tag>
+                                        ))}
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     </div>
-                </div>
-            </Modal>
-        </div>
+                </Modal>
+            </div>
+        </Spin>
     );
 }

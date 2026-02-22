@@ -114,6 +114,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         delete: (id) => ipcRenderer.invoke('refunds:delete', id),
         bulkDelete: (ids) => ipcRenderer.invoke('refunds:bulkDelete', ids),
         bulkCreate: (records) => ipcRenderer.invoke('refunds:bulkCreate', records),
+        importFromFolder: () => ipcRenderer.invoke('refunds:importFromFolder'),
     },
 
     // Stock Balance (CÂN BẰNG KHO)
