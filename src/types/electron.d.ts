@@ -142,6 +142,7 @@ export interface ElectronAPI {
         updateStatus: (id: number, status: string) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         getStats: (filters?: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        resetDaily: () => Promise<{ success: boolean; data?: { reset: boolean; resetCount: number; message: string }; error?: string }>;
     };
     ecommerceExports: {
         getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;

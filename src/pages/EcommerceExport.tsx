@@ -890,7 +890,7 @@ Thời gian: ${currentTime}`;
     const handleImportFolder = async () => {
         try {
             // Chọn thư mục
-            const folderResult = await (window as any).electronAPI.ecommerceExport.selectFolder();
+            const folderResult = await (window as any).electronAPI.ecommerceExports.selectFolder();
 
             if (!folderResult.success) {
                 if (folderResult.error !== 'Không có thư mục được chọn') {
@@ -903,7 +903,7 @@ Thời gian: ${currentTime}`;
             message.loading({ content: `Đang đọc file từ thư mục...`, key: 'import-folder', duration: 0 });
 
             // Đọc tất cả file Excel
-            const filesResult = await (window as any).electronAPI.ecommerceExport.loadExcelFiles(folderPath);
+            const filesResult = await (window as any).electronAPI.ecommerceExports.loadExcelFiles(folderPath);
 
             if (!filesResult.success) {
                 message.error({ content: filesResult.error, key: 'import-folder' });

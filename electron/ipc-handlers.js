@@ -2328,6 +2328,96 @@ ipcMain.handle('dailyTasks:stats', async (event, filters = {}) => {
     }
 });
 
+// Reset daily tasks - tự động reset khi sang ngày mới
+ipcMain.handle('dailyTasks:resetDaily', async () => {
+    try {
+        if (!prisma) throw new Error('Database chưa được khởi tạo.');
+
+        // Lấy ngày hôm nay (theo timezone local)
+        const now = new Date();
+        const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+        // Kiểm tra ngày reset cuối cùng
+        const lastResetConfig = await prisma.appConfig.findUnique({
+            where: { key: 'dailyTasksLastResetDate' }
+        });
+
+        const lastResetDate = lastResetConfig ? JSON.parse(lastResetConfig.value) : null;
+
+        if (lastResetDate === today) {
+            // Đã reset hôm nay rồi
+            return { success: true, data: { reset: false, message: 'Đã reset hôm nay rồi' } };
+        }
+
+        // Lấy danh sách task đã completed để lưu history trước khi reset
+        const completedTasks = await prisma.dailyTask.findMany({
+            where: { status: 'completed' }
+        });
+
+        // Lưu vào history trước khi reset
+        if (completedTasks.length > 0) {
+            // Đọc history cũ
+            const historyConfig = await prisma.appConfig.findUnique({
+                where: { key: 'dailyTasksHistory' }
+            });
+            const existingHistory = historyConfig ? JSON.parse(historyConfig.value) : [];
+
+            // Thêm entry cho mỗi task đã hoàn thành
+            const newEntries = completedTasks.map(task => ({
+                taskId: task.id,
+                taskTitle: task.title,
+                category: task.category,
+                assignee: task.assignee,
+                verifier: task.verifier || '',
+                action: 'daily_reset',
+                timestamp: task.completedAt ? task.completedAt.toISOString() : lastResetDate || now.toISOString(),
+                description: `✅ Đã hoàn thành: "${task.title}" (tự động reset sang ngày ${today})`
+            }));
+
+            const updatedHistory = [...newEntries, ...existingHistory].slice(0, 500); // Giữ tối đa 500 entries
+
+            await prisma.appConfig.upsert({
+                where: { key: 'dailyTasksHistory' },
+                update: { value: JSON.stringify(updatedHistory) },
+                create: { key: 'dailyTasksHistory', value: JSON.stringify(updatedHistory) }
+            });
+
+            // Reset tất cả completed tasks về pending
+            await prisma.dailyTask.updateMany({
+                where: { status: 'completed' },
+                data: {
+                    status: 'pending',
+                    completedAt: null,
+                    verifier: null
+                }
+            });
+
+            console.log(`✅ [DAILY RESET] Ngày ${today}: Reset ${completedTasks.length} tasks completed → pending`);
+        }
+
+        // Lưu ngày reset
+        await prisma.appConfig.upsert({
+            where: { key: 'dailyTasksLastResetDate' },
+            update: { value: JSON.stringify(today) },
+            create: { key: 'dailyTasksLastResetDate', value: JSON.stringify(today) }
+        });
+
+        return {
+            success: true,
+            data: {
+                reset: completedTasks.length > 0,
+                resetCount: completedTasks.length,
+                message: completedTasks.length > 0
+                    ? `Đã reset ${completedTasks.length} công việc sang ngày mới`
+                    : 'Sang ngày mới, không có công việc cần reset'
+            }
+        };
+    } catch (error) {
+        console.error('Error resetting daily tasks:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 // ========================================
 // COMBO PRODUCTS
 // ========================================

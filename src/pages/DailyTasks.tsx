@@ -52,171 +52,7 @@ interface Task {
     note?: string;
 }
 
-// 🎯 DEMO DATA
-const DEMO_TASKS: Task[] = [
-    // SÀN TMDT
-    {
-        id: 4,
-        title: 'Check phản hồi Shopee',
-        category: 'Sàn TMDT',
-        assignee: 'Khánh',
-        priority: 'urgent',
-        dueTime: '17:30',
-        dueDate: dayjs().format('YYYY-MM-DD'), // Hôm nay
-        status: 'pending',
-        tags: ['Shopee', 'Urgent'],
-        description: 'Trả lời khiếu nại khách hàng'
-    },
-    {
-        id: 5,
-        title: 'Cập nhật giá TikTok Shop',
-        category: 'Sàn TMDT',
-        assignee: 'Khánh',
-        priority: 'high',
-        dueTime: '09:00',
-        dueDate: dayjs().format('YYYY-MM-DD'), // Hôm nay
-        status: 'pending',
-        tags: ['TikTok', 'CTKM']
-    },
-    {
-        id: 6,
-        title: 'Check đơn hàng Shopee',
-        category: 'Sàn TMDT',
-        assignee: 'Khánh',
-        priority: 'high',
-        dueTime: '08:30',
-        dueDate: dayjs().add(1, 'day').format('YYYY-MM-DD'), // Ngày mai
-        status: 'completed',
-        tags: ['Shopee']
-    },
-    {
-        id: 7,
-        title: 'Trả lời inbox TikTok',
-        category: 'Sàn TMDT',
-        assignee: 'Toàn',
-        priority: 'normal',
-        dueTime: '10:00',
-        dueDate: dayjs().add(2, 'day').format('YYYY-MM-DD'), // 2 ngày nữa
-        status: 'completed',
-        tags: ['TikTok']
-    },
-
-    // KHO HÀNG
-    {
-        id: 8,
-        title: 'Nhập hàng mới về kho',
-        category: 'Kho hàng',
-        assignee: 'Toàn',
-        priority: 'high',
-        dueTime: '07:30',
-        dueDate: dayjs().subtract(1, 'day').format('YYYY-MM-DD'), // Hôm qua
-        status: 'completed',
-        tags: ['Nhập kho']
-    },
-    {
-        id: 9,
-        title: 'Kiểm kê tồn kho',
-        category: 'Kho hàng',
-        assignee: 'Toàn',
-        priority: 'urgent',
-        dueTime: '18:00',
-        dueDate: dayjs().format('YYYY-MM-DD'), // Hôm nay
-        status: 'pending',
-        tags: ['Kiểm kê', 'THI']
-    },
-    {
-        id: 10,
-        title: 'Đóng gói đơn Shopee',
-        category: 'Kho hàng',
-        assignee: 'Phượng',
-        priority: 'high',
-        dueTime: '15:00',
-        dueDate: dayjs().add(3, 'day').format('YYYY-MM-DD'), // 3 ngày nữa
-        status: 'pending',
-        tags: ['Đóng gói']
-    },
-
-    // CHĂM SÓC KH
-    {
-        id: 11,
-        title: 'Giải quyết khiếu nại',
-        category: 'Chăm sóc KH',
-        assignee: 'Khánh',
-        priority: 'urgent',
-        dueTime: '09:30',
-        dueDate: dayjs().format('YYYY-MM-DD'), // Hôm nay
-        status: 'pending',
-        tags: ['Khiếu nại', 'Shopee']
-    },
-    {
-        id: 12,
-        title: 'Gọi điện xác nhận đơn',
-        category: 'Chăm sóc KH',
-        assignee: 'Toàn',
-        priority: 'normal',
-        dueTime: '11:00',
-        dueDate: dayjs().add(1, 'day').format('YYYY-MM-DD'), // Ngày mai
-        status: 'completed',
-        tags: ['Xác nhận']
-    },
-    {
-        id: 13,
-        title: 'Phản hồi đánh giá 1 sao',
-        category: 'Chăm sóc KH',
-        assignee: 'Khánh',
-        priority: 'high',
-        dueTime: '14:00',
-        dueDate: dayjs().add(4, 'day').format('YYYY-MM-DD'), // 4 ngày nữa
-        status: 'pending',
-        tags: ['Khiếu nại']
-    },
-
-    // VỆ SINH
-    {
-        id: 14,
-        title: 'Lau dọn văn phòng',
-        category: 'Vệ sinh',
-        assignee: 'Phượng',
-        priority: 'normal',
-        dueTime: '08:00',
-        dueDate: dayjs().subtract(2, 'day').format('YYYY-MM-DD'), // 2 ngày trước
-        status: 'completed',
-        tags: ['Hàng ngày']
-    },
-    {
-        id: 15,
-        title: 'Vệ sinh kho hàng',
-        category: 'Vệ sinh',
-        assignee: 'Phượng',
-        priority: 'normal',
-        dueTime: '16:00',
-        dueDate: dayjs().add(5, 'day').format('YYYY-MM-DD'), // 5 ngày nữa
-        status: 'pending'
-    },
-
-    // BÁO CÁO
-    {
-        id: 16,
-        title: 'Báo cáo doanh số tuần',
-        category: 'Báo cáo',
-        assignee: 'Toàn',
-        priority: 'urgent',
-        dueTime: '17:00',
-        dueDate: dayjs().add(1, 'day').format('YYYY-MM-DD'), // Ngày mai
-        status: 'pending',
-        tags: ['Tuần', 'Deadline']
-    },
-    {
-        id: 17,
-        title: 'Tổng hợp tồn kho',
-        category: 'Báo cáo',
-        assignee: 'Toàn',
-        priority: 'normal',
-        dueTime: '18:30',
-        dueDate: dayjs().add(6, 'day').format('YYYY-MM-DD'), // 6 ngày nữa
-        status: 'pending'
-    }
-];
+// Default categories (dùng khi DB chưa có dữ liệu)
 
 const CATEGORIES = [
     { key: 'Sàn TMDT', icon: '🛒', color: '#1890ff', gradient: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' },
@@ -240,7 +76,7 @@ const GRADIENT_PRESETS = [
 ];
 
 const DailyTasks = () => {
-    const [tasks, setTasks] = useState<Task[]>(DEMO_TASKS);
+    const [tasks, setTasks] = useState<Task[]>([]);
     const [categories, setCategories] = useState(CATEGORIES);
     const [editingCategory, setEditingCategory] = useState<any>(null);
     const [categoryModalVisible, setCategoryModalVisible] = useState(false);
@@ -254,22 +90,32 @@ const DailyTasks = () => {
     // Assignee management
     const [assigneeList, setAssigneeList] = useState<string[]>([]);
     const [newAssigneeName, setNewAssigneeName] = useState('');
+    const [showAddAssignee, setShowAddAssignee] = useState(false);
 
-    // Load assignee list from database on mount
+    // Load assignee list + categories from database on mount
     useEffect(() => {
         (async () => {
             try {
+                // Load assignee list
                 const result = await window.electronAPI.appConfig.get('dailyTasksAssigneeList');
                 if (result.success && result.data) {
                     setAssigneeList(result.data);
                 } else {
-                    // Chỉ dùng default khi DB chưa có dữ liệu
                     const defaults = ['Khánh', 'Toàn', 'Phượng'];
                     setAssigneeList(defaults);
                     await window.electronAPI.appConfig.set('dailyTasksAssigneeList', defaults);
                 }
+
+                // Load categories from DB
+                const catResult = await window.electronAPI.appConfig.get('dailyTasksCategories');
+                if (catResult.success && catResult.data) {
+                    setCategories(catResult.data);
+                } else {
+                    // Lưu default categories vào DB lần đầu
+                    await window.electronAPI.appConfig.set('dailyTasksCategories', CATEGORIES);
+                }
             } catch (error) {
-                console.error('Error loading assignee list:', error);
+                console.error('Error loading config:', error);
             }
         })();
     }, []);
@@ -279,14 +125,35 @@ const DailyTasks = () => {
         await window.electronAPI.appConfig.set('dailyTasksAssigneeList', list);
     };
 
+    const saveCategories = async (cats: typeof CATEGORIES) => {
+        setCategories(cats);
+        await window.electronAPI.appConfig.set('dailyTasksCategories', cats);
+    };
+
     // History state
     const [activeTab, setActiveTab] = useState<'tasks' | 'history'>('tasks');
     const [history, setHistory] = useState<any[]>([]);
 
     // Load tasks from backend
     useEffect(() => {
-        loadTasks();
-        loadHistory();
+        (async () => {
+            // 🔄 Reset daily tasks nếu sang ngày mới
+            try {
+                const resetResult = await window.electronAPI.dailyTasks.resetDaily();
+                if (resetResult.success && resetResult.data?.reset) {
+                    message.info({
+                        content: `🔄 Sang ngày mới! Đã reset ${resetResult.data.resetCount} công việc về chưa hoàn thành.`,
+                        duration: 4
+                    });
+                }
+            } catch (err) {
+                console.log('Daily reset skipped:', err);
+            }
+
+            // Load data
+            loadTasks();
+            loadHistory();
+        })();
     }, []);
 
     const loadTasks = async () => {
@@ -376,6 +243,7 @@ const DailyTasks = () => {
                                 size="large"
                                 virtual={false}
                                 dropdownStyle={{ zIndex: 2100 }}
+                                getPopupContainer={(trigger) => trigger.parentNode as HTMLElement}
                                 onChange={(value) => { selectedVerifier = value; }}
                                 defaultValue={task.verifier || undefined}
                             >
@@ -507,8 +375,9 @@ const DailyTasks = () => {
             okText: 'Xóa',
             okType: 'danger',
             cancelText: 'Hủy',
-            onOk: () => {
-                setCategories(prev => prev.filter(c => c.key !== categoryKey));
+            onOk: async () => {
+                const updated = categories.filter(c => c.key !== categoryKey);
+                await saveCategories(updated);
                 // Move tasks to "Khác" category
                 setTasks(prev => prev.map(task =>
                     task.category === categoryKey ? { ...task, category: 'Khác' } : task
@@ -614,9 +483,10 @@ const DailyTasks = () => {
 
             if (editingCategory) {
                 // Update existing
-                setCategories(prev => prev.map(c =>
+                const updated = categories.map(c =>
                     c.key === editingCategory.key ? { ...c, ...values } : c
-                ));
+                );
+                await saveCategories(updated);
                 // Update tasks
                 if (values.key !== editingCategory.key) {
                     setTasks(prev => prev.map(task =>
@@ -626,7 +496,8 @@ const DailyTasks = () => {
                 message.success('Đã cập nhật danh mục!');
             } else {
                 // Add new
-                setCategories(prev => [...prev, values]);
+                const updated = [...categories, values];
+                await saveCategories(updated);
                 message.success('Đã thêm danh mục mới!');
             }
 
@@ -1352,57 +1223,27 @@ const DailyTasks = () => {
                         name="assignee"
                         label={<span style={{ fontSize: 14, fontWeight: 600 }}>👤 Người thực hiện</span>}
                         rules={[{ required: true, message: 'Vui lòng chọn người thực hiện!' }]}
+                        style={{ marginBottom: 16 }}
                     >
                         <Select
                             size="large"
-                            placeholder="Chọn người thực hiện"
+                            placeholder="Chọn hoặc gõ tên mới..."
                             optionLabelProp="label"
                             virtual={false}
+                            showSearch
                             dropdownStyle={{ zIndex: 2000 }}
-                            dropdownRender={(menu) => (
-                                <>
-                                    {menu}
-                                    <div style={{ padding: '8px 12px', borderTop: '1px solid #f0f0f0', marginTop: 4 }}>
-                                        <div style={{ display: 'flex', gap: 6 }}>
-                                            <Input
-                                                placeholder="Thêm người..."
-                                                value={newAssigneeName}
-                                                onChange={(e) => setNewAssigneeName(e.target.value)}
-                                                onPressEnter={(e) => {
-                                                    e.stopPropagation();
-                                                    if (newAssigneeName.trim() && !assigneeList.includes(newAssigneeName.trim())) {
-                                                        const updated = [...assigneeList, newAssigneeName.trim()];
-                                                        saveAssigneeList(updated);
-                                                        setNewAssigneeName('');
-                                                        message.success('Đã thêm người mới!');
-                                                    } else if (assigneeList.includes(newAssigneeName.trim())) {
-                                                        message.warning('Người này đã tồn tại!');
-                                                    }
-                                                }}
-                                                size="small"
-                                                style={{ flex: 1 }}
-                                                onClick={(e) => e.stopPropagation()}
-                                            />
-                                            <Button
-                                                type="primary"
-                                                icon={<PlusOutlined />}
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    if (newAssigneeName.trim() && !assigneeList.includes(newAssigneeName.trim())) {
-                                                        const updated = [...assigneeList, newAssigneeName.trim()];
-                                                        saveAssigneeList(updated);
-                                                        setNewAssigneeName('');
-                                                        message.success('Đã thêm người mới!');
-                                                    } else if (assigneeList.includes(newAssigneeName.trim())) {
-                                                        message.warning('Người này đã tồn tại!');
-                                                    }
-                                                }}
-                                                size="small"
-                                            />
-                                        </div>
-                                    </div>
-                                </>
-                            )}
+                            filterOption={(input, option) =>
+                                (option?.label as string || '').toLowerCase().includes(input.toLowerCase())
+                            }
+                            onSearch={() => { }}
+                            onChange={(value) => {
+                                // Nếu người dùng gõ tên mới (không có trong danh sách)
+                                if (value && !assigneeList.includes(value)) {
+                                    const updated = [...assigneeList, value];
+                                    saveAssigneeList(updated);
+                                    message.success(`✅ Đã thêm "${value}" vào danh sách!`);
+                                }
+                            }}
                         >
                             {assigneeList.map((name, index) => {
                                 const colors = ['#1890ff', '#52c41a', '#eb2f96', '#722ed1', '#fa8c16', '#13c2c2'];
@@ -1445,6 +1286,92 @@ const DailyTasks = () => {
                             })}
                         </Select>
                     </Form.Item>
+
+                    {/* Thêm người mới - Toggle inline Input */}
+                    {!showAddAssignee ? (
+                        <Button
+                            type="dashed"
+                            icon={<PlusOutlined />}
+                            onClick={() => setShowAddAssignee(true)}
+                            block
+                            size="small"
+                            style={{
+                                marginBottom: 16,
+                                borderRadius: 8,
+                                borderColor: '#52c41a',
+                                color: '#52c41a'
+                            }}
+                        >
+                            Thêm người thực hiện mới
+                        </Button>
+                    ) : (
+                        <div style={{ marginBottom: 16 }}>
+                            <Form.Item
+                                label={<span style={{ fontSize: 13, fontWeight: 500 }}>✏️ Nhập tên người mới</span>}
+                                style={{ marginBottom: 8 }}
+                            >
+                                <Input
+                                    placeholder="VD: Nguyễn Văn A"
+                                    size="large"
+                                    autoFocus
+                                    value={newAssigneeName}
+                                    onChange={(e) => setNewAssigneeName(e.target.value)}
+                                    onPressEnter={() => {
+                                        const name = newAssigneeName.trim();
+                                        if (!name) return;
+                                        if (assigneeList.includes(name)) {
+                                            message.warning('Người này đã tồn tại!');
+                                            return;
+                                        }
+                                        const updated = [...assigneeList, name];
+                                        saveAssigneeList(updated);
+                                        taskForm.setFieldsValue({ assignee: name });
+                                        setNewAssigneeName('');
+                                        setShowAddAssignee(false);
+                                        message.success(`✅ Đã thêm "${name}"!`);
+                                    }}
+                                    style={{ fontSize: 15 }}
+                                />
+                            </Form.Item>
+                            <div style={{ display: 'flex', gap: 8 }}>
+                                <Button
+                                    type="primary"
+                                    size="small"
+                                    icon={<PlusOutlined />}
+                                    onClick={() => {
+                                        const name = newAssigneeName.trim();
+                                        if (!name) {
+                                            message.warning('Vui lòng nhập tên!');
+                                            return;
+                                        }
+                                        if (assigneeList.includes(name)) {
+                                            message.warning('Người này đã tồn tại!');
+                                            return;
+                                        }
+                                        const updated = [...assigneeList, name];
+                                        saveAssigneeList(updated);
+                                        taskForm.setFieldsValue({ assignee: name });
+                                        setNewAssigneeName('');
+                                        setShowAddAssignee(false);
+                                        message.success(`✅ Đã thêm "${name}"!`);
+                                    }}
+                                    style={{ borderRadius: 6 }}
+                                >
+                                    Thêm
+                                </Button>
+                                <Button
+                                    size="small"
+                                    onClick={() => {
+                                        setShowAddAssignee(false);
+                                        setNewAssigneeName('');
+                                    }}
+                                    style={{ borderRadius: 6 }}
+                                >
+                                    Hủy
+                                </Button>
+                            </div>
+                        </div>
+                    )}
 
                     {/* Hidden fields - auto-generated */}
                     <Form.Item name="category" hidden>

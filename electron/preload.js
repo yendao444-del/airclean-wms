@@ -74,6 +74,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         updateStatus: (id, status) => ipcRenderer.invoke('dailyTasks:updateStatus', id, status),
         delete: (id) => ipcRenderer.invoke('dailyTasks:delete', id),
         getStats: (filters) => ipcRenderer.invoke('dailyTasks:stats', filters),
+        resetDaily: () => ipcRenderer.invoke('dailyTasks:resetDaily'),
     },
 
     // Ecommerce Export (XUẤT HÀNG TMDT)
