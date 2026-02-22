@@ -365,6 +365,13 @@ Thời gian: ${currentTime}`;
                 // Sau đó mới chạy async operations (không block UI)
                 (async () => {
                     try {
+                        // 🔧 FIX: Cập nhật status vào DATABASE trực tiếp thay vì dùng stale closure
+                        await window.electronAPI.ecommerceExports.update(foundEcommerceExport.id, {
+                            ...foundEcommerceExport,
+                            status: 'completed'
+                        });
+                        console.log(`✅ Đã cập nhật status → completed cho đơn #${foundEcommerceExport.id}`);
+
                         // Parse items để trừ tồn kho
                         let items: ExportItem[] = [];
                         try {
@@ -389,15 +396,11 @@ Thời gian: ${currentTime}`;
                             }
                         }
 
-                        const updatedEcommerceExports = ecommerceExports.map(r =>
-                            r.id === foundEcommerceExport.id
-                                ? { ...r, status: 'completed' }
-                                : r
-                        );
-                        saveEcommerceExports(updatedEcommerceExports);
-
                         // 📱 Gửi thông báo Telegram
                         await sendTelegramNotification(foundEcommerceExport);
+
+                        // 🔄 Reload từ DB sau khi tất cả operations hoàn tất
+                        loadEcommerceExports();
                     } catch (error) {
                         console.error('Error updating stock:', error);
                         message.error('Lỗi khi cập nhật tồn kho!');
@@ -1072,13 +1075,27 @@ Thời gian: ${currentTime}`;
                     totalSkipped += skippedCount;
 
                     if (newEcommerceExports.length > 0) {
-                        setEcommerceExports(prev => [...newEcommerceExports, ...prev]);
+                        // 🔧 FIX: Lưu vào DATABASE thay vì chỉ React state
+                        // Trước đây chỉ gọi setEcommerceExports → data chỉ ở memory
+                        // → Khi handleScan gọi loadEcommerceExports() reload từ DB → mất hết data
+                        try {
+                            await window.electronAPI.ecommerceExports.bulkCreate(newEcommerceExports);
+                            console.log(`✅ Đã lưu ${newEcommerceExports.length} đơn vào database`);
+                        } catch (dbError) {
+                            console.error('❌ Lỗi lưu vào database:', dbError);
+                            message.error(`Lỗi lưu ${newEcommerceExports.length} đơn vào database`);
+                        }
                     }
 
                     processedFiles++;
                 } catch (error) {
                     console.error(`Error processing ${fileData.name}:`, error);
                 }
+            }
+
+            // 🔄 Reload toàn bộ data từ DB sau khi import xong
+            if (totalImported > 0) {
+                await loadEcommerceExports();
             }
 
             message.success({

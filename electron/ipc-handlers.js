@@ -2825,7 +2825,13 @@ ipcMain.handle('returns:getAll', async () => {
         });
         const formatted = returns.map(r => ({
             ...r,
-            returnDate: r.returnDate.toISOString().split('T')[0]
+            // Map DB fields → frontend fields
+            complaintCode: r.returnCode || '',      // returnCode → complaintCode
+            productName: r.customerName || '',       // customerName → productName (frontend uses productName)
+            complaintDate: r.returnDate.toISOString().split('T')[0],  // returnDate → complaintDate
+            reason: r.returnReason || '',            // returnReason → reason
+            returnDate: r.returnDate.toISOString().split('T')[0],
+            processNotes: r.notes || null,           // notes → processNotes
         }));
         return { success: true, data: formatted };
     } catch (error) {
@@ -2863,20 +2869,22 @@ ipcMain.handle('returns:create', async (event, data) => {
 ipcMain.handle('returns:update', async (event, id, data) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
+        // 🔧 FIX: Chỉ update field được gửi, không ghi đè null các field khác
+        const updateData = {};
+        if (data.customerName !== undefined) updateData.customerName = data.customerName;
+        if (data.returnCode !== undefined) updateData.returnCode = data.returnCode || null;
+        if (data.orderNumber !== undefined) updateData.orderNumber = data.orderNumber || null;
+        if (data.returnReason !== undefined) updateData.returnReason = data.returnReason || null;
+        if (data.returnDate !== undefined) updateData.returnDate = new Date(data.returnDate);
+        if (data.items !== undefined) updateData.items = typeof data.items === 'string' ? data.items : JSON.stringify(data.items);
+        if (data.totalAmount !== undefined) updateData.totalAmount = data.totalAmount;
+        if (data.notes !== undefined) updateData.notes = data.notes || null;
+        if (data.status !== undefined) updateData.status = data.status;
+        if (data.packer !== undefined) updateData.packer = data.packer || null;
+
         const record = await prisma.return.update({
             where: { id },
-            data: {
-                customerName: data.customerName,
-                returnCode: data.returnCode || null,
-                orderNumber: data.orderNumber || null,
-                returnReason: data.returnReason || null,
-                returnDate: data.returnDate ? new Date(data.returnDate) : undefined,
-                items: data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : undefined,
-                totalAmount: data.totalAmount,
-                notes: data.notes || null,
-                status: data.status,
-                packer: data.packer || null
-            }
+            data: updateData
         });
         console.log(`✅ Updated return #${record.id}`);
         return { success: true, data: record };

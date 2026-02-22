@@ -164,11 +164,8 @@ export default function ReturnsPage() {
     };
 
     const handleAdd = () => {
-        setEditingReturn(null);
-        setProcessLogs([]);
-        setTempNote('');
-        form.resetFields();
-        setMethodModalVisible(true);
+        // Mở thẳng popup Import Excel
+        setInputMethod('excel');
     };
 
     const handleMethodSelect = (method: 'manual' | 'excel') => {
@@ -227,10 +224,16 @@ export default function ReturnsPage() {
             okText: 'Xóa',
             okType: 'danger',
             cancelText: 'Hủy',
-            onOk: () => {
-                const updatedReturns = returns.filter(r => r.id !== id);
-                saveReturns(updatedReturns);
-                message.success('Đã xóa phiếu trả!');
+            onOk: async () => {
+                try {
+                    await window.electronAPI.returns.delete(id);
+                    console.log(`✅ Đã xóa phiếu trả #${id} từ database`);
+                    await loadReturns();
+                    message.success('Đã xóa phiếu trả!');
+                } catch (error) {
+                    console.error('❌ Lỗi xóa phiếu trả:', error);
+                    message.error('Lỗi khi xóa phiếu trả!');
+                }
             },
         });
     };
@@ -264,12 +267,16 @@ export default function ReturnsPage() {
             width: 600,
             onOk: async () => {
                 try {
-                    const updatedReturns = returns.filter(r => !selectedRowKeys.includes(r.id));
-                    saveReturns(updatedReturns);
-
+                    // 🔧 FIX: Gọi API delete cho từng phiếu
+                    for (const id of selectedRowKeys) {
+                        await window.electronAPI.returns.delete(id);
+                        console.log(`✅ Đã xóa phiếu trả #${id}`);
+                    }
+                    await loadReturns();
                     message.success(`Đã xóa ${selectedRowKeys.length} phiếu trả!`);
                     setSelectedRowKeys([]);
                 } catch (error) {
+                    console.error('❌ Lỗi xóa hàng loạt:', error);
                     message.error('Lỗi khi xóa phiếu trả hàng loạt!');
                 }
             },
@@ -280,33 +287,33 @@ export default function ReturnsPage() {
         try {
             const values = await form.validateFields();
 
+            // Map frontend fields → DB fields
+            const dbData = {
+                customerName: values.productName,
+                returnCode: values.complaintCode,
+                orderNumber: values.orderNumber,
+                returnReason: values.reason,
+                returnDate: values.complaintDate.format('YYYY-MM-DD'),
+                items: JSON.stringify([]),
+                totalAmount: 0,
+                notes: processLogs.length > 0 ? JSON.stringify(processLogs) : null,
+                status: values.status,
+                packer: values.packer || null,
+            };
+
             let updatedReturns: Return[];
 
             if (editingReturn) {
-                // EDIT MODE
-                const updatedReturn: Return = {
-                    ...editingReturn,
-                    complaintCode: values.complaintCode,
-                    orderNumber: values.orderNumber,
-                    productName: values.productName,
-                    complaintDate: values.complaintDate.format('YYYY-MM-DD'),
-                    status: values.status,
-                    reason: values.reason,
-                    packer: values.packer || undefined,
-                    processNotes: processLogs.length > 0 ? JSON.stringify(processLogs) : undefined,
-                };
-
-                updatedReturns = returns.map(r =>
-                    r.id === editingReturn.id ? updatedReturn : r
-                );
+                // EDIT MODE - gọi API update
+                await window.electronAPI.returns.update(editingReturn.id, dbData);
+                console.log(`✅ Đã cập nhật phiếu trả #${editingReturn.id}`);
+                updatedReturns = returns; // placeholder for activity log
             } else {
-                // CREATE MODE
-                const newId = returns.length > 0
-                    ? Math.max(...returns.map(r => r.id)) + 1
-                    : 1;
-
+                // CREATE MODE - gọi API create
+                const result = await window.electronAPI.returns.create(dbData);
+                console.log(`✅ Đã tạo phiếu trả mới`);
                 const newReturn: Return = {
-                    id: newId,
+                    id: result.data?.id || 0,
                     complaintCode: values.complaintCode,
                     orderNumber: values.orderNumber,
                     productName: values.productName,
@@ -317,12 +324,10 @@ export default function ReturnsPage() {
                     processNotes: processLogs.length > 0 ? JSON.stringify(processLogs) : undefined,
                     createdAt: new Date(),
                 };
-
                 updatedReturns = [newReturn, ...returns];
             }
 
-
-            saveReturns(updatedReturns);
+            await loadReturns();
 
             // Log activity
             if (editingReturn) {
@@ -386,7 +391,7 @@ export default function ReturnsPage() {
     const handleImportExcel = (file: File) => {
         const reader = new FileReader();
 
-        reader.onload = (e) => {
+        reader.onload = async (e) => {
             try {
                 const data = e.target?.result;
                 const workbook = XLSX.read(data, { type: 'binary' });
@@ -431,10 +436,52 @@ export default function ReturnsPage() {
                     return;
                 }
 
-                const updatedReturns = [...newReturns, ...returns];
-                saveReturns(updatedReturns);
+                // 🔧 FIX: Lọc trùng theo complaintCode (so với data đã có trong DB)
+                const existingCodes = new Set(returns.map(r => r.complaintCode));
+                const uniqueReturns = newReturns.filter(r => !existingCodes.has(r.complaintCode));
+                const duplicateCount = newReturns.length - uniqueReturns.length;
 
-                message.success(`✅ Đã import ${newReturns.length} phiếu trả hàng từ Excel!`);
+                if (duplicateCount > 0) {
+                    console.log(`⚠️ Bỏ qua ${duplicateCount} phiếu trùng mã khiếu nại`);
+                }
+
+                if (uniqueReturns.length === 0) {
+                    message.warning(`Tất cả ${newReturns.length} phiếu đều đã tồn tại (trùng mã khiếu nại)!`);
+                    return;
+                }
+
+                // 🔧 FIX: Lưu vào DATABASE qua bulkCreate API
+                // Map frontend fields → database fields (Prisma schema)
+                // Frontend: complaintCode, productName, complaintDate, reason
+                // Database: returnCode, customerName, returnDate, returnReason, items
+                try {
+                    const dbRecords = uniqueReturns.map(r => ({
+                        customerName: r.productName,        // productName → customerName
+                        returnCode: r.complaintCode,        // complaintCode → returnCode
+                        orderNumber: r.orderNumber,
+                        returnReason: r.reason,             // reason → returnReason
+                        returnDate: r.complaintDate,        // complaintDate → returnDate
+                        items: JSON.stringify([]),           // Required field
+                        totalAmount: 0,
+                        notes: r.processNotes || null,
+                        status: r.status || 'pending',
+                        packer: r.packer || null,
+                    }));
+                    await window.electronAPI.returns.bulkCreate(dbRecords);
+                    console.log(`✅ Đã lưu ${uniqueReturns.length} phiếu trả vào database`);
+
+                    // Reload data từ DB
+                    await loadReturns();
+
+                    // 🔧 FIX: Đóng popup import
+                    setInputMethod('manual');
+
+                    const dupMsg = duplicateCount > 0 ? ` (bỏ qua ${duplicateCount} phiếu trùng)` : '';
+                    message.success(`✅ Đã import ${uniqueReturns.length} phiếu trả hàng từ Excel!${dupMsg}`);
+                } catch (dbError) {
+                    console.error('❌ Lỗi lưu vào database:', dbError);
+                    message.error(`Lỗi lưu ${newReturns.length} phiếu trả vào database!`);
+                }
             } catch (error) {
                 console.error('Import error:', error);
                 message.error('Lỗi khi đọc file Excel!');
@@ -503,7 +550,7 @@ export default function ReturnsPage() {
                 const showInput = showInputRows[record.id] || false;
                 const quickNote = quickNotes[record.id] || '';
 
-                const handleQuickAdd = () => {
+                const handleQuickAdd = async () => {
                     if (!quickNote.trim()) {
                         message.warning('Vui lòng nhập nội dung ghi chú!');
                         return;
@@ -518,15 +565,20 @@ export default function ReturnsPage() {
                     };
 
                     const updatedLogs = [...logs, newLog];
-                    const updatedReturn: Return = {
-                        ...record,
-                        processNotes: JSON.stringify(updatedLogs),
-                    };
+                    const notesJson = JSON.stringify(updatedLogs);
 
-                    const updatedReturns = returns.map(r =>
-                        r.id === record.id ? updatedReturn : r
-                    );
-                    saveReturns(updatedReturns);
+                    // 🔧 FIX: Gọi API update để lưu notes vào DB
+                    try {
+                        await window.electronAPI.returns.update(record.id, {
+                            notes: notesJson,
+                        });
+                        console.log(`✅ Đã lưu ghi chú cho phiếu #${record.id}`);
+                        await loadReturns();
+                    } catch (err) {
+                        console.error('❌ Lỗi lưu ghi chú:', err);
+                        message.error('Lỗi lưu ghi chú!');
+                        return;
+                    }
 
                     // Clear input
                     setQuickNotes(prev => ({ ...prev, [record.id]: '' }));
@@ -743,18 +795,23 @@ export default function ReturnsPage() {
                     <Select
                         value={status}
                         disabled={isInHistory}
-                        onChange={(newStatus) => {
+                        onChange={async (newStatus) => {
                             // Validation: Nếu chuyển sang "completed" mà chưa có packer
                             if (newStatus === 'completed' && !record.packer) {
                                 message.warning('⚠️ Vui lòng điền "Nhân viên đóng gói" trước khi chuyển sang Hoàn thành!');
                                 return;
                             }
 
-                            const updatedReturns = returns.map(r =>
-                                r.id === record.id ? { ...r, status: newStatus } : r
-                            );
-                            saveReturns(updatedReturns);
-                            message.success('Đã cập nhật trạng thái!');
+                            // 🔧 FIX: Gọi API update status vào DB
+                            try {
+                                await window.electronAPI.returns.update(record.id, { status: newStatus });
+                                console.log(`✅ Đã cập nhật status → ${newStatus} cho phiếu #${record.id}`);
+                                await loadReturns();
+                                message.success('Đã cập nhật trạng thái!');
+                            } catch (err) {
+                                console.error('❌ Lỗi cập nhật trạng thái:', err);
+                                message.error('Lỗi cập nhật trạng thái!');
+                            }
                         }}
                         style={{ width: '100%' }}
                         size="small"
