@@ -20,7 +20,7 @@ import {
     Col,
     Statistic,
 } from 'antd';
-import { EditOutlined, DeleteOutlined, SendOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, SettingOutlined } from '@ant-design/icons';
+import { EditOutlined, DeleteOutlined, SendOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, SettingOutlined, SearchOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import * as XLSX from 'xlsx';
@@ -90,6 +90,9 @@ export default function EcommerceExportPage() {
 
     // 🔍 State cho bộ lọc trạng thái
     const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed' | 'overdue'>('pending'); // Mặc định: Chưa hoàn
+
+    // 🔎 State cho tìm kiếm mã vận đơn đi
+    const [searchKeyword, setSearchKeyword] = useState('');
 
     // ⚙️ State cho Settings Telegram
     const [settingsModalVisible, setSettingsModalVisible] = useState(false);
@@ -217,10 +220,19 @@ export default function EcommerceExportPage() {
             okText: 'Xóa',
             okType: 'danger',
             cancelText: 'Hủy',
-            onOk: () => {
-                const updatedEcommerceExports = ecommerceExports.filter(r => r.id !== ecommerceExportRecord.id);
-                saveEcommerceExports(updatedEcommerceExports);
-                message.success('Đã xóa phiếu xuất!');
+            onOk: async () => {
+                try {
+                    const result = await window.electronAPI.ecommerceExports.delete(ecommerceExportRecord.id);
+                    if (result.success) {
+                        message.success('Đã xóa phiếu xuất!');
+                        loadEcommerceExports();
+                    } else {
+                        message.error('Lỗi khi xóa phiếu xuất: ' + (result.error || 'Unknown error'));
+                    }
+                } catch (error) {
+                    console.error('Delete error:', error);
+                    message.error('Lỗi khi xóa phiếu xuất!');
+                }
             },
         });
     };
@@ -260,12 +272,16 @@ export default function EcommerceExportPage() {
             width: 600,
             onOk: async () => {
                 try {
-                    const updatedEcommerceExports = ecommerceExports.filter(r => !selectedRowKeys.includes(r.id));
-                    saveEcommerceExports(updatedEcommerceExports);
-
-                    message.success(`Đã xóa ${selectedRowKeys.length} phiếu xuất!`);
-                    setSelectedRowKeys([]);
+                    const result = await window.electronAPI.ecommerceExports.bulkDelete(selectedRowKeys);
+                    if (result.success) {
+                        message.success(`Đã xóa ${selectedRowKeys.length} phiếu xuất!`);
+                        setSelectedRowKeys([]);
+                        loadEcommerceExports();
+                    } else {
+                        message.error('Lỗi khi xóa phiếu xuất: ' + (result.error || 'Unknown error'));
+                    }
                 } catch (error) {
+                    console.error('Bulk delete error:', error);
                     message.error('Lỗi khi xóa phiếu xuất hàng loạt!');
                 }
             },
@@ -733,6 +749,12 @@ Thời gian: ${currentTime}`;
                             return;
                         }
 
+                        // 🚫 Skip nếu thiếu Tracking ID (file không đúng cấu trúc)
+                        if (!trackingId) {
+                            console.warn('⚠️ Skip row: missing Tracking ID', row);
+                            return;
+                        }
+
                         // Create item
                         const item = {
                             productId: 0,
@@ -967,6 +989,11 @@ Thời gian: ${currentTime}`;
                                 return;
                             }
 
+                            // 🚫 Skip nếu thiếu Tracking ID
+                            if (!trackingId) {
+                                return;
+                            }
+
                             const item = {
                                 productId: 0,
                                 productName: variation ? `${productName} - ${variation}` : productName,
@@ -1049,8 +1076,17 @@ Thời gian: ${currentTime}`;
                             return;
                         }
 
-
+                        // ⛔ KIỂM TRA TRACKING ID - Bỏ qua nếu không có Tracking ID
                         const firstItem = orderItems[0];
+                        const trackingId = firstItem.trackingId?.toString().trim();
+                        const hasTracking = trackingId && trackingId !== 'N/A' && trackingId !== '—' && trackingId !== '';
+
+                        if (!hasTracking) {
+                            console.warn(`⚠️ Skip order ${orderId} - No Tracking ID`);
+                            skippedCount++;
+                            return;
+                        }
+
                         const allItems = orderItems.map(data => data.item);
                         const totalQuantity = allItems.reduce((sum, item) => sum + item.quantity, 0);
                         const skuCount = allItems.length; // Số lượng SKU khác nhau
@@ -1439,16 +1475,27 @@ Thời gian: ${currentTime}`;
 
     // 🔍 Lọc dữ liệu theo trạng thái
     const filteredEcommerceExports = ecommerceExports.filter(ecommerceExport => {
-        if (statusFilter === 'all') return true;
-        if (statusFilter === 'pending') return ecommerceExport.status !== 'completed'; // Chưa hoàn
-        if (statusFilter === 'completed') return ecommerceExport.status === 'completed'; // Đã hoàn
-        if (statusFilter === 'overdue') {
-            // Quá hạn: Đơn tạo từ ngày hôm qua trở về trước (không phải hôm nay) và chưa giao DVVC
+        // Lọc theo trạng thái
+        let statusMatch = true;
+        if (statusFilter === 'pending') statusMatch = ecommerceExport.status !== 'completed';
+        else if (statusFilter === 'completed') statusMatch = ecommerceExport.status === 'completed';
+        else if (statusFilter === 'overdue') {
             const ecommerceExportDate = dayjs(ecommerceExport.ecommerceExportDate).startOf('day');
             const today = dayjs().startOf('day');
-            const isNotToday = ecommerceExportDate.isBefore(today); // Created Time < hôm nay
-            return isNotToday && ecommerceExport.status !== 'completed';
+            const isNotToday = ecommerceExportDate.isBefore(today);
+            statusMatch = isNotToday && ecommerceExport.status !== 'completed';
         }
+        if (!statusMatch) return false;
+
+        // 🔎 Lọc theo từ khóa tìm kiếm mã vận đơn đi
+        if (searchKeyword.trim()) {
+            const keyword = searchKeyword.trim().toLowerCase();
+            const trackingMatch = ecommerceExport.notes?.match(/Tracking: ([^|]+)/);
+            const tracking = trackingMatch ? trackingMatch[1].trim().toLowerCase() : '';
+            const orderId = (ecommerceExport.orderNumber || ecommerceExport.ecommerceExportCode || '').toLowerCase();
+            return tracking.includes(keyword) || orderId.includes(keyword);
+        }
+
         return true;
     });
 
@@ -1688,7 +1735,29 @@ Thời gian: ${currentTime}`;
                 )}
             </Card>
 
-
+            {/* 🔎 TÌM KIẾM MÃ VẬN ĐƠN ĐI */}
+            <div style={{ marginBottom: 16, display: 'flex', gap: 12, alignItems: 'center' }}>
+                <Input
+                    value={searchKeyword}
+                    onChange={(e) => setSearchKeyword(e.target.value)}
+                    placeholder="Tìm kiếm mã vận đơn đi (Tracking ID / Order ID)..."
+                    size="large"
+                    allowClear
+                    style={{
+                        maxWidth: 500,
+                        fontSize: 14,
+                        borderColor: '#1890ff',
+                        borderWidth: 2,
+                        borderRadius: 8,
+                    }}
+                    prefix={<SearchOutlined style={{ color: '#1890ff', fontSize: 16 }} />}
+                />
+                {searchKeyword.trim() && (
+                    <Tag color="blue" style={{ fontSize: 13, padding: '4px 12px' }}>
+                        Tìm thấy: {filteredEcommerceExports.length} kết quả
+                    </Tag>
+                )}
+            </div>
 
             <Card>
                 <Table
@@ -1750,7 +1819,9 @@ Thời gian: ${currentTime}`;
                         },
                     }}
                     pagination={{
-                        pageSize: 25,
+                        defaultPageSize: 50,
+                        showSizeChanger: true,
+                        pageSizeOptions: ['10', '20', '50', '100'],
                         showTotal: (total) => `Tổng ${total} phiếu`,
                     }}
                     scroll={{ x: 'max-content' }}
@@ -2005,7 +2076,7 @@ Thời gian: ${currentTime}`;
                 </Form>
             </Modal>
 
-        </div>
+        </div >
     );
 }
 
