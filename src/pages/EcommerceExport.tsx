@@ -698,7 +698,7 @@ Thời gian: ${currentTime}`;
     const handleImportExcel = (file: File) => {
         const reader = new FileReader();
 
-        reader.onload = (e) => {
+        reader.onload = async (e) => {
             try {
                 const data = e.target?.result;
                 const workbook = XLSX.read(data, { type: 'binary' });
@@ -892,8 +892,16 @@ Thời gian: ${currentTime}`;
                     return;
                 }
 
-                const updatedEcommerceExports = [...newEcommerceExports, ...ecommerceExports];
-                saveEcommerceExports(updatedEcommerceExports);
+                // 🔧 FIX: Lưu vào DATABASE thay vì chỉ reload (saveEcommerceExports chỉ reload)
+                try {
+                    await window.electronAPI.ecommerceExports.bulkCreate(newEcommerceExports);
+                    console.log(`✅ Đã lưu ${newEcommerceExports.length} đơn vào database`);
+                    loadEcommerceExports();
+                } catch (dbError) {
+                    console.error('❌ Lỗi lưu vào database:', dbError);
+                    message.error('Lỗi khi lưu dữ liệu vào database!');
+                    return;
+                }
 
                 const source = isTikTok ? 'TikTok' : 'Shopee';
                 if (skippedCount > 0) {
@@ -939,6 +947,8 @@ Thời gian: ${currentTime}`;
             let totalImported = 0;
             let totalSkipped = 0;
             let processedFiles = 0;
+            // 🔧 FIX: Track tất cả orderNumber đã import trong session này để tránh trùng giữa các file
+            const importedOrderNumbers = new Set<string>();
 
             // Xử lý từng file
             for (const fileData of files) {
@@ -1067,11 +1077,14 @@ Thời gian: ${currentTime}`;
                     let skippedCount = 0;
 
                     orderMap.forEach((orderItems, orderId) => {
-                        const isDuplicate = ecommerceExports.some(existing =>
+                        // Check trùng với DB hiện có
+                        const isDuplicateInDB = ecommerceExports.some(existing =>
                             existing.orderNumber === orderId || existing.ecommerceExportCode === orderId
                         );
+                        // 🔧 FIX: Check trùng với các file đã import trong cùng session
+                        const isDuplicateInSession = importedOrderNumbers.has(orderId);
 
-                        if (isDuplicate) {
+                        if (isDuplicateInDB || isDuplicateInSession) {
                             skippedCount++;
                             return;
                         }
@@ -1105,6 +1118,8 @@ Thời gian: ${currentTime}`;
                         };
 
                         newEcommerceExports.push(ecommerceExportRecord);
+                        // 🔧 FIX: Track order đã import để tránh trùng với file tiếp theo
+                        importedOrderNumbers.add(orderId);
                     });
 
                     totalImported += newEcommerceExports.length;
