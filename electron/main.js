@@ -16,6 +16,7 @@ function createWindow() {
             preload: path.join(__dirname, 'preload.js'),
         },
         title: 'QuanLyPOS - Quản lý bán hàng',
+        icon: path.join(__dirname, '../public/favicon.png'),
         backgroundColor: '#1f1f1f',
     });
 
