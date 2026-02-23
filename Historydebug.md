@@ -47,3 +47,19 @@ if (data.status !== undefined) updateData.status = data.status;
 await prisma.refund.update({ where: { id }, data: updateData });
 ```
 **Bài học:** Mọi API update đều phải dùng pattern `if (field !== undefined)`, không bao giờ overwrite toàn bộ.
+
+---
+
+## Lỗi 3: SKU Combo sinh ra xấu và thừa timestamp
+**Ngày:** 2026-02-23 | **File:** `src/components/ComboWizardModal.tsx` → `generateSku()`
+
+**Mô tả:** SKU combo tự sinh có dạng `CB-5TRANG-5BE-803353` — 6 số cuối là timestamp vô nghĩa. Combo đơn sinh `10-1-UPF` thay vì `10-UPF` (giữ nguyên số lượng gốc `1-` từ variant SKU).
+
+**Fix:**
+- **Bỏ timestamp** 6 số cuối (không cần thiết vì tổ hợp qty+màu đã đủ phân biệt)
+- **Combo đơn:** Strip số lượng gốc khỏi variant SKU → `variant.sku.replace(/^\d+-/, '')`
+  - `1-UPF` → `UPF` → combo 10 gói = `10-UPF` ✅
+- **Combo mix:** Thêm tên thương hiệu (base SKU) ở cuối
+  - `CB-5TRANG-5DEN-UPF` ✅
+
+**⚠️ Lưu ý quan trọng:** Sau khi sửa code, app vẫn hiển thị code cũ vì **Electron load từ `dist/`** (bản build cũ). Phải chạy `npx vite build` để build lại `dist/` trước khi khởi động. (Xem mục QUAN TRỌNG NHẤT ở trên)

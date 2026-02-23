@@ -112,14 +112,13 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
 
         if (selected.length === 0) return '';
 
-        // Timestamp unique 6 chữ số cuối để tránh trùng SKU
-        const timestamp = Date.now().toString().slice(-6);
-
         if (selected.length === 1) {
             const [idx, qty] = selected[0];
             const variant = variants[parseInt(idx)];
-            // VD: "10-5DUNICARE-TRANG-234567"
-            return `${qty}-${variant.sku}-${timestamp}`;
+            // Bỏ số lượng gốc ở đầu SKU (VD: "1-UPF" → "UPF", "1-5DUNI" → "5DUNI")
+            const baseSku = variant.sku.replace(/^\d+-/, '');
+            // VD: "10-UPF", "10-5DUNI"
+            return `${qty}-${baseSku}`;
         }
 
         // Mix combo - remove diacritics from color names
@@ -129,8 +128,11 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
             return `${qty}${shortSku}`;
         });
 
-        // VD: "CB-10DEN-10TRANG-234567"
-        return `CB-${parts.join('-')}-${timestamp}`;
+        // Thêm tên thương hiệu từ SKU gốc sản phẩm (bỏ số lượng đầu)
+        // VD: SKU gốc "1-UPF" → "UPF"
+        const baseSku = selectedProduct?.sku.replace(/^\d+-/, '') || '';
+        // VD: "CB-5TRANG-5DEN-5BE-UPF"
+        return `CB-${parts.join('-')}-${baseSku}`;
     };
 
     const generateName = (): string => {
