@@ -5,7 +5,7 @@
 
 module.exports = {
     // Supabase Database Connection
-    DATABASE_URL: "postgresql://[REDACTED]@supabase/postgres-direct?pgbouncer=true",
+    DATABASE_URL: "postgresql://[REDACTED]@supabase/postgres",
     DIRECT_URL: "postgresql://[REDACTED]@supabase/postgres-direct",
     
     // App Metadata
