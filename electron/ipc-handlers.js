@@ -2395,6 +2395,20 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
             console.log(`✅ [DAILY RESET] Ngày ${today}: Reset ${completedTasks.length} tasks completed → pending`);
         }
 
+        // Cập nhật dueDate của TẤT CẢ task sang ngày hôm nay (giữ nguyên giờ)
+        // Fix bug: task vẫn mang dueDate cũ → calendar hiển thị sai ngày hoàn thành
+        const allTasks = await prisma.dailyTask.findMany();
+        for (const task of allTasks) {
+            const oldDueDate = new Date(task.dueDate);
+            const newDueDate = new Date(now);
+            newDueDate.setHours(oldDueDate.getHours(), oldDueDate.getMinutes(), 0, 0);
+            await prisma.dailyTask.update({
+                where: { id: task.id },
+                data: { dueDate: newDueDate }
+            });
+        }
+        console.log(`✅ [DAILY RESET] Đã cập nhật dueDate của ${allTasks.length} tasks sang ngày ${today}`);
+
         // Lưu ngày reset
         await prisma.appConfig.upsert({
             where: { key: 'dailyTasksLastResetDate' },
