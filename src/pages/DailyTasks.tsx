@@ -1788,15 +1788,15 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
     // Lấy TẤT CẢ công việc trong ngày (để hiển thị trong modal chi tiết)
     const getAllTasksForDate = (date: dayjs.Dayjs) => {
         const dateStr = date.format('YYYY-MM-DD');
+        const isToday = date.isSame(dayjs(), 'day');
         return tasks.filter(task => {
-            // Xử lý cả dueDate (YYYY-MM-DD) và dueTime (HH:mm trong cùng ngày)
+            // Daily tasks: hiển ở ngày hôm nay (vì lặp hàng ngày)
+            if (!task.type || task.type === 'daily') {
+                return isToday;
+            }
+            // Assignment tasks: so sánh theo dueDate thực tế
             if (task.dueDate) {
-                // Nếu có dueDate, so sánh trực tiếp
                 return task.dueDate === dateStr;
-            } else if (task.dueTime) {
-                // Nếu chỉ có dueTime, lấy ngày hôm nay
-                const today = dayjs().format('YYYY-MM-DD');
-                return today === dateStr;
             }
             return false;
         });
