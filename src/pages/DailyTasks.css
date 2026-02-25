@@ -499,6 +499,21 @@
     }
 }
 
+/* Pulse RED animation for overdue assignments */
+@keyframes pulse-red {
+
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(255, 77, 79, 0.4);
+        border-color: #ffa39e;
+    }
+
+    50% {
+        box-shadow: 0 0 0 8px rgba(255, 77, 79, 0);
+        border-color: #ff4d4f;
+    }
+}
+
 /* Reduce motion for accessibility */
 @media (prefers-reduced-motion: reduce) {
     * {

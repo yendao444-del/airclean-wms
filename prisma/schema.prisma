@@ -466,6 +466,9 @@ model DailyTask {
   status        String   @default("pending") // pending, in_progress, completed, cancelled, overdue
   priority      String   @default("normal")  // low, normal, high, urgent
   
+  // Loại công việc
+  type          String   @default("daily")   // daily = hàng ngày, assignment = bàn giao
+  
   // Danh mục công việc
   category      String   @default("general") // general, checkin, inventory, customer_service, cleaning, report, etc.
   

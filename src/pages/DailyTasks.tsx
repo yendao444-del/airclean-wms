@@ -50,6 +50,7 @@ interface Task {
     tags?: string[];
     description?: string;
     note?: string;
+    type?: 'daily' | 'assignment';
 }
 
 // Default categories (dùng khi DB chưa có dữ liệu)
@@ -131,8 +132,14 @@ const DailyTasks = () => {
     };
 
     // History state
-    const [activeTab, setActiveTab] = useState<'tasks' | 'history'>('tasks');
+    const [activeTab, setActiveTab] = useState<'tasks' | 'assignments' | 'history'>('tasks');
     const [history, setHistory] = useState<any[]>([]);
+
+    // === ASSIGNMENT TASKS ===
+    const [assignmentModalVisible, setAssignmentModalVisible] = useState(false);
+    const [editingAssignment, setEditingAssignment] = useState<Task | null>(null);
+    const [assignmentForm] = Form.useForm();
+    const [, forceUpdate] = useState(0); // for countdown re-render
 
     // Load tasks from backend
     useEffect(() => {
@@ -165,7 +172,8 @@ const DailyTasks = () => {
                     ...t,
                     tags: t.tags ? JSON.parse(t.tags) : [],
                     dueTime: dayjs(t.dueDate).format('HH:mm'),
-                    dueDate: dayjs(t.dueDate).format('YYYY-MM-DD') // Giữ lại dueDate để calendar filter
+                    dueDate: dayjs(t.dueDate).format('YYYY-MM-DD'),
+                    type: t.type || 'daily'
                 })));
             }
         } catch (error: any) {
@@ -174,6 +182,182 @@ const DailyTasks = () => {
             setLoading(false);
         }
     };
+
+    // === ASSIGNMENT DEADLINE LOGIC ===
+    const getDeadlineStatus = (task: Task) => {
+        if (task.status === 'completed') return { status: 'done', color: '#52c41a', bg: '#f6ffed', border: '#b7eb8f', label: '✅ Hoàn thành', icon: '✅' };
+        const now = dayjs();
+        const deadline = dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm');
+        const diffMinutes = deadline.diff(now, 'minute');
+        if (diffMinutes < 0) return { status: 'overdue', color: '#ff4d4f', bg: '#fff2f0', border: '#ffa39e', label: `⛔ Quá hạn ${formatTimeDiff(Math.abs(diffMinutes))}`, icon: '🔴' };
+        if (diffMinutes <= 60) return { status: 'warning', color: '#fa8c16', bg: '#fff7e6', border: '#ffd591', label: `⚠️ Còn ${formatTimeDiff(diffMinutes)}`, icon: '🟡' };
+        return { status: 'normal', color: '#1890ff', bg: '#e6f7ff', border: '#91d5ff', label: `🕐 Còn ${formatTimeDiff(diffMinutes)}`, icon: '🟢' };
+    };
+
+    const formatTimeDiff = (minutes: number) => {
+        if (minutes < 60) return `${minutes} phút`;
+        const h = Math.floor(minutes / 60);
+        const m = minutes % 60;
+        if (h < 24) return m > 0 ? `${h}h ${m}p` : `${h} giờ`;
+        const d = Math.floor(h / 24);
+        return `${d} ngày ${h % 24}h`;
+    };
+
+    // Countdown timer - update every 30 seconds
+    useEffect(() => {
+        const interval = setInterval(() => {
+            forceUpdate(v => v + 1);
+            // Check for deadline warnings & send desktop notifications
+            const assignmentTasks = tasks.filter(t => t.type === 'assignment' && t.status !== 'completed');
+            assignmentTasks.forEach(task => {
+                const ds = getDeadlineStatus(task);
+                if (ds.status === 'overdue' || ds.status === 'warning') {
+                    // Desktop notification
+                    if (Notification.permission === 'granted') {
+                        new Notification(
+                            ds.status === 'overdue' ? `⛔ QUÁ HẠN: ${task.title}` : `⚠️ SẮP ĐẾN HẠN: ${task.title}`,
+                            {
+                                body: `Người thực hiện: ${task.assignee}\nDeadline: ${task.dueDate} ${task.dueTime}\n${ds.label}`,
+                                icon: ds.status === 'overdue' ? '🔴' : '🟡',
+                                tag: `task-${task.id}`, // Prevent duplicate notifications
+                                silent: false
+                            }
+                        );
+                    }
+                }
+            });
+        }, 30000); // Every 30 seconds
+        return () => clearInterval(interval);
+    }, [tasks]);
+
+    // Request notification permission on mount
+    useEffect(() => {
+        if (Notification.permission === 'default') {
+            Notification.requestPermission();
+        }
+    }, []);
+
+    // Assignment task handlers
+    const handleAddAssignment = () => {
+        setEditingAssignment(null);
+        assignmentForm.resetFields();
+        assignmentForm.setFieldsValue({
+            priority: 'normal',
+            deadline: dayjs().add(2, 'hour'),
+        });
+        setAssignmentModalVisible(true);
+    };
+
+    const handleEditAssignment = (task: Task) => {
+        setEditingAssignment(task);
+        assignmentForm.setFieldsValue({
+            title: task.title,
+            description: task.description,
+            assignee: task.assignee,
+            priority: task.priority,
+            deadline: dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm'),
+            note: task.note || '',
+        });
+        setAssignmentModalVisible(true);
+    };
+
+    const handleSaveAssignment = async () => {
+        try {
+            const values = await assignmentForm.validateFields();
+            const taskData = {
+                title: values.title,
+                description: values.description || '',
+                assignee: values.assignee,
+                priority: values.priority,
+                dueDate: values.deadline.toISOString(),
+                status: 'pending',
+                type: 'assignment',
+                category: 'Bàn giao',
+                note: values.note || '',
+            };
+
+            let result;
+            if (editingAssignment) {
+                result = await window.electronAPI.dailyTasks.update(editingAssignment.id, taskData);
+                message.success('Đã cập nhật!');
+            } else {
+                result = await window.electronAPI.dailyTasks.create(taskData);
+                message.success('Đã tạo công việc bàn giao!');
+            }
+            if (result.success) {
+                setAssignmentModalVisible(false);
+                assignmentForm.resetFields();
+                setEditingAssignment(null);
+                loadTasks();
+            }
+        } catch (error: any) {
+            message.error('Lỗi: ' + (error.message || ''));
+        }
+    };
+
+    const handleCompleteAssignment = async (taskId: number) => {
+        try {
+            await window.electronAPI.dailyTasks.update(taskId, { status: 'completed' });
+            message.success('✅ Đã hoàn thành!');
+            loadTasks();
+        } catch (e: any) {
+            message.error('Lỗi: ' + e.message);
+        }
+    };
+
+    const handleDeleteAssignment = (taskId: number) => {
+        Modal.confirm({
+            title: 'Xóa công việc bàn giao?',
+            content: 'Bạn có chắc muốn xóa?',
+            okText: 'Xóa', okType: 'danger', cancelText: 'Hủy',
+            onOk: async () => {
+                await window.electronAPI.dailyTasks.delete(taskId);
+                message.success('Đã xóa!');
+                loadTasks();
+            }
+        });
+    };
+
+    // Quick note for assignment
+    const handleNoteAssignment = (task: Task) => {
+        let noteValue = task.note || '';
+        Modal.confirm({
+            title: '✏️ Ghi chú công việc',
+            icon: null,
+            width: 480,
+            content: (
+                <div>
+                    <p style={{ marginBottom: 8, color: '#666', fontSize: 13 }}>
+                        <strong>{task.title}</strong> — {task.assignee}
+                    </p>
+                    <TextArea
+                        rows={4}
+                        defaultValue={noteValue}
+                        placeholder="Nhập ghi chú tiến độ, lý do chưa xong..."
+                        onChange={e => { noteValue = e.target.value; }}
+                        style={{ fontSize: 14 }}
+                    />
+                </div>
+            ),
+            okText: 'Lưu ghi chú',
+            cancelText: 'Hủy',
+            onOk: async () => {
+                try {
+                    await window.electronAPI.dailyTasks.update(task.id, { note: noteValue });
+                    message.success('Đã lưu ghi chú!');
+                    loadTasks();
+                } catch (e: any) {
+                    message.error('Lỗi: ' + e.message);
+                }
+            }
+        });
+    };
+
+    // Filter tasks by type
+    const dailyTasks = tasks.filter(t => !t.type || t.type === 'daily');
+    const assignmentTasks = tasks.filter(t => t.type === 'assignment');
+    const pendingAssignments = assignmentTasks.filter(t => t.status !== 'completed');
+    const overdueAssignments = assignmentTasks.filter(t => getDeadlineStatus(t).status === 'overdue');
 
     const loadHistory = async () => {
         try {
@@ -914,11 +1098,11 @@ const DailyTasks = () => {
         );
     };
 
-    // Stats
-    const totalTasks = tasks.length;
-    const completedTasks = tasks.filter(t => t.status === 'completed').length;
-    const overdueTasks = tasks.filter(t => isOverdue(t)).length;
-    const urgentTasks = tasks.filter(t => t.priority === 'urgent' && t.status !== 'completed').length;
+    // Stats (only daily tasks)
+    const totalTasks = dailyTasks.length;
+    const completedTasks = dailyTasks.filter(t => t.status === 'completed').length;
+    const overdueTasks = dailyTasks.filter(t => isOverdue(t)).length;
+    const urgentTasks = dailyTasks.filter(t => t.priority === 'urgent' && t.status !== 'completed').length;
 
     return (
         <div style={{ padding: 24, backgroundColor: '#f0f2f5', minHeight: '100vh' }}>
@@ -1024,7 +1208,22 @@ const DailyTasks = () => {
                             borderRadius: 8
                         }}
                     >
-                        📋 Công việc ({tasks.length})
+                        📋 Công việc ({dailyTasks.length})
+                    </Radio.Button>
+                    <Radio.Button
+                        value="assignments"
+                        style={{
+                            height: 44,
+                            lineHeight: '44px',
+                            paddingLeft: 24,
+                            paddingRight: 24,
+                            fontSize: 15,
+                            fontWeight: 600,
+                            borderRadius: 8,
+                            marginLeft: 8
+                        }}
+                    >
+                        📌 Bàn giao {overdueAssignments.length > 0 ? <Badge count={overdueAssignments.length} offset={[8, -4]} /> : `(${assignmentTasks.length})`}
                     </Radio.Button>
                     <Radio.Button
                         value="history"
@@ -1043,6 +1242,176 @@ const DailyTasks = () => {
                     </Radio.Button>
                 </Radio.Group>
             </div>
+
+            {/* === ASSIGNMENT TAB === */}
+            {activeTab === 'assignments' && (
+                <div>
+                    {/* Header */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                        <div>
+                            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: '#1a1a2e' }}>📌 Bàn giao công việc</h2>
+                            <p style={{ margin: '4px 0 0', color: '#888', fontSize: 13 }}>
+                                {pendingAssignments.length} đang thực hiện • {overdueAssignments.length > 0 && <span style={{ color: '#ff4d4f', fontWeight: 700 }}>⛔ {overdueAssignments.length} quá hạn</span>}
+                            </p>
+                        </div>
+                        <Button type="primary" icon={<PlusOutlined />} size="large" onClick={handleAddAssignment}
+                            style={{ height: 44, fontSize: 15, fontWeight: 'bold', borderRadius: 10, background: 'linear-gradient(135deg, #667eea, #764ba2)', border: 'none' }}>
+                            Giao việc mới
+                        </Button>
+                    </div>
+
+                    {/* Assignment Cards */}
+                    {assignmentTasks.length === 0 ? (
+                        <Card style={{ borderRadius: 14, textAlign: 'center', padding: 40 }}>
+                            <Empty description="Chưa có công việc bàn giao nào" />
+                            <Button type="primary" icon={<PlusOutlined />} onClick={handleAddAssignment} style={{ marginTop: 16 }}>Giao việc đầu tiên</Button>
+                        </Card>
+                    ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                            {assignmentTasks
+                                .sort((a, b) => {
+                                    // Overdue first, then warning, then normal, completed last
+                                    const order: any = { overdue: 0, warning: 1, normal: 2, done: 3 };
+                                    return (order[getDeadlineStatus(a).status] || 2) - (order[getDeadlineStatus(b).status] || 2);
+                                })
+                                .map(task => {
+                                    const ds = getDeadlineStatus(task);
+                                    return (
+                                        <Card key={task.id} bordered={false} style={{
+                                            borderRadius: 14,
+                                            border: `2px solid ${ds.border}`,
+                                            background: ds.bg,
+                                            boxShadow: ds.status === 'overdue' ? '0 4px 20px rgba(255,77,79,0.2)' : '0 2px 8px rgba(0,0,0,0.06)',
+                                            animation: ds.status === 'overdue' ? 'pulse-red 2s infinite' : undefined,
+                                            transition: 'all 0.3s',
+                                        }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
+                                                {/* Left: Content */}
+                                                <div style={{ flex: 1 }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                                                        <span style={{ fontSize: 20 }}>{ds.icon}</span>
+                                                        <h3 style={{
+                                                            margin: 0, fontSize: 16, fontWeight: 700,
+                                                            color: task.status === 'completed' ? '#999' : '#1a1a2e',
+                                                            textDecoration: task.status === 'completed' ? 'line-through' : 'none',
+                                                        }}>{task.title}</h3>
+                                                        <Tag color={task.priority === 'urgent' ? 'red' : task.priority === 'high' ? 'orange' : task.priority === 'low' ? 'default' : 'blue'}>
+                                                            {task.priority === 'urgent' ? '🔥 Khẩn' : task.priority === 'high' ? '⚡ Cao' : task.priority === 'low' ? '💤 Thấp' : '📋 BT'}
+                                                        </Tag>
+                                                    </div>
+                                                    {task.description && (
+                                                        <p style={{ margin: '0 0 10px 30px', color: '#666', fontSize: 13, lineHeight: 1.5 }}>{task.description}</p>
+                                                    )}
+                                                    <div style={{ display: 'flex', gap: 20, marginLeft: 30, alignItems: 'center' }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                            <UserOutlined style={{ color: '#888' }} />
+                                                            <span style={{ fontSize: 13, fontWeight: 600 }}>{task.assignee}</span>
+                                                        </div>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                            <ClockCircleOutlined style={{ color: ds.color }} />
+                                                            <span style={{ fontSize: 13, fontWeight: 600, color: ds.color }}>
+                                                                {task.dueDate} {task.dueTime}
+                                                            </span>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Ghi chú */}
+                                                    {task.note && (
+                                                        <div style={{
+                                                            marginTop: 10, marginLeft: 30,
+                                                            padding: '8px 12px', borderRadius: 8,
+                                                            background: 'rgba(0,0,0,0.04)',
+                                                            border: '1px solid rgba(0,0,0,0.06)',
+                                                            fontSize: 13, color: '#555', lineHeight: 1.5,
+                                                        }}>
+                                                            <span style={{ fontWeight: 600, color: '#888', fontSize: 11 }}>📝 Ghi chú:</span><br />
+                                                            {task.note}
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {/* Right: Status + Actions */}
+                                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8, minWidth: 160 }}>
+                                                    <div style={{
+                                                        padding: '6px 14px', borderRadius: 20,
+                                                        background: ds.color, color: '#fff',
+                                                        fontSize: 12, fontWeight: 700,
+                                                        boxShadow: `0 2px 8px ${ds.color}40`,
+                                                    }}>
+                                                        {ds.label}
+                                                    </div>
+                                                    <Space size={4}>
+                                                        {task.status !== 'completed' && (
+                                                            <Button type="primary" size="small" onClick={() => handleCompleteAssignment(task.id)}
+                                                                style={{ borderRadius: 6, background: '#52c41a', border: 'none', fontWeight: 600 }}>
+                                                                ✅ Xong
+                                                            </Button>
+                                                        )}
+                                                        <Tooltip title="Ghi chú">
+                                                            <Button type="text" size="small" onClick={() => handleNoteAssignment(task)}
+                                                                style={{ color: '#fa8c16', fontWeight: 600 }}>
+                                                                ✏️
+                                                            </Button>
+                                                        </Tooltip>
+                                                        <Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditAssignment(task)}
+                                                            style={{ color: '#1890ff' }} />
+                                                        <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteAssignment(task.id)} />
+                                                    </Space>
+                                                </div>
+                                            </div>
+                                        </Card>
+                                    );
+                                })}
+                        </div>
+                    )}
+
+                    {/* Assignment Modal */}
+                    <Modal
+                        title={editingAssignment ? '✏️ Sửa công việc bàn giao' : '📌 Giao việc mới'}
+                        open={assignmentModalVisible}
+                        onOk={handleSaveAssignment}
+                        onCancel={() => { setAssignmentModalVisible(false); assignmentForm.resetFields(); }}
+                        okText={editingAssignment ? 'Cập nhật' : 'Giao việc'}
+                        cancelText="Hủy"
+                        width={520}
+                    >
+                        <Form form={assignmentForm} layout="vertical" size="large">
+                            <Form.Item name="title" label="Tên công việc" rules={[{ required: true, message: 'Nhập tên công việc!' }]}>
+                                <Input placeholder="VD: Lắp camera cho kho A" />
+                            </Form.Item>
+                            <Form.Item name="description" label="Mô tả chi tiết">
+                                <TextArea rows={3} placeholder="Chi tiết công việc cần làm..." />
+                            </Form.Item>
+                            <div style={{ display: 'flex', gap: 16 }}>
+                                <Form.Item name="assignee" label="Giao cho" rules={[{ required: true, message: 'Chọn người!' }]} style={{ flex: 1 }}>
+                                    <Select placeholder="Chọn nhân viên">
+                                        {assigneeList.map(name => (
+                                            <Option key={name} value={name}>
+                                                <Avatar size="small" style={{ backgroundColor: getAvatarColor(name), marginRight: 8 }}>{name[0]}</Avatar>
+                                                {name}
+                                            </Option>
+                                        ))}
+                                    </Select>
+                                </Form.Item>
+                                <Form.Item name="priority" label="Mức ưu tiên" style={{ flex: 1 }}>
+                                    <Select>
+                                        <Option value="low">💤 Thấp</Option>
+                                        <Option value="normal">📋 Bình thường</Option>
+                                        <Option value="high">⚡ Cao</Option>
+                                        <Option value="urgent">🔥 Khẩn cấp</Option>
+                                    </Select>
+                                </Form.Item>
+                            </div>
+                            <Form.Item name="deadline" label="⏰ Thời hạn hoàn thành" rules={[{ required: true, message: 'Chọn deadline!' }]}>
+                                <DatePicker showTime format="DD/MM/YYYY HH:mm" style={{ width: '100%' }} placeholder="Chọn ngày giờ deadline" />
+                            </Form.Item>
+                            <Form.Item name="note" label="📝 Ghi chú">
+                                <TextArea rows={2} placeholder="Ghi chú thêm (tùy chọn)..." />
+                            </Form.Item>
+                        </Form>
+                    </Modal>
+                </div>
+            )}
 
             {/* Tasks View */}
             {activeTab === 'tasks' && (

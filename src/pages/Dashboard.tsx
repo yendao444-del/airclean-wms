@@ -100,9 +100,9 @@ export default function DashboardPage() {
     const yesterday = today.subtract(1, 'day');
     const monthStart = today.startOf('month');
 
-    const isToday = (d: string) => dayjs(d).isAfter(today);
-    const isYesterday = (d: string) => { const dd = dayjs(d); return dd.isAfter(yesterday) && dd.isBefore(today); };
-    const isThisMonth = (d: string) => dayjs(d).isAfter(monthStart);
+    const isToday = (d: string) => dayjs(d).isSame(today, 'day');
+    const isYesterday = (d: string) => dayjs(d).isSame(yesterday, 'day');
+    const isThisMonth = (d: string) => dayjs(d).isSame(dayjs(), 'month');
 
     // Revenue
     const todayExports = exports.filter(e => isToday(e.exportDate || e.createdAt));
@@ -111,6 +111,7 @@ export default function DashboardPage() {
     const yesterdayRevenue = exports.filter(e => isYesterday(e.exportDate || e.createdAt)).reduce((s, e) => s + (e.totalAmount || 0), 0) + ecomExports.filter(e => isYesterday(e.ecommerceExportDate || e.createdAt)).reduce((s, e) => s + (e.totalAmount || 0), 0);
     const todayOrders = todayExports.length + todayEcom.length;
     const yesterdayOrders = exports.filter(e => isYesterday(e.exportDate || e.createdAt)).length + ecomExports.filter(e => isYesterday(e.ecommerceExportDate || e.createdAt)).length;
+
 
     // Inventory
     const totalStock = products.reduce((s, p) => {
@@ -140,8 +141,8 @@ export default function DashboardPage() {
     const todayPurchases = purchases.filter(p => isToday(p.purchaseDate || p.createdAt));
     const todayPurchaseAmount = todayPurchases.reduce((s, p) => s + (p.totalAmount || 0), 0);
 
-    // Daily Tasks
-    const todayTasks = tasks.filter(t => dayjs(t.dueDate).isSame(today, 'day') || dayjs(t.dueDate).isAfter(today));
+    // Daily Tasks - Công việc hàng ngày (hiển thị tất cả vì là task lặp lại)
+    const todayTasks = tasks;
     const completedTasks = todayTasks.filter(t => t.status === 'completed');
 
     // Stock Balance
