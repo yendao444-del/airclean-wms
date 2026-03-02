@@ -68,7 +68,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'fee-calculator',
         'reports',
         'history',
-        // ❌ Manager KHÔNG có quyền: settings, permissions
+        'settings',
+        // ❌ Manager KHÔNG có quyền: permissions
     ],
 
     staff: [
@@ -88,6 +89,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'combos.create',
 
         'fee-calculator',
+        'settings',
     ],
 
     viewer: [
@@ -99,6 +101,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'refunds.view',
         'stock-balance.view',
         'history',
+        'settings',
     ],
 };
 

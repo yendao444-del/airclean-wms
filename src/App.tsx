@@ -51,6 +51,7 @@ const RefundsPage = lazy(() => import('./pages/Refunds'));
 const EcommerceExportPage = lazy(() => import('./pages/EcommerceExport'));
 const POSPage = lazy(() => import('./pages/POS'));
 const SalesHistoryPage = lazy(() => import('./pages/SalesHistory'));
+const OrderPickingPage = lazy(() => import('./pages/OrderPicking'));
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -124,6 +125,7 @@ function AppContent() {
         if (accessibleKeys.includes('fee-calculator')) {
             toolsChildren.push(createMenuItem('Tính phí sản', 'fee-calculator', <CalculatorOutlined />));
         }
+        toolsChildren.push(createMenuItem('Nhặt hàng', 'order-picking', <ScanOutlined />));
         if (toolsChildren.length > 0) {
             items.push(createMenuItem('Công cụ hỗ trợ', 'tools', <ToolOutlined />, toolsChildren));
         }
@@ -234,6 +236,8 @@ function AppContent() {
 
             case 'fee-calculator':
                 return <FeeCalculatorPage />;
+            case 'order-picking':
+                return <OrderPickingPage />;
             case 'purchase':
                 return <PurchasePage />;
             case 'export':
