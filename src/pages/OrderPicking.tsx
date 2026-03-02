@@ -3,6 +3,7 @@ import { Button, Input, Typography, Tag, message } from 'antd';
 import {
     ScanOutlined, FileExcelOutlined, InboxOutlined, CheckCircleOutlined,
     WarningOutlined, CloseCircleOutlined, InfoCircleOutlined, DeleteOutlined,
+    EnterOutlined,
 } from '@ant-design/icons';
 import * as XLSX from 'xlsx';
 import './OrderPicking.css';
@@ -82,6 +83,7 @@ interface ConsolidatedItem {
     productName: string;
     color: string;
     totalPieces: number;
+    unit: string;
     details: {
         sku: string;
         orderQty: number;
@@ -149,8 +151,8 @@ function getColorTag(color: string): string {
  * - comboMap: "3-UPF-KEMSUA" → [{ productName, color, pieces }]
  */
 function buildSkuMaps(products: any[], combos: any[]) {
-    const variantBaseMap = new Map<string, { productName: string; color: string }>();
-    const comboMap = new Map<string, { productName: string; color: string; pieces: number }[]>();
+    const variantBaseMap = new Map<string, { productName: string; color: string; unit: string }>();
+    const comboMap = new Map<string, { productName: string; color: string; pieces: number; unit: string }[]>();
 
     // 1. Extract variant base parts from products
     for (const product of products) {
@@ -164,7 +166,8 @@ function buildSkuMaps(products: any[], combos: any[]) {
                 if (match) {
                     variantBaseMap.set(match[2], {
                         productName: product.name,
-                        color: v.color || ''
+                        color: v.color || '',
+                        unit: product.unit || 'Cái'
                     });
                 }
             }
@@ -181,7 +184,8 @@ function buildSkuMaps(products: any[], combos: any[]) {
                 return {
                     productName: product?.name || item.productName || combo.name || 'Unknown',
                     color: item.variantName || '',
-                    pieces: item.quantity || 1
+                    pieces: item.quantity || 1,
+                    unit: product?.unit || 'Cái'
                 };
             });
             comboMap.set(combo.sku, resolved);
@@ -196,11 +200,11 @@ function buildSkuMaps(products: any[], combos: any[]) {
  */
 function resolveSku(
     sku: string,
-    variantBaseMap: Map<string, { productName: string; color: string }>,
-    comboMap: Map<string, { productName: string; color: string; pieces: number }[]>,
+    variantBaseMap: Map<string, { productName: string; color: string; unit: string }>,
+    comboMap: Map<string, { productName: string; color: string; pieces: number; unit: string }[]>,
     excelProductName?: string,
     excelVariantName?: string
-): { productName: string; color: string; piecesPerUnit: number; isCombo: boolean }[] {
+): { productName: string; color: string; piecesPerUnit: number; isCombo: boolean; unit: string }[] {
 
     // 1. Check combos first (exact match)
     if (comboMap.has(sku)) {
@@ -208,7 +212,8 @@ function resolveSku(
             productName: item.productName,
             color: item.color,
             piecesPerUnit: item.pieces,
-            isCombo: true
+            isCombo: true,
+            unit: item.unit
         }));
     }
 
@@ -223,7 +228,8 @@ function resolveSku(
                 productName: info.productName,
                 color: info.color,
                 piecesPerUnit: pieces,
-                isCombo: pieces > 1
+                isCombo: pieces > 1,
+                unit: info.unit
             }];
         }
     }
@@ -237,7 +243,8 @@ function resolveSku(
         productName: fallbackName,
         color: fallbackColor,
         piecesPerUnit: fallbackPieces,
-        isCombo: false
+        isCombo: false,
+        unit: 'Cái'
     }];
 }
 
@@ -246,8 +253,8 @@ function resolveSku(
  */
 function consolidateItems(
     items: ExcelOrderItem[],
-    variantBaseMap: Map<string, { productName: string; color: string }>,
-    comboMap: Map<string, { productName: string; color: string; pieces: number }[]>
+    variantBaseMap: Map<string, { productName: string; color: string; unit: string }>,
+    comboMap: Map<string, { productName: string; color: string; pieces: number; unit: string }[]>
 ): ConsolidatedItem[] {
     const grouped = new Map<string, ConsolidatedItem>();
 
@@ -264,6 +271,7 @@ function consolidateItems(
                     productName: r.productName,
                     color: r.color,
                     totalPieces: 0,
+                    unit: r.unit,
                     details: []
                 });
             }
@@ -309,7 +317,7 @@ const TIKTOK_MAPPING: ColumnMapping = {
     productName: -1,   // Tự detect
     sku: 6,            // Col G - SKU
     variantName: -1,   // Tự detect
-    quantity: -1       // Tự detect
+    quantity: 9        // Col J - Số lượng
 };
 
 /**
@@ -375,8 +383,8 @@ export default function OrderPickingPage() {
     const [importedFiles, setImportedFiles] = useState<ImportedFile[]>([]);
     const [products, setProducts] = useState<any[]>([]);
     const [combos, setCombos] = useState<any[]>([]);
-    const [variantBaseMap, setVariantBaseMap] = useState<Map<string, { productName: string; color: string }>>(new Map());
-    const [comboMap, setComboMap] = useState<Map<string, { productName: string; color: string; pieces: number }[]>>(new Map());
+    const [variantBaseMap, setVariantBaseMap] = useState<Map<string, { productName: string; color: string; unit: string }>>(new Map());
+    const [comboMap, setComboMap] = useState<Map<string, { productName: string; color: string; pieces: number; unit: string }[]>>(new Map());
 
     const [scanCount, setScanCount] = useState(0);
     const [scannedCodes] = useState<Set<string>>(new Set());
@@ -503,7 +511,12 @@ export default function OrderPickingPage() {
                             merged.set(tracking, []);
                             newOrderCount++;
                         }
-                        merged.get(tracking)!.push(item);
+                        // Bỏ qua dòng trùng tracking + SKU (Shopee xuất 2 dòng/SP)
+                        const existingItems = merged.get(tracking)!;
+                        const isDuplicate = existingItems.some(existing => existing.sku === item.sku);
+                        if (!isDuplicate) {
+                            existingItems.push(item);
+                        }
                     }
 
                     console.log(`📦 [${colMap.platform}] ${newOrderCount} đơn mới → Tổng map: ${merged.size}`);
@@ -778,7 +791,7 @@ export default function OrderPickingPage() {
                         type="primary"
                         icon={<ScanOutlined />}
                         onClick={handleScan}
-                        style={{ height: 44, paddingInline: 20, fontWeight: 600 }}
+                        style={{ height: 44, paddingInline: 16, fontWeight: 600 }}
                     >
                         Tra cứu
                     </Button>
@@ -789,6 +802,24 @@ export default function OrderPickingPage() {
                     <div className="picking-scan-count">
                         <strong>{scanCount}</strong> đơn
                     </div>
+                )}
+
+                {/* Nút Hoàn tất - icon compact */}
+                {accumulatedPickList.length > 0 && (
+                    <Button
+                        onClick={handleCompletePicking}
+                        className="picking-complete-btn"
+                        style={{
+                            height: 44, padding: '0 14px',
+                            background: '#ff4d4f', borderColor: '#ff4d4f',
+                            color: '#fff', fontSize: 14, fontWeight: 700,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            gap: 6, borderRadius: 8, flexShrink: 0
+                        }}
+                        title="Hoàn tất nhặt hàng (Enter)"
+                    >
+                        <EnterOutlined /> Enter
+                    </Button>
                 )}
             </div>
 
@@ -805,27 +836,7 @@ export default function OrderPickingPage() {
             <div className="picking-list-area">
                 {accumulatedPickList.length > 0 ? (
                     <>
-                        <div className="picking-list-header">
-                            <h3>
-                                <span style={{ color: '#00ab56' }}>📋</span> Tổng hợp nhặt hàng
-                            </h3>
-                            <div className="picking-header-right">
-                                <Text type="secondary" style={{ fontSize: 12 }}>
-                                    {scanCount} đơn • {accumulatedPickList.length} loại • {grandTotalPieces} chiếc
-                                </Text>
-                                <Button
-                                    danger
-                                    type="primary"
-                                    size="large"
-                                    icon={<DeleteOutlined />}
-                                    onClick={handleCompletePicking}
-                                    className="picking-complete-btn"
-                                    style={{ fontWeight: 700, fontSize: 16, height: 44, paddingInline: 24 }}
-                                >
-                                    ⏎ Hoàn tất nhặt hàng
-                                </Button>
-                            </div>
-                        </div>
+
 
                         {/* Scanned tracking tags */}
                         {scannedTrackings.length > 0 && (
@@ -842,6 +853,7 @@ export default function OrderPickingPage() {
                         <div className="picking-table">
                             <div className="picking-table-header">
                                 <span>Sản phẩm</span>
+                                <span style={{ textAlign: 'center' }}>ĐVT</span>
                                 <span style={{ textAlign: 'center' }}>Số lượng</span>
                             </div>
 
@@ -869,9 +881,12 @@ export default function OrderPickingPage() {
                                             ).join(' • ')}
                                         </div>
                                     </div>
+                                    <div style={{ textAlign: 'center', fontWeight: 600, fontSize: 13, color: '#595959' }}>
+                                        {group.unit}
+                                    </div>
                                     <div>
                                         <div className="picking-row-qty">{group.totalPieces}</div>
-                                        <span className="picking-row-qty-unit">chiếc</span>
+                                        <span className="picking-row-qty-unit">{group.unit}</span>
                                     </div>
                                 </div>
                             ))}
