@@ -40,7 +40,6 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     admin: ['all'], // Admin has all permissions
 
     manager: [
-        'dashboard',
         'pos',
         'orders',
         'products.view',
@@ -73,7 +72,6 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     ],
 
     staff: [
-        'dashboard',
         'pos',
         'orders',
         'products.view',
@@ -93,7 +91,6 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     ],
 
     viewer: [
-        'dashboard',
         'products.view',
         'purchase.view',
         'export.view',

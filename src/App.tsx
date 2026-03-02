@@ -23,6 +23,7 @@ import {
     CheckCircleOutlined,
     AppstoreOutlined,
     ShoppingOutlined,
+    OrderedListOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import viVN from 'antd/locale/vi_VN';
@@ -52,6 +53,7 @@ const EcommerceExportPage = lazy(() => import('./pages/EcommerceExport'));
 const POSPage = lazy(() => import('./pages/POS'));
 const SalesHistoryPage = lazy(() => import('./pages/SalesHistory'));
 const OrderPickingPage = lazy(() => import('./pages/OrderPicking'));
+const OrdersPage = lazy(() => import('./pages/Orders'));
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -112,14 +114,13 @@ function AppContent() {
         }
 
         // BÁN HÀNG submenu
-        const salesChildren: MenuItem[] = [];
         if (accessibleKeys.includes('pos')) {
-            salesChildren.push(createMenuItem('Bán hàng (POS)', 'pos', <ShoppingCartOutlined />));
+            items.push(createMenuItem('Bán hàng (POS)', 'pos', <ShoppingCartOutlined />));
         }
-        salesChildren.push(createMenuItem('Lịch sử bán hàng', 'sales-history', <HistoryOutlined />));
-        if (salesChildren.length > 0) {
-            items.push(createMenuItem('Bán hàng', 'sales-menu', <ShoppingCartOutlined />, salesChildren));
-        }
+
+        // 📋 Đơn hàng - module độc lập
+        items.push(createMenuItem('Đơn hàng', 'orders', <OrderedListOutlined />));
+
         // Tools submenu
         const toolsChildren: MenuItem[] = [];
         if (accessibleKeys.includes('fee-calculator')) {
@@ -248,6 +249,8 @@ function AppContent() {
                 return <RefundsPage />;
             case 'ecommerce-export':
                 return <EcommerceExportPage />;
+            case 'orders':
+                return <OrdersPage />;
             case 'stock-balance':
                 return <StockBalancePage />;
             case 'daily-tasks':

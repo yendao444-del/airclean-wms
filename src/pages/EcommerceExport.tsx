@@ -1574,27 +1574,6 @@ Thời gian: ${currentTime}`;
                             }).length}
                         </Tag>
                         <Tag
-                            onClick={() => setStatusFilter('completed')}
-                            style={{
-                                cursor: 'pointer',
-                                padding: '6px 14px',
-                                fontSize: 13,
-                                fontWeight: 600,
-                                borderRadius: 8,
-                                border: 'none',
-                                background: statusFilter === 'completed'
-                                    ? 'linear-gradient(135deg, #52c41a 0%, #73d13d 100%)'
-                                    : 'linear-gradient(135deg, #95de64 0%, #b7eb8f 100%)',
-                                color: '#fff',
-                                boxShadow: statusFilter === 'completed'
-                                    ? '0 2px 8px rgba(82, 196, 26, 0.4)'
-                                    : '0 1px 4px rgba(82, 196, 26, 0.2)',
-                                transition: 'all 0.3s',
-                            }}
-                        >
-                            ✅ Đã bàn giao cho ĐVVC: {ecommerceExports.filter(r => r.status === 'completed').length}
-                        </Tag>
-                        <Tag
                             onClick={() => setStatusFilter('all')}
                             style={{
                                 cursor: 'pointer',

@@ -1,4 +1,4 @@
-import { Card, Row, Col, Statistic, Typography, Spin, Tag, Table, Progress, Timeline, Divider } from 'antd';
+import { Card, Row, Col, Statistic, Typography, Spin, Tag, Table, Progress, Timeline, Divider, Select } from 'antd';
 import {
     DollarOutlined,
     ShoppingOutlined,
@@ -17,6 +17,7 @@ import {
 } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import dayjs from 'dayjs';
+import { useAuth } from '../contexts/AuthContext';
 
 const { Title, Text } = Typography;
 
@@ -54,6 +55,7 @@ interface DailyTask {
 }
 
 export default function DashboardPage() {
+    const { user } = useAuth();
     const [loading, setLoading] = useState(true);
     const [products, setProducts] = useState<Product[]>([]);
     const [exports, setExports] = useState<ExportOrder[]>([]);
@@ -63,6 +65,7 @@ export default function DashboardPage() {
     const [refunds, setRefunds] = useState<Refund[]>([]);
     const [stockBalances, setStockBalances] = useState<StockBalanceRecord[]>([]);
     const [tasks, setTasks] = useState<DailyTask[]>([]);
+    const [topProductRange, setTopProductRange] = useState('today');
 
     useEffect(() => { loadAllData(); }, []);
 
@@ -95,23 +98,47 @@ export default function DashboardPage() {
         }
     };
 
-    // ===== COMPUTED DATA =====
+    // ===== DATE RANGE FILTER =====
     const today = dayjs().startOf('day');
     const yesterday = today.subtract(1, 'day');
-    const monthStart = today.startOf('month');
 
-    const isToday = (d: string) => dayjs(d).isSame(today, 'day');
-    const isYesterday = (d: string) => dayjs(d).isSame(yesterday, 'day');
+    const rangeLabels: Record<string, string> = {
+        today: 'Hôm nay', yesterday: 'Hôm qua',
+        '7days': '7 ngày qua', '30days': '30 ngày qua', month: 'Tháng này',
+    };
+    const rangeLabel = rangeLabels[topProductRange] || 'Hôm nay';
+
+    const inRange = (d: string) => {
+        const date = dayjs(d);
+        switch (topProductRange) {
+            case 'today': return date.isSame(today, 'day');
+            case 'yesterday': return date.isSame(yesterday, 'day');
+            case '7days': return date.isAfter(today.subtract(7, 'day'));
+            case '30days': return date.isAfter(today.subtract(30, 'day'));
+            case 'month': return date.isSame(dayjs(), 'month');
+            default: return date.isSame(today, 'day');
+        }
+    };
+    const inPrevRange = (d: string) => {
+        const date = dayjs(d);
+        switch (topProductRange) {
+            case 'today': return date.isSame(yesterday, 'day');
+            case 'yesterday': return date.isSame(today.subtract(2, 'day'), 'day');
+            case '7days': { const s = today.subtract(14, 'day'); const e = today.subtract(7, 'day'); return date.isAfter(s) && date.isBefore(e); }
+            case '30days': { const s = today.subtract(60, 'day'); const e = today.subtract(30, 'day'); return date.isAfter(s) && date.isBefore(e); }
+            case 'month': return date.isSame(dayjs().subtract(1, 'month'), 'month');
+            default: return date.isSame(yesterday, 'day');
+        }
+    };
     const isThisMonth = (d: string) => dayjs(d).isSame(dayjs(), 'month');
 
-    // Revenue
-    const todayExports = exports.filter(e => isToday(e.exportDate || e.createdAt));
-    const todayEcom = ecomExports.filter(e => isToday(e.ecommerceExportDate || e.createdAt));
-    const todayRevenue = todayExports.reduce((s, e) => s + (e.totalAmount || 0), 0) + todayEcom.reduce((s, e) => s + (e.totalAmount || 0), 0);
-    const yesterdayRevenue = exports.filter(e => isYesterday(e.exportDate || e.createdAt)).reduce((s, e) => s + (e.totalAmount || 0), 0) + ecomExports.filter(e => isYesterday(e.ecommerceExportDate || e.createdAt)).reduce((s, e) => s + (e.totalAmount || 0), 0);
-    const todayOrders = todayExports.length + todayEcom.length;
-    const yesterdayOrders = exports.filter(e => isYesterday(e.exportDate || e.createdAt)).length + ecomExports.filter(e => isYesterday(e.ecommerceExportDate || e.createdAt)).length;
-
+    // ===== COMPUTED DATA (filtered by range) =====
+    const filteredExports = exports.filter(e => inRange(e.exportDate || e.createdAt));
+    const filteredEcom = ecomExports.filter(e => inRange(e.ecommerceExportDate || e.createdAt));
+    const filteredRevenue = filteredExports.reduce((s, e) => s + (e.totalAmount || 0), 0) + filteredEcom.reduce((s, e) => s + (e.totalAmount || 0), 0);
+    const prevRevenue = exports.filter(e => inPrevRange(e.exportDate || e.createdAt)).reduce((s, e) => s + (e.totalAmount || 0), 0) + ecomExports.filter(e => inPrevRange(e.ecommerceExportDate || e.createdAt)).reduce((s, e) => s + (e.totalAmount || 0), 0);
+    const filteredOrders = filteredExports.length + filteredEcom.length;
+    const prevOrders = exports.filter(e => inPrevRange(e.exportDate || e.createdAt)).length + ecomExports.filter(e => inPrevRange(e.ecommerceExportDate || e.createdAt)).length;
 
     // Inventory
     const totalStock = products.reduce((s, p) => {
@@ -137,11 +164,11 @@ export default function DashboardPage() {
     const monthPurchases = purchases.filter(p => isThisMonth(p.purchaseDate || p.createdAt)).reduce((s, p) => s + (p.totalAmount || 0), 0);
     const monthProfit = monthRevenue - monthPurchases;
 
-    // Today purchases & ecom
-    const todayPurchases = purchases.filter(p => isToday(p.purchaseDate || p.createdAt));
-    const todayPurchaseAmount = todayPurchases.reduce((s, p) => s + (p.totalAmount || 0), 0);
+    // Purchases filtered
+    const filteredPurchases = purchases.filter(p => inRange(p.purchaseDate || p.createdAt));
+    const filteredPurchaseAmount = filteredPurchases.reduce((s, p) => s + (p.totalAmount || 0), 0);
 
-    // Daily Tasks - Công việc hàng ngày (hiển thị tất cả vì là task lặp lại)
+    // Daily Tasks
     const todayTasks = tasks;
     const completedTasks = todayTasks.filter(t => t.status === 'completed');
 
@@ -150,8 +177,16 @@ export default function DashboardPage() {
 
     // Percent change
     const pctChange = (cur: number, prev: number) => { if (prev === 0) return cur > 0 ? 100 : 0; return +((cur - prev) / prev * 100).toFixed(1); };
-    const revChange = pctChange(todayRevenue, yesterdayRevenue);
-    const ordChange = pctChange(todayOrders, yesterdayOrders);
+    const revChange = pctChange(filteredRevenue, prevRevenue);
+    const ordChange = pctChange(filteredOrders, prevOrders);
+
+    // Backward compat aliases
+    const todayExports = filteredExports;
+    const todayEcom = filteredEcom;
+    const todayRevenue = filteredRevenue;
+    const todayOrders = filteredOrders;
+    const todayPurchases = filteredPurchases;
+    const todayPurchaseAmount = filteredPurchaseAmount;
 
     // 7-day data for chart
     const last7 = Array.from({ length: 7 }, (_, i) => today.subtract(6 - i, 'day'));
@@ -171,6 +206,16 @@ export default function DashboardPage() {
         return (<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '400px' }}><Spin size="large" tip="Đang tải dữ liệu..." /></div>);
     }
 
+    if (user?.role !== 'admin') {
+        return (
+            <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', minHeight: '400px', gap: 16 }}>
+                <WarningOutlined style={{ fontSize: 48, color: '#faad14' }} />
+                <Title level={4} style={{ margin: 0, color: '#595959' }}>Không có quyền truy cập</Title>
+                <Text type="secondary">Chỉ tài khoản Admin mới được xem trang Tổng quan.</Text>
+            </div>
+        );
+    }
+
     // ===== CARD STYLES =====
     const cardStyle = (bg: string, shadow: string): React.CSSProperties => ({
         background: bg, borderRadius: 14, boxShadow: `0 4px 14px ${shadow}`,
@@ -179,28 +224,42 @@ export default function DashboardPage() {
 
     return (
         <div style={{ maxWidth: 1440 }}>
-            <Title level={3} style={{ marginBottom: 20, color: '#1a1a2e', display: 'flex', alignItems: 'center', gap: 8 }}>
-                📊 Tổng quan
-                <Text style={{ fontSize: 12, color: '#8c8c8c', marginLeft: 8 }}>
-                    {dayjs().format('DD/MM/YYYY • HH:mm')}
-                </Text>
-            </Title>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+                <Title level={3} style={{ margin: 0, color: '#1a1a2e', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    📊 Tổng quan
+                    <Text style={{ fontSize: 12, color: '#8c8c8c', marginLeft: 8 }}>
+                        {dayjs().format('DD/MM/YYYY • HH:mm')}
+                    </Text>
+                </Title>
+                <Select
+                    value={topProductRange}
+                    onChange={setTopProductRange}
+                    style={{ width: 150 }}
+                    options={[
+                        { value: 'today', label: '📅 Hôm nay' },
+                        { value: 'yesterday', label: '📅 Hôm qua' },
+                        { value: '7days', label: '📆 7 ngày qua' },
+                        { value: '30days', label: '📆 30 ngày qua' },
+                        { value: 'month', label: '📆 Tháng này' },
+                    ]}
+                />
+            </div>
 
             {/* ===== ROW 1: 4 MAIN STAT CARDS ===== */}
             <Row gutter={[14, 14]}>
                 <Col xs={24} sm={12} lg={6}>
                     <Card bordered={false} style={cardStyle('linear-gradient(135deg, #00ab56, #00d66c)', 'rgba(0,171,86,0.2)')}>
-                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>💰 Doanh thu hôm nay</span>}
+                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>💰 Doanh thu {rangeLabel.toLowerCase()}</span>}
                             value={todayRevenue} precision={0} suffix="đ"
                             valueStyle={{ color: '#fff', fontSize: 24, fontWeight: 800 }} />
                         <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
-                            {revChange >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />} {Math.abs(revChange)}% so với hôm qua
+                            {revChange >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />} {Math.abs(revChange)}% so với kỳ trước
                         </div>
                     </Card>
                 </Col>
                 <Col xs={24} sm={12} lg={6}>
                     <Card bordered={false} style={cardStyle('linear-gradient(135deg, #1890ff, #36cfc9)', 'rgba(24,144,255,0.2)')}>
-                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>📦 Đơn hàng hôm nay</span>}
+                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>📦 Đơn hàng {rangeLabel.toLowerCase()}</span>}
                             value={todayOrders} suffix="đơn"
                             valueStyle={{ color: '#fff', fontSize: 24, fontWeight: 800 }} />
                         <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
@@ -234,7 +293,7 @@ export default function DashboardPage() {
             <Row gutter={[14, 14]} style={{ marginTop: 14 }}>
                 <Col xs={24} sm={12} lg={6}>
                     <Card bordered={false} style={cardStyle('linear-gradient(135deg, #13c2c2, #87e8de)', 'rgba(19,194,194,0.2)')}>
-                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>📥 Nhập hàng hôm nay</span>}
+                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>📥 Nhập hàng {rangeLabel.toLowerCase()}</span>}
                             value={todayPurchases.length} suffix="phiếu" prefix={<ImportOutlined />}
                             valueStyle={{ color: '#fff', fontSize: 24, fontWeight: 800 }} />
                         <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
@@ -244,7 +303,7 @@ export default function DashboardPage() {
                 </Col>
                 <Col xs={24} sm={12} lg={6}>
                     <Card bordered={false} style={cardStyle('linear-gradient(135deg, #eb2f96, #ff85c0)', 'rgba(235,47,150,0.2)')}>
-                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>🚀 TMDT hôm nay</span>}
+                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>🚀 TMDT {rangeLabel.toLowerCase()}</span>}
                             value={todayEcom.length} suffix="đơn" prefix={<RocketOutlined />}
                             valueStyle={{ color: '#fff', fontSize: 24, fontWeight: 800 }} />
                         <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
@@ -254,7 +313,7 @@ export default function DashboardPage() {
                 </Col>
                 <Col xs={24} sm={12} lg={6}>
                     <Card bordered={false} style={cardStyle('linear-gradient(135deg, #faad14, #ffd666)', 'rgba(250,173,20,0.2)')}>
-                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>✅ Công việc hôm nay</span>}
+                        <Statistic title={<span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600, fontSize: 12 }}>✅ Công việc hàng ngày</span>}
                             value={`${completedTasks.length}/${todayTasks.length}`} suffix="xong" prefix={<CheckCircleOutlined />}
                             valueStyle={{ color: '#fff', fontSize: 24, fontWeight: 800 }} />
                         <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
@@ -352,6 +411,78 @@ export default function DashboardPage() {
                     </Card>
                 </Col>
             </Row>
+
+            {/* ===== ROW 4.5: TOP SẢN PHẨM BÁN CHẠY ===== */}
+            {(() => {
+                const parseItems = (itemsJson: string) => {
+                    try { return JSON.parse(itemsJson || '[]'); } catch { return []; }
+                };
+                const productSales = new Map<string, { name: string; qty: number; revenue: number }>();
+                for (const ex of todayExports) {
+                    for (const it of parseItems(ex.items)) {
+                        const name = it.productName || it.name || 'Không rõ';
+                        const qty = it.quantity || 1;
+                        const rev = (it.price || 0) * qty;
+                        const cur = productSales.get(name) || { name, qty: 0, revenue: 0 };
+                        cur.qty += qty; cur.revenue += rev;
+                        productSales.set(name, cur);
+                    }
+                }
+                for (const ec of todayEcom) {
+                    for (const it of parseItems(ec.items)) {
+                        const name = it.productName || it.name || 'Không rõ';
+                        const qty = it.quantity || 1;
+                        const rev = (it.price || 0) * qty;
+                        const cur = productSales.get(name) || { name, qty: 0, revenue: 0 };
+                        cur.qty += qty; cur.revenue += rev;
+                        productSales.set(name, cur);
+                    }
+                }
+                const topProducts = Array.from(productSales.values()).sort((a, b) => b.qty - a.qty).slice(0, 10);
+                const maxQty = topProducts[0]?.qty || 1;
+                const medals = ['🥇', '🥈', '🥉'];
+                const totalSold = topProducts.reduce((s, p) => s + p.qty, 0);
+
+                return (
+                    <Card bordered={false} style={{ borderRadius: 14, marginTop: 14 }}
+                        title={<span style={{ fontSize: 14, fontWeight: 700 }}>🔥 Top sản phẩm bán chạy</span>}
+                        extra={<Tag color="red">{totalSold} SP</Tag>}>
+                        {topProducts.length > 0 ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                {topProducts.map((p, i) => (
+                                    <div key={p.name} style={{
+                                        display: 'grid', gridTemplateColumns: '28px 1fr 70px 100px',
+                                        alignItems: 'center', gap: 10, padding: '6px 0',
+                                        borderBottom: i < topProducts.length - 1 ? '1px solid #f5f5f5' : 'none'
+                                    }}>
+                                        <span style={{ fontSize: 16, textAlign: 'center' }}>
+                                            {i < 3 ? medals[i] : <span style={{ fontSize: 12, fontWeight: 700, color: '#8c8c8c' }}>{i + 1}</span>}
+                                        </span>
+                                        <div>
+                                            <div style={{ fontSize: 13, fontWeight: 600, color: '#262626', lineHeight: 1.3 }}>{p.name}</div>
+                                            <div style={{
+                                                height: 4, borderRadius: 2, marginTop: 3,
+                                                background: `linear-gradient(90deg, ${i === 0 ? '#ff4d4f' : i === 1 ? '#fa8c16' : i === 2 ? '#faad14' : '#00ab56'} ${(p.qty / maxQty) * 100}%, #f0f0f0 0%)`,
+                                            }} />
+                                        </div>
+                                        <div style={{ textAlign: 'right' }}>
+                                            <span style={{ fontSize: 16, fontWeight: 800, color: i < 3 ? '#ff4d4f' : '#00ab56' }}>{p.qty}</span>
+                                            <span style={{ fontSize: 10, color: '#8c8c8c', marginLeft: 2 }}>SP</span>
+                                        </div>
+                                        <div style={{ textAlign: 'right', fontSize: 11, fontWeight: 600, color: '#595959' }}>
+                                            {fmt(p.revenue)}đ
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <div style={{ textAlign: 'center', padding: 30, color: '#8c8c8c' }}>
+                                📭 Chưa có đơn hàng nào trong {rangeLabel.toLowerCase()}
+                            </div>
+                        )}
+                    </Card>
+                );
+            })()}
 
             {/* ===== ROW 5: NHẬP HÀNG + XUẤT HÀNG ===== */}
             <Row gutter={[14, 14]} style={{ marginTop: 14 }}>

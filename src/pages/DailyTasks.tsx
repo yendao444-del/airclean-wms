@@ -33,6 +33,7 @@ import {
     DeleteOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import { useAuth } from '../contexts/AuthContext';
 import './DailyTasks.css';
 
 
@@ -93,6 +94,8 @@ const GRADIENT_PRESETS = [
 ];
 
 const DailyTasks = () => {
+    const { user } = useAuth();
+    const isAdmin = user?.role === 'admin';
     const [tasks, setTasks] = useState<Task[]>([]);
     const [categories, setCategories] = useState(CATEGORIES);
     const [editingCategory, setEditingCategory] = useState<any>(null);
@@ -223,32 +226,176 @@ const DailyTasks = () => {
         return `${d} ngày ${h % 24}h`;
     };
 
-    // Countdown timer - update every 30 seconds
+    // === AUDIO ALERT SYSTEM (ESCALATING) ===
+    const [acknowledgedTasks, setAcknowledgedTasks] = useState<Set<number>>(() => new Set());
+    const lastOverdueAlertRef = useState<Map<number, number>>(() => new Map())[0];
+
+    // Tạo WAV beep trực tiếp từ PCM data
+    const generateBeepWav = (freq: number, durationMs: number, volume = 0.4): string => {
+        const sampleRate = 22050;
+        const numSamples = Math.floor(sampleRate * durationMs / 1000);
+        const buffer = new ArrayBuffer(44 + numSamples * 2);
+        const view = new DataView(buffer);
+        const writeStr = (offset: number, str: string) => {
+            for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+        };
+        writeStr(0, 'RIFF');
+        view.setUint32(4, 36 + numSamples * 2, true);
+        writeStr(8, 'WAVE');
+        writeStr(12, 'fmt ');
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, 1, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * 2, true);
+        view.setUint16(32, 2, true);
+        view.setUint16(34, 16, true);
+        writeStr(36, 'data');
+        view.setUint32(40, numSamples * 2, true);
+        for (let i = 0; i < numSamples; i++) {
+            const t = i / sampleRate;
+            const fadeOut = 1 - (i / numSamples);
+            const sample = Math.sin(2 * Math.PI * freq * t) * volume * fadeOut;
+            view.setInt16(44 + i * 2, Math.max(-32768, Math.min(32767, sample * 32767)), true);
+        }
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        return 'data:audio/wav;base64,' + btoa(binary);
+    };
+
+    const playBeeps = (count: number, freq = 880, urgent = false) => {
+        try {
+            const f = urgent ? 1100 : freq;
+            const dur = urgent ? 150 : 300;
+            const gap = urgent ? 200 : 400;
+            for (let i = 0; i < count; i++) {
+                setTimeout(() => {
+                    const audio = new Audio(generateBeepWav(f, dur, urgent ? 0.5 : 0.35));
+                    audio.play().catch(() => { });
+                }, i * gap);
+            }
+        } catch (err) {
+            console.warn('Audio alert failed:', err);
+        }
+    };
+
+    // Xác nhận "Đang làm" - dừng kêu cho task ≤10p
+    const handleAcknowledgeTask = (taskId: number) => {
+        setAcknowledgedTasks(prev => {
+            const next = new Set(prev);
+            next.add(taskId);
+            return next;
+        });
+        message.success({ content: '✅ Đã xác nhận đang làm!', duration: 2 });
+    };
+
+    // Countdown timer - update every 30 seconds (UI + popup messages)
     useEffect(() => {
         const interval = setInterval(() => {
             forceUpdate(v => v + 1);
-            // Check for deadline warnings & send desktop notifications
-            const assignmentTasks = tasks.filter(t => t.type === 'assignment' && t.status !== 'completed');
-            assignmentTasks.forEach(task => {
-                const ds = getDeadlineStatus(task);
-                if (ds.status === 'overdue' || ds.status === 'warning') {
-                    // Desktop notification
-                    if (Notification.permission === 'granted') {
-                        new Notification(
-                            ds.status === 'overdue' ? `⛔ QUÁ HẠN: ${task.title}` : `⚠️ SẮP ĐẾN HẠN: ${task.title}`,
-                            {
-                                body: `Người thực hiện: ${task.assignee}\nDeadline: ${task.dueDate} ${task.dueTime}\n${ds.label}`,
-                                icon: ds.status === 'overdue' ? '🔴' : '🟡',
-                                tag: `task-${task.id}`, // Prevent duplicate notifications
-                                silent: false
-                            }
-                        );
+
+            const pendingAssignments = tasks.filter(t => t.type === 'assignment' && t.status !== 'completed');
+            const now = dayjs();
+
+            pendingAssignments.forEach(task => {
+                const deadline = dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm');
+                const diffMinutes = deadline.diff(now, 'minute');
+
+                // === QUÁ HẠN ===
+                if (diffMinutes < 0) {
+                    const overdueMin = Math.abs(diffMinutes);
+
+                    // Quá 24h → bỏ qua
+                    if (overdueMin >= 1440) return;
+
+                    // Chỉ nhắc 1 lần khi quá hạn 10 phút
+                    const alreadyAlerted = lastOverdueAlertRef.get(task.id);
+                    if (!alreadyAlerted && overdueMin >= 10) {
+                        lastOverdueAlertRef.set(task.id, Date.now());
+                        playBeeps(8, 1100, true);
+                        message.error({
+                            content: `⛔ Bàn giao "${task.title}" quá hạn ${formatTimeDiff(overdueMin)}! (${task.assignee})`,
+                            duration: 10,
+                            key: `overdue-${task.id}`,
+                        });
+                        if (Notification.permission === 'granted') {
+                            new Notification(`⛔ QUÁ HẠN: ${task.title}`, {
+                                body: `Quá hạn ${formatTimeDiff(overdueMin)}!\nNgười thực hiện: ${task.assignee}`,
+                                tag: `overdue-${task.id}`,
+                            });
+                        }
                     }
+                    return;
+                }
+
+                // === CÒN ≤ 10 PHÚT: popup (âm thanh xử lý ở interval riêng) ===
+                if (diffMinutes <= 10) {
+                    if (!acknowledgedTasks.has(task.id)) {
+                        message.warning({
+                            content: `🚨 Bàn giao "${task.title}" chỉ còn ${diffMinutes} phút! (${task.assignee})`,
+                            duration: 8,
+                            key: `urgent-${task.id}`,
+                        });
+                    }
+                    return;
+                }
+
+                // === CÒN 10-20 PHÚT: 5 beep ===
+                if (diffMinutes <= 20) {
+                    playBeeps(5, 1000, false);
+                    message.warning({
+                        content: `🔥 Bàn giao "${task.title}" còn ${diffMinutes} phút! (${task.assignee})`,
+                        duration: 5,
+                        key: `warn-${task.id}`,
+                    });
+                    return;
+                }
+
+                // === CÒN 20-30 PHÚT: 2 beep ===
+                if (diffMinutes <= 30) {
+                    playBeeps(2, 880, false);
+                    message.warning({
+                        content: `⚠️ Bàn giao "${task.title}" còn ${diffMinutes} phút (${task.assignee})`,
+                        duration: 4,
+                        key: `warn-${task.id}`,
+                    });
+                    return;
+                }
+
+                // === CÒN 30-60 PHÚT: 1 beep nhẹ ===
+                if (diffMinutes <= 60) {
+                    playBeeps(1, 660, false);
+                    message.info({
+                        content: `🔔 Bàn giao "${task.title}" còn ${formatTimeDiff(diffMinutes)} (${task.assignee})`,
+                        duration: 3,
+                        key: `info-${task.id}`,
+                    });
+                    return;
                 }
             });
-        }, 30000); // Every 30 seconds
+        }, 30000);
         return () => clearInterval(interval);
-    }, [tasks]);
+    }, [tasks, acknowledgedTasks]);
+
+    // === CONTINUOUS ALARM: kêu liên tục mỗi 5 giây khi ≤ 10 phút ===
+    useEffect(() => {
+        const alarmInterval = setInterval(() => {
+            const now = dayjs();
+            const urgentTasks = tasks.filter(t => {
+                if (t.type !== 'assignment' || t.status === 'completed') return false;
+                if (acknowledgedTasks.has(t.id)) return false;
+                const deadline = dayjs(`${t.dueDate} ${t.dueTime}`, 'YYYY-MM-DD HH:mm');
+                const diff = deadline.diff(now, 'minute');
+                return diff >= 0 && diff <= 10;
+            });
+
+            if (urgentTasks.length > 0) {
+                playBeeps(3, 1100, true);
+            }
+        }, 5000); // Mỗi 5 giây
+        return () => clearInterval(alarmInterval);
+    }, [tasks, acknowledgedTasks]);
 
     // Request notification permission on mount
     useEffect(() => {
@@ -1397,16 +1544,35 @@ const DailyTasks = () => {
                                                         {ds.label}
                                                     </div>
                                                     <Space size={2}>
+                                                        {/* Nút "Đang làm" - chỉ hiện khi ≤10p và chưa acknowledged */}
+                                                        {!isCompleted && (() => {
+                                                            const deadline = dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm');
+                                                            const remaining = deadline.diff(dayjs(), 'minute');
+                                                            return remaining <= 10 && remaining >= 0 && !acknowledgedTasks.has(task.id);
+                                                        })() && (
+                                                                <Button type="primary" size="small" onClick={() => handleAcknowledgeTask(task.id)}
+                                                                    style={{
+                                                                        borderRadius: 6, background: '#fa8c16', border: 'none',
+                                                                        fontWeight: 700, fontSize: 12,
+                                                                        animation: 'pulse 1s infinite',
+                                                                    }}>
+                                                                    🔔 Đang làm
+                                                                </Button>
+                                                            )}
                                                         {!isCompleted && (
                                                             <Button type="primary" size="small" onClick={() => handleCompleteAssignment(task.id)}
                                                                 style={{ borderRadius: 6, background: '#52c41a', border: 'none', fontWeight: 600, fontSize: 12 }}>
                                                                 ✅ Xong
                                                             </Button>
                                                         )}
-                                                        <Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditAssignment(task)}
-                                                            style={{ color: '#1890ff', padding: '0 4px' }} />
-                                                        <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteAssignment(task.id)}
-                                                            style={{ padding: '0 4px' }} />
+                                                        {isAdmin && (
+                                                            <Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditAssignment(task)}
+                                                                style={{ color: '#1890ff', padding: '0 4px' }} />
+                                                        )}
+                                                        {isAdmin && (
+                                                            <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteAssignment(task.id)}
+                                                                style={{ padding: '0 4px' }} />
+                                                        )}
                                                     </Space>
                                                 </div>
                                             </div>

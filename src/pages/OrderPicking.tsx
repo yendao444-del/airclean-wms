@@ -321,59 +321,88 @@ const TIKTOK_MAPPING: ColumnMapping = {
 };
 
 /**
- * Detect platform từ filename trước, fallback header detection
+ * Detect platform từ CẤU TRÚC CỘT thực tế của file Excel.
+ * - Cột AI (index 34) có mã vận đơn → TikTok
+ * - Cột G (index 6) có mã vận đơn → Shopee
  */
-function detectColumnMapping(fileName: string, headerRow: any[]): ColumnMapping {
-    const lowerName = fileName.toLowerCase();
+function detectColumnMapping(fileName: string, rows: any[][]): ColumnMapping {
+    const headerRow = rows[0] || [];
+    const headers = headerRow.map((h: any) => String(h || '').toLowerCase().trim());
+    const sampleRows = rows.slice(1, 6); // Lấy 5 dòng dữ liệu đầu để kiểm tra
 
-    // 1. Ưu tiên detect từ filename
-    if (lowerName.includes('shopee')) {
-        console.log(`📊 [${fileName}] → Shopee (detected from filename)`);
+    const trackingKeywords = ['mã vận đơn', 'tracking', 'mã vận chuyển', 'tracking id', 'số vận đơn'];
+    const isTrackingHeader = (header: string) =>
+        header.length > 0 && trackingKeywords.some(kw => header.includes(kw));
+
+    // === 1. Kiểm tra HEADER tại vị trí cột cụ thể ===
+
+    // Cột AI (index 34) có header tracking → TikTok
+    if (headers.length > 34 && isTrackingHeader(headers[34])) {
+        console.log(`📊 [${fileName}] → TikTok (tracking header tại cột AI)`);
+        return buildTikTokMapping(headers);
+    }
+
+    // Cột G (index 6) có header tracking → Shopee
+    if (headers.length > 6 && isTrackingHeader(headers[6])) {
+        console.log(`📊 [${fileName}] → Shopee (tracking header tại cột G)`);
         return { ...SHOPEE_MAPPING };
     }
-    if (lowerName.includes('tiktok') || lowerName.includes('tik tok') || lowerName.includes('tt_')) {
-        console.log(`📊 [${fileName}] → TikTok (detected from filename)`);
-        // Bổ sung detect thêm các cột còn thiếu từ header
-        const enhanced = { ...TIKTOK_MAPPING };
-        if (headerRow) {
-            const headers = headerRow.map((h: any) => String(h || '').toLowerCase().trim());
-            for (let i = 0; i < headers.length; i++) {
-                const h = headers[i];
-                if (enhanced.productName === -1 && (h.includes('tên sản phẩm') || h.includes('product name'))) {
-                    enhanced.productName = i;
-                }
-                if (enhanced.variantName === -1 && (h.includes('phân loại') || h.includes('variant') || h.includes('variation'))) {
-                    enhanced.variantName = i;
-                }
-                if (enhanced.quantity === -1 && (h.includes('số lượng') || h.includes('quantity') || h === 'qty')) {
-                    enhanced.quantity = i;
-                }
-            }
+
+    // === 2. Kiểm tra DỮ LIỆU thực tế tại các cột ===
+
+    // Check cột AI (34) có dữ liệu giống mã vận đơn không
+    const colAISamples = sampleRows
+        .map(r => String(r?.[34] || '').trim())
+        .filter(v => v.length > 0);
+
+    if (colAISamples.length > 0) {
+        // TikTok tracking: chuỗi số dài hoặc bắt đầu bằng TTVN
+        const looksLikeTracking = colAISamples.some(v =>
+            v.length > 8 && (/^\d+$/.test(v) || /^TTVN/i.test(v))
+        );
+        if (looksLikeTracking) {
+            console.log(`📊 [${fileName}] → TikTok (tracking data tại cột AI, mẫu: ${colAISamples[0]})`);
+            return buildTikTokMapping(headers);
         }
-        return enhanced;
     }
 
-    // 2. Fallback: detect từ header content
-    if (headerRow && headerRow.length > 0) {
-        const headers = headerRow.map((h: any) => String(h || '').toLowerCase().trim());
-        const headerStr = headers.join(' ');
+    // Check cột G (6) có dữ liệu giống mã vận đơn Shopee không
+    const colGSamples = sampleRows
+        .map(r => String(r?.[6] || '').trim())
+        .filter(v => v.length > 0);
 
-        // Check header content cho Shopee
-        if (headerStr.includes('mã đơn hàng') || headerStr.includes('shopee')) {
-            console.log(`📊 [${fileName}] → Shopee (detected from header)`);
+    if (colGSamples.length > 0) {
+        // Shopee tracking: SPXVN..., VN..., hoặc mã chữ+số dài
+        const looksLikeShopeeTracking = colGSamples.some(v =>
+            /^SPXVN/i.test(v) || /^VN\d/i.test(v) || (v.length > 10 && /^[A-Z]{2,}\d+/.test(v))
+        );
+        if (looksLikeShopeeTracking) {
+            console.log(`📊 [${fileName}] → Shopee (tracking data tại cột G, mẫu: ${colGSamples[0]})`);
             return { ...SHOPEE_MAPPING };
         }
-
-        // Check header content cho TikTok
-        if (headerStr.includes('tiktok') || headerStr.includes('tik tok')) {
-            console.log(`📊 [${fileName}] → TikTok (detected from header)`);
-            return { ...TIKTOK_MAPPING };
-        }
     }
 
-    // 3. Default: coi là Shopee
+    // === 3. Default fallback → Shopee ===
     console.log(`📊 [${fileName}] → Shopee (default fallback)`);
     return { ...SHOPEE_MAPPING };
+}
+
+/** Build TikTok mapping với auto-detect các cột productName, variantName từ header */
+function buildTikTokMapping(headers: string[]): ColumnMapping {
+    const enhanced = { ...TIKTOK_MAPPING };
+    for (let i = 0; i < headers.length; i++) {
+        const h = headers[i];
+        if (enhanced.productName === -1 && (h.includes('tên sản phẩm') || h.includes('product name'))) {
+            enhanced.productName = i;
+        }
+        if (enhanced.variantName === -1 && (h.includes('phân loại') || h.includes('variant') || h.includes('variation'))) {
+            enhanced.variantName = i;
+        }
+        if (enhanced.quantity === -1 && (h.includes('số lượng') || h.includes('quantity') || h === 'qty')) {
+            enhanced.quantity = i;
+        }
+    }
+    return enhanced;
 }
 
 // ===== COMPONENT =====
@@ -476,8 +505,8 @@ export default function OrderPickingPage() {
                     return;
                 }
 
-                // Auto-detect column mapping từ filename + header
-                const colMap = detectColumnMapping(file.name, rows[0]);
+                // Auto-detect column mapping từ cấu trúc cột thực tế
+                const colMap = detectColumnMapping(file.name, rows);
 
                 console.log(`📊 [${file.name}] Platform: ${colMap.platform}`);
                 console.log(`   Tracking col: ${colMap.tracking}, SKU col: ${colMap.sku}, Product col: ${colMap.productName}, Qty col: ${colMap.quantity}`);

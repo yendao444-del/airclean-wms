@@ -12,7 +12,7 @@ interface User {
 interface AuthContextType {
     user: User | null;
     isAuthenticated: boolean;
-    login: (username: string, password: string) => Promise<boolean>;
+    login: (username: string, password: string, rememberMe?: boolean) => Promise<boolean>;
     logout: () => void;
 }
 
@@ -21,7 +21,6 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export function AuthProvider({ children }: { children: ReactNode }) {
     const [user, setUser] = useState<User | null>(null);
 
-    // Helper function to ensure admin user exists
     const ensureAdminExists = async () => {
         try {
             await window.electronAPI.users.ensureAdmin();
@@ -32,17 +31,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     useEffect(() => {
-        // Always ensure admin exists on app startup
         ensureAdminExists();
 
-        // Check if user is already logged in (session-based)
+        // 1. Check localStorage first (remember me)
+        const rememberedUser = localStorage.getItem('rememberedUser');
+        if (rememberedUser) {
+            try {
+                const parsed = JSON.parse(rememberedUser);
+                setUser(parsed);
+                sessionStorage.setItem('currentUser', rememberedUser);
+                console.log('✅ Auto-login từ phiên ghi nhớ:', parsed.username);
+                return;
+            } catch { }
+        }
+
+        // 2. Fallback to sessionStorage
         const sessionUser = sessionStorage.getItem('currentUser');
         if (sessionUser) {
             setUser(JSON.parse(sessionUser));
         }
     }, []);
 
-    const login = async (username: string, password: string): Promise<boolean> => {
+    const login = async (username: string, password: string, rememberMe = false): Promise<boolean> => {
         try {
             const result = await window.electronAPI.users.login(username, password);
 
@@ -51,12 +61,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
 
             const foundUser = result.data;
-
-            // Remove password before saving to session
             const { password: _, ...userWithoutPassword } = foundUser;
 
             // Save to session
             sessionStorage.setItem('currentUser', JSON.stringify(userWithoutPassword));
+
+            // Save to localStorage if "remember me"
+            if (rememberMe) {
+                localStorage.setItem('rememberedUser', JSON.stringify(userWithoutPassword));
+            }
+
             setUser(userWithoutPassword);
             return true;
         } catch (error) {
@@ -67,6 +81,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const logout = () => {
         sessionStorage.removeItem('currentUser');
+        localStorage.removeItem('rememberedUser');
         setUser(null);
     };
 
