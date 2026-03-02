@@ -781,6 +781,196 @@ async function updateSingleProductStock(sku, quantity, isAdd) {
 }
 
 // ========================================
+// POS ORDER - BÁN HÀNG TẠI QUẦY
+// ========================================
+
+// Tạo đơn hàng POS (thanh toán)
+ipcMain.handle('posOrder:create', async (event, data) => {
+    try {
+        if (!prisma) throw new Error('Database chưa được khởi tạo.');
+        console.log('💰 [POS] Creating order...', JSON.stringify(data, null, 2));
+
+        // 1. Generate order number: POS-YYYYMMDD-XXX (unique)
+        const today = new Date();
+        const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
+        const prefix = `POS-${dateStr}-`;
+
+        // Find the highest existing order number for today
+        const lastOrder = await prisma.order.findFirst({
+            where: {
+                orderNumber: { startsWith: prefix }
+            },
+            orderBy: { orderNumber: 'desc' },
+            select: { orderNumber: true }
+        });
+
+        let nextNum = 1;
+        if (lastOrder && lastOrder.orderNumber) {
+            const lastNumStr = lastOrder.orderNumber.replace(prefix, '');
+            const lastNum = parseInt(lastNumStr, 10);
+            if (!isNaN(lastNum)) nextNum = lastNum + 1;
+        }
+        const orderNumber = `${prefix}${String(nextNum).padStart(3, '0')}`;
+
+        // 2. Calculate totals
+        const items = data.items || [];
+        const subtotal = items.reduce((sum, item) => sum + (item.price * item.qty), 0);
+        const totalCost = items.reduce((sum, item) => sum + (item.cost * item.qty), 0);
+        const discount = data.discount || 0;
+        const total = subtotal - discount;
+        const profit = total - totalCost;
+
+        // 3. Create Order + OrderItems + Payment in transaction
+        const order = await prisma.$transaction(async (tx) => {
+            // Create Order
+            const newOrder = await tx.order.create({
+                data: {
+                    orderNumber,
+                    customerId: data.customerId || null,
+                    source: 'pos',
+                    status: 'completed',
+                    paymentStatus: 'paid',
+                    paymentMethod: data.paymentMethod || 'cash',
+                    subtotal,
+                    discount,
+                    total,
+                    profit,
+                    note: data.note || null,
+                }
+            });
+
+            // Create OrderItems
+            for (const item of items) {
+                await tx.orderItem.create({
+                    data: {
+                        orderId: newOrder.id,
+                        productId: item.productId,
+                        sku: item.sku,
+                        productName: item.name,
+                        variant: item.variant || null,
+                        quantity: item.qty,
+                        price: item.price,
+                        cost: item.cost,
+                        subtotal: item.price * item.qty,
+                    }
+                });
+            }
+
+            // Create Payment
+            await tx.payment.create({
+                data: {
+                    orderId: newOrder.id,
+                    method: data.paymentMethod || 'cash',
+                    amount: data.paidAmount || total,
+                    note: data.paymentNote || null,
+                }
+            });
+
+            return newOrder;
+        });
+
+        // 4. Deduct stock for each item (outside transaction for flexibility)
+        for (const item of items) {
+            try {
+                await updateSingleProductStock(item.sku, item.qty, false);
+                console.log(`  ✅ Stock deducted: ${item.sku} × ${item.qty}`);
+            } catch (stockErr) {
+                console.error(`  ⚠️ Stock deduct failed for ${item.sku}:`, stockErr.message);
+            }
+        }
+
+        // 5. Activity Log
+        try {
+            await prisma.activityLog.create({
+                data: {
+                    module: 'sales',
+                    action: 'CREATE',
+                    description: `Bán hàng POS: ${orderNumber} - ${items.length} SP - ${new Intl.NumberFormat('vi-VN').format(total)}đ (${data.paymentMethod || 'cash'})`,
+                    userName: data.userName || 'System',
+                    severity: 'INFO',
+                    details: JSON.stringify({
+                        orderNumber,
+                        itemCount: items.length,
+                        total,
+                        profit,
+                        paymentMethod: data.paymentMethod,
+                    }),
+                }
+            });
+        } catch (logErr) {
+            console.error('  ⚠️ Activity log failed:', logErr.message);
+        }
+
+        console.log(`✅ [POS] Order created: ${orderNumber}, Total: ${total}`);
+        return { success: true, data: { ...order, orderNumber } };
+    } catch (error) {
+        console.error('❌ [POS] Create order error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
+// Lấy danh sách đơn hàng POS
+ipcMain.handle('posOrder:getAll', async (event, filters = {}) => {
+    try {
+        if (!prisma) throw new Error('Database chưa được khởi tạo.');
+
+        const where = { source: 'pos' };
+
+        // Filter by date
+        if (filters.startDate || filters.endDate) {
+            where.createdAt = {};
+            if (filters.startDate) where.createdAt.gte = new Date(filters.startDate);
+            if (filters.endDate) {
+                const end = new Date(filters.endDate);
+                end.setHours(23, 59, 59, 999);
+                where.createdAt.lte = end;
+            }
+        }
+
+        // Filter by payment method
+        if (filters.paymentMethod) {
+            where.paymentMethod = filters.paymentMethod;
+        }
+
+        // Filter by status
+        if (filters.status) {
+            where.status = filters.status;
+        }
+
+        const orders = await prisma.order.findMany({
+            where,
+            include: {
+                items: true,
+                payments: true,
+                customer: true,
+            },
+            orderBy: { createdAt: 'desc' },
+            take: filters.limit || 200,
+        });
+
+        console.log(`✅ [POS] Loaded ${orders.length} POS orders`);
+        return { success: true, data: orders };
+    } catch (error) {
+        console.error('❌ [POS] Get orders error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
+// Xem chi tiết đơn hàng POS
+ipcMain.handle('posOrder:getById', async (event, id) => {
+    try {
+        if (!prisma) throw new Error('Database chưa được khởi tạo.');
+        const order = await prisma.order.findUnique({
+            where: { id },
+            include: { items: true, payments: true, customer: true },
+        });
+        return { success: true, data: order };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// ========================================
 // ACTIVITY LOG HANDLERS
 // ========================================
 
@@ -2228,6 +2418,13 @@ ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
             updateData.attachments = JSON.stringify(updates.attachments);
         }
 
+        // Auto set completedAt khi status thay đổi
+        if (updates.status === 'completed' && !updates.completedAt) {
+            updateData.completedAt = new Date();
+        } else if (updates.status === 'pending') {
+            updateData.completedAt = null;
+        }
+
         const task = await prisma.dailyTask.update({
             where: { id },
             data: updateData
@@ -2349,9 +2546,10 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
             return { success: true, data: { reset: false, message: 'Đã reset hôm nay rồi' } };
         }
 
-        // Lấy danh sách task đã completed để lưu history trước khi reset
+        // Lấy danh sách task HÀNG NGÀY đã completed để lưu history trước khi reset
+        // Bàn giao (type: 'assignment') KHÔNG reset - chỉ reset daily tasks
         const completedTasks = await prisma.dailyTask.findMany({
-            where: { status: 'completed' }
+            where: { status: 'completed', type: 'daily' }
         });
 
         // Lưu vào history trước khi reset
@@ -2382,9 +2580,9 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
                 create: { key: 'dailyTasksHistory', value: JSON.stringify(updatedHistory) }
             });
 
-            // Reset tất cả completed tasks về pending
+            // Reset chỉ daily tasks completed về pending (không reset bàn giao)
             await prisma.dailyTask.updateMany({
-                where: { status: 'completed' },
+                where: { status: 'completed', type: 'daily' },
                 data: {
                     status: 'pending',
                     completedAt: null,
@@ -2395,9 +2593,10 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
             console.log(`✅ [DAILY RESET] Ngày ${today}: Reset ${completedTasks.length} tasks completed → pending`);
         }
 
-        // Cập nhật dueDate của TẤT CẢ task sang ngày hôm nay (giữ nguyên giờ)
+        // Cập nhật dueDate của chỉ DAILY tasks sang ngày hôm nay (giữ nguyên giờ)
         // Fix bug: task vẫn mang dueDate cũ → calendar hiển thị sai ngày hoàn thành
-        const allTasks = await prisma.dailyTask.findMany();
+        // Bàn giao (assignment) giữ nguyên deadline riêng, không cập nhật
+        const allTasks = await prisma.dailyTask.findMany({ where: { type: 'daily' } });
         for (const task of allTasks) {
             const oldDueDate = new Date(task.dueDate);
             const newDueDate = new Date(now);

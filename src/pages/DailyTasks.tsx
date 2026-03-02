@@ -36,6 +36,22 @@ import dayjs from 'dayjs';
 import './DailyTasks.css';
 
 
+interface ProcessLog {
+    timestamp: string; // DD/MM HH[h]mm
+    note: string;
+}
+
+const parseNotes = (note?: string): ProcessLog[] => {
+    if (!note) return [];
+    try {
+        const parsed = JSON.parse(note);
+        if (Array.isArray(parsed)) return parsed;
+        return [{ timestamp: '', note: String(parsed) }];
+    } catch {
+        return [{ timestamp: '', note }];
+    }
+};
+
 interface Task {
     id: number;
     title: string;
@@ -87,6 +103,10 @@ const DailyTasks = () => {
     const [taskModalVisible, setTaskModalVisible] = useState(false);
     const [taskForm] = Form.useForm();
     const [loading, setLoading] = useState(false);
+
+    // Quick note state for assignment cards
+    const [quickNotes, setQuickNotes] = useState<Record<number, string>>({});
+    const [showNoteInput, setShowNoteInput] = useState<Record<number, boolean>>({});
 
     // Assignee management
     const [assigneeList, setAssigneeList] = useState<string[]>([]);
@@ -320,9 +340,9 @@ const DailyTasks = () => {
 
     // Quick note for assignment
     const handleNoteAssignment = (task: Task) => {
-        let noteValue = task.note || '';
+        let noteValue = '';
         Modal.confirm({
-            title: '✏️ Ghi chú công việc',
+            title: '✏️ Thêm ghi chú',
             icon: null,
             width: 480,
             content: (
@@ -332,18 +352,29 @@ const DailyTasks = () => {
                     </p>
                     <TextArea
                         rows={4}
-                        defaultValue={noteValue}
                         placeholder="Nhập ghi chú tiến độ, lý do chưa xong..."
                         onChange={e => { noteValue = e.target.value; }}
                         style={{ fontSize: 14 }}
+                        autoFocus
                     />
                 </div>
             ),
             okText: 'Lưu ghi chú',
             cancelText: 'Hủy',
             onOk: async () => {
+                if (!noteValue.trim()) {
+                    message.warning('Vui lòng nhập nội dung ghi chú!');
+                    return Promise.reject();
+                }
                 try {
-                    await window.electronAPI.dailyTasks.update(task.id, { note: noteValue });
+                    const existing = parseNotes(task.note);
+                    const newLog: ProcessLog = {
+                        timestamp: dayjs().format('DD/MM HH[h]mm'),
+                        note: noteValue.trim()
+                    };
+                    await window.electronAPI.dailyTasks.update(task.id, {
+                        note: JSON.stringify([...existing, newLog])
+                    });
                     message.success('Đã lưu ghi chú!');
                     loadTasks();
                 } catch (e: any) {
@@ -351,6 +382,30 @@ const DailyTasks = () => {
                 }
             }
         });
+    };
+
+    const handleQuickAddNote = async (task: Task) => {
+        const noteText = (quickNotes[task.id] || '').trim();
+        if (!noteText) {
+            message.warning('Vui lòng nhập nội dung ghi chú!');
+            return;
+        }
+        try {
+            const existing = parseNotes(task.note);
+            const newLog: ProcessLog = {
+                timestamp: dayjs().format('DD/MM HH[h]mm'),
+                note: noteText
+            };
+            await window.electronAPI.dailyTasks.update(task.id, {
+                note: JSON.stringify([...existing, newLog])
+            });
+            message.success('Đã thêm ghi chú!');
+            setQuickNotes(prev => ({ ...prev, [task.id]: '' }));
+            setShowNoteInput(prev => ({ ...prev, [task.id]: false }));
+            loadTasks();
+        } catch (e: any) {
+            message.error('Lỗi: ' + e.message);
+        }
     };
 
     // Filter tasks by type
@@ -377,6 +432,7 @@ const DailyTasks = () => {
                 taskTitle: task.title,
                 category: task.category,
                 assignee: task.assignee,
+                verifier: task.verifier || '',
                 action,
                 timestamp: new Date().toISOString(),
                 description: `${action === 'completed' ? 'Đã hoàn thành' : 'Đã hủy hoàn thành'} công việc: "${task.title}"`
@@ -1247,16 +1303,24 @@ const DailyTasks = () => {
             {activeTab === 'assignments' && (
                 <div>
                     {/* Header */}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-                        <div>
-                            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: '#1a1a2e' }}>📌 Bàn giao công việc</h2>
-                            <p style={{ margin: '4px 0 0', color: '#888', fontSize: 13 }}>
-                                {pendingAssignments.length} đang thực hiện • {overdueAssignments.length > 0 && <span style={{ color: '#ff4d4f', fontWeight: 700 }}>⛔ {overdueAssignments.length} quá hạn</span>}
-                            </p>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                            <span style={{ fontSize: 13, color: '#555' }}>
+                                <span style={{ fontWeight: 600, color: '#1a1a2e' }}>{pendingAssignments.length}</span> đang thực hiện
+                            </span>
+                            {overdueAssignments.length > 0 && (
+                                <span style={{
+                                    background: '#fff1f0', color: '#ff4d4f',
+                                    border: '1px solid #ffccc7', borderRadius: 20,
+                                    padding: '2px 10px', fontSize: 12, fontWeight: 700
+                                }}>
+                                    ⛔ {overdueAssignments.length} quá hạn
+                                </span>
+                            )}
                         </div>
-                        <Button type="primary" icon={<PlusOutlined />} size="large" onClick={handleAddAssignment}
-                            style={{ height: 44, fontSize: 15, fontWeight: 'bold', borderRadius: 10, background: 'linear-gradient(135deg, #667eea, #764ba2)', border: 'none' }}>
-                            Giao việc mới
+                        <Button type="primary" icon={<PlusOutlined />} onClick={handleAddAssignment}
+                            style={{ fontWeight: 600, borderRadius: 8, background: 'linear-gradient(135deg, #667eea, #764ba2)', border: 'none' }}>
+                            + Giao việc mới
                         </Button>
                     </div>
 
@@ -1267,99 +1331,136 @@ const DailyTasks = () => {
                             <Button type="primary" icon={<PlusOutlined />} onClick={handleAddAssignment} style={{ marginTop: 16 }}>Giao việc đầu tiên</Button>
                         </Card>
                     ) : (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                             {assignmentTasks
                                 .sort((a, b) => {
-                                    // Overdue first, then warning, then normal, completed last
                                     const order: any = { overdue: 0, warning: 1, normal: 2, done: 3 };
                                     return (order[getDeadlineStatus(a).status] || 2) - (order[getDeadlineStatus(b).status] || 2);
                                 })
                                 .map(task => {
                                     const ds = getDeadlineStatus(task);
+                                    const notes = parseNotes(task.note);
+                                    const isCompleted = task.status === 'completed';
                                     return (
-                                        <Card key={task.id} bordered={false} style={{
-                                            borderRadius: 14,
-                                            border: `2px solid ${ds.border}`,
-                                            background: ds.bg,
-                                            boxShadow: ds.status === 'overdue' ? '0 4px 20px rgba(255,77,79,0.2)' : '0 2px 8px rgba(0,0,0,0.06)',
-                                            animation: ds.status === 'overdue' ? 'pulse-red 2s infinite' : undefined,
-                                            transition: 'all 0.3s',
+                                        <div key={task.id} style={{
+                                            borderRadius: 12,
+                                            background: isCompleted ? '#f6ffed' : '#fff',
+                                            border: `1px solid ${isCompleted ? '#b7eb8f' : ds.status === 'overdue' ? '#ffccc7' : ds.status === 'warning' ? '#ffe7ba' : '#e8e8e8'}`,
+                                            borderLeft: `4px solid ${ds.color}`,
+                                            boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
+                                            overflow: 'hidden',
                                         }}>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
-                                                {/* Left: Content */}
-                                                <div style={{ flex: 1 }}>
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                                                        <span style={{ fontSize: 20 }}>{ds.icon}</span>
-                                                        <h3 style={{
-                                                            margin: 0, fontSize: 16, fontWeight: 700,
-                                                            color: task.status === 'completed' ? '#999' : '#1a1a2e',
-                                                            textDecoration: task.status === 'completed' ? 'line-through' : 'none',
-                                                        }}>{task.title}</h3>
-                                                        <Tag color={task.priority === 'urgent' ? 'red' : task.priority === 'high' ? 'orange' : task.priority === 'low' ? 'default' : 'blue'}>
-                                                            {task.priority === 'urgent' ? '🔥 Khẩn' : task.priority === 'high' ? '⚡ Cao' : task.priority === 'low' ? '💤 Thấp' : '📋 BT'}
+                                            {/* Main row */}
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px' }}>
+                                                {/* Status icon */}
+                                                <span style={{ fontSize: 18, flexShrink: 0 }}>{ds.icon}</span>
+
+                                                {/* Title + meta */}
+                                                <div style={{ flex: 1, minWidth: 0 }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                                        <span style={{
+                                                            fontSize: 15, fontWeight: 700,
+                                                            color: isCompleted ? '#999' : '#1a1a2e',
+                                                            textDecoration: isCompleted ? 'line-through' : 'none',
+                                                        }}>{task.title}</span>
+                                                        <Tag color={task.priority === 'urgent' ? 'red' : task.priority === 'high' ? 'orange' : task.priority === 'low' ? 'default' : 'blue'}
+                                                            style={{ margin: 0, fontSize: 11 }}>
+                                                            {task.priority === 'urgent' ? '🔥 Khẩn' : task.priority === 'high' ? '⚡ Cao' : task.priority === 'low' ? '💤 Thấp' : 'BT'}
                                                         </Tag>
+                                                        {task.category && task.category !== 'Bàn giao' && (
+                                                            <Tag style={{ margin: 0, fontSize: 11 }}>{task.category}</Tag>
+                                                        )}
                                                     </div>
                                                     {task.description && (
-                                                        <p style={{ margin: '0 0 10px 30px', color: '#666', fontSize: 13, lineHeight: 1.5 }}>{task.description}</p>
+                                                        <div style={{ fontSize: 12, color: '#888', marginTop: 3, lineHeight: 1.4 }}>{task.description}</div>
                                                     )}
-                                                    <div style={{ display: 'flex', gap: 20, marginLeft: 30, alignItems: 'center' }}>
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                            <UserOutlined style={{ color: '#888' }} />
-                                                            <span style={{ fontSize: 13, fontWeight: 600 }}>{task.assignee}</span>
-                                                        </div>
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                            <ClockCircleOutlined style={{ color: ds.color }} />
-                                                            <span style={{ fontSize: 13, fontWeight: 600, color: ds.color }}>
-                                                                {task.dueDate} {task.dueTime}
-                                                            </span>
-                                                        </div>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 6 }}>
+                                                        <span style={{ fontSize: 12, color: '#666', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                            <UserOutlined style={{ fontSize: 11 }} />
+                                                            <strong>{task.assignee}</strong>
+                                                        </span>
+                                                        <span style={{ fontSize: 12, color: ds.color, display: 'flex', alignItems: 'center', gap: 4, fontWeight: 600 }}>
+                                                            <ClockCircleOutlined style={{ fontSize: 11 }} />
+                                                            {task.dueDate} {task.dueTime}
+                                                        </span>
                                                     </div>
-
-                                                    {/* Ghi chú */}
-                                                    {task.note && (
-                                                        <div style={{
-                                                            marginTop: 10, marginLeft: 30,
-                                                            padding: '8px 12px', borderRadius: 8,
-                                                            background: 'rgba(0,0,0,0.04)',
-                                                            border: '1px solid rgba(0,0,0,0.06)',
-                                                            fontSize: 13, color: '#555', lineHeight: 1.5,
-                                                        }}>
-                                                            <span style={{ fontWeight: 600, color: '#888', fontSize: 11 }}>📝 Ghi chú:</span><br />
-                                                            {task.note}
-                                                        </div>
-                                                    )}
                                                 </div>
 
-                                                {/* Right: Status + Actions */}
-                                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8, minWidth: 160 }}>
+                                                {/* Right: countdown + actions */}
+                                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6, flexShrink: 0 }}>
                                                     <div style={{
-                                                        padding: '6px 14px', borderRadius: 20,
+                                                        padding: '3px 10px', borderRadius: 20,
                                                         background: ds.color, color: '#fff',
-                                                        fontSize: 12, fontWeight: 700,
-                                                        boxShadow: `0 2px 8px ${ds.color}40`,
+                                                        fontSize: 11, fontWeight: 700,
+                                                        whiteSpace: 'nowrap',
                                                     }}>
                                                         {ds.label}
                                                     </div>
-                                                    <Space size={4}>
-                                                        {task.status !== 'completed' && (
+                                                    <Space size={2}>
+                                                        {!isCompleted && (
                                                             <Button type="primary" size="small" onClick={() => handleCompleteAssignment(task.id)}
-                                                                style={{ borderRadius: 6, background: '#52c41a', border: 'none', fontWeight: 600 }}>
+                                                                style={{ borderRadius: 6, background: '#52c41a', border: 'none', fontWeight: 600, fontSize: 12 }}>
                                                                 ✅ Xong
                                                             </Button>
                                                         )}
-                                                        <Tooltip title="Ghi chú">
-                                                            <Button type="text" size="small" onClick={() => handleNoteAssignment(task)}
-                                                                style={{ color: '#fa8c16', fontWeight: 600 }}>
-                                                                ✏️
-                                                            </Button>
-                                                        </Tooltip>
                                                         <Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditAssignment(task)}
-                                                            style={{ color: '#1890ff' }} />
-                                                        <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteAssignment(task.id)} />
+                                                            style={{ color: '#1890ff', padding: '0 4px' }} />
+                                                        <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteAssignment(task.id)}
+                                                            style={{ padding: '0 4px' }} />
                                                     </Space>
                                                 </div>
                                             </div>
-                                        </Card>
+
+                                            {/* Notes section */}
+                                            <div style={{
+                                                borderTop: '1px solid #f0f0f0',
+                                                padding: '8px 16px 10px',
+                                                background: 'rgba(0,0,0,0.01)',
+                                            }}>
+                                                {notes.length > 0 && (
+                                                    <div style={{ marginBottom: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                                        {notes.map((log, idx) => (
+                                                            <div key={idx} style={{
+                                                                display: 'flex', gap: 8, alignItems: 'flex-start',
+                                                                fontSize: 12, color: '#444',
+                                                            }}>
+                                                                {log.timestamp && (
+                                                                    <span style={{
+                                                                        flexShrink: 0, background: '#e6f4ff', color: '#1677ff',
+                                                                        borderRadius: 4, padding: '1px 6px', fontSize: 11, fontWeight: 600
+                                                                    }}>{log.timestamp}</span>
+                                                                )}
+                                                                <span style={{ lineHeight: 1.5 }}>{log.note}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                {showNoteInput[task.id] ? (
+                                                    <div style={{ display: 'flex', gap: 6 }}>
+                                                        <Input
+                                                            placeholder="Nhập ghi chú..."
+                                                            value={quickNotes[task.id] || ''}
+                                                            onChange={e => setQuickNotes(prev => ({ ...prev, [task.id]: e.target.value }))}
+                                                            onPressEnter={() => handleQuickAddNote(task)}
+                                                            autoFocus
+                                                            size="small"
+                                                            style={{ fontSize: 12 }}
+                                                        />
+                                                        <Button type="primary" size="small" onClick={() => handleQuickAddNote(task)}>Lưu</Button>
+                                                        <Button size="small" onClick={() => setShowNoteInput(prev => ({ ...prev, [task.id]: false }))}>Hủy</Button>
+                                                    </div>
+                                                ) : (
+                                                    <Button
+                                                        type="text" size="small"
+                                                        icon={<PlusOutlined />}
+                                                        onClick={() => setShowNoteInput(prev => ({ ...prev, [task.id]: true }))}
+                                                        style={{ color: '#888', fontSize: 12, padding: '0 4px', height: 24 }}
+                                                    >
+                                                        Thêm ghi chú
+                                                    </Button>
+                                                )}
+                                            </div>
+                                        </div>
                                     );
                                 })}
                         </div>
@@ -2518,14 +2619,22 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                                                                 <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6, color: '#2c3e50' }}>
                                                                     {h.description}
                                                                 </div>
-                                                                <Space size={8}>
+                                                                <Space size={8} wrap>
                                                                     <span style={{ fontSize: 12, color: '#666', fontWeight: 500 }}>
                                                                         🕐 {dayjs(h.timestamp).format('HH:mm:ss')}
                                                                     </span>
                                                                     <span style={{ fontSize: 12, color: '#999' }}>•</span>
-                                                                    <span style={{ fontSize: 12, color: '#666', fontWeight: 600 }}>
-                                                                        👤 {h.assignee}
+                                                                    <span style={{ fontSize: 12, color: '#555', fontWeight: 600 }}>
+                                                                        👤 Thực hiện: {h.assignee}
                                                                     </span>
+                                                                    {h.verifier && (
+                                                                        <>
+                                                                            <span style={{ fontSize: 12, color: '#999' }}>•</span>
+                                                                            <span style={{ fontSize: 12, color: '#2e7d32', fontWeight: 600 }}>
+                                                                                ✅ Xác nhận: {h.verifier}
+                                                                            </span>
+                                                                        </>
+                                                                    )}
                                                                 </Space>
                                                             </div>
                                                         </div>

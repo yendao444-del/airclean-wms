@@ -97,6 +97,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         delete: (id) => ipcRenderer.invoke('exportOrders:delete', id),
     },
 
+    // POS Order (BÁN HÀNG TẠI QUẦY)
+    posOrder: {
+        create: (data) => ipcRenderer.invoke('posOrder:create', data),
+        getAll: (filters) => ipcRenderer.invoke('posOrder:getAll', filters),
+        getById: (id) => ipcRenderer.invoke('posOrder:getById', id),
+    },
+
     // Returns (TRẢ HÀNG)
     returns: {
         getAll: () => ipcRenderer.invoke('returns:getAll'),

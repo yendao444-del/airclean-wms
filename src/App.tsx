@@ -49,6 +49,8 @@ const PurchasePage = lazy(() => import('./pages/Purchase'));
 const ReturnsPage = lazy(() => import('./pages/Returns'));
 const RefundsPage = lazy(() => import('./pages/Refunds'));
 const EcommerceExportPage = lazy(() => import('./pages/EcommerceExport'));
+const POSPage = lazy(() => import('./pages/POS'));
+const SalesHistoryPage = lazy(() => import('./pages/SalesHistory'));
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -108,13 +110,15 @@ function AppContent() {
             items.push(createMenuItem('Tổng quan', 'dashboard', <DashboardOutlined />));
         }
 
-        // POS
+        // BÁN HÀNG submenu
+        const salesChildren: MenuItem[] = [];
         if (accessibleKeys.includes('pos')) {
-            items.push(createMenuItem('Bán hàng', 'pos', <ShoppingCartOutlined />));
+            salesChildren.push(createMenuItem('Bán hàng (POS)', 'pos', <ShoppingCartOutlined />));
         }
-
-
-
+        salesChildren.push(createMenuItem('Lịch sử bán hàng', 'sales-history', <HistoryOutlined />));
+        if (salesChildren.length > 0) {
+            items.push(createMenuItem('Bán hàng', 'sales-menu', <ShoppingCartOutlined />, salesChildren));
+        }
         // Tools submenu
         const toolsChildren: MenuItem[] = [];
         if (accessibleKeys.includes('fee-calculator')) {
@@ -219,6 +223,10 @@ function AppContent() {
         switch (selectedKey) {
             case 'dashboard':
                 return <DashboardPage />;
+            case 'pos':
+                return <POSPage />;
+            case 'sales-history':
+                return <SalesHistoryPage />;
             case 'products':
                 return <ProductsPage />;
             case 'combos':
@@ -359,12 +367,12 @@ function AppContent() {
 
                         <Content
                             style={{
-                                margin: 24,
+                                margin: selectedKey === 'pos' ? 0 : 24,
                                 padding: 0,
                                 minHeight: 280,
-                                maxHeight: 'calc(100vh - 112px)',
-                                overflowY: 'auto',
-                                overflowX: 'auto', // ✨ Cho phép scroll ngang khi cần
+                                maxHeight: selectedKey === 'pos' ? 'calc(100vh - 64px)' : 'calc(100vh - 112px)',
+                                overflowY: selectedKey === 'pos' ? 'hidden' : 'auto',
+                                overflowX: 'auto',
                             }}
                         >
                             <Suspense fallback={

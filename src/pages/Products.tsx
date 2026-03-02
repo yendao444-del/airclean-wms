@@ -734,9 +734,20 @@ export default function ProductsPage() {
                 // Ẩn nếu row đang expand
                 if (expandedRowKeys.includes(record.id)) return null;
 
+                // Nếu có variants → tính tổng tồn từ tất cả variants
+                let displayStock = value;
+                if (record.variants) {
+                    try {
+                        const variantList = JSON.parse(record.variants);
+                        if (Array.isArray(variantList) && variantList.length > 0) {
+                            displayStock = variantList.reduce((sum: number, v: any) => sum + (v.stock || 0), 0);
+                        }
+                    } catch { /* dùng value gốc nếu parse lỗi */ }
+                }
+
                 // Xác định màu dựa trên tồn kho
-                const isLow = value <= record.minStock;
-                const isWarning = value <= record.minStock * 1.5 && !isLow;
+                const isLow = displayStock <= record.minStock;
+                const isWarning = displayStock <= record.minStock * 1.5 && !isLow;
 
                 const bgColor = isLow
                     ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
@@ -759,7 +770,7 @@ export default function ProductsPage() {
                             minWidth: 60,
                         }}
                     >
-                        {value}
+                        {displayStock}
                     </div>
                 );
             },

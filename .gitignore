@@ -9,3 +9,4 @@ release*
 *.zip
 /src/generated/prisma
 /prisma/dev.db
+nul

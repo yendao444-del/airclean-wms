@@ -70,7 +70,7 @@ export default function ComboProductsPage() {
     const loadProducts = async () => {
         try {
             const result = await window.electronAPI.products.getAll();
-            if (result.success) setProducts(result.data);
+            if (result.success && result.data) setProducts(result.data as any);
         } catch (error) {
             message.error('Lỗi tải danh sách sản phẩm');
         }
