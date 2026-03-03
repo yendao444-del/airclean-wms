@@ -3680,6 +3680,79 @@ ipcMain.handle('users:ensureAdmin', async () => {
     }
 });
 
+// ========================================
+// DAILY EXPENSES HANDLERS (CHI PHÍ HÀNG NGÀY - P&L)
+// ========================================
+
+ipcMain.handle('dailyExpenses:getAll', async (event, filters) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const where = {};
+        if (filters?.startDate && filters?.endDate) {
+            where.date = {
+                gte: new Date(filters.startDate),
+                lte: new Date(filters.endDate),
+            };
+        }
+        const records = await prisma.dailyExpense.findMany({
+            where,
+            orderBy: { date: 'desc' }
+        });
+        const formatted = records.map(r => ({
+            ...r,
+            date: r.date.toISOString().split('T')[0],
+        }));
+        return { success: true, data: formatted };
+    } catch (error) {
+        console.error('❌ Get daily expenses error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('dailyExpenses:upsert', async (event, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const dateObj = new Date(data.date);
+        // Normalize to start of day UTC
+        dateObj.setUTCHours(0, 0, 0, 0);
+
+        const expenseData = {
+            shopeeAds: data.shopeeAds || 0,
+            tiktokAds: data.tiktokAds || 0,
+            facebookAds: data.facebookAds || 0,
+            otherAds: data.otherAds || 0,
+            shippingCost: data.shippingCost || 0,
+            returnCost: data.returnCost || 0,
+            otherExpense: data.otherExpense || 0,
+            otherNote: data.otherNote || null,
+            createdBy: data.createdBy || null,
+        };
+
+        const record = await prisma.dailyExpense.upsert({
+            where: { date: dateObj },
+            update: expenseData,
+            create: { date: dateObj, ...expenseData },
+        });
+        console.log(`✅ Upserted daily expense for ${data.date}`);
+        return { success: true, data: { ...record, date: record.date.toISOString().split('T')[0] } };
+    } catch (error) {
+        console.error('❌ Upsert daily expense error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('dailyExpenses:delete', async (event, id) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        await prisma.dailyExpense.delete({ where: { id } });
+        console.log(`✅ Deleted daily expense #${id}`);
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Delete daily expense error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 module.exports = { prisma };
 
 // ===== REFUNDS: Import từ thư mục =====

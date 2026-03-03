@@ -190,6 +190,11 @@ export interface ElectronAPI {
         get: (key: string) => Promise<{ success: boolean; data?: any; error?: string }>;
         set: (key: string, value: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     };
+    dailyExpenses: {
+        getAll: (filters?: { startDate?: string; endDate?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        upsert: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        delete: (id: number) => Promise<{ success: boolean; error?: string }>;
+    };
     users: {
         getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;

@@ -137,6 +137,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         set: (key, value) => ipcRenderer.invoke('appConfig:set', key, value),
     },
 
+    // Daily Expenses (CHI PHÍ HÀNG NGÀY - P&L)
+    dailyExpenses: {
+        getAll: (filters) => ipcRenderer.invoke('dailyExpenses:getAll', filters),
+        upsert: (data) => ipcRenderer.invoke('dailyExpenses:upsert', data),
+        delete: (id) => ipcRenderer.invoke('dailyExpenses:delete', id),
+    },
+
     // Users (NGƯỜI DÙNG / PHÂN QUYỀN)
     users: {
         getAll: () => ipcRenderer.invoke('users:getAll'),

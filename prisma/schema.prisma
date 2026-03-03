@@ -533,3 +533,34 @@ model UpdateHistory {
   machine     String?  // Tên máy thực hiện cập nhật
   notes       String?  // Changelog / ghi chú
 }
+
+// ========================================
+// DAILY EXPENSES / CHI PHÍ HÀNG NGÀY
+// (Module Báo cáo kinh doanh P&L)
+// ========================================
+
+model DailyExpense {
+  id          Int      @id @default(autoincrement())
+  date        DateTime // Ngày chi phí
+  
+  // Chi phí Ads (biến đổi hàng ngày)
+  shopeeAds   Float    @default(0)
+  tiktokAds   Float    @default(0)
+  facebookAds Float    @default(0)
+  otherAds    Float    @default(0)
+  
+  // Chi phí vận chuyển phát sinh
+  shippingCost  Float  @default(0)  // Phí ship gửi
+  returnCost    Float  @default(0)  // Phí ship hoàn + hàng hỏng
+  
+  // Chi phí khác phát sinh trong ngày
+  otherExpense  Float  @default(0)
+  otherNote     String? // Ghi chú chi phí khác
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdBy   String?
+  
+  @@unique([date])
+  @@index([date])
+}
