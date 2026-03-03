@@ -1021,7 +1021,7 @@ export default function ReturnsPage() {
                         )}
                         <Button
                             icon={<ReloadOutlined />}
-                            onClick={loadReturns}
+                            onClick={() => loadReturns()}
                             loading={loading}
                         >
                             Tải lại

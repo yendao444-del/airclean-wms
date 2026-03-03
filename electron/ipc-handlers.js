@@ -2664,6 +2664,12 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
             return { success: true, data: { reset: false, message: 'Đã reset hôm nay rồi' } };
         }
 
+        // Fix dữ liệu cũ: Các task category='Bàn giao' nhưng type='daily' → sửa thành 'assignment'
+        await prisma.dailyTask.updateMany({
+            where: { category: 'Bàn giao', type: 'daily' },
+            data: { type: 'assignment' }
+        });
+
         // Lấy danh sách task HÀNG NGÀY đã completed để lưu history trước khi reset
         // Bàn giao (type: 'assignment') KHÔNG reset - chỉ reset daily tasks
         const completedTasks = await prisma.dailyTask.findMany({

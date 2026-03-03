@@ -29,6 +29,7 @@ import type { MenuProps } from 'antd';
 import viVN from 'antd/locale/vi_VN';
 import './App.css';
 import { usePermissions } from './lib/hooks/usePermissions';
+import ForceUpdateGate from './components/ForceUpdateGate';
 
 // ✅ EAGER LOADING - Small/Fast pages (always needed)
 import DashboardPage from './pages/Dashboard';
@@ -404,8 +405,10 @@ function AppContent() {
 
 export default function App() {
     return (
-        <AuthProvider>
-            <AppContent />
-        </AuthProvider>
+        <ForceUpdateGate>
+            <AuthProvider>
+                <AppContent />
+            </AuthProvider>
+        </ForceUpdateGate>
     );
 }

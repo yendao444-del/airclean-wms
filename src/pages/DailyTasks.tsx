@@ -431,17 +431,20 @@ const DailyTasks = () => {
     const handleSaveAssignment = async () => {
         try {
             const values = await assignmentForm.validateFields();
-            const taskData = {
+            const taskData: any = {
                 title: values.title,
                 description: values.description || '',
                 assignee: values.assignee,
                 priority: values.priority,
                 dueDate: values.deadline.toISOString(),
-                status: 'pending',
                 type: 'assignment',
                 category: 'Bàn giao',
                 note: values.note || '',
             };
+            // Khi tạo mới: set pending. Khi edit: giữ nguyên status hiện tại
+            if (!editingAssignment) {
+                taskData.status = 'pending';
+            }
 
             let result;
             if (editingAssignment) {
@@ -1411,7 +1414,7 @@ const DailyTasks = () => {
                             borderRadius: 8
                         }}
                     >
-                        📋 Công việc ({dailyTasks.length})
+                        📋 Công việc ({dailyTasks.filter(t => t.status !== 'completed').length})
                     </Radio.Button>
                     <Radio.Button
                         value="assignments"
@@ -1426,7 +1429,7 @@ const DailyTasks = () => {
                             marginLeft: 8
                         }}
                     >
-                        📌 Bàn giao {overdueAssignments.length > 0 ? <Badge count={overdueAssignments.length} offset={[8, -4]} /> : `(${assignmentTasks.length})`}
+                        📌 Bàn giao {overdueAssignments.length > 0 ? <Badge count={overdueAssignments.length} offset={[8, -4]} /> : `(${pendingAssignments.length})`}
                     </Radio.Button>
                     <Radio.Button
                         value="history"

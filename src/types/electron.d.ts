@@ -134,6 +134,7 @@ export interface ElectronAPI {
         browseAndRestore: () => Promise<{ success: boolean; data?: { filePath: string; message: string }; error?: string }>;
         inspectBackup: (backupPath: string) => Promise<{ success: boolean; data?: any; error?: string }>;
         deleteBackup: (backupPath: string) => Promise<{ success: boolean; error?: string }>;
+        getInfo: () => Promise<{ success: boolean; data?: { dbStatus: string; machineName: string; environment: string; platform: string; appVersion: string; nodeVersion: string; electronVersion: string }; error?: string }>;
     };
     dailyTasks: {
         list: (filters?: any) => Promise<{ success: boolean; data?: any[]; error?: string }>;
@@ -209,7 +210,7 @@ export interface ElectronAPI {
         check: () => Promise<{ success: boolean; data?: { currentVersion: string; latestVersion: string; hasUpdate: boolean; releaseNotes: string; publishedAt: string; downloadUrl: string | null; downloadSize: number }; error?: string }>;
         download: (downloadUrl: string) => Promise<{ success: boolean; data?: { version: string }; error?: string }>;
         restart: () => Promise<void>;
-        getHistory: () => Promise<{ success: boolean; data?: Array<{ version: string; date: string; status: string }>; error?: string }>;
+        getHistory: () => Promise<{ success: boolean; data?: Array<{ id: number; fromVersion: string; toVersion: string; updatedAt: string; machine?: string; notes?: string }>; error?: string }>;
     };
     shell: {
         openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;

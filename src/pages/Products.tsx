@@ -157,12 +157,27 @@ export default function ProductsPage() {
                                         (parentProduct as any).mixCombos = [];
                                     }
 
+                                    // Calculate mix combo cost/price from variants × quantity if not set
+                                    let mixCost = combo.cost;
+                                    let mixPrice = combo.price;
+                                    if (!mixCost || !mixPrice) {
+                                        mixCost = 0;
+                                        mixPrice = 0;
+                                        items.forEach((item: any) => {
+                                            if (item.variantIndex !== undefined && variants[item.variantIndex]) {
+                                                const v = variants[item.variantIndex];
+                                                mixCost += (v.cost || 0) * (item.quantity || 1);
+                                                mixPrice += (v.price || 0) * (item.quantity || 1);
+                                            }
+                                        });
+                                    }
+
                                     (parentProduct as any).mixCombos.push({
                                         id: combo.id,
                                         sku: combo.sku,
                                         name: combo.name,
-                                        price: combo.price,
-                                        cost: combo.cost,
+                                        price: mixPrice,
+                                        cost: mixCost,
                                         stock: combo.stock,
                                         items: items
                                     });
@@ -174,13 +189,18 @@ export default function ProductsPage() {
                                             variants[item.variantIndex].combos = [];
                                         }
 
+                                        // Calculate combo cost/price from parent variant × quantity if not set
+                                        const parentVariant = variants[item.variantIndex];
+                                        const comboCost = combo.cost || (parentVariant.cost || 0) * (item.quantity || 1);
+                                        const comboPrice = combo.price || (parentVariant.price || 0) * (item.quantity || 1);
+
                                         // Add combo info to variant
                                         variants[item.variantIndex].combos.push({
                                             id: combo.id,
                                             sku: combo.sku,
                                             name: combo.name,
-                                            price: combo.price,
-                                            cost: combo.cost,
+                                            price: comboPrice,
+                                            cost: comboCost,
                                             stock: combo.stock,
                                             quantity: item.quantity
                                         });

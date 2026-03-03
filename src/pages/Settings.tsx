@@ -119,7 +119,7 @@ const Settings = () => {
     try {
       const result = await window.electronAPI.update.getHistory();
       if (result.success && result.data) {
-        setUpdateHistory(result.data);
+        setUpdateHistory(result.data as unknown as UpdateHistoryItem[]);
       }
     } catch { }
   };
@@ -134,7 +134,7 @@ const Settings = () => {
       }
       const result = await window.electronAPI.system.getInfo();
       if (result.success && result.data) {
-        setSystemInfo(result.data);
+        setSystemInfo(result.data as SystemInfo);
       } else {
         setSysInfoError(`IPC failed: ${result?.error || 'no data'}`);
         setSystemInfo(null);
@@ -836,7 +836,7 @@ const Settings = () => {
             <Table
               columns={updateHistoryColumns}
               dataSource={updateHistory}
-              rowKey={(r) => r.date}
+              rowKey={(r) => r.id}
               pagination={{ pageSize: 10 }}
               size="small"
             />
