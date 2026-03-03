@@ -203,7 +203,8 @@ function resolveSku(
     variantBaseMap: Map<string, { productName: string; color: string; unit: string }>,
     comboMap: Map<string, { productName: string; color: string; pieces: number; unit: string }[]>,
     excelProductName?: string,
-    excelVariantName?: string
+    excelVariantName?: string,
+    products?: any[]
 ): { productName: string; color: string; piecesPerUnit: number; isCombo: boolean; unit: string }[] {
 
     // 1. Check combos first (exact match)
@@ -234,17 +235,27 @@ function resolveSku(
         }
     }
 
-    // 3. Fallback: use Excel data
+    // 3. Fallback: tìm unit từ products DB bằng tên hoặc SKU
     const fallbackName = excelProductName || sku;
     const fallbackColor = excelVariantName || '';
     const fallbackPieces = match ? parseInt(match[1]) : 1;
+
+    let fallbackUnit = 'Cái';
+    if (products && excelProductName) {
+        const found = products.find((p: any) =>
+            p.name === excelProductName ||
+            p.sku === sku ||
+            (p.variants && p.variants.includes(sku))
+        );
+        if (found?.unit) fallbackUnit = found.unit;
+    }
 
     return [{
         productName: fallbackName,
         color: fallbackColor,
         piecesPerUnit: fallbackPieces,
         isCombo: false,
-        unit: 'Cái'
+        unit: fallbackUnit
     }];
 }
 
@@ -254,14 +265,15 @@ function resolveSku(
 function consolidateItems(
     items: ExcelOrderItem[],
     variantBaseMap: Map<string, { productName: string; color: string; unit: string }>,
-    comboMap: Map<string, { productName: string; color: string; pieces: number; unit: string }[]>
+    comboMap: Map<string, { productName: string; color: string; pieces: number; unit: string }[]>,
+    products?: any[]
 ): ConsolidatedItem[] {
     const grouped = new Map<string, ConsolidatedItem>();
 
     for (const item of items) {
         const resolved = resolveSku(
             item.sku, variantBaseMap, comboMap,
-            item.productName, item.variantName
+            item.productName, item.variantName, products
         );
 
         for (const r of resolved) {
@@ -616,7 +628,7 @@ export default function OrderPickingPage() {
         setCurrentTracking(input);
         setScannedTrackings(prev => [...prev, input]);
 
-        const consolidated = consolidateItems(orderItems, variantBaseMap, comboMap);
+        const consolidated = consolidateItems(orderItems, variantBaseMap, comboMap, products);
 
         // ACCUMULATE: merge new items into existing accumulated list
         setAccumulatedPickList(prev => {
@@ -644,7 +656,7 @@ export default function OrderPickingPage() {
         playSound('success');
         setScanStatus({
             type: 'success',
-            msg: `✅ TÌM THẤY — ${input} — ${consolidated.length} loại SP, ${totalPieces} chiếc`
+            msg: `✅ TÌM THẤY — ${input} — ${consolidated.length} loại SP, ${totalPieces} sản phẩm`
         });
 
         // Clear input
@@ -692,11 +704,11 @@ export default function OrderPickingPage() {
 
             let msg = `📋 *NHẶT HÀNG — ${dateStr} ${timeStr}*\n`;
             msg += `━━━━━━━━━━━━━━━━\n`;
-            msg += `📦 Đơn: *${scanCount}* | SP: *${accumulatedPickList.length}* | Tổng: *${grandTotalPieces} chiếc*\n\n`;
+            msg += `📦 Đơn: *${scanCount}* | SP: *${accumulatedPickList.length}* | Tổng: *${grandTotalPieces}*\n\n`;
 
             for (const group of accumulatedPickList) {
                 const name = group.color ? `${group.productName} — ${group.color}` : group.productName;
-                msg += `▪️ *${name}*: ${group.totalPieces} chiếc\n`;
+                msg += `▪️ *${name}*: ${group.totalPieces} ${group.unit || 'chiếc'}\n`;
             }
 
             msg += `\n✅ Hoàn tất nhặt hàng`;
@@ -935,7 +947,7 @@ export default function OrderPickingPage() {
                                 <span className="picking-footer-stat">
                                     <span className="label">Tổng:</span>
                                     <span className="value" style={{ color: '#00ab56', fontSize: 16 }}>
-                                        {grandTotalPieces} chiếc
+                                        {grandTotalPieces}
                                     </span>
                                 </span>
                             </div>

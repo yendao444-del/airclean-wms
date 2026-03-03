@@ -51,7 +51,7 @@ interface StockBalanceRecord {
 }
 interface DailyTask {
     id: number; title: string; assignee: string; status: string; dueDate: string;
-    completedAt?: string; priority: string; category: string;
+    completedAt?: string; priority: string; category: string; type?: string;
 }
 
 export default function DashboardPage() {
@@ -168,9 +168,16 @@ export default function DashboardPage() {
     const filteredPurchases = purchases.filter(p => inRange(p.purchaseDate || p.createdAt));
     const filteredPurchaseAmount = filteredPurchases.reduce((s, p) => s + (p.totalAmount || 0), 0);
 
-    // Daily Tasks
-    const todayTasks = tasks;
+    // Daily Tasks - chỉ đếm task completed hôm nay (tránh đếm task ẩn/orphan)
+    const todayStr = dayjs().format('YYYY-MM-DD');
+    const todayTasks = tasks.filter(t => {
+        if (!t.dueDate) return false;
+        const taskDateStr = dayjs(t.dueDate).format('YYYY-MM-DD');
+        return taskDateStr === todayStr;
+    });
     const completedTasks = todayTasks.filter(t => t.status === 'completed');
+    // Dùng completedTasks.length / completedTasks.length nếu toàn bộ completed,
+    // hoặc completedTasks / todayTasks nếu muốn tính cả pending
 
     // Stock Balance
     const recentBalances = [...stockBalances].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 3);
