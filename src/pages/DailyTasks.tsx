@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
     Card,
     Button,
@@ -35,6 +35,7 @@ import {
 import dayjs from 'dayjs';
 import { useAuth } from '../contexts/AuthContext';
 import './DailyTasks.css';
+import AlertPopup, { AlertPopupItem } from '../components/AlertPopup';
 
 
 interface ProcessLog {
@@ -163,6 +164,21 @@ const DailyTasks = () => {
     const [editingAssignment, setEditingAssignment] = useState<Task | null>(null);
     const [assignmentForm] = Form.useForm();
     const [, forceUpdate] = useState(0); // for countdown re-render
+    const [alertPopups, setAlertPopups] = useState<AlertPopupItem[]>([]);
+
+    const addAlertPopup = useCallback((item: Omit<AlertPopupItem, 'id'>) => {
+        const id = `alert-${Date.now()}-${Math.random()}`;
+        setAlertPopups(prev => {
+            // Không thêm trùng key cho cùng task + level
+            const key = `${item.taskName}-${item.level}`;
+            if (prev.some(p => `${p.taskName}-${p.level}` === key)) return prev;
+            return [...prev, { ...item, id }];
+        });
+    }, []);
+
+    const dismissAlertPopup = useCallback((id: string) => {
+        setAlertPopups(prev => prev.filter(p => p.id !== id));
+    }, []);
 
     // Load tasks from backend
     useEffect(() => {
@@ -230,8 +246,8 @@ const DailyTasks = () => {
     const [acknowledgedTasks, setAcknowledgedTasks] = useState<Set<number>>(() => new Set());
     const lastOverdueAlertRef = useState<Map<number, number>>(() => new Map())[0];
 
-    // Tạo WAV beep trực tiếp từ PCM data
-    const generateBeepWav = (freq: number, durationMs: number, volume = 0.4): string => {
+    // === AUDIO ALERT SYSTEM ===
+    const generateBeepWav = (freq: number, durationMs: number, volume = 0.7, waveType: 'sine' | 'square' | 'sawtooth' = 'sine'): string => {
         const sampleRate = 22050;
         const numSamples = Math.floor(sampleRate * durationMs / 1000);
         const buffer = new ArrayBuffer(44 + numSamples * 2);
@@ -254,9 +270,16 @@ const DailyTasks = () => {
         view.setUint32(40, numSamples * 2, true);
         for (let i = 0; i < numSamples; i++) {
             const t = i / sampleRate;
-            const fadeOut = 1 - (i / numSamples);
-            const sample = Math.sin(2 * Math.PI * freq * t) * volume * fadeOut;
-            view.setInt16(44 + i * 2, Math.max(-32768, Math.min(32767, sample * 32767)), true);
+            const fadeOut = i < numSamples * 0.1 ? (i / (numSamples * 0.1)) : 1 - ((i - numSamples * 0.1) / (numSamples * 0.9));
+            let raw = 0;
+            if (waveType === 'square') {
+                raw = Math.sin(2 * Math.PI * freq * t) >= 0 ? 1 : -1;
+            } else if (waveType === 'sawtooth') {
+                raw = 2 * ((freq * t) % 1) - 1;
+            } else {
+                raw = Math.sin(2 * Math.PI * freq * t);
+            }
+            view.setInt16(44 + i * 2, Math.max(-32768, Math.min(32767, raw * volume * fadeOut * 32767)), true);
         }
         const bytes = new Uint8Array(buffer);
         let binary = '';
@@ -264,20 +287,39 @@ const DailyTasks = () => {
         return 'data:audio/wav;base64,' + btoa(binary);
     };
 
-    const playBeeps = (count: number, freq = 880, urgent = false) => {
+    // Còi hú 2 tần số xen kẽ - dùng khi quá hạn
+    const playSiren = (cycles: number) => {
         try {
-            const f = urgent ? 1100 : freq;
-            const dur = urgent ? 150 : 300;
-            const gap = urgent ? 200 : 400;
-            for (let i = 0; i < count; i++) {
-                setTimeout(() => {
-                    const audio = new Audio(generateBeepWav(f, dur, urgent ? 0.5 : 0.35));
-                    audio.play().catch(() => { });
-                }, i * gap);
+            for (let i = 0; i < cycles; i++) {
+                setTimeout(() => new Audio(generateBeepWav(880, 220, 0.8, 'square')).play().catch(() => {}), i * 440);
+                setTimeout(() => new Audio(generateBeepWav(1200, 220, 0.8, 'square')).play().catch(() => {}), i * 440 + 220);
             }
-        } catch (err) {
-            console.warn('Audio alert failed:', err);
-        }
+        } catch { }
+    };
+
+    // Beep nhanh liên tiếp - dùng khi khẩn cấp ≤10p
+    const playUrgentBeeps = (count: number) => {
+        try {
+            for (let i = 0; i < count; i++) {
+                setTimeout(() => new Audio(generateBeepWav(1100, 120, 0.75, 'square')).play().catch(() => {}), i * 180);
+            }
+        } catch { }
+    };
+
+    // Beep thường - dùng khi còn 10-30p
+    const playWarningBeeps = (count: number) => {
+        try {
+            for (let i = 0; i < count; i++) {
+                setTimeout(() => new Audio(generateBeepWav(880, 200, 0.6, 'sine')).play().catch(() => {}), i * 350);
+            }
+        } catch { }
+    };
+
+    // Beep nhẹ - dùng khi còn 30-60p
+    const playInfoBeep = () => {
+        try {
+            new Audio(generateBeepWav(660, 300, 0.45, 'sine')).play().catch(() => {});
+        } catch { }
     };
 
     // Xác nhận "Đang làm" - dừng kêu cho task ≤10p
@@ -290,7 +332,7 @@ const DailyTasks = () => {
         message.success({ content: '✅ Đã xác nhận đang làm!', duration: 2 });
     };
 
-    // Countdown timer - update every 30 seconds (UI + popup messages)
+    // Countdown timer - update every 30 seconds (UI + popup alerts)
     useEffect(() => {
         const interval = setInterval(() => {
             forceUpdate(v => v + 1);
@@ -305,80 +347,89 @@ const DailyTasks = () => {
                 // === QUÁ HẠN ===
                 if (diffMinutes < 0) {
                     const overdueMin = Math.abs(diffMinutes);
+                    if (overdueMin >= 1440) return; // quá 24h → bỏ qua
 
-                    // Quá 24h → bỏ qua
-                    if (overdueMin >= 1440) return;
-
-                    // Chỉ nhắc 1 lần khi quá hạn 10 phút
                     const alreadyAlerted = lastOverdueAlertRef.get(task.id);
                     if (!alreadyAlerted && overdueMin >= 10) {
                         lastOverdueAlertRef.set(task.id, Date.now());
-                        playBeeps(8, 1100, true);
-                        message.error({
-                            content: `⛔ Bàn giao "${task.title}" quá hạn ${formatTimeDiff(overdueMin)}! (${task.assignee})`,
-                            duration: 10,
-                            key: `overdue-${task.id}`,
+                        playSiren(6); // còi hú 6 chu kỳ
+                        addAlertPopup({
+                            level: 'overdue',
+                            taskName: task.title,
+                            assignee: task.assignee,
+                            deadline: `${task.dueDate} ${task.dueTime}`,
+                            timeNum: overdueMin,
+                            timeUnit: 'phút trễ',
                         });
-                        if (Notification.permission === 'granted') {
-                            new Notification(`⛔ QUÁ HẠN: ${task.title}`, {
-                                body: `Quá hạn ${formatTimeDiff(overdueMin)}!\nNgười thực hiện: ${task.assignee}`,
-                                tag: `overdue-${task.id}`,
-                            });
-                        }
                     }
                     return;
                 }
 
-                // === CÒN ≤ 10 PHÚT: popup (âm thanh xử lý ở interval riêng) ===
+                // === CÒN ≤ 10 PHÚT ===
                 if (diffMinutes <= 10) {
                     if (!acknowledgedTasks.has(task.id)) {
-                        message.warning({
-                            content: `🚨 Bàn giao "${task.title}" chỉ còn ${diffMinutes} phút! (${task.assignee})`,
-                            duration: 8,
-                            key: `urgent-${task.id}`,
+                        addAlertPopup({
+                            level: 'urgent',
+                            taskName: task.title,
+                            assignee: task.assignee,
+                            deadline: `${task.dueDate} ${task.dueTime}`,
+                            timeNum: diffMinutes,
+                            timeUnit: 'phút còn lại',
                         });
                     }
                     return;
                 }
 
-                // === CÒN 10-20 PHÚT: 5 beep ===
+                // === CÒN 10-20 PHÚT ===
                 if (diffMinutes <= 20) {
-                    playBeeps(5, 1000, false);
-                    message.warning({
-                        content: `🔥 Bàn giao "${task.title}" còn ${diffMinutes} phút! (${task.assignee})`,
-                        duration: 5,
-                        key: `warn-${task.id}`,
+                    playWarningBeeps(5);
+                    addAlertPopup({
+                        level: 'urgent',
+                        taskName: task.title,
+                        assignee: task.assignee,
+                        deadline: `${task.dueDate} ${task.dueTime}`,
+                        timeNum: diffMinutes,
+                        timeUnit: 'phút còn lại',
+                        autoDismiss: 10000,
                     });
                     return;
                 }
 
-                // === CÒN 20-30 PHÚT: 2 beep ===
+                // === CÒN 20-30 PHÚT ===
                 if (diffMinutes <= 30) {
-                    playBeeps(2, 880, false);
-                    message.warning({
-                        content: `⚠️ Bàn giao "${task.title}" còn ${diffMinutes} phút (${task.assignee})`,
-                        duration: 4,
-                        key: `warn-${task.id}`,
+                    playWarningBeeps(3);
+                    addAlertPopup({
+                        level: 'warning',
+                        taskName: task.title,
+                        assignee: task.assignee,
+                        deadline: `${task.dueDate} ${task.dueTime}`,
+                        timeNum: diffMinutes,
+                        timeUnit: 'phút còn lại',
+                        autoDismiss: 8000,
                     });
                     return;
                 }
 
-                // === CÒN 30-60 PHÚT: 1 beep nhẹ ===
+                // === CÒN 30-60 PHÚT ===
                 if (diffMinutes <= 60) {
-                    playBeeps(1, 660, false);
-                    message.info({
-                        content: `🔔 Bàn giao "${task.title}" còn ${formatTimeDiff(diffMinutes)} (${task.assignee})`,
-                        duration: 3,
-                        key: `info-${task.id}`,
+                    playInfoBeep();
+                    addAlertPopup({
+                        level: 'info',
+                        taskName: task.title,
+                        assignee: task.assignee,
+                        deadline: `${task.dueDate} ${task.dueTime}`,
+                        timeNum: formatTimeDiff(diffMinutes),
+                        timeUnit: 'còn lại',
+                        autoDismiss: 6000,
                     });
                     return;
                 }
             });
         }, 30000);
         return () => clearInterval(interval);
-    }, [tasks, acknowledgedTasks]);
+    }, [tasks, acknowledgedTasks, addAlertPopup]);
 
-    // === CONTINUOUS ALARM: kêu liên tục mỗi 5 giây khi ≤ 10 phút ===
+    // === CONTINUOUS ALARM: còi hú + beep liên tục mỗi 5 giây khi ≤ 10 phút ===
     useEffect(() => {
         const alarmInterval = setInterval(() => {
             const now = dayjs();
@@ -389,11 +440,8 @@ const DailyTasks = () => {
                 const diff = deadline.diff(now, 'minute');
                 return diff >= 0 && diff <= 10;
             });
-
-            if (urgentTasks.length > 0) {
-                playBeeps(3, 1100, true);
-            }
-        }, 5000); // Mỗi 5 giây
+            if (urgentTasks.length > 0) playUrgentBeeps(5);
+        }, 5000);
         return () => clearInterval(alarmInterval);
     }, [tasks, acknowledgedTasks]);
 
@@ -2045,6 +2093,9 @@ const DailyTasks = () => {
                     </div>
                 </Form>
             </Modal>
+
+            {/* Alert Popups góc phải dưới */}
+            <AlertPopup popups={alertPopups} onDismiss={dismissAlertPopup} />
         </div>
     );
 };
@@ -2837,6 +2888,7 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                     </div>
                 )}
             </Modal>
+
         </div>
     );
 };
