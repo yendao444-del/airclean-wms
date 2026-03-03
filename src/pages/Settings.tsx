@@ -4,7 +4,7 @@ import {
   Card,
   Modal,
   message,
-
+  Badge,
   Space,
   Typography,
   Divider,
@@ -14,7 +14,9 @@ import {
   Tabs,
   Row,
   Col,
-  Statistic
+  Statistic,
+  Spin,
+  Descriptions
 } from 'antd';
 import {
   ExportOutlined,
@@ -33,7 +35,10 @@ import {
   CheckCircleOutlined,
   SyncOutlined,
   HistoryOutlined,
-  RocketOutlined
+  RocketOutlined,
+  DesktopOutlined,
+  ApiOutlined,
+  InfoCircleOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 
@@ -58,9 +63,22 @@ interface UpdateInfo {
 }
 
 interface UpdateHistoryItem {
-  version: string;
-  date: string;
-  status: string;
+  id: number;
+  fromVersion: string;
+  toVersion: string;
+  updatedAt: string;
+  machine?: string;
+  notes?: string;
+}
+
+interface SystemInfo {
+  dbStatus: 'connected' | 'disconnected';
+  machineName: string;
+  environment: string;
+  platform: string;
+  appVersion: string;
+  nodeVersion: string;
+  electronVersion: string;
 }
 
 const Settings = () => {
@@ -74,12 +92,16 @@ const Settings = () => {
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [updateHistory, setUpdateHistory] = useState<UpdateHistoryItem[]>([]);
+  const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
+  const [loadingSystemInfo, setLoadingSystemInfo] = useState(false);
+  const [sysInfoError, setSysInfoError] = useState<string | null>(null);
 
   // Load danh sách backups + version + update history khi component mount
   useEffect(() => {
     loadBackups();
     loadCurrentVersion();
     loadUpdateHistory();
+    loadSystemInfo();
     // Auto check update
     handleCheckUpdate(true);
   }, []);
@@ -100,6 +122,29 @@ const Settings = () => {
         setUpdateHistory(result.data);
       }
     } catch { }
+  };
+
+  const loadSystemInfo = async () => {
+    setLoadingSystemInfo(true);
+    setSysInfoError(null);
+    try {
+      if (typeof window.electronAPI?.system?.getInfo !== 'function') {
+        setSysInfoError(`window.electronAPI.system.getInfo is not a function (type: ${typeof window.electronAPI?.system?.getInfo})`);
+        return;
+      }
+      const result = await window.electronAPI.system.getInfo();
+      if (result.success && result.data) {
+        setSystemInfo(result.data);
+      } else {
+        setSysInfoError(`IPC failed: ${result?.error || 'no data'}`);
+        setSystemInfo(null);
+      }
+    } catch (e: any) {
+      setSysInfoError(`Exception: ${e?.message}`);
+      setSystemInfo(null);
+    } finally {
+      setLoadingSystemInfo(false);
+    }
   };
 
   const handleCheckUpdate = async (silent = false) => {
@@ -645,29 +690,31 @@ const Settings = () => {
 
   const updateHistoryColumns = [
     {
-      title: 'Phiên bản',
-      dataIndex: 'version',
-      key: 'version',
-      width: 120,
-      render: (v: string) => <Text strong>v{v}</Text>,
+      title: 'Từ phiên bản',
+      dataIndex: 'fromVersion',
+      key: 'fromVersion',
+      width: 130,
+      render: (v: string) => <Text type="secondary">v{v}</Text>,
+    },
+    {
+      title: 'Lên phiên bản',
+      dataIndex: 'toVersion',
+      key: 'toVersion',
+      width: 130,
+      render: (v: string) => <Text strong style={{ color: '#52c41a' }}>v{v}</Text>,
     },
     {
       title: 'Thời gian',
-      dataIndex: 'date',
-      key: 'date',
-      width: 200,
-      render: (d: string) => dayjs(d).format('DD/MM/YYYY HH:mm:ss'),
+      dataIndex: 'updatedAt',
+      key: 'updatedAt',
+      width: 180,
+      render: (d: string) => dayjs(d).format('DD/MM/YYYY HH:mm'),
     },
     {
-      title: 'Trạng thái',
-      dataIndex: 'status',
-      key: 'status',
-      width: 120,
-      render: (s: string) => (
-        <span style={{ color: s === 'success' ? '#52c41a' : '#ff4d4f' }}>
-          {s === 'success' ? <><CheckCircleOutlined /> Thành công</> : <><WarningOutlined /> Lỗi</>}
-        </span>
-      ),
+      title: 'Máy thực hiện',
+      dataIndex: 'machine',
+      key: 'machine',
+      render: (m: string) => m || '—',
     },
   ];
 
@@ -767,7 +814,7 @@ const Settings = () => {
 
           {/* Actions */}
           <Row gutter={16} style={{ marginBottom: 24 }}>
-            <Col span={12}>
+            <Col span={24}>
               <Button
                 type="primary"
                 icon={<SyncOutlined spin={checkingUpdate} />}
@@ -778,18 +825,6 @@ const Settings = () => {
                 style={{ height: 60 }}
               >
                 Kiểm tra cập nhật
-              </Button>
-            </Col>
-            <Col span={12}>
-              <Button
-                icon={<CloudDownloadOutlined />}
-                onClick={handleDownloadUpdate}
-                size="large"
-                loading={downloading}
-                block
-                style={{ height: 60 }}
-              >
-                Tải và cập nhật thủ công
               </Button>
             </Col>
           </Row>
@@ -818,182 +853,91 @@ const Settings = () => {
       ),
     },
     {
-      key: 'backup',
+      key: 'sysinfo',
       label: (
         <span>
-          <FileZipOutlined /> Sao lưu Hệ thống
+          <InfoCircleOutlined /> Thông tin hệ thống
         </span>
       ),
       children: (
         <div>
-          {/* Stats Row */}
-          <Row gutter={16} style={{ marginBottom: 24 }}>
-            <Col span={8}>
-              <Card>
-                <Statistic
-                  title="Tổng Backups"
-                  value={backups.length}
-                  prefix={<FolderOpenOutlined />}
-                  valueStyle={{ color: '#3f8600' }}
-                />
-              </Card>
-            </Col>
-            <Col span={8}>
-              <Card>
-                <Statistic
-                  title="Backup gần nhất"
-                  value={backups.length > 0 ? dayjs(backups[0].createdAt).fromNow() : 'Chưa có'}
-                  prefix={<ClockCircleOutlined />}
-                  valueStyle={{ color: '#1890ff' }}
-                />
-              </Card>
-            </Col>
-            <Col span={8}>
-              <Card>
-                <Statistic
-                  title="Tổng dung lượng"
-                  value={backups.reduce((sum, b) => sum + b.size, 0) / 1024 / 1024}
-                  precision={2}
-                  suffix="MB"
-                  prefix={<DatabaseOutlined />}
-                  valueStyle={{ color: '#cf1322' }}
-                />
-              </Card>
-            </Col>
-          </Row>
+          {loadingSystemInfo ? (
+            <div style={{ textAlign: 'center', padding: 48 }}><Spin size="large" /></div>
+          ) : systemInfo ? (
+            <>
+              {/* DB + Machine + Env */}
+              <Row gutter={16} style={{ marginBottom: 24 }}>
+                <Col span={8}>
+                  <Card>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                      <ApiOutlined style={{ fontSize: 32, color: systemInfo.dbStatus === 'connected' ? '#52c41a' : '#ff4d4f' }} />
+                      <div>
+                        <div style={{ fontSize: 12, color: '#8c8c8c' }}>Kết nối Database</div>
+                        <div style={{ marginTop: 4 }}>
+                          <Badge
+                            status={systemInfo.dbStatus === 'connected' ? 'success' : 'error'}
+                            text={
+                              <Text strong style={{ color: systemInfo.dbStatus === 'connected' ? '#52c41a' : '#ff4d4f' }}>
+                                {systemInfo.dbStatus === 'connected' ? 'Đã kết nối' : 'Mất kết nối'}
+                              </Text>
+                            }
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
+                </Col>
+                <Col span={8}>
+                  <Card>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                      <DesktopOutlined style={{ fontSize: 32, color: '#1890ff' }} />
+                      <div>
+                        <div style={{ fontSize: 12, color: '#8c8c8c' }}>Tên máy tính</div>
+                        <Text strong style={{ fontSize: 16 }}>{systemInfo.machineName}</Text>
+                      </div>
+                    </div>
+                  </Card>
+                </Col>
+                <Col span={8}>
+                  <Card>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                      <CheckCircleOutlined style={{ fontSize: 32, color: '#722ed1' }} />
+                      <div>
+                        <div style={{ fontSize: 12, color: '#8c8c8c' }}>Môi trường</div>
+                        <Text strong style={{ fontSize: 16, textTransform: 'capitalize' }}>{systemInfo.environment}</Text>
+                      </div>
+                    </div>
+                  </Card>
+                </Col>
+              </Row>
 
-          {/* Actions */}
-          <Row gutter={16} style={{ marginBottom: 24 }}>
-            <Col span={12}>
-              <Button
-                type="primary"
-                icon={<CloudUploadOutlined />}
-                onClick={handleBackup}
-                size="large"
-                loading={backupLoading}
-                block
-                style={{ height: 80, backgroundColor: '#52c41a', borderColor: '#52c41a' }}
-              >
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-                  <Text strong style={{ color: 'white', fontSize: 16 }}>Tạo Backup Mới</Text>
-                  <Text style={{ color: 'rgba(255, 255, 255, 0.85)', fontSize: 12 }}>
-                    Nén toàn bộ ứng dụng thành ZIP
-                  </Text>
-                </div>
-              </Button>
-            </Col>
-            <Col span={12}>
-              <Button
-                icon={<ImportOutlined />}
-                onClick={handleBrowseAndRestore}
-                size="large"
-                loading={backupLoading}
-                block
-                style={{ height: 80 }}
-              >
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-                  <Text strong style={{ fontSize: 16 }}>Khôi phục từ File</Text>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    Chọn file ZIP từ bất kỳ đâu
-                  </Text>
-                </div>
-              </Button>
-            </Col>
-          </Row>
+              {/* Chi tiết kỹ thuật */}
+              <Card title="Chi tiết kỹ thuật" size="small">
+                <Descriptions column={2} size="small">
+                  <Descriptions.Item label="Phiên bản ứng dụng">
+                    <Text strong>v{systemInfo.appVersion}</Text>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Hệ điều hành">
+                    {systemInfo.platform}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Electron">
+                    {systemInfo.electronVersion}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Node.js">
+                    {systemInfo.nodeVersion}
+                  </Descriptions.Item>
+                </Descriptions>
+              </Card>
 
-          <Divider>Danh sách Backup ({backups.length})</Divider>
-
-          {backups.length > 0 ? (
-            <Table
-              columns={backupColumns}
-              dataSource={backups}
-              rowKey="path"
-              pagination={{ pageSize: 10 }}
-              size="small"
-            />
+              <div style={{ marginTop: 16, textAlign: 'right' }}>
+                <Button icon={<SyncOutlined />} onClick={loadSystemInfo} loading={loadingSystemInfo}>
+                  Làm mới
+                </Button>
+              </div>
+            </>
           ) : (
-            <Alert
-              message="Chưa có backup nào"
-              description="Nhấn nút 'Tạo Backup Mới' để tạo backup đầu tiên."
-              type="info"
-              showIcon
-              icon={<FileZipOutlined />}
-            />
+            <Alert message="Không thể tải thông tin hệ thống" description={sysInfoError || 'Lỗi không xác định'} type="error" showIcon />
           )}
-        </div>
-      ),
-    },
-    {
-      key: 'data',
-      label: (
-        <span>
-          <DatabaseOutlined /> Dữ liệu Excel
-        </span>
-      ),
-      children: (
-        <div>
-          <Alert
-            message="Xuất/Nhập dữ liệu Excel"
-            description="Sao lưu và đồng bộ dữ liệu giữa các máy tính bằng file Excel. Phù hợp cho việc chuyển dữ liệu hoặc backup nhanh."
-            type="info"
-            showIcon
-            style={{ marginBottom: 24 }}
-          />
-
-          <Row gutter={16}>
-            <Col span={12}>
-              <Card
-                hoverable
-                style={{ height: '100%' }}
-                onClick={handleExport}
-              >
-                <div style={{ textAlign: 'center', padding: '20px 0' }}>
-                  <ExportOutlined style={{ fontSize: 48, color: '#1890ff', marginBottom: 16 }} />
-                  <Title level={4}>Xuất Dữ liệu</Title>
-                  <Paragraph type="secondary">
-                    Tạo file Excel chứa toàn bộ dữ liệu (sản phẩm, đơn hàng, khách hàng...)
-                  </Paragraph>
-                  <Button type="primary" size="large" disabled={loading}>
-                    Xuất Excel
-                  </Button>
-                </div>
-              </Card>
-            </Col>
-            <Col span={12}>
-              <Card
-                hoverable
-                style={{ height: '100%' }}
-                onClick={handleImport}
-              >
-                <div style={{ textAlign: 'center', padding: '20px 0' }}>
-                  <ImportOutlined style={{ fontSize: 48, color: '#52c41a', marginBottom: 16 }} />
-                  <Title level={4}>Nhập Dữ liệu</Title>
-                  <Paragraph type="secondary">
-                    Đọc file Excel và cập nhật dữ liệu vào hệ thống
-                  </Paragraph>
-                  <Button type="primary" size="large" style={{ backgroundColor: '#52c41a', borderColor: '#52c41a' }} disabled={loading}>
-                    Nhập Excel
-                  </Button>
-                </div>
-              </Card>
-            </Col>
-          </Row>
-
-          <Divider />
-
-          <Alert
-            message="Lưu ý quan trọng"
-            description={
-              <ul style={{ marginBottom: 0, paddingLeft: 20 }}>
-                <li>File Excel sẽ chứa nhiều sheets tương ứng với các bảng dữ liệu khác nhau</li>
-                <li>Dữ liệu nhạy cảm (mật khẩu người dùng) sẽ KHÔNG được xuất ra file</li>
-                <li>Khi nhập dữ liệu, hệ thống sẽ tự động xử lý trùng lặp bằng cách cập nhật thay vì tạo mới</li>
-                <li>Đảm bảo đóng tất cả ứng dụng Excel trước khi xuất/nhập để tránh lỗi file đang được mở</li>
-              </ul>
-            }
-            type="warning"
-            showIcon
-          />
         </div>
       ),
     },
@@ -1007,7 +951,7 @@ const Settings = () => {
           Cài đặt Hệ thống
         </Title>
         <Paragraph type="secondary">
-          Quản lý backup, sao lưu và khôi phục dữ liệu hệ thống
+          Cập nhật phần mềm và theo dõi trạng thái hệ thống
         </Paragraph>
       </div>
 

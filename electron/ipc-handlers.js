@@ -106,18 +106,32 @@ async function logActivity({ module, action, description, recordId, recordName, 
 async function cleanupOldLogs() {
     try {
         if (!prisma) return;
-        const cutoff = new Date();
-        cutoff.setDate(cutoff.getDate() - 7);
 
-        const result = await prisma.activityLog.deleteMany({
-            where: { timestamp: { lt: cutoff } }
+        // 1. Xóa ActivityLog cũ hơn 30 ngày
+        const logCutoff = new Date();
+        logCutoff.setDate(logCutoff.getDate() - 30);
+        const logResult = await prisma.activityLog.deleteMany({
+            where: { timestamp: { lt: logCutoff } }
         });
-
-        if (result.count > 0) {
-            console.log(`🧹 Auto-cleanup: Đã xóa ${result.count} log cũ hơn 7 ngày`);
+        if (logResult.count > 0) {
+            console.log(`🧹 Cleanup: Đã xóa ${logResult.count} activity log cũ hơn 30 ngày`);
         }
+
+        // 2. Xóa EcommerceExport đã hoàn thành cũ hơn 2 tháng
+        const exportCutoff = new Date();
+        exportCutoff.setMonth(exportCutoff.getMonth() - 2);
+        const exportResult = await prisma.ecommerceExport.deleteMany({
+            where: {
+                status: 'completed',
+                ecommerceExportDate: { lt: exportCutoff }
+            }
+        });
+        if (exportResult.count > 0) {
+            console.log(`🧹 Cleanup: Đã xóa ${exportResult.count} đơn TMDT hoàn thành cũ hơn 2 tháng`);
+        }
+
     } catch (err) {
-        console.error('⚠️ Cleanup logs failed:', err.message);
+        console.error('⚠️ Cleanup failed:', err.message);
     }
 }
 
@@ -126,6 +140,42 @@ setTimeout(cleanupOldLogs, 10000);
 
 // Lặp lại mỗi 6 tiếng
 setInterval(cleanupOldLogs, 6 * 60 * 60 * 1000);
+
+// ========================================
+// SYSTEM INFO
+// ========================================
+
+const os = require('os');
+
+ipcMain.handle('system:getInfo', async () => {
+    try {
+        let dbStatus = 'disconnected';
+        try {
+            if (prisma) {
+                await prisma.$queryRawUnsafe('SELECT 1');
+                dbStatus = 'connected';
+            }
+        } catch { }
+
+        const packageJson = require('../package.json');
+
+        return {
+            success: true,
+            data: {
+                dbStatus,
+                machineName: os.hostname(),
+                environment: config.ENVIRONMENT || 'production',
+                platform: `${os.type()} ${os.release()}`,
+                appVersion: packageJson.version,
+                nodeVersion: process.version,
+                electronVersion: process.versions.electron || 'N/A',
+            }
+        };
+    } catch (error) {
+        console.error('❌ system:getInfo error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
 
 // ========================================
 // PRODUCTS
@@ -2889,7 +2939,7 @@ function getUpdateHistory() {
 // ========================================
 // AUTO UPDATE HANDLERS
 // ========================================
-require('./update-handlers');
+require('./update-handlers')(prisma);
 
 // ========================================
 // ECOMMERCE EXPORTS HANDLERS (XUẤT HÀNG TMDT)

@@ -94,6 +94,8 @@ export default function RefundsPage() {
 
         loadRefunds();
         loadProducts();
+        const interval = setInterval(() => loadRefunds(true), 30000);
+        return () => clearInterval(interval);
     }, []);
 
     // 📊 Hàm phát âm thanh - clone mỗi lần để quét nhanh không bị chồng
@@ -108,17 +110,17 @@ export default function RefundsPage() {
     const playSuccess = () => playSound(successSoundRef.current);
     const playAlert = () => playSound(alertSoundRef.current);
 
-    const loadRefunds = async () => {
-        setLoading(true);
+    const loadRefunds = async (silent = false) => {
+        if (!silent) setLoading(true);
         try {
             const result = await window.electronAPI.refunds.getAll();
             if (result.success && result.data) {
                 setRefunds(result.data);
             }
         } catch (error) {
-            message.error('Lỗi khi tải dữ liệu');
+            if (!silent) message.error('Lỗi khi tải dữ liệu');
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
 
@@ -628,8 +630,17 @@ export default function RefundsPage() {
                         const excelEpoch = new Date(1899, 11, 30);
                         parsedDate = dayjs(new Date(excelEpoch.getTime() + ct * 86400000));
                     } else {
-                        const tryParse = dayjs(ct);
-                        if (tryParse.isValid()) parsedDate = tryParse;
+                        // Parse thủ công DD/MM/YYYY hoặc DD/MM/YYYY HH:mm:ss (định dạng Việt Nam)
+                        const ddmmMatch = String(ct).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+                        if (ddmmMatch) {
+                            // ddmmMatch[1]=day, ddmmMatch[2]=month, ddmmMatch[3]=year
+                            const isoStr = `${ddmmMatch[3]}-${ddmmMatch[2].padStart(2,'0')}-${ddmmMatch[1].padStart(2,'0')}`;
+                            const tryParse = dayjs(isoStr);
+                            if (tryParse.isValid()) parsedDate = tryParse;
+                        } else {
+                            const tryParse = dayjs(ct);
+                            if (tryParse.isValid()) parsedDate = tryParse;
+                        }
                     }
                 }
                 const refundDate = parsedDate.isValid() ? parsedDate.format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD');

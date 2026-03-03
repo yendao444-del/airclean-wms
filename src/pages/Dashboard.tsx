@@ -67,11 +67,15 @@ export default function DashboardPage() {
     const [tasks, setTasks] = useState<DailyTask[]>([]);
     const [topProductRange, setTopProductRange] = useState('today');
 
-    useEffect(() => { loadAllData(); }, []);
+    useEffect(() => {
+        loadAllData();
+        const interval = setInterval(() => loadAllData(true), 30000);
+        return () => clearInterval(interval);
+    }, []);
 
-    const loadAllData = async () => {
+    const loadAllData = async (silent = false) => {
         try {
-            setLoading(true);
+            if (!silent) setLoading(true);
             const api = (window as any).electronAPI;
             const [pRes, exRes, ecRes, puRes, rtRes, rfRes, sbRes, tkRes] = await Promise.all([
                 api.products.getAll(),
@@ -94,7 +98,7 @@ export default function DashboardPage() {
         } catch (e) {
             console.error('Dashboard load error:', e);
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
 

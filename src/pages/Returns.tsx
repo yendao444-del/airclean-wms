@@ -89,6 +89,8 @@ export default function ReturnsPage() {
         loadReturns();
         loadPackerList();
         loadStatusList();
+        const interval = setInterval(() => loadReturns(true), 30000);
+        return () => clearInterval(interval);
     }, []);
 
     const loadPackerList = async () => {
@@ -146,17 +148,17 @@ export default function ReturnsPage() {
         }
     };
 
-    const loadReturns = async () => {
-        setLoading(true);
+    const loadReturns = async (silent = false) => {
+        if (!silent) setLoading(true);
         try {
             const result = await window.electronAPI.returns.getAll();
             if (result.success && result.data) {
                 setReturns(result.data);
             }
         } catch (error) {
-            message.error('Lỗi khi tải dữ liệu');
+            if (!silent) message.error('Lỗi khi tải dữ liệu');
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
 

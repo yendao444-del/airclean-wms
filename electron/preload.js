@@ -50,6 +50,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // System Backup/Restore
     system: {
+        getInfo: () => ipcRenderer.invoke('system:getInfo'),
         backup: () => ipcRenderer.invoke('system:backup'),
         listBackups: () => ipcRenderer.invoke('system:listBackups'),
         restore: (backupPath) => ipcRenderer.invoke('system:restore', backupPath),

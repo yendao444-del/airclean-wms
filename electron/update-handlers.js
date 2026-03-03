@@ -9,6 +9,12 @@ const path = require('path');
 const os = require('os');
 const { app, ipcMain, shell } = require('electron');
 
+// Prisma được truyền vào từ ipc-handlers.js
+let prisma = null;
+module.exports = function(prismaInstance) {
+    prisma = prismaInstance;
+};
+
 // GitHub repository info
 const GITHUB_OWNER = 'yendao444-del';
 const GITHUB_REPO = 'airclean-wms';
@@ -361,7 +367,25 @@ exit
             }
         };
 
-        // 9. Thoát app sau 2 giây (đợi IPC response gửi xong)
+        // 9. Lưu lịch sử cập nhật vào DB
+        try {
+            const packageJson = require('../package.json');
+            if (prisma) {
+                await prisma.updateHistory.create({
+                    data: {
+                        fromVersion: packageJson.version,
+                        toVersion: newVersion,
+                        machine: os.hostname(),
+                        notes: `Cập nhật từ v${packageJson.version} lên v${newVersion}`
+                    }
+                });
+                console.log('✅ Đã lưu lịch sử cập nhật vào DB');
+            }
+        } catch (histErr) {
+            console.warn('⚠️ Không thể lưu lịch sử cập nhật:', histErr.message);
+        }
+
+        // 10. Thoát app sau 2 giây (đợi IPC response gửi xong)
         setTimeout(() => {
             console.log('👋 Đóng ứng dụng để cập nhật...');
             app.quit();
@@ -401,9 +425,12 @@ ipcMain.handle('update:restart', async () => {
  */
 ipcMain.handle('update:getHistory', async () => {
     try {
-        // TODO: Implement update history tracking
-        // For now, return empty array
-        return { success: true, data: [] };
+        if (!prisma) return { success: true, data: [] };
+        const history = await prisma.updateHistory.findMany({
+            orderBy: { updatedAt: 'desc' },
+            take: 20
+        });
+        return { success: true, data: history };
     } catch (error) {
         return { success: false, error: error.message };
     }

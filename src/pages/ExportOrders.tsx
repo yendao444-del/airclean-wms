@@ -86,6 +86,8 @@ export default function ExportOrdersPage() {
     useEffect(() => {
         loadProducts();
         loadExports();
+        const interval = setInterval(loadExports, 30000);
+        return () => clearInterval(interval);
     }, []);
 
     const loadProducts = async () => {

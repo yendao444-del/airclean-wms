@@ -123,6 +123,9 @@ export default function EcommerceExportPage() {
                 console.error('Error loading telegram settings:', error);
             }
         })();
+
+        const interval = setInterval(() => loadEcommerceExports(true), 30000);
+        return () => clearInterval(interval);
     }, []);
 
     // 📊 Hàm phát âm thanh - clone mỗi lần để quét nhanh không bị chồng
@@ -137,17 +140,17 @@ export default function EcommerceExportPage() {
     const playSuccess = () => playSound(successSoundRef.current);
     const playAlert = () => playSound(alertSoundRef.current);
 
-    const loadEcommerceExports = async () => {
-        setLoading(true);
+    const loadEcommerceExports = async (silent = false) => {
+        if (!silent) setLoading(true);
         try {
             const result = await window.electronAPI.ecommerceExports.getAll();
             if (result.success && result.data) {
                 setEcommerceExports(result.data);
             }
         } catch (error) {
-            message.error('Lỗi khi tải dữ liệu');
+            if (!silent) message.error('Lỗi khi tải dữ liệu');
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
 

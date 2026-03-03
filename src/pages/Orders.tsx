@@ -45,10 +45,14 @@ export default function OrdersPage() {
     const [datePreset, setDatePreset] = useState<DatePreset>('today');
     const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
 
-    useEffect(() => { loadAllOrders(); }, []);
+    useEffect(() => {
+        loadAllOrders();
+        const interval = setInterval(() => loadAllOrders(true), 30000);
+        return () => clearInterval(interval);
+    }, []);
 
-    const loadAllOrders = async () => {
-        setLoading(true);
+    const loadAllOrders = async (silent = false) => {
+        if (!silent) setLoading(true);
         try {
             const api = (window as any).electronAPI;
             const [posRes, exRes, ecRes] = await Promise.all([
@@ -116,7 +120,7 @@ export default function OrdersPage() {
         } catch (error) {
             console.error('Error loading orders:', error);
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
 

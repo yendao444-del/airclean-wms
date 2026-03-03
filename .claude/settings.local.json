@@ -35,7 +35,9 @@
       "Bash(powershell -Command \"Remove-Item -Recurse -Force ''dist''\")",
       "Bash(start npx electron .)",
       "Bash(powershell -Command \"if \\(Test-Path ''.\\\\nul''\\) { Remove-Item -Force ''\\\\.\\\\g:\\\\QUAN LY BAN HANG\\\\desktop-FIXDEBUG\\\\nul''; echo ''Đã xóa file nul'' } else { echo ''File nul không tồn tại'' }\")",
-      "Bash(git rm --cached nul)"
+      "Bash(git rm --cached nul)",
+      "Bash(Test-Path \"g:/QUAN LY BAN HANG/desktop-FIXDEBUG/dist\")",
+      "Bash(\"g:/QUAN LY:*)"
     ]
   }
 }

@@ -520,3 +520,16 @@ model ActivityLog {
   @@index([module, recordId])
   @@index([userId, timestamp])
 }
+
+// ========================================
+// UPDATE HISTORY
+// ========================================
+
+model UpdateHistory {
+  id          Int      @id @default(autoincrement())
+  fromVersion String   // Phiên bản cũ
+  toVersion   String   // Phiên bản mới
+  updatedAt   DateTime @default(now())
+  machine     String?  // Tên máy thực hiện cập nhật
+  notes       String?  // Changelog / ghi chú
+}
