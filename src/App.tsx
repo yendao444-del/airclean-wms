@@ -120,7 +120,7 @@ function AppContent() {
 
         // BÁN HÀNG submenu
         if (accessibleKeys.includes('pos')) {
-            items.push(createMenuItem('Bán hàng (POS)', 'pos', <ShoppingCartOutlined />));
+            items.push(createMenuItem('Bán hàng', 'pos', <ShoppingCartOutlined />));
         }
 
         // 📋 Đơn hàng - module độc lập
