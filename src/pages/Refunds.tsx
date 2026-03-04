@@ -109,6 +109,20 @@ export default function RefundsPage() {
     const [mismatchOpen, setMismatchOpen] = useState<Set<number>>(new Set());
     const [stockLog, setStockLog] = useState<StockLogEntry[]>([]);
 
+    // 🎥 State cho danh sách đơn cần quay video (lưu localStorage)
+    const [videoIds, setVideoIds] = useState<{ id: string; done: boolean }[]>(() => {
+        try {
+            const saved = localStorage.getItem('refund_video_ids');
+            return saved ? JSON.parse(saved) : [];
+        } catch { return []; }
+    });
+    const [videoInput, setVideoInput] = useState('');
+
+    // 🎥 Auto-save videoIds vào localStorage
+    useEffect(() => {
+        localStorage.setItem('refund_video_ids', JSON.stringify(videoIds));
+    }, [videoIds]);
+
     useEffect(() => {
         // Khởi tạo audio
         successSoundRef.current = new Audio('./sounds/ting.wav');
@@ -289,32 +303,101 @@ export default function RefundsPage() {
                 setStatusFilter('received');
             } else {
                 // Chưa nhận → Chuyển sang "Đã nhận" (received)
-                await window.electronAPI.refunds.update(foundRefund.id, { status: 'received' });
-                const updatedRefunds = refunds.map(r =>
-                    r.id === foundRefund.id ? { ...r, status: 'received' } : r
-                );
-                setRefunds(updatedRefunds);
 
-                // Tự populate returnItemsMap từ items gốc
-                try {
-                    const origItems: RefundItem[] = JSON.parse(foundRefund.items);
-                    setReturnItemsMap(prev => ({
-                        ...prev,
-                        [foundRefund.id]: origItems.map(i => ({
-                            sku: i.variantSku || '',
-                            name: i.productName || '',
-                            qty: i.quantity,
-                        })),
-                    }));
-                } catch { /* ignore */ }
+                // Helper function to encapsulate refund receiving logic
+                const doReceiveRefund = async (refundToReceive: Refund) => {
+                    await window.electronAPI.refunds.update(refundToReceive.id, { status: 'received' });
+                    const updatedRefunds = refunds.map(r =>
+                        r.id === refundToReceive.id ? { ...r, status: 'received' } : r
+                    );
+                    setRefunds(updatedRefunds);
 
-                playSuccess();
-                setScanStatus({
-                    type: 'success',
-                    message: `✅ Đã nhận hàng hoàn: ${foundRefund.orderNumber || foundRefund.refundCode}`,
-                });
-                message.success('📦 Đã nhận hàng hoàn! Kiểm hàng và xác nhận.');
-                setStatusFilter('received');
+                    // Tự populate returnItemsMap từ items gốc
+                    try {
+                        const origItems: RefundItem[] = JSON.parse(refundToReceive.items);
+                        setReturnItemsMap(prev => ({
+                            ...prev,
+                            [refundToReceive.id]: origItems.map(i => ({
+                                sku: i.variantSku || '',
+                                name: i.productName || '',
+                                qty: i.quantity,
+                            })),
+                        }));
+                    } catch { /* ignore */ }
+
+                    playSuccess();
+                    setScanStatus({
+                        type: 'success',
+                        message: `✅ Đã nhận hàng hoàn: ${refundToReceive.orderNumber || refundToReceive.refundCode}`,
+                    });
+                    message.success('📦 Đã nhận hàng hoàn! Kiểm hàng và xác nhận.');
+                    setStatusFilter('received');
+                };
+
+                // 🎥 CHECK: Đơn này có cần quay video?
+                const trackingMatch = foundRefund.notes?.match(/Tracking: ([^|]+)/);
+                const trackingId = trackingMatch ? trackingMatch[1].trim() : '';
+                const videoItem = videoIds.find(v => !v.done && (
+                    v.id === foundRefund.orderNumber ||
+                    v.id === trackingId ||
+                    v.id === trimmed
+                ));
+
+                if (videoItem) {
+                    // Cảnh báo quay video
+                    playAlert();
+                    setScanStatus({
+                        type: 'warning',
+                        message: `🎥 ⚠️ CẦN QUAY VIDEO — Đơn ${foundRefund.orderNumber || trimmed}`,
+                    });
+
+                    // ⏱ Delay 300ms để Enter từ máy quét không tự bấm OK
+                    setTimeout(() => {
+                        Modal.confirm({
+                            title: '🎥 CẦN QUAY VIDEO',
+                            icon: <WarningOutlined style={{ color: '#ff4d4f', fontSize: 28 }} />,
+                            width: 480,
+                            autoFocusButton: null,
+                            content: (
+                                <div style={{ textAlign: 'center' }}>
+                                    <div style={{ fontSize: 40, marginBottom: 8 }}>🎥</div>
+                                    <div style={{
+                                        background: '#fff1f0', border: '2px solid #ff4d4f',
+                                        borderRadius: 8, padding: '12px 16px', marginBottom: 12,
+                                        color: '#a8071a', fontWeight: 700, fontSize: 16
+                                    }}>
+                                        Hãy BẬT CAMERA QUAY VIDEO trước khi mở gói hàng!
+                                    </div>
+                                    <Tag color="blue" style={{ fontSize: 14, padding: '4px 12px', fontFamily: 'monospace' }}>
+                                        {foundRefund.orderNumber || trimmed}
+                                    </Tag>
+                                    <p style={{ marginTop: 8, color: '#8c8c8c', fontSize: 12 }}>
+                                        Video là bằng chứng cho tranh chấp / trả hàng hoàn tiền
+                                    </p>
+                                </div>
+                            ),
+                            okText: '✅ Đã quay video — Tiếp tục nhận hàng',
+                            cancelText: '👁 Đã hiểu — Tiếp tục',
+                            okButtonProps: { style: { background: '#52c41a', borderColor: '#52c41a' } },
+                            onOk: async () => {
+                                // Đánh dấu đã quay video + nhận hàng
+                                setVideoIds(prev => prev.map(v => v.id === videoItem.id ? { ...v, done: true } : v));
+                                await doReceiveRefund(foundRefund);
+                            },
+                            onCancel: () => {
+                                // Chỉ đóng popup — KHÔNG nhận hàng, chờ quay video
+                                message.info('⏸ Chưa nhận hàng — hãy quay video rồi scan lại');
+                            },
+                        });
+                    }, 300);
+
+                    setScanInput('');
+                    scanInputRef.current?.focus();
+                    return;
+                }
+
+                // Không cần video → nhận bình thường
+                await doReceiveRefund(foundRefund);
             }
         } else {
             playAlert();
@@ -914,7 +997,23 @@ export default function RefundsPage() {
             dataIndex: 'orderNumber',
             key: 'orderNumber',
             width: 200,
-            render: (num) => num ? <Tag color="blue">{num}</Tag> : <span style={{ color: '#bfbfbf' }}>—</span>,
+            render: (num: string, record: Refund) => {
+                const trackingMatch = record.notes?.match(/Tracking: ([^|]+)/);
+                const tid = trackingMatch ? trackingMatch[1].trim() : '';
+                const needsVideo = videoIds.some(v => !v.done && (v.id === num || v.id === tid));
+                return (
+                    <span>
+                        {num ? <Tag color="blue">{num}</Tag> : <span style={{ color: '#bfbfbf' }}>—</span>}
+                        {needsVideo && (
+                            <Tag color="red" style={{
+                                fontWeight: 700, fontSize: 11, border: 'none',
+                                background: 'linear-gradient(135deg, #ff4d4f, #cf1322)',
+                                color: '#fff', marginLeft: 4
+                            }}>🎥 VIDEO</Tag>
+                        )}
+                    </span>
+                );
+            },
         },
         {
             title: 'Tracking ID',
@@ -1149,6 +1248,89 @@ export default function RefundsPage() {
                         </Button>
                     </Space>
                 </div>
+
+                {/* 🎥 CARD ĐƠN CẦN QUAY VIDEO */}
+                <Card
+                    size="small"
+                    style={{
+                        marginBottom: 16,
+                        border: '2px solid #ff4d4f',
+                        borderRadius: 10,
+                        boxShadow: '0 2px 8px rgba(255,77,79,0.15)'
+                    }}
+                    title={
+                        <span style={{ color: '#a8071a', fontWeight: 700 }}>
+                            🎥 Đơn cần quay video ({videoIds.filter(v => !v.done).length})
+                        </span>
+                    }
+                    extra={
+                        videoIds.length > 0 ? (
+                            <Button size="small" danger onClick={() => setVideoIds([])}>🗑 Xóa hết</Button>
+                        ) : null
+                    }
+                >
+                    <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                        <Input
+                            value={videoInput}
+                            onChange={e => setVideoInput(e.target.value)}
+                            onKeyDown={e => {
+                                if (e.key === 'Enter') {
+                                    const val = videoInput.trim();
+                                    if (!val) return;
+                                    if (videoIds.some(v => v.id === val)) { message.warning('ID đã tồn tại!'); return; }
+                                    setVideoIds(prev => [...prev, { id: val, done: false }]);
+                                    setVideoInput('');
+                                }
+                            }}
+                            placeholder="Nhập Order ID hoặc Tracking ID..."
+                            style={{ borderColor: '#ffa39e', fontFamily: 'monospace' }}
+                        />
+                        <Button
+                            danger
+                            onClick={() => {
+                                const val = videoInput.trim();
+                                if (!val) return;
+                                if (videoIds.some(v => v.id === val)) { message.warning('ID đã tồn tại!'); return; }
+                                setVideoIds(prev => [...prev, { id: val, done: false }]);
+                                setVideoInput('');
+                            }}
+                        >+ Thêm</Button>
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, minHeight: 28 }}>
+                        {videoIds.length === 0 ? (
+                            <span style={{ color: '#bfbfbf', fontSize: 13, fontStyle: 'italic' }}>Chưa có đơn nào — nhập ID bên trên để thêm</span>
+                        ) : videoIds.map(v => (
+                            <Tag
+                                key={v.id}
+                                closable
+                                onClose={() => setVideoIds(prev => prev.filter(x => x.id !== v.id))}
+                                style={{
+                                    padding: '4px 10px',
+                                    fontSize: 13,
+                                    fontFamily: 'monospace',
+                                    fontWeight: 600,
+                                    borderRadius: 6,
+                                    ...(v.done
+                                        ? { background: '#f6ffed', borderColor: '#b7eb8f', color: '#389e0d', textDecoration: 'line-through', opacity: 0.7 }
+                                        : { background: '#fff1f0', borderColor: '#ffa39e', color: '#a8071a' }
+                                    ),
+                                }}
+                            >
+                                🎥 {v.id}
+                                {!v.done && (
+                                    <Button
+                                        type="link"
+                                        size="small"
+                                        style={{ color: '#52c41a', padding: '0 4px', fontSize: 11 }}
+                                        onClick={() => setVideoIds(prev => prev.map(x => x.id === v.id ? { ...x, done: true } : x))}
+                                        title="Đánh dấu đã quay video"
+                                    >✓</Button>
+                                )}
+                                {v.done && <span style={{ marginLeft: 4, fontSize: 11 }}>✅</span>}
+                            </Tag>
+                        ))}
+                    </div>
+                </Card>
 
                 {/* 🔍 SCAN INPUT - Ngay ngoài màn hình chính! */}
                 <Card
