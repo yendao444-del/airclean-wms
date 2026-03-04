@@ -11,7 +11,7 @@ const { app, ipcMain, shell } = require('electron');
 
 // Prisma được truyền vào từ ipc-handlers.js
 let prisma = null;
-module.exports = function(prismaInstance) {
+module.exports = function (prismaInstance) {
     prisma = prismaInstance;
 };
 
@@ -161,6 +161,24 @@ function compareVersions(v1, v2) {
 }
 
 /**
+ * Đếm số files trong thư mục (đệ quy)
+ */
+function countFiles(dir) {
+    let count = 0;
+    if (!fs.existsSync(dir)) return 0;
+    const items = fs.readdirSync(dir);
+    for (const item of items) {
+        const fullPath = path.join(dir, item);
+        if (fs.statSync(fullPath).isDirectory()) {
+            count += countFiles(fullPath);
+        } else {
+            count++;
+        }
+    }
+    return count;
+}
+
+/**
  * Download file với hỗ trợ redirect (GitHub dùng 302)
  */
 function downloadFile(url, destPath, onProgress) {
@@ -307,67 +325,80 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
         }
         console.log('🏷️  Version mới:', newVersion);
 
-        // 7. Tạo script cập nhật (.bat)
-        //    Script chạy sau khi app đóng: copy files mới → khởi động lại
-        const batPath = path.join(tempDir, 'update.bat');
-        const exePath = process.execPath;
+        // 7. Copy files trực tiếp bằng Node.js (KHÔNG dùng .bat, KHÔNG hiện CMD)
+        console.log('📋 Đang copy files...');
+        const copyErrors = [];
 
-        const batContent = `@echo off
+        function copyRecursive(src, dest) {
+            if (!fs.existsSync(src)) return;
+
+            const stat = fs.statSync(src);
+            if (stat.isDirectory()) {
+                fs.mkdirSync(dest, { recursive: true });
+                const items = fs.readdirSync(src);
+                for (const item of items) {
+                    copyRecursive(path.join(src, item), path.join(dest, item));
+                }
+            } else {
+                try {
+                    fs.copyFileSync(src, dest);
+                } catch (err) {
+                    // File có thể bị khóa (ví dụ: .exe đang chạy)
+                    copyErrors.push({ file: dest, error: err.message });
+                    console.warn(`   ⚠️ Không thể copy: ${path.basename(dest)} (${err.code})`);
+                }
+            }
+        }
+
+        copyRecursive(sourceDir, appRoot);
+
+        const successCount = countFiles(sourceDir) - copyErrors.length;
+        console.log(`✅ Copy xong: ${successCount} files thành công`);
+
+        if (copyErrors.length > 0) {
+            console.log(`⚠️ ${copyErrors.length} files bị khóa (sẽ được cập nhật sau khi restart):`);
+
+            // Tạo script ẩn để copy các file bị khóa sau khi app tắt
+            const batPath = path.join(tempDir, 'update-locked.bat');
+            const exePath = process.execPath;
+
+            let copyCommands = copyErrors.map(e => {
+                const relPath = e.file.replace(appRoot + '\\', '');
+                const srcFile = path.join(sourceDir, relPath);
+                return `copy /Y "${srcFile}" "${e.file}" >nul 2>&1`;
+            }).join('\r\n');
+
+            const batContent = `@echo off
 chcp 65001 >nul
-title QuanLyPOS - Cap nhat v${newVersion}
-echo.
-echo ========================================
-echo   QuanLyPOS - Dang cap nhat v${newVersion}
-echo ========================================
-echo.
-echo [1/4] Doi ung dung dong...
 timeout /t 3 /nobreak >nul
-echo [2/4] Dang cap nhat files...
-xcopy "${sourceDir.replace(/\\/g, '\\')}\\*" "${appRoot.replace(/\\/g, '\\')}\\" /E /Y /I /Q >nul 2>&1
-if %errorlevel% neq 0 (
-    echo.
-    echo LOI: Khong the cap nhat files!
-    echo Vui long thu lai hoac cap nhat thu cong.
-    pause
-    exit /b 1
-)
-echo [3/4] Cap nhat thanh cong!
-echo.
-echo ========================================
-echo   Da cap nhat len v${newVersion}
-echo ========================================
-echo.
-echo [4/4] Dang khoi dong lai...
-timeout /t 2 /nobreak >nul
-start "" "${exePath.replace(/\\/g, '\\')}"
-timeout /t 10 /nobreak >nul
-rmdir /S /Q "${tempDir.replace(/\\/g, '\\')}" 2>nul
+${copyCommands}
+start "" "${exePath}"
+timeout /t 5 /nobreak >nul
+rmdir /S /Q "${tempDir}" 2>nul
 exit
 `;
+            fs.writeFileSync(batPath, batContent);
 
-        fs.writeFileSync(batPath, batContent);
-        console.log('📝 Tạo script cập nhật:', batPath);
+            // Chạy .bat ẨN hoàn toàn qua VBScript (không hiện CMD)
+            const vbsPath = path.join(tempDir, 'update-silent.vbs');
+            const vbsContent = `Set WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run """${batPath}""", 0, False`;
+            fs.writeFileSync(vbsPath, vbsContent);
 
-        // 8. Chạy script cập nhật (chạy độc lập, tách khỏi process chính)
-        console.log('🚀 Chạy script cập nhật...');
-        const { spawn } = require('child_process');
-        const child = spawn('cmd.exe', ['/c', 'start', '""', batPath], {
-            detached: true,
-            stdio: 'ignore',
-            shell: true
-        });
-        child.unref();
+            const { spawn } = require('child_process');
+            const child = spawn('wscript.exe', [vbsPath], {
+                detached: true,
+                stdio: 'ignore'
+            });
+            child.unref();
+            console.log('🔇 Script cập nhật ẩn đã khởi chạy (không hiện CMD)');
+        } else {
+            // Tất cả files đã copy xong → dọn thư mục tạm
+            try {
+                fs.rmSync(tempDir, { recursive: true, force: true });
+            } catch (e) { }
+        }
 
-        // Trả kết quả cho frontend trước khi thoát
-        const result = {
-            success: true,
-            data: {
-                version: newVersion,
-                message: `Đang cập nhật lên v${newVersion}...`
-            }
-        };
-
-        // 9. Lưu lịch sử cập nhật vào DB
+        // 8. Lưu lịch sử cập nhật vào DB
         try {
             const packageJson = require('../package.json');
             if (prisma) {
@@ -385,11 +416,27 @@ exit
             console.warn('⚠️ Không thể lưu lịch sử cập nhật:', histErr.message);
         }
 
-        // 10. Thoát app sau 2 giây (đợi IPC response gửi xong)
+        // 9. Restart app mượt mà (giống VS Code)
+        const result = {
+            success: true,
+            data: {
+                version: newVersion,
+                message: `Đã cập nhật lên v${newVersion}. Đang khởi động lại...`,
+                lockedFiles: copyErrors.length
+            }
+        };
+
         setTimeout(() => {
-            console.log('👋 Đóng ứng dụng để cập nhật...');
-            app.quit();
-        }, 2000);
+            console.log('🔄 Đang khởi động lại ứng dụng...');
+            if (copyErrors.length > 0) {
+                // Có file bị khóa → .bat ẩn sẽ lo restart
+                app.quit();
+            } else {
+                // Tất cả OK → restart ngay bằng app.relaunch()
+                app.relaunch();
+                app.exit(0);
+            }
+        }, 1500);
 
         return result;
 
