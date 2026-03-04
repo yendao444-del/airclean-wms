@@ -156,7 +156,7 @@ const Settings = () => {
         setCurrentVersion(result.data.currentVersion);
         if (!silent) {
           if (result.data.hasUpdate) {
-            message.info(`Phát hiện bản cập nhật mới: v${result.data.latestVersion}`);
+            if (!silent) message.info(`Phát hiện bản cập nhật mới: v${result.data.latestVersion} → Đang tải...`);
             setCheckingUpdate(false);
             handleDownloadUpdate();
             return;
@@ -202,59 +202,26 @@ const Settings = () => {
         return;
       }
 
-      // Hiển thị modal xác nhận
-      Modal.confirm({
-        title: 'Cập nhật phần mềm',
-        icon: <CloudDownloadOutlined style={{ color: '#1890ff' }} />,
-        content: (
-          <div>
-            <p>Cập nhật từ <strong>v{latestUpdateInfo.currentVersion}</strong> lên <strong>v{latestUpdateInfo.latestVersion}</strong></p>
-            {latestUpdateInfo.releaseNotes && (
-              <Alert
-                message="Ghi chú thay đổi"
-                description={latestUpdateInfo.releaseNotes}
-                type="info"
-                showIcon
-                style={{ marginTop: 12 }}
-              />
-            )}
-            <Alert
-              message="Ứng dụng sẽ tự động khởi động lại sau khi cập nhật."
-              type="warning"
-              showIcon
-              style={{ marginTop: 12 }}
-            />
-          </div>
-        ),
-        okText: 'Cập nhật ngay',
-        cancelText: 'Hủy',
-        onOk: async () => {
-          try {
-            setDownloading(true);
-            message.loading({ content: 'Đang tải bản cập nhật... Vui lòng chờ', key: 'update', duration: 0 });
+      // TỰ ĐỘNG download — không cần Modal.confirm
+      setDownloading(true);
+      message.loading({ content: `🔄 Đang tải v${latestUpdateInfo.latestVersion}... App sẽ tự khởi động lại`, key: 'update', duration: 0 });
 
-            const downloadResult = await window.electronAPI.update.download(latestUpdateInfo.downloadUrl!);
+      const downloadResult = await window.electronAPI.update.download(latestUpdateInfo.downloadUrl!);
 
-            if (downloadResult.success && downloadResult.data) {
-              message.success({
-                content: `✅ Tải xong v${downloadResult.data.version}! Ứng dụng sẽ tự khởi động lại...`,
-                key: 'update',
-                duration: 10
-              });
-              // App sẽ tự đóng và khởi động lại qua script cập nhật
-            } else {
-              message.error({ content: `Lỗi cập nhật: ${downloadResult.error}`, key: 'update' });
-              setDownloading(false);
-            }
-          } catch (error: any) {
-            message.error({ content: `Lỗi: ${error.message}`, key: 'update' });
-            setDownloading(false);
-          }
-        }
-      });
+      if (downloadResult.success && downloadResult.data) {
+        message.success({
+          content: `✅ Tải xong v${downloadResult.data.version}! Đang khởi động lại...`,
+          key: 'update',
+          duration: 10
+        });
+      } else {
+        message.error({ content: `Lỗi cập nhật: ${downloadResult.error}`, key: 'update' });
+        setDownloading(false);
+      }
     } catch (error: any) {
       setCheckingUpdate(false);
       message.error(`Lỗi: ${error.message}`);
+      setDownloading(false);
     }
   };
 
@@ -791,15 +758,19 @@ const Settings = () => {
               icon={<CheckCircleOutlined />}
               style={{ marginBottom: 24 }}
               action={
-                <Button
-                  type="primary"
-                  icon={<CloudDownloadOutlined />}
-                  onClick={handleDownloadUpdate}
-                  loading={downloading}
-                  size="large"
-                >
-                  Cập nhật ngay
-                </Button>
+                downloading ? (
+                  <Spin size="small" />
+                ) : (
+                  <Button
+                    type="primary"
+                    icon={<CloudDownloadOutlined />}
+                    onClick={() => handleDownloadUpdate()}
+                    loading={downloading}
+                    size="large"
+                  >
+                    Tải lại
+                  </Button>
+                )
               }
             />
           ) : updateInfo && !updateInfo.hasUpdate ? (

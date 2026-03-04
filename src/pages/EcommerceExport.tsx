@@ -387,7 +387,7 @@ Thời gian: ${currentTime}`;
                     type: 'warning',
                     message: `⚠️ ĐÃ PICKUP - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                 });
-                message.warning(`Đơn "${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}" đã được bàn giao DVVC rồi!`);
+                message.warning(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} đã gửi rồi!`);
             } else {
                 // ✅ Đơn hàng chưa pickup → Cập nhật thành "Đã bàn giao DVVC" + TRỪ TỒN KHO
 
@@ -397,7 +397,7 @@ Thời gian: ${currentTime}`;
                     type: 'success',
                     message: `✅ THÀNH CÔNG - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                 });
-                message.success(`Đã cập nhật "${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}" → Đã bàn giao DVVC + Trừ tồn kho!`);
+                message.success(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} gửi hàng thành công ✓`);
 
                 // Sau đó mới chạy async operations (không block UI)
                 (async () => {
