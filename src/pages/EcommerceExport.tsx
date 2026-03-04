@@ -89,7 +89,10 @@ export default function EcommerceExportPage() {
     const alertSoundRef = useRef<HTMLAudioElement | null>(null);
 
     // 🔍 State cho bộ lọc trạng thái
-    const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed' | 'overdue'>('pending'); // Mặc định: Chưa hoàn
+    const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed' | 'overdue' | 'no_data'>('pending');
+
+    // 🚫 Danh sách tracking ID scan nhưng không có trong data
+    const [unmatchedScans, setUnmatchedScans] = useState<{ trackingId: string; scannedAt: string }[]>([]);
 
     // 🔎 State cho tìm kiếm mã vận đơn đi
     const [searchKeyword, setSearchKeyword] = useState('');
@@ -427,12 +430,21 @@ Thời gian: ${currentTime}`;
                 })();
             }
         } else {
-            playAlert(); // 📊 Âm thanh cảnh báo
+            playAlert();
             setScanStatus({
                 type: 'error',
                 message: `❌ KHÔNG TÌM THẤY - Tracking ID: ${trimmed}`,
             });
             message.warning(`Không tìm thấy đơn hàng với Tracking ID: ${trimmed}`);
+
+            // ⚡ Lưu vào danh sách "Lệch đơn" (tránh trùng)
+            setUnmatchedScans(prev => {
+                if (prev.some(s => s.trackingId === trimmed)) return prev;
+                return [...prev, {
+                    trackingId: trimmed,
+                    scannedAt: dayjs().format('HH:mm:ss DD/MM/YYYY')
+                }];
+            });
         }
 
         setScanInput('');
@@ -1618,6 +1630,27 @@ Thời gian: ${currentTime}`;
                         >
                             📋 Tất cả: {ecommerceExports.length}
                         </Tag>
+                        <Tag
+                            onClick={() => setStatusFilter('no_data')}
+                            style={{
+                                cursor: 'pointer',
+                                padding: '6px 14px',
+                                fontSize: 13,
+                                fontWeight: 600,
+                                borderRadius: 8,
+                                border: 'none',
+                                background: statusFilter === 'no_data'
+                                    ? 'linear-gradient(135deg, #8c8c8c 0%, #595959 100%)'
+                                    : 'linear-gradient(135deg, #d9d9d9 0%, #bfbfbf 100%)',
+                                color: '#fff',
+                                boxShadow: statusFilter === 'no_data'
+                                    ? '0 2px 8px rgba(0, 0, 0, 0.3)'
+                                    : '0 1px 4px rgba(0, 0, 0, 0.1)',
+                                transition: 'all 0.3s',
+                            }}
+                        >
+                            ⚡ Lệch đơn: {unmatchedScans.length}
+                        </Tag>
                     </Space>
 
 
@@ -1777,74 +1810,152 @@ Thời gian: ${currentTime}`;
                 )}
             </div>
 
-            <Card>
-                <Table
-                    columns={columns}
-                    dataSource={filteredEcommerceExports}
-                    rowKey="id"
-                    loading={loading}
-                    rowClassName={(record) => {
-                        try {
-                            const items = JSON.parse(record.items);
-                            return items.length > 1 ? 'multi-sku-row' : '';
-                        } catch {
-                            return '';
-                        }
-                    }}
-                    rowSelection={{
-                        selectedRowKeys,
-                        onChange: (selectedKeys) => {
-                            setSelectedRowKeys(selectedKeys as number[]);
-                        },
-                        columnWidth: 50,
-                        getCheckboxProps: (record) => ({
-                            name: record.orderNumber || record.ecommerceExportCode || `ecommerceExport-${record.id}`,
-                        }),
-                    }}
-                    expandable={{
-                        showExpandColumn: false,
-                        expandRowByClick: true,
-                        expandedRowRender: (record) => {
-                            let items: ExportItem[] = [];
-                            try {
-                                items = JSON.parse(record.items);
-                            } catch {
-                                items = [];
-                            }
-
-                            if (items.length === 0) {
-                                return <p style={{ margin: 0, color: '#bfbfbf' }}>Không có sản phẩm</p>;
-                            }
-
-                            return (
-                                <Table
-                                    columns={itemColumns}
-                                    dataSource={items}
-                                    pagination={false}
-                                    rowKey={(_item, index) => `${record.id}-${index}`}
-                                    size="small"
-                                    style={{ margin: '0 48px' }}
-                                />
-                            );
-                        },
-                        rowExpandable: (record) => {
+            {statusFilter === 'no_data' ? (
+                /* 🚫 BẢNG "KHÔNG CÓ DL" */
+                <Card>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                        <Title level={5} style={{ margin: 0 }}>
+                            ⚡ Lệch đơn — Tracking ID không khớp dữ liệu ({unmatchedScans.length})
+                        </Title>
+                        {unmatchedScans.length > 0 && (
+                            <Button
+                                danger
+                                size="small"
+                                icon={<DeleteOutlined />}
+                                onClick={() => {
+                                    Modal.confirm({
+                                        title: 'Xóa tất cả?',
+                                        content: `Xóa ${unmatchedScans.length} tracking ID không có dữ liệu?`,
+                                        okText: 'Xóa',
+                                        okType: 'danger',
+                                        onOk: () => setUnmatchedScans([]),
+                                    });
+                                }}
+                            >
+                                Xóa tất cả
+                            </Button>
+                        )}
+                    </div>
+                    {unmatchedScans.length === 0 ? (
+                        <div style={{ textAlign: 'center', padding: 40, color: '#8c8c8c' }}>
+                            ✅ Không có đơn lệch nào
+                        </div>
+                    ) : (
+                        <Table
+                            dataSource={unmatchedScans}
+                            rowKey="trackingId"
+                            pagination={false}
+                            size="middle"
+                            columns={[
+                                {
+                                    title: 'STT',
+                                    width: 60,
+                                    align: 'center' as const,
+                                    render: (_: any, __: any, index: number) => index + 1,
+                                },
+                                {
+                                    title: 'Tracking ID',
+                                    dataIndex: 'trackingId',
+                                    render: (id: string) => (
+                                        <Tag color="red" style={{ fontSize: 13, padding: '4px 10px', fontFamily: 'monospace' }}>
+                                            {id}
+                                        </Tag>
+                                    ),
+                                },
+                                {
+                                    title: 'Thời gian scan',
+                                    dataIndex: 'scannedAt',
+                                    width: 200,
+                                },
+                                {
+                                    title: '',
+                                    width: 60,
+                                    render: (_: any, record: any) => (
+                                        <Button
+                                            type="link"
+                                            size="small"
+                                            danger
+                                            onClick={() => setUnmatchedScans(prev => prev.filter(s => s.trackingId !== record.trackingId))}
+                                        >
+                                            Xóa
+                                        </Button>
+                                    ),
+                                },
+                            ]}
+                        />
+                    )}
+                </Card>
+            ) : (
+                /* 📋 BẢNG ĐƠN HÀNG CHÍNH */
+                <Card>
+                    <Table
+                        columns={columns}
+                        dataSource={filteredEcommerceExports}
+                        rowKey="id"
+                        loading={loading}
+                        rowClassName={(record) => {
                             try {
                                 const items = JSON.parse(record.items);
-                                return items.length > 0;
+                                return items.length > 1 ? 'multi-sku-row' : '';
                             } catch {
-                                return false;
+                                return '';
                             }
-                        },
-                    }}
-                    pagination={{
-                        defaultPageSize: 50,
-                        showSizeChanger: true,
-                        pageSizeOptions: ['10', '20', '50', '100'],
-                        showTotal: (total) => `Tổng ${total} phiếu`,
-                    }}
-                    scroll={{ x: 'max-content' }}
-                />
-            </Card>
+                        }}
+                        rowSelection={{
+                            selectedRowKeys,
+                            onChange: (selectedKeys) => {
+                                setSelectedRowKeys(selectedKeys as number[]);
+                            },
+                            columnWidth: 50,
+                            getCheckboxProps: (record) => ({
+                                name: record.orderNumber || record.ecommerceExportCode || `ecommerceExport-${record.id}`,
+                            }),
+                        }}
+                        expandable={{
+                            showExpandColumn: false,
+                            expandRowByClick: true,
+                            expandedRowRender: (record) => {
+                                let items: ExportItem[] = [];
+                                try {
+                                    items = JSON.parse(record.items);
+                                } catch {
+                                    items = [];
+                                }
+
+                                if (items.length === 0) {
+                                    return <p style={{ margin: 0, color: '#bfbfbf' }}>Không có sản phẩm</p>;
+                                }
+
+                                return (
+                                    <Table
+                                        columns={itemColumns}
+                                        dataSource={items}
+                                        pagination={false}
+                                        rowKey={(_item, index) => `${record.id}-${index}`}
+                                        size="small"
+                                        style={{ margin: '0 48px' }}
+                                    />
+                                );
+                            },
+                            rowExpandable: (record) => {
+                                try {
+                                    const items = JSON.parse(record.items);
+                                    return items.length > 0;
+                                } catch {
+                                    return false;
+                                }
+                            },
+                        }}
+                        pagination={{
+                            defaultPageSize: 50,
+                            showSizeChanger: true,
+                            pageSizeOptions: ['10', '20', '50', '100'],
+                            showTotal: (total) => `Tổng ${total} phiếu`,
+                        }}
+                        scroll={{ x: 'max-content' }}
+                    />
+                </Card>
+            )}
 
             {/* Method Selection Modal */}
             <Modal
