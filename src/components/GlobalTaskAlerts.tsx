@@ -118,34 +118,65 @@ export default function GlobalTaskAlerts() {
         setAlertPopups(prev => prev.filter(p => p.id !== id));
     }, []);
 
-    // Load tasks từ DB mỗi 60 giây
+    // === Load tasks từ DB ===
+    const loadTasks = useCallback(async () => {
+        try {
+            const result = await (window as any).electronAPI.dailyTasks.list({});
+            if (result.success && result.data) {
+                const assignmentTasks = result.data
+                    .filter((t: any) => (t.type === 'assignment') && t.status !== 'completed')
+                    .map((t: any) => ({
+                        id: t.id,
+                        title: t.title,
+                        assignee: t.assignee,
+                        dueDate: dayjs(t.dueDate).format('YYYY-MM-DD'),
+                        dueTime: dayjs(t.dueDate).format('HH:mm'),
+                        status: t.status,
+                        type: t.type,
+                    }));
+                setTasks(assignmentTasks);
+            }
+        } catch (err) {
+            console.log('[GlobalAlerts] Load tasks error:', err);
+        }
+    }, []);
+
+    // Load mỗi 60 giây
     useEffect(() => {
-        const loadTasks = async () => {
-            try {
-                const result = await window.electronAPI.dailyTasks.list({});
-                if (result.success && result.data) {
-                    const assignmentTasks = result.data
-                        .filter((t: any) => (t.type === 'assignment') && t.status !== 'completed')
-                        .map((t: any) => ({
-                            id: t.id,
-                            title: t.title,
-                            assignee: t.assignee,
-                            dueDate: dayjs(t.dueDate).format('YYYY-MM-DD'),
-                            dueTime: dayjs(t.dueDate).format('HH:mm'),
-                            status: t.status,
-                            type: t.type,
-                        }));
-                    setTasks(assignmentTasks);
-                }
-            } catch (err) {
-                console.log('[GlobalAlerts] Load tasks error:', err);
+        loadTasks();
+        const interval = setInterval(loadTasks, 60000);
+        return () => clearInterval(interval);
+    }, [loadTasks]);
+
+    // === Lắng nghe events từ DailyTasks ===
+    useEffect(() => {
+        // Khi bấm "Đang làm" → dừng kêu cho task đó
+        const onAcknowledged = (e: Event) => {
+            const taskId = (e as CustomEvent).detail?.taskId;
+            if (taskId) {
+                setAcknowledgedTasks(prev => {
+                    const next = new Set(prev);
+                    next.add(taskId);
+                    return next;
+                });
+                // Xóa popup liên quan
+                setAlertPopups([]);
             }
         };
+        // Khi xóa/hoàn thành/cập nhật task → reload ngay
+        const onTaskChanged = () => {
+            loadTasks();
+            // Clear all popups vì data đã thay đổi
+            setAlertPopups([]);
+        };
 
-        loadTasks();
-        const interval = setInterval(loadTasks, 60000); // reload mỗi 60 giây
-        return () => clearInterval(interval);
-    }, []);
+        window.addEventListener('task-acknowledged', onAcknowledged);
+        window.addEventListener('task-changed', onTaskChanged);
+        return () => {
+            window.removeEventListener('task-acknowledged', onAcknowledged);
+            window.removeEventListener('task-changed', onTaskChanged);
+        };
+    }, [loadTasks]);
 
     // Kiểm tra deadline mỗi 30 giây → popup + âm thanh
     useEffect(() => {

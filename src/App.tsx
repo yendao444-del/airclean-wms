@@ -42,6 +42,7 @@ import SystemLogsPage from './pages/SystemLogs';
 import SettingsPage from './pages/Settings';
 import DailyTasksPage from './pages/DailyTasks';
 import GlobalTaskAlerts from './components/GlobalTaskAlerts';
+import HeaderTaskTicker from './components/HeaderTaskTicker';
 
 import Login from './pages/Login';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
@@ -361,9 +362,10 @@ function AppContent() {
                                 boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
                             }}
                         >
-                            <Title level={4} style={{ margin: 0, color: '#262626' }}>
+                            <Title level={4} style={{ margin: 0, color: '#262626', flexShrink: 0 }}>
                                 {getMenuLabel(selectedKey)}
                             </Title>
+                            <HeaderTaskTicker onNavigate={(key) => setSelectedKey(key)} />
                             <Space size={16}>
                                 <Text strong>{user?.username || 'User'}</Text>
                                 <Text type="secondary">

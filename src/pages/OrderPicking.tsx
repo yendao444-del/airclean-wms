@@ -703,13 +703,12 @@ export default function OrderPickingPage() {
         }
 
         // Tạo nội dung tin nhắn
-        let msg = `📋 *Phiếu nhặt hàng #${slipNo}*\n`;
-        msg += `📦 ${orderCount} đơn · ${pickList.length} SP · ${totalPcs} sản phẩm\n`;
+        let msg = `📋 Phiếu nhặt hàng #${slipNo}\n`;
         msg += `━━━━━━━━━━━━━━━━\n`;
 
         pickList.forEach((group, idx) => {
             const name = group.color ? `${group.productName} - ${group.color}` : group.productName;
-            msg += `${idx + 1}. ${name} - *${group.totalPieces} ${group.unit || 'Chiếc'}*\n`;
+            msg += `${idx + 1}. ${name} - ${group.totalPieces} ${group.unit || 'Chiếc'}\n`;
         });
 
         // Gửi ngầm — không await, không block UI

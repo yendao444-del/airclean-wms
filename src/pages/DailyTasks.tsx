@@ -291,8 +291,8 @@ const DailyTasks = () => {
     const playSiren = (cycles: number) => {
         try {
             for (let i = 0; i < cycles; i++) {
-                setTimeout(() => new Audio(generateBeepWav(880, 220, 0.8, 'square')).play().catch(() => {}), i * 440);
-                setTimeout(() => new Audio(generateBeepWav(1200, 220, 0.8, 'square')).play().catch(() => {}), i * 440 + 220);
+                setTimeout(() => new Audio(generateBeepWav(880, 220, 0.8, 'square')).play().catch(() => { }), i * 440);
+                setTimeout(() => new Audio(generateBeepWav(1200, 220, 0.8, 'square')).play().catch(() => { }), i * 440 + 220);
             }
         } catch { }
     };
@@ -301,7 +301,7 @@ const DailyTasks = () => {
     const playUrgentBeeps = (count: number) => {
         try {
             for (let i = 0; i < count; i++) {
-                setTimeout(() => new Audio(generateBeepWav(1100, 120, 0.75, 'square')).play().catch(() => {}), i * 180);
+                setTimeout(() => new Audio(generateBeepWav(1100, 120, 0.75, 'square')).play().catch(() => { }), i * 180);
             }
         } catch { }
     };
@@ -310,7 +310,7 @@ const DailyTasks = () => {
     const playWarningBeeps = (count: number) => {
         try {
             for (let i = 0; i < count; i++) {
-                setTimeout(() => new Audio(generateBeepWav(880, 200, 0.6, 'sine')).play().catch(() => {}), i * 350);
+                setTimeout(() => new Audio(generateBeepWav(880, 200, 0.6, 'sine')).play().catch(() => { }), i * 350);
             }
         } catch { }
     };
@@ -318,7 +318,7 @@ const DailyTasks = () => {
     // Beep nhẹ - dùng khi còn 30-60p
     const playInfoBeep = () => {
         try {
-            new Audio(generateBeepWav(660, 300, 0.45, 'sine')).play().catch(() => {});
+            new Audio(generateBeepWav(660, 300, 0.45, 'sine')).play().catch(() => { });
         } catch { }
     };
 
@@ -329,6 +329,8 @@ const DailyTasks = () => {
             next.add(taskId);
             return next;
         });
+        // Thông báo GlobalTaskAlerts dừng kêu
+        window.dispatchEvent(new CustomEvent('task-acknowledged', { detail: { taskId } }));
         message.success({ content: '✅ Đã xác nhận đang làm!', duration: 2 });
     };
 
@@ -517,6 +519,7 @@ const DailyTasks = () => {
         try {
             await window.electronAPI.dailyTasks.update(taskId, { status: 'completed' });
             message.success('✅ Đã hoàn thành!');
+            window.dispatchEvent(new CustomEvent('task-changed'));
             loadTasks();
         } catch (e: any) {
             message.error('Lỗi: ' + e.message);
@@ -531,6 +534,7 @@ const DailyTasks = () => {
             onOk: async () => {
                 await window.electronAPI.dailyTasks.delete(taskId);
                 message.success('Đã xóa!');
+                window.dispatchEvent(new CustomEvent('task-changed'));
                 loadTasks();
             }
         });

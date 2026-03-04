@@ -16,14 +16,31 @@ import {
     Dropdown,
     Radio,
     Spin,
+    Divider,
+    Alert,
 } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, RollbackOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, RollbackOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, CheckCircleOutlined, WarningOutlined, SearchOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import * as XLSX from 'xlsx';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
+
+// Kiểu dữ liệu cho hàng thực nhận
+interface ReturnItem {
+    sku: string;
+    name: string;
+    qty: number;
+}
+
+interface StockLogEntry {
+    sku: string;
+    name: string;
+    qty: number;
+    orderId: string;
+    time: string;
+}
 
 interface Product {
     id: number;
@@ -85,7 +102,12 @@ export default function RefundsPage() {
     const alertSoundRef = useRef<HTMLAudioElement | null>(null);
 
     // 🔍 State cho bộ lọc trạng thái
-    const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed' | 'overdue'>('pending'); // Mặc định: Chưa hoàn
+    const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'received' | 'completed' | 'overdue'>('pending');
+
+    // 📦 State cho xác nhận hoàn - chọn SKU & SL thực nhận
+    const [returnItemsMap, setReturnItemsMap] = useState<Record<number, ReturnItem[]>>({});
+    const [mismatchOpen, setMismatchOpen] = useState<Set<number>>(new Set());
+    const [stockLog, setStockLog] = useState<StockLogEntry[]>([]);
 
     useEffect(() => {
         // Khởi tạo audio
@@ -236,7 +258,7 @@ export default function RefundsPage() {
         });
     };
 
-    // 📦 Xử lý quét mã vận đơn
+    // 📦 Xử lý quét mã vận đơn → Chuyển sang "Đã nhận" (received)
     const handleScan = async (code: string) => {
         const trimmed = code.trim();
         if (!trimmed) return;
@@ -245,28 +267,57 @@ export default function RefundsPage() {
         const foundRefund = refunds.find(r => {
             const trackingMatch = r.notes?.match(/Tracking: ([^|]+)/);
             const tracking = trackingMatch ? trackingMatch[1].trim() : '';
-
             return r.orderNumber === trimmed || tracking === trimmed;
         });
 
         if (foundRefund) {
-            // Cập nhật trạng thái thành "Đã hoàn"
-            await window.electronAPI.refunds.update(foundRefund.id, { status: 'completed' });
-            const updatedRefunds = refunds.map(r =>
-                r.id === foundRefund.id
-                    ? { ...r, status: 'completed' }
-                    : r
-            );
-            setRefunds(updatedRefunds);
+            if (foundRefund.status === 'completed') {
+                // Đã hoàn rồi
+                playAlert();
+                setScanStatus({
+                    type: 'warning',
+                    message: `⚠️ Đơn ${foundRefund.orderNumber || foundRefund.refundCode} đã hoàn rồi!`,
+                });
+                message.warning('Đơn hàng này đã được hoàn!');
+            } else if (foundRefund.status === 'received') {
+                // Đã nhận rồi - nhắc kiểm hàng
+                playAlert();
+                setScanStatus({
+                    type: 'warning',
+                    message: `⚠️ Đơn ${foundRefund.orderNumber || foundRefund.refundCode} đã nhận — kiểm hàng & xác nhận hoàn!`,
+                });
+                setStatusFilter('received');
+            } else {
+                // Chưa nhận → Chuyển sang "Đã nhận" (received)
+                await window.electronAPI.refunds.update(foundRefund.id, { status: 'received' });
+                const updatedRefunds = refunds.map(r =>
+                    r.id === foundRefund.id ? { ...r, status: 'received' } : r
+                );
+                setRefunds(updatedRefunds);
 
-            playSuccess(); // 📊 Âm thanh thành công
-            setScanStatus({
-                type: 'success',
-                message: `✅ THÀNH CÔNG - ${foundRefund.orderNumber || foundRefund.refundCode}`,
-            });
-            message.success('Đã cập nhật trạng thái "Đã hoàn"!');
+                // Tự populate returnItemsMap từ items gốc
+                try {
+                    const origItems: RefundItem[] = JSON.parse(foundRefund.items);
+                    setReturnItemsMap(prev => ({
+                        ...prev,
+                        [foundRefund.id]: origItems.map(i => ({
+                            sku: i.variantSku || '',
+                            name: i.productName || '',
+                            qty: i.quantity,
+                        })),
+                    }));
+                } catch { /* ignore */ }
+
+                playSuccess();
+                setScanStatus({
+                    type: 'success',
+                    message: `✅ Đã nhận hàng hoàn: ${foundRefund.orderNumber || foundRefund.refundCode}`,
+                });
+                message.success('📦 Đã nhận hàng hoàn! Kiểm hàng và xác nhận.');
+                setStatusFilter('received');
+            }
         } else {
-            playAlert(); // 📊 Âm thanh cảnh báo
+            playAlert();
             setScanStatus({
                 type: 'error',
                 message: `❌ KHÔNG TÌM THẤY - ${trimmed}`,
@@ -276,6 +327,148 @@ export default function RefundsPage() {
 
         setScanInput('');
         scanInputRef.current?.focus();
+    };
+
+    // ✅ Xác nhận hoàn ĐẦY ĐỦ → Cộng kho theo hàng gốc
+    const confirmFull = async (refundRecord: Refund) => {
+        try {
+            let origItems: RefundItem[] = [];
+            try { origItems = JSON.parse(refundRecord.items); } catch { origItems = []; }
+
+            // Cộng tồn kho cho từng item gốc
+            for (const item of origItems) {
+                if (item.variantSku && item.quantity > 0) {
+                    try {
+                        await window.electronAPI.products.updateStock({
+                            sku: item.variantSku,
+                            quantity: item.quantity,
+                            isAdd: true,
+                        });
+                        console.log(`✅ Cộng kho: ${item.variantSku} +${item.quantity}`);
+                    } catch (err) {
+                        console.error(`❌ Lỗi cộng kho ${item.variantSku}:`, err);
+                    }
+                }
+            }
+
+            // Cập nhật status → completed
+            await window.electronAPI.refunds.update(refundRecord.id, { status: 'completed' });
+            setRefunds(prev => prev.map(r => r.id === refundRecord.id ? { ...r, status: 'completed' } : r));
+
+            // Ghi stock log
+            const newLogs: StockLogEntry[] = origItems
+                .filter(i => i.variantSku && i.quantity > 0)
+                .map(i => ({
+                    sku: i.variantSku || '',
+                    name: i.productName || '',
+                    qty: i.quantity,
+                    orderId: refundRecord.orderNumber || refundRecord.refundCode || `#${refundRecord.id}`,
+                    time: dayjs().format('HH:mm:ss DD/MM'),
+                }));
+            setStockLog(prev => [...newLogs, ...prev]);
+
+            const totalQty = origItems.reduce((s, i) => s + i.quantity, 0);
+            message.success(`✅ Đã hoàn! Cộng ${totalQty} SP vào kho`);
+            playSuccess();
+        } catch (error) {
+            console.error('Confirm full error:', error);
+            message.error('❌ Lỗi khi xác nhận hoàn!');
+        }
+    };
+
+    // ⚠️ Xác nhận hoàn KHÔNG KHỚP → Cộng kho theo SKU/SL custom
+    const confirmCustom = async (refundRecord: Refund) => {
+        const returnItems = returnItemsMap[refundRecord.id] || [];
+        const validItems = returnItems.filter(i => i.sku && i.qty > 0);
+
+        if (validItems.length === 0) {
+            message.warning('⚠️ Chưa nhập hàng thực nhận!');
+            return;
+        }
+
+        try {
+            // Cộng tồn kho theo SKU custom
+            for (const item of validItems) {
+                try {
+                    await window.electronAPI.products.updateStock({
+                        sku: item.sku,
+                        quantity: item.qty,
+                        isAdd: true,
+                    });
+                    console.log(`✅ Cộng kho (custom): ${item.sku} +${item.qty}`);
+                } catch (err) {
+                    console.error(`❌ Lỗi cộng kho ${item.sku}:`, err);
+                }
+            }
+
+            // Cập nhật status + lưu returnItems vào notes
+            let origItems: RefundItem[] = [];
+            try { origItems = JSON.parse(refundRecord.items); } catch { origItems = []; }
+            const origTotal = origItems.reduce((s, i) => s + i.quantity, 0);
+            const recvTotal = validItems.reduce((s, i) => s + i.qty, 0);
+            const lossNote = `[KHÔNG KHỚP] Gửi ${origTotal} combo → Nhận ${recvTotal} SP. Xác nhận: ${dayjs().format('DD/MM HH:mm')}`;
+
+            const existingNotes = refundRecord.notes || '';
+            const updatedNotes = existingNotes + ' | ' + lossNote;
+
+            await window.electronAPI.refunds.update(refundRecord.id, {
+                status: 'completed',
+                notes: updatedNotes,
+            });
+            setRefunds(prev => prev.map(r => r.id === refundRecord.id ? { ...r, status: 'completed', notes: updatedNotes } : r));
+
+            // Ghi stock log
+            const newLogs: StockLogEntry[] = validItems.map(i => ({
+                sku: i.sku,
+                name: i.name,
+                qty: i.qty,
+                orderId: refundRecord.orderNumber || refundRecord.refundCode || `#${refundRecord.id}`,
+                time: dayjs().format('HH:mm:ss DD/MM'),
+            }));
+            setStockLog(prev => [...newLogs, ...prev]);
+
+            // Đóng mismatch
+            setMismatchOpen(prev => { const n = new Set(prev); n.delete(refundRecord.id); return n; });
+
+            message.success(`✅ Đã hoàn! Cộng ${recvTotal} SP vào kho (đã chỉnh SKU)`);
+            playSuccess();
+        } catch (error) {
+            console.error('Confirm custom error:', error);
+            message.error('❌ Lỗi khi xác nhận hoàn!');
+        }
+    };
+
+    // Toggle mismatch section
+    const toggleMismatch = (id: number) => {
+        setMismatchOpen(prev => {
+            const n = new Set(prev);
+            if (n.has(id)) n.delete(id); else n.add(id);
+            return n;
+        });
+    };
+
+    // Update return item sku
+    const updateReturnItem = (refundId: number, index: number, field: keyof ReturnItem, value: any) => {
+        setReturnItemsMap(prev => {
+            const items = [...(prev[refundId] || [])];
+            items[index] = { ...items[index], [field]: value };
+            return { ...prev, [refundId]: items };
+        });
+    };
+
+    const addReturnItem = (refundId: number) => {
+        setReturnItemsMap(prev => ({
+            ...prev,
+            [refundId]: [...(prev[refundId] || []), { sku: '', name: '', qty: 0 }],
+        }));
+    };
+
+    const removeReturnItem = (refundId: number, index: number) => {
+        setReturnItemsMap(prev => {
+            const items = [...(prev[refundId] || [])];
+            items.splice(index, 1);
+            return { ...prev, [refundId]: items };
+        });
     };
 
     const handleScanInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -634,7 +827,7 @@ export default function RefundsPage() {
                         const ddmmMatch = String(ct).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
                         if (ddmmMatch) {
                             // ddmmMatch[1]=day, ddmmMatch[2]=month, ddmmMatch[3]=year
-                            const isoStr = `${ddmmMatch[3]}-${ddmmMatch[2].padStart(2,'0')}-${ddmmMatch[1].padStart(2,'0')}`;
+                            const isoStr = `${ddmmMatch[3]}-${ddmmMatch[2].padStart(2, '0')}-${ddmmMatch[1].padStart(2, '0')}`;
                             const tryParse = dayjs(isoStr);
                             if (tryParse.isValid()) parsedDate = tryParse;
                         } else {
@@ -796,16 +989,22 @@ export default function RefundsPage() {
             key: 'status',
             width: 150,
             render: (status, record) => {
-                // Kiểm tra quá hạn (>3 ngày từ refundDate/cancelledTime)
                 const refundDate = dayjs(record.refundDate);
                 const now = dayjs();
                 const daysPassed = now.diff(refundDate, 'day');
-                const isOverdue = daysPassed > 3 && status !== 'completed';
+                const isOverdue = daysPassed > 3 && status !== 'completed' && status !== 'received';
+
+                const statusMap: Record<string, { color: string; label: string }> = {
+                    'pending': { color: 'processing', label: 'Chưa hoàn' },
+                    'received': { color: 'blue', label: '📋 Đã nhận' },
+                    'completed': { color: 'success', label: '✅ Đã hoàn' },
+                };
+                const st = statusMap[status] || statusMap['pending'];
 
                 return (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <Tag color={status === 'completed' ? 'success' : 'processing'}>
-                            {status === 'completed' ? 'Hoàn thành' : 'Đang xử lý'}
+                        <Tag color={st.color}>
+                            {st.label}
                         </Tag>
                         {isOverdue && (
                             <Tag color="red" style={{ fontWeight: 600 }}>
@@ -901,14 +1100,14 @@ export default function RefundsPage() {
     // 🔍 Lọc dữ liệu theo trạng thái
     const filteredRefunds = refunds.filter(refund => {
         if (statusFilter === 'all') return true;
-        if (statusFilter === 'pending') return refund.status !== 'completed'; // Chưa hoàn
-        if (statusFilter === 'completed') return refund.status === 'completed'; // Đã hoàn
+        if (statusFilter === 'pending') return refund.status === 'pending';
+        if (statusFilter === 'received') return refund.status === 'received';
+        if (statusFilter === 'completed') return refund.status === 'completed';
         if (statusFilter === 'overdue') {
-            // Khiếu nại: Đơn quá hạn (>3 ngày) và chưa hoàn
             const refundDate = dayjs(refund.refundDate);
             const now = dayjs();
             const daysPassed = now.diff(refundDate, 'day');
-            return daysPassed > 3 && refund.status !== 'completed';
+            return daysPassed > 3 && refund.status !== 'completed' && refund.status !== 'received';
         }
         return true;
     });
@@ -1030,12 +1229,15 @@ export default function RefundsPage() {
                         size="large"
                     >
                         <Radio.Button value="pending">
-                            📦 Chưa hoàn ({refunds.filter(r => r.status !== 'completed').length})
+                            📦 Chưa hoàn ({refunds.filter(r => r.status === 'pending').length})
+                        </Radio.Button>
+                        <Radio.Button value="received">
+                            📋 Đã nhận ({refunds.filter(r => r.status === 'received').length})
                         </Radio.Button>
                         <Radio.Button value="overdue">
                             ⚠️ Khiếu nại ({refunds.filter(r => {
                                 const daysPassed = dayjs().diff(dayjs(r.refundDate), 'day');
-                                return daysPassed > 3 && r.status !== 'completed';
+                                return daysPassed > 3 && r.status !== 'completed' && r.status !== 'received';
                             }).length})
                         </Radio.Button>
                         <Radio.Button value="completed">
@@ -1105,26 +1307,220 @@ export default function RefundsPage() {
                             showExpandColumn: false,
                             expandRowByClick: true,
                             expandedRowRender: (record) => {
-                                let items: RefundItem[] = [];
-                                try {
-                                    items = JSON.parse(record.items);
-                                } catch {
-                                    items = [];
-                                }
+                                let origItems: RefundItem[] = [];
+                                try { origItems = JSON.parse(record.items); } catch { origItems = []; }
 
-                                if (items.length === 0) {
+                                if (origItems.length === 0) {
                                     return <p style={{ margin: 0, color: '#bfbfbf' }}>Không có sản phẩm</p>;
                                 }
 
+                                const isReceived = record.status === 'received';
+                                const isCompleted = record.status === 'completed';
+                                const isMismatchMode = mismatchOpen.has(record.id);
+                                const returnItems = returnItemsMap[record.id] || [];
+
+                                // Trích xuất tracking & shipping
+                                const trackingMatch = record.notes?.match(/Tracking: ([^|]+)/);
+                                const tracking = trackingMatch ? trackingMatch[1].trim() : '—';
+                                const shippingMatch = record.notes?.match(/Shipping: ([^|]+)/);
+                                const shipping = shippingMatch ? shippingMatch[1].trim() : '—';
+                                const hasLossNote = record.notes?.includes('[KHÔNG KHỚP]');
+
                                 return (
-                                    <Table
-                                        columns={itemColumns}
-                                        dataSource={items}
-                                        pagination={false}
-                                        rowKey={(_item, index) => `${record.id}-${index}`}
-                                        size="small"
-                                        style={{ margin: '0 48px' }}
-                                    />
+                                    <div style={{ padding: '12px 16px' }}>
+                                        {/* Info row */}
+                                        <div style={{ display: 'flex', gap: 20, marginBottom: 12, fontSize: 12, flexWrap: 'wrap' }}>
+                                            <span>
+                                                <span style={{ color: '#8c8c8c' }}>Tracking: </span>
+                                                <Tag color="blue" style={{ cursor: 'pointer' }} onClick={() => {
+                                                    navigator.clipboard.writeText(tracking);
+                                                    message.success('📋 Đã copy Tracking!');
+                                                }}>{tracking} 📋</Tag>
+                                            </span>
+                                            <span>
+                                                <span style={{ color: '#8c8c8c' }}>ĐVVC: </span>
+                                                <strong>{shipping}</strong>
+                                            </span>
+                                        </div>
+
+                                        {/* Bảng hàng gốc */}
+                                        <div style={{ fontSize: 12, fontWeight: 700, color: '#8c8c8c', marginBottom: 6 }}>📦 Hàng gửi đi (gốc):</div>
+                                        <Table
+                                            columns={[
+                                                { title: 'SKU gốc', dataIndex: 'variantSku', width: 140, render: (sku: string) => <Tag color="cyan">{sku || 'N/A'}</Tag> },
+                                                { title: 'Sản phẩm', dataIndex: 'productName', render: (name: string) => <span style={{ fontSize: 12 }}>{name}</span> },
+                                                { title: 'SL gửi', dataIndex: 'quantity', width: 80, align: 'center' as const, render: (qty: number) => <strong>{qty}</strong> },
+                                                { title: 'Giá trị', dataIndex: 'total', width: 120, align: 'right' as const, render: (total: number) => <span style={{ fontWeight: 600 }}>{(total || 0).toLocaleString('vi-VN')}đ</span> },
+                                            ]}
+                                            dataSource={origItems}
+                                            pagination={false}
+                                            rowKey={(_item, index) => `orig-${record.id}-${index}`}
+                                            size="small"
+                                            style={{ marginBottom: 14 }}
+                                        />
+
+                                        {/* === ĐÃ NHẬN: 2 nút action === */}
+                                        {isReceived && !isMismatchMode && (
+                                            <>
+                                                <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 14 }}>
+                                                    <Button
+                                                        type="primary"
+                                                        size="large"
+                                                        icon={<CheckCircleOutlined />}
+                                                        onClick={(e) => { e.stopPropagation(); confirmFull(record); }}
+                                                        style={{ background: '#52c41a', borderColor: '#52c41a', fontWeight: 700 }}
+                                                    >
+                                                        ✅ Xác nhận hoàn (đầy đủ)
+                                                    </Button>
+                                                    <span style={{ fontSize: 12, color: '#8c8c8c' }}>→ Cộng tồn kho đúng theo hàng gửi gốc</span>
+                                                </div>
+
+                                                {/* Toggle "Không khớp" */}
+                                                <div
+                                                    onClick={(e) => { e.stopPropagation(); toggleMismatch(record.id); }}
+                                                    style={{
+                                                        display: 'flex', alignItems: 'center', gap: 12,
+                                                        padding: '14px 24px', marginTop: 16,
+                                                        background: 'linear-gradient(135deg, #fff7e6 0%, #fff2e8 100%)',
+                                                        border: '2px solid #fa8c16', borderRadius: 12,
+                                                        cursor: 'pointer', fontSize: 14, fontWeight: 700,
+                                                        color: '#d46b08', position: 'relative', overflow: 'hidden',
+                                                        boxShadow: '0 2px 8px rgba(250,140,22,0.12)',
+                                                        transition: 'all 0.2s',
+                                                    }}
+                                                >
+                                                    <span style={{ fontSize: 22 }}>📦</span>
+                                                    <div style={{ flex: 1 }}>
+                                                        <div>▶ Đơn hàng không khớp số lượng</div>
+                                                        <div style={{ fontSize: 11, color: '#ad6800', fontWeight: 500 }}>Kiện bị rách, mất hàng, thiếu sản phẩm → Đổi SKU & nhập lại số lượng</div>
+                                                    </div>
+                                                </div>
+                                            </>
+                                        )}
+
+                                        {/* === CHẾ ĐỘ KHÔNG KHỚP === */}
+                                        {isReceived && isMismatchMode && (
+                                            <div style={{
+                                                marginTop: 12, padding: 16,
+                                                background: '#fff', border: '1px solid #ffd591', borderRadius: 10,
+                                            }}>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                                    <div style={{ fontSize: 13, fontWeight: 700, color: '#fa8c16' }}>⚠️ Chỉnh sửa hàng thực nhận</div>
+                                                    <Space>
+                                                        <Button size="small" type="primary" ghost onClick={(e) => { e.stopPropagation(); addReturnItem(record.id); }}>
+                                                            + Thêm dòng
+                                                        </Button>
+                                                        <Button size="small" onClick={(e) => { e.stopPropagation(); toggleMismatch(record.id); }}>✕ Đóng</Button>
+                                                    </Space>
+                                                </div>
+
+                                                <Alert
+                                                    type="warning"
+                                                    showIcon
+                                                    style={{ marginBottom: 12 }}
+                                                    message="Đổi SKU combo → SKU lẻ nếu kiện bị rách. Nhập đúng số lượng thực nhận."
+                                                />
+
+                                                {/* Bảng chỉnh sửa */}
+                                                <Table
+                                                    columns={[
+                                                        {
+                                                            title: 'SKU thực nhận', width: 240,
+                                                            render: (_: any, item: ReturnItem, index: number) => (
+                                                                <Select
+                                                                    showSearch
+                                                                    placeholder="Chọn SKU..."
+                                                                    value={item.sku || undefined}
+                                                                    onChange={(val) => {
+                                                                        const p = products.find(pr => pr.sku === val);
+                                                                        updateReturnItem(record.id, index, 'sku', val);
+                                                                        updateReturnItem(record.id, index, 'name', p?.name || val);
+                                                                    }}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                    filterOption={(input, option) =>
+                                                                        String(option?.label || '').toLowerCase().includes(input.toLowerCase()) ||
+                                                                        String(option?.value || '').toLowerCase().includes(input.toLowerCase())
+                                                                    }
+                                                                    options={products.map(p => ({ value: p.sku, label: `${p.sku} — ${p.name}` }))}
+                                                                    style={{ width: '100%' }}
+                                                                    size="small"
+                                                                />
+                                                            ),
+                                                        },
+                                                        { title: 'Tên sản phẩm', render: (_: any, item: ReturnItem) => <span style={{ fontSize: 11, color: '#595959' }}>{item.name || '—'}</span> },
+                                                        {
+                                                            title: 'SL nhận', width: 90, align: 'center' as const,
+                                                            render: (_: any, item: ReturnItem, index: number) => (
+                                                                <InputNumber
+                                                                    min={0}
+                                                                    value={item.qty}
+                                                                    onChange={(val) => updateReturnItem(record.id, index, 'qty', val || 0)}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                    size="small"
+                                                                    style={{ width: 70, fontWeight: 700 }}
+                                                                />
+                                                            ),
+                                                        },
+                                                        {
+                                                            title: '', width: 40,
+                                                            render: (_: any, __: any, index: number) => returnItems.length > 1 ? (
+                                                                <Button size="small" danger type="link" onClick={(e) => { e.stopPropagation(); removeReturnItem(record.id, index); }}>✕</Button>
+                                                            ) : null,
+                                                        },
+                                                    ]}
+                                                    dataSource={returnItems}
+                                                    pagination={false}
+                                                    rowKey={(_item, index) => `ret-${record.id}-${index}`}
+                                                    size="small"
+                                                    style={{ marginBottom: 14 }}
+                                                />
+
+                                                {/* Confirm bar */}
+                                                <div style={{
+                                                    padding: '14px 18px',
+                                                    background: 'linear-gradient(135deg, #f6ffed, #e6fffb)',
+                                                    border: '1px solid #b7eb8f', borderRadius: 10,
+                                                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                                }}>
+                                                    <div style={{ fontSize: 13 }}>
+                                                        📦 Gửi gốc: <strong>{origItems.reduce((s, i) => s + i.quantity, 0)} SP</strong>
+                                                        {' '} → Nhận thực tế: <strong style={{ color: '#1890ff' }}>{returnItems.reduce((s, i) => s + i.qty, 0)} SP</strong>
+                                                        <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 2 }}>→ Cộng tồn kho theo SKU & SL đã chỉnh</div>
+                                                    </div>
+                                                    <Button
+                                                        type="primary"
+                                                        size="large"
+                                                        icon={<CheckCircleOutlined />}
+                                                        onClick={(e) => { e.stopPropagation(); confirmCustom(record); }}
+                                                        style={{ background: '#52c41a', borderColor: '#52c41a', fontWeight: 700 }}
+                                                    >
+                                                        ✅ Xác nhận hoàn
+                                                    </Button>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* === ĐÃ HOÀN: hiện kết quả === */}
+                                        {isCompleted && (
+                                            <div style={{ marginTop: 10 }}>
+                                                {hasLossNote ? (
+                                                    <Alert
+                                                        type="warning"
+                                                        showIcon
+                                                        message="Đơn không khớp — đã chỉnh SKU/SL"
+                                                        description={record.notes?.match(/\[KHÔNG KHỚP\](.*)/)?.[1]?.trim()}
+                                                        style={{ marginBottom: 8 }}
+                                                    />
+                                                ) : (
+                                                    <Alert
+                                                        type="success"
+                                                        showIcon
+                                                        message="✅ Hoàn đầy đủ — đã cộng tồn kho theo hàng gốc"
+                                                    />
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
                                 );
                             },
                             rowExpandable: (record) => {
@@ -1144,6 +1540,36 @@ export default function RefundsPage() {
                         }}
                     />
                 </Card>
+
+                {/* 📦 Stock Log - Lịch sử cộng tồn kho */}
+                {stockLog.length > 0 && (
+                    <Card
+                        style={{
+                            marginTop: 16,
+                            border: '1px solid #b7eb8f',
+                        }}
+                        title={
+                            <span style={{ color: '#389e0d', fontWeight: 700 }}>
+                                📦 Lịch sử cộng tồn kho (từ hàng hoàn) — Phiên này
+                            </span>
+                        }
+                        size="small"
+                    >
+                        <Table
+                            columns={[
+                                { title: 'SKU', dataIndex: 'sku', width: 150, render: (sku: string) => <Tag color="cyan">{sku}</Tag> },
+                                { title: 'Tên sản phẩm', dataIndex: 'name' },
+                                { title: 'Cộng kho', dataIndex: 'qty', width: 100, render: (qty: number) => <Tag color="green" style={{ fontWeight: 700 }}>+{qty} SP</Tag> },
+                                { title: 'Đơn hàng', dataIndex: 'orderId', width: 200, render: (id: string) => <span style={{ fontSize: 11, fontFamily: 'monospace' }}>{id}</span> },
+                                { title: 'Thời gian', dataIndex: 'time', width: 150 },
+                            ]}
+                            dataSource={stockLog}
+                            pagination={false}
+                            rowKey={(_item, index) => `log-${index}`}
+                            size="small"
+                        />
+                    </Card>
+                )}
 
                 {/* Method Selection Modal */}
                 <Modal
