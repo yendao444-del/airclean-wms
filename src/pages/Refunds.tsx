@@ -17,6 +17,7 @@ import {
     Radio,
     Spin,
     Divider,
+    Collapse,
     Alert,
 } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, RollbackOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, CheckCircleOutlined, WarningOutlined, SearchOutlined } from '@ant-design/icons';
@@ -1249,88 +1250,92 @@ export default function RefundsPage() {
                     </Space>
                 </div>
 
-                {/* 🎥 CARD ĐƠN CẦN QUAY VIDEO */}
-                <Card
+                {/* 🎥 ĐƠN CẦN QUAY VIDEO — Thu gọn mặc định */}
+                <Collapse
                     size="small"
                     style={{
                         marginBottom: 16,
                         border: '2px solid #ff4d4f',
                         borderRadius: 10,
-                        boxShadow: '0 2px 8px rgba(255,77,79,0.15)'
+                        boxShadow: videoIds.filter(v => !v.done).length > 0 ? '0 2px 8px rgba(255,77,79,0.15)' : 'none',
                     }}
-                    title={
-                        <span style={{ color: '#a8071a', fontWeight: 700 }}>
-                            🎥 Đơn cần quay video ({videoIds.filter(v => !v.done).length})
-                        </span>
-                    }
-                    extra={
-                        videoIds.length > 0 ? (
-                            <Button size="small" danger onClick={() => setVideoIds([])}>🗑 Xóa hết</Button>
-                        ) : null
-                    }
-                >
-                    <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-                        <Input
-                            value={videoInput}
-                            onChange={e => setVideoInput(e.target.value)}
-                            onKeyDown={e => {
-                                if (e.key === 'Enter') {
-                                    const val = videoInput.trim();
-                                    if (!val) return;
-                                    if (videoIds.some(v => v.id === val)) { message.warning('ID đã tồn tại!'); return; }
-                                    setVideoIds(prev => [...prev, { id: val, done: false }]);
-                                    setVideoInput('');
-                                }
-                            }}
-                            placeholder="Nhập Order ID hoặc Tracking ID..."
-                            style={{ borderColor: '#ffa39e', fontFamily: 'monospace' }}
-                        />
-                        <Button
-                            danger
-                            onClick={() => {
-                                const val = videoInput.trim();
-                                if (!val) return;
-                                if (videoIds.some(v => v.id === val)) { message.warning('ID đã tồn tại!'); return; }
-                                setVideoIds(prev => [...prev, { id: val, done: false }]);
-                                setVideoInput('');
-                            }}
-                        >+ Thêm</Button>
-                    </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, minHeight: 28 }}>
-                        {videoIds.length === 0 ? (
-                            <span style={{ color: '#bfbfbf', fontSize: 13, fontStyle: 'italic' }}>Chưa có đơn nào — nhập ID bên trên để thêm</span>
-                        ) : videoIds.map(v => (
-                            <Tag
-                                key={v.id}
-                                closable
-                                onClose={() => setVideoIds(prev => prev.filter(x => x.id !== v.id))}
-                                style={{
-                                    padding: '4px 10px',
-                                    fontSize: 13,
-                                    fontFamily: 'monospace',
-                                    fontWeight: 600,
-                                    borderRadius: 6,
-                                    ...(v.done
-                                        ? { background: '#f6ffed', borderColor: '#b7eb8f', color: '#389e0d', textDecoration: 'line-through', opacity: 0.7 }
-                                        : { background: '#fff1f0', borderColor: '#ffa39e', color: '#a8071a' }
-                                    ),
-                                }}
-                            >
-                                🎥 {v.id}
-                                {!v.done && (
+                    items={[{
+                        key: 'video',
+                        label: (
+                            <span style={{ color: '#a8071a', fontWeight: 700 }}>
+                                🎥 Đơn cần quay video ({videoIds.filter(v => !v.done).length})
+                            </span>
+                        ),
+                        extra: videoIds.length > 0 ? (
+                            <Button size="small" danger onClick={(e) => { e.stopPropagation(); setVideoIds([]); }}>🗑 Xóa hết</Button>
+                        ) : null,
+                        children: (
+                            <>
+                                <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                                    <Input
+                                        value={videoInput}
+                                        onChange={e => setVideoInput(e.target.value)}
+                                        onKeyDown={e => {
+                                            if (e.key === 'Enter') {
+                                                const val = videoInput.trim();
+                                                if (!val) return;
+                                                if (videoIds.some(v => v.id === val)) { message.warning('ID đã tồn tại!'); return; }
+                                                setVideoIds(prev => [...prev, { id: val, done: false }]);
+                                                setVideoInput('');
+                                            }
+                                        }}
+                                        placeholder="Nhập Order ID hoặc Tracking ID..."
+                                        style={{ borderColor: '#ffa39e', fontFamily: 'monospace' }}
+                                    />
                                     <Button
-                                        type="link"
-                                        size="small"
-                                        style={{ color: '#52c41a', padding: '0 4px', fontSize: 11 }}
-                                        onClick={() => setVideoIds(prev => prev.map(x => x.id === v.id ? { ...x, done: true } : x))}
-                                        title="Đánh dấu đã quay video"
-                                    >✓</Button>
-                                )}
-                                {v.done && <span style={{ marginLeft: 4, fontSize: 11 }}>✅</span>}
-                            </Tag>
-                        ))}
-                    </div>
-                </Card>
+                                        danger
+                                        onClick={() => {
+                                            const val = videoInput.trim();
+                                            if (!val) return;
+                                            if (videoIds.some(v => v.id === val)) { message.warning('ID đã tồn tại!'); return; }
+                                            setVideoIds(prev => [...prev, { id: val, done: false }]);
+                                            setVideoInput('');
+                                        }}
+                                    >+ Thêm</Button>
+                                </div>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, minHeight: 28 }}>
+                                    {videoIds.length === 0 ? (
+                                        <span style={{ color: '#bfbfbf', fontSize: 13, fontStyle: 'italic' }}>Chưa có đơn nào — nhập ID bên trên để thêm</span>
+                                    ) : videoIds.map(v => (
+                                        <Tag
+                                            key={v.id}
+                                            closable
+                                            onClose={() => setVideoIds(prev => prev.filter(x => x.id !== v.id))}
+                                            style={{
+                                                padding: '4px 10px',
+                                                fontSize: 13,
+                                                fontFamily: 'monospace',
+                                                fontWeight: 600,
+                                                borderRadius: 6,
+                                                ...(v.done
+                                                    ? { background: '#f6ffed', borderColor: '#b7eb8f', color: '#389e0d', textDecoration: 'line-through', opacity: 0.7 }
+                                                    : { background: '#fff1f0', borderColor: '#ffa39e', color: '#a8071a' }
+                                                ),
+                                            }}
+                                        >
+                                            🎥 {v.id}
+                                            {!v.done && (
+                                                <Button
+                                                    type="link"
+                                                    size="small"
+                                                    style={{ color: '#52c41a', padding: '0 4px', fontSize: 11 }}
+                                                    onClick={() => setVideoIds(prev => prev.map(x => x.id === v.id ? { ...x, done: true } : x))}
+                                                    title="Đánh dấu đã quay video"
+                                                >✓</Button>
+                                            )}
+                                            {v.done && <span style={{ marginLeft: 4, fontSize: 11 }}>✅</span>}
+                                        </Tag>
+                                    ))}
+                                </div>
+                            </>
+                        ),
+                    }]}
+                />
 
                 {/* 🔍 SCAN INPUT - Ngay ngoài màn hình chính! */}
                 <Card
