@@ -180,8 +180,10 @@ function AppContent() {
 
 
 
-        // Báo cáo kinh doanh
-        items.push(createMenuItem('Báo cáo kinh doanh', 'business-report', <LineChartOutlined />));
+        // Báo cáo kinh doanh (Admin only)
+        if (hasPermission('permissions')) {
+            items.push(createMenuItem('Báo cáo kinh doanh', 'business-report', <LineChartOutlined />));
+        }
 
         // Daily Tasks
         items.push(createMenuItem('Công việc hàng ngày', 'daily-tasks', <CheckCircleOutlined />));

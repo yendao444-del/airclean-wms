@@ -125,15 +125,15 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
                         <span style={{ margin: '0 16px', color: '#d9d9d9', fontSize: 10 }}>★</span>
                     )}
                     <span style={{
-                        fontSize: 13, fontWeight: 600, color: style.color, letterSpacing: 0.3,
+                        fontSize: 14, fontWeight: 600, color: style.color, letterSpacing: 0.3,
                     }}>
                         {style.icon} Bàn giao "{task.title}"
                     </span>
-                    <span style={{ fontSize: 12, color: '#8c8c8c', marginLeft: 6 }}>
+                    <span style={{ fontSize: 13, color: '#666', marginLeft: 6 }}>
                         ({task.assignee})
                     </span>
                     <span style={{
-                        fontSize: 12, fontWeight: 700, color: style.color, marginLeft: 6,
+                        fontSize: 13, fontWeight: 700, color: style.color, marginLeft: 6,
                         padding: '1px 6px', borderRadius: 4,
                         background: task.diffMinutes < 0
                             ? 'rgba(255,77,79,0.1)'
@@ -157,50 +157,40 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
             onMouseLeave={() => { pausedRef.current = false; }}
             style={{
                 flex: 1,
-                margin: '0 20px',
+                margin: '0 16px',
                 overflow: 'hidden',
                 cursor: 'pointer',
                 position: 'relative',
-                height: 32,
+                height: 36,
                 borderRadius: 6,
+                display: 'flex',
+                alignItems: 'center',
                 background: tickerTasks.some(t => t.diffMinutes < 0)
-                    ? 'linear-gradient(90deg, rgba(255,77,79,0.08), rgba(255,77,79,0.04))'
+                    ? 'rgba(255,240,240,0.9)'
                     : tickerTasks.some(t => t.diffMinutes <= 10)
-                        ? 'linear-gradient(90deg, rgba(250,84,28,0.08), rgba(250,84,28,0.04))'
-                        : 'linear-gradient(90deg, rgba(24,144,255,0.06), rgba(24,144,255,0.03))',
+                        ? 'rgba(255,245,235,0.9)'
+                        : 'rgba(240,248,255,0.9)',
                 border: tickerTasks.some(t => t.diffMinutes < 0)
-                    ? '1px solid rgba(255,77,79,0.2)'
+                    ? '1px solid #ffccc7'
                     : tickerTasks.some(t => t.diffMinutes <= 10)
-                        ? '1px solid rgba(250,84,28,0.15)'
-                        : '1px solid rgba(24,144,255,0.12)',
+                        ? '1px solid #ffd8bf'
+                        : '1px solid #bae7ff',
             }}
         >
-            {/* Fade edges */}
-            <div style={{
-                position: 'absolute', left: 0, top: 0, bottom: 0, width: 30,
-                background: 'linear-gradient(90deg, rgba(255,255,255,0.95), transparent)',
-                zIndex: 2, pointerEvents: 'none',
-            }} />
-            <div style={{
-                position: 'absolute', right: 0, top: 0, bottom: 0, width: 30,
-                background: 'linear-gradient(270deg, rgba(255,255,255,0.95), transparent)',
-                zIndex: 2, pointerEvents: 'none',
-            }} />
-
-            {/* Scrolling track — JS animation */}
+            {/* Scrolling track */}
             <div
                 ref={trackRef}
                 style={{
-                    display: 'inline-flex',
+                    display: 'flex',
                     alignItems: 'center',
-                    height: '100%',
+                    height: 36,
+                    lineHeight: '36px',
                     whiteSpace: 'nowrap',
-                    willChange: 'transform',
                 }}
             >
                 {/* Original content */}
                 {renderTaskItems('a')}
-                {/* Gap = container width → đảm bảo bản copy không bao giờ hiện cùng lúc */}
+                {/* Gap = container width */}
                 <span style={{ display: 'inline-block', minWidth: containerWidth }} />
                 {/* Duplicate cho seamless loop */}
                 {renderTaskItems('b')}
