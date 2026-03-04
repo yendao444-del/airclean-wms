@@ -134,6 +134,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Pickup (NHẶT HÀNG)
     pickup: {
         sendTelegram: (data) => ipcRenderer.invoke('pickup:sendTelegram', data),
+        selectAndWatch: () => ipcRenderer.invoke('pickup:selectAndWatch'),
+        startWatch: (folderPath) => ipcRenderer.invoke('pickup:startWatch', folderPath),
+        readFolderFiles: (folderPath) => ipcRenderer.invoke('pickup:readFolderFiles', folderPath),
+        stopWatch: () => ipcRenderer.invoke('pickup:stopWatch'),
+        onNewFile: (callback) => {
+            ipcRenderer.on('pickup:newFile', (event, data) => callback(data));
+            // Return cleanup function
+            return () => ipcRenderer.removeAllListeners('pickup:newFile');
+        },
     },
 
     // App Config (CẤU HÌNH)

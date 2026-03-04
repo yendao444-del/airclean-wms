@@ -775,6 +775,208 @@ ipcMain.handle('pickup:exportPickup', async () => {
 });
 
 // ========================================
+// PICKUP - AUTO WATCH THƯ MỤC
+// ========================================
+
+let pickupWatcher = null;
+let pickupWatchFolder = '';
+let pickupKnownFiles = new Set();
+
+// Chọn thư mục + bắt đầu theo dõi
+ipcMain.handle('pickup:selectAndWatch', async () => {
+    try {
+        const result = await dialog.showOpenDialog({
+            properties: ['openDirectory'],
+            title: 'Chọn thư mục chứa file đơn hàng (sẽ tự động import)',
+        });
+        if (result.canceled || result.filePaths.length === 0) {
+            return { success: false, error: 'Không có thư mục được chọn' };
+        }
+
+        const folderPath = result.filePaths[0];
+
+        // Lấy danh sách file hiện có
+        const existingFiles = fs.readdirSync(folderPath).filter(f => {
+            const ext = path.extname(f).toLowerCase();
+            return ['.xlsx', '.xls', '.csv'].includes(ext) && !f.startsWith('~$');
+        });
+
+        pickupKnownFiles = new Set(existingFiles);
+        pickupWatchFolder = folderPath;
+
+        // Dừng watcher cũ nếu có
+        if (pickupWatcher) {
+            pickupWatcher.close();
+            pickupWatcher = null;
+        }
+
+        // Bắt đầu theo dõi thư mục
+        let debounceTimer = null;
+        pickupWatcher = fs.watch(folderPath, (eventType, filename) => {
+            if (!filename) return;
+            const ext = path.extname(filename).toLowerCase();
+            if (!['.xlsx', '.xls', '.csv'].includes(ext)) return;
+            if (filename.startsWith('~$')) return; // File tạm Excel
+
+            // Debounce 2 giây (file có thể đang copy)
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                const filePath = path.join(folderPath, filename);
+
+                // Chỉ xử lý file MỚI (chưa có trong danh sách)
+                if (!pickupKnownFiles.has(filename) && fs.existsSync(filePath)) {
+                    console.log(`📁 [AutoWatch] File mới: ${filename}`);
+                    pickupKnownFiles.add(filename);
+
+                    // Đọc file và gửi về frontend
+                    try {
+                        const fileBuffer = fs.readFileSync(filePath);
+                        const base64 = fileBuffer.toString('base64');
+
+                        // Gửi event về tất cả cửa sổ
+                        const { BrowserWindow } = require('electron');
+                        const windows = BrowserWindow.getAllWindows();
+                        for (const win of windows) {
+                            win.webContents.send('pickup:newFile', {
+                                name: filename,
+                                base64: base64,
+                                path: filePath
+                            });
+                        }
+                        console.log(`✅ [AutoWatch] Đã gửi ${filename} về frontend`);
+                    } catch (readErr) {
+                        console.error(`❌ [AutoWatch] Lỗi đọc file ${filename}:`, readErr.message);
+                    }
+                }
+            }, 2000);
+        });
+
+        console.log(`👁️ [AutoWatch] Đang theo dõi: ${folderPath} (${existingFiles.length} file có sẵn)`);
+
+        return {
+            success: true,
+            data: {
+                folderPath,
+                existingFiles: existingFiles.length
+            }
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Dừng theo dõi
+ipcMain.handle('pickup:stopWatch', async () => {
+    if (pickupWatcher) {
+        pickupWatcher.close();
+        pickupWatcher = null;
+        pickupWatchFolder = '';
+        pickupKnownFiles.clear();
+        console.log('🛑 [AutoWatch] Đã dừng theo dõi');
+        return { success: true };
+    }
+    return { success: false, error: 'Không có watcher nào đang chạy' };
+});
+
+// Đọc tất cả file Excel trong thư mục (trả về base64, không mở dialog)
+ipcMain.handle('pickup:readFolderFiles', async (event, folderPath) => {
+    try {
+        if (!folderPath || !fs.existsSync(folderPath)) {
+            return { success: false, error: 'Thư mục không tồn tại' };
+        }
+
+        const excelFiles = fs.readdirSync(folderPath).filter(f => {
+            const ext = path.extname(f).toLowerCase();
+            return ['.xlsx', '.xls', '.csv'].includes(ext) && !f.startsWith('~$');
+        });
+
+        const files = [];
+        for (const filename of excelFiles) {
+            try {
+                const filePath = path.join(folderPath, filename);
+                const buffer = fs.readFileSync(filePath);
+                files.push({
+                    name: filename,
+                    base64: buffer.toString('base64')
+                });
+            } catch (e) {
+                console.warn(`⚠️ Không đọc được ${filename}:`, e.message);
+            }
+        }
+
+        console.log(`📂 [ReadFolder] Đọc ${files.length}/${excelFiles.length} files từ ${folderPath}`);
+        return { success: true, data: files };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Bắt đầu theo dõi trực tiếp (không dialog — dùng khi auto-restore)
+ipcMain.handle('pickup:startWatch', async (event, folderPath) => {
+    try {
+        if (!folderPath || !fs.existsSync(folderPath)) {
+            return { success: false, error: 'Thư mục không tồn tại' };
+        }
+
+        // Lấy danh sách file hiện có
+        const existingFiles = fs.readdirSync(folderPath).filter(f => {
+            const ext = path.extname(f).toLowerCase();
+            return ['.xlsx', '.xls', '.csv'].includes(ext) && !f.startsWith('~$');
+        });
+
+        pickupKnownFiles = new Set(existingFiles);
+        pickupWatchFolder = folderPath;
+
+        // Dừng watcher cũ nếu có
+        if (pickupWatcher) {
+            pickupWatcher.close();
+            pickupWatcher = null;
+        }
+
+        // Bắt đầu theo dõi
+        let debounceTimer = null;
+        pickupWatcher = fs.watch(folderPath, (eventType, filename) => {
+            if (!filename) return;
+            const ext = path.extname(filename).toLowerCase();
+            if (!['.xlsx', '.xls', '.csv'].includes(ext)) return;
+            if (filename.startsWith('~$')) return;
+
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                const filePath = path.join(folderPath, filename);
+                if (!pickupKnownFiles.has(filename) && fs.existsSync(filePath)) {
+                    console.log(`📁 [AutoWatch] File mới: ${filename}`);
+                    pickupKnownFiles.add(filename);
+                    try {
+                        const fileBuffer = fs.readFileSync(filePath);
+                        const base64 = fileBuffer.toString('base64');
+                        const { BrowserWindow } = require('electron');
+                        const windows = BrowserWindow.getAllWindows();
+                        for (const win of windows) {
+                            win.webContents.send('pickup:newFile', {
+                                name: filename, base64, path: filePath
+                            });
+                        }
+                        console.log(`✅ [AutoWatch] Đã gửi ${filename} về frontend`);
+                    } catch (readErr) {
+                        console.error(`❌ [AutoWatch] Lỗi đọc file ${filename}:`, readErr.message);
+                    }
+                }
+            }, 2000);
+        });
+
+        console.log(`👁️ [AutoWatch-Restore] Đang theo dõi: ${folderPath} (${existingFiles.length} file có sẵn)`);
+
+        return {
+            success: true,
+            data: { folderPath, existingFiles: existingFiles.length }
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// ========================================
 // INVENTORY - UPDATE STOCK
 // ========================================
 

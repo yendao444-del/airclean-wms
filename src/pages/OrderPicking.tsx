@@ -3,7 +3,7 @@ import { Button, Input, Typography, Tag, message } from 'antd';
 import {
     ScanOutlined, FileExcelOutlined, InboxOutlined, CheckCircleOutlined,
     WarningOutlined, CloseCircleOutlined, InfoCircleOutlined, DeleteOutlined,
-    EnterOutlined,
+    EnterOutlined, EyeOutlined, FolderOpenOutlined,
 } from '@ant-design/icons';
 import * as XLSX from 'xlsx';
 import './OrderPicking.css';
@@ -438,6 +438,9 @@ export default function OrderPickingPage() {
     const [isCompleting, setIsCompleting] = useState(false);
     const [pickSlipNumber, setPickSlipNumber] = useState(1);
 
+    const [isWatching, setIsWatching] = useState(false);
+    const [watchFolder, setWatchFolder] = useState('');
+
     const scanInputRef = useRef<any>(null);
     const scanTimerRef = useRef<any>(null);
     const accumulatedPickListRef = useRef<ConsolidatedItem[]>([]);
@@ -448,16 +451,14 @@ export default function OrderPickingPage() {
     useEffect(() => {
         loadProductData();
         loadTelegramSettings();
+        autoRestoreWatcher();
 
         // Global Enter key listener cho phím tắt "Hoàn tất"
         const handleGlobalKeyDown = (e: KeyboardEvent) => {
             if (e.key === 'Enter') {
-                // Bỏ qua nếu ô scan đang focus (để onPressEnter xử lý)
                 const activeEl = document.activeElement;
                 const scanEl = scanInputRef.current?.input;
                 if (activeEl === scanEl) return;
-
-                // Chỉ trigger hoàn tất khi có dữ liệu nhặt
                 if (accumulatedPickListRef.current.length > 0) {
                     e.preventDefault();
                     handleCompletePickingRef.current();
@@ -465,7 +466,27 @@ export default function OrderPickingPage() {
             }
         };
         window.addEventListener('keydown', handleGlobalKeyDown);
-        return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+
+        // Lắng nghe file mới từ backend (auto-watch)
+        let cleanupNewFile: (() => void) | null = null;
+        if (window.electronAPI?.pickup?.onNewFile) {
+            cleanupNewFile = window.electronAPI.pickup.onNewFile((data: any) => {
+                console.log('📁 [AutoWatch] Nhận file mới:', data.name);
+                // Decode base64 → binary → parse Excel
+                const binary = atob(data.base64);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                const blob = new Blob([bytes]);
+                const file = new File([blob], data.name);
+                handleExcelImport(file);
+                message.info(`📁 Tự động import: ${data.name}`);
+            });
+        }
+
+        return () => {
+            window.removeEventListener('keydown', handleGlobalKeyDown);
+            if (cleanupNewFile) cleanupNewFile();
+        };
     }, []);
 
     const loadTelegramSettings = async () => {
@@ -501,6 +522,52 @@ export default function OrderPickingPage() {
             console.log(`✅ Loaded ${prods.length} products, ${cmbs.length} combos`);
         } catch (error) {
             console.error('Error loading product data:', error);
+        }
+    };
+
+    // ===== AUTO-RESTORE WATCHER =====
+    const importFilesFromBackend = async (folderPath: string) => {
+        try {
+            const filesResult = await window.electronAPI.pickup.readFolderFiles(folderPath);
+            if (filesResult.success && filesResult.data) {
+                for (const fileData of filesResult.data) {
+                    const binary = atob(fileData.base64);
+                    const bytes = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                    const blob = new Blob([bytes]);
+                    const file = new File([blob], fileData.name);
+                    handleExcelImport(file);
+                }
+                if (filesResult.data.length > 0) {
+                    message.success(`✅ Đã import ${filesResult.data.length} file Excel`);
+                }
+            }
+        } catch (err) {
+            console.error('importFilesFromBackend error:', err);
+        }
+    };
+
+    const autoRestoreWatcher = async () => {
+        try {
+            const result = await window.electronAPI.appConfig.get('pickupWatchFolder');
+            const savedFolder = result?.data;
+            if (savedFolder && window.electronAPI?.pickup?.startWatch) {
+                console.log('🔄 [AutoRestore] Đang khôi phục watcher:', savedFolder);
+                const watchResult = await window.electronAPI.pickup.startWatch(savedFolder);
+                if (watchResult.success) {
+                    setIsWatching(true);
+                    setWatchFolder(savedFolder);
+                    console.log(`✅ [AutoRestore] Đã khôi phục (${watchResult.data?.existingFiles} files)`);
+
+                    // Đọc & import file có sẵn qua backend (KHÔNG mở dialog)
+                    await importFilesFromBackend(savedFolder);
+                } else {
+                    console.warn('⚠️ [AutoRestore] Thư mục không còn, xóa config');
+                    await window.electronAPI.appConfig.set('pickupWatchFolder', '');
+                }
+            }
+        } catch (err) {
+            console.error('AutoRestore error:', err);
         }
     };
 
@@ -766,22 +833,57 @@ export default function OrderPickingPage() {
     handleCompletePickingRef.current = handleCompletePicking;
     scanValueRef.current = scanValue;
 
-    // ===== IMPORT THƯ MỤC =====
+    // ===== IMPORT THƯ MỤC (Manual fallback) =====
     const folderInputRef = useRef<HTMLInputElement>(null);
 
-    const handleFolderImport = () => {
-        // Trigger hidden folder input
-        if (folderInputRef.current) {
-            folderInputRef.current.value = '';
-            folderInputRef.current.click();
+    const handleFolderImport = async () => {
+        // Dùng Electron dialog chọn thư mục (CHỈ MỞ 1 DIALOG)
+        if (window.electronAPI?.pickup?.selectAndWatch) {
+            try {
+                const result = await window.electronAPI.pickup.selectAndWatch();
+                if (result.success) {
+                    setIsWatching(true);
+                    setWatchFolder(result.data.folderPath);
+                    // Lưu vào DB để auto-restore khi restart
+                    window.electronAPI.appConfig.set('pickupWatchFolder', result.data.folderPath);
+                    message.success(`👁️ Đang theo dõi thư mục (${result.data.existingFiles} file có sẵn)`);
+
+                    // Import file có sẵn qua backend (KHÔNG mở dialog lần 2)
+                    await importFilesFromBackend(result.data.folderPath);
+                }
+            } catch (err) {
+                console.error('selectAndWatch error:', err);
+                // Fallback: dùng input thường
+                if (folderInputRef.current) {
+                    folderInputRef.current.value = '';
+                    folderInputRef.current.click();
+                }
+            }
+        } else {
+            // Browser fallback
+            if (folderInputRef.current) {
+                folderInputRef.current.value = '';
+                folderInputRef.current.click();
+            }
         }
+    };
+
+    const handleStopWatching = async () => {
+        if (window.electronAPI?.pickup?.stopWatch) {
+            await window.electronAPI.pickup.stopWatch();
+        }
+        // Xóa config để không auto-restore nữa
+        window.electronAPI.appConfig.set('pickupWatchFolder', '');
+        setIsWatching(false);
+        setWatchFolder('');
+        message.info('🛑 Đã dừng theo dõi thư mục');
     };
 
     const handleFolderSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
         const files = Array.from(e.target.files || []);
         const excelFiles = files.filter(f =>
             (f.name.endsWith('.xlsx') || f.name.endsWith('.xls') || f.name.endsWith('.csv'))
-            && !f.name.startsWith('~$')  // Bỏ qua file tạm của Excel
+            && !f.name.startsWith('~$')
         );
 
         if (excelFiles.length === 0) {
@@ -789,7 +891,6 @@ export default function OrderPickingPage() {
             return;
         }
 
-        // Import từng file
         for (const file of excelFiles) {
             handleExcelImport(file);
         }
@@ -811,17 +912,35 @@ export default function OrderPickingPage() {
 
             {/* === TOOLBAR: Import + Scan trên 1 hàng === */}
             <div className="picking-toolbar">
-                {/* Nút Import thư mục */}
-                <div
-                    className={`picking-import-btn ${excelData.size > 0 ? 'has-data' : ''}`}
-                    onClick={handleFolderImport}
-                >
-                    <FileExcelOutlined />
-                    {excelData.size > 0
-                        ? <span>📦 {excelData.size} đơn</span>
-                        : <span>Import thư mục</span>
-                    }
-                </div>
+                {/* Nút Import / Theo dõi thư mục */}
+                {isWatching ? (
+                    <div
+                        className="picking-import-btn has-data"
+                        onClick={handleStopWatching}
+                        title={`Đang theo dõi: ${watchFolder}\nNhấn để dừng`}
+                        style={{ background: '#e6f7ee', borderColor: '#00ab56', position: 'relative' }}
+                    >
+                        <EyeOutlined style={{ color: '#00ab56' }} />
+                        <span>👁️ {excelData.size > 0 ? `${excelData.size} đơn` : 'Đang theo dõi'}</span>
+                        <span style={{
+                            position: 'absolute', top: 4, right: 4,
+                            width: 8, height: 8, borderRadius: '50%',
+                            backgroundColor: '#00ab56',
+                            animation: 'pulse 1.5s infinite'
+                        }} />
+                    </div>
+                ) : (
+                    <div
+                        className={`picking-import-btn ${excelData.size > 0 ? 'has-data' : ''}`}
+                        onClick={handleFolderImport}
+                    >
+                        <FolderOpenOutlined />
+                        {excelData.size > 0
+                            ? <span>📦 {excelData.size} đơn</span>
+                            : <span>Chọn thư mục</span>
+                        }
+                    </div>
+                )}
 
                 {/* Scan input */}
                 <div className="picking-scan-area">

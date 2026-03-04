@@ -188,6 +188,11 @@ export interface ElectronAPI {
     };
     pickup: {
         sendTelegram: (data: { token: string; chatId: string; message: string }) => Promise<{ success: boolean; error?: string }>;
+        selectAndWatch: () => Promise<{ success: boolean; data?: { folderPath: string; existingFiles: number }; error?: string }>;
+        startWatch: (folderPath: string) => Promise<{ success: boolean; data?: { folderPath: string; existingFiles: number }; error?: string }>;
+        readFolderFiles: (folderPath: string) => Promise<{ success: boolean; data?: { name: string; base64: string }[]; error?: string }>;
+        stopWatch: () => Promise<{ success: boolean; error?: string }>;
+        onNewFile: (callback: (data: { name: string; base64: string; path: string }) => void) => () => void;
     };
     appConfig: {
         get: (key: string) => Promise<{ success: boolean; data?: any; error?: string }>;
