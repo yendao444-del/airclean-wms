@@ -93,6 +93,7 @@ export default function EcommerceExportPage() {
 
     // 🚫 Danh sách tracking ID scan nhưng không có trong data
     const [unmatchedScans, setUnmatchedScans] = useState<{ trackingId: string; scannedAt: string }[]>([]);
+    const unmatchedDateRef = useRef(dayjs().format('YYYY-MM-DD')); // Ngày hiện tại để auto-reset
 
     // 🔎 State cho tìm kiếm mã vận đơn đi
     const [searchKeyword, setSearchKeyword] = useState('');
@@ -128,7 +129,21 @@ export default function EcommerceExportPage() {
         })();
 
         const interval = setInterval(() => loadEcommerceExports(true), 30000);
-        return () => clearInterval(interval);
+
+        // ⚡ Auto-reset danh sách lệch đơn khi sang ngày mới (check mỗi phút)
+        const dailyResetInterval = setInterval(() => {
+            const today = dayjs().format('YYYY-MM-DD');
+            if (today !== unmatchedDateRef.current) {
+                unmatchedDateRef.current = today;
+                setUnmatchedScans([]);
+                console.log('🗓️ [Lệch đơn] Đã tự động xóa - sang ngày mới:', today);
+            }
+        }, 60000);
+
+        return () => {
+            clearInterval(interval);
+            clearInterval(dailyResetInterval);
+        };
     }, []);
 
     // 📊 Hàm phát âm thanh - clone mỗi lần để quét nhanh không bị chồng
