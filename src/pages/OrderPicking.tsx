@@ -435,6 +435,8 @@ export default function OrderPickingPage() {
     const [scanStatus, setScanStatus] = useState<{ type: string; msg: string }>({ type: 'idle', msg: 'Sẵn sàng — Import thư mục rồi quét mã vận đơn' });
     const [telegramSettings, setTelegramSettings] = useState({ chatId: '', apiToken: '' });
     const [scanValue, setScanValue] = useState('');
+    const [isCompleting, setIsCompleting] = useState(false);
+    const [pickSlipNumber, setPickSlipNumber] = useState(1);
 
     const scanInputRef = useRef<any>(null);
     const scanTimerRef = useRef<any>(null);
@@ -665,20 +667,24 @@ export default function OrderPickingPage() {
     };
 
     // Auto-scan timeout (barcode scanner pattern)
-    const handleScanInputChange = () => {
+    const handleScanInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const val = e.target.value;
+        setScanValue(val);
         clearTimeout(scanTimerRef.current);
         scanTimerRef.current = setTimeout(() => {
-            if (scanValue.trim().length > 6) handleScan();
+            if (val.trim().length > 6) handleScan();
         }, 2000);
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
+            e.preventDefault();
+            e.stopPropagation();
             clearTimeout(scanTimerRef.current);
             if (scanValue.trim().length > 0) {
                 // Có mã → quét
                 handleScan();
-            } else if (accumulatedPickList.length > 0) {
+            } else if (accumulatedPickList.length > 0 && !isCompleting) {
                 // Ô rỗng + có dữ liệu nhặt → Hoàn tất
                 handleCompletePicking();
             }
@@ -688,62 +694,60 @@ export default function OrderPickingPage() {
     // Compute totals
     const grandTotalPieces = accumulatedPickList.reduce((sum, c) => sum + c.totalPieces, 0);
 
-    // ===== GỬI TELEGRAM =====
-    const sendTelegramPickList = async () => {
+    // ===== GỬI TELEGRAM (chạy ngầm, không block UI) =====
+    const sendTelegramInBackground = (pickList: ConsolidatedItem[], orderCount: number, totalPcs: number, slipNo: number) => {
         const { chatId, apiToken } = telegramSettings;
         if (!chatId || !apiToken) {
-            console.warn('⚠️ Chưa cấu hình Telegram');
-            return false;
+            console.log('ℹ️ Telegram chưa cấu hình — bỏ qua gửi.');
+            return;
         }
 
-        try {
-            // Tạo nội dung tin nhắn
-            const now = new Date();
-            const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-            const dateStr = `${now.getDate().toString().padStart(2, '0')}/${(now.getMonth() + 1).toString().padStart(2, '0')}`;
+        // Tạo nội dung tin nhắn
+        let msg = `📋 *Phiếu nhặt hàng #${slipNo}*\n`;
+        msg += `📦 ${orderCount} đơn · ${pickList.length} SP · ${totalPcs} sản phẩm\n`;
+        msg += `━━━━━━━━━━━━━━━━\n`;
 
-            let msg = `📋 *NHẶT HÀNG — ${dateStr} ${timeStr}*\n`;
-            msg += `━━━━━━━━━━━━━━━━\n`;
-            msg += `📦 Đơn: *${scanCount}* | SP: *${accumulatedPickList.length}* | Tổng: *${grandTotalPieces}*\n\n`;
+        pickList.forEach((group, idx) => {
+            const name = group.color ? `${group.productName} - ${group.color}` : group.productName;
+            msg += `${idx + 1}. ${name} - *${group.totalPieces} ${group.unit || 'Chiếc'}*\n`;
+        });
 
-            for (const group of accumulatedPickList) {
-                const name = group.color ? `${group.productName} — ${group.color}` : group.productName;
-                msg += `▪️ *${name}*: ${group.totalPieces} ${group.unit || 'chiếc'}\n`;
+        // Gửi ngầm — không await, không block UI
+        const doSend = async () => {
+            try {
+                if (window.electronAPI?.pickup?.sendTelegram) {
+                    const result = await window.electronAPI.pickup.sendTelegram({
+                        token: apiToken,
+                        chatId: chatId,
+                        message: msg
+                    });
+                    if (result.success) {
+                        console.log('✅ Đã gửi Telegram nhặt hàng');
+                        message.success('📱 Đã gửi Telegram!');
+                    } else {
+                        console.warn('⚠️ Telegram lỗi:', result.error);
+                    }
+                } else {
+                    console.log('ℹ️ pickup.sendTelegram chưa có — cần restart Electron');
+                }
+            } catch (error) {
+                console.error('❌ Lỗi gửi Telegram:', error);
             }
-
-            msg += `\n✅ Hoàn tất nhặt hàng`;
-
-            const url = `https://api.telegram.org/bot${apiToken}/sendMessage`;
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    chat_id: chatId,
-                    text: msg,
-                    parse_mode: 'Markdown'
-                })
-            });
-
-            if (!response.ok) throw new Error('Telegram API error');
-            console.log('✅ Đã gửi Telegram nhặt hàng');
-            return true;
-        } catch (error) {
-            console.error('❌ Lỗi gửi Telegram:', error);
-            return false;
-        }
+        };
+        doSend();
     };
 
     // ===== HOÀN TẤT NHẶT HÀNG =====
-    const handleCompletePicking = async () => {
-        if (accumulatedPickList.length === 0) return;
+    const handleCompletePicking = () => {
+        if (accumulatedPickList.length === 0 || isCompleting) return;
 
-        // Gửi Telegram trước
-        const sent = await sendTelegramPickList();
-        if (sent) {
-            message.success('📱 Đã gửi kết quả nhặt hàng lên Telegram!');
-        }
+        // Lưu snapshot dữ liệu TRƯỚC khi reset
+        const pickListSnapshot = [...accumulatedPickList];
+        const scanCountSnapshot = scanCount;
+        const totalPcsSnapshot = grandTotalPieces;
+        const slipNoSnapshot = pickSlipNumber;
 
-        // Reset phần nhặt hàng (giữ nguyên Excel data)
+        // ✅ RESET NGAY LẬP TỨC — không chờ Telegram
         setAccumulatedPickList([]);
         setScannedTrackings([]);
         setCurrentTracking('');
@@ -752,6 +756,10 @@ export default function OrderPickingPage() {
         setScanStatus({ type: 'idle', msg: `Sẵn sàng — Đã hoàn tất! ${excelData.size} đơn vẫn sẵn sàng quét tiếp.` });
         playSound('success');
         scanInputRef.current?.focus();
+
+        // 📱 Gửi Telegram NGẦM (fire and forget)
+        sendTelegramInBackground(pickListSnapshot, scanCountSnapshot, totalPcsSnapshot, slipNoSnapshot);
+        setPickSlipNumber(prev => prev + 1);
     };
 
     // Sync refs cho global Enter listener
@@ -823,8 +831,8 @@ export default function OrderPickingPage() {
                         className="picking-scan-input"
                         placeholder="Quét hoặc nhập mã vận đơn..."
                         value={scanValue}
-                        onChange={(e) => setScanValue(e.target.value)}
-                        onPressEnter={handleKeyDown as any}
+                        onChange={handleScanInputChange}
+                        onKeyDown={handleKeyDown}
                         prefix={<ScanOutlined style={{ color: '#00ab56' }} />}
                         autoFocus
                     />

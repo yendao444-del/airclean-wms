@@ -131,6 +131,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
         create: (data) => ipcRenderer.invoke('stockBalance:create', data),
     },
 
+    // Pickup (NHẶT HÀNG)
+    pickup: {
+        sendTelegram: (data) => ipcRenderer.invoke('pickup:sendTelegram', data),
+    },
+
     // App Config (CẤU HÌNH)
     appConfig: {
         get: (key) => ipcRenderer.invoke('appConfig:get', key),

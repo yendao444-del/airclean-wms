@@ -508,7 +508,7 @@ export default function OrdersPage() {
                                         <tbody>
                                             {items.map((it: any, i: number) => (
                                                 <tr key={i} style={{ borderBottom: i < items.length - 1 ? '1px solid #f5f5f5' : 'none' }}>
-                                                    <td style={{ padding: '7px 10px' }}><Tag color="cyan" style={{ fontSize: 11 }}>{it.variantSku || it.sku || '-'}</Tag></td>
+                                                    <td style={{ padding: '7px 10px' }}><Tag color="cyan" style={{ fontSize: 11 }}>{it.variantSku || it.sku || it.variant_sku || it.product_sku || it.SKU || it.Sku || <span style={{ color: '#bfbfbf' }}>N/A</span>}</Tag></td>
                                                     <td style={{ padding: '7px 10px' }}>{it.productName || it.name || '-'}</td>
                                                     <td style={{ padding: '7px 10px', textAlign: 'center', fontWeight: 600 }}>{it.quantity || it.qty || 1}</td>
                                                     <td style={{ padding: '7px 10px', textAlign: 'right' }}>{fmt(it.unitPrice || it.price || 0)}đ</td>

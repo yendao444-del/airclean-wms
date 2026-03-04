@@ -24,6 +24,7 @@ import {
     AppstoreOutlined,
     ShoppingOutlined,
     OrderedListOutlined,
+    LineChartOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import viVN from 'antd/locale/vi_VN';
@@ -40,6 +41,7 @@ import PermissionsPage from './pages/Permissions';
 import SystemLogsPage from './pages/SystemLogs';
 import SettingsPage from './pages/Settings';
 import DailyTasksPage from './pages/DailyTasks';
+import GlobalTaskAlerts from './components/GlobalTaskAlerts';
 
 import Login from './pages/Login';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
@@ -55,6 +57,7 @@ const POSPage = lazy(() => import('./pages/POS'));
 const SalesHistoryPage = lazy(() => import('./pages/SalesHistory'));
 const OrderPickingPage = lazy(() => import('./pages/OrderPicking'));
 const OrdersPage = lazy(() => import('./pages/Orders'));
+const BusinessReportPage = lazy(() => import('./pages/BusinessReport'));
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -176,6 +179,9 @@ function AppContent() {
 
 
 
+        // Báo cáo kinh doanh
+        items.push(createMenuItem('Báo cáo kinh doanh', 'business-report', <LineChartOutlined />));
+
         // Daily Tasks
         items.push(createMenuItem('Công việc hàng ngày', 'daily-tasks', <CheckCircleOutlined />));
 
@@ -254,6 +260,8 @@ function AppContent() {
                 return <OrdersPage />;
             case 'stock-balance':
                 return <StockBalancePage />;
+            case 'business-report':
+                return <BusinessReportPage />;
             case 'daily-tasks':
                 return <DailyTasksPage />;
 
@@ -293,6 +301,7 @@ function AppContent() {
             }}
         >
             <AntAppProvider>
+                <GlobalTaskAlerts />
                 <Layout style={{ minHeight: '100vh', background: '#f0f2f5' }}>
                     <Sider
                         collapsible

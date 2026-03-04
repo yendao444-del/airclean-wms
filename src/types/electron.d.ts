@@ -186,6 +186,9 @@ export interface ElectronAPI {
         getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     };
+    pickup: {
+        sendTelegram: (data: { token: string; chatId: string; message: string }) => Promise<{ success: boolean; error?: string }>;
+    };
     appConfig: {
         get: (key: string) => Promise<{ success: boolean; data?: any; error?: string }>;
         set: (key: string, value: any) => Promise<{ success: boolean; data?: any; error?: string }>;

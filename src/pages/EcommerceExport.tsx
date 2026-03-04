@@ -726,16 +726,30 @@ Thời gian: ${currentTime}`;
                 // Group by Order ID to combine items from same order
                 const orderMap = new Map<string, any[]>();
 
+                // 📊 Shopee: lấy header cột T trực tiếp từ cell
+                let shopeeSkuHeader = '';
+                if (isShopee) {
+                    const skuCell = worksheet['T1'];
+                    shopeeSkuHeader = skuCell ? (skuCell.v || skuCell.w || '') : '';
+                }
+
                 if (isTikTok) {
                     // ===== XỬ LÝ TIKTOK =====
                     console.log('📱 Processing TikTok data...');
+                    // Debug: log keys của row đầu tiên
+                    if (jsonData[0]) {
+                        const firstRow = jsonData[0] as any;
+                        console.log('🔑 TikTok first row keys:', Object.keys(firstRow));
+                        console.log('🔑 Seller SKU value:', firstRow['Seller SKU']);
+                        console.log('🔑 All SKU-related:', Object.keys(firstRow).filter(k => k.toLowerCase().includes('sku')));
+                    }
 
                     jsonData.forEach((row: any) => {
                         const orderId = row['Order ID'] || '';
                         const productName = row['Product Name'] || '';
                         const variation = row['Variation'] || '';
-                        const sku = row['SKU'] || row['Sku'] || '';
-                        const quantity = parseInt(row['Quantity of return'] || row['Quantity of Return'] || '1');
+                        const sku = row['Seller SKU'] || '';
+                        const quantity = parseInt(row['Quantity'] || row['Quantity of return'] || row['Quantity of Return'] || '1');
                         const cancelledTime = row['Cancelled Time'] || row['Cancelled time'] || '';
                         const shippingProvider = row['Shipping Provider Name'] || '';
                         const trackingId = row['Tracking ID'] || '';
@@ -792,7 +806,7 @@ Thời gian: ${currentTime}`;
                         const orderId = row['Mã đơn hàng'] || '';
                         const productName = row['Tên sản phẩm'] || row['Tên Sản Phẩm'] || '';
                         const variation = row['Tên phân loại hàng'] || row['Phân loại hàng'] || '';
-                        const sku = row['Mã phân loại hàng'] || row['SKU phân loại hàng'] || '';
+                        const sku = row[shopeeSkuHeader] || '';
                         const quantity = parseInt(row['Số lượng'] || '1');
                         const cancelledTime = row['Ngày gửi hàng'] || row['Thời gian tạo đơn hàng'] || '';
                         const shippingProvider = row['Đơn Vị Vận Chuyển'] || '';
@@ -982,13 +996,20 @@ Thời gian: ${currentTime}`;
                     // Process same as handleImportExcel
                     const orderMap = new Map<string, any[]>();
 
+                    // 📊 Shopee: lấy header cột T
+                    let shopeeSkuHeader = '';
+                    if (isShopee) {
+                        const skuCell = worksheet['T1'];
+                        shopeeSkuHeader = skuCell ? (skuCell.v || skuCell.w || '') : '';
+                    }
+
                     if (isTikTok) {
                         jsonData.forEach((row: any) => {
                             const orderId = row['Order ID'] || '';
                             const productName = row['Product Name'] || '';
                             const variation = row['Variation'] || '';
-                            const sku = row['SKU'] || row['Sku'] || '';
-                            const quantity = parseInt(row['Quantity of return'] || row['Quantity of Return'] || '1');
+                            const sku = row['Seller SKU'] || '';
+                            const quantity = parseInt(row['Quantity'] || row['Quantity of return'] || row['Quantity of Return'] || '1');
                             const cancelledTime = row['Cancelled Time'] || row['Cancelled time'] || '';
                             const shippingProvider = row['Shipping Provider Name'] || '';
                             const trackingId = row['Tracking ID'] || '';
@@ -1036,7 +1057,7 @@ Thời gian: ${currentTime}`;
                             const orderId = row['Mã đơn hàng'] || '';
                             const productName = row['Tên sản phẩm'] || row['Tên Sản Phẩm'] || '';
                             const variation = row['Tên phân loại hàng'] || row['Phân loại hàng'] || '';
-                            const sku = row['Mã phân loại hàng'] || row['SKU phân loại hàng'] || '';
+                            const sku = row[shopeeSkuHeader] || '';
                             const quantity = parseInt(row['Số lượng'] || '1');
                             const cancelledTime = row['Ngày gửi hàng'] || row['Thời gian tạo đơn hàng'] || '';
                             const shippingProvider = row['Đơn Vị Vận Chuyển'] || '';
@@ -1447,7 +1468,7 @@ Thời gian: ${currentTime}`;
             title: 'SKU',
             dataIndex: 'variantSku',
             width: 120,
-            render: (sku) => <Tag color="cyan">{sku}</Tag>,
+            render: (sku) => sku ? <Tag color="cyan">{sku}</Tag> : <span style={{ color: '#bfbfbf' }}>N/A</span>,
         },
         {
             title: 'Sản phẩm',
