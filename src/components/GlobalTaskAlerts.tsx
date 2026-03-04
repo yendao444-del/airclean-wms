@@ -4,7 +4,7 @@ import AlertPopup, { AlertPopupItem } from './AlertPopup';
 
 /**
  * GlobalTaskAlerts - Component chạy TOÀN CỤC ở App.tsx
- * Kiểm tra deadline "Bàn giao" mỗi 30 giây, phát âm thanh + popup cảnh báo
+ * Kiểm tra deadline "Bàn giao" mỗi 5 phút, phát âm thanh + popup cảnh báo
  * BẤT KỂ user đang ở tab nào.
  */
 
@@ -144,7 +144,7 @@ export default function GlobalTaskAlerts() {
     // Load mỗi 60 giây
     useEffect(() => {
         loadTasks();
-        const interval = setInterval(loadTasks, 60000);
+        const interval = setInterval(loadTasks, 120000); // 2 phút
         return () => clearInterval(interval);
     }, [loadTasks]);
 
@@ -269,7 +269,7 @@ export default function GlobalTaskAlerts() {
                     return;
                 }
             });
-        }, 30000);
+        }, 300000); // 5 phút
         return () => clearInterval(interval);
     }, [tasks, acknowledgedTasks, addAlertPopup]);
 
@@ -285,7 +285,7 @@ export default function GlobalTaskAlerts() {
                 return diff >= 0 && diff <= 10;
             });
             if (urgentTasks.length > 0) playUrgentBeeps(5);
-        }, 5000);
+        }, 30000); // 30 giây
         return () => clearInterval(alarmInterval);
     }, [tasks, acknowledgedTasks]);
 
