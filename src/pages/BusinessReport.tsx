@@ -215,27 +215,37 @@ export default function BusinessReportPage() {
 
         // === B. GIÁ VỐN (COGS) ===
         // Lookup giá vốn từ costMap (SKU → cost) × quantity
+        // ExportOrder items dùng trường "sku", EcommerceExport items dùng "variantSku"
+        console.log('🔍 [COGS DEBUG] costMap:', costMap);
+        console.log('🔍 [COGS DEBUG] costMap keys:', Object.keys(costMap));
+        console.log('🔍 [COGS DEBUG] filteredEcom count:', filteredEcom.length);
+
         let cogsPOS = 0;
         filteredExports.forEach(e => {
             try {
                 const items = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []);
                 items.forEach((item: any) => {
-                    const cost = costMap[item.sku] ?? item.cost ?? 0;
+                    const sku = item.sku || item.variantSku || '';
+                    const cost = costMap[sku] ?? item.cost ?? 0;
                     cogsPOS += cost * (item.quantity || 0);
                 });
             } catch { /* skip */ }
         });
 
         let cogsTMDT = 0;
-        filteredEcom.forEach(e => {
+        filteredEcom.forEach((e, idx) => {
             try {
                 const items = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []);
+                if (idx < 3) console.log(`🔍 [COGS DEBUG] Ecom #${idx} items:`, items.map((i: any) => ({ sku: i.sku, variantSku: i.variantSku, qty: i.quantity, keys: Object.keys(i) })));
                 items.forEach((item: any) => {
-                    const cost = costMap[item.sku] ?? item.cost ?? 0;
+                    const sku = item.sku || item.variantSku || '';
+                    const cost = costMap[sku] ?? item.cost ?? 0;
+                    if (idx < 3) console.log(`🔍 [COGS DEBUG] SKU="${sku}" → cost=${cost}, qty=${item.quantity}`);
                     cogsTMDT += cost * (item.quantity || 0);
                 });
             } catch { /* skip */ }
         });
+        console.log('🔍 [COGS DEBUG] Result: cogsPOS=', cogsPOS, 'cogsTMDT=', cogsTMDT);
         const totalCOGS = cogsPOS + cogsTMDT;
 
         // === C. PHÍ SÀN (lấy từ FeeCalculator - Công cụ hỗ trợ > Tính phí sàn) ===

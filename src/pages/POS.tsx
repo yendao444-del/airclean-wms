@@ -348,7 +348,20 @@ export default function POSPage() {
                                         {getInitials(p.name)}
                                     </div>
                                     <div className="pos-product-name">{p.name}</div>
-                                    <div className="pos-product-price">{fmt(p.price)}đ</div>
+                                    <div className="pos-product-price">
+                                        {(() => {
+                                            if (p.price > 0) return `${fmt(p.price)}đ`;
+                                            if (variants.length > 0) {
+                                                const prices = variants.map(v => v.price).filter(pr => pr > 0);
+                                                if (prices.length === 0) return '0đ';
+                                                const min = Math.min(...prices);
+                                                const max = Math.max(...prices);
+                                                if (min === max) return `${fmt(min)}đ`;
+                                                return `Từ ${fmt(min)}đ`;
+                                            }
+                                            return '0đ';
+                                        })()}
+                                    </div>
                                     {variants.length > 1 && (
                                         <div className="pos-variant-dots">
                                             {variants.slice(0, 5).map((v, i) => (

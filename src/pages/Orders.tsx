@@ -5,7 +5,7 @@ import {
 import {
     OrderedListOutlined, SearchOutlined, DownloadOutlined,
     ArrowUpOutlined, ArrowDownOutlined, FireOutlined,
-    CalendarOutlined,
+    CalendarOutlined, TrophyOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { Dayjs } from 'dayjs';
@@ -329,6 +329,16 @@ export default function OrdersPage() {
         transition: 'all 0.2s',
     });
 
+    const sourceTabStyle = (active: boolean, color: string) => ({
+        padding: '6px 16px', fontSize: 12, fontWeight: active ? 700 : 500,
+        borderRadius: 8, cursor: 'pointer' as const,
+        border: active ? `2px solid ${color}` : '2px solid transparent',
+        background: active ? `${color}12` : '#f5f5f5',
+        color: active ? color : '#595959',
+        transition: 'all 0.25s ease',
+        display: 'inline-flex', alignItems: 'center', gap: 6,
+    });
+
     return (
         <div style={{ maxWidth: 1440 }}>
             {/* Header */}
@@ -338,14 +348,6 @@ export default function OrdersPage() {
                     Đơn hàng
                 </Title>
                 <Space>
-                    <Select value={sourceFilter} onChange={setSourceFilter} style={{ width: 130 }}
-                        options={[
-                            { value: 'all', label: '📋 Tất cả' },
-                            { value: 'pos', label: '🏪 POS' },
-                            { value: 'export', label: '📦 Xuất hàng' },
-                            { value: 'tmdt', label: '🛒 TMDT' },
-                        ]}
-                    />
                     <Input placeholder="Tìm mã đơn, tracking..." prefix={<SearchOutlined />}
                         value={searchKeyword} onChange={e => setSearchKeyword(e.target.value)}
                         allowClear style={{ width: 200 }}
@@ -353,6 +355,37 @@ export default function OrdersPage() {
                     <Button icon={<DownloadOutlined />} onClick={handleExportExcel}>Xuất Excel</Button>
                 </Space>
             </div>
+
+            {/* Source Filter Tabs */}
+            <Card bordered={false} style={{ borderRadius: 12, marginBottom: 16 }} bodyStyle={{ padding: '10px 16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <Text type="secondary" style={{ fontSize: 12, fontWeight: 600, marginRight: 4 }}>Lọc nguồn:</Text>
+                    <button style={sourceTabStyle(sourceFilter === 'all', '#1890ff')} onClick={() => setSourceFilter('all')}>
+                        📋 Tất cả
+                        <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', borderRadius: 10, background: sourceFilter === 'all' ? '#1890ff' : '#d9d9d9', color: '#fff', border: 'none', padding: '0 6px' }}>
+                            {orders.filter(o => isInRange(o.date)).length}
+                        </Tag>
+                    </button>
+                    <button style={sourceTabStyle(sourceFilter === 'tmdt', '#13c2c2')} onClick={() => setSourceFilter('tmdt')}>
+                        🛒 TMDT
+                        <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', borderRadius: 10, background: sourceFilter === 'tmdt' ? '#13c2c2' : '#d9d9d9', color: '#fff', border: 'none', padding: '0 6px' }}>
+                            {orders.filter(o => o.source === 'tmdt' && isInRange(o.date)).length}
+                        </Tag>
+                    </button>
+                    <button style={sourceTabStyle(sourceFilter === 'pos', '#1890ff')} onClick={() => setSourceFilter('pos')}>
+                        🏪 Bán hàng
+                        <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', borderRadius: 10, background: sourceFilter === 'pos' ? '#1890ff' : '#d9d9d9', color: '#fff', border: 'none', padding: '0 6px' }}>
+                            {orders.filter(o => o.source === 'pos' && isInRange(o.date)).length}
+                        </Tag>
+                    </button>
+                    <button style={sourceTabStyle(sourceFilter === 'export', '#722ed1')} onClick={() => setSourceFilter('export')}>
+                        📦 Xuất hàng
+                        <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', borderRadius: 10, background: sourceFilter === 'export' ? '#722ed1' : '#d9d9d9', color: '#fff', border: 'none', padding: '0 6px' }}>
+                            {orders.filter(o => o.source === 'export' && isInRange(o.date)).length}
+                        </Tag>
+                    </button>
+                </div>
+            </Card>
 
             {/* Date Filter Bar */}
             <Card bordered={false} style={{ borderRadius: 12, marginBottom: 16, padding: 0 }} bodyStyle={{ padding: '12px 16px' }}>
@@ -425,43 +458,72 @@ export default function OrdersPage() {
             </Card>
 
             {/* Top sản phẩm bán chạy */}
-            {topProducts.length > 0 && (
-                <Card bordered={false} style={{ borderRadius: 12, marginBottom: 16 }} bodyStyle={{ padding: '16px 20px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                        <FireOutlined style={{ color: '#ff4d4f', fontSize: 16 }} />
-                        <Text strong style={{ fontSize: 14 }}>Top sản phẩm bán chạy</Text>
-                        <Text type="secondary" style={{ fontSize: 11 }}>({datePreset === 'today' ? 'hôm nay' : datePreset === '7days' ? '7 ngày qua' : datePreset === '30days' ? '30 ngày' : datePreset === 'month' ? 'tháng này' : 'kỳ chọn'})</Text>
-                    </div>
-                    <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-                        <thead>
-                            <tr style={{ background: '#fafafa' }}>
-                                <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 600, borderBottom: '1px solid #f0f0f0', width: 35 }}>#</th>
-                                <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 600, borderBottom: '1px solid #f0f0f0' }}>Sản phẩm</th>
-                                <th style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 600, borderBottom: '1px solid #f0f0f0', width: 80 }}>Đã bán</th>
-                                <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600, borderBottom: '1px solid #f0f0f0', width: 130 }}>Doanh thu</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {topProducts.map((p, i) => (
-                                <tr key={i} style={{ borderBottom: '1px solid #f5f5f5' }}>
-                                    <td style={{ padding: '7px 10px' }}>
+            {topProducts.length > 0 && (() => {
+                const maxQty = topProducts[0]?.qty || 1;
+                const rankGradients = [
+                    'linear-gradient(135deg, #ff4d4f, #ff7875)',
+                    'linear-gradient(135deg, #fa8c16, #ffa940)',
+                    'linear-gradient(135deg, #faad14, #ffc53d)',
+                ];
+                const rankIcons = ['🥇', '🥈', '🥉'];
+                return (
+                    <Card bordered={false} style={{ borderRadius: 12, marginBottom: 16 }} bodyStyle={{ padding: '16px 20px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <div style={{ width: 30, height: 30, borderRadius: 8, background: 'linear-gradient(135deg, #ff4d4f, #ff7875)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                    <TrophyOutlined style={{ color: '#fff', fontSize: 15 }} />
+                                </div>
+                                <div>
+                                    <Text strong style={{ fontSize: 14, display: 'block', lineHeight: 1.2 }}>Top sản phẩm bán chạy</Text>
+                                    <Text type="secondary" style={{ fontSize: 11 }}>{datePreset === 'today' ? 'Hôm nay' : datePreset === '7days' ? '7 ngày qua' : datePreset === '30days' ? '30 ngày' : datePreset === 'month' ? 'Tháng này' : 'Kỳ chọn'} · {topProducts.reduce((s, p) => s + p.qty, 0)} SP đã bán</Text>
+                                </div>
+                            </div>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+                            {topProducts.slice(0, 8).map((p, i) => (
+                                <div key={i} style={{
+                                    display: 'flex', alignItems: 'center', gap: 10,
+                                    padding: '8px 10px', borderRadius: 8,
+                                    background: i < 3 ? `${rankGradients[i].split(',')[1]?.replace(')', '').trim()}08` : 'transparent',
+                                    transition: 'background 0.2s',
+                                    borderBottom: i < topProducts.slice(0, 8).length - 1 ? '1px solid #f5f5f5' : 'none',
+                                }}>
+                                    {/* Rank */}
+                                    <div style={{ width: 28, textAlign: 'center', flexShrink: 0 }}>
                                         {i < 3 ? (
-                                            <span style={{ display: 'inline-flex', width: 22, height: 22, borderRadius: '50%', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 11, color: '#fff', background: i === 0 ? '#ff4d4f' : i === 1 ? '#fa8c16' : '#faad14' }}>
-                                                {i + 1}
-                                            </span>
-                                        ) : <Text type="secondary">{i + 1}</Text>}
-                                    </td>
-                                    <td style={{ padding: '7px 10px', fontWeight: i < 3 ? 600 : 400 }}>{p.name}</td>
-                                    <td style={{ padding: '7px 10px', textAlign: 'center' }}>
-                                        <Tag color={i < 3 ? 'red' : 'default'} style={{ fontWeight: 700 }}>{p.qty}</Tag>
-                                    </td>
-                                    <td style={{ padding: '7px 10px', textAlign: 'right', fontWeight: 600, color: '#00ab56' }}>{fmt(p.revenue)}đ</td>
-                                </tr>
+                                            <span style={{ fontSize: 18, lineHeight: 1 }}>{rankIcons[i]}</span>
+                                        ) : (
+                                            <span style={{ fontSize: 12, fontWeight: 600, color: '#8c8c8c' }}>{i + 1}</span>
+                                        )}
+                                    </div>
+                                    {/* Product Name */}
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                        <Text ellipsis style={{ fontSize: 12, fontWeight: i < 3 ? 600 : 400, display: 'block', marginBottom: 3 }}>{p.name}</Text>
+                                        {/* Progress bar */}
+                                        <div style={{ height: 4, borderRadius: 2, background: '#f0f0f0', overflow: 'hidden' }}>
+                                            <div style={{
+                                                height: '100%', borderRadius: 2,
+                                                width: `${(p.qty / maxQty) * 100}%`,
+                                                background: i === 0 ? '#ff4d4f' : i === 1 ? '#fa8c16' : i === 2 ? '#faad14' : '#1890ff',
+                                                transition: 'width 0.5s ease',
+                                            }} />
+                                        </div>
+                                    </div>
+                                    {/* Qty */}
+                                    <div style={{ textAlign: 'center', flexShrink: 0, minWidth: 50 }}>
+                                        <Text strong style={{ fontSize: 13, color: i < 3 ? '#ff4d4f' : '#1a1a2e' }}>{p.qty}</Text>
+                                        <div style={{ fontSize: 10, color: '#8c8c8c' }}>đã bán</div>
+                                    </div>
+                                    {/* Revenue */}
+                                    <div style={{ textAlign: 'right', flexShrink: 0, minWidth: 95 }}>
+                                        <Text strong style={{ fontSize: 12, color: '#00ab56' }}>{fmtShort(p.revenue)}đ</Text>
+                                    </div>
+                                </div>
                             ))}
-                        </tbody>
-                    </table>
-                </Card>
-            )}
+                        </div>
+                    </Card>
+                );
+            })()}
 
             {/* Table */}
             <Card bordered={false} style={{ borderRadius: 14 }}>
