@@ -34,6 +34,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         create: (data) => ipcRenderer.invoke('purchases:create', data),
         update: (id, data) => ipcRenderer.invoke('purchases:update', { id, data }),
         delete: (id) => ipcRenderer.invoke('purchases:delete', id),
+        uploadVATInvoice: (data) => ipcRenderer.invoke('purchases:uploadVATInvoice', data),
     },
     suppliers: {
         getAll: () => ipcRenderer.invoke('suppliers:getAll'),
@@ -165,6 +166,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         update: (id, data) => ipcRenderer.invoke('users:update', id, data),
         delete: (id) => ipcRenderer.invoke('users:delete', id),
         login: (username, password) => ipcRenderer.invoke('users:login', username, password),
+        logout: () => ipcRenderer.invoke('users:logout'),
+        restoreSession: (userId) => ipcRenderer.invoke('users:restoreSession', userId),
         ensureAdmin: () => ipcRenderer.invoke('users:ensureAdmin'),
     },
 
@@ -180,6 +183,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
         download: (downloadUrl) => ipcRenderer.invoke('update:download', downloadUrl),
         restart: () => ipcRenderer.invoke('update:restart'),
         getHistory: () => ipcRenderer.invoke('update:getHistory'),
+    },
+
+    // E-Invoice (HÓA ĐƠN ĐIỆN TỬ)
+    einvoice: {
+        getAll: () => ipcRenderer.invoke('einvoice:getAll'),
+        bulkImport: (orders) => ipcRenderer.invoke('einvoice:bulkImport', orders),
+        issueInvoices: (orderIds) => ipcRenderer.invoke('einvoice:issueInvoices', orderIds),
+        exportExcel: (filters) => ipcRenderer.invoke('einvoice:exportExcel', filters),
+        getStats: () => ipcRenderer.invoke('einvoice:getStats'),
+        delete: (id) => ipcRenderer.invoke('einvoice:delete', id),
+        bulkDelete: (orderIds) => ipcRenderer.invoke('einvoice:bulkDelete', orderIds),
+        deleteAll: () => ipcRenderer.invoke('einvoice:deleteAll'),
+        getOriginalInvoice: (orderId) => ipcRenderer.invoke('einvoice:getOriginalInvoice', orderId),
+        adjustInvoice: (data) => ipcRenderer.invoke('einvoice:adjustInvoice', data),
+        getInvoiceChain: (orderId) => ipcRenderer.invoke('einvoice:getInvoiceChain', orderId),
     },
 });
 

@@ -1625,27 +1625,6 @@ Thời gian: ${currentTime}`;
                             }).length}
                         </Tag>
                         <Tag
-                            onClick={() => setStatusFilter('all')}
-                            style={{
-                                cursor: 'pointer',
-                                padding: '6px 14px',
-                                fontSize: 13,
-                                fontWeight: 600,
-                                borderRadius: 8,
-                                border: 'none',
-                                background: statusFilter === 'all'
-                                    ? 'linear-gradient(135deg, #1890ff 0%, #40a9ff 100%)'
-                                    : 'linear-gradient(135deg, #91d5ff 0%, #bae7ff 100%)',
-                                color: '#fff',
-                                boxShadow: statusFilter === 'all'
-                                    ? '0 2px 8px rgba(24, 144, 255, 0.4)'
-                                    : '0 1px 4px rgba(24, 144, 255, 0.2)',
-                                transition: 'all 0.3s',
-                            }}
-                        >
-                            📋 Tất cả: {ecommerceExports.length}
-                        </Tag>
-                        <Tag
                             onClick={() => setStatusFilter('no_data')}
                             style={{
                                 cursor: 'pointer',

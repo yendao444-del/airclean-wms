@@ -1,6 +1,6 @@
 {
   "name": "quan-ly-ban-hang-desktop",
-  "version": "1.0.81",
+  "version": "1.0.82",
   "description": "Hệ thống quản lý bán hàng - Desktop App",
   "main": "electron/main.js",
   "scripts": {
@@ -46,6 +46,10 @@
       "node_modules/adm-zip/**/*",
       "node_modules/archiver/**/*",
       "node_modules/glob/**/*",
+      "node_modules/googleapis/**/*",
+      "node_modules/google-auth-library/**/*",
+      "node_modules/gaxios/**/*",
+      "node_modules/gtoken/**/*",
       ".env"
     ],
     "extraResources": [
@@ -62,13 +66,16 @@
     "asar": false
   },
   "dependencies": {
-    "@prisma/client": "5.22.0",
-    "dotenv": "^17.2.3",
     "@ant-design/icons": "^6.1.0",
+    "@prisma/client": "5.22.0",
     "adm-zip": "^0.5.16",
     "antd": "^6.2.3",
     "archiver": "^7.0.1",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.2.3",
     "glob": "^13.0.1",
+    "googleapis": "^171.4.0",
+    "nodemailer": "^8.0.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-hook-form": "^7.71.1",

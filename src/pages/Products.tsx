@@ -712,9 +712,27 @@ export default function ProductsPage() {
             width: 120,
             minWidth: 100,
             render: (value: number, record: Product) => {
-                // Ẩn nếu row đang expand
                 if (expandedRowKeys.includes(record.id)) return null;
-                return new Intl.NumberFormat('vi-VN').format(value) + 'đ';
+                // Nếu có variants → hiển thị khoảng giá vốn từ variants
+                if (record.variants) {
+                    try {
+                        const variantList = JSON.parse(record.variants);
+                        if (Array.isArray(variantList) && variantList.length > 0) {
+                            const costs = variantList.map((v: any) => v.cost || 0).filter((c: number) => c > 0);
+                            if (costs.length > 0) {
+                                const min = Math.min(...costs);
+                                const max = Math.max(...costs);
+                                const fmt = (n: number) => new Intl.NumberFormat('vi-VN').format(n);
+                                return (
+                                    <span style={{ fontSize: 12, color: '#595959' }}>
+                                        {min === max ? `${fmt(min)}đ` : `${fmt(min)}đ - ${fmt(max)}đ`}
+                                    </span>
+                                );
+                            }
+                        }
+                    } catch { /* fallback */ }
+                }
+                return value ? new Intl.NumberFormat('vi-VN').format(value) + 'đ' : <span style={{ color: '#bfbfbf' }}>—</span>;
             },
         },
         {
@@ -724,13 +742,31 @@ export default function ProductsPage() {
             width: 120,
             minWidth: 100,
             render: (value: number, record: Product) => {
-                // Ẩn nếu row đang expand
                 if (expandedRowKeys.includes(record.id)) return null;
-                return (
+                // Nếu có variants → hiển thị khoảng giá bán từ variants
+                if (record.variants) {
+                    try {
+                        const variantList = JSON.parse(record.variants);
+                        if (Array.isArray(variantList) && variantList.length > 0) {
+                            const prices = variantList.map((v: any) => v.price || 0).filter((p: number) => p > 0);
+                            if (prices.length > 0) {
+                                const min = Math.min(...prices);
+                                const max = Math.max(...prices);
+                                const fmt = (n: number) => new Intl.NumberFormat('vi-VN').format(n);
+                                return (
+                                    <strong style={{ color: '#00ab56', fontSize: 12 }}>
+                                        {min === max ? `${fmt(min)}đ` : `${fmt(min)}đ - ${fmt(max)}đ`}
+                                    </strong>
+                                );
+                            }
+                        }
+                    } catch { /* fallback */ }
+                }
+                return value ? (
                     <strong style={{ color: '#00ab56' }}>
                         {new Intl.NumberFormat('vi-VN').format(value)}đ
                     </strong>
-                );
+                ) : <span style={{ color: '#bfbfbf' }}>—</span>;
             },
         },
         {

@@ -15,8 +15,9 @@ import {
     Tag,
     Timeline,
     Alert,
+    Upload,
 } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, EyeOutlined, HistoryOutlined, ClockCircleOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, EyeOutlined, HistoryOutlined, ClockCircleOutlined, UploadOutlined, FileTextOutlined, CheckCircleOutlined, LinkOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import dayjs from 'dayjs';
@@ -97,6 +98,13 @@ export default function PurchasePage() {
 
     // ⏳ State cho loading data (suppliers & products)
     const [loadingData, setLoadingData] = useState(false);
+
+    // 🧾 State cho upload HĐ VAT
+    const [vatModalVisible, setVatModalVisible] = useState(false);
+    const [vatPurchaseId, setVatPurchaseId] = useState<number | null>(null);
+    const [vatForm] = Form.useForm();
+    const [vatFile, setVatFile] = useState<File | null>(null);
+    const [vatUploading, setVatUploading] = useState(false);
 
     // Ref cho trường màu sắc để tự động focus
     const colorSelectRef = useRef<any>(null);
@@ -591,6 +599,89 @@ export default function PurchasePage() {
         setViewModalVisible(true);
     };
 
+    // 🧾 Upload HĐ VAT nhà cung cấp
+    const openVatModal = (purchaseId: number, record?: any) => {
+        setVatPurchaseId(purchaseId);
+        setVatFile(null);
+        vatForm.resetFields();
+
+        if (record?.vatInvoiceNumber) {
+            // Sửa HĐ đã có → fill data cũ
+            vatForm.setFieldsValue({
+                invoiceNumber: record.vatInvoiceNumber,
+                invoiceDate: record.vatInvoiceDate ? dayjs(record.vatInvoiceDate) : dayjs(),
+            });
+        } else {
+            // Tạo mới → auto-generate
+            const now = dayjs();
+            const autoCode = `VAT-PO${purchaseId}-${now.format('YYMMDD-HHmm')}`;
+            vatForm.setFieldsValue({ invoiceNumber: autoCode, invoiceDate: now });
+        }
+        setVatModalVisible(true);
+    };
+
+    const handleVatUpload = async (values: any) => {
+        if (!vatPurchaseId) return;
+
+        // Nếu chưa có file và đây là upload mới → yêu cầu chọn file
+        const existingPurchase = purchases.find(p => p.id === vatPurchaseId) as any;
+        const isEdit = !!existingPurchase?.vatInvoiceNumber;
+
+        if (!vatFile && !isEdit) {
+            message.warning('Vui lòng chọn file HĐ VAT!');
+            return;
+        }
+
+        setVatUploading(true);
+        try {
+            let base64: string | null = null;
+            let fileName: string | null = null;
+
+            if (vatFile) {
+                // Convert file to base64
+                base64 = await new Promise<string>((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                        const result = reader.result as string;
+                        resolve(result.split(',')[1]);
+                    };
+                    reader.onerror = reject;
+                    reader.readAsDataURL(vatFile);
+                });
+                fileName = vatFile.name;
+            }
+
+            const payload: any = {
+                purchaseId: vatPurchaseId,
+                invoiceNumber: values.invoiceNumber || `VAT-PO${vatPurchaseId}-${dayjs().format('YYMMDDHHmm')}`,
+                invoiceDate: values.invoiceDate.format('YYYY-MM-DD'),
+            };
+
+            // Chỉ gửi file nếu có file mới
+            if (base64 && fileName) {
+                payload.fileBase64 = base64;
+                payload.fileName = fileName;
+            }
+
+            const result = await (window.electronAPI as any).purchases.uploadVATInvoice(payload);
+
+            if (result.success) {
+                message.success(`✅ ${isEdit ? 'Đã cập nhật' : 'Đã upload'} HĐ VAT #${values.invoiceNumber}!`);
+                if (result.data?.driveUrl) {
+                    message.info('☁️ Đã backup lên Google Drive');
+                }
+                setVatModalVisible(false);
+                loadPurchases();
+            } else {
+                message.error(result.error || 'Lỗi upload');
+            }
+        } catch (err: any) {
+            message.error('Lỗi: ' + (err.message || 'Không xác định'));
+        } finally {
+            setVatUploading(false);
+        }
+    };
+
     const columns: ColumnsType<Purchase> = [
         {
             title: 'Mã phiếu',
@@ -644,11 +735,36 @@ export default function PurchasePage() {
                 ) : '-'
             ),
         },
+        {
+            title: '🧾 HĐ VAT',
+            key: 'vatStatus',
+            width: 130,
+            align: 'center' as const,
+            render: (_: any, record: Purchase) => {
+                const r = record as any;
+                if (r.vatInvoiceStatus === 'uploaded') {
+                    return (
+                        <Tag color="success" style={{ fontWeight: 600, fontSize: 12, cursor: 'pointer' }}
+                            onClick={(e) => { e.stopPropagation(); openVatModal(record.id, r); }}
+                        >
+                            ✅ Đã có HĐ
+                        </Tag>
+                    );
+                }
+                return (
+                    <Tag color="warning" style={{ fontWeight: 600, fontSize: 12, cursor: 'pointer' }}
+                        onClick={(e) => { e.stopPropagation(); openVatModal(record.id); }}
+                    >
+                        ⏳ Chưa có
+                    </Tag>
+                );
+            },
+        },
     ];
 
     const totalAmount = purchaseItems.reduce((sum, item) => sum + item.total, 0);
 
-    // ✨ Expandable row render - hiển thị actions ở đây
+    // ✨ Expandable row render - hiển thị actions + bảng sản phẩm chuyên nghiệp
     const expandedRowRender = (record: Purchase) => {
         let items: PurchaseItem[] = [];
         try {
@@ -657,10 +773,18 @@ export default function PurchasePage() {
             items = [];
         }
 
+        const itemTotal = items.reduce((sum, i) => sum + i.total, 0);
+
         return (
-            <div style={{ padding: '16px 24px', background: '#fafafa' }}>
+            <div style={{
+                padding: '12px',
+                background: '#e6f7ff',
+                border: '3px solid #1890ff',
+                borderRadius: '8px',
+                margin: '8px 0',
+            }}>
                 {/* Actions */}
-                <div style={{ marginBottom: 16, display: 'flex', gap: 8 }}>
+                <div style={{ marginBottom: 12, display: 'flex', gap: 8 }}>
                     <Button
                         type="primary"
                         icon={<EyeOutlined />}
@@ -682,36 +806,159 @@ export default function PurchasePage() {
                     >
                         Xóa
                     </Button>
+                    {/* 🧾 Nút Upload HĐ VAT */}
+                    <Button
+                        icon={<UploadOutlined />}
+                        onClick={() => openVatModal(record.id, record)}
+                        style={{
+                            background: (record as any).vatInvoiceStatus === 'uploaded' ? '#f6ffed' : '#fff7e6',
+                            borderColor: (record as any).vatInvoiceStatus === 'uploaded' ? '#52c41a' : '#faad14',
+                            color: (record as any).vatInvoiceStatus === 'uploaded' ? '#52c41a' : '#d48806',
+                        }}
+                    >
+                        {(record as any).vatInvoiceStatus === 'uploaded' ? '✅ Đã có HĐ VAT' : '🧾 Upload HĐ VAT'}
+                    </Button>
                 </div>
 
-                {/* Product Items */}
-                <div style={{ background: 'white', padding: 16, borderRadius: 8 }}>
-                    <div style={{ fontWeight: 600, marginBottom: 12, color: '#262626' }}>
-                        📦 Danh sách sản phẩm ({items.length})
-                    </div>
-                    {items.map((item, index) => (
-                        <div
-                            key={index}
-                            style={{
-                                display: 'flex',
-                                justifyContent: 'space-between',
-                                padding: '8px 0',
-                                borderBottom: index < items.length - 1 ? '1px solid #f0f0f0' : 'none',
-                            }}
-                        >
-                            <div>
-                                <strong>{item.productName}</strong>
-                                {item.color && <Tag color="blue" style={{ marginLeft: 8 }}>{item.color}</Tag>}
-                                {item.sku && <span style={{ color: '#8c8c8c', fontSize: 12, marginLeft: 8 }}>SKU: {item.sku}</span>}
+                {/* 🧾 VAT Invoice Info (nếu đã upload) */}
+                {(record as any).vatInvoiceNumber && (
+                    <div style={{
+                        marginBottom: 12, padding: '10px 14px', borderRadius: 8,
+                        background: 'linear-gradient(135deg, #f6ffed 0%, #e8f5e0 100%)',
+                        border: '1px solid #b7eb8f',
+                        display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap',
+                    }}>
+                        <CheckCircleOutlined style={{ fontSize: 20, color: '#52c41a' }} />
+                        <div style={{ flex: 1 }}>
+                            <div style={{ fontWeight: 700, fontSize: 13, color: '#262626' }}>
+                                🧾 HĐ VAT: <span style={{ color: '#1890ff' }}>#{(record as any).vatInvoiceNumber}</span>
                             </div>
-                            <div style={{ textAlign: 'right' }}>
-                                <div>SL: <strong>{item.quantity}</strong> {item.unit}</div>
-                                <div style={{ color: '#1890ff' }}>
-                                    {item.unitPrice.toLocaleString()}đ × {item.quantity} = <strong>{item.total.toLocaleString()}đ</strong>
-                                </div>
+                            <div style={{ fontSize: 12, color: '#595959' }}>
+                                📅 {dayjs((record as any).vatInvoiceDate).format('DD/MM/YYYY')}
+                                {(record as any).vatInvoiceDriveUrl && (
+                                    <a href={(record as any).vatInvoiceDriveUrl} target="_blank" rel="noreferrer"
+                                        style={{ marginLeft: 12, color: '#1890ff' }}
+                                    >
+                                        <LinkOutlined /> Xem trên Drive
+                                    </a>
+                                )}
                             </div>
                         </div>
-                    ))}
+                        <Tag color="success">Đã upload</Tag>
+                    </div>
+                )}
+
+                {/* Product Table */}
+                <div style={{ overflowX: 'auto', overflowY: 'hidden' }}>
+                    <table style={{
+                        width: '100%',
+                        minWidth: 700,
+                        borderCollapse: 'collapse',
+                        borderRadius: 8,
+                        overflow: 'hidden',
+                    }}>
+                        <thead>
+                            <tr style={{ background: 'linear-gradient(135deg, #1890ff 0%, #096dd9 100%)' }}>
+                                <th style={{ padding: '10px 12px', textAlign: 'left', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 40 }}>
+                                    #
+                                </th>
+                                <th style={{ padding: '10px 12px', textAlign: 'left', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 200 }}>
+                                    Sản phẩm
+                                </th>
+                                <th style={{ padding: '10px 12px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 100 }}>
+                                    Phân loại
+                                </th>
+                                <th style={{ padding: '10px 12px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 100 }}>
+                                    SKU
+                                </th>
+                                <th style={{ padding: '10px 12px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 60 }}>
+                                    ĐVT
+                                </th>
+                                <th style={{ padding: '10px 12px', textAlign: 'right', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 80 }}>
+                                    Đơn giá
+                                </th>
+                                <th style={{ padding: '10px 12px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 60 }}>
+                                    SL
+                                </th>
+                                <th style={{ padding: '10px 12px', textAlign: 'right', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 100 }}>
+                                    Thành tiền
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {items.map((item, idx) => {
+                                const rowBg = idx % 2 === 0 ? '#fff' : '#fafafa';
+                                return (
+                                    <tr key={idx} style={{
+                                        background: rowBg,
+                                        transition: 'background 0.2s',
+                                    }}
+                                        onMouseEnter={(e) => e.currentTarget.style.background = '#e6f7ff'}
+                                        onMouseLeave={(e) => e.currentTarget.style.background = rowBg}
+                                    >
+                                        <td style={{ padding: '10px 12px', fontSize: 12, color: '#8c8c8c', fontWeight: 600 }}>
+                                            {idx + 1}
+                                        </td>
+                                        <td style={{ padding: '10px 12px', fontSize: 13 }}>
+                                            <span style={{ fontWeight: 600, color: '#262626' }}>
+                                                {item.productName?.replace(` - ${item.color}`, '') || item.productName}
+                                            </span>
+                                        </td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                                            {item.color ? (
+                                                <Tag color="blue" style={{ margin: 0, fontWeight: 600 }}>{item.color}</Tag>
+                                            ) : (
+                                                <span style={{ color: '#bfbfbf' }}>—</span>
+                                            )}
+                                        </td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                                            <span style={{ fontSize: 11, color: '#00ab56', fontWeight: 600 }}>
+                                                {item.variantSku || item.sku || '—'}
+                                            </span>
+                                        </td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                                            <Tag color="purple" style={{ margin: 0 }}>{item.unit || 'Cái'}</Tag>
+                                        </td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'right', fontSize: 12, color: '#595959' }}>
+                                            {new Intl.NumberFormat('vi-VN').format(item.unitPrice)}đ
+                                        </td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                                            <div style={{
+                                                background: 'linear-gradient(135deg, #1890ff 0%, #40a9ff 100%)',
+                                                color: '#fff',
+                                                padding: '4px 10px',
+                                                borderRadius: 6,
+                                                fontWeight: 900,
+                                                fontSize: 14,
+                                                display: 'inline-block',
+                                                minWidth: 40,
+                                            }}>
+                                                {item.quantity}
+                                            </div>
+                                        </td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'right' }}>
+                                            <strong style={{ color: '#00ab56', fontSize: 13 }}>
+                                                {new Intl.NumberFormat('vi-VN').format(item.total)}đ
+                                            </strong>
+                                        </td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                        <tfoot>
+                            <tr style={{ background: 'linear-gradient(135deg, #f0f5ff 0%, #e6f7ff 100%)', borderTop: '2px solid #1890ff' }}>
+                                <td colSpan={6} style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, fontSize: 13, color: '#262626' }}>
+                                    📦 {items.length} sản phẩm — Tổng cộng:
+                                </td>
+                                <td style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 900, fontSize: 14, color: '#1890ff' }}>
+                                    {items.reduce((sum, i) => sum + i.quantity, 0)}
+                                </td>
+                                <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 900, fontSize: 15, color: '#00ab56' }}>
+                                    {new Intl.NumberFormat('vi-VN').format(itemTotal)}đ
+                                </td>
+                            </tr>
+                        </tfoot>
+                    </table>
                 </div>
             </div>
         );
@@ -771,6 +1018,8 @@ export default function PurchasePage() {
                         expandable={{
                             expandedRowRender,
                             rowExpandable: (record) => true,
+                            expandRowByClick: true,
+                            showExpandColumn: false,
                         }}
                         rowSelection={{
                             selectedRowKeys,
@@ -1419,6 +1668,88 @@ export default function PurchasePage() {
                         </div>
                     </div>
                 )}
+            </Modal>
+
+            {/* === 🧾 MODAL UPLOAD HĐ VAT === */}
+            <Modal
+                title={(() => {
+                    const existing = purchases.find(p => p.id === vatPurchaseId) as any;
+                    return existing?.vatInvoiceNumber ? '✏️ Sửa Hóa đơn VAT' : '🧾 Upload Hóa đơn VAT nhà cung cấp';
+                })()}
+                open={vatModalVisible}
+                onCancel={() => setVatModalVisible(false)}
+                footer={null}
+                width={480}
+            >
+                <Form form={vatForm} layout="vertical" onFinish={handleVatUpload}>
+                    {/* Số HĐ */}
+                    <Form.Item name="invoiceNumber" label="Số hóa đơn VAT">
+                        <Input prefix={<FileTextOutlined />}
+                            style={{ fontWeight: 700, color: '#1890ff', fontSize: 14 }} />
+                    </Form.Item>
+                    {/* Ngày HĐ */}
+                    <Form.Item name="invoiceDate" label="Ngày hóa đơn">
+                        <DatePicker style={{ width: '100%' }} format="DD/MM/YYYY HH:mm" showTime={{ format: 'HH:mm' }} />
+                    </Form.Item>
+                    {/* File upload */}
+                    {(() => {
+                        const existing = purchases.find(p => p.id === vatPurchaseId) as any;
+                        const isEdit = !!existing?.vatInvoiceNumber;
+                        return (
+                            <Form.Item label={
+                                <span style={{ fontWeight: 700, fontSize: 14, color: '#262626' }}>
+                                    📎 {isEdit ? 'Chọn file mới để thay thế (không bắt buộc)' : 'Ảnh / PDF hóa đơn VAT'}
+                                </span>
+                            } required={!isEdit}>
+                                <Upload.Dragger
+                                    beforeUpload={(file) => {
+                                        setVatFile(file);
+                                        return false;
+                                    }}
+                                    onRemove={() => setVatFile(null)}
+                                    maxCount={1}
+                                    accept="image/*,.pdf"
+                                    fileList={vatFile ? [{ uid: '-1', name: vatFile.name, status: 'done' as const }] : []}
+                                    style={{ padding: '16px 0', borderColor: vatFile ? '#52c41a' : isEdit ? '#1890ff' : '#faad14' }}
+                                >
+                                    <p style={{ fontSize: 32, marginBottom: 8 }}>{vatFile ? '✅' : isEdit ? '🔄' : '📄'}</p>
+                                    <p style={{ fontWeight: 700, fontSize: 14, color: vatFile ? '#52c41a' : '#595959' }}>
+                                        {vatFile ? vatFile.name : isEdit ? 'Kéo thả file mới để thay thế' : 'Kéo thả hoặc bấm để chọn file'}
+                                    </p>
+                                    <p style={{ fontSize: 12, color: '#8c8c8c' }}>Hỗ trợ: JPG, PNG, PDF</p>
+                                </Upload.Dragger>
+                            </Form.Item>
+                        );
+                    })()}
+                    <Alert
+                        type="info"
+                        showIcon
+                        style={{ marginBottom: 16 }}
+                        message={<span style={{ fontWeight: 600 }}>📁 Local + ☁️ Google Drive + 📱 Telegram</span>}
+                        description="File sẽ được lưu trữ an toàn 3 nơi cùng lúc"
+                    />
+                    <Form.Item>
+                        {(() => {
+                            const existing = purchases.find(p => p.id === vatPurchaseId) as any;
+                            const isEdit = !!existing?.vatInvoiceNumber;
+                            const canSubmit = isEdit || !!vatFile;
+                            return (
+                                <Button type="primary" htmlType="submit" loading={vatUploading} block
+                                    disabled={!canSubmit}
+                                    icon={<UploadOutlined />}
+                                    style={{
+                                        height: 48, fontWeight: 800, fontSize: 16,
+                                        background: canSubmit ? 'linear-gradient(135deg, #52c41a 0%, #389e0d 100%)' : undefined,
+                                        borderColor: canSubmit ? '#389e0d' : undefined,
+                                        boxShadow: canSubmit ? '0 4px 12px rgba(82,196,26,0.4)' : undefined,
+                                    }}
+                                >
+                                    {vatUploading ? '⏳ Đang xử lý...' : isEdit ? '✏️ CẬP NHẬT HĐ VAT' : '🧾 UPLOAD HĐ VAT'}
+                                </Button>
+                            );
+                        })()}
+                    </Form.Item>
+                </Form>
             </Modal>
         </div>
     );

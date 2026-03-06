@@ -23,6 +23,7 @@ import {
     CheckCircleOutlined,
     AppstoreOutlined,
     ShoppingOutlined,
+    FileTextOutlined,
     OrderedListOutlined,
     LineChartOutlined,
 } from '@ant-design/icons';
@@ -54,6 +55,7 @@ const PurchasePage = lazy(() => import('./pages/Purchase'));
 const ReturnsPage = lazy(() => import('./pages/Returns'));
 const RefundsPage = lazy(() => import('./pages/Refunds'));
 const EcommerceExportPage = lazy(() => import('./pages/EcommerceExport'));
+const EInvoicePage = lazy(() => import('./pages/EInvoice'));
 const POSPage = lazy(() => import('./pages/POS'));
 const SalesHistoryPage = lazy(() => import('./pages/SalesHistory'));
 const OrderPickingPage = lazy(() => import('./pages/OrderPicking'));
@@ -174,6 +176,9 @@ function AppContent() {
         if (accessibleKeys.includes('ecommerce-export')) {
             ecommerceChildren.push(createMenuItem('Xuất hàng TMDT', 'ecommerce-export', <SendOutlined />));
         }
+        if (accessibleKeys.includes('einvoice')) {
+            ecommerceChildren.push(createMenuItem('Xuất HĐĐT', 'einvoice', <FileTextOutlined />));
+        }
         if (ecommerceChildren.length > 0) {
             items.push(createMenuItem('Bàn giao TMDT', 'ecommerce-menu', <ShoppingOutlined />, ecommerceChildren));
         }
@@ -259,6 +264,8 @@ function AppContent() {
                 return <RefundsPage />;
             case 'ecommerce-export':
                 return <EcommerceExportPage />;
+            case 'einvoice':
+                return <EInvoicePage />;
             case 'orders':
                 return <OrdersPage />;
             case 'stock-balance':

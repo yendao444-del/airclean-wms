@@ -26,7 +26,6 @@ interface User {
     email?: string;
     role: 'admin' | 'manager' | 'staff' | 'viewer';
     isActive: boolean;
-    password: string; // Added password field
     createdAt: string;
 }
 

@@ -140,7 +140,14 @@ export default function BusinessReportPage() {
             // Load phí sàn từ FeeCalculator
             const feesRes = await window.electronAPI.appConfig.get('fees_config');
             if (feesRes.success && feesRes.data) {
-                setFeeConfig(feesRes.data);
+                // Merge: lấy giá trị đã lưu + thêm các mục mới từ defaults (vd: affiliate)
+                const saved = feesRes.data as any[];
+                const savedIds = new Set(saved.map((f: any) => f.id));
+                const merged = [
+                    ...saved,
+                    ...DEFAULT_FEES.filter(d => !savedIds.has(d.id)),
+                ];
+                setFeeConfig(merged);
             }
         } catch (err) {
             console.error('Load data error:', err);
@@ -253,7 +260,7 @@ export default function BusinessReportPage() {
         const ecomOrders = filteredEcom.length;
         // Tính từng loại phí (bỏ qua ADS vì đã tính riêng ở mục D)
         const platformFeeDetails = feeConfig
-            .filter(f => !f.isCustom && f.id !== 'affiliate')
+            .filter(f => !f.isCustom)
             .map(fee => {
                 let amount = 0;
                 if (fee.type === 'percent') {
@@ -265,16 +272,7 @@ export default function BusinessReportPage() {
             });
         const totalPlatformFees = platformFeeDetails.reduce((sum, f) => sum + f.amount, 0);
 
-        // === C2. HOA HỒNG AFFILIATE (từ feeConfig, tính theo đơn) ===
-        const affiliateFee = feeConfig.find(f => f.id === 'affiliate');
-        let totalAffiliate = 0;
-        if (affiliateFee && affiliateFee.value > 0) {
-            if (affiliateFee.type === 'percent') {
-                totalAffiliate = revenueTMDT * affiliateFee.value / 100;
-            } else {
-                totalAffiliate = affiliateFee.value * ecomOrders;
-            }
-        }
+        // Affiliate đã được gộp vào platformFeeDetails ở trên
 
         // === D. CHI PHÍ ADS (từ dailyExpenses) ===
         const totalShopeeAds = filteredDailyExpenses.reduce((s, d) => s + (d.shopeeAds || 0), 0);
@@ -314,7 +312,7 @@ export default function BusinessReportPage() {
         const totalOtherExpense = filteredDailyExpenses.reduce((s, d) => s + (d.otherExpense || 0), 0);
 
         // === TỔNG HỢP ===
-        const totalCost = totalCOGS + totalPlatformFees + totalAds + totalShipReturn + totalAffiliate + totalOpex + totalOtherExpense;
+        const totalCost = totalCOGS + totalPlatformFees + totalAds + totalShipReturn + totalOpex + totalOtherExpense;
         const grossProfit = netRevenue - totalCOGS;
         const netProfit = netRevenue - totalCost;
         const grossMargin = netRevenue > 0 ? (grossProfit / netRevenue * 100) : 0;
@@ -332,8 +330,7 @@ export default function BusinessReportPage() {
             totalShopeeAds, totalTiktokAds, totalAds,
             // Shipping
             totalShipping, totalReturnCost, totalShipReturn,
-            // Affiliate
-            totalAffiliate,
+
             // Opex
             monthlyTotal, dailyOpex, totalOpex, opexDetails,
             // Other
@@ -430,61 +427,78 @@ export default function BusinessReportPage() {
     // P&L TABLE DATA
     // ============================================
     const pnlTableData = useMemo(() => [
-        // A. DOANH THU
-        { key: 'rev-header', name: '💰 A. DOANH THU', amount: pnl.totalRevenue, pctVal: '', isGroup: true, color: '#00ab56' },
-        { key: 'rev-pos', name: 'Bán hàng POS', amount: pnl.revenuePOS, pctVal: pct(pnl.revenuePOS), isChild: true },
-        { key: 'rev-shopee', name: 'Shopee', amount: pnl.shopeeRevenue, pctVal: pct(pnl.shopeeRevenue), isChild: true },
-        { key: 'rev-tiktok', name: 'TikTok', amount: pnl.tiktokRevenue, pctVal: pct(pnl.tiktokRevenue), isChild: true },
-        ...(pnl.otherTMDTRevenue > 0 ? [{ key: 'rev-other', name: 'TMDT khác', amount: pnl.otherTMDTRevenue, pctVal: pct(pnl.otherTMDTRevenue), isChild: true }] : []),
+        // A. DOANH THU — collapsed by default
+        {
+            key: 'rev-header', name: '💰 A. DOANH THU', amount: pnl.totalRevenue, pctVal: '', isGroup: true, color: '#00ab56',
+            children: [
+                { key: 'rev-pos', name: 'Bán hàng POS', amount: pnl.revenuePOS, pctVal: pct(pnl.revenuePOS), isChild: true },
+                { key: 'rev-shopee', name: 'Shopee', amount: pnl.shopeeRevenue, pctVal: pct(pnl.shopeeRevenue), isChild: true },
+                { key: 'rev-tiktok', name: 'TikTok', amount: pnl.tiktokRevenue, pctVal: pct(pnl.tiktokRevenue), isChild: true },
+                ...(pnl.otherTMDTRevenue > 0 ? [{ key: 'rev-other', name: 'TMDT khác', amount: pnl.otherTMDTRevenue, pctVal: pct(pnl.otherTMDTRevenue), isChild: true }] : []),
+            ],
+        },
+
+        // Doanh thu thuần — luôn hiện
         { key: 'rev-net', name: '🟢 DOANH THU THUẦN', amount: pnl.netRevenue, pctVal: '100.0', isSubtotal: true, color: '#00ab56' },
 
-        // B. CHI PHÍ
-        { key: 'cost-header', name: '📉 B. TỔNG CHI PHÍ', amount: pnl.totalCost, pctVal: pct(pnl.totalCost), isGroup: true, color: '#f5222d' },
+        // B. TỔNG CHI PHÍ — collapsed by default
+        {
+            key: 'cost-header', name: '📉 B. TỔNG CHI PHÍ', amount: pnl.totalCost, pctVal: pct(pnl.totalCost), isGroup: true, color: '#f5222d',
+            children: [
+                // B1. COGS
+                {
+                    key: 'cogs', name: 'B1. Giá vốn hàng bán (COGS)', amount: pnl.totalCOGS, pctVal: pct(pnl.totalCOGS), isParent: true,
+                    children: [
+                        { key: 'cogs-pos', name: 'Giá vốn POS', amount: pnl.cogsPOS, pctVal: pct(pnl.cogsPOS), isChild: true },
+                        { key: 'cogs-tmdt', name: 'Giá vốn TMDT', amount: pnl.cogsTMDT, pctVal: pct(pnl.cogsTMDT), isChild: true },
+                    ],
+                },
+                // B2. Phí sàn
+                {
+                    key: 'platform', name: 'B2. Phí sàn TMĐT', amount: pnl.totalPlatformFees, pctVal: pct(pnl.totalPlatformFees), isParent: true,
+                    children: pnl.platformFeeDetails.map((fee: any) => ({
+                        key: `plat-${fee.id}`,
+                        name: fee.type === 'percent'
+                            ? `${fee.icon || ''} ${fee.name} (${fee.value}%)`
+                            : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
+                        amount: fee.amount,
+                        pctVal: pct(fee.amount),
+                        isChild: true,
+                    })),
+                },
+                // B3. Marketing
+                {
+                    key: 'ads', name: 'B3. Chi phí Marketing (Ads)', amount: pnl.totalAds, pctVal: pct(pnl.totalAds), isParent: true,
+                    children: [
+                        { key: 'ads-shopee', name: 'Shopee Ads', amount: pnl.totalShopeeAds, pctVal: pct(pnl.totalShopeeAds), isChild: true },
+                        { key: 'ads-tiktok', name: 'TikTok Ads', amount: pnl.totalTiktokAds, pctVal: pct(pnl.totalTiktokAds), isChild: true },
+                    ],
+                },
+                // B4. Ship & Hoàn
+                {
+                    key: 'ship', name: 'B4. Vận chuyển & Hoàn', amount: pnl.totalShipReturn, pctVal: pct(pnl.totalShipReturn), isParent: true,
+                    children: [
+                        { key: 'ship-out', name: 'Phí ship gửi', amount: pnl.totalShipping, pctVal: pct(pnl.totalShipping), isChild: true },
+                        { key: 'ship-return', name: 'Phí hoàn + hàng hỏng', amount: pnl.totalReturnCost, pctVal: pct(pnl.totalReturnCost), isChild: true },
+                    ],
+                },
+                // B5. Vận hành
+                {
+                    key: 'opex', name: `B5. Chi phí vận hành (${fmt(pnl.monthlyTotal)}đ/tháng)`, amount: pnl.totalOpex, pctVal: pct(pnl.totalOpex), isParent: true,
+                    children: pnl.opexDetails.map((d: any) => ({
+                        key: `opex-${d.key}`,
+                        name: `${d.name} (${fmt(d.monthly)}đ/th)`,
+                        amount: d.amount,
+                        pctVal: pct(d.amount),
+                        isChild: true,
+                    })),
+                },
+                // B6. Khác
+                ...(pnl.totalOtherExpense > 0 ? [{ key: 'other-exp', name: 'B6. Chi phí khác', amount: pnl.totalOtherExpense, pctVal: pct(pnl.totalOtherExpense), isParent: true }] : []),
+            ],
+        },
 
-        // B1. COGS
-        { key: 'cogs', name: 'B1. Giá vốn hàng bán (COGS)', amount: pnl.totalCOGS, pctVal: pct(pnl.totalCOGS), isParent: true },
-        { key: 'cogs-pos', name: 'Giá vốn POS', amount: pnl.cogsPOS, pctVal: pct(pnl.cogsPOS), isChild: true },
-        { key: 'cogs-tmdt', name: 'Giá vốn TMDT', amount: pnl.cogsTMDT, pctVal: pct(pnl.cogsTMDT), isChild: true },
-
-        // B2. Phí sàn (lấy từ Công cụ hỗ trợ > Tính phí sàn)
-        { key: 'platform', name: 'B2. Phí sàn TMĐT', amount: pnl.totalPlatformFees, pctVal: pct(pnl.totalPlatformFees), isParent: true },
-        ...pnl.platformFeeDetails.map((fee: any) => ({
-            key: `plat-${fee.id}`,
-            name: fee.type === 'percent'
-                ? `${fee.icon || ''} ${fee.name} (${fee.value}%)`
-                : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
-            amount: fee.amount,
-            pctVal: pct(fee.amount),
-            isChild: true,
-        })),
-
-        // B3. Marketing
-        { key: 'ads', name: 'B3. Chi phí Marketing (Ads)', amount: pnl.totalAds, pctVal: pct(pnl.totalAds), isParent: true },
-        { key: 'ads-shopee', name: 'Shopee Ads', amount: pnl.totalShopeeAds, pctVal: pct(pnl.totalShopeeAds), isChild: true },
-        { key: 'ads-tiktok', name: 'TikTok Ads', amount: pnl.totalTiktokAds, pctVal: pct(pnl.totalTiktokAds), isChild: true },
-
-        // B4. Ship & Hoàn
-        { key: 'ship', name: 'B4. Vận chuyển & Hoàn', amount: pnl.totalShipReturn, pctVal: pct(pnl.totalShipReturn), isParent: true },
-        { key: 'ship-out', name: 'Phí ship gửi', amount: pnl.totalShipping, pctVal: pct(pnl.totalShipping), isChild: true },
-        { key: 'ship-return', name: 'Phí hoàn + hàng hỏng', amount: pnl.totalReturnCost, pctVal: pct(pnl.totalReturnCost), isChild: true },
-
-        // B5. Affiliate
-        ...(pnl.totalAffiliate > 0 ? [{ key: 'affiliate', name: 'B5. Hoa hồng Affiliate/CTV', amount: pnl.totalAffiliate, pctVal: pct(pnl.totalAffiliate), isParent: true }] : []),
-
-        // B6. Vận hành
-        { key: 'opex', name: `B6. Chi phí vận hành (${fmt(pnl.monthlyTotal)}đ/tháng)`, amount: pnl.totalOpex, pctVal: pct(pnl.totalOpex), isParent: true },
-        ...pnl.opexDetails.map((d: any) => ({
-            key: `opex-${d.key}`,
-            name: `${d.name} (${fmt(d.monthly)}đ/th)`,
-            amount: d.amount,
-            pctVal: pct(d.amount),
-            isChild: true,
-        })),
-
-        // B7. Khác
-        ...(pnl.totalOtherExpense > 0 ? [{ key: 'other-exp', name: 'B7. Chi phí khác', amount: pnl.totalOtherExpense, pctVal: pct(pnl.totalOtherExpense), isParent: true }] : []),
-
-        // KẾT QUẢ
+        // KẾT QUẢ — luôn hiện
         { key: 'gross', name: '💚 LỢI NHUẬN GỘP (DT − COGS)', amount: pnl.grossProfit, pctVal: pnl.grossMargin.toFixed(1), isSubtotal: true, color: '#1890ff' },
         { key: 'net', name: '🎯 LỢI NHUẬN RÒNG', amount: pnl.netProfit, pctVal: pnl.netMargin.toFixed(1), isTotal: true, color: pnl.netProfit >= 0 ? '#00ab56' : '#f5222d' },
     ], [pnl, config, feeConfig]);
@@ -656,6 +670,8 @@ export default function BusinessReportPage() {
                     pagination={false}
                     size="small"
                     loading={loading}
+                    defaultExpandedRowKeys={[]}
+                    indentSize={20}
                     rowClassName={(r) => {
                         if (r.isTotal) return 'pnl-row-total';
                         if (r.isSubtotal) return 'pnl-row-subtotal';
@@ -671,7 +687,6 @@ export default function BusinessReportPage() {
                             key: 'name',
                             render: (text: string, r: any) => (
                                 <span style={{
-                                    paddingLeft: r.isChild ? 24 : 0,
                                     fontWeight: r.isGroup || r.isSubtotal || r.isTotal || r.isParent ? 700 : 400,
                                     fontSize: r.isTotal ? 15 : r.isGroup || r.isSubtotal ? 14 : r.isChild ? 12 : 13,
                                     color: r.color || (r.isChild ? '#595959' : '#262626'),

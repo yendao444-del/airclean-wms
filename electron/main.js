@@ -37,7 +37,16 @@ function createWindow() {
     } else {
         mainWindow.loadFile(indexPath);
     }
-    // mainWindow.webContents.openDevTools();
+    // 🔒 SECURITY: DevTools control based on packaging
+    if (app.isPackaged) {
+        // PRODUCTION (.exe) → khóa DevTools để nhân viên không mở được
+        mainWindow.webContents.on('devtools-opened', () => {
+            mainWindow.webContents.closeDevTools();
+        });
+    } else {
+        // DEV (chạy từ source) → mở DevTools để debug
+        // mainWindow.webContents.openDevTools();
+    }
 
     mainWindow.on('closed', () => {
         mainWindow = null;

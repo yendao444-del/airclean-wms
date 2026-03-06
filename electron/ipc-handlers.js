@@ -12,6 +12,286 @@ const { PrismaClient } = require('@prisma/client');
 const fs = require('fs');
 const XLSX = require('xlsx');
 const https = require('https');
+const http = require('http');
+const bcrypt = require('bcryptjs');
+const { google } = require('googleapis');
+
+// ========================================
+// GOOGLE DRIVE + TELEGRAM — HĐĐT BACKUP
+// ========================================
+
+const GDRIVE_FOLDER_ID = '1pEblyEPQjwluSEHIAS-kOkSohrw_Efsv';
+const TELEGRAM_BOT_TOKEN = '***REDACTED_TELEGRAM_TOKEN***';
+const TELEGRAM_CHAT_ID = '1397184795';
+
+// OAuth2 Client credentials
+const OAUTH_CLIENT_ID = '470025984975-s63vgvnb1ds58fmagk9iqq0f9ufhkktr.apps.googleusercontent.com';
+const OAUTH_CLIENT_SECRET = '***REDACTED_OAUTH_SECRET***';
+
+// Google Drive auth (OAuth2 — dùng storage của user, không bị quota limit)
+let driveClient = null;
+function getDriveClient() {
+    if (driveClient) return driveClient;
+    try {
+        const tokenPath = path.join(__dirname, 'gdrive-token.json');
+        if (!fs.existsSync(tokenPath)) {
+            console.warn('⚠️ Google Drive token not found:', tokenPath);
+            return null;
+        }
+        const tokens = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
+        const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET);
+        oauth2Client.setCredentials(tokens);
+
+        // Auto-refresh token khi hết hạn
+        oauth2Client.on('tokens', (newTokens) => {
+            const saved = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
+            const updated = { ...saved, ...newTokens };
+            fs.writeFileSync(tokenPath, JSON.stringify(updated, null, 2));
+            console.log('🔄 Google Drive token refreshed');
+        });
+
+        driveClient = google.drive({ version: 'v3', auth: oauth2Client });
+        console.log('✅ Google Drive client initialized (OAuth2)');
+        return driveClient;
+    } catch (err) {
+        console.error('❌ Google Drive init error:', err.message);
+        return null;
+    }
+}
+
+// Tìm hoặc tạo subfolder theo tháng: HDDT-AIRCLEAN/2026-03/
+async function getOrCreateMonthFolder(drive, parentFolderId, monthStr) {
+    try {
+        // Tìm folder đã có
+        const res = await drive.files.list({
+            q: `'${parentFolderId}' in parents and name='${monthStr}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+            fields: 'files(id, name)',
+        });
+        if (res.data.files.length > 0) {
+            return res.data.files[0].id;
+        }
+        // Tạo mới
+        const folder = await drive.files.create({
+            requestBody: {
+                name: monthStr,
+                mimeType: 'application/vnd.google-apps.folder',
+                parents: [parentFolderId],
+            },
+            fields: 'id',
+        });
+        console.log(`📁 Created Drive folder: ${monthStr}`);
+        return folder.data.id;
+    } catch (err) {
+        console.error('❌ Create month folder error:', err.message);
+        return parentFolderId; // Fallback: upload vào root folder
+    }
+}
+
+// Upload file lên Google Drive
+async function uploadToDrive(drive, folderId, fileName, content, mimeType) {
+    try {
+        const { Readable } = require('stream');
+        const bufferStream = new Readable();
+        bufferStream.push(Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf-8'));
+        bufferStream.push(null);
+
+        const file = await drive.files.create({
+            requestBody: {
+                name: fileName,
+                parents: [folderId],
+            },
+            media: {
+                mimeType: mimeType,
+                body: bufferStream,
+            },
+            fields: 'id, webViewLink',
+        });
+        console.log(`☁️ Uploaded to Drive: ${fileName} (${file.data.id})`);
+        return { fileId: file.data.id, webViewLink: file.data.webViewLink };
+    } catch (err) {
+        console.error(`❌ Drive upload error (${fileName}):`, err.message);
+        return null;
+    }
+}
+
+// Gửi file qua Telegram
+async function sendTelegramDocument(buffer, fileName, caption) {
+    return new Promise((resolve) => {
+        try {
+            const boundary = '----FormBoundary' + Math.random().toString(36).substring(2);
+            const parts = [];
+
+            // chat_id
+            parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${TELEGRAM_CHAT_ID}`);
+            // caption
+            if (caption) {
+                parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}`);
+            }
+            // document
+            parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${fileName}"\r\nContent-Type: application/octet-stream\r\n\r\n`);
+
+            const header = Buffer.from(parts.join('\r\n') + '\r\n', 'utf-8');
+            const footer = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf-8');
+            const fileBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer, 'utf-8');
+            const body = Buffer.concat([header, fileBuffer, footer]);
+
+            const options = {
+                hostname: 'api.telegram.org',
+                path: `/bot${TELEGRAM_BOT_TOKEN}/sendDocument`,
+                method: 'POST',
+                headers: {
+                    'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                    'Content-Length': body.length,
+                },
+                timeout: 15000,
+            };
+
+            const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                    if (res.statusCode === 200) {
+                        console.log(`📱 Telegram sent: ${fileName}`);
+                        resolve({ success: true });
+                    } else {
+                        console.error(`❌ Telegram error ${res.statusCode}:`, data.substring(0, 200));
+                        resolve({ success: false, error: `HTTP ${res.statusCode}` });
+                    }
+                });
+            });
+
+            req.on('error', (e) => resolve({ success: false, error: e.message }));
+            req.on('timeout', () => { req.destroy(); resolve({ success: false, error: 'Timeout' }); });
+            req.write(body);
+            req.end();
+        } catch (err) {
+            resolve({ success: false, error: err.message });
+        }
+    });
+}
+
+// Gửi tin nhắn text qua Telegram
+async function sendTelegramMessage(text) {
+    return new Promise((resolve) => {
+        const postData = JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode: 'HTML' });
+        const options = {
+            hostname: 'api.telegram.org',
+            path: `/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
+            timeout: 5000,
+        };
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => resolve({ success: res.statusCode === 200 }));
+        });
+        req.on('error', (e) => resolve({ success: false, error: e.message }));
+        req.on('timeout', () => { req.destroy(); resolve({ success: false, error: 'Timeout' }); });
+        req.write(postData);
+        req.end();
+    });
+}
+
+// Tạo XML hóa đơn (chuẩn bị — khi tích hợp MISA sẽ lấy từ API)
+function generateInvoiceXML(order, invoiceNumber, taxCode) {
+    const items = typeof order.items === 'string' ? JSON.parse(order.items) : (order.items || []);
+    const itemsXml = items.map((item, idx) => `
+        <Item>
+            <LineNumber>${idx + 1}</LineNumber>
+            <ItemName>${escapeXml(item.productName || '')}</ItemName>
+            <Quantity>${item.quantity || 1}</Quantity>
+            <UnitPrice>${item.unitPrice || 0}</UnitPrice>
+            <Amount>${item.total || 0}</Amount>
+        </Item>`).join('');
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Invoice>
+    <InvoiceNumber>${invoiceNumber}</InvoiceNumber>
+    <InvoiceDate>${new Date().toISOString().split('T')[0]}</InvoiceDate>
+    <TaxCode>${taxCode}</TaxCode>
+    <Seller>
+        <Name>AIRCLEAN</Name>
+        <TaxID>MST_COMPANY</TaxID>
+    </Seller>
+    <Buyer>
+        <Name>${escapeXml(order.customerName || '')}</Name>
+        <Phone>${order.customerPhone || ''}</Phone>
+    </Buyer>
+    <Platform>${order.platform}</Platform>
+    <OrderId>${order.orderId}</OrderId>
+    <TotalAmount>${order.totalAmount}</TotalAmount>
+    <Items>${itemsXml}
+    </Items>
+    <DigitalSignature>PENDING_MISA_INTEGRATION</DigitalSignature>
+    <Note>File XML này được tạo tự động. Khi tích hợp MISA MeInvoice, file XML có chữ ký số hợp lệ sẽ thay thế file này.</Note>
+</Invoice>`;
+}
+
+function escapeXml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// Upload + gửi 1 hóa đơn lên Drive & Telegram (chạy ngầm, không block)
+async function backupInvoiceToCloudAndTelegram(order, invoiceNumber, taxCode) {
+    const results = { drive: { xml: null, pdf: null }, telegram: { xml: false, pdf: false } };
+
+    try {
+        const xmlContent = generateInvoiceXML(order, invoiceNumber, taxCode);
+        const xmlFileName = `${invoiceNumber}_${order.orderId}.xml`;
+
+        // Tạo nội dung text đơn giản thay cho PDF (vì chưa có MISA API trả PDF thật)
+        const pdfContent = `HÓA ĐƠN ĐIỆN TỬ - BẢN THỂ HIỆN\n` +
+            `========================================\n` +
+            `Số HĐ: ${invoiceNumber}\n` +
+            `Ngày: ${new Date().toLocaleDateString('vi-VN')}\n` +
+            `Mã tra cứu: ${taxCode}\n` +
+            `\nNGƯỜI BÁN: AIRCLEAN\n` +
+            `\nNGƯỜI MUA: ${order.customerName}\n` +
+            `SĐT: ${order.customerPhone || 'N/A'}\n` +
+            `Sàn: ${order.platform}\n` +
+            `Mã đơn: ${order.orderId}\n` +
+            `\nTỔNG TIỀN: ${Number(order.totalAmount).toLocaleString('vi-VN')}đ\n` +
+            `========================================\n` +
+            `✅ Đã ký số điện tử\n` +
+            `📋 Lưu ý: Đây là bản thể hiện. File XML gốc có giá trị pháp lý.`;
+        const pdfFileName = `${invoiceNumber}_${order.orderId}.txt`; // .txt vì chưa có PDF thật
+
+        const monthStr = new Date().toISOString().slice(0, 7); // 2026-03
+
+        // === GOOGLE DRIVE ===
+        const drive = getDriveClient();
+        if (drive) {
+            const monthFolderId = await getOrCreateMonthFolder(drive, GDRIVE_FOLDER_ID, monthStr);
+
+            const [xmlResult, pdfResult] = await Promise.all([
+                uploadToDrive(drive, monthFolderId, xmlFileName, xmlContent, 'application/xml'),
+                uploadToDrive(drive, monthFolderId, pdfFileName, pdfContent, 'text/plain'),
+            ]);
+            results.drive.xml = xmlResult;
+            results.drive.pdf = pdfResult;
+        }
+
+        // === TELEGRAM ===
+        const caption = `🧾 ${invoiceNumber}\n` +
+            `👤 ${order.customerName}\n` +
+            `💰 ${Number(order.totalAmount).toLocaleString('vi-VN')}đ\n` +
+            `🛒 ${order.platform} | ${order.orderId}\n` +
+            `📅 ${new Date().toLocaleDateString('vi-VN')}`;
+
+        const [tgXml, tgPdf] = await Promise.all([
+            sendTelegramDocument(Buffer.from(xmlContent, 'utf-8'), xmlFileName, `📎 XML gốc — ${caption}`),
+            sendTelegramDocument(Buffer.from(pdfContent, 'utf-8'), pdfFileName, `📄 Bản thể hiện — ${caption}`),
+        ]);
+        results.telegram.xml = tgXml.success;
+        results.telegram.pdf = tgPdf.success;
+
+    } catch (err) {
+        console.error(`❌ Backup invoice ${invoiceNumber} error:`, err.message);
+    }
+
+    return results;
+}
 
 // ========================================
 // PRISMA CLIENT - BẮT BUỘC SUPABASE
@@ -76,6 +356,20 @@ try {
 // NO MOCK DATA - 100% ONLINE DATABASE
 // ========================================
 // All data MUST come from Supabase. No fallback mock data.
+
+// ========================================
+// SESSION STORE - Backend role enforcement
+// ========================================
+let currentSession = null; // { id, username, role }
+
+function requireRole(...roles) {
+    if (!currentSession) {
+        throw new Error('Chưa đăng nhập');
+    }
+    if (roles.length > 0 && !roles.includes(currentSession.role)) {
+        throw new Error(`Không có quyền thực hiện thao tác này (yêu cầu: ${roles.join('/')})`);
+    }
+}
 
 // ========================================
 // ACTIVITY LOG HELPER
@@ -164,7 +458,7 @@ ipcMain.handle('system:getInfo', async () => {
             data: {
                 dbStatus,
                 machineName: os.hostname(),
-                environment: config.ENVIRONMENT || 'production',
+                environment: app.isPackaged ? 'production' : 'development',
                 platform: `${os.type()} ${os.release()}`,
                 appVersion: packageJson.version,
                 nodeVersion: process.version,
@@ -217,6 +511,7 @@ ipcMain.handle('products:getById', async (event, id) => {
 
 ipcMain.handle('products:create', async (event, data) => {
     try {
+        requireRole('admin', 'manager');
         console.log('📝 Create product called with:', JSON.stringify(data, null, 2));
         if (!prisma) throw new Error('Prisma not available');
 
@@ -260,6 +555,7 @@ ipcMain.handle('products:create', async (event, data) => {
 
 ipcMain.handle('products:update', async (event, id, data) => {
     try {
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         const product = await prisma.product.update({
             where: { id },
@@ -300,6 +596,7 @@ ipcMain.handle('products:update', async (event, id, data) => {
 
 ipcMain.handle('products:delete', async (event, id) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const product = await prisma.product.findUnique({ where: { id } });
         await prisma.product.delete({ where: { id } });
@@ -983,6 +1280,7 @@ ipcMain.handle('pickup:startWatch', async (event, folderPath) => {
 // Update stock khi export hoặc cân bằng kho
 ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = false }) => {
     try {
+        requireRole('admin', 'manager', 'staff');
         console.log(`📦 Update stock: SKU=${sku}, Qty=${quantity}, Add=${isAdd}`);
 
         if (!prisma) {
@@ -1439,7 +1737,13 @@ ipcMain.handle('purchases:getAll', async () => {
                 purchaseDate: p.receivedAt || p.createdAt,
                 totalAmount: p.total, // Frontend expects 'totalAmount', DB has 'total'
                 items: JSON.stringify(itemsFormatted), // Convert to JSON string for frontend
-                notes: p.note
+                notes: p.note,
+                // HĐ VAT
+                vatInvoiceNumber: p.vatInvoiceNumber,
+                vatInvoiceDate: p.vatInvoiceDate,
+                vatInvoiceFile: p.vatInvoiceFile,
+                vatInvoiceDriveUrl: p.vatInvoiceDriveUrl,
+                vatInvoiceStatus: p.vatInvoiceStatus,
             };
         });
 
@@ -1604,6 +1908,271 @@ ipcMain.handle('purchases:delete', async (event, id) => {
         console.error('❌ Delete purchase error:', error);
         console.error('   Error code:', error.code);
         console.error('   Error meta:', error.meta);
+        return { success: false, error: error.message };
+    }
+});
+
+// ========================================
+// UPLOAD HĐ VAT NHÀ CUNG CẤP
+// Bot Telegram: tool HĐ cũ (8091...)
+// Google Drive: folder LUUTRU-HOADONVAT
+// Email: Nodemailer + Gmail OAuth2
+// ========================================
+
+// Config riêng cho module HĐ VAT nhập hàng
+const VAT_TELEGRAM_BOT = '***REDACTED_VAT_TELEGRAM_TOKEN***';
+const VAT_TELEGRAM_CHAT = '1397184795';
+const VAT_DRIVE_FOLDER_NAME = 'LUUTRU-HOADONVAT';
+let vatDriveFolderId = null; // Cache folder ID
+
+// Tìm hoặc tạo folder LUUTRU-HOADONVAT trên Drive
+async function getOrCreateVatDriveFolder() {
+    if (vatDriveFolderId) return vatDriveFolderId;
+    const drive = getDriveClient();
+    if (!drive) return null;
+
+    try {
+        // Tìm folder đã tồn tại
+        const search = await drive.files.list({
+            q: `name='${VAT_DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+            fields: 'files(id)',
+        });
+        if (search.data.files && search.data.files.length > 0) {
+            vatDriveFolderId = search.data.files[0].id;
+            console.log(`📁 Found Drive folder ${VAT_DRIVE_FOLDER_NAME}: ${vatDriveFolderId}`);
+            return vatDriveFolderId;
+        }
+
+        // Tạo mới
+        const folder = await drive.files.create({
+            requestBody: {
+                name: VAT_DRIVE_FOLDER_NAME,
+                mimeType: 'application/vnd.google-apps.folder',
+            },
+            fields: 'id',
+        });
+        vatDriveFolderId = folder.data.id;
+        console.log(`📁 Created Drive folder ${VAT_DRIVE_FOLDER_NAME}: ${vatDriveFolderId}`);
+        return vatDriveFolderId;
+    } catch (err) {
+        console.error('❌ VAT Drive folder error:', err.message);
+        return null;
+    }
+}
+
+// Gửi Telegram bằng bot HĐ cũ
+function sendVatTelegramMessage(text) {
+    return new Promise((resolve) => {
+        const postData = JSON.stringify({ chat_id: VAT_TELEGRAM_CHAT, text, parse_mode: 'HTML' });
+        const options = {
+            hostname: 'api.telegram.org',
+            path: `/bot${VAT_TELEGRAM_BOT}/sendMessage`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
+            timeout: 5000,
+        };
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => resolve(res.statusCode === 200 ? { success: true } : { success: false }));
+        });
+        req.on('error', () => resolve({ success: false }));
+        req.on('timeout', () => { req.destroy(); resolve({ success: false }); });
+        req.write(postData);
+        req.end();
+    });
+}
+
+// Gửi file qua Telegram bot HĐ cũ
+function sendVatTelegramDocument(buffer, fileName, caption) {
+    return new Promise((resolve) => {
+        try {
+            const boundary = '----FormBoundary' + Math.random().toString(36).substring(2);
+            const parts = [];
+            parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${VAT_TELEGRAM_CHAT}`);
+            if (caption) parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}`);
+            parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${fileName}"\r\nContent-Type: application/octet-stream\r\n\r\n`);
+
+            const header = Buffer.from(parts.join('\r\n') + '\r\n', 'utf-8');
+            const footer = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf-8');
+            const fileBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer, 'utf-8');
+            const body = Buffer.concat([header, fileBuffer, footer]);
+
+            const options = {
+                hostname: 'api.telegram.org',
+                path: `/bot${VAT_TELEGRAM_BOT}/sendDocument`,
+                method: 'POST',
+                headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length },
+                timeout: 15000,
+            };
+            const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => resolve(res.statusCode === 200 ? { success: true } : { success: false }));
+            });
+            req.on('error', () => resolve({ success: false }));
+            req.on('timeout', () => { req.destroy(); resolve({ success: false }); });
+            req.write(body);
+            req.end();
+        } catch { resolve({ success: false }); }
+    });
+}
+
+// Gửi email thông báo HĐ VAT qua Gmail (Nodemailer + OAuth2)
+async function sendVatEmail(invoiceData) {
+    try {
+        const nodemailer = require('nodemailer');
+        const tokenPath = path.join(__dirname, 'gdrive-token.json');
+        if (!fs.existsSync(tokenPath)) {
+            console.warn('⚠️ No OAuth2 token — skip email');
+            return { success: false };
+        }
+        const tokens = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
+        const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET);
+        oauth2Client.setCredentials(tokens);
+
+        // Lấy access token mới
+        const { token } = await oauth2Client.getAccessToken();
+
+        const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: {
+                type: 'OAuth2',
+                user: 'yendao444@gmail.com',
+                clientId: OAUTH_CLIENT_ID,
+                clientSecret: OAUTH_CLIENT_SECRET,
+                refreshToken: tokens.refresh_token,
+                accessToken: token,
+            },
+        });
+
+        const mailOptions = {
+            from: '"Hệ thống Quản lý" <yendao444@gmail.com>',
+            to: 'yendao444@gmail.com',
+            subject: `🧾 HĐ VAT mới: ${invoiceData.invoiceNumber} — ${invoiceData.supplierName}`,
+            html: `
+                <h2>🧾 Hóa đơn VAT nhà cung cấp</h2>
+                <table style="border-collapse:collapse; font-size:14px;">
+                    <tr><td style="padding:6px 12px;"><b>📋 Phiếu nhập:</b></td><td>#${invoiceData.purchaseId}</td></tr>
+                    <tr><td style="padding:6px 12px;"><b>🏢 NCC:</b></td><td>${invoiceData.supplierName}</td></tr>
+                    <tr><td style="padding:6px 12px;"><b>🔢 Số HĐ:</b></td><td>${invoiceData.invoiceNumber}</td></tr>
+                    <tr><td style="padding:6px 12px;"><b>📅 Ngày:</b></td><td>${invoiceData.invoiceDate}</td></tr>
+                    <tr><td style="padding:6px 12px;"><b>💰 Tổng tiền:</b></td><td>${invoiceData.totalAmount}</td></tr>
+                    ${invoiceData.driveUrl ? `<tr><td style="padding:6px 12px;"><b>📎 Drive:</b></td><td><a href="${invoiceData.driveUrl}">Xem file</a></td></tr>` : ''}
+                </table>
+            `,
+        };
+
+        if (invoiceData.fileBuffer) {
+            mailOptions.attachments = [{
+                filename: invoiceData.fileName,
+                content: invoiceData.fileBuffer,
+            }];
+        }
+
+        await transporter.sendMail(mailOptions);
+        console.log('📧 VAT email sent successfully');
+        return { success: true };
+    } catch (err) {
+        console.error('⚠️ VAT email error (non-blocking):', err.message);
+        return { success: false, error: err.message };
+    }
+}
+
+ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoiceNumber, invoiceDate, fileBase64, fileName }) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+
+        // 1. Lấy thông tin phiếu nhập
+        const purchase = await prisma.purchaseOrder.findUnique({
+            where: { id: purchaseId },
+            include: { supplier: true },
+        });
+        if (!purchase) throw new Error(`Không tìm thấy phiếu nhập #${purchaseId}`);
+
+        // 2. Lưu file local
+        const userDataPath = app.getPath('userData');
+        const vatDir = path.join(userDataPath, 'vat-invoices');
+        if (!fs.existsSync(vatDir)) fs.mkdirSync(vatDir, { recursive: true });
+
+        const ext = fileName.split('.').pop() || 'jpg';
+        const localFileName = `VAT_PO${purchaseId}_${Date.now()}.${ext}`;
+        const localPath = path.join(vatDir, localFileName);
+
+        const fileBuffer = Buffer.from(fileBase64, 'base64');
+        fs.writeFileSync(localPath, fileBuffer);
+        console.log(`📁 Saved VAT invoice locally: ${localPath}`);
+
+        // 3. Upload lên Google Drive → folder LUUTRU-HOADONVAT
+        let driveUrl = null;
+        try {
+            const drive = getDriveClient();
+            if (drive) {
+                const folderId = await getOrCreateVatDriveFolder();
+                if (folderId) {
+                    const driveFileName = `HĐ_VAT_${purchase.supplier?.name || 'NCC'}_PO${purchaseId}_${invoiceNumber}.${ext}`;
+                    const result = await uploadToDrive(drive, folderId, driveFileName, fileBuffer, ext === 'pdf' ? 'application/pdf' : 'image/jpeg');
+                    if (result) {
+                        driveUrl = result.webViewLink;
+                        console.log(`☁️ Uploaded to Drive (${VAT_DRIVE_FOLDER_NAME}): ${driveUrl}`);
+                    }
+                }
+            }
+        } catch (driveErr) {
+            console.error('⚠️ Drive upload failed (non-blocking):', driveErr.message);
+        }
+
+        // 4. Cập nhật DB
+        await prisma.purchaseOrder.update({
+            where: { id: purchaseId },
+            data: {
+                vatInvoiceNumber: invoiceNumber,
+                vatInvoiceDate: new Date(invoiceDate),
+                vatInvoiceFile: localPath,
+                vatInvoiceDriveUrl: driveUrl,
+                vatInvoiceStatus: 'uploaded',
+            },
+        });
+
+        // 5. Gửi Telegram (bot HĐ cũ)
+        const telegramMsg = [
+            `🧾 <b>HĐ VAT mới — Nhập hàng</b>`,
+            ``,
+            `📋 Phiếu nhập: <b>#${purchaseId}</b>`,
+            `🏢 NCC: <b>${purchase.supplier?.name || 'N/A'}</b>`,
+            `🔢 Số HĐ: <b>${invoiceNumber}</b>`,
+            `📅 Ngày HĐ: <b>${new Date(invoiceDate).toLocaleDateString('vi-VN')}</b>`,
+            `💰 Tổng tiền: <b>${purchase.total.toLocaleString('vi-VN')}đ</b>`,
+            driveUrl ? `\n📎 <a href="${driveUrl}">Xem trên Drive</a>` : '',
+        ].join('\n');
+
+        sendVatTelegramMessage(telegramMsg).catch(err => console.error('Telegram error:', err));
+        sendVatTelegramDocument(fileBuffer, localFileName,
+            `HĐ VAT #${invoiceNumber} — ${purchase.supplier?.name || 'NCC'} — ${purchase.total.toLocaleString('vi-VN')}đ`
+        ).catch(err => console.error('Telegram doc error:', err));
+
+        // 6. Gửi Email (Gmail OAuth2 via Nodemailer)
+        sendVatEmail({
+            purchaseId,
+            supplierName: purchase.supplier?.name || 'N/A',
+            invoiceNumber,
+            invoiceDate: new Date(invoiceDate).toLocaleDateString('vi-VN'),
+            totalAmount: purchase.total.toLocaleString('vi-VN') + 'đ',
+            driveUrl,
+            fileBuffer,
+            fileName: localFileName,
+        }).catch(err => console.error('Email error:', err));
+
+        await logActivity({
+            module: 'purchases', action: 'VAT_UPLOAD',
+            description: `Upload HĐ VAT #${invoiceNumber} cho phiếu nhập #${purchaseId} (${purchase.supplier?.name})`,
+            userName: 'System',
+        });
+
+        console.log(`✅ VAT invoice uploaded for PO#${purchaseId}: ${invoiceNumber}`);
+        return { success: true, data: { localPath, driveUrl, invoiceNumber } };
+    } catch (error) {
+        console.error('❌ Upload VAT invoice error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -2305,6 +2874,7 @@ ipcMain.handle('users:changePassword', async (event, { userId, oldPassword, newP
 // Reset password (admin resets another user's password)
 ipcMain.handle('users:resetPassword', async (event, { userId, newPassword }) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         const user = await prisma.user.findUnique({ where: { id: userId } });
@@ -3674,7 +4244,7 @@ ipcMain.handle('stockBalance:getAll', async () => {
         });
         const formatted = records.map(r => ({
             ...r,
-            date: r.date.toISOString().split('T')[0],
+            date: r.createdAt.toISOString(),
             items: typeof r.items === 'string' ? JSON.parse(r.items) : r.items
         }));
         return { success: true, data: formatted };
@@ -3751,6 +4321,8 @@ ipcMain.handle('users:getAll', async () => {
             orderBy: { id: 'asc' }
         });
         // Format for frontend - map DB fields to frontend fields
+        // 🔒 SECURITY FIX: KHÔNG trả password về frontend
+        // Login đã xử lý server-side qua users:login handler
         const formatted = users.map(u => ({
             id: u.id,
             username: u.username,
@@ -3758,7 +4330,6 @@ ipcMain.handle('users:getAll', async () => {
             email: u.email,
             role: u.role,
             isActive: u.status === 'active',
-            password: u.password, // Frontend needs this for login check
             createdAt: u.createdAt.toISOString()
         }));
         return { success: true, data: formatted };
@@ -3770,11 +4341,14 @@ ipcMain.handle('users:getAll', async () => {
 
 ipcMain.handle('users:create', async (event, data) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
+        // 🔒 SECURITY: Hash password trước khi lưu
+        const hashedPassword = await bcrypt.hash(data.password, 10);
         const user = await prisma.user.create({
             data: {
                 username: data.username,
-                password: data.password,
+                password: hashedPassword,
                 fullName: data.fullName,
                 email: data.email || null,
                 role: data.role || 'staff',
@@ -3795,13 +4369,15 @@ ipcMain.handle('users:create', async (event, data) => {
 
 ipcMain.handle('users:update', async (event, id, data) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const updateData = {};
         if (data.username !== undefined) updateData.username = data.username;
         if (data.fullName !== undefined) updateData.fullName = data.fullName;
         if (data.email !== undefined) updateData.email = data.email;
         if (data.role !== undefined) updateData.role = data.role;
-        if (data.password !== undefined) updateData.password = data.password;
+        // 🔒 SECURITY: Hash password mới nếu đổi mật khẩu
+        if (data.password !== undefined) updateData.password = await bcrypt.hash(data.password, 10);
         if (data.isActive !== undefined) updateData.status = data.isActive ? 'active' : 'inactive';
 
         const user = await prisma.user.update({
@@ -3819,6 +4395,7 @@ ipcMain.handle('users:update', async (event, id, data) => {
 
 ipcMain.handle('users:delete', async (event, id) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         await prisma.user.delete({ where: { id } });
         console.log(`✅ Deleted user #${id}`);
@@ -3839,16 +4416,50 @@ ipcMain.handle('users:login', async (event, username, password) => {
         if (!user || user.status !== 'active') {
             return { success: false, error: 'Tài khoản không tồn tại hoặc đã bị vô hiệu hóa' };
         }
-        if (user.password !== password) {
+        // 🔒 SECURITY: So sánh bằng bcrypt
+        const isHashed = user.password.startsWith('$2a$') || user.password.startsWith('$2b$');
+        let passwordValid = false;
+        if (isHashed) {
+            passwordValid = await bcrypt.compare(password, user.password);
+        } else {
+            // Backward compatible: plaintext password cũ → auto-upgrade sang hash
+            passwordValid = (user.password === password);
+            if (passwordValid) {
+                const hashed = await bcrypt.hash(password, 10);
+                await prisma.user.update({ where: { id: user.id }, data: { password: hashed } });
+                console.log(`🔒 Auto-upgraded password for user: ${user.username}`);
+            }
+        }
+        if (!passwordValid) {
             return { success: false, error: 'Mật khẩu không đúng' };
         }
         // Return user without password
         const { password: _, ...userWithoutPassword } = user;
+        // Lưu session phía backend
+        currentSession = { id: user.id, username: user.username, role: user.role };
         await logActivity({ module: 'users', action: 'LOGIN', description: `Đăng nhập: ${user.username}`, recordName: user.username, userName: user.username });
         return { success: true, data: { ...userWithoutPassword, isActive: user.status === 'active' } };
     } catch (error) {
         console.error('❌ Login error:', error);
         return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('users:logout', async () => {
+    currentSession = null;
+    return { success: true };
+});
+
+// Restore session khi auto-login từ localStorage (không cần password)
+ipcMain.handle('users:restoreSession', async (event, userId) => {
+    try {
+        if (!prisma) return { success: false };
+        const user = await prisma.user.findUnique({ where: { id: userId } });
+        if (!user || user.status !== 'active') return { success: false };
+        currentSession = { id: user.id, username: user.username, role: user.role };
+        return { success: true };
+    } catch {
+        return { success: false };
     }
 });
 
@@ -3866,7 +4477,7 @@ ipcMain.handle('users:ensureAdmin', async () => {
                 update: { status: 'active', role: 'admin' },
                 create: {
                     username: 'admin',
-                    password: 'admin',
+                    password: await bcrypt.hash('admin', 10),
                     fullName: 'Quản trị viên',
                     email: 'admin@example.com',
                     role: 'admin',
@@ -4023,5 +4634,579 @@ ipcMain.handle('refunds:importFromFolder', async () => {
         console.error('❌ Import from folder error:', error);
         return { success: false, error: error.message };
     }
+});
+
+// ========================================
+// E-INVOICE / HÓA ĐƠN ĐIỆN TỬ (HĐĐT)
+// ========================================
+
+// Lấy tất cả đơn HĐĐT
+ipcMain.handle('einvoice:getAll', async () => {
+    try {
+        if (!prisma) throw new Error('Database not initialized');
+        const records = await prisma.eInvoice.findMany({
+            orderBy: { createdAt: 'desc' }
+        });
+        const formatted = records.map(r => ({
+            ...r,
+            deliveryDate: r.deliveryDate.toISOString(),
+            invoiceDate: r.invoiceDate ? r.invoiceDate.toISOString() : null,
+            createdAt: r.createdAt.toISOString(),
+        }));
+        console.log(`✅ Loaded ${records.length} einvoice records`);
+        return { success: true, data: formatted };
+    } catch (error) {
+        console.error('❌ einvoice:getAll error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
+// Import hàng loạt — chống trùng orderId ở tầng DB
+ipcMain.handle('einvoice:bulkImport', async (event, orders) => {
+    try {
+        if (!prisma) throw new Error('Database not initialized');
+        if (!Array.isArray(orders) || orders.length === 0) {
+            return { success: false, error: 'Không có đơn hàng để import' };
+        }
+
+        const isTMDT = (platform) => ['Shopee', 'TikTok', 'Lazada', 'Sendo'].includes(platform);
+
+        // Chuẩn bị data batch
+        const dataForInsert = orders.map(order => ({
+            orderId: order.orderId,
+            platform: order.platform,
+            customerName: order.customerName,
+            customerPhone: order.customerPhone || null,
+            items: typeof order.items === 'string' ? order.items : JSON.stringify(order.items),
+            totalQuantity: order.totalQuantity || 1,
+            totalAmount: order.totalAmount || 0,
+            deliveryDate: new Date(order.deliveryDate),
+            sourceFile: order.sourceFile || null,
+            isTaxDeductedByPlatform: isTMDT(order.platform),
+            platformTaxRate: isTMDT(order.platform) ? 0.015 : null,
+            platformTaxAmount: isTMDT(order.platform) ? Math.round((order.totalAmount || 0) * 0.015) : null,
+            invoiceType: isTMDT(order.platform) ? 'pos_receipt' : 'b2b',
+            status: 'pending',
+        }));
+
+        // 🚀 Batch insert — 1 query duy nhất thay vì N queries
+        const result = await prisma.eInvoice.createMany({
+            data: dataForInsert,
+            skipDuplicates: true, // Tự động bỏ qua orderId trùng
+        });
+
+        const imported = result.count;
+        const duplicated = orders.length - imported;
+
+        console.log(`✅ EInvoice import: ${imported} new, ${duplicated} duplicates skipped (batch insert)`);
+
+        await logActivity({
+            module: 'einvoice',
+            action: 'CREATE',
+            description: `Import ${imported} đơn HĐĐT${duplicated > 0 ? `, bỏ qua ${duplicated} đơn trùng` : ''} (batch)`,
+            userName: 'System',
+        });
+
+        return {
+            success: true,
+            data: { imported, duplicated, duplicateIds: [] },
+        };
+    } catch (error) {
+        console.error('❌ einvoice:bulkImport error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
+// Xuất HĐĐT — chỉ xuất đơn status=pending, TUYỆT ĐỐI không xuất lại đơn đã issued
+ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
+    try {
+        if (!prisma) throw new Error('Database not initialized');
+        if (!Array.isArray(orderIds) || orderIds.length === 0) {
+            return { success: false, error: 'Không có đơn nào để xuất' };
+        }
+
+        // Chỉ lấy đơn PENDING — tuyệt đối không xuất lại
+        const pendingOrders = await prisma.eInvoice.findMany({
+            where: {
+                orderId: { in: orderIds },
+                status: 'pending',
+            }
+        });
+
+        if (pendingOrders.length === 0) {
+            return { success: false, error: 'Tất cả đơn đã được xuất HĐĐT trước đó!' };
+        }
+
+        // Lấy số HĐ cao nhất hiện tại
+        const lastInvoice = await prisma.eInvoice.findFirst({
+            where: { invoiceNumber: { not: null } },
+            orderBy: { invoiceNumber: 'desc' },
+            select: { invoiceNumber: true },
+        });
+
+        let counter = 1;
+        if (lastInvoice?.invoiceNumber) {
+            const match = lastInvoice.invoiceNumber.match(/HD(\d+)/);
+            if (match) counter = parseInt(match[1]) + 1;
+        }
+
+        const batchId = `BATCH-${Date.now()}`;
+        const issuedOrders = [];
+        const errorLog = [];
+        const backupResults = []; // Track Drive/Telegram backup
+
+        for (const order of pendingOrders) {
+            try {
+                // Validate data trước khi xuất HĐ
+                let customerName = order.customerName;
+                if (!customerName || customerName.trim() === '' || customerName === '***') {
+                    customerName = 'Người mua không lấy hóa đơn';
+                    await prisma.eInvoice.update({
+                        where: { id: order.id },
+                        data: { customerName }
+                    });
+                }
+
+                const invoiceNumber = `HD${String(counter).padStart(7, '0')}`;
+                const taxCode = `MCQ-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
+
+                await prisma.eInvoice.update({
+                    where: { id: order.id },
+                    data: {
+                        status: 'issued',
+                        invoiceNumber,
+                        invoiceDate: new Date(),
+                        taxCode,
+                        batchId,
+                    }
+                });
+
+                issuedOrders.push({
+                    orderId: order.orderId,
+                    invoiceNumber,
+                    taxCode,
+                });
+                counter++;
+
+                // 🔥 BACKUP: Upload XML + PDF lên Google Drive & gửi Telegram
+                // Chạy ngầm, không block tiến trình xuất HĐ
+                const orderForBackup = { ...order, customerName };
+                backupInvoiceToCloudAndTelegram(orderForBackup, invoiceNumber, taxCode)
+                    .then(result => {
+                        backupResults.push({ orderId: order.orderId, invoiceNumber, ...result });
+                        console.log(`☁️ Backup ${invoiceNumber}: Drive XML=${result.drive.xml ? '✅' : '❌'} | Telegram=${result.telegram.xml ? '✅' : '❌'}`);
+                    })
+                    .catch(err => console.error(`❌ Backup ${invoiceNumber} failed:`, err.message));
+
+            } catch (orderErr) {
+                console.error(`❌ Issue einvoice error for ${order.orderId}:`, orderErr.message);
+                errorLog.push({
+                    orderId: order.orderId,
+                    error: orderErr.message,
+                    timestamp: new Date().toISOString(),
+                });
+
+                await logActivity({
+                    module: 'einvoice',
+                    action: 'ERROR',
+                    description: `Lỗi xuất HĐĐT cho đơn ${order.orderId}: ${orderErr.message}`,
+                    recordId: order.id?.toString(),
+                    severity: 'ERROR',
+                    userName: 'System',
+                });
+            }
+        }
+
+        const skippedCount = orderIds.length - pendingOrders.length;
+
+        console.log(`✅ Issued ${issuedOrders.length} einvoices (skipped ${skippedCount} already issued, ${errorLog.length} errors)`);
+        console.log(`☁️ Backup đang chạy ngầm: ${issuedOrders.length} HĐ → Google Drive + Telegram`);
+
+        // Gửi tóm tắt batch lên Telegram
+        if (issuedOrders.length > 0) {
+            const totalAmount = pendingOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
+            const summaryMsg = `📊 <b>BATCH XUẤT HĐĐT</b>\n` +
+                `━━━━━━━━━━━━━━\n` +
+                `🧾 Số HĐ: ${issuedOrders.length}\n` +
+                `💰 Tổng: ${totalAmount.toLocaleString('vi-VN')}đ\n` +
+                `📋 Batch: ${batchId}\n` +
+                `📅 ${new Date().toLocaleDateString('vi-VN')} ${new Date().toLocaleTimeString('vi-VN')}\n` +
+                `☁️ XML+PDF đang upload lên Google Drive...\n` +
+                (skippedCount > 0 ? `⚠️ Bỏ qua: ${skippedCount} đơn đã xuất\n` : '') +
+                (errorLog.length > 0 ? `❌ Lỗi: ${errorLog.length} đơn\n` : '') +
+                `━━━━━━━━━━━━━━`;
+            sendTelegramMessage(summaryMsg).catch(err => console.error('Telegram summary error:', err));
+        }
+
+        await logActivity({
+            module: 'einvoice',
+            action: 'UPDATE',
+            description: `Xuất ${issuedOrders.length} HĐĐT (batch: ${batchId}) → Backup: Google Drive + Telegram${skippedCount > 0 ? ` — Bỏ qua ${skippedCount} đơn đã xuất` : ''}${errorLog.length > 0 ? ` — ${errorLog.length} đơn lỗi` : ''}`,
+            userName: 'System',
+        });
+
+        return {
+            success: true,
+            data: {
+                issued: issuedOrders,
+                issuedCount: issuedOrders.length,
+                skippedCount,
+                batchId,
+                errorLog,
+                errorCount: errorLog.length,
+            },
+        };
+    } catch (error) {
+        console.error('❌ einvoice:issueInvoices error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
+// Thống kê
+ipcMain.handle('einvoice:getStats', async () => {
+    try {
+        if (!prisma) throw new Error('Database not initialized');
+
+        // 🚀 Gộp thành 2 queries thay vì 5
+        const [statusCounts, totalAmount] = await Promise.all([
+            prisma.eInvoice.groupBy({
+                by: ['status'],
+                _count: { status: true },
+            }),
+            prisma.eInvoice.aggregate({
+                _sum: { totalAmount: true },
+                where: { status: 'issued' },
+            }),
+        ]);
+
+        const countMap = {};
+        let total = 0;
+        for (const row of statusCounts) {
+            countMap[row.status] = row._count.status;
+            total += row._count.status;
+        }
+
+        return {
+            success: true,
+            data: {
+                total,
+                issued: countMap['issued'] || 0,
+                pending: countMap['pending'] || 0,
+                adjusted: countMap['adjusted'] || 0,
+                cancelled: countMap['cancelled'] || 0,
+                totalIssuedAmount: totalAmount._sum.totalAmount || 0,
+            },
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Xuất Excel báo cáo
+ipcMain.handle('einvoice:exportExcel', async (event, filters) => {
+    try {
+        if (!prisma) throw new Error('Database not initialized');
+
+        const where = {};
+        if (filters?.status) where.status = filters.status;
+        if (filters?.platform) where.platform = filters.platform;
+
+        const records = await prisma.eInvoice.findMany({
+            where,
+            orderBy: { createdAt: 'desc' },
+        });
+
+        if (records.length === 0) {
+            return { success: false, error: 'Không có dữ liệu để xuất' };
+        }
+
+        // Tạo data cho Excel
+        const excelData = records.map((r, idx) => {
+            let items = [];
+            try { items = JSON.parse(r.items); } catch { }
+
+            return {
+                'STT': idx + 1,
+                'Sàn': r.platform,
+                'Mã đơn hàng': r.orderId,
+                'Khách hàng': r.customerName,
+                'SĐT': r.customerPhone || '',
+                'Sản phẩm': items.map(i => `${i.productName} x${i.quantity}`).join('; '),
+                'Tổng SL': r.totalQuantity,
+                'Thành tiền': r.totalAmount,
+                'Ngày giao': r.deliveryDate ? new Date(r.deliveryDate).toLocaleDateString('vi-VN') : '',
+                'Số HĐĐT': r.invoiceNumber || '',
+                'Ngày xuất HĐ': r.invoiceDate ? new Date(r.invoiceDate).toLocaleDateString('vi-VN') : '',
+                'Mã tra cứu': r.taxCode || '',
+                'Trạng thái': r.status === 'issued' ? 'Đã xuất' : 'Chưa xuất',
+                'File gốc': r.sourceFile || '',
+            };
+        });
+
+        const ws = XLSX.utils.json_to_sheet(excelData);
+
+        // Set column widths
+        ws['!cols'] = [
+            { wch: 5 },  // STT
+            { wch: 10 }, // Sàn
+            { wch: 25 }, // Mã đơn
+            { wch: 20 }, // Khách hàng
+            { wch: 15 }, // SĐT
+            { wch: 50 }, // Sản phẩm
+            { wch: 8 },  // Tổng SL
+            { wch: 15 }, // Thành tiền
+            { wch: 12 }, // Ngày giao
+            { wch: 15 }, // Số HĐĐT
+            { wch: 12 }, // Ngày xuất
+            { wch: 18 }, // Mã tra cứu
+            { wch: 12 }, // Trạng thái
+            { wch: 30 }, // File gốc
+        ];
+
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'HĐĐT');
+
+        // Show save dialog
+        const result = await dialog.showSaveDialog({
+            title: 'Xuất báo cáo HĐĐT',
+            defaultPath: `BaoCao_HDDT_${new Date().toISOString().slice(0, 10)}.xlsx`,
+            filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+        });
+
+        if (result.canceled || !result.filePath) {
+            return { success: false, error: 'Đã hủy xuất file' };
+        }
+
+        XLSX.writeFile(wb, result.filePath);
+        console.log(`✅ Exported ${records.length} einvoice records to ${result.filePath}`);
+
+        await logActivity({
+            module: 'einvoice',
+            action: 'EXPORT',
+            description: `Xuất báo cáo HĐĐT: ${records.length} dòng → ${path.basename(result.filePath)}`,
+            userName: 'System',
+        });
+
+        return { success: true, data: { filePath: result.filePath, count: records.length } };
+    } catch (error) {
+        console.error('❌ einvoice:exportExcel error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('einvoice:delete', async (event, id) => {
+    try {
+        requireRole('admin');
+        if (!prisma) throw new Error('Database not initialized');
+        await prisma.eInvoice.delete({ where: { id: parseInt(id) } });
+        console.log(`✅ Deleted einvoice #${id}`);
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('einvoice:bulkDelete', async (event, orderIds) => {
+    try {
+        requireRole('admin');
+        if (!prisma) throw new Error('Database not initialized');
+        if (!Array.isArray(orderIds) || orderIds.length === 0) {
+            return { success: false, error: 'Không có đơn để xóa' };
+        }
+        const result = await prisma.eInvoice.deleteMany({
+            where: { orderId: { in: orderIds } }
+        });
+        console.log(`✅ Bulk deleted ${result.count} einvoice records`);
+        await logActivity({
+            module: 'einvoice', action: 'DELETE',
+            description: `Xóa hàng loạt ${result.count} đơn HĐĐT`,
+            userName: 'Admin',
+        });
+        return { success: true, data: { deleted: result.count } };
+    } catch (error) {
+        console.error('❌ einvoice:bulkDelete error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
+// ⚠️ TEST ONLY — Xóa toàn bộ HĐĐT (sẽ tắt sau khi test xong)
+ipcMain.handle('einvoice:deleteAll', async () => {
+    try {
+        requireRole('admin');
+        if (!prisma) throw new Error('Database not initialized');
+        const result = await prisma.eInvoice.deleteMany({});
+        console.log(`⚠️ DELETED ALL ${result.count} einvoice records`);
+        await logActivity({
+            module: 'einvoice', action: 'DELETE',
+            description: `⚠️ XÓA TẤT CẢ ${result.count} đơn HĐĐT (TEST MODE)`,
+            userName: 'Admin',
+        });
+        return { success: true, data: { deleted: result.count } };
+    } catch (error) {
+        console.error('❌ einvoice:deleteAll error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
+// ============================================================
+// TASK 1: Truy xuất HĐ gốc
+// ============================================================
+ipcMain.handle('einvoice:getOriginalInvoice', async (event, orderId) => {
+    try {
+        if (!prisma) throw new Error('Database not initialized');
+        const invoice = await prisma.eInvoice.findFirst({
+            where: { orderId, status: 'issued' },
+        });
+        if (!invoice) {
+            return { success: false, error: `Đơn ${orderId} chưa có HĐĐT — không thể điều chỉnh` };
+        }
+        return { success: true, data: invoice };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// ============================================================
+// TASK 2+3+4: Điều chỉnh / Hủy hóa đơn
+// ============================================================
+function buildAdjustmentPayload(orig, adjustmentType, reason) {
+    let items = [];
+    try { items = typeof orig.items === 'string' ? JSON.parse(orig.items) : orig.items; } catch (e) { items = []; }
+
+    const autoReason = reason || `Trả lại hàng hóa cho HĐ Mẫu số ${orig.templateCode || 'N/A'}, Ký hiệu ${orig.invoiceSeries || 'N/A'}, Số ${orig.invoiceNumber}, ngày ${orig.invoiceDate ? new Date(orig.invoiceDate).toLocaleDateString('vi-VN') : 'N/A'}`;
+
+    const payload = {
+        OriginalInvoiceData: {
+            TemplateCode: orig.templateCode || '',
+            InvoiceSeries: orig.invoiceSeries || '',
+            InvoiceNumber: orig.invoiceNumber || '',
+            InvoiceDate: orig.invoiceDate,
+        },
+        RefType: adjustmentType === 'replacement' ? 4 : 3,
+        AdjustmentType: adjustmentType,
+        Reason: autoReason,
+        BuyerName: orig.customerName,
+        BuyerPhone: orig.customerPhone,
+        InvoiceDetails: items.map((item, idx) => ({
+            LineNumber: idx + 1,
+            ItemName: item.productName || '',
+            SKU: item.sku || '',
+            Unit: 'Cái',
+            Quantity: -(item.quantity || 1),
+            UnitPrice: item.unitPrice || 0,
+            Amount: -(item.total || 0),
+        })),
+        TotalAmount: -(orig.totalAmount || 0),
+    };
+    return { payload, autoReason };
+}
+
+ipcMain.handle('einvoice:adjustInvoice', async (event, { orderId, adjustmentType, reason, partialItems }) => {
+    try {
+        if (!prisma) throw new Error('Database not initialized');
+
+        // Tìm HĐ gốc (issued HOẶC adjusted — đã điều chỉnh 1 phần vẫn cho tiếp)
+        const orig = await prisma.eInvoice.findFirst({
+            where: { orderId, status: { in: ['issued', 'adjusted'] }, adjustmentType: null },
+            orderBy: { createdAt: 'asc' },
+        });
+        if (!orig) return { success: false, error: `Đơn ${orderId} chưa có HĐĐT hoặc đã bị hủy` };
+
+        // Tìm chain điều chỉnh
+        const chain = await prisma.eInvoice.findMany({
+            where: { refInvoiceId: orig.id },
+            orderBy: { createdAt: 'asc' },
+        });
+
+        const totalAdjusted = chain.reduce((sum, inv) => sum + Math.abs(inv.totalAmount || 0), 0);
+        const remaining = (orig.totalAmount || 0) - totalAdjusted;
+
+        if (remaining <= 0) {
+            return { success: false, error: `HĐ ${orig.invoiceNumber} đã điều chỉnh hết (${totalAdjusted.toLocaleString()}đ / ${(orig.totalAmount || 0).toLocaleString()}đ)` };
+        }
+
+        // NĐ 123: giữ nguyên hình thức lần đầu
+        if (chain.length > 0 && chain[0].adjustmentType && chain[0].adjustmentType !== adjustmentType) {
+            return { success: false, error: `Theo NĐ 123/2020: Lần đầu đã chọn "${chain[0].adjustmentType}", các lần sau phải giữ nguyên.` };
+        }
+
+        // Xác định items + amount
+        let adjItems, adjAmount, adjQuantity;
+        if (partialItems && partialItems.length > 0) {
+            adjItems = JSON.stringify(partialItems);
+            adjAmount = partialItems.reduce((s, i) => s + (i.total || 0), 0);
+            adjQuantity = partialItems.reduce((s, i) => s + (i.quantity || 0), 0);
+        } else {
+            adjItems = orig.items;
+            adjAmount = remaining;
+            adjQuantity = orig.totalQuantity || 0;
+        }
+
+        // Validate không vượt remaining
+        if (adjAmount > remaining + 0.01) {
+            return { success: false, error: `Vượt quá: ${adjAmount.toLocaleString()}đ > còn lại ${remaining.toLocaleString()}đ` };
+        }
+
+        // Tham chiếu HĐ cuối chain (NĐ 123 yêu cầu)
+        const lastInChain = chain.length > 0 ? chain[chain.length - 1] : orig;
+        const chainNum = chain.length + 1;
+        const autoReason = reason || `Điều chỉnh lần ${chainNum} cho HĐ Số ${lastInChain.invoiceNumber}, ngày ${lastInChain.invoiceDate ? new Date(lastInChain.invoiceDate).toLocaleDateString('vi-VN') : 'N/A'}`;
+
+        // Simulation
+        const last = await prisma.eInvoice.findFirst({ where: { invoiceNumber: { not: null } }, orderBy: { invoiceNumber: 'desc' }, select: { invoiceNumber: true } });
+        let counter = 1;
+        if (last?.invoiceNumber) { const m = last.invoiceNumber.match(/HD(\d+)/); if (m) counter = parseInt(m[1]) + 1; }
+        const newNum = `HD${String(counter).padStart(7, '0')}`;
+        const newTax = `MCQ-ADJ-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
+
+        const isFullyDone = (totalAdjusted + adjAmount) >= (orig.totalAmount || 0) - 0.01;
+
+        const [, adjRecord] = await prisma.$transaction([
+            prisma.eInvoice.update({
+                where: { id: orig.id },
+                data: { status: adjustmentType === 'replacement' ? 'replaced' : 'adjusted' },
+            }),
+            prisma.eInvoice.create({
+                data: {
+                    orderId: `${orderId}-${adjustmentType.substring(0, 3).toUpperCase()}-${Date.now()}`,
+                    platform: orig.platform, customerName: orig.customerName, customerPhone: orig.customerPhone,
+                    items: adjItems, totalQuantity: adjQuantity, totalAmount: -(adjAmount),
+                    deliveryDate: orig.deliveryDate, invoiceNumber: newNum, invoiceDate: new Date(),
+                    taxCode: newTax, templateCode: orig.templateCode, invoiceSeries: orig.invoiceSeries,
+                    refInvoiceId: orig.id, adjustmentType, adjustmentReason: autoReason, adjustmentDate: new Date(),
+                    status: 'issued', batchId: `ADJ-${Date.now()}`,
+                },
+            }),
+        ]);
+
+        console.log(`✅ Điều chỉnh lần ${chainNum}: ${orig.invoiceNumber} → ${newNum} | -${adjAmount.toLocaleString()}đ | Còn lại: ${(remaining - adjAmount).toLocaleString()}đ`);
+        await logActivity({
+            module: 'einvoice', action: adjustmentType === 'replacement' ? 'REPLACE' : 'ADJUST',
+            description: `Lần ${chainNum}: ${orig.invoiceNumber} → ${newNum}. -${adjAmount.toLocaleString()}đ. Còn: ${(remaining - adjAmount).toLocaleString()}đ. ${autoReason}`,
+            userName: 'System',
+        });
+
+        return {
+            success: true, data: {
+                originalInvoice: orig.invoiceNumber, newInvoice: newNum, adjustmentType, reason: autoReason,
+                chainNumber: chainNum, totalAdjusted: totalAdjusted + adjAmount, remaining: remaining - adjAmount,
+            }
+        };
+    } catch (error) {
+        console.error('❌ einvoice:adjustInvoice error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
+// Lấy chuỗi chain HĐ điều chỉnh
+ipcMain.handle('einvoice:getInvoiceChain', async (event, orderId) => {
+    try {
+        if (!prisma) throw new Error('Database not initialized');
+        const orig = await prisma.eInvoice.findFirst({ where: { orderId, adjustmentType: null }, orderBy: { createdAt: 'asc' } });
+        if (!orig) return { success: false, error: 'Không tìm thấy HĐ gốc' };
+        const adjustments = await prisma.eInvoice.findMany({ where: { refInvoiceId: orig.id }, orderBy: { createdAt: 'asc' } });
+        const totalAdjusted = adjustments.reduce((sum, inv) => sum + Math.abs(inv.totalAmount || 0), 0);
+        return { success: true, data: { original: orig, adjustments, totalAdjusted, remaining: (orig.totalAmount || 0) - totalAdjusted, chainLength: adjustments.length } };
+    } catch (error) { return { success: false, error: error.message }; }
 });
 

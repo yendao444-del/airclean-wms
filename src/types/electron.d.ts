@@ -209,6 +209,8 @@ export interface ElectronAPI {
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         login: (username: string, password: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+        logout: () => Promise<{ success: boolean }>;
+        restoreSession: (userId: number) => Promise<{ success: boolean }>;
         ensureAdmin: () => Promise<{ success: boolean; error?: string }>;
     };
     combos: {
@@ -227,6 +229,18 @@ export interface ElectronAPI {
     };
     shell: {
         openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
+    };
+    einvoice: {
+        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        bulkImport: (orders: any[]) => Promise<{ success: boolean; data?: { imported: number; duplicated: number; duplicateIds: string[] }; error?: string }>;
+        issueInvoices: (orderIds: string[]) => Promise<{ success: boolean; data?: { issued: any[]; issuedCount: number; skippedCount: number; batchId: string; errorLog?: any[]; errorCount?: number }; error?: string }>;
+        exportExcel: (filters?: any) => Promise<{ success: boolean; data?: { filePath: string; count: number }; error?: string }>;
+        getStats: () => Promise<{ success: boolean; data?: { total: number; issued: number; pending: number; totalIssuedAmount: number }; error?: string }>;
+        delete: (id: number) => Promise<{ success: boolean; error?: string }>;
+        bulkDelete: (orderIds: string[]) => Promise<{ success: boolean; data?: { deleted: number }; error?: string }>;
+        getOriginalInvoice: (orderId: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+        adjustInvoice: (data: { orderId: string; adjustmentType: string; reason?: string; partialItems?: any[] }) => Promise<{ success: boolean; data?: { originalInvoice: string; newInvoice: string; adjustmentType: string; reason: string; chainNumber?: number; totalAdjusted?: number; remaining?: number }; error?: string }>;
+        getInvoiceChain: (orderId: string) => Promise<{ success: boolean; data?: { original: any; adjustments: any[]; totalAdjusted: number; remaining: number; chainLength: number }; error?: string }>;
     };
 }
 

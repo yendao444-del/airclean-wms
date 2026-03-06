@@ -40,6 +40,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 const parsed = JSON.parse(rememberedUser);
                 setUser(parsed);
                 sessionStorage.setItem('currentUser', rememberedUser);
+                // Sync session lên backend khi auto-login từ localStorage
+                window.electronAPI.users.restoreSession(parsed.id).catch(() => {});
                 console.log('✅ Auto-login từ phiên ghi nhớ:', parsed.username);
                 return;
             } catch { }
@@ -48,7 +50,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // 2. Fallback to sessionStorage
         const sessionUser = sessionStorage.getItem('currentUser');
         if (sessionUser) {
-            setUser(JSON.parse(sessionUser));
+            const parsed = JSON.parse(sessionUser);
+            setUser(parsed);
+            window.electronAPI.users.restoreSession(parsed.id).catch(() => {});
         }
     }, []);
 
@@ -83,6 +87,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         sessionStorage.removeItem('currentUser');
         localStorage.removeItem('rememberedUser');
         setUser(null);
+        window.electronAPI.users.logout().catch(() => {});
     };
 
     return (

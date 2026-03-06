@@ -163,6 +163,13 @@ model PurchaseOrder {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
   createdBy  String?  // Username của người tạo
+
+  // HĐ VAT nhà cung cấp (tích hợp từ tool Quản lý hóa đơn)
+  vatInvoiceNumber  String?   // Số hóa đơn VAT (VD: "0012345")
+  vatInvoiceDate    DateTime? // Ngày trên hóa đơn VAT
+  vatInvoiceFile    String?   // Path file ảnh/PDF HĐ VAT (local)
+  vatInvoiceDriveUrl String?  // URL Google Drive (backup cloud)
+  vatInvoiceStatus  String    @default("pending") // pending | uploaded | verified
   
   items      PurchaseItem[]
 }
@@ -563,4 +570,59 @@ model DailyExpense {
   
   @@unique([date])
   @@index([date])
+}
+
+// ========================================
+// E-INVOICE / HÓA ĐƠN ĐIỆN TỬ (HĐĐT)
+// ========================================
+
+model EInvoice {
+  id              Int      @id @default(autoincrement())
+  orderId         String   @unique  // Mã đơn hàng sàn TMĐT — UNIQUE chống trùng
+  platform        String   // Shopee, TikTok
+  customerName    String
+  customerPhone   String?
+  items           String   // JSON array of items [{productName, sku, variation, quantity, unitPrice, total}]
+  totalQuantity   Int      @default(1)
+  totalAmount     Float    @default(0)
+  deliveryDate    DateTime // Ngày giao hàng
+
+  // Thông tin hóa đơn
+  invoiceNumber   String?  // Số HĐĐT (HD0000136)
+  invoiceDate     DateTime? // Ngày xuất HĐ
+  taxCode         String?  // Mã tra cứu thuế
+  templateCode    String?  // Mẫu số HĐ (VD: 1/001) — MISA cần
+  invoiceSeries   String?  // Ký hiệu HĐ (VD: 2C25TTU) — MISA cần
+
+  // Điều chỉnh / Hủy hóa đơn
+  refInvoiceId    Int?     // ID HĐ gốc (khi đây là HĐ điều chỉnh/thay thế)
+  adjustmentType  String?  // 'adjustment' | 'cancellation' | 'replacement'
+  adjustmentReason String? // Lý do điều chỉnh/hủy (bắt buộc theo CQT)
+  adjustmentDate  DateTime? // Ngày điều chỉnh
+
+  // NĐ 117/2025 — Sàn khấu trừ thuế thay
+  isTaxDeductedByPlatform Boolean @default(false) // Sàn đã khấu trừ thuế 1.5%?
+  platformTaxRate  Float?   // Tỷ lệ khấu trừ (VD: 0.015 = 1.5%)
+  platformTaxAmount Float?  // Số tiền thuế sàn đã khấu trừ
+
+  // Loại HĐ (TT 32/2025)
+  invoiceType     String?  // pos_receipt (máy tính tiền), b2b, ecommerce_export
+
+  // Lưu trữ XML (NĐ 70/2025 — 10 năm)
+  xmlFilePath     String?  // Path file XML gốc (nguyên trạng, không chỉnh sửa)
+  pdfFilePath     String?  // Path file PDF hóa đơn
+
+  // Metadata
+  sourceFile      String?  // Tên file Excel gốc
+  batchId         String?  // ID đợt xuất
+  status          String   @default("pending") // pending, issued, adjusted, replaced (NĐ 70/2025: không được hủy)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  createdBy       String?
+
+  @@index([status])
+  @@index([platform])
+  @@index([invoiceDate])
+  @@index([batchId])
+  @@index([refInvoiceId])
 }
