@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import {
     Card,
     Button,
@@ -61,19 +62,36 @@ interface StockBalanceRecord {
     notes?: string;
 }
 
+// Product-level row for grouped display
+interface ProductRow {
+    key: string;
+    productId: number;
+    productName: string;
+    totalSystemStock: number;
+    totalSold: number; // Doanh số bán
+    variantCount: number;
+    variants: StockBalanceItem[];
+}
+
 export default function StockBalancePage() {
+    const currentUser = useCurrentUser();
     const [products, setProducts] = useState<Product[]>([]);
     const [balanceItems, setBalanceItems] = useState<StockBalanceItem[]>([]);
+    const [productRows, setProductRows] = useState<ProductRow[]>([]);
     const [balanceRecords, setBalanceRecords] = useState<StockBalanceRecord[]>([]);
     const [loading, setLoading] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
     const [quickBalanceModalVisible, setQuickBalanceModalVisible] = useState(false);
     const [form] = Form.useForm();
     const [quickBalanceForm] = Form.useForm();
+    const [expandedRowKeys, setExpandedRowKeys] = useState<string[]>([]);
 
     // Quick balance state
     const [quickBalanceItem, setQuickBalanceItem] = useState<StockBalanceItem | null>(null);
     const [searchText, setSearchText] = useState('');
+
+    // Sales data for sorting
+    const [salesMap, setSalesMap] = useState<Map<string, number>>(new Map());
 
     // Statistics
     const [stats, setStats] = useState({
@@ -83,17 +101,67 @@ export default function StockBalancePage() {
     });
 
     useEffect(() => {
-        loadProducts();
+        initData();
         loadBalanceRecords();
     }, []);
 
-    const loadProducts = async () => {
+    const initData = async () => {
+        const sales = await loadSalesData();
+        await loadProducts(sales);
+    };
+
+    // Load doanh số bán từ POS + TMDT để sắp xếp
+    const loadSalesData = async (): Promise<Map<string, number>> => {
+        try {
+            const api = (window as any).electronAPI;
+            const skuSales = new Map<string, number>();
+
+            // 1. POS orders
+            const posRes = await api.posOrder.getAll({});
+            if (posRes.success && posRes.data) {
+                for (const order of posRes.data) {
+                    const items = order.items || [];
+                    for (const item of items) {
+                        const sku = item.sku || '';
+                        if (sku) {
+                            skuSales.set(sku, (skuSales.get(sku) || 0) + (item.quantity || item.qty || 1));
+                        }
+                    }
+                }
+            }
+
+            // 2. Ecommerce exports (completed)
+            const ecRes = await api.ecommerceExports.getAll();
+            if (ecRes.success && ecRes.data) {
+                for (const ec of ecRes.data) {
+                    if (ec.status !== 'completed') continue;
+                    try {
+                        const items = typeof ec.items === 'string' ? JSON.parse(ec.items) : ec.items || [];
+                        for (const item of items) {
+                            const sku = item.variantSku || '';
+                            if (sku) {
+                                skuSales.set(sku, (skuSales.get(sku) || 0) + (item.quantity || 1));
+                            }
+                        }
+                    } catch { /* skip */ }
+                }
+            }
+
+            setSalesMap(skuSales);
+            return skuSales;
+        } catch (error) {
+            console.error('Error loading sales data:', error);
+            return new Map();
+        }
+    };
+
+    const loadProducts = async (sales?: Map<string, number>) => {
         setLoading(true);
         try {
             const result = await window.electronAPI.products.getAll();
             if (result.success && result.data) {
                 setProducts(result.data);
-                generateBalanceItems(result.data);
+                generateBalanceItems(result.data, sales || salesMap);
             } else {
                 message.error('Lỗi khi tải sản phẩm');
             }
@@ -104,47 +172,70 @@ export default function StockBalancePage() {
         }
     };
 
-    const generateBalanceItems = (productList: Product[]) => {
+    const generateBalanceItems = (productList: Product[], currentSalesMap: Map<string, number>) => {
         const items: StockBalanceItem[] = [];
+        const rows: ProductRow[] = [];
 
         productList.forEach(product => {
-            // Kiểm tra nếu có variants
+            const productItems: StockBalanceItem[] = [];
+
             if (product.variants) {
                 try {
                     const variants: Variant[] = JSON.parse(product.variants);
                     variants.forEach(variant => {
-                        items.push({
+                        const item: StockBalanceItem = {
                             sku: variant.sku,
                             productName: product.name,
                             color: variant.color,
                             systemStock: variant.stock,
-                            actualStock: variant.stock, // Mặc định = system stock
+                            actualStock: variant.stock,
                             difference: 0,
-                        });
+                        };
+                        items.push(item);
+                        productItems.push(item);
                     });
                 } catch {
-                    // Nếu parse lỗi, thêm parent product
-                    items.push({
+                    const item: StockBalanceItem = {
                         sku: product.sku,
                         productName: product.name,
                         systemStock: product.stock,
                         actualStock: product.stock,
                         difference: 0,
-                    });
+                    };
+                    items.push(item);
+                    productItems.push(item);
                 }
             } else {
-                // Không có variants
-                items.push({
+                const item: StockBalanceItem = {
                     sku: product.sku,
                     productName: product.name,
                     systemStock: product.stock,
                     actualStock: product.stock,
                     difference: 0,
-                });
+                };
+                items.push(item);
+                productItems.push(item);
             }
+
+            // Tính tổng doanh số cho product — dùng param truyền vào
+            const totalSold = productItems.reduce((sum, pi) => sum + (currentSalesMap.get(pi.sku) || 0), 0);
+
+            rows.push({
+                key: `product-${product.id}`,
+                productId: product.id,
+                productName: product.name,
+                totalSystemStock: productItems.reduce((sum, pi) => sum + pi.systemStock, 0),
+                totalSold,
+                variantCount: productItems.length,
+                variants: productItems,
+            });
         });
 
+        // Sắp xếp: bán nhiều → đầu, bán ít/không bán → cuối
+        rows.sort((a, b) => b.totalSold - a.totalSold);
+
         setBalanceItems(items);
+        setProductRows(rows);
         calculateStats(items);
     };
 
@@ -184,9 +275,72 @@ export default function StockBalancePage() {
 
         setBalanceItems(updatedItems);
         calculateStats(updatedItems);
+
+        // Cập nhật productRows
+        setProductRows(prev => prev.map(row => ({
+            ...row,
+            variants: row.variants.map(v => {
+                if (v.sku === sku) {
+                    return { ...v, actualStock, difference: actualStock - v.systemStock };
+                }
+                return v;
+            }),
+        })));
     };
 
+    // === CÂN BẰNG LẺ 1 SKU ===
+    const handleSingleBalance = (item: StockBalanceItem) => {
+        if (item.difference === 0) {
+            message.info(`${item.sku} đã khớp, không cần điều chỉnh!`);
+            return;
+        }
 
+        Modal.confirm({
+            title: '⚖️ Xác nhận cân bằng lẻ',
+            content: (
+                <div>
+                    <p><strong>SKU:</strong> <Tag color="cyan">{item.sku}</Tag></p>
+                    <p><strong>Sản phẩm:</strong> {item.productName}</p>
+                    {item.color && <p><strong>Màu:</strong> <Tag color="blue">🎨 {item.color}</Tag></p>}
+                    <p><strong>Tồn hệ thống:</strong> {item.systemStock}</p>
+                    <p><strong>Tồn thực tế:</strong> {item.actualStock}</p>
+                    <p style={{ color: item.difference > 0 ? '#52c41a' : '#ff4d4f', fontWeight: 700, fontSize: 16 }}>
+                        <strong>Chênh lệch:</strong> {item.difference > 0 ? `+${item.difference}` : item.difference}
+                    </p>
+                </div>
+            ),
+            okText: 'Xác nhận cân bằng',
+            okType: 'primary',
+            cancelText: 'Hủy',
+            onOk: async () => {
+                setLoading(true);
+                try {
+                    await window.electronAPI.products.updateStock({
+                        sku: item.sku,
+                        quantity: Math.abs(item.difference),
+                        isAdd: item.difference > 0,
+                    });
+
+                    const newRecord = {
+                        date: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+                        adjustedBy: currentUser || 'Admin',
+                        items: [item],
+                        notes: `Cân bằng lẻ: ${item.sku}`,
+                    };
+
+                    await window.electronAPI.stockBalance.create(newRecord);
+                    await loadBalanceRecords();
+
+                    message.success(`✅ Đã cân bằng ${item.sku}: ${item.systemStock} → ${item.actualStock}`);
+                    await loadProducts();
+                } catch (error) {
+                    message.error('Lỗi khi cân bằng kho!');
+                } finally {
+                    setLoading(false);
+                }
+            },
+        });
+    };
 
     const handleApplyBalance = () => {
         const itemsToAdjust = balanceItems.filter(item => item.difference !== 0);
@@ -215,7 +369,6 @@ export default function StockBalancePage() {
 
                     for (const item of itemsToAdjust) {
                         try {
-                            // Cập nhật stock trong database
                             await window.electronAPI.products.updateStock({
                                 sku: item.sku,
                                 quantity: Math.abs(item.difference),
@@ -227,10 +380,9 @@ export default function StockBalancePage() {
                         }
                     }
 
-                    // Lưu lịch sử cân bằng kho
                     const newRecord = {
                         date: dayjs().format('YYYY-MM-DD HH:mm:ss'),
-                        adjustedBy: 'Admin',
+                        adjustedBy: currentUser || 'Admin',
                         items: itemsToAdjust,
                         notes: form.getFieldValue('notes') || '',
                     };
@@ -245,7 +397,6 @@ export default function StockBalancePage() {
                         message.warning(`⚠️ Không thể cân bằng ${failCount} sản phẩm!`);
                     }
 
-                    // Tải lại dữ liệu
                     await loadProducts();
                     setModalVisible(false);
                     form.resetFields();
@@ -298,14 +449,12 @@ export default function StockBalancePage() {
                 onOk: async () => {
                     setLoading(true);
                     try {
-                        // Cập nhật stock
                         await window.electronAPI.products.updateStock({
                             sku: quickBalanceItem.sku,
                             quantity: Math.abs(difference),
                             isAdd: difference > 0,
                         });
 
-                        // Lưu lịch sử
                         const adjustedItem = {
                             ...quickBalanceItem,
                             actualStock,
@@ -314,7 +463,7 @@ export default function StockBalancePage() {
 
                         const newRecord = {
                             date: dayjs().format('YYYY-MM-DD HH:mm:ss'),
-                            adjustedBy: 'Admin',
+                            adjustedBy: currentUser || 'Admin',
                             items: [adjustedItem],
                             notes: values.notes || 'Cân bằng nhanh',
                         };
@@ -324,7 +473,6 @@ export default function StockBalancePage() {
 
                         message.success(`✅ Đã cân bằng ${quickBalanceItem.sku}!`);
 
-                        // Tải lại dữ liệu
                         await loadProducts();
                         setQuickBalanceModalVisible(false);
                         quickBalanceForm.resetFields();
@@ -341,71 +489,59 @@ export default function StockBalancePage() {
         }
     };
 
-    const columns: ColumnsType<StockBalanceItem> = [
-        {
-            title: 'SKU',
-            dataIndex: 'sku',
-            key: 'sku',
-            width: 150,
-            render: (sku) => <Tag color="cyan">{sku}</Tag>,
-        },
+    // Columns cho bảng product-level (grouped)
+    const productColumns: ColumnsType<ProductRow> = [
         {
             title: 'Sản phẩm',
             dataIndex: 'productName',
             key: 'productName',
-        },
-        {
-            title: 'Màu sắc',
-            dataIndex: 'color',
-            key: 'color',
-            width: 120,
-            render: (color) => color ? <Tag color="blue">🎨 {color}</Tag> : <span style={{ color: '#bfbfbf' }}>—</span>,
-        },
-        {
-            title: 'Tồn hệ thống',
-            dataIndex: 'systemStock',
-            key: 'systemStock',
-            width: 130,
-            align: 'right',
-            render: (stock) => <Text strong>{stock}</Text>,
-        },
-        {
-            title: (
+            render: (name, record) => (
                 <div>
-                    Tồn thực tế
-                    <div style={{ fontSize: 11, fontWeight: 400, color: '#8c8c8c' }}>
-                        💡 Thay đổi số để cân bằng
+                    <span style={{ fontWeight: 600, color: '#262626' }}>{name}</span>
+                    <div style={{ fontSize: 11, color: '#8c8c8c' }}>
+                        {record.variantCount} phân loại
                     </div>
                 </div>
             ),
-            dataIndex: 'actualStock',
-            key: 'actualStock',
-            width: 180,
-            align: 'right',
-            render: (actualStock, record) => (
-                <InputNumber
-                    value={actualStock}
-                    min={0}
-                    style={{ width: '100%', fontWeight: 600 }}
-                    onChange={(value) => handleActualStockChange(record.sku, value || 0)}
-                    placeholder="Nhập số thực tế..."
-                />
-            ),
         },
         {
-            title: 'Chênh lệch',
-            dataIndex: 'difference',
-            key: 'difference',
+            title: 'Tổng tồn',
+            dataIndex: 'totalSystemStock',
+            key: 'totalSystemStock',
             width: 120,
-            align: 'right',
-            render: (diff) => (
-                <Tag
-                    color={diff === 0 ? 'default' : diff > 0 ? 'success' : 'error'}
-                    style={{ fontWeight: 700, fontSize: 14 }}
-                >
-                    {diff > 0 ? `+${diff}` : diff}
-                </Tag>
+            align: 'center',
+            render: (stock) => (
+                <div style={{
+                    background: stock <= 10
+                        ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
+                        : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)',
+                    color: '#fff',
+                    padding: '6px 12px',
+                    borderRadius: 8,
+                    fontWeight: 900,
+                    fontSize: 16,
+                    display: 'inline-block',
+                    minWidth: 50,
+                    textAlign: 'center',
+                }}>
+                    {stock}
+                </div>
             ),
+        },
+
+        {
+            title: 'Trạng thái',
+            key: 'status',
+            width: 130,
+            align: 'center',
+            render: (_, record) => {
+                const needAdjust = record.variants.filter(v => v.difference !== 0).length;
+                return needAdjust > 0 ? (
+                    <Tag color="warning" style={{ fontWeight: 600 }}>⚠️ {needAdjust} cần CB</Tag>
+                ) : (
+                    <Tag color="success">✅ Khớp</Tag>
+                );
+            },
         },
     ];
 
@@ -443,13 +579,15 @@ export default function StockBalancePage() {
     ];
 
     // Filter products based on search
-    const filteredBalanceItems = balanceItems.filter(item => {
+    const filteredProductRows = productRows.filter(row => {
         if (!searchText.trim()) return true;
         const search = searchText.toLowerCase();
         return (
-            item.sku.toLowerCase().includes(search) ||
-            item.productName.toLowerCase().includes(search) ||
-            (item.color?.toLowerCase().includes(search) || false)
+            row.productName.toLowerCase().includes(search) ||
+            row.variants.some(v =>
+                v.sku.toLowerCase().includes(search) ||
+                (v.color?.toLowerCase().includes(search) || false)
+            )
         );
     });
 
@@ -462,7 +600,7 @@ export default function StockBalancePage() {
                 <Space>
                     <Button
                         icon={<ReloadOutlined />}
-                        onClick={loadProducts}
+                        onClick={() => { initData(); loadBalanceRecords(); }}
                         loading={loading}
                     >
                         Tải lại
@@ -526,22 +664,124 @@ export default function StockBalancePage() {
                 />
             </div>
 
-            <Card
-                title="🔍 Kiểm tra tồn kho"
-            >
+            <Card title="🔍 Kiểm tra tồn kho">
                 <Table
-                    columns={columns}
-                    dataSource={filteredBalanceItems}
-                    rowKey="sku"
+                    columns={productColumns}
+                    dataSource={filteredProductRows}
+                    rowKey="key"
                     loading={loading}
                     pagination={{
-                        pageSize: 20,
+                        pageSize: 50,
                         showSizeChanger: true,
-                        showTotal: (total) => searchText ? `Tìm thấy ${total} / ${balanceItems.length} sản phẩm` : `Tổng ${total} sản phẩm`,
+                        showTotal: (total) => searchText ? `Tìm thấy ${total} / ${productRows.length} sản phẩm` : `Tổng ${total} sản phẩm`,
                     }}
-                    rowClassName={(record) =>
-                        record.difference !== 0 ? 'stock-difference-row' : ''
-                    }
+                    expandable={{
+                        expandedRowKeys,
+                        onExpand: (expanded, record) => {
+                            if (expanded) {
+                                setExpandedRowKeys([...expandedRowKeys, record.key]);
+                            } else {
+                                setExpandedRowKeys(expandedRowKeys.filter(k => k !== record.key));
+                            }
+                        },
+                        expandedRowRender: (record) => (
+                            <div style={{
+                                padding: 12,
+                                background: '#e6f7ff',
+                                border: '2px solid #1890ff',
+                                borderRadius: 8,
+                                margin: '4px 0',
+                            }}>
+                                <div style={{ overflowX: 'auto' }}>
+                                    <table style={{
+                                        width: '100%',
+                                        borderCollapse: 'collapse',
+                                    }}>
+                                        <thead>
+                                            <tr style={{ background: 'linear-gradient(135deg, #1890ff 0%, #096dd9 100%)' }}>
+                                                <th style={{ padding: '10px 8px', textAlign: 'left', fontSize: 12, fontWeight: 700, color: '#fff' }}>SKU</th>
+                                                <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff' }}>Màu sắc</th>
+                                                <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: 12, fontWeight: 700, color: '#fff' }}>Tồn HT</th>
+                                                <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 140 }}>Tồn thực tế</th>
+                                                <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: 12, fontWeight: 700, color: '#fff' }}>Chênh lệch</th>
+
+                                                <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 120 }}></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {record.variants.map((variant, idx) => {
+                                                const rowBg = idx % 2 === 0 ? '#fff' : '#fafafa';
+                                                return (
+                                                    <tr key={variant.sku} style={{ background: rowBg }}>
+                                                        <td style={{ padding: '10px 8px', borderBottom: '1px solid #f0f0f0' }}>
+                                                            <Tag color="cyan">{variant.sku}</Tag>
+                                                        </td>
+                                                        <td style={{ padding: '10px 8px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
+                                                            {variant.color ? (
+                                                                <Tag color="blue">🎨 {variant.color}</Tag>
+                                                            ) : (
+                                                                <span style={{ color: '#bfbfbf' }}>—</span>
+                                                            )}
+                                                        </td>
+                                                        <td style={{ padding: '10px 8px', textAlign: 'right', borderBottom: '1px solid #f0f0f0', fontWeight: 700 }}>
+                                                            {variant.systemStock}
+                                                        </td>
+                                                        <td style={{ padding: '10px 8px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
+                                                            <InputNumber
+                                                                value={variant.actualStock}
+                                                                min={0}
+                                                                style={{ width: 100, fontWeight: 600 }}
+                                                                onChange={(value) => handleActualStockChange(variant.sku, value || 0)}
+                                                            />
+                                                        </td>
+                                                        <td style={{ padding: '10px 8px', textAlign: 'right', borderBottom: '1px solid #f0f0f0' }}>
+                                                            <Tag
+                                                                color={variant.difference === 0 ? 'default' : variant.difference > 0 ? 'success' : 'error'}
+                                                                style={{ fontWeight: 700, fontSize: 13 }}
+                                                            >
+                                                                {variant.difference > 0 ? `+${variant.difference}` : variant.difference}
+                                                            </Tag>
+                                                        </td>
+
+                                                        <td style={{ padding: '10px 8px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
+                                                            {variant.difference !== 0 ? (
+                                                                <Button
+                                                                    type="primary"
+                                                                    size="small"
+                                                                    icon={<SyncOutlined />}
+                                                                    onClick={() => handleSingleBalance(variant)}
+                                                                    style={{ background: '#faad14', borderColor: '#faad14', fontWeight: 600 }}
+                                                                >
+                                                                    Cân bằng
+                                                                </Button>
+                                                            ) : (
+                                                                <Tag color="success">✅</Tag>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        ),
+                        rowExpandable: (record) => record.variantCount > 0,
+                    }}
+                    onRow={(record) => ({
+                        onClick: () => {
+                            if (expandedRowKeys.includes(record.key)) {
+                                setExpandedRowKeys(expandedRowKeys.filter(k => k !== record.key));
+                            } else {
+                                setExpandedRowKeys([...expandedRowKeys, record.key]);
+                            }
+                        },
+                        style: { cursor: 'pointer' },
+                    })}
+                    rowClassName={(record) => {
+                        const hasAdjust = record.variants.some(v => v.difference !== 0);
+                        return hasAdjust ? 'stock-difference-row' : '';
+                    }}
                 />
             </Card>
 
@@ -578,24 +818,12 @@ export default function StockBalancePage() {
                                     }}>
                                         <thead>
                                             <tr style={{ background: 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)' }}>
-                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'left', fontWeight: 600 }}>
-                                                    SKU
-                                                </th>
-                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'left', fontWeight: 600 }}>
-                                                    Tên sản phẩm
-                                                </th>
-                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'center', fontWeight: 600 }}>
-                                                    Màu sắc
-                                                </th>
-                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'right', fontWeight: 600 }}>
-                                                    Tồn cũ
-                                                </th>
-                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'right', fontWeight: 600 }}>
-                                                    Tồn mới
-                                                </th>
-                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'right', fontWeight: 600 }}>
-                                                    Chênh lệch
-                                                </th>
+                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'left', fontWeight: 600 }}>SKU</th>
+                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'left', fontWeight: 600 }}>Tên sản phẩm</th>
+                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'center', fontWeight: 600 }}>Màu sắc</th>
+                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'right', fontWeight: 600 }}>Tồn cũ</th>
+                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'right', fontWeight: 600 }}>Tồn mới</th>
+                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'right', fontWeight: 600 }}>Chênh lệch</th>
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -680,7 +908,7 @@ export default function StockBalancePage() {
                 </Form>
             </Modal>
 
-            {/* Quick Balance Modal - Hiện khi chọn sản phẩm từ search */}
+            {/* Quick Balance Modal */}
             <Modal
                 title={
                     <div>

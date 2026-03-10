@@ -91,7 +91,22 @@ export default function EInvoicePage() {
     const [adjustReason, setAdjustReason] = useState('');
     const [adjustLoading, setAdjustLoading] = useState(false);
     const [adjustItems, setAdjustItems] = useState<{ checked: boolean; quantity: number; originalQty: number; productName: string; sku: string; variation: string; unitPrice: number; total: number }[]>([]);
+    const [misaConfigForm, setMisaConfigForm] = useState<any>({ appid: '', taxcode: '', username: '', password: '', invSeries: '', vatRate: 'KCT', paymentMethod: 'TM/CK', env: 'test' });
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    // Load MISA config when config modal opens
+    useEffect(() => {
+        if (configVisible) {
+            const api = (window as any).electronAPI?.misa;
+            if (api) {
+                api.getConfig().then((result: any) => {
+                    if (result.success && result.data) {
+                        setMisaConfigForm({ appid: '', taxcode: '', username: '', password: '', invSeries: '', vatRate: 'KCT', paymentMethod: 'TM/CK', env: 'test', ...result.data });
+                    }
+                });
+            }
+        }
+    }, [configVisible]);
 
     // === LOAD FROM DB ON MOUNT ===
     const loadFromDB = useCallback(async () => {
@@ -183,6 +198,13 @@ export default function EInvoicePage() {
                     items: OrderItem[];
                 }>();
 
+                // Shopee: lấy header cột T trực tiếp từ worksheet (giống module TMDT)
+                let shopeeSkuHeader = '';
+                if (isShopee) {
+                    const skuCell = worksheet['T1'];
+                    shopeeSkuHeader = skuCell ? (skuCell.v || skuCell.w || '') : '';
+                }
+
                 let shopeeCount = 0;
                 let tiktokCount = 0;
                 let zeroItemsFiltered = 0;
@@ -203,7 +225,8 @@ export default function EInvoicePage() {
                         sku = row['Seller SKU'] || '';
                         variation = row['Variation'] || '';
                         qty = parseInt(row['Quantity'] || '1') || 1;
-                        total = parseFloat(row['SKU Total Price'] || row['Order Amount'] || '0') || 0;
+                        // Lấy trực tiếp từ Excel — giống module TMDT
+                        total = parseFloat(row['Order Amount'] || row['SKU Total Price'] || '0') || 0;
                         unitPrice = qty > 0 ? total / qty : total;
                         deliveryDate = row['Delivered Time'] || row['Shipped Date'] || '';
                         orderStatus = (row['Order Status'] || row['Trạng thái đơn hàng'] || '').toString().toLowerCase();
@@ -214,13 +237,15 @@ export default function EInvoicePage() {
                         customer = row['Tên Người nhận'] || row['Người Mua'] || '';
                         phone = (row['Số điện thoại'] || '').toString();
                         product = row['Tên sản phẩm'] || '';
-                        sku = row['Mã SKU sản phẩm'] || row['SKU sản phẩm'] || '';
+                        // SKU: lấy từ header cột T (giống module TMDT)
+                        sku = row[shopeeSkuHeader] || row['Mã SKU sản phẩm'] || row['SKU sản phẩm'] || '';
                         variation = row['Tên phân loại hàng'] || row['Phân Loại Hàng'] || '';
                         qty = parseInt(row['Số lượng'] || '1') || 1;
-                        // KHỐI 3: Bóc tách đúng cột doanh thu — ưu tiên "Thành tiền sau giảm giá"
+                        // Lấy trực tiếp từ Excel — giống module TMDT
                         total = parseFloat(
+                            row['Tổng giá bán (sản phẩm)'] || row['Tổng giá bán'] ||
                             row['Thành tiền sau cùng'] || row['Tổng số tiền được người bán nhận'] ||
-                            row['Tổng giá bán'] || row['Giá gốc'] || '0'
+                            row['Tổng cộng'] || '0'
                         ) || 0;
                         unitPrice = qty > 0 ? total / qty : total;
                         deliveryDate = row['Ngày giao hàng'] || row['Thời gian đơn hàng hoàn thành'] || '';
@@ -390,6 +415,31 @@ export default function EInvoicePage() {
             return;
         }
         await doIssue(selectedPending);
+    };
+
+    // === XEM NHÁP HĐ (không phát hành) ===
+    const handlePreviewSelected = async () => {
+        const selectedPending = orders
+            .filter(o => selectedRowKeys.includes(o.key) && !o.invoice);
+        if (!selectedPending.length) {
+            message.warning('Vui lòng chọn đơn chưa xuất HĐ để xem nháp!');
+            return;
+        }
+        // Chỉ preview 1 đơn đầu tiên
+        const orderId = selectedPending[0].orderId;
+        message.loading({ content: `👀 Đang tạo nháp HĐ cho đơn ${orderId}...`, key: 'preview-draft', duration: 0 });
+        const api = (window as any).electronAPI?.einvoice;
+        if (!api?.previewDraft) {
+            message.error({ content: '❌ API previewDraft chưa sẵn sàng', key: 'preview-draft' });
+            return;
+        }
+        const result = await api.previewDraft(orderId);
+        if (result.success && result.data) {
+            message.success({ content: '👀 Mở nháp HĐ trên trình duyệt!', key: 'preview-draft' });
+            (window as any).electronAPI?.shell?.openExternal(result.data);
+        } else {
+            message.error({ content: `❌ ${result.error}`, key: 'preview-draft', duration: 8 });
+        }
     };
 
     const doIssue = async (orderIds: string[]) => {
@@ -909,6 +959,12 @@ export default function EInvoicePage() {
                             >
                                 🗑️ Xóa ({selectedRowKeys.length})
                             </Button>
+                            <Button icon={<EyeOutlined />}
+                                style={{ background: '#e6f7ff', borderColor: '#1890ff', color: '#1890ff' }}
+                                onClick={handlePreviewSelected}
+                            >
+                                👀 Nháp HĐ
+                            </Button>
                             <Button type="primary" onClick={handleIssueSelected} icon={<ThunderboltOutlined />}>
                                 Xuất {selectedRowKeys.filter(k => !orders.find(o => o.key === k)?.invoice).length} đơn đã chọn
                             </Button>
@@ -993,7 +1049,17 @@ export default function EInvoicePage() {
 
             {/* === DETAIL MODAL === */}
             <Modal open={detailModalVisible} onCancel={() => setDetailModalVisible(false)}
-                footer={<Button type="primary" icon={<FilePdfOutlined />}>📥 Tải PDF hóa đơn</Button>}
+                footer={selectedOrder?.invoice?.taxCode ? <Button type="primary" icon={<FilePdfOutlined />} onClick={async () => {
+                    const api = (window as any).electronAPI?.misa;
+                    if (!api || !selectedOrder?.invoice?.taxCode) return;
+                    message.loading({ content: '📥 Đang tải PDF từ MISA...', key: 'pdf-dl', duration: 0 });
+                    const result = await api.downloadPDF(selectedOrder.invoice.taxCode);
+                    if (result.success) {
+                        message.success({ content: `✅ Đã lưu: ${result.data.filePath}`, key: 'pdf-dl' });
+                    } else {
+                        message.error({ content: `❌ ${result.error}`, key: 'pdf-dl' });
+                    }
+                }}>📥 Tải PDF hóa đơn</Button> : null}
                 title="🧾 Chi tiết hóa đơn" width={640}>
                 {selectedOrder && (
                     <div>
@@ -1178,43 +1244,206 @@ export default function EInvoicePage() {
             <Modal
                 open={configVisible}
                 onCancel={() => setConfigVisible(false)}
-                title="⚙️ Cấu hình HĐĐT"
-                footer={<Button type="primary" onClick={() => { setConfigVisible(false); message.success('Đã lưu cấu hình'); }}>💾 Lưu cấu hình</Button>}
-                width={520}
+                title="⚙️ Cấu hình MISA meInvoice"
+                footer={[
+                    <Button key="templates" onClick={async () => {
+                        const api = (window as any).electronAPI?.misa;
+                        if (!api) return;
+                        message.loading({ content: '📋 Đang lấy danh sách mẫu HĐ...', key: 'misa-tpl', duration: 0 });
+                        const result = await api.getTemplates();
+                        if (result.success && result.data?.length > 0) {
+                            const templates = result.data;
+                            const info = templates.map((t: any) => `${t.InvSeries || t.invSeries} — ${t.TemplateName || t.templateName || 'N/A'}`).join('\n');
+                            message.success({ content: `📋 Tìm thấy ${templates.length} mẫu HĐ!`, key: 'misa-tpl' });
+                            // Auto-fill InvSeries đầu tiên nếu chưa có
+                            if (!misaConfigForm.invSeries && templates[0]) {
+                                setMisaConfigForm({ ...misaConfigForm, invSeries: templates[0].InvSeries || templates[0].invSeries });
+                            }
+                            Modal.info({ title: '📋 Danh sách mẫu HĐ', content: <pre style={{ fontSize: 12, maxHeight: 300, overflow: 'auto' }}>{info}</pre>, width: 500 });
+                        } else {
+                            message.error({ content: `❌ ${result.error || 'Không tìm thấy mẫu HĐ'}`, key: 'misa-tpl', duration: 5 });
+                        }
+                    }}>
+                        📋 Lấy mẫu HĐ
+                    </Button>,
+                    <Button key="preview" style={{ background: '#e6f7ff', borderColor: '#1890ff', color: '#1890ff' }} onClick={async () => {
+                        const api = (window as any).electronAPI?.misa;
+                        if (!api) return;
+                        if (!misaConfigForm.invSeries) {
+                            message.warning('⚠️ Điền InvSeries trước khi xem nháp!');
+                            return;
+                        }
+                        message.loading({ content: '👀 Đang tạo HĐ nháp...', key: 'misa-preview', duration: 0 });
+                        // Build 1 HĐ mẫu test
+                        const sampleInvoice = {
+                            RefID: crypto.randomUUID(),
+                            InvSeries: misaConfigForm.invSeries,
+                            InvDate: new Date().toISOString().split('T')[0],
+                            CurrencyCode: 'VND',
+                            ExchangeRate: 1.0,
+                            PaymentMethodName: misaConfigForm.paymentMethod || 'TM/CK',
+                            BuyerLegalName: 'Khách hàng test',
+                            BuyerTaxCode: '',
+                            BuyerAddress: '',
+                            BuyerFullName: 'Khách hàng test',
+                            TotalSaleAmountOC: 100000,
+                            TotalSaleAmount: 100000,
+                            TotalAmountWithoutVATOC: 100000,
+                            TotalAmountWithoutVAT: 100000,
+                            TotalVATAmountOC: 0,
+                            TotalVATAmount: 0,
+                            TotalDiscountAmountOC: 0,
+                            TotalDiscountAmount: 0,
+                            TotalAmountOC: 100000,
+                            TotalAmount: 100000,
+                            TotalAmountInWords: 'Một trăm nghìn đồng.',
+                            OriginalInvoiceDetail: [{
+                                ItemType: 1, LineNumber: 1, SortOrder: 1,
+                                ItemCode: 'TEST01', ItemName: 'Sản phẩm test', UnitName: 'Cái',
+                                Quantity: 1, UnitPrice: 100000,
+                                AmountOC: 100000, Amount: 100000,
+                                AmountWithoutVATOC: 100000, AmountWithoutVAT: 100000,
+                                VATRateName: misaConfigForm.vatRate || 'KCT',
+                                VATAmountOC: 0, VATAmount: 0,
+                                DiscountRate: 0, DiscountAmountOC: 0, DiscountAmount: 0,
+                            }],
+                            TaxRateInfo: [{
+                                VATRateName: misaConfigForm.vatRate || 'KCT',
+                                AmountWithoutVATOC: 100000, VATAmountOC: 0,
+                            }],
+                        };
+                        const result = await api.previewInvoice(sampleInvoice);
+                        if (result.success && result.data) {
+                            message.success({ content: '👀 Mở link xem nháp HĐ!', key: 'misa-preview' });
+                            // Mở link trên browser
+                            (window as any).electronAPI?.shell?.openExternal(result.data);
+                        } else {
+                            message.error({ content: `❌ ${result.error || 'Lỗi xem nháp'}`, key: 'misa-preview', duration: 8 });
+                        }
+                    }}>
+                        👀 Xem nháp HĐ
+                    </Button>,
+                    <Button key="test" onClick={async () => {
+                        const api = (window as any).electronAPI?.misa;
+                        if (!api) return;
+                        message.loading({ content: '💾 Đang lưu & test kết nối MISA...', key: 'misa-test', duration: 0 });
+                        const saveResult = await api.saveConfig(misaConfigForm);
+                        if (!saveResult.success) {
+                            message.error({ content: `❌ Lưu config lỗi: ${saveResult.error}`, key: 'misa-test', duration: 5 });
+                            return;
+                        }
+                        const result = await api.testConnection();
+                        if (result.success) {
+                            message.success({ content: '✅ Kết nối MISA thành công! Token hợp lệ.', key: 'misa-test' });
+                        } else {
+                            message.error({ content: `❌ ${result.error}`, key: 'misa-test', duration: 5 });
+                        }
+                    }}>
+                        🔗 Test kết nối
+                    </Button>,
+                    <Button key="save" type="primary" onClick={async () => {
+                        const api = (window as any).electronAPI?.misa;
+                        if (!api) return;
+                        const result = await api.saveConfig(misaConfigForm);
+                        if (result.success) {
+                            message.success('💾 Đã lưu cấu hình MISA!');
+                            setConfigVisible(false);
+                        } else {
+                            message.error(result.error);
+                        }
+                    }}>
+                        💾 Lưu cấu hình
+                    </Button>,
+                ]}
+                width={560}
             >
                 <div style={{ padding: '8px 0' }}>
-                    <Text type="secondary" style={{ fontSize: 12, marginBottom: 16, display: 'block' }}>
-                        Cấu hình kết nối nhà cung cấp HĐĐT (MISA, VNPT, Hoadon30s...)
-                    </Text>
-                    <div style={{ margin: '12px 0 8px', fontWeight: 600, fontSize: 13, color: '#1890ff', borderBottom: '1px solid #f0f0f0', paddingBottom: 4 }}>Thông tin doanh nghiệp</div>
-                    <div style={{ marginBottom: 12 }}>
-                        <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Mã số thuế</Text>
-                        <Input placeholder="VD: 0123456789" />
+                    <div style={{ margin: '0 0 12px', padding: 10, background: '#e6f7ff', borderRadius: 6, border: '1px solid #91d5ff' }}>
+                        <Text style={{ fontSize: 12 }}>
+                            🔑 <strong>MISA meInvoice API</strong> — Tích hợp sâu (NEW) với <strong>SignType=2</strong> (HSM ký số tự động)
+                        </Text>
                     </div>
-                    <div style={{ marginBottom: 12 }}>
-                        <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Tên doanh nghiệp</Text>
-                        <Input placeholder="VD: CÔNG TY TNHH AIRCLEAN" />
+                    <div style={{ margin: '12px 0 8px', fontWeight: 600, fontSize: 13, color: '#1890ff', borderBottom: '1px solid #f0f0f0', paddingBottom: 4 }}>Thông tin tài khoản MISA</div>
+                    <div style={{ marginBottom: 10 }}>
+                        <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>AppID *</Text>
+                        <Input placeholder="Chuỗi do MISA cung cấp khi đăng ký tích hợp"
+                            value={misaConfigForm.appid} onChange={(e) => setMisaConfigForm({ ...misaConfigForm, appid: e.target.value })} />
                     </div>
-                    <div style={{ marginBottom: 12 }}>
-                        <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Địa chỉ</Text>
-                        <Input placeholder="VD: 123 Đường ABC, Q.1, TP.HCM" />
+                    <div style={{ marginBottom: 10 }}>
+                        <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Mã số thuế *</Text>
+                        <Input placeholder="VD: 0123456789"
+                            value={misaConfigForm.taxcode} onChange={(e) => setMisaConfigForm({ ...misaConfigForm, taxcode: e.target.value })} />
                     </div>
-                    <div style={{ margin: '12px 0 8px', fontWeight: 600, fontSize: 13, color: '#1890ff', borderBottom: '1px solid #f0f0f0', paddingBottom: 4 }}>API nhà cung cấp</div>
-                    <div style={{ marginBottom: 12 }}>
-                        <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Nhà cung cấp HĐĐT</Text>
-                        <Input placeholder="VD: MISA, VNPT, Hoadon30s" />
-                    </div>
-                    <div style={{ marginBottom: 12 }}>
-                        <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>API Key</Text>
-                        <Input.Password placeholder="Nhập API Key từ nhà cung cấp" />
-                    </div>
-                    <div style={{ marginBottom: 12 }}>
-                        <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Thuế suất mặc định (%)</Text>
-                        <Input placeholder="VD: 8" type="number" style={{ width: 120 }} />
-                    </div>
-                    <div style={{ padding: 12, background: '#fff7e6', borderRadius: 6, border: '1px solid #ffe7ba' }}>
-                        <Text type="warning" style={{ fontSize: 12 }}>
-                            ⚠️ <strong>Lưu ý:</strong> Hiện tại module đang ở chế độ simulation. Khi có API key từ nhà cung cấp, hệ thống sẽ tự động kết nối.
+                    <Row gutter={12}>
+                        <Col span={12}>
+                            <div style={{ marginBottom: 10 }}>
+                                <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Username MISA *</Text>
+                                <Input placeholder="Tài khoản meinvoice.vn"
+                                    value={misaConfigForm.username} onChange={(e) => setMisaConfigForm({ ...misaConfigForm, username: e.target.value })} />
+                            </div>
+                        </Col>
+                        <Col span={12}>
+                            <div style={{ marginBottom: 10 }}>
+                                <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Password MISA *</Text>
+                                <Input.Password placeholder="Đã lưu — nhập lại nếu cần đổi"
+                                    value={misaConfigForm.password} onChange={(e) => setMisaConfigForm({ ...misaConfigForm, password: e.target.value })} />
+                                <div style={{ fontSize: 11, color: '#52c41a', marginTop: 2 }}>🔒 Password đã lưu trong DB. Để trống = giữ nguyên.</div>
+                            </div>
+                        </Col>
+                    </Row>
+                    <div style={{ margin: '12px 0 8px', fontWeight: 600, fontSize: 13, color: '#1890ff', borderBottom: '1px solid #f0f0f0', paddingBottom: 4 }}>Cấu hình hóa đơn</div>
+                    <Row gutter={12}>
+                        <Col span={12}>
+                            <div style={{ marginBottom: 10 }}>
+                                <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Ký hiệu HĐ (InvSeries) *</Text>
+                                <Input placeholder="VD: 1C24TQQ"
+                                    value={misaConfigForm.invSeries} onChange={(e) => setMisaConfigForm({ ...misaConfigForm, invSeries: e.target.value })} />
+                            </div>
+                        </Col>
+                        <Col span={12}>
+                            <div style={{ marginBottom: 10 }}>
+                                <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Thuế suất</Text>
+                                <select
+                                    value={misaConfigForm.vatRate || 'KCT'}
+                                    onChange={(e) => setMisaConfigForm({ ...misaConfigForm, vatRate: e.target.value })}
+                                    style={{ width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid #d9d9d9', fontSize: 13 }}
+                                >
+                                    <option value="KCT">KCT — Không chịu thuế</option>
+                                    <option value="0%">0%</option>
+                                    <option value="5%">5%</option>
+                                    <option value="8%">8%</option>
+                                    <option value="10%">10%</option>
+                                </select>
+                            </div>
+                        </Col>
+                    </Row>
+                    <Row gutter={12}>
+                        <Col span={12}>
+                            <div style={{ marginBottom: 10 }}>
+                                <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Hình thức thanh toán</Text>
+                                <select
+                                    value={misaConfigForm.paymentMethod || 'TM/CK'}
+                                    onChange={(e) => setMisaConfigForm({ ...misaConfigForm, paymentMethod: e.target.value })}
+                                    style={{ width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid #d9d9d9', fontSize: 13 }}
+                                >
+                                    <option value="TM/CK">TM/CK — Tiền mặt/Chuyển khoản</option>
+                                    <option value="TM">TM — Tiền mặt</option>
+                                    <option value="CK">CK — Chuyển khoản</option>
+                                </select>
+                            </div>
+                        </Col>
+                        <Col span={12}>
+                            <div style={{ marginBottom: 10 }}>
+                                <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Môi trường</Text>
+                                <div style={{ width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid #d9d9d9', fontSize: 13, background: '#fafafa', color: '#52c41a', fontWeight: 600 }}>
+                                    🚀 Live (api.meinvoice.vn)
+                                </div>
+                            </div>
+                        </Col>
+                    </Row>
+                    <div style={{ padding: 10, background: '#fff1f0', borderRadius: 6, border: '1px solid #ffa39e' }}>
+                        <Text style={{ fontSize: 12 }}>
+                            🚀 Đang dùng môi trường LIVE — Hóa đơn sẽ phát hành THẬT lên CQT!
                         </Text>
                     </div>
                 </div>

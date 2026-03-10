@@ -1,9 +1,41 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, Menu } = require('electron');
 const path = require('path');
 
 let mainWindow;
 
 function createWindow() {
+    // Tạo Menu với Edit + View actions để Ctrl+C/V và Ctrl+R hoạt động
+    const template = [
+        {
+            label: 'Edit',
+            submenu: [
+                { role: 'undo' },
+                { role: 'redo' },
+                { type: 'separator' },
+                { role: 'cut' },
+                { role: 'copy' },
+                { role: 'paste' },
+                { role: 'selectAll' },
+            ],
+        },
+        {
+            label: 'View',
+            submenu: [
+                { role: 'reload' },
+                { role: 'forceReload' },
+                { role: 'toggleDevTools' },
+                { type: 'separator' },
+                { role: 'zoomIn' },
+                { role: 'zoomOut' },
+                { role: 'resetZoom' },
+                { type: 'separator' },
+                { role: 'togglefullscreen' },
+            ],
+        },
+    ];
+    const menu = Menu.buildFromTemplate(template);
+    Menu.setApplicationMenu(menu);
+
     mainWindow = new BrowserWindow({
         width: 1400,
         height: 900,

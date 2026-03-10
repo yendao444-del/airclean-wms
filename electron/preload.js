@@ -198,6 +198,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getOriginalInvoice: (orderId) => ipcRenderer.invoke('einvoice:getOriginalInvoice', orderId),
         adjustInvoice: (data) => ipcRenderer.invoke('einvoice:adjustInvoice', data),
         getInvoiceChain: (orderId) => ipcRenderer.invoke('einvoice:getInvoiceChain', orderId),
+        previewDraft: (orderId) => ipcRenderer.invoke('einvoice:previewDraft', orderId),
+    },
+
+    // MISA meInvoice API
+    misa: {
+        getConfig: () => ipcRenderer.invoke('misa:getConfig'),
+        saveConfig: (config) => ipcRenderer.invoke('misa:saveConfig', config),
+        testConnection: () => ipcRenderer.invoke('misa:testConnection'),
+        getTemplates: () => ipcRenderer.invoke('misa:getTemplates'),
+        previewInvoice: (invoiceData) => ipcRenderer.invoke('misa:previewInvoice', invoiceData),
+        downloadPDF: (transactionId) => ipcRenderer.invoke('misa:downloadPDF', transactionId),
     },
 });
 

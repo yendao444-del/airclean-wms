@@ -4637,6 +4637,528 @@ ipcMain.handle('refunds:importFromFolder', async () => {
 });
 
 // ========================================
+// MISA meINVOICE API INTEGRATION
+// ========================================
+
+const { v4: uuidv4 } = (() => {
+    try { return require('uuid'); } catch {
+        // Fallback UUID generator nếu chưa install uuid
+        return {
+            v4: () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+            })
+        };
+    }
+})();
+
+// Cache token MISA
+let misaTokenCache = { token: null, expiresAt: 0 };
+
+// Lấy cấu hình MISA từ AppConfig
+async function getMisaConfig() {
+    if (!prisma) throw new Error('Database not initialized');
+    const configRecord = await prisma.appConfig.findUnique({ where: { key: 'misaConfig' } });
+    if (!configRecord?.value) throw new Error('Chưa cấu hình MISA meInvoice! Vào ⚙️ Cấu hình để thiết lập.');
+    const config = JSON.parse(configRecord.value);
+    if (!config.appid || !config.taxcode || !config.username || !config.password) {
+        throw new Error('Cấu hình MISA thiếu thông tin! Cần: AppID, MST, Username, Password.');
+    }
+    return config;
+}
+
+// Lấy token MISA (có cache)
+async function getMisaToken() {
+    // Trả về cached token nếu chưa hết hạn (trừ 5 phút buffer)
+    if (misaTokenCache.token && Date.now() < misaTokenCache.expiresAt - 300000) {
+        return misaTokenCache.token;
+    }
+
+    const config = await getMisaConfig();
+    const baseUrl = 'https://api.meinvoice.vn';
+
+    // Trim tất cả field để loại bỏ khoảng trắng ẩn
+    const appid = (config.appid || '').trim();
+    const taxcode = (config.taxcode || '').trim();
+    const username = (config.username || '').trim();
+    const password = (config.password || '').trim();
+
+    console.log(`🔑 MISA: Requesting token from ${baseUrl}...`);
+    console.log(`🔑 MISA: AppID=${appid}, TaxCode=${taxcode}, User=${username}, PassLength=${password.length}`);
+
+    // Thử cả 2 URL endpoint (v3 và integration)
+    const tokenUrls = [
+        `${baseUrl}/api/integration/auth/token`,
+        `${baseUrl}/api/v3/auth/token`,
+    ];
+
+    let lastError = '';
+    let lastResult = null;
+
+    for (const tokenUrl of tokenUrls) {
+        console.log(`🔑 MISA: Trying ${tokenUrl}...`);
+        let response;
+        try {
+            response = await fetch(tokenUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    appid,
+                    taxcode,
+                    username,
+                    password,
+                }),
+            });
+        } catch (fetchErr) {
+            console.error(`❌ MISA fetch error (${tokenUrl}):`, fetchErr.message);
+            lastError = fetchErr.message;
+            continue;
+        }
+
+        const responseText = await response.text();
+        console.log(`🔑 MISA Response from ${tokenUrl} (${response.status}):`, responseText.substring(0, 800));
+
+        let result;
+        try {
+            result = JSON.parse(responseText);
+        } catch {
+            console.error(`❌ MISA: Non-JSON response from ${tokenUrl}`);
+            lastError = `Response không hợp lệ (status ${response.status}): ${responseText.substring(0, 200)}`;
+            continue;
+        }
+
+        // MISA API có thể trả về Success hoặc success
+        const isSuccess = result.Success === true || result.success === true;
+        const data = result.Data || result.data;
+        const errorCode = result.ErrorCode || result.errorCode || '';
+
+        if (isSuccess && data) {
+            // Thành công!
+            misaTokenCache = {
+                token: data,
+                expiresAt: Date.now() + 12 * 24 * 60 * 60 * 1000,
+            };
+            console.log(`✅ MISA: Token obtained successfully from ${tokenUrl}`);
+            return data;
+        }
+
+        // Lưu lại lỗi, thử URL tiếp theo
+        console.error(`❌ MISA Auth Error from ${tokenUrl}:`, JSON.stringify(result, null, 2));
+        lastResult = result;
+        lastError = errorCode;
+    }
+
+    // Cả 2 URL đều thất bại — phân tích lỗi chi tiết
+    const errorCode = lastError;
+    const errors = lastResult?.Errors || lastResult?.errors || [];
+    const errorsStr = Array.isArray(errors) ? errors.join(', ') : String(errors);
+    const fullResponse = lastResult ? JSON.stringify(lastResult).substring(0, 400) : 'No response';
+
+    // Check Errors array trước — MISA thường ghi chi tiết lỗi ở đây
+    let errorMsg;
+    if (errorsStr.includes('TaxCodeNotExist')) {
+        errorMsg = `❌ Mã số thuế "${taxcode}" KHÔNG tồn tại trên MISA! Kiểm tra lại MST hoặc đăng ký MST trên meinvoice.vn trước.`;
+    } else if (errorCode === 'InvalidAppID') {
+        errorMsg = `❌ Sai AppID MISA! [${fullResponse}]`;
+    } else if (errorCode === 'InactiveAppID') {
+        errorMsg = `❌ AppID MISA đã bị khóa! [${fullResponse}]`;
+    } else if (errorCode === 'UnAuthorize') {
+        errorMsg = `❌ Lỗi xác thực MISA (UnAuthorize). Chi tiết: ${errorsStr || 'Không rõ'}. [User=${username}, TaxCode=${taxcode}]`;
+    } else {
+        errorMsg = `❌ Lỗi MISA: ${errorsStr || fullResponse}`;
+    }
+    throw new Error(errorMsg);
+}
+
+// Chuyển số thành chữ tiếng Việt
+function numberToVietnameseWords(num) {
+    if (num === 0) return 'Không đồng.';
+    const units = ['', 'một', 'hai', 'ba', 'bốn', 'năm', 'sáu', 'bảy', 'tám', 'chín'];
+    const groups = ['', 'nghìn', 'triệu', 'tỷ'];
+
+    function readThreeDigits(n, showZeroHundred) {
+        const h = Math.floor(n / 100);
+        const t = Math.floor((n % 100) / 10);
+        const u = n % 10;
+        let result = '';
+        if (h > 0) result += units[h] + ' trăm ';
+        else if (showZeroHundred) result += 'không trăm ';
+        if (t > 1) result += units[t] + ' mươi ';
+        else if (t === 1) result += 'mười ';
+        else if (t === 0 && h > 0 && u > 0) result += 'lẻ ';
+        if (u === 1 && t > 1) result += 'mốt';
+        else if (u === 5 && t > 0) result += 'lăm';
+        else if (u > 0) result += units[u];
+        return result.trim();
+    }
+
+    const rounded = Math.round(num);
+    const parts = [];
+    let temp = rounded;
+    while (temp > 0) {
+        parts.push(temp % 1000);
+        temp = Math.floor(temp / 1000);
+    }
+
+    let result = '';
+    for (let i = parts.length - 1; i >= 0; i--) {
+        if (parts[i] > 0 || i < parts.length - 1) {
+            const text = readThreeDigits(parts[i], i < parts.length - 1);
+            if (text) result += text + ' ' + groups[i] + ' ';
+        }
+    }
+
+    result = result.trim();
+    result = result.charAt(0).toUpperCase() + result.slice(1) + ' đồng.';
+    return result;
+}
+
+// Build InvoiceData cho MISA API từ DB record
+function buildMisaInvoiceData(order, config) {
+    let items = [];
+    try { items = typeof order.items === 'string' ? JSON.parse(order.items) : order.items; } catch { items = []; }
+
+    const totalAmount = order.totalAmount || 0;
+    const refId = uuidv4();
+
+    // Build OriginalInvoiceDetail
+    const invoiceDetails = items.map((item, idx) => ({
+        ItemType: 1,
+        LineNumber: idx + 1,
+        SortOrder: idx + 1,
+        ItemCode: item.sku || '',
+        ItemName: item.productName || 'Hàng hóa',
+        UnitName: 'Cái',
+        Quantity: item.quantity || 1,
+        UnitPrice: item.unitPrice || 0,
+        DiscountRate: 0,
+        DiscountAmountOC: 0,
+        DiscountAmount: 0,
+        AmountOC: item.total || (item.unitPrice * item.quantity) || 0,
+        Amount: item.total || (item.unitPrice * item.quantity) || 0,
+        AmountWithoutVATOC: item.total || (item.unitPrice * item.quantity) || 0,
+        AmountWithoutVAT: item.total || (item.unitPrice * item.quantity) || 0,
+        VATRateName: config.vatRate || 'KCT',
+        VATAmountOC: 0,
+        VATAmount: 0,
+    }));
+
+    // Build TaxRateInfo
+    const taxRateInfo = [{
+        VATRateName: config.vatRate || 'KCT',
+        AmountWithoutVATOC: totalAmount,
+        VATAmountOC: 0,
+    }];
+
+    return {
+        RefID: refId,
+        InvSeries: config.invSeries || '',
+        InvDate: order.deliveryDate
+            ? new Date(order.deliveryDate).toISOString().split('T')[0]
+            : new Date().toISOString().split('T')[0],
+        CurrencyCode: 'VND',
+        ExchangeRate: 1.0,
+        PaymentMethodName: config.paymentMethod || 'TM/CK',
+        // Thông tin người mua
+        BuyerLegalName: order.customerName || 'Người mua không lấy hóa đơn',
+        BuyerTaxCode: '',
+        BuyerAddress: '',
+        BuyerFullName: order.customerName || 'Người mua không lấy hóa đơn',
+        BuyerPhoneNumber: order.customerPhone || '',
+        BuyerEmail: '',
+        // Tổng tiền
+        TotalSaleAmountOC: totalAmount,
+        TotalSaleAmount: totalAmount,
+        TotalDiscountAmountOC: 0,
+        TotalDiscountAmount: 0,
+        TotalAmountWithoutVATOC: totalAmount,
+        TotalAmountWithoutVAT: totalAmount,
+        TotalVATAmountOC: 0,
+        TotalVATAmount: 0,
+        TotalAmountOC: totalAmount,
+        TotalAmount: totalAmount,
+        TotalAmountInWords: numberToVietnameseWords(totalAmount),
+        // Chi tiết
+        OriginalInvoiceDetail: invoiceDetails,
+        TaxRateInfo: taxRateInfo,
+        OptionUserDefined: {
+            MainCurrency: 'VND',
+            AmountDecimalDigits: '0',
+            AmountOCDecimalDigits: '0',
+            UnitPriceOCDecimalDigits: '0',
+            UnitPriceDecimalDigits: '0',
+        },
+        _refId: refId, // internal tracking
+    };
+}
+
+// Gọi MISA API phát hành hóa đơn — Theo tài liệu Mục 6
+// URL: {BaseURL}/invoice
+// SignType: 2 = HSM (ký số từ xa), 5 = Không ký (MTT/Vé)
+async function publishMisaInvoice(invoiceDataList) {
+    const config = await getMisaConfig();
+    const token = await getMisaToken();
+    const baseUrl = 'https://api.meinvoice.vn/api/integration';
+
+    // Body theo tài liệu Mục 6: { SignType, InvoiceData, PublishInvoiceData }
+    const body = {
+        SignType: 2,  // 2=HSM ký số từ xa, 5=Không ký (MTT)
+        InvoiceData: invoiceDataList,
+        PublishInvoiceData: null,
+    };
+
+    console.log(`📤 MISA: Publishing ${invoiceDataList.length} invoice(s) to ${baseUrl}/invoice ...`);
+    console.log(`📤 MISA: SignType=${body.SignType}, Sample:`, JSON.stringify(invoiceDataList[0]).substring(0, 500));
+
+    const response = await fetch(`${baseUrl}/invoice`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify(body),
+    });
+
+    const responseText = await response.text();
+    console.log(`📤 MISA Publish Response (${response.status}):`, responseText.substring(0, 800));
+
+    let result;
+    try {
+        result = JSON.parse(responseText);
+    } catch {
+        throw new Error(`MISA trả về response không hợp lệ khi phát hành (status ${response.status}): ${responseText.substring(0, 200)}`);
+    }
+
+    // Check success (MISA API trả về success hoặc Success)
+    const isSuccess = result.Success === true || result.success === true;
+    if (!isSuccess) {
+        const errCode = result.ErrorCode || result.errorCode || '';
+        const errDesc = result.descriptionErrorCode || result.Errors || '';
+        console.error('❌ MISA Publish FULL Response:', JSON.stringify(result, null, 2));
+        throw new Error(`MISA Publish Error: ${errCode} — ${errDesc || JSON.stringify(result).substring(0, 300)}`);
+    }
+
+    // Parse publishInvoiceResult (có thể là string JSON) — theo tài liệu Mục 6
+    let publishResults = result.publishInvoiceResult;
+    if (typeof publishResults === 'string') {
+        try { publishResults = JSON.parse(publishResults); } catch { publishResults = []; }
+    }
+    if (!publishResults) publishResults = [];
+
+    console.log(`✅ MISA: Published ${publishResults.length} invoice(s)`);
+    return publishResults;
+}
+
+// Tải PDF hóa đơn từ MISA — Theo tài liệu Mục 8
+// URL: {BaseURL}/invoice/download?downloadDataType=2  (2=PDF)
+async function downloadMisaInvoicePDF(transactionId) {
+    const config = await getMisaConfig();
+    const token = await getMisaToken();
+    const baseUrl = 'https://api.meinvoice.vn/api/integration';
+
+    const response = await fetch(`${baseUrl}/invoice/download?downloadDataType=2`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify([transactionId]),  // Mảng TransactionID, tối đa 50
+    });
+
+    const responseText = await response.text();
+    console.log(`📥 MISA Download Response (${response.status}):`, responseText.substring(0, 300));
+
+    let result;
+    try { result = JSON.parse(responseText); } catch {
+        throw new Error(`MISA download trả về response không hợp lệ (status ${response.status})`);
+    }
+
+    const isSuccess = result.Success === true || result.success === true;
+    const data = result.Data || result.data;
+    if (!isSuccess || !data) {
+        throw new Error(`Lỗi tải PDF: ${result.ErrorCode || result.errorCode || JSON.stringify(result).substring(0, 200)}`);
+    }
+
+    // Data trả về dạng: [{ TransactionID, Data (base64) }]
+    if (Array.isArray(data) && data.length > 0) {
+        return data[0].Data; // Base64 PDF string
+    }
+    return data; // Fallback
+}
+
+// ========================================
+// MISA CONFIG IPC HANDLERS
+// ========================================
+
+ipcMain.handle('misa:getConfig', async () => {
+    try {
+        if (!prisma) throw new Error('Database not initialized');
+        const record = await prisma.appConfig.findUnique({ where: { key: 'misaConfig' } });
+        const config = record?.value ? JSON.parse(record.value) : {};
+        // Không trả password ra frontend
+        return { success: true, data: { ...config, password: '' } }; // Không trả password, frontend tự hiện placeholder
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('misa:saveConfig', async (event, config) => {
+    try {
+        if (!prisma) throw new Error('Database not initialized');
+        // Nếu password rỗng hoặc là masked → giữ nguyên password cũ
+        if (!config.password || config.password === '••••••••') {
+            const existing = await prisma.appConfig.findUnique({ where: { key: 'misaConfig' } });
+            if (existing?.value) {
+                const old = JSON.parse(existing.value);
+                config.password = old.password;
+            }
+        }
+        await prisma.appConfig.upsert({
+            where: { key: 'misaConfig' },
+            update: { value: JSON.stringify(config) },
+            create: { key: 'misaConfig', value: JSON.stringify(config) },
+        });
+        // Clear token cache khi đổi config
+        misaTokenCache = { token: null, expiresAt: 0 };
+        console.log('✅ MISA config saved');
+        await logActivity({ module: 'einvoice', action: 'UPDATE', description: 'Cập nhật cấu hình MISA meInvoice', userName: 'Admin' });
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('misa:testConnection', async () => {
+    try {
+        const token = await getMisaToken();
+        return { success: true, data: { tokenLength: token.length } };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Lấy danh sách mẫu HĐ — Tài liệu Mục 3
+ipcMain.handle('misa:getTemplates', async () => {
+    try {
+        const config = await getMisaConfig();
+        const token = await getMisaToken();
+        const baseUrl = config.env === 'live'
+            ? 'https://api.meinvoice.vn/api/integration'
+            : 'https://testapi.meinvoice.vn/api/integration';
+
+        // Thử nhiều combinations để tìm tất cả mẫu HĐ
+        const queries = [
+            'invoiceWithCode=true&ticket=false',
+            'invoiceWithCode=false&ticket=false',
+            'ticket=true',
+            '', // Không filter
+        ];
+
+        let allTemplates = [];
+        let lastResponse = '';
+        for (const q of queries) {
+            const url = q ? `${baseUrl}/invoice/templates?${q}` : `${baseUrl}/invoice/templates`;
+            console.log(`📋 MISA: Trying templates URL: ${url}`);
+            const response = await fetch(url, {
+                method: 'GET',
+                headers: { 'Authorization': `Bearer ${token}` },
+            });
+            const responseText = await response.text();
+            console.log(`📋 MISA Templates Response (${q}):`, responseText.substring(0, 500));
+
+            let result;
+            try { result = JSON.parse(responseText); } catch { continue; }
+
+            const isSuccess = result.Success === true || result.success === true;
+            let data = result.Data || result.data;
+
+            // Data có thể là string JSON
+            if (typeof data === 'string') {
+                try { data = JSON.parse(data); } catch { }
+            }
+
+            if (isSuccess && data) {
+                if (Array.isArray(data) && data.length > 0) {
+                    allTemplates = [...allTemplates, ...data];
+                    break;
+                } else if (typeof data === 'object' && !Array.isArray(data)) {
+                    // Có thể là object đơn
+                    allTemplates.push(data);
+                    break;
+                }
+            }
+            // Lưu lại response cuối để debug
+            lastResponse = responseText.substring(0, 400);
+        }
+
+        // Loại bỏ trùng
+        const uniqueMap = new Map();
+        allTemplates.forEach(t => uniqueMap.set(t.InvSeries || t.invSeries, t));
+        const unique = Array.from(uniqueMap.values());
+
+        if (unique.length === 0) {
+            return { success: false, error: `Không tìm thấy mẫu HĐ. MISA Response: ${lastResponse || 'Empty'}` };
+        }
+        return { success: true, data: unique };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Xem nháp HĐ (unpublishview) — Tài liệu Mục 4 — KHÔNG phát hành, chỉ xem
+ipcMain.handle('misa:previewInvoice', async (event, invoiceData) => {
+    try {
+        const config = await getMisaConfig();
+        const token = await getMisaToken();
+        const baseUrl = config.env === 'live'
+            ? 'https://api.meinvoice.vn/api/integration'
+            : 'https://testapi.meinvoice.vn/api/integration';
+        console.log('👀 MISA Preview: Sending unpublishview...', JSON.stringify(invoiceData).substring(0, 500));
+        const response = await fetch(`${baseUrl}/invoice/unpublishview`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`,
+            },
+            body: JSON.stringify(invoiceData),
+        });
+        const responseText = await response.text();
+        console.log('👀 MISA Preview Response:', responseText.substring(0, 500));
+        let result;
+        try { result = JSON.parse(responseText); } catch {
+            throw new Error(`MISA preview trả về response không hợp lệ (status ${response.status})`);
+        }
+        const isSuccess = result.Success === true || result.success === true;
+        const data = result.Data || result.data;
+        if (!isSuccess || !data) {
+            const errCode = result.ErrorCode || result.errorCode || '';
+            const errors = result.Errors || result.errors || [];
+            throw new Error(`Lỗi xem nháp: ${errCode} — ${Array.isArray(errors) ? errors.join(', ') : errors || JSON.stringify(result).substring(0, 300)}`);
+        }
+        return { success: true, data: data }; // data = link xem HĐ
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('misa:downloadPDF', async (event, transactionId) => {
+    try {
+        const base64PDF = await downloadMisaInvoicePDF(transactionId);
+        // Cho user chọn nơi lưu
+        const result = await dialog.showSaveDialog({
+            title: 'Lưu hóa đơn PDF',
+            defaultPath: `HoaDon_${transactionId}.pdf`,
+            filters: [{ name: 'PDF', extensions: ['pdf'] }],
+        });
+        if (result.canceled || !result.filePath) return { success: false, error: 'Đã hủy' };
+        fs.writeFileSync(result.filePath, Buffer.from(base64PDF, 'base64'));
+        console.log(`✅ PDF saved: ${result.filePath}`);
+        return { success: true, data: { filePath: result.filePath } };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// ========================================
 // E-INVOICE / HÓA ĐƠN ĐIỆN TỬ (HĐĐT)
 // ========================================
 
@@ -4717,12 +5239,77 @@ ipcMain.handle('einvoice:bulkImport', async (event, orders) => {
     }
 });
 
-// Xuất HĐĐT — chỉ xuất đơn status=pending, TUYỆT ĐỐI không xuất lại đơn đã issued
+// Xem nháp HĐ từ đơn hàng thật — gọi unpublishview, KHÔNG phát hành
+ipcMain.handle('einvoice:previewDraft', async (event, orderId) => {
+    try {
+        if (!prisma) throw new Error('Database not initialized');
+        const misaConfig = await getMisaConfig();
+        const token = await getMisaToken();
+
+        // Lấy đơn hàng từ DB
+        const order = await prisma.eInvoice.findFirst({ where: { orderId } });
+        if (!order) throw new Error(`Không tìm thấy đơn ${orderId}`);
+
+        // Build data HĐ giống khi xuất thật
+        let customerName = order.customerName;
+        if (!customerName || customerName.trim() === '' || customerName === '***') {
+            customerName = 'Người mua không lấy hóa đơn';
+        }
+        const invoiceData = buildMisaInvoiceData({ ...order, customerName }, misaConfig);
+        delete invoiceData._refId;
+
+        // Gọi unpublishview
+        const baseUrl = misaConfig.env === 'live'
+            ? 'https://api.meinvoice.vn/api/integration'
+            : 'https://testapi.meinvoice.vn/api/integration';
+
+        console.log('👀 Preview Draft:', JSON.stringify(invoiceData).substring(0, 500));
+
+        const response = await fetch(`${baseUrl}/invoice/unpublishview`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`,
+            },
+            body: JSON.stringify(invoiceData),
+        });
+
+        const responseText = await response.text();
+        console.log('👀 Preview Response:', responseText.substring(0, 500));
+
+        let result;
+        try { result = JSON.parse(responseText); } catch {
+            throw new Error(`MISA preview lỗi (status ${response.status}): ${responseText.substring(0, 200)}`);
+        }
+
+        const isSuccess = result.Success === true || result.success === true;
+        const data = result.Data || result.data;
+        if (!isSuccess || !data) {
+            const errCode = result.ErrorCode || result.errorCode || '';
+            const errors = result.Errors || result.errors || [];
+            throw new Error(`Lỗi nháp: ${errCode} — ${Array.isArray(errors) ? errors.join(', ') : JSON.stringify(result).substring(0, 300)}`);
+        }
+
+        return { success: true, data: data }; // data = link xem HĐ
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Xuất HĐĐT — gọi MISA meInvoice API thật (SignType=2 — HSM ký tự động)
 ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
     try {
         if (!prisma) throw new Error('Database not initialized');
         if (!Array.isArray(orderIds) || orderIds.length === 0) {
             return { success: false, error: 'Không có đơn nào để xuất' };
+        }
+
+        // Kiểm tra config MISA trước
+        let misaConfig;
+        try {
+            misaConfig = await getMisaConfig();
+        } catch (configErr) {
+            return { success: false, error: configErr.message };
         }
 
         // Chỉ lấy đơn PENDING — tuyệt đối không xuất lại
@@ -4737,27 +5324,14 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
             return { success: false, error: 'Tất cả đơn đã được xuất HĐĐT trước đó!' };
         }
 
-        // Lấy số HĐ cao nhất hiện tại
-        const lastInvoice = await prisma.eInvoice.findFirst({
-            where: { invoiceNumber: { not: null } },
-            orderBy: { invoiceNumber: 'desc' },
-            select: { invoiceNumber: true },
-        });
-
-        let counter = 1;
-        if (lastInvoice?.invoiceNumber) {
-            const match = lastInvoice.invoiceNumber.match(/HD(\d+)/);
-            if (match) counter = parseInt(match[1]) + 1;
-        }
-
         const batchId = `BATCH-${Date.now()}`;
         const issuedOrders = [];
         const errorLog = [];
-        const backupResults = []; // Track Drive/Telegram backup
 
+        // Xuất từng đơn qua MISA API (1 đơn = 1 API call để dễ track lỗi)
         for (const order of pendingOrders) {
             try {
-                // Validate data trước khi xuất HĐ
+                // Validate data
                 let customerName = order.customerName;
                 if (!customerName || customerName.trim() === '' || customerName === '***') {
                     customerName = 'Người mua không lấy hóa đơn';
@@ -4767,39 +5341,75 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
                     });
                 }
 
-                const invoiceNumber = `HD${String(counter).padStart(7, '0')}`;
-                const taxCode = `MCQ-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
+                const orderForBuild = { ...order, customerName };
 
+                // Build MISA InvoiceData
+                const invoiceData = buildMisaInvoiceData(orderForBuild, misaConfig);
+                const refId = invoiceData._refId;
+                delete invoiceData._refId; // Xóa field internal trước khi gửi MISA
+
+                // Gọi MISA API phát hành (SignType=2)
+                const publishResults = await publishMisaInvoice([invoiceData]);
+
+                if (!publishResults || publishResults.length === 0) {
+                    throw new Error('MISA không trả về kết quả phát hành');
+                }
+
+                const misaResult = publishResults[0];
+
+                // Kiểm tra lỗi từ MISA cho từng HĐ
+                if (misaResult.ErrorCode && misaResult.ErrorCode !== '') {
+                    throw new Error(`MISA: ${misaResult.ErrorCode}`);
+                }
+
+                // Thành công — cập nhật DB với dữ liệu thật từ MISA
                 await prisma.eInvoice.update({
                     where: { id: order.id },
                     data: {
                         status: 'issued',
-                        invoiceNumber,
+                        invoiceNumber: misaResult.InvNo || misaResult.invNo || '',
                         invoiceDate: new Date(),
-                        taxCode,
+                        taxCode: misaResult.TransactionID || misaResult.transactionID || '',
+                        templateCode: misaResult.InvTemplateNo || misaResult.invTemplateNo || '',
+                        invoiceSeries: misaResult.InvSeries || misaResult.invSeries || misaConfig.invSeries || '',
                         batchId,
                     }
                 });
 
+                const invoiceNumber = misaResult.InvNo || misaResult.invNo || '';
+                const transactionId = misaResult.TransactionID || misaResult.transactionID || '';
+
                 issuedOrders.push({
                     orderId: order.orderId,
                     invoiceNumber,
-                    taxCode,
+                    taxCode: transactionId,
+                    refId,
                 });
-                counter++;
 
-                // 🔥 BACKUP: Upload XML + PDF lên Google Drive & gửi Telegram
-                // Chạy ngầm, không block tiến trình xuất HĐ
-                const orderForBackup = { ...order, customerName };
-                backupInvoiceToCloudAndTelegram(orderForBackup, invoiceNumber, taxCode)
-                    .then(result => {
-                        backupResults.push({ orderId: order.orderId, invoiceNumber, ...result });
-                        console.log(`☁️ Backup ${invoiceNumber}: Drive XML=${result.drive.xml ? '✅' : '❌'} | Telegram=${result.telegram.xml ? '✅' : '❌'}`);
-                    })
-                    .catch(err => console.error(`❌ Backup ${invoiceNumber} failed:`, err.message));
+                console.log(`✅ MISA issued: ${order.orderId} → HĐ số ${invoiceNumber} | Mã: ${transactionId}`);
+
+                // Backup PDF lên Google Drive & Telegram (chạy ngầm)
+                (async () => {
+                    try {
+                        const pdfBase64 = await downloadMisaInvoicePDF(transactionId);
+                        const pdfBuffer = Buffer.from(pdfBase64, 'base64');
+                        const pdfPath = path.join(os.tmpdir(), `HD_${invoiceNumber}_${transactionId}.pdf`);
+                        fs.writeFileSync(pdfPath, pdfBuffer);
+
+                        // Lưu path PDF vào DB
+                        await prisma.eInvoice.update({
+                            where: { id: order.id },
+                            data: { pdfFilePath: pdfPath }
+                        });
+
+                        console.log(`📄 PDF saved: ${pdfPath}`);
+                    } catch (backupErr) {
+                        console.error(`⚠️ Backup PDF for ${invoiceNumber} failed:`, backupErr.message);
+                    }
+                })();
 
             } catch (orderErr) {
-                console.error(`❌ Issue einvoice error for ${order.orderId}:`, orderErr.message);
+                console.error(`❌ MISA issue error for ${order.orderId}:`, orderErr.message);
                 errorLog.push({
                     orderId: order.orderId,
                     error: orderErr.message,
@@ -4809,7 +5419,7 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
                 await logActivity({
                     module: 'einvoice',
                     action: 'ERROR',
-                    description: `Lỗi xuất HĐĐT cho đơn ${order.orderId}: ${orderErr.message}`,
+                    description: `Lỗi xuất HĐĐT MISA cho đơn ${order.orderId}: ${orderErr.message}`,
                     recordId: order.id?.toString(),
                     severity: 'ERROR',
                     userName: 'System',
@@ -4819,19 +5429,20 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
 
         const skippedCount = orderIds.length - pendingOrders.length;
 
-        console.log(`✅ Issued ${issuedOrders.length} einvoices (skipped ${skippedCount} already issued, ${errorLog.length} errors)`);
-        console.log(`☁️ Backup đang chạy ngầm: ${issuedOrders.length} HĐ → Google Drive + Telegram`);
+        console.log(`✅ MISA Issued ${issuedOrders.length} einvoices (skipped ${skippedCount} already issued, ${errorLog.length} errors)`);
 
         // Gửi tóm tắt batch lên Telegram
         if (issuedOrders.length > 0) {
-            const totalAmount = pendingOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
-            const summaryMsg = `📊 <b>BATCH XUẤT HĐĐT</b>\n` +
+            const totalAmount = pendingOrders
+                .filter(o => issuedOrders.some(i => i.orderId === o.orderId))
+                .reduce((s, o) => s + (o.totalAmount || 0), 0);
+            const summaryMsg = `📊 <b>BATCH XUẤT HĐĐT (MISA)</b>\n` +
                 `━━━━━━━━━━━━━━\n` +
                 `🧾 Số HĐ: ${issuedOrders.length}\n` +
                 `💰 Tổng: ${totalAmount.toLocaleString('vi-VN')}đ\n` +
                 `📋 Batch: ${batchId}\n` +
+                `🔑 Ký số: HSM (SignType=2)\n` +
                 `📅 ${new Date().toLocaleDateString('vi-VN')} ${new Date().toLocaleTimeString('vi-VN')}\n` +
-                `☁️ XML+PDF đang upload lên Google Drive...\n` +
                 (skippedCount > 0 ? `⚠️ Bỏ qua: ${skippedCount} đơn đã xuất\n` : '') +
                 (errorLog.length > 0 ? `❌ Lỗi: ${errorLog.length} đơn\n` : '') +
                 `━━━━━━━━━━━━━━`;
@@ -4841,7 +5452,7 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
         await logActivity({
             module: 'einvoice',
             action: 'UPDATE',
-            description: `Xuất ${issuedOrders.length} HĐĐT (batch: ${batchId}) → Backup: Google Drive + Telegram${skippedCount > 0 ? ` — Bỏ qua ${skippedCount} đơn đã xuất` : ''}${errorLog.length > 0 ? ` — ${errorLog.length} đơn lỗi` : ''}`,
+            description: `MISA: Xuất ${issuedOrders.length} HĐĐT thật (batch: ${batchId}, HSM ký số)${skippedCount > 0 ? ` — Bỏ qua ${skippedCount} đơn đã xuất` : ''}${errorLog.length > 0 ? ` — ${errorLog.length} đơn lỗi` : ''}`,
             userName: 'System',
         });
 
