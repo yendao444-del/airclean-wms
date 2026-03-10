@@ -176,7 +176,7 @@ function AppContent() {
         if (accessibleKeys.includes('ecommerce-export')) {
             ecommerceChildren.push(createMenuItem('Xuất hàng TMDT', 'ecommerce-export', <SendOutlined />));
         }
-        if (accessibleKeys.includes('einvoice')) {
+        if (hasPermission('permissions')) {
             ecommerceChildren.push(createMenuItem('Xuất HĐĐT', 'einvoice', <FileTextOutlined />));
         }
         if (ecommerceChildren.length > 0) {
