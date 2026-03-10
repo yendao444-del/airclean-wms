@@ -4654,12 +4654,30 @@ const { v4: uuidv4 } = (() => {
 // Cache token MISA
 let misaTokenCache = { token: null, expiresAt: 0 };
 
+// Mã hóa / giải mã password đơn giản (obfuscation)
+function encodeSecret(plain) {
+    if (!plain) return '';
+    return Buffer.from(plain).toString('base64');
+}
+function decodeSecret(encoded) {
+    if (!encoded) return '';
+    try { return Buffer.from(encoded, 'base64').toString('utf-8'); } catch { return encoded; }
+}
+function maskString(str, showChars = 3) {
+    if (!str || str.length <= showChars) return '***';
+    return str.substring(0, showChars) + '***';
+}
+
 // Lấy cấu hình MISA từ AppConfig
 async function getMisaConfig() {
     if (!prisma) throw new Error('Database not initialized');
     const configRecord = await prisma.appConfig.findUnique({ where: { key: 'misaConfig' } });
     if (!configRecord?.value) throw new Error('Chưa cấu hình MISA meInvoice! Vào ⚙️ Cấu hình để thiết lập.');
     const config = JSON.parse(configRecord.value);
+    // Giải mã password nếu đã mã hóa
+    if (config.password) {
+        config.password = decodeSecret(config.password);
+    }
     if (!config.appid || !config.taxcode || !config.username || !config.password) {
         throw new Error('Cấu hình MISA thiếu thông tin! Cần: AppID, MST, Username, Password.');
     }
@@ -4683,7 +4701,7 @@ async function getMisaToken() {
     const password = (config.password || '').trim();
 
     console.log(`🔑 MISA: Requesting token from ${baseUrl}...`);
-    console.log(`🔑 MISA: AppID=${appid}, TaxCode=${taxcode}, User=${username}, PassLength=${password.length}`);
+    console.log(`🔑 MISA: AppID=${maskString(appid)}, TaxCode=${maskString(taxcode)}, User=${maskString(username)}, PassLen=${password.length}`);
 
     // Thử cả 2 URL endpoint (v3 và integration)
     const tokenUrls = [
@@ -5004,13 +5022,16 @@ ipcMain.handle('misa:getConfig', async () => {
 ipcMain.handle('misa:saveConfig', async (event, config) => {
     try {
         if (!prisma) throw new Error('Database not initialized');
-        // Nếu password rỗng hoặc là masked → giữ nguyên password cũ
+        // Nếu password rỗng hoặc là masked → giữ nguyên password cũ (đã mã hóa)
         if (!config.password || config.password === '••••••••') {
             const existing = await prisma.appConfig.findUnique({ where: { key: 'misaConfig' } });
             if (existing?.value) {
                 const old = JSON.parse(existing.value);
-                config.password = old.password;
+                config.password = old.password; // Giữ nguyên password đã mã hóa
             }
+        } else {
+            // Mã hóa password mới trước khi lưu
+            config.password = encodeSecret(config.password);
         }
         await prisma.appConfig.upsert({
             where: { key: 'misaConfig' },
