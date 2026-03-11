@@ -103,7 +103,7 @@ export default function PurchasePage() {
     const [vatModalVisible, setVatModalVisible] = useState(false);
     const [vatPurchaseId, setVatPurchaseId] = useState<number | null>(null);
     const [vatForm] = Form.useForm();
-    const [vatFile, setVatFile] = useState<File | null>(null);
+    const [vatFiles, setVatFiles] = useState<File[]>([]);
     const [vatUploading, setVatUploading] = useState(false);
 
     // Ref cho trường màu sắc để tự động focus
@@ -599,10 +599,30 @@ export default function PurchasePage() {
         setViewModalVisible(true);
     };
 
+    // 📦 Đánh dấu / hoàn tác Đơn THHT
+    const handleMarkThht = (purchaseId: number, revert: boolean) => {
+        Modal.confirm({
+            title: revert ? '↩️ Hoàn tác Đơn THHT' : '📦 Đánh dấu là Đơn THHT',
+            content: `Bạn có chắc muốn ${revert ? 'hoàn tác' : 'đánh dấu'} phiếu nhập #${purchaseId} ${revert ? 'về trạng thái "Chưa có HĐ"' : 'là Đơn THHT (không cần HĐ VAT)'}?`,
+            okText: revert ? 'Hoàn tác' : 'Xác nhận',
+            cancelText: 'Hủy',
+            okButtonProps: { style: revert ? {} : { background: '#722ed1', borderColor: '#722ed1' } },
+            onOk: async () => {
+                const result = await (window.electronAPI as any).purchases.markAsThht(purchaseId, revert);
+                if (result.success) {
+                    message.success(revert ? '↩️ Đã hoàn tác, phiếu trở về Chưa có HĐ' : '📦 Đã đánh dấu là Đơn THHT');
+                    loadPurchases();
+                } else {
+                    message.error(result.error || 'Có lỗi xảy ra');
+                }
+            },
+        });
+    };
+
     // 🧾 Upload HĐ VAT nhà cung cấp
     const openVatModal = (purchaseId: number, record?: any) => {
         setVatPurchaseId(purchaseId);
-        setVatFile(null);
+        setVatFiles([]);
         vatForm.resetFields();
 
         if (record?.vatInvoiceNumber) {
@@ -623,51 +643,40 @@ export default function PurchasePage() {
     const handleVatUpload = async (values: any) => {
         if (!vatPurchaseId) return;
 
-        // Nếu chưa có file và đây là upload mới → yêu cầu chọn file
         const existingPurchase = purchases.find(p => p.id === vatPurchaseId) as any;
         const isEdit = !!existingPurchase?.vatInvoiceNumber;
 
-        if (!vatFile && !isEdit) {
-            message.warning('Vui lòng chọn file HĐ VAT!');
+        if (vatFiles.length === 0 && !isEdit) {
+            message.warning('Vui lòng chọn ít nhất 1 file HĐ VAT!');
             return;
         }
 
         setVatUploading(true);
         try {
-            let base64: string | null = null;
-            let fileName: string | null = null;
-
-            if (vatFile) {
-                // Convert file to base64
-                base64 = await new Promise<string>((resolve, reject) => {
+            // Convert tất cả files sang base64
+            const filesData = await Promise.all(vatFiles.map(async (file) => {
+                const base64 = await new Promise<string>((resolve, reject) => {
                     const reader = new FileReader();
-                    reader.onload = () => {
-                        const result = reader.result as string;
-                        resolve(result.split(',')[1]);
-                    };
+                    reader.onload = () => resolve((reader.result as string).split(',')[1]);
                     reader.onerror = reject;
-                    reader.readAsDataURL(vatFile);
+                    reader.readAsDataURL(file);
                 });
-                fileName = vatFile.name;
-            }
+                return { fileBase64: base64, fileName: file.name };
+            }));
 
             const payload: any = {
                 purchaseId: vatPurchaseId,
                 invoiceNumber: values.invoiceNumber || `VAT-PO${vatPurchaseId}-${dayjs().format('YYMMDDHHmm')}`,
                 invoiceDate: values.invoiceDate.format('YYYY-MM-DD'),
+                files: filesData,
             };
-
-            // Chỉ gửi file nếu có file mới
-            if (base64 && fileName) {
-                payload.fileBase64 = base64;
-                payload.fileName = fileName;
-            }
 
             const result = await (window.electronAPI as any).purchases.uploadVATInvoice(payload);
 
             if (result.success) {
-                message.success(`✅ ${isEdit ? 'Đã cập nhật' : 'Đã upload'} HĐ VAT #${values.invoiceNumber}!`);
-                if (result.data?.driveUrl) {
+                const fileCount = filesData.length;
+                message.success(`✅ ${isEdit ? 'Đã cập nhật' : 'Đã upload'} HĐ VAT #${values.invoiceNumber}${fileCount > 1 ? ` (${fileCount} files)` : ''}!`);
+                if (result.data?.driveUrls?.length > 0) {
                     message.info('☁️ Đã backup lên Google Drive');
                 }
                 setVatModalVisible(false);
@@ -751,6 +760,13 @@ export default function PurchasePage() {
                         </Tag>
                     );
                 }
+                if (r.vatInvoiceStatus === 'thht') {
+                    return (
+                        <Tag color="purple" style={{ fontWeight: 600, fontSize: 12 }}>
+                            📦 Đơn THHT
+                        </Tag>
+                    );
+                }
                 return (
                     <Tag color="warning" style={{ fontWeight: 600, fontSize: 12, cursor: 'pointer' }}
                         onClick={(e) => { e.stopPropagation(); openVatModal(record.id); }}
@@ -806,18 +822,35 @@ export default function PurchasePage() {
                     >
                         Xóa
                     </Button>
-                    {/* 🧾 Nút Upload HĐ VAT */}
-                    <Button
-                        icon={<UploadOutlined />}
-                        onClick={() => openVatModal(record.id, record)}
-                        style={{
-                            background: (record as any).vatInvoiceStatus === 'uploaded' ? '#f6ffed' : '#fff7e6',
-                            borderColor: (record as any).vatInvoiceStatus === 'uploaded' ? '#52c41a' : '#faad14',
-                            color: (record as any).vatInvoiceStatus === 'uploaded' ? '#52c41a' : '#d48806',
-                        }}
-                    >
-                        {(record as any).vatInvoiceStatus === 'uploaded' ? '✅ Đã có HĐ VAT' : '🧾 Upload HĐ VAT'}
-                    </Button>
+                    {/* 🧾 Nút Upload HĐ VAT / Đơn THHT */}
+                    {(record as any).vatInvoiceStatus === 'thht' ? (
+                        <Button
+                            onClick={() => handleMarkThht(record.id, true)}
+                            style={{ background: '#f9f0ff', borderColor: '#b37feb', color: '#722ed1' }}
+                        >
+                            📦 Đơn THHT · Hoàn tác
+                        </Button>
+                    ) : (
+                        <>
+                            <Button
+                                icon={<UploadOutlined />}
+                                onClick={() => openVatModal(record.id, record)}
+                                style={{
+                                    background: (record as any).vatInvoiceStatus === 'uploaded' ? '#f6ffed' : '#fff7e6',
+                                    borderColor: (record as any).vatInvoiceStatus === 'uploaded' ? '#52c41a' : '#faad14',
+                                    color: (record as any).vatInvoiceStatus === 'uploaded' ? '#52c41a' : '#d48806',
+                                }}
+                            >
+                                {(record as any).vatInvoiceStatus === 'uploaded' ? '✅ Đã có HĐ VAT' : '🧾 Upload HĐ VAT'}
+                            </Button>
+                            <Button
+                                onClick={() => handleMarkThht(record.id, false)}
+                                style={{ background: '#f9f0ff', borderColor: '#b37feb', color: '#722ed1' }}
+                            >
+                                📦 Đơn THHT
+                            </Button>
+                        </>
+                    )}
                 </div>
 
                 {/* 🧾 VAT Invoice Info (nếu đã upload) */}
@@ -1698,25 +1731,30 @@ export default function PurchasePage() {
                         return (
                             <Form.Item label={
                                 <span style={{ fontWeight: 700, fontSize: 14, color: '#262626' }}>
-                                    📎 {isEdit ? 'Chọn file mới để thay thế (không bắt buộc)' : 'Ảnh / PDF hóa đơn VAT'}
+                                    📎 {isEdit ? 'Thêm / thay thế file (không bắt buộc)' : 'Ảnh / PDF hóa đơn VAT'}
                                 </span>
                             } required={!isEdit}>
                                 <Upload.Dragger
+                                    multiple
                                     beforeUpload={(file) => {
-                                        setVatFile(file);
+                                        setVatFiles(prev => [...prev, file]);
                                         return false;
                                     }}
-                                    onRemove={() => setVatFile(null)}
-                                    maxCount={1}
+                                    onRemove={(file) => {
+                                        const idx = Number(file.uid);
+                                        setVatFiles(prev => prev.filter((_, i) => i !== idx));
+                                    }}
                                     accept="image/*,.pdf"
-                                    fileList={vatFile ? [{ uid: '-1', name: vatFile.name, status: 'done' as const }] : []}
-                                    style={{ padding: '16px 0', borderColor: vatFile ? '#52c41a' : isEdit ? '#1890ff' : '#faad14' }}
+                                    fileList={vatFiles.map((f, i) => ({ uid: String(i), name: f.name, status: 'done' as const }))}
+                                    style={{ padding: '16px 0', borderColor: vatFiles.length > 0 ? '#52c41a' : isEdit ? '#1890ff' : '#faad14' }}
                                 >
-                                    <p style={{ fontSize: 32, marginBottom: 8 }}>{vatFile ? '✅' : isEdit ? '🔄' : '📄'}</p>
-                                    <p style={{ fontWeight: 700, fontSize: 14, color: vatFile ? '#52c41a' : '#595959' }}>
-                                        {vatFile ? vatFile.name : isEdit ? 'Kéo thả file mới để thay thế' : 'Kéo thả hoặc bấm để chọn file'}
+                                    <p style={{ fontSize: 32, marginBottom: 8 }}>{vatFiles.length > 0 ? '✅' : isEdit ? '🔄' : '📄'}</p>
+                                    <p style={{ fontWeight: 700, fontSize: 14, color: vatFiles.length > 0 ? '#52c41a' : '#595959' }}>
+                                        {vatFiles.length > 0
+                                            ? `${vatFiles.length} file đã chọn`
+                                            : isEdit ? 'Kéo thả file mới để thêm / thay thế' : 'Kéo thả hoặc bấm để chọn file'}
                                     </p>
-                                    <p style={{ fontSize: 12, color: '#8c8c8c' }}>Hỗ trợ: JPG, PNG, PDF</p>
+                                    <p style={{ fontSize: 12, color: '#8c8c8c' }}>Hỗ trợ: JPG, PNG, PDF · Có thể chọn nhiều file cùng lúc</p>
                                 </Upload.Dragger>
                             </Form.Item>
                         );
@@ -1732,7 +1770,7 @@ export default function PurchasePage() {
                         {(() => {
                             const existing = purchases.find(p => p.id === vatPurchaseId) as any;
                             const isEdit = !!existing?.vatInvoiceNumber;
-                            const canSubmit = isEdit || !!vatFile;
+                            const canSubmit = isEdit || vatFiles.length > 0;
                             return (
                                 <Button type="primary" htmlType="submit" loading={vatUploading} block
                                     disabled={!canSubmit}
@@ -1744,7 +1782,11 @@ export default function PurchasePage() {
                                         boxShadow: canSubmit ? '0 4px 12px rgba(82,196,26,0.4)' : undefined,
                                     }}
                                 >
-                                    {vatUploading ? '⏳ Đang xử lý...' : isEdit ? '✏️ CẬP NHẬT HĐ VAT' : '🧾 UPLOAD HĐ VAT'}
+                                    {vatUploading
+                                        ? '⏳ Đang xử lý...'
+                                        : isEdit
+                                            ? `✏️ CẬP NHẬT HĐ VAT${vatFiles.length > 0 ? ` (${vatFiles.length} file)` : ''}`
+                                            : `🧾 UPLOAD HĐ VAT${vatFiles.length > 1 ? ` (${vatFiles.length} files)` : ''}`}
                                 </Button>
                             );
                         })()}

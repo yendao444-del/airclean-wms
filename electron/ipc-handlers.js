@@ -2079,7 +2079,7 @@ async function sendVatEmail(invoiceData) {
     }
 }
 
-ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoiceNumber, invoiceDate, fileBase64, fileName }) => {
+ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoiceNumber, invoiceDate, files = [], fileBase64, fileName }) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
 
@@ -2090,51 +2090,67 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
         });
         if (!purchase) throw new Error(`Không tìm thấy phiếu nhập #${purchaseId}`);
 
-        // 2. Lưu file local
+        // Normalize: hỗ trợ cả nhiều file (files[]) và 1 file (fileBase64/fileName)
+        const filesList = files.length > 0 ? files : (fileBase64 ? [{ fileBase64, fileName }] : []);
+
         const userDataPath = app.getPath('userData');
         const vatDir = path.join(userDataPath, 'vat-invoices');
         if (!fs.existsSync(vatDir)) fs.mkdirSync(vatDir, { recursive: true });
 
-        const ext = fileName.split('.').pop() || 'jpg';
-        const localFileName = `VAT_PO${purchaseId}_${Date.now()}.${ext}`;
-        const localPath = path.join(vatDir, localFileName);
+        const localPaths = [];
+        const driveUrls = [];
+        const savedBuffers = [];
+        const savedFileNames = [];
 
-        const fileBuffer = Buffer.from(fileBase64, 'base64');
-        fs.writeFileSync(localPath, fileBuffer);
-        console.log(`📁 Saved VAT invoice locally: ${localPath}`);
+        // 2. Lưu từng file local + upload Drive
+        for (let i = 0; i < filesList.length; i++) {
+            const { fileBase64: b64, fileName: fn } = filesList[i];
+            const ext = (fn || 'jpg').split('.').pop() || 'jpg';
+            const suffix = filesList.length > 1 ? `_${i + 1}` : '';
+            const localFileName = `VAT_PO${purchaseId}_${Date.now()}${suffix}.${ext}`;
+            const localPath = path.join(vatDir, localFileName);
 
-        // 3. Upload lên Google Drive → folder LUUTRU-HOADONVAT
-        let driveUrl = null;
-        try {
-            const drive = getDriveClient();
-            if (drive) {
-                const folderId = await getOrCreateVatDriveFolder();
-                if (folderId) {
-                    const driveFileName = `HĐ_VAT_${purchase.supplier?.name || 'NCC'}_PO${purchaseId}_${invoiceNumber}.${ext}`;
-                    const result = await uploadToDrive(drive, folderId, driveFileName, fileBuffer, ext === 'pdf' ? 'application/pdf' : 'image/jpeg');
-                    if (result) {
-                        driveUrl = result.webViewLink;
-                        console.log(`☁️ Uploaded to Drive (${VAT_DRIVE_FOLDER_NAME}): ${driveUrl}`);
+            const fileBuffer = Buffer.from(b64, 'base64');
+            fs.writeFileSync(localPath, fileBuffer);
+            console.log(`📁 Saved VAT invoice [${i+1}/${filesList.length}]: ${localPath}`);
+            localPaths.push(localPath);
+            savedBuffers.push(fileBuffer);
+            savedFileNames.push(localFileName);
+
+            // Upload lên Google Drive
+            try {
+                const drive = getDriveClient();
+                if (drive) {
+                    const folderId = await getOrCreateVatDriveFolder();
+                    if (folderId) {
+                        const driveFileName = `HĐ_VAT_${purchase.supplier?.name || 'NCC'}_PO${purchaseId}_${invoiceNumber}${suffix}.${ext}`;
+                        const result = await uploadToDrive(drive, folderId, driveFileName, fileBuffer, ext === 'pdf' ? 'application/pdf' : 'image/jpeg');
+                        if (result) {
+                            driveUrls.push(result.webViewLink);
+                            console.log(`☁️ Uploaded to Drive [${i+1}]: ${result.webViewLink}`);
+                        }
                     }
                 }
+            } catch (driveErr) {
+                console.error(`⚠️ Drive upload failed for file ${i+1}:`, driveErr.message);
             }
-        } catch (driveErr) {
-            console.error('⚠️ Drive upload failed (non-blocking):', driveErr.message);
         }
 
-        // 4. Cập nhật DB
-        await prisma.purchaseOrder.update({
-            where: { id: purchaseId },
-            data: {
-                vatInvoiceNumber: invoiceNumber,
-                vatInvoiceDate: new Date(invoiceDate),
-                vatInvoiceFile: localPath,
-                vatInvoiceDriveUrl: driveUrl,
-                vatInvoiceStatus: 'uploaded',
-            },
-        });
+        // 3. Cập nhật DB
+        const dbUpdate = {
+            vatInvoiceNumber: invoiceNumber,
+            vatInvoiceDate: new Date(invoiceDate),
+            vatInvoiceStatus: 'uploaded',
+        };
+        if (localPaths.length > 0) {
+            dbUpdate.vatInvoiceFile = localPaths.length === 1 ? localPaths[0] : JSON.stringify(localPaths);
+        }
+        if (driveUrls.length > 0) {
+            dbUpdate.vatInvoiceDriveUrl = driveUrls.length === 1 ? driveUrls[0] : driveUrls.join('\n');
+        }
+        await prisma.purchaseOrder.update({ where: { id: purchaseId }, data: dbUpdate });
 
-        // 5. Gửi Telegram (bot HĐ cũ)
+        // 4. Gửi Telegram
         const telegramMsg = [
             `🧾 <b>HĐ VAT mới — Nhập hàng</b>`,
             ``,
@@ -2143,36 +2159,61 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
             `🔢 Số HĐ: <b>${invoiceNumber}</b>`,
             `📅 Ngày HĐ: <b>${new Date(invoiceDate).toLocaleDateString('vi-VN')}</b>`,
             `💰 Tổng tiền: <b>${purchase.total.toLocaleString('vi-VN')}đ</b>`,
-            driveUrl ? `\n📎 <a href="${driveUrl}">Xem trên Drive</a>` : '',
-        ].join('\n');
+            filesList.length > 1 ? `📎 <b>${filesList.length} files đính kèm</b>` : '',
+            driveUrls[0] ? `\n📎 <a href="${driveUrls[0]}">Xem trên Drive</a>` : '',
+        ].filter(Boolean).join('\n');
 
         sendVatTelegramMessage(telegramMsg).catch(err => console.error('Telegram error:', err));
-        sendVatTelegramDocument(fileBuffer, localFileName,
-            `HĐ VAT #${invoiceNumber} — ${purchase.supplier?.name || 'NCC'} — ${purchase.total.toLocaleString('vi-VN')}đ`
-        ).catch(err => console.error('Telegram doc error:', err));
+        for (let i = 0; i < savedBuffers.length; i++) {
+            sendVatTelegramDocument(savedBuffers[i], savedFileNames[i],
+                `HĐ VAT #${invoiceNumber}${savedBuffers.length > 1 ? ` [${i+1}/${savedBuffers.length}]` : ''} — ${purchase.supplier?.name || 'NCC'}`
+            ).catch(err => console.error('Telegram doc error:', err));
+        }
 
-        // 6. Gửi Email (Gmail OAuth2 via Nodemailer)
-        sendVatEmail({
-            purchaseId,
-            supplierName: purchase.supplier?.name || 'N/A',
-            invoiceNumber,
-            invoiceDate: new Date(invoiceDate).toLocaleDateString('vi-VN'),
-            totalAmount: purchase.total.toLocaleString('vi-VN') + 'đ',
-            driveUrl,
-            fileBuffer,
-            fileName: localFileName,
-        }).catch(err => console.error('Email error:', err));
+        // 5. Gửi Email (file đầu tiên)
+        if (savedBuffers.length > 0) {
+            sendVatEmail({
+                purchaseId,
+                supplierName: purchase.supplier?.name || 'N/A',
+                invoiceNumber,
+                invoiceDate: new Date(invoiceDate).toLocaleDateString('vi-VN'),
+                totalAmount: purchase.total.toLocaleString('vi-VN') + 'đ',
+                driveUrl: driveUrls[0] || null,
+                fileBuffer: savedBuffers[0],
+                fileName: savedFileNames[0],
+            }).catch(err => console.error('Email error:', err));
+        }
 
         await logActivity({
             module: 'purchases', action: 'VAT_UPLOAD',
-            description: `Upload HĐ VAT #${invoiceNumber} cho phiếu nhập #${purchaseId} (${purchase.supplier?.name})`,
+            description: `Upload ${filesList.length} file HĐ VAT #${invoiceNumber} cho phiếu nhập #${purchaseId} (${purchase.supplier?.name})`,
             userName: 'System',
         });
 
-        console.log(`✅ VAT invoice uploaded for PO#${purchaseId}: ${invoiceNumber}`);
-        return { success: true, data: { localPath, driveUrl, invoiceNumber } };
+        console.log(`✅ VAT invoice uploaded for PO#${purchaseId}: ${invoiceNumber} (${filesList.length} files)`);
+        return { success: true, data: { localPaths, driveUrls, invoiceNumber } };
     } catch (error) {
         console.error('❌ Upload VAT invoice error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// Đánh dấu phiếu nhập là "Đơn THHT" (không cần HĐ VAT)
+ipcMain.handle('purchases:markAsThht', async (event, { purchaseId, revert }) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        requireRole('admin', 'manager', 'staff');
+        await prisma.purchaseOrder.update({
+            where: { id: purchaseId },
+            data: { vatInvoiceStatus: revert ? 'pending' : 'thht' },
+        });
+        await logActivity({
+            module: 'purchases', action: revert ? 'THHT_REVERT' : 'THHT_MARK',
+            description: `${revert ? 'Hoàn tác' : 'Đánh dấu'} phiếu nhập #${purchaseId} là Đơn THHT`,
+            userName: 'System',
+        });
+        return { success: true };
+    } catch (error) {
         return { success: false, error: error.message };
     }
 });
