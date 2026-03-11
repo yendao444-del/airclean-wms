@@ -3281,7 +3281,7 @@ ipcMain.handle('dailyTasks:create', async (event, taskData) => {
             }
         });
 
-        await logActivity({ module: 'system', action: 'CREATE', description: `Tạo công việc "${task.title}"`, recordName: task.title, userName: taskData.assignee });
+        await logActivity({ module: 'system', action: 'CREATE', description: `Tạo công việc "${task.title}"`, recordName: task.title, userName: taskData.assignee || 'Chưa phân công' });
         return { success: true, data: task };
     } catch (error) {
         console.error('Error creating task:', error);
@@ -3482,12 +3482,21 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
                 data: {
                     status: 'pending',
                     completedAt: null,
-                    verifier: null
+                    verifier: null,
+                    assignee: null  // Xóa người thực hiện → ai rảnh nhận việc lại mỗi ngày
                 }
             });
 
             console.log(`✅ [DAILY RESET] Ngày ${today}: Reset ${completedTasks.length} tasks completed → pending`);
         }
+
+        // Reset assignee của TẤT CẢ daily tasks sang ngày mới (ai rảnh nhận việc lại)
+        // Bàn giao (assignment) KHÔNG reset assignee
+        const resetAssigneeResult = await prisma.dailyTask.updateMany({
+            where: { type: 'daily' },
+            data: { assignee: null, verifier: null }
+        });
+        console.log(`✅ [DAILY RESET] Đã xóa assignee của ${resetAssigneeResult.count} daily tasks`);
 
         // Cập nhật dueDate của chỉ DAILY tasks sang ngày hôm nay (giữ nguyên giờ)
         // Fix bug: task vẫn mang dueDate cũ → calendar hiển thị sai ngày hoàn thành
@@ -4753,7 +4762,7 @@ async function getMisaToken() {
             // Thành công!
             misaTokenCache = {
                 token: data,
-                expiresAt: Date.now() + 12 * 24 * 60 * 60 * 1000,
+                expiresAt: Date.now() + 2 * 60 * 60 * 1000, // Cache 2 giờ (MISA token expire nhanh)
             };
             console.log(`✅ MISA: Token obtained successfully from ${tokenUrl}`);
             return data;
@@ -4785,6 +4794,12 @@ async function getMisaToken() {
         errorMsg = `❌ Lỗi MISA: ${errorsStr || fullResponse}`;
     }
     throw new Error(errorMsg);
+}
+
+// Xóa token cache khi bị reject (để lần sau lấy token mới)
+function invalidateMisaToken() {
+    misaTokenCache = { token: null, expiresAt: 0 };
+    console.log('🔄 MISA: Token cache invalidated — sẽ lấy token mới lần tới');
 }
 
 // Chuyển số thành chữ tiếng Việt
@@ -4927,27 +4942,47 @@ async function publishMisaInvoice(invoiceDataList) {
     console.log(`📤 MISA: Publishing ${invoiceDataList.length} invoice(s) to ${baseUrl}/invoice ...`);
     console.log(`📤 MISA: SignType=${body.SignType}, Sample:`, JSON.stringify(invoiceDataList[0]).substring(0, 500));
 
-    const response = await fetch(`${baseUrl}/invoice`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify(body),
-    });
+    // Helper: gọi API publish 1 lần
+    async function doPublishRequest(authToken) {
+        const response = await fetch(`${baseUrl}/invoice`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`,
+            },
+            body: JSON.stringify(body),
+        });
 
-    const responseText = await response.text();
-    console.log(`📤 MISA Publish Response (${response.status}):`, responseText.substring(0, 800));
+        const responseText = await response.text();
+        console.log(`📤 MISA Publish Response (${response.status}):`, responseText.substring(0, 800));
 
-    let result;
-    try {
-        result = JSON.parse(responseText);
-    } catch {
-        throw new Error(`MISA trả về response không hợp lệ khi phát hành (status ${response.status}): ${responseText.substring(0, 200)}`);
+        let result;
+        try {
+            result = JSON.parse(responseText);
+        } catch {
+            throw new Error(`MISA trả về response không hợp lệ khi phát hành (status ${response.status}): ${responseText.substring(0, 200)}`);
+        }
+        return { result, status: response.status };
     }
 
+    let { result, status } = await doPublishRequest(token);
+
     // Check success (MISA API trả về success hoặc Success)
-    const isSuccess = result.Success === true || result.success === true;
+    let isSuccess = result.Success === true || result.success === true;
+
+    // AUTO-RETRY: Nếu bị UnAuthorize hoặc HTTP 401 → xóa cache, lấy token mới, thử lại 1 lần
+    if (!isSuccess) {
+        const errCode = result.ErrorCode || result.errorCode || '';
+        if (errCode === 'UnAuthorize' || status === 401) {
+            console.log('🔄 MISA: Token expired — invalidating cache and retrying with fresh token...');
+            invalidateMisaToken();
+            const newToken = await getMisaToken();
+            const retry = await doPublishRequest(newToken);
+            result = retry.result;
+            isSuccess = result.Success === true || result.success === true;
+        }
+    }
+
     if (!isSuccess) {
         const errCode = result.ErrorCode || result.errorCode || '';
         const errDesc = result.descriptionErrorCode || result.Errors || '';
@@ -4970,27 +5005,45 @@ async function publishMisaInvoice(invoiceDataList) {
 // URL: {BaseURL}/invoice/download?downloadDataType=2  (2=PDF)
 async function downloadMisaInvoicePDF(transactionId) {
     const config = await getMisaConfig();
-    const token = await getMisaToken();
+    let token = await getMisaToken();
     const baseUrl = 'https://api.meinvoice.vn/api/integration';
 
-    const response = await fetch(`${baseUrl}/invoice/download?downloadDataType=2`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify([transactionId]),  // Mảng TransactionID, tối đa 50
-    });
+    async function doDownloadRequest(authToken) {
+        const response = await fetch(`${baseUrl}/invoice/download?downloadDataType=2`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`,
+            },
+            body: JSON.stringify([transactionId]),
+        });
 
-    const responseText = await response.text();
-    console.log(`📥 MISA Download Response (${response.status}):`, responseText.substring(0, 300));
+        const responseText = await response.text();
+        console.log(`📥 MISA Download Response (${response.status}):`, responseText.substring(0, 300));
 
-    let result;
-    try { result = JSON.parse(responseText); } catch {
-        throw new Error(`MISA download trả về response không hợp lệ (status ${response.status})`);
+        let result;
+        try { result = JSON.parse(responseText); } catch {
+            throw new Error(`MISA download trả về response không hợp lệ (status ${response.status})`);
+        }
+        return { result, status: response.status };
     }
 
-    const isSuccess = result.Success === true || result.success === true;
+    let { result, status } = await doDownloadRequest(token);
+    let isSuccess = result.Success === true || result.success === true;
+
+    // AUTO-RETRY: token expired → lấy mới và thử lại
+    if (!isSuccess) {
+        const errCode = result.ErrorCode || result.errorCode || '';
+        if (errCode === 'UnAuthorize' || status === 401) {
+            console.log('🔄 MISA Download: Token expired — retrying with fresh token...');
+            invalidateMisaToken();
+            token = await getMisaToken();
+            const retry = await doDownloadRequest(token);
+            result = retry.result;
+            isSuccess = result.Success === true || result.success === true;
+        }
+    }
+
     const data = result.Data || result.data;
     if (!isSuccess || !data) {
         throw new Error(`Lỗi tải PDF: ${result.ErrorCode || result.errorCode || JSON.stringify(result).substring(0, 200)}`);
@@ -5039,8 +5092,8 @@ ipcMain.handle('misa:saveConfig', async (event, config) => {
             create: { key: 'misaConfig', value: JSON.stringify(config) },
         });
         // Clear token cache khi đổi config
-        misaTokenCache = { token: null, expiresAt: 0 };
-        console.log('✅ MISA config saved');
+        invalidateMisaToken();
+        console.log(`✅ MISA config saved (password length: ${config.password?.length || 0})`);
         await logActivity({ module: 'einvoice', action: 'UPDATE', description: 'Cập nhật cấu hình MISA meInvoice', userName: 'Admin' });
         return { success: true };
     } catch (error) {

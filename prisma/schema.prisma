@@ -461,7 +461,7 @@ model DailyTask {
   description   String?  // Mô tả chi tiết
   
   // Phân công
-  assignee      String   // Người phụ trách (Khánh, Toàn, Phượng...)
+  assignee      String?  // Người phụ trách (có thể để trống — nhận việc sau)
   verifier      String?  // Người xác nhận
   area          String?  // Khu vực (Shopee/Tiktok, Kho, Văn phòng...)
   

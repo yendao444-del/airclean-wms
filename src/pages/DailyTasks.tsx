@@ -58,7 +58,7 @@ interface Task {
     id: number;
     title: string;
     category: string;
-    assignee: string;
+    assignee: string; // Có thể rỗng '' khi chưa phân công
     verifier?: string;
     area?: string;
     priority: 'low' | 'normal' | 'high' | 'urgent';
@@ -659,6 +659,8 @@ const DailyTasks = () => {
         if (isCompleting) {
             // Khởi tạo với người xác nhận cũ nếu có, nếu không thì empty
             let selectedVerifier = task.verifier || '';
+            let selectedAssignee = task.assignee || '';
+            const needAssignee = !task.assignee; // Chưa ai nhận việc → cần chọn khi hoàn thành
 
             Modal.confirm({
                 title: '✅ Xác nhận hoàn thành?',
@@ -670,9 +672,41 @@ const DailyTasks = () => {
                         <p style={{ color: '#666', fontSize: 13, marginBottom: 16 }}>
                             Bạn có chắc chắn đã hoàn thành công việc này không?
                         </p>
-                        <p style={{ color: '#999', fontSize: 12, marginBottom: 8 }}>
-                            Người thực hiện: <strong>{task.assignee}</strong>
-                        </p>
+
+                        {/* Nếu chưa có assignee → cho chọn */}
+                        {needAssignee ? (
+                            <div style={{ marginBottom: 12 }}>
+                                <label style={{ display: 'block', marginBottom: 8, fontWeight: 600, color: '#262626' }}>
+                                    👤 Người thực hiện: <span style={{ color: '#ff4d4f' }}>*</span>
+                                </label>
+                                <Select
+                                    placeholder="Chọn người đã thực hiện"
+                                    style={{ width: '100%' }}
+                                    size="large"
+                                    virtual={false}
+                                    dropdownStyle={{ zIndex: 2100 }}
+                                    getPopupContainer={(trigger) => trigger.parentNode as HTMLElement}
+                                    onChange={(value) => { selectedAssignee = value; }}
+                                >
+                                    {assigneeList.map((name, index) => {
+                                        const colors = ['#1890ff', '#52c41a', '#eb2f96', '#722ed1', '#fa8c16', '#13c2c2'];
+                                        const color = colors[index % colors.length];
+                                        return (
+                                            <Option key={name} value={name}>
+                                                <Avatar size="small" style={{ backgroundColor: color, marginRight: 8 }}>
+                                                    {name[0]}
+                                                </Avatar>
+                                                {name}
+                                            </Option>
+                                        );
+                                    })}
+                                </Select>
+                            </div>
+                        ) : (
+                            <p style={{ color: '#999', fontSize: 12, marginBottom: 8 }}>
+                                Người thực hiện: <strong>{task.assignee}</strong>
+                            </p>
+                        )}
 
                         {/* Người xác nhận - BẮT BUỘC */}
                         <div style={{ marginTop: 16 }}>
@@ -717,21 +751,27 @@ const DailyTasks = () => {
                         message.error('⚠️ Vui lòng chọn người xác nhận!');
                         return Promise.reject();
                     }
+                    // Validate assignee nếu chưa có
+                    if (needAssignee && !selectedAssignee) {
+                        message.error('⚠️ Vui lòng chọn người thực hiện!');
+                        return Promise.reject();
+                    }
 
                     try {
-                        // Update status and verifier
+                        const finalAssignee = selectedAssignee || task.assignee;
+                        // Update status, verifier, and assignee
                         setTasks(prev => prev.map(t =>
                             t.id === taskId
-                                ? { ...t, status: 'completed', verifier: selectedVerifier }
+                                ? { ...t, status: 'completed', verifier: selectedVerifier, assignee: finalAssignee }
                                 : t
                         ));
 
                         // Add to history
-                        await addToHistory({ ...task, verifier: selectedVerifier }, 'completed');
+                        await addToHistory({ ...task, assignee: finalAssignee, verifier: selectedVerifier }, 'completed');
 
                         // Show success message
                         message.success({
-                            content: `✅ Đã xác nhận hoàn thành! (Người xác nhận: ${selectedVerifier})`,
+                            content: `✅ Đã xác nhận hoàn thành! (Thực hiện: ${finalAssignee}, Xác nhận: ${selectedVerifier})`,
                             duration: 3
                         });
 
@@ -739,7 +779,8 @@ const DailyTasks = () => {
                         try {
                             await window.electronAPI.dailyTasks.update(taskId, {
                                 status: 'completed',
-                                verifier: selectedVerifier
+                                verifier: selectedVerifier,
+                                assignee: finalAssignee
                             });
                         } catch (err) {
                             console.log('Backend update skipped:', err);
@@ -879,6 +920,86 @@ const DailyTasks = () => {
         });
     };
 
+    // Nhận việc (Claim task)
+    const handleClaimTask = async (taskId: number, claimerName?: string) => {
+        const task = tasks.find(t => t.id === taskId);
+        if (!task) return;
+
+        // Nếu task đã có assignee → không cho claim
+        if (task.assignee) {
+            message.info(`Công việc này đã được gán cho ${task.assignee}`);
+            return;
+        }
+
+        // Nếu có claimerName (từ dropdown) → dùng luôn
+        if (claimerName) {
+            try {
+                await window.electronAPI.dailyTasks.update(taskId, { assignee: claimerName });
+                message.success(`✅ ${claimerName} đã nhận việc: "${task.title}"`);
+                loadTasks();
+            } catch (e: any) {
+                message.error('Lỗi: ' + e.message);
+            }
+            return;
+        }
+
+        // Hiển thị modal chọn người nhận việc
+        let selectedPerson = '';
+        Modal.confirm({
+            title: '🙋 Nhận việc',
+            icon: null,
+            width: 420,
+            content: (
+                <div>
+                    <p style={{ marginBottom: 8 }}>
+                        <strong>{task.title}</strong>
+                    </p>
+                    <p style={{ color: '#666', fontSize: 13, marginBottom: 16 }}>
+                        Chọn người nhận công việc này:
+                    </p>
+                    <Select
+                        placeholder="Chọn người nhận việc"
+                        style={{ width: '100%' }}
+                        size="large"
+                        virtual={false}
+                        dropdownStyle={{ zIndex: 2100 }}
+                        getPopupContainer={(trigger) => trigger.parentNode as HTMLElement}
+                        onChange={(value) => { selectedPerson = value; }}
+                    >
+                        {assigneeList.map((name, index) => {
+                            const colors = ['#1890ff', '#52c41a', '#eb2f96', '#722ed1', '#fa8c16', '#13c2c2'];
+                            const color = colors[index % colors.length];
+                            return (
+                                <Option key={name} value={name}>
+                                    <Avatar size="small" style={{ backgroundColor: color, marginRight: 8 }}>
+                                        {name[0]}
+                                    </Avatar>
+                                    {name}
+                                </Option>
+                            );
+                        })}
+                    </Select>
+                </div>
+            ),
+            okText: 'Nhận việc',
+            okType: 'primary',
+            cancelText: 'Hủy',
+            onOk: async () => {
+                if (!selectedPerson) {
+                    message.warning('Vui lòng chọn người nhận việc!');
+                    return Promise.reject();
+                }
+                try {
+                    await window.electronAPI.dailyTasks.update(taskId, { assignee: selectedPerson });
+                    message.success(`✅ ${selectedPerson} đã nhận việc: "${task.title}"`);
+                    loadTasks();
+                } catch (e: any) {
+                    message.error('Lỗi: ' + e.message);
+                }
+            }
+        });
+    };
+
     // Save task
     const handleSaveTask = async () => {
         try {
@@ -888,7 +1009,7 @@ const DailyTasks = () => {
                 title: values.title,
                 description: values.description || '',
                 category: values.category,
-                assignee: values.assignee,
+                assignee: values.assignee || '',
                 verifier: values.verifier || '',
                 area: values.area || '',
                 dueDate: values.dueDate.toISOString(),
@@ -1131,23 +1252,52 @@ const DailyTasks = () => {
 
                             {/* Center: Assignee + Verifier */}
                             <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                                {/* Assignee */}
-                                <Tooltip title={`Người thực hiện: ${task.assignee}`}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                        <span style={{ fontSize: 11, color: '#999', fontWeight: 500 }}>👤</span>
-                                        <Avatar
-                                            size={28}
-                                            style={{
-                                                backgroundColor: getAvatarColor(task.assignee),
-                                                fontSize: 12,
-                                                fontWeight: 'bold',
-                                                boxShadow: '0 2px 6px rgba(0,0,0,0.15)'
-                                            }}
-                                        >
-                                            {task.assignee[0]}
-                                        </Avatar>
-                                    </div>
-                                </Tooltip>
+                                {/* Assignee — hoặc nút Nhận việc */}
+                                {task.assignee ? (
+                                    <Tooltip title={`Người thực hiện: ${task.assignee}`}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                            <span style={{ fontSize: 11, color: '#999', fontWeight: 500 }}>👤</span>
+                                            <Avatar
+                                                size={28}
+                                                style={{
+                                                    backgroundColor: getAvatarColor(task.assignee),
+                                                    fontSize: 12,
+                                                    fontWeight: 'bold',
+                                                    boxShadow: '0 2px 6px rgba(0,0,0,0.15)'
+                                                }}
+                                            >
+                                                {task.assignee[0]}
+                                            </Avatar>
+                                        </div>
+                                    </Tooltip>
+                                ) : (
+                                    task.status !== 'completed' && (
+                                        <Tooltip title="Chưa ai nhận — bấm để nhận việc">
+                                            <Button
+                                                type="dashed"
+                                                size="small"
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    handleClaimTask(task.id);
+                                                }}
+                                                style={{
+                                                    borderColor: '#faad14',
+                                                    color: '#faad14',
+                                                    borderRadius: 16,
+                                                    fontSize: 11,
+                                                    fontWeight: 600,
+                                                    padding: '0 10px',
+                                                    height: 28,
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: 4
+                                                }}
+                                            >
+                                                🙋 Nhận việc
+                                            </Button>
+                                        </Tooltip>
+                                    )
+                                )}
 
                                 {/* Verifier (if exists) */}
                                 {task.verifier && (
@@ -1909,19 +2059,19 @@ const DailyTasks = () => {
                         />
                     </Form.Item>
 
-                    {/* Người thực hiện - BẮT BUỘC */}
+                    {/* Người thực hiện - TÙY CHỌN (có thể nhận việc sau) */}
                     <Form.Item
                         name="assignee"
-                        label={<span style={{ fontSize: 14, fontWeight: 600 }}>👤 Người thực hiện</span>}
-                        rules={[{ required: true, message: 'Vui lòng chọn người thực hiện!' }]}
+                        label={<span style={{ fontSize: 14, fontWeight: 600 }}>👤 Người thực hiện <span style={{ fontSize: 12, fontWeight: 400, color: '#999' }}>(có thể để trống — nhận việc sau)</span></span>}
                         style={{ marginBottom: 16 }}
                     >
                         <Select
                             size="large"
-                            placeholder="Chọn hoặc gõ tên mới..."
+                            placeholder="Để trống = ai rảnh nhận việc"
                             optionLabelProp="label"
                             virtual={false}
                             showSearch
+                            allowClear
                             dropdownStyle={{ zIndex: 2000 }}
                             filterOption={(input, option) =>
                                 (option?.label as string || '').toLowerCase().includes(input.toLowerCase())
