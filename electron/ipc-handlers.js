@@ -3464,6 +3464,10 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
     try {
         if (!prisma) throw new Error('Database chưa được khởi tạo.');
 
+        // Fix null assignee/verifier (tương thích Prisma client cũ)
+        await prisma.$executeRawUnsafe(`UPDATE "DailyTask" SET assignee = '' WHERE assignee IS NULL`);
+        await prisma.$executeRawUnsafe(`UPDATE "DailyTask" SET verifier = '' WHERE verifier IS NULL`);
+
         // Lấy ngày hôm nay (theo timezone local)
         const now = new Date();
         const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -3526,8 +3530,8 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
                 data: {
                     status: 'pending',
                     completedAt: null,
-                    verifier: null,
-                    assignee: null  // Xóa người thực hiện → ai rảnh nhận việc lại mỗi ngày
+                    verifier: '',
+                    assignee: ''  // Xóa người thực hiện → ai rảnh nhận việc lại mỗi ngày
                 }
             });
 
@@ -3538,7 +3542,7 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
         // Bàn giao (assignment) KHÔNG reset assignee
         const resetAssigneeResult = await prisma.dailyTask.updateMany({
             where: { type: 'daily' },
-            data: { assignee: null, verifier: null }
+            data: { assignee: '', verifier: '' }
         });
         console.log(`✅ [DAILY RESET] Đã xóa assignee của ${resetAssigneeResult.count} daily tasks`);
 
