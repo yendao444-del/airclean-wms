@@ -214,6 +214,8 @@ const DailyTasks = () => {
                     dueDate: dayjs(t.dueDate).format('YYYY-MM-DD'),
                     type: t.type || 'daily'
                 })));
+            } else if (!result.success) {
+                message.error('Lỗi tải công việc: ' + (result.error || 'Không xác định'));
             }
         } catch (error: any) {
             message.error('Lỗi khi tải dữ liệu: ' + (error.message || 'Unknown error'));
