@@ -16,6 +16,7 @@ import {
     Timeline,
     Alert,
     Upload,
+    Checkbox,
 } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, EyeOutlined, HistoryOutlined, ClockCircleOutlined, UploadOutlined, FileTextOutlined, CheckCircleOutlined, LinkOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -238,7 +239,8 @@ export default function PurchasePage() {
             purchaseDate: dayjs(purchase.purchaseDate),
             status: purchase.status,
             notes: purchase.notes,
-            createdBy: purchase.createdBy || currentUser, // 👤 Hiển thị người tạo hoặc mặc định
+            createdBy: purchase.createdBy || currentUser,
+            isThht: (purchase as any).vatInvoiceStatus === 'thht', // 📦 Tích sẵn nếu đã là THHT
         });
         setModalVisible(true);
     };
@@ -330,7 +332,8 @@ export default function PurchasePage() {
                 purchaseDate: values.purchaseDate.format('YYYY-MM-DD HH:mm:ss'),
                 items: JSON.stringify(purchaseItems),
                 totalAmount,
-                createdBy: editingPurchase ? editingPurchase.createdBy : currentUser, // 👤 Lưu người tạo
+                createdBy: editingPurchase ? editingPurchase.createdBy : currentUser,
+                isThht: values.isThht || false, // 📦 Gửi flag THHT
             };
 
             let result;
@@ -822,34 +825,24 @@ export default function PurchasePage() {
                     >
                         Xóa
                     </Button>
-                    {/* 🧾 Nút Upload HĐ VAT / Đơn THHT */}
-                    {(record as any).vatInvoiceStatus === 'thht' ? (
+                    {/* 🧾 Nút Upload HĐ VAT */}
+                    {(record as any).vatInvoiceStatus !== 'thht' && (
                         <Button
-                            onClick={() => handleMarkThht(record.id, true)}
-                            style={{ background: '#f9f0ff', borderColor: '#b37feb', color: '#722ed1' }}
+                            icon={<UploadOutlined />}
+                            onClick={() => openVatModal(record.id, record)}
+                            style={{
+                                background: (record as any).vatInvoiceStatus === 'uploaded' ? '#f6ffed' : '#fff7e6',
+                                borderColor: (record as any).vatInvoiceStatus === 'uploaded' ? '#52c41a' : '#faad14',
+                                color: (record as any).vatInvoiceStatus === 'uploaded' ? '#52c41a' : '#d48806',
+                            }}
                         >
-                            📦 Đơn THHT · Hoàn tác
+                            {(record as any).vatInvoiceStatus === 'uploaded' ? '✅ Đã có HĐ VAT' : '🧾 Upload HĐ VAT'}
                         </Button>
-                    ) : (
-                        <>
-                            <Button
-                                icon={<UploadOutlined />}
-                                onClick={() => openVatModal(record.id, record)}
-                                style={{
-                                    background: (record as any).vatInvoiceStatus === 'uploaded' ? '#f6ffed' : '#fff7e6',
-                                    borderColor: (record as any).vatInvoiceStatus === 'uploaded' ? '#52c41a' : '#faad14',
-                                    color: (record as any).vatInvoiceStatus === 'uploaded' ? '#52c41a' : '#d48806',
-                                }}
-                            >
-                                {(record as any).vatInvoiceStatus === 'uploaded' ? '✅ Đã có HĐ VAT' : '🧾 Upload HĐ VAT'}
-                            </Button>
-                            <Button
-                                onClick={() => handleMarkThht(record.id, false)}
-                                style={{ background: '#f9f0ff', borderColor: '#b37feb', color: '#722ed1' }}
-                            >
-                                📦 Đơn THHT
-                            </Button>
-                        </>
+                    )}
+                    {(record as any).vatInvoiceStatus === 'thht' && (
+                        <Tag color="purple" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px', lineHeight: '22px' }}>
+                            📦 Đơn THHT
+                        </Tag>
                     )}
                 </div>
 
@@ -1317,6 +1310,30 @@ export default function PurchasePage() {
                                 cursor: 'not-allowed'
                             }}
                         />
+                    </Form.Item>
+
+                    {/* 📦 Checkbox đánh dấu Đơn THHT */}
+                    <Form.Item
+                        name="isThht"
+                        valuePropName="checked"
+                        style={{ marginBottom: 16 }}
+                    >
+                        <Checkbox
+                            style={{
+                                fontSize: 14,
+                                fontWeight: 600,
+                                padding: '8px 16px',
+                                background: form.getFieldValue('isThht') ? '#f9f0ff' : '#fafafa',
+                                borderRadius: 8,
+                                border: form.getFieldValue('isThht') ? '2px solid #b37feb' : '1px solid #d9d9d9',
+                                transition: 'all 0.3s',
+                            }}
+                        >
+                            <span style={{ color: '#722ed1' }}>📦 Phiếu THHT</span>
+                            <span style={{ color: '#8c8c8c', fontWeight: 400, marginLeft: 8, fontSize: 12 }}>
+                                (Đơn thay hàng/hàng tặng — không cần HĐ VAT)
+                            </span>
+                        </Checkbox>
                     </Form.Item>
 
                     {/* Add Product Section */}

@@ -120,11 +120,14 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
         setPhase('scrolling');
     }, []);
 
-    // Load data mỗi 5 phút
+    // ⚡ Delay 10s lần đầu để Dashboard load xong, sau đó poll mỗi 5 phút
     useEffect(() => {
-        loadData();
+        const initDelay = setTimeout(loadData, 10000);
         const interval = setInterval(loadData, 5 * 60 * 1000);
-        return () => clearInterval(interval);
+        return () => {
+            clearTimeout(initDelay);
+            clearInterval(interval);
+        };
     }, [loadData]);
 
     useEffect(() => {

@@ -1713,7 +1713,8 @@ ipcMain.handle('purchases:getAll', async () => {
                     }
                 }
             },
-            orderBy: { createdAt: 'desc' }
+            orderBy: { createdAt: 'desc' },
+            take: 300 // ⚡ Giới hạn 300 phiếu nhập gần nhất
         });
 
         // Format data for frontend
@@ -1784,15 +1785,16 @@ ipcMain.handle('purchases:create', async (event, data) => {
                 total: data.totalAmount,
                 note: data.notes,
                 receivedAt: new Date(data.purchaseDate),
-                createdBy: data.createdBy || 'Admin', // 👤 Lưu người tạo
+                createdBy: data.createdBy || 'Admin',
+                vatInvoiceStatus: data.isThht ? 'thht' : 'pending', // 📦 THHT flag
                 items: {
                     create: items.map(item => ({
                         productId: item.productId,
                         quantity: item.quantity,
                         price: item.unitPrice,
                         subtotal: item.total,
-                        variantSku: item.variantSku || null, // 🎨 Lưu SKU variant
-                        color: item.color || null // 🎨 Lưu màu sắc
+                        variantSku: item.variantSku || null,
+                        color: item.color || null
                     }))
                 }
             },
@@ -1866,7 +1868,8 @@ ipcMain.handle('purchases:update', async (event, { id, data }) => {
                 subtotal: data.totalAmount,
                 total: data.totalAmount,
                 note: data.notes,
-                receivedAt: new Date(data.purchaseDate)
+                receivedAt: new Date(data.purchaseDate),
+                ...(data.isThht !== undefined ? { vatInvoiceStatus: data.isThht ? 'thht' : 'pending' } : {}), // 📦 THHT
             }
         });
 
@@ -3777,7 +3780,8 @@ ipcMain.handle('ecommerceExports:getAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const exports = await prisma.ecommerceExport.findMany({
-            orderBy: { createdAt: 'desc' }
+            orderBy: { createdAt: 'desc' },
+            take: 500 // ⚡ Giới hạn 500 đơn TMDT gần nhất
         });
         // Format dates for frontend
         const formatted = exports.map(e => ({
@@ -3910,7 +3914,8 @@ ipcMain.handle('exportOrders:getAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const orders = await prisma.exportOrder.findMany({
-            orderBy: { createdAt: 'desc' }
+            orderBy: { createdAt: 'desc' },
+            take: 500 // ⚡ Giới hạn 500 đơn xuất hàng gần nhất
         });
         const formatted = orders.map(o => ({
             ...o,
@@ -3991,7 +3996,8 @@ ipcMain.handle('returns:getAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const returns = await prisma.return.findMany({
-            orderBy: { createdAt: 'desc' }
+            orderBy: { createdAt: 'desc' },
+            take: 500 // ⚡ Giới hạn 500 phiếu trả gần nhất
         });
         const formatted = returns.map(r => ({
             ...r,
@@ -4130,7 +4136,8 @@ ipcMain.handle('refunds:getAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const refunds = await prisma.refund.findMany({
-            orderBy: { createdAt: 'desc' }
+            orderBy: { createdAt: 'desc' },
+            take: 500 // ⚡ Giới hạn 500 phiếu hoàn gần nhất
         });
         const formatted = refunds.map(r => ({
             ...r,

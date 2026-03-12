@@ -172,10 +172,12 @@ export default function DashboardPage() {
     const filteredPurchases = purchases.filter(p => inRange(p.purchaseDate || p.createdAt));
     const filteredPurchaseAmount = filteredPurchases.reduce((s, p) => s + (p.totalAmount || 0), 0);
 
-    // Daily Tasks - chỉ đếm task completed hôm nay (tránh đếm task ẩn/orphan)
+    // Daily Tasks - chỉ đếm task HÀNG NGÀY (loại bỏ task bàn giao/assignment)
     const todayStr = dayjs().format('YYYY-MM-DD');
     const todayTasks = tasks.filter(t => {
         if (!t.dueDate) return false;
+        // Chỉ lấy task daily, loại bỏ assignment
+        if (t.type && t.type !== 'daily') return false;
         const taskDateStr = dayjs(t.dueDate).format('YYYY-MM-DD');
         return taskDateStr === todayStr;
     });

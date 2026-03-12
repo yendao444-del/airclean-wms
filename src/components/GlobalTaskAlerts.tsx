@@ -141,11 +141,14 @@ export default function GlobalTaskAlerts() {
         }
     }, []);
 
-    // Load mỗi 60 giây
+    // ⚡ Delay 15s lần đầu (Dashboard đã load tasks), sau đó poll mỗi 2 phút
     useEffect(() => {
-        loadTasks();
-        const interval = setInterval(loadTasks, 120000); // 2 phút
-        return () => clearInterval(interval);
+        const initDelay = setTimeout(loadTasks, 15000);
+        const interval = setInterval(loadTasks, 120000);
+        return () => {
+            clearTimeout(initDelay);
+            clearInterval(interval);
+        };
     }, [loadTasks]);
 
     // === Lắng nghe events từ DailyTasks ===

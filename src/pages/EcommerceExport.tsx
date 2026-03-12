@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import {
     Card,
@@ -327,9 +327,20 @@ export default function EcommerceExportPage() {
             // Lấy tracking number
             const trackingNumber = ecommerceExport.notes?.match(/Tracking: ([^|]+)/)?.[1]?.trim() || 'N/A';
 
-            // Đếm số thứ tự
+            // Đếm số thứ tự (reset theo ngày)
+            const today = dayjs().format('YYYY-MM-DD');
+            const counterDateResult = await window.electronAPI.appConfig.get('telegramOrderCounterDate');
+            const lastDate = counterDateResult.success && counterDateResult.data ? counterDateResult.data : '';
+
             const counterResult = await window.electronAPI.appConfig.get('telegramOrderCounter');
             let orderCounter = counterResult.success && counterResult.data ? parseInt(counterResult.data) : 0;
+
+            // Reset counter nếu sang ngày mới
+            if (lastDate !== today) {
+                orderCounter = 0;
+                await window.electronAPI.appConfig.set('telegramOrderCounterDate', today);
+            }
+
             orderCounter++;
             await window.electronAPI.appConfig.set('telegramOrderCounter', orderCounter.toString());
 

@@ -33,22 +33,22 @@ import './App.css';
 import { usePermissions } from './lib/hooks/usePermissions';
 import ForceUpdateGate from './components/ForceUpdateGate';
 
-// ✅ EAGER LOADING - Small/Fast pages (always needed)
+// ✅ EAGER LOADING - Chỉ Dashboard (trang mặc định) + global components
 import DashboardPage from './pages/Dashboard';
-import FeeCalculatorPage from './pages/FeeCalculator';
-import ExportOrdersPage from './pages/ExportOrders';
-import StockBalancePage from './pages/StockBalance';
-import PermissionsPage from './pages/Permissions';
-import SystemLogsPage from './pages/SystemLogs';
-import SettingsPage from './pages/Settings';
-import DailyTasksPage from './pages/DailyTasks';
 import GlobalTaskAlerts from './components/GlobalTaskAlerts';
 import HeaderTaskTicker from './components/HeaderTaskTicker';
 
 import Login from './pages/Login';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 
-// ⚡ LAZY LOADING - Large pages (load on demand)
+// ⚡ LAZY LOADING - Tất cả pages còn lại (load on demand)
+const FeeCalculatorPage = lazy(() => import('./pages/FeeCalculator'));
+const ExportOrdersPage = lazy(() => import('./pages/ExportOrders'));
+const StockBalancePage = lazy(() => import('./pages/StockBalance'));
+const PermissionsPage = lazy(() => import('./pages/Permissions'));
+const SystemLogsPage = lazy(() => import('./pages/SystemLogs'));
+const SettingsPage = lazy(() => import('./pages/Settings'));
+const DailyTasksPage = lazy(() => import('./pages/DailyTasks'));
 const ProductsPage = lazy(() => import('./pages/Products'));
 const ComboProductsPage = lazy(() => import('./pages/ComboProducts'));
 const PurchasePage = lazy(() => import('./pages/Purchase'));

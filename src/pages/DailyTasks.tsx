@@ -852,20 +852,28 @@ const DailyTasks = () => {
 
     // Delete category
     const handleDeleteCategory = (categoryKey: string) => {
+        const tasksInCategory = dailyTasks.filter(t => t.category === categoryKey);
         Modal.confirm({
             title: 'Xóa danh mục?',
-            content: `Bạn có chắc muốn xóa danh mục "${categoryKey}"? Tất cả công việc trong danh mục này sẽ chuyển sang "Khác".`,
+            content: `Bạn có chắc muốn xóa danh mục "${categoryKey}"? ${tasksInCategory.length > 0 ? `⚠️ ${tasksInCategory.length} công việc trong danh mục này cũng sẽ bị xóa!` : 'Danh mục này đang trống.'}`,
             okText: 'Xóa',
             okType: 'danger',
             cancelText: 'Hủy',
             onOk: async () => {
-                const updated = categories.filter(c => c.key !== categoryKey);
-                await saveCategories(updated);
-                // Move tasks to "Khác" category
-                setTasks(prev => prev.map(task =>
-                    task.category === categoryKey ? { ...task, category: 'Khác' } : task
-                ));
-                message.success('Đã xóa danh mục!');
+                try {
+                    // Xóa tất cả tasks trong danh mục này trên DATABASE
+                    for (const task of tasksInCategory) {
+                        await window.electronAPI.dailyTasks.delete(task.id);
+                    }
+                    // Xóa danh mục khỏi config
+                    const updated = categories.filter(c => c.key !== categoryKey);
+                    await saveCategories(updated);
+                    // Reload tasks từ DB để đồng bộ
+                    await loadTasks();
+                    message.success(`Đã xóa danh mục "${categoryKey}" và ${tasksInCategory.length} công việc!`);
+                } catch (error: any) {
+                    message.error('Lỗi khi xóa: ' + (error.message || 'Unknown'));
+                }
             }
         });
     };
@@ -1363,7 +1371,9 @@ const DailyTasks = () => {
 
     // Kanban Column - TỐI ĐA 3 CỘT HIỂN THỊ
     const KanbanColumn = ({ category }: { category: typeof CATEGORIES[0] }) => {
-        const columnTasks = tasks.filter(t => t.category === category.key);
+        const columnTasks = category.key === '__orphan__'
+            ? dailyTasks.filter(t => !t.category || !categories.map(c => c.key).includes(t.category))
+            : dailyTasks.filter(t => t.category === category.key);
         const completed = columnTasks.filter(t => t.status === 'completed').length;
         const total = columnTasks.length;
 
@@ -1437,7 +1447,7 @@ const DailyTasks = () => {
                             flex: 1,
                             paddingRight: 50
                         }}>
-                            {category.key}
+                            {category.key === '__orphan__' ? 'Khác' : category.key}
                         </h3>
                         <Badge
                             count={total}
@@ -1901,6 +1911,24 @@ const DailyTasks = () => {
                         {categories.map(category => (
                             <KanbanColumn key={category.key} category={category} />
                         ))}
+
+                        {/* Cột "Khác" — hiển thị task mồ côi không thuộc danh mục nào */}
+                        {(() => {
+                            const categoryKeys = categories.map(c => c.key);
+                            const orphanTasks = dailyTasks.filter(t => !t.category || !categoryKeys.includes(t.category));
+                            if (orphanTasks.length === 0) return null;
+                            return (
+                                <KanbanColumn
+                                    key="__orphan__"
+                                    category={{
+                                        key: '__orphan__',
+                                        icon: '📂',
+                                        color: '#8c8c8c',
+                                        gradient: 'linear-gradient(135deg, #636e72, #b2bec3)'
+                                    } as any}
+                                />
+                            );
+                        })()}
 
                         {/* Add New Category Button */}
                         <div
