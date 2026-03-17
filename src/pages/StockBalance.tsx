@@ -84,6 +84,8 @@ export default function StockBalancePage() {
     const [loading, setLoading] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
     const [quickBalanceModalVisible, setQuickBalanceModalVisible] = useState(false);
+    // Ghi chú inline per SKU
+    const [balanceNotes, setBalanceNotes] = useState<Record<string, string>>({});
     const [form] = Form.useForm();
     const [quickBalanceForm] = Form.useForm();
     const [expandedRowKeys, setExpandedRowKeys] = useState<string[]>([]);
@@ -411,6 +413,12 @@ export default function StockBalancePage() {
             return;
         }
 
+        const note = balanceNotes[item.sku]?.trim();
+        if (!note) {
+            message.warning('⚠️ Vui lòng nhập lý do cân bằng trước!');
+            return;
+        }
+
         Modal.confirm({
             title: '⚖️ Xác nhận cân bằng lẻ',
             content: (
@@ -423,6 +431,8 @@ export default function StockBalancePage() {
                     <p style={{ color: item.difference > 0 ? '#52c41a' : '#ff4d4f', fontWeight: 700, fontSize: 16 }}>
                         <strong>Chênh lệch:</strong> {item.difference > 0 ? `+${item.difference}` : item.difference}
                     </p>
+                    <Divider style={{ margin: '8px 0' }} />
+                    <p><strong>📝 Lý do:</strong> {note}</p>
                 </div>
             ),
             okText: 'Xác nhận cân bằng',
@@ -441,13 +451,15 @@ export default function StockBalancePage() {
                         date: dayjs().format('YYYY-MM-DD HH:mm:ss'),
                         adjustedBy: currentUser || 'Admin',
                         items: [item],
-                        notes: `Cân bằng lẻ: ${item.sku}`,
+                        notes: note,
                     };
 
                     await window.electronAPI.stockBalance.create(newRecord);
                     await loadBalanceRecords();
 
                     message.success(`✅ Đã cân bằng ${item.sku}: ${item.systemStock} → ${item.actualStock}`);
+                    // Xóa ghi chú đã dùng
+                    setBalanceNotes(prev => { const n = { ...prev }; delete n[item.sku]; return n; });
                     await loadProducts();
                 } catch (error) {
                     message.error('Lỗi khi cân bằng kho!');
@@ -690,7 +702,21 @@ export default function StockBalancePage() {
         {
             title: 'Ghi chú',
             dataIndex: 'notes',
-            render: (notes) => notes || <span style={{ color: '#bfbfbf' }}>—</span>,
+            render: (notes) => notes ? (
+                <div style={{
+                    background: '#fffbe6',
+                    border: '1px solid #ffe58f',
+                    borderRadius: 6,
+                    padding: '4px 10px',
+                    fontSize: 13,
+                    color: '#ad6800',
+                    maxWidth: 350,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                }}>
+                    📝 {notes}
+                </div>
+            ) : <span style={{ color: '#bfbfbf' }}>—</span>,
         },
     ];
 
@@ -873,6 +899,7 @@ export default function StockBalancePage() {
                                                     <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#262626', minWidth: 70 }}>📦 Lẻ ({record.unit})</th>
                                                     {units.length > 0 && <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#096dd9', minWidth: 90 }}>Tổng TT</th>}
                                                     <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: 12, fontWeight: 700, color: '#262626' }}>Chênh lệch</th>
+                                                    <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#262626', minWidth: 180 }}>📝 Ghi chú <span style={{ color: '#ff4d4f' }}>*</span></th>
                                                     <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#262626', minWidth: 100 }}></th>
                                                 </tr>
                                             </thead>
@@ -937,6 +964,27 @@ export default function StockBalancePage() {
                                                                 >
                                                                     {variant.difference > 0 ? `+${variant.difference}` : variant.difference}
                                                                 </Tag>
+                                                            </td>
+                                                            {/* GHI CHÚ - bắt buộc khi chênh lệch */}
+                                                            <td style={{ padding: '6px 4px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
+                                                                {variant.difference !== 0 ? (
+                                                                    <Input.TextArea
+                                                                        value={balanceNotes[variant.sku] || ''}
+                                                                        onChange={(e) => setBalanceNotes(prev => ({ ...prev, [variant.sku]: e.target.value }))}
+                                                                        placeholder="Nhập lý do..."
+                                                                        rows={1}
+                                                                        autoSize={{ minRows: 1, maxRows: 3 }}
+                                                                        style={{
+                                                                            width: '100%',
+                                                                            minWidth: 140,
+                                                                            fontSize: 12,
+                                                                            borderColor: (balanceNotes[variant.sku]?.trim()) ? '#52c41a' : '#ff4d4f',
+                                                                        }}
+                                                                        status={!(balanceNotes[variant.sku]?.trim()) ? 'error' : undefined}
+                                                                    />
+                                                                ) : (
+                                                                    <span style={{ color: '#bfbfbf', fontSize: 12 }}>—</span>
+                                                                )}
                                                             </td>
                                                             {/* CÂN BẰNG */}
                                                             <td style={{ padding: '10px 8px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
@@ -1082,7 +1130,11 @@ export default function StockBalancePage() {
                         </Text>
                     </div>
 
-                    <Form.Item label="Ghi chú (tùy chọn)" name="notes">
+                    <Form.Item
+                        label={<span style={{ fontWeight: 600 }}>📝 Lý do cân bằng <span style={{ color: '#ff4d4f' }}>*</span></span>}
+                        name="notes"
+                        rules={[{ required: true, message: 'Vui lòng nhập lý do cân bằng kho!' }]}
+                    >
                         <TextArea
                             rows={4}
                             placeholder="Lý do cân bằng kho (VD: Kiểm kê định kỳ, phát hiện lỗi nhập liệu...)"
@@ -1095,7 +1147,12 @@ export default function StockBalancePage() {
                         </Button>
                         <Button
                             type="primary"
-                            onClick={handleApplyBalance}
+                            onClick={async () => {
+                                try {
+                                    await form.validateFields();
+                                    handleApplyBalance();
+                                } catch { /* validation failed */ }
+                            }}
                             loading={loading}
                             style={{ background: '#00ab56', borderColor: '#00ab56' }}
                         >
@@ -1154,7 +1211,11 @@ export default function StockBalancePage() {
                         <Form.Item label="Tồn thực tế kiểm kê" name="actualStock" rules={[{ required: true, message: 'Vui lòng nhập tồn thực tế!' }]}>
                             <InputNumber placeholder="Nhập số lượng thực tế..." min={0} style={{ width: '100%' }} size="large" />
                         </Form.Item>
-                        <Form.Item label="Ghi chú (tùy chọn)" name="notes">
+                        <Form.Item
+                            label={<span style={{ fontWeight: 600 }}>📝 Lý do cân bằng <span style={{ color: '#ff4d4f' }}>*</span></span>}
+                            name="notes"
+                            rules={[{ required: true, message: 'Vui lòng nhập lý do cân bằng!' }]}
+                        >
                             <TextArea rows={3} placeholder="Lý do điều chỉnh (VD: Kiểm kê tồn kho, sai sót nhập liệu...)" />
                         </Form.Item>
                         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
@@ -1171,6 +1232,8 @@ export default function StockBalancePage() {
                     </div>
                 )}
             </Modal>
+
+
 
             <style>{`
                 .stock-difference-row {
