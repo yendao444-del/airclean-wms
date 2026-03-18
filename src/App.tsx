@@ -309,6 +309,18 @@ function AppContent() {
                     colorBgContainer: '#ffffff',
                 },
             }}
+            spin={{
+                indicator: <div className="logo-spin-wrapper">
+                    <img
+                        src="./logo_splash.png"
+                        alt="Loading"
+                        className="logo-spin-img"
+                    />
+                    <div className="logo-spin-dots">
+                        <span></span><span></span><span></span>
+                    </div>
+                </div>,
+            }}
         >
             <AntAppProvider>
                 <GlobalTaskAlerts />
@@ -337,14 +349,19 @@ function AppContent() {
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
-                                fontSize: collapsed ? '20px' : '22px',
-                                fontWeight: 700,
-                                color: '#00ab56',
                                 borderBottom: '1px solid #f0f0f0',
-                                background: '#fafafa',
+                                padding: '0 12px',
                             }}
                         >
-                            {collapsed ? '📦' : '📦 AIRCLEAN WMS'}
+                            <img
+                                src="./logo-ngang.png"
+                                alt="AIRCLEAN WMS"
+                                style={{
+                                    height: collapsed ? 28 : 40,
+                                    maxWidth: collapsed ? 50 : '100%',
+                                    objectFit: 'contain',
+                                }}
+                            />
                         </div>
                         <Menu
                             defaultSelectedKeys={['dashboard']}

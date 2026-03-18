@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
     Card,
     Button,
@@ -20,7 +20,7 @@ import {
     Collapse,
     Alert,
 } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, RollbackOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, CheckCircleOutlined, WarningOutlined, SearchOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, RollbackOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, CheckCircleOutlined, WarningOutlined, SearchOutlined, StopOutlined, DollarOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import * as XLSX from 'xlsx';
@@ -103,7 +103,21 @@ export default function RefundsPage() {
     const alertSoundRef = useRef<HTMLAudioElement | null>(null);
 
     // 🔍 State cho bộ lọc trạng thái
-    const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'received' | 'completed' | 'overdue'>('pending');
+    const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'received' | 'completed' | 'overdue' | 'lost'>('pending');
+
+    // 🚫 State cho Mất hàng
+    const [lostModalVisible, setLostModalVisible] = useState(false);
+    const [lostTarget, setLostTarget] = useState<Refund | null>(null);
+    const [compModalVisible, setCompModalVisible] = useState(false);
+    const [compTarget, setCompTarget] = useState<Refund | null>(null);
+    const [compAmount, setCompAmount] = useState<number>(0);
+    // Map: refundId -> { amount: number, date: string }
+    const [compensationMap, setCompensationMap] = useState<Record<number, { amount: number; date: string }>>(() => {
+        try {
+            const saved = localStorage.getItem('refund_compensation_map');
+            return saved ? JSON.parse(saved) : {};
+        } catch { return {}; }
+    });
 
     // 📦 State cho xác nhận hoàn - chọn SKU & SL thực nhận
     const [returnItemsMap, setReturnItemsMap] = useState<Record<number, ReturnItem[]>>({});
@@ -123,6 +137,11 @@ export default function RefundsPage() {
     useEffect(() => {
         localStorage.setItem('refund_video_ids', JSON.stringify(videoIds));
     }, [videoIds]);
+
+    // 🚫 Auto-save compensationMap vào localStorage
+    useEffect(() => {
+        localStorage.setItem('refund_compensation_map', JSON.stringify(compensationMap));
+    }, [compensationMap]);
 
     useEffect(() => {
         // Khởi tạo audio
@@ -1092,24 +1111,30 @@ export default function RefundsPage() {
                 const refundDate = dayjs(record.refundDate);
                 const now = dayjs();
                 const daysPassed = now.diff(refundDate, 'day');
-                const isOverdue = daysPassed > 3 && status !== 'completed' && status !== 'received';
+                const isOverdue = daysPassed > 3 && status !== 'completed' && status !== 'received' && status !== 'lost';
 
                 const statusMap: Record<string, { color: string; label: string }> = {
                     'pending': { color: 'processing', label: 'Chưa hoàn' },
                     'received': { color: 'blue', label: '📋 Đã nhận' },
                     'completed': { color: 'success', label: '✅ Đã hoàn' },
+                    'lost': { color: 'error', label: '🚫 Mất hàng' },
                 };
                 const st = statusMap[status] || statusMap['pending'];
 
                 return (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <Tag color={st.color}>
+                        <Tag color={st.color} style={status === 'lost' ? { fontWeight: 700 } : {}}>
                             {st.label}
                         </Tag>
                         {isOverdue && (
                             <Tag color="red" style={{ fontWeight: 600 }}>
                                 ⚠️ Quá hạn ({daysPassed} ngày)
                             </Tag>
+                        )}
+                        {status === 'lost' && (
+                            <span style={{ fontSize: 11, color: '#8c8c8c' }}>
+                                {daysPassed} ngày trước
+                            </span>
                         )}
                     </div>
                 );
@@ -1121,7 +1146,7 @@ export default function RefundsPage() {
             width: 100,
             fixed: 'right',
             render: (_, record) => {
-                const menuItems = [
+                const menuItems: any[] = [
                     {
                         key: 'edit',
                         icon: <EditOutlined />,
@@ -1136,6 +1161,23 @@ export default function RefundsPage() {
                         onClick: () => handleDelete(record),
                     },
                 ];
+
+                // Thêm nút "Đánh dấu mất hàng" cho tất cả trạng thái trừ đã hoàn & đã mất
+                if (record.status !== 'completed' && record.status !== 'lost') {
+                    menuItems.push(
+                        { type: 'divider' },
+                        {
+                            key: 'lost',
+                            icon: <StopOutlined />,
+                            label: <span style={{ fontWeight: 600 }}>Đánh dấu mất hàng</span>,
+                            danger: true,
+                            onClick: () => {
+                                setLostTarget(record);
+                                setLostModalVisible(true);
+                            },
+                        },
+                    );
+                }
 
                 return (
                     <Dropdown menu={{ items: menuItems }} trigger={['click']}>
@@ -1197,20 +1239,98 @@ export default function RefundsPage() {
     ];
 
 
+    // 🚫 Hàm đánh dấu mất hàng
+    const handleMarkLost = async () => {
+        if (!lostTarget) return;
+        try {
+            await window.electronAPI.refunds.update(lostTarget.id, { status: 'lost' });
+            setRefunds(prev => prev.map(r => r.id === lostTarget.id ? { ...r, status: 'lost' } : r));
+            message.success(`🚫 Đã đánh dấu mất hàng: ${lostTarget.orderNumber || lostTarget.refundCode || '#' + lostTarget.id}`);
+            setLostModalVisible(false);
+            setLostTarget(null);
+        } catch (error) {
+            message.error('❌ Lỗi khi đánh dấu mất hàng!');
+        }
+    };
+
+    // 💰 Hàm xác nhận đền bù
+    const handleConfirmCompensation = () => {
+        if (!compTarget || compAmount <= 0) {
+            message.warning('Vui lòng nhập số tiền đền bù!');
+            return;
+        }
+        setCompensationMap(prev => ({
+            ...prev,
+            [compTarget.id]: { amount: compAmount, date: dayjs().format('DD/MM/YYYY HH:mm') },
+        }));
+        const pct = Math.round(compAmount / compTarget.totalAmount * 100);
+        message.success(`✅ Đã ghi nhận đền bù ${compAmount.toLocaleString('vi-VN')} đ (${pct}%)`);
+        setCompModalVisible(false);
+        setCompTarget(null);
+        setCompAmount(0);
+    };
+
     // 🔍 Lọc dữ liệu theo trạng thái
     const filteredRefunds = refunds.filter(refund => {
         if (statusFilter === 'all') return true;
         if (statusFilter === 'pending') return refund.status === 'pending';
         if (statusFilter === 'received') return refund.status === 'received';
         if (statusFilter === 'completed') return refund.status === 'completed';
+        if (statusFilter === 'lost') return refund.status === 'lost';
         if (statusFilter === 'overdue') {
             const refundDate = dayjs(refund.refundDate);
             const now = dayjs();
             const daysPassed = now.diff(refundDate, 'day');
-            return daysPassed > 3 && refund.status !== 'completed' && refund.status !== 'received';
+            return daysPassed > 3 && refund.status !== 'completed' && refund.status !== 'received' && refund.status !== 'lost';
         }
         return true;
     });
+
+    // 📊 Thống kê mất hàng
+    const lostRefunds = refunds.filter(r => r.status === 'lost');
+    const lostTotal = lostRefunds.reduce((s, r) => s + r.totalAmount, 0);
+    const lostCompensated = lostRefunds.filter(r => compensationMap[r.id]);
+    const lostNotCompensated = lostRefunds.filter(r => !compensationMap[r.id]);
+    const compensatedTotal = lostCompensated.reduce((s, r) => s + (compensationMap[r.id]?.amount || 0), 0);
+    const notCompensatedTotal = lostNotCompensated.reduce((s, r) => s + r.totalAmount, 0);
+
+    // Cột đền bù (chỉ hiện khi filter = lost)
+    const lostColumns: ColumnsType<Refund> = statusFilter === 'lost' ? [
+        ...columns.slice(0, -1), // Bỏ cột actions cuối
+        {
+            title: 'Đền bù',
+            key: 'compensation',
+            width: 150,
+            render: (_, record) => {
+                const comp = compensationMap[record.id];
+                if (comp) {
+                    const pct = Math.round(comp.amount / record.totalAmount * 100);
+                    return (
+                        <div>
+                            <Tag color="success" style={{ fontWeight: 600 }}>✅ Đã đền bù</Tag>
+                            <div style={{ fontSize: 10, color: '#389e0d', marginTop: 2 }}>
+                                💰 {comp.amount.toLocaleString('vi-VN')} đ ({pct}%)
+                            </div>
+                        </div>
+                    );
+                }
+                return (
+                    <Tag
+                        color="warning"
+                        style={{ cursor: 'pointer', fontWeight: 600 }}
+                        onClick={() => {
+                            setCompTarget(record);
+                            setCompAmount(record.totalAmount);
+                            setCompModalVisible(true);
+                        }}
+                    >
+                        ⏳ Chưa đền bù
+                    </Tag>
+                );
+            },
+        },
+        columns[columns.length - 1], // Cột actions
+    ] : columns;
 
 
     return (
@@ -1424,11 +1544,14 @@ export default function RefundsPage() {
                         <Radio.Button value="overdue">
                             ⚠️ Khiếu nại ({refunds.filter(r => {
                                 const daysPassed = dayjs().diff(dayjs(r.refundDate), 'day');
-                                return daysPassed > 3 && r.status !== 'completed' && r.status !== 'received';
+                                return daysPassed > 3 && r.status !== 'completed' && r.status !== 'received' && r.status !== 'lost';
                             }).length})
                         </Radio.Button>
                         <Radio.Button value="completed">
                             ✅ Đã hoàn ({refunds.filter(r => r.status === 'completed').length})
+                        </Radio.Button>
+                        <Radio.Button value="lost" style={statusFilter === 'lost' ? { background: '#ff4d4f', borderColor: '#ff4d4f' } : { color: '#a8071a', fontWeight: 700 }}>
+                            🚫 Mất hàng ({lostRefunds.length})
                         </Radio.Button>
                         <Radio.Button value="all">
                             📋 Tất cả ({refunds.length})
@@ -1466,13 +1589,35 @@ export default function RefundsPage() {
                     </Dropdown>
                 </div>
 
+                {/* 📊 Summary cards cho tab Mất hàng */}
+                {statusFilter === 'lost' && lostRefunds.length > 0 && (
+                    <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
+                        <Card style={{ flex: 1, borderColor: '#ffa39e', background: 'linear-gradient(135deg, #fff1f0 0%, #fff 100%)' }}>
+                            <div style={{ fontSize: 28, fontWeight: 700, color: '#a8071a' }}>{lostRefunds.length}</div>
+                            <div style={{ fontSize: 13, color: '#8c8c8c', marginTop: 4 }}>Tổng đơn mất hàng</div>
+                            <div style={{ fontSize: 15, fontWeight: 600, color: '#a8071a', marginTop: 4 }}>Thiệt hại: {lostTotal.toLocaleString('vi-VN')} đ</div>
+                        </Card>
+                        <Card style={{ flex: 1, borderColor: '#ffd591', background: 'linear-gradient(135deg, #fff7e6 0%, #fff 100%)' }}>
+                            <div style={{ fontSize: 28, fontWeight: 700, color: '#d46b08' }}>{lostNotCompensated.length}</div>
+                            <div style={{ fontSize: 13, color: '#8c8c8c', marginTop: 4 }}>Chưa đền bù</div>
+                            <div style={{ fontSize: 15, fontWeight: 600, color: '#d46b08', marginTop: 4 }}>Còn nợ: {notCompensatedTotal.toLocaleString('vi-VN')} đ</div>
+                        </Card>
+                        <Card style={{ flex: 1, borderColor: '#b7eb8f', background: 'linear-gradient(135deg, #f6ffed 0%, #fff 100%)' }}>
+                            <div style={{ fontSize: 28, fontWeight: 700, color: '#389e0d' }}>{lostCompensated.length}</div>
+                            <div style={{ fontSize: 13, color: '#8c8c8c', marginTop: 4 }}>Đã đền bù</div>
+                            <div style={{ fontSize: 15, fontWeight: 600, color: '#389e0d', marginTop: 4 }}>Thu hồi: {compensatedTotal.toLocaleString('vi-VN')} đ</div>
+                        </Card>
+                    </div>
+                )}
+
                 <Card>
                     <Table
-                        columns={columns}
+                        columns={lostColumns}
                         dataSource={filteredRefunds}
                         rowKey="id"
                         loading={loading}
                         rowClassName={(record) => {
+                            if (record.status === 'lost' && compensationMap[record.id]) return 'compensated-row';
                             try {
                                 const items = JSON.parse(record.items);
                                 return items.length > 1 ? 'multi-sku-row' : '';
@@ -1951,6 +2096,155 @@ export default function RefundsPage() {
                             </Button>
                         </div>
                     </Form>
+                </Modal>
+
+                {/* 🚫 Modal xác nhận MẤT HÀNG */}
+                <Modal
+                    title={
+                        <span style={{ color: '#a8071a', fontWeight: 700 }}>
+                            <WarningOutlined style={{ marginRight: 8 }} />
+                            Xác nhận đánh dấu mất hàng?
+                        </span>
+                    }
+                    open={lostModalVisible}
+                    onCancel={() => { setLostModalVisible(false); setLostTarget(null); }}
+                    footer={[
+                        <Button key="cancel" onClick={() => { setLostModalVisible(false); setLostTarget(null); }}>
+                            Hủy
+                        </Button>,
+                        <Button key="confirm" danger type="primary" icon={<StopOutlined />} onClick={handleMarkLost}>
+                            🚫 Xác nhận mất hàng
+                        </Button>,
+                    ]}
+                    width={480}
+                >
+                    {lostTarget && (
+                        <div>
+                            <p style={{ fontSize: 14, color: '#595959', marginBottom: 16 }}>
+                                Đơn hàng này sẽ được chuyển sang trạng thái <strong style={{ color: '#a8071a' }}>Mất hàng</strong>.
+                                Hàng sẽ <strong>không được cộng lại tồn kho</strong>.
+                            </p>
+                            <div style={{
+                                background: '#fafafa', border: '1px solid #f0f0f0',
+                                borderRadius: 8, padding: '12px 16px',
+                            }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
+                                    <span style={{ color: '#8c8c8c' }}>Order ID</span>
+                                    <Tag color="blue">{lostTarget.orderNumber || '—'}</Tag>
+                                </div>
+                                {lostTarget.notes?.match(/Tracking: ([^|]+)/) && (
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
+                                        <span style={{ color: '#8c8c8c' }}>Tracking ID</span>
+                                        <Tag color="orange">{lostTarget.notes.match(/Tracking: ([^|]+)/)![1].trim()}</Tag>
+                                    </div>
+                                )}
+                                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
+                                    <span style={{ color: '#8c8c8c' }}>Nguồn</span>
+                                    <span style={{ fontWeight: 600 }}>{lostTarget.customerName}</span>
+                                </div>
+                                {lostTarget.notes?.match(/Shipping: ([^|]+)/) && (
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
+                                        <span style={{ color: '#8c8c8c' }}>ĐVVC</span>
+                                        <span style={{ fontWeight: 600 }}>{lostTarget.notes.match(/Shipping: ([^|]+)/)![1].trim()}</span>
+                                    </div>
+                                )}
+                                <Divider style={{ margin: '8px 0' }} />
+                                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
+                                    <span style={{ fontWeight: 600, color: '#595959' }}>Giá trị đơn hàng</span>
+                                    <span style={{ color: '#a8071a', fontSize: 15, fontWeight: 700 }}>
+                                        {lostTarget.totalAmount.toLocaleString('vi-VN')} đ
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </Modal>
+
+                {/* 💰 Modal NHẬP SỐ TIỀN ĐỀN BÙ */}
+                <Modal
+                    title={
+                        <span style={{ color: '#389e0d', fontWeight: 700 }}>
+                            <DollarOutlined style={{ marginRight: 8 }} />
+                            Xác nhận đền bù
+                        </span>
+                    }
+                    open={compModalVisible}
+                    onCancel={() => { setCompModalVisible(false); setCompTarget(null); setCompAmount(0); }}
+                    footer={[
+                        <Button key="cancel" onClick={() => { setCompModalVisible(false); setCompTarget(null); setCompAmount(0); }}>
+                            Hủy
+                        </Button>,
+                        <Button key="confirm" type="primary" style={{ background: '#52c41a', borderColor: '#52c41a' }} onClick={handleConfirmCompensation}>
+                            ✅ Xác nhận đền bù
+                        </Button>,
+                    ]}
+                    width={440}
+                >
+                    {compTarget && (
+                        <div>
+                            <div style={{
+                                background: '#fafafa', border: '1px solid #f0f0f0',
+                                borderRadius: 8, padding: '12px 16px', marginBottom: 16,
+                            }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
+                                    <span style={{ color: '#8c8c8c' }}>Order ID</span>
+                                    <Tag color="blue">{compTarget.orderNumber || '—'}</Tag>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
+                                    <span style={{ color: '#8c8c8c' }}>Giá trị đơn hàng</span>
+                                    <span style={{ color: '#a8071a', fontWeight: 700 }}>{compTarget.totalAmount.toLocaleString('vi-VN')} đ</span>
+                                </div>
+                            </div>
+
+                            <div style={{ marginBottom: 12 }}>
+                                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Số tiền được đền bù:</div>
+                                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                    <InputNumber
+                                        value={compAmount}
+                                        onChange={(val) => setCompAmount(val || 0)}
+                                        style={{
+                                            flex: 1, fontSize: 15, fontWeight: 600,
+                                            borderColor: '#52c41a', borderWidth: 2,
+                                        }}
+                                        formatter={value => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                                        parser={value => Number(value?.replace(/,/g, '') || 0)}
+                                        min={0}
+                                        size="large"
+                                    />
+                                    <span style={{ fontSize: 14, fontWeight: 600, color: '#8c8c8c' }}>đ</span>
+                                </div>
+
+                                <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                                    {[100, 80, 50, 30].map(pct => (
+                                        <Button
+                                            key={pct}
+                                            size="small"
+                                            type={compAmount === Math.round(compTarget.totalAmount * pct / 100) ? 'primary' : 'default'}
+                                            style={compAmount === Math.round(compTarget.totalAmount * pct / 100) ? { background: '#52c41a', borderColor: '#52c41a' } : {}}
+                                            onClick={() => setCompAmount(Math.round(compTarget.totalAmount * pct / 100))}
+                                        >
+                                            {pct}%
+                                        </Button>
+                                    ))}
+                                </div>
+
+                                {compAmount > 0 && (
+                                    <div style={{
+                                        marginTop: 10, padding: '8px 12px', borderRadius: 6,
+                                        fontSize: 12, fontWeight: 600,
+                                        ...(Math.round(compAmount / compTarget.totalAmount * 100) >= 100
+                                            ? { background: '#f6ffed', color: '#389e0d', border: '1px solid #b7eb8f' }
+                                            : { background: '#fff7e6', color: '#d46b08', border: '1px solid #ffd591' }),
+                                    }}>
+                                        {Math.round(compAmount / compTarget.totalAmount * 100) >= 100
+                                            ? `✅ Đền bù 100% — Thu hồi toàn bộ ${compAmount.toLocaleString('vi-VN')} đ`
+                                            : `⚠️ Đền bù ${Math.round(compAmount / compTarget.totalAmount * 100)}% — Thiệt hại còn lại: ${(compTarget.totalAmount - compAmount).toLocaleString('vi-VN')} đ`
+                                        }
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
                 </Modal>
 
             </div>

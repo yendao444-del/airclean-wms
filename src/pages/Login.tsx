@@ -75,18 +75,22 @@ export default function Login() {
                 {/* Logo/Header */}
                 <div style={{ textAlign: 'center', marginBottom: 40 }}>
                     <div style={{
-                        width: 90,
-                        height: 90,
-                        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                        borderRadius: '50%',
+                        width: 100,
+                        height: 100,
                         margin: '0 auto 24px',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        fontSize: 48,
-                        boxShadow: '0 10px 30px rgba(102, 126, 234, 0.4)',
                     }}>
-                        🛒
+                        <img
+                            src="./logo_splash.png"
+                            alt="AIRCLEAN Logo"
+                            style={{
+                                width: '100%',
+                                height: '100%',
+                                objectFit: 'contain',
+                            }}
+                        />
                     </div>
                     <Title level={2} style={{ margin: '0 0 8px 0', color: '#262626', fontSize: 28 }}>
                         AIRCLEAN CORP.

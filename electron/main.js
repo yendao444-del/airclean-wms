@@ -49,8 +49,8 @@ function createWindow() {
         },
         title: 'QuanLyPOS - Quản lý bán hàng',
         icon: app.isPackaged
-            ? path.join(__dirname, '../dist/favicon.png')
-            : path.join(__dirname, '../public/favicon.png'),
+            ? path.join(__dirname, '../dist/app_icon.ico')
+            : path.join(__dirname, '../public/app_icon.ico'),
         backgroundColor: '#1f1f1f',
     });
 

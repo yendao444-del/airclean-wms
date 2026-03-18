@@ -3,6 +3,41 @@
     height: 100%;
 }
 
+/* Logo Spin Animation - Custom loading indicator */
+.logo-spin-wrapper {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+}
+.logo-spin-img {
+    width: 40px;
+    height: 40px;
+    object-fit: contain;
+    animation: logoSpin 1.2s ease-in-out infinite;
+}
+.logo-spin-dots {
+    display: flex;
+    gap: 5px;
+}
+.logo-spin-dots span {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #00ab56;
+    animation: logoDotBounce 1.2s ease-in-out infinite;
+}
+.logo-spin-dots span:nth-child(2) { animation-delay: 0.15s; }
+.logo-spin-dots span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes logoSpin {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(0.85); opacity: 0.5; }
+}
+@keyframes logoDotBounce {
+    0%, 80%, 100% { transform: scale(0.5); opacity: 0.3; }
+    40% { transform: scale(1); opacity: 1; }
+}
+
 /* ============= SIDEBAR COLLAPSE BUTTON ============= */
 .ant-layout-sider-trigger {
     background: linear-gradient(135deg, #00ab56 0%, #00d66c 100%) !important;
@@ -193,6 +228,15 @@
 
 .ant-table-tbody>tr.multi-sku-row:hover>td {
     background-color: #fff4d6 !important;
+}
+
+/* Compensated Row - Đơn mất hàng đã đền bù */
+.ant-table-tbody>tr.compensated-row>td {
+    background-color: #f6ffed !important;
+}
+
+.ant-table-tbody>tr.compensated-row:hover>td {
+    background-color: #e8fce0 !important;
 }
 
 /* ============= RESPONSIVE UTILITIES ============= */
