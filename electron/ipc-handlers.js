@@ -1428,6 +1428,25 @@ ipcMain.handle('posOrder:create', async (event, data) => {
         const profit = total - totalCost;
 
         // 3. Create Order + OrderItems + Payment in transaction
+        // Lookup userId from userName for createdBy
+        let createdByUserId = null;
+        if (data.userName) {
+            try {
+                const user = await prisma.user.findFirst({
+                    where: { 
+                        OR: [
+                            { username: data.userName },
+                            { fullName: data.userName }
+                        ]
+                    },
+                    select: { id: true }
+                });
+                if (user) createdByUserId = user.id;
+            } catch (e) {
+                console.log('  ⚠️ Could not find user:', data.userName);
+            }
+        }
+
         const order = await prisma.$transaction(async (tx) => {
             // Create Order
             const newOrder = await tx.order.create({
@@ -1443,6 +1462,7 @@ ipcMain.handle('posOrder:create', async (event, data) => {
                     total,
                     profit,
                     note: data.note || null,
+                    createdBy: createdByUserId,
                 }
             });
 
@@ -1550,13 +1570,20 @@ ipcMain.handle('posOrder:getAll', async (event, filters = {}) => {
                 items: true,
                 payments: true,
                 customer: true,
+                user: { select: { username: true, fullName: true } },
             },
             orderBy: { createdAt: 'desc' },
             take: filters.limit || 200,
         });
 
+        // Map userName from user relation for frontend
+        const ordersWithUser = orders.map(o => ({
+            ...o,
+            userName: o.user?.fullName || o.user?.username || null,
+        }));
+
         console.log(`✅ [POS] Loaded ${orders.length} POS orders`);
-        return { success: true, data: orders };
+        return { success: true, data: ordersWithUser };
     } catch (error) {
         console.error('❌ [POS] Get orders error:', error.message);
         return { success: false, error: error.message };

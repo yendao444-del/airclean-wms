@@ -33,6 +33,7 @@ interface UnifiedOrder {
     tracking?: string;
     shipping?: string;
     notes?: string;
+    createdBy?: string;
 }
 
 type DatePreset = 'today' | '7days' | '30days' | 'month' | 'custom';
@@ -78,6 +79,7 @@ export default function OrdersPage() {
                         customer: po.customer?.name || po.customerName || 'Khách lẻ',
                         items: JSON.stringify(items), totalAmount: po.total || 0,
                         status: po.status || 'completed', date: po.createdAt || '', notes: po.note || '',
+                        createdBy: po.userName || '',
                     });
                 }
             }
@@ -90,6 +92,7 @@ export default function OrdersPage() {
                         orderNumber: `#XH-${ex.id}`, customer: ex.customer || 'Khách lẻ',
                         items: itemsStr, totalAmount: ex.totalAmount || 0,
                         status: ex.status || 'completed', date: ex.createdAt || ex.exportDate || '', notes: ex.notes || '',
+                        createdBy: ex.createdBy || '',
                     });
                 }
             }
@@ -111,6 +114,7 @@ export default function OrdersPage() {
                         tracking: trackingMatch ? trackingMatch[1].trim() : undefined,
                         shipping: shippingMatch ? shippingMatch[1].trim() : undefined,
                         notes: ec.notes || '',
+                        createdBy: ec.createdBy || '',
                     });
                 }
             }
@@ -314,6 +318,15 @@ export default function OrdersPage() {
             title: 'Tổng tiền', dataIndex: 'totalAmount', key: 'totalAmount', width: 120,
             align: 'right', sorter: (a, b) => a.totalAmount - b.totalAmount,
             render: (v) => <Text strong style={{ color: '#00ab56' }}>{fmt(v)}đ</Text>,
+        },
+        {
+            title: 'Người thực hiện', dataIndex: 'createdBy', key: 'createdBy', width: 120,
+            ellipsis: true,
+            render: (v) => v ? (
+                <Tag style={{ fontSize: 11, borderRadius: 6, background: '#f0f5ff', color: '#1890ff', border: '1px solid #adc6ff', fontWeight: 500 }}>
+                    👤 {v}
+                </Tag>
+            ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
         },
     ];
 

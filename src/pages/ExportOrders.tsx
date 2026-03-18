@@ -17,6 +17,8 @@ import {
     Row,
     Col,
     Statistic,
+    Dropdown,
+    Tooltip,
 } from 'antd';
 import {
     PlusOutlined,
@@ -26,6 +28,8 @@ import {
     BarcodeOutlined,
     ClearOutlined,
     SaveOutlined,
+    MoreOutlined,
+    UserOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
@@ -60,6 +64,7 @@ interface ExportOrder {
     totalAmount: number;
     notes?: string;
     items: ExportItem[];
+    createdBy?: string;
 }
 
 type ViewMode = 'list' | 'pos';
@@ -170,6 +175,10 @@ export default function ExportOrdersPage() {
         try {
             const values = await form.validateFields();
 
+            // ⚡ Lưu vào biến local NGAY để tránh mất reference sau re-render
+            const isEditing = !!editingExport;
+            const currentEditingExport = editingExport;
+
             if (!selectedProduct) {
                 message.warning('Vui lòng chọn sản phẩm');
                 return;
@@ -194,10 +203,24 @@ export default function ExportOrdersPage() {
                 }
             }
 
-            // Check stock
-            if (values.quantity > availableStock) {
-                message.error(`⚠️ Không đủ tồn kho! Còn: ${availableStock}`);
-                return;
+            // ========================================
+            // CHECK STOCK (có tính cả stock cũ khi sửa)
+            // ========================================
+            if (isEditing && currentEditingExport) {
+                const oldItem = currentEditingExport.items[0];
+                // Khi sửa: stock thực tế = stock hiện tại + số lượng cũ đã xuất (vì sẽ hoàn lại)
+                const realAvailable = (oldItem.sku === finalSku)
+                    ? availableStock + oldItem.quantity
+                    : availableStock;
+                if (values.quantity > realAvailable) {
+                    message.error(`⚠️ Không đủ tồn kho! Còn: ${realAvailable}`);
+                    return;
+                }
+            } else {
+                if (values.quantity > availableStock) {
+                    message.error(`⚠️ Không đủ tồn kho! Còn: ${availableStock}`);
+                    return;
+                }
             }
 
             const totalAmount = values.quantity * values.unitPrice;
@@ -210,55 +233,40 @@ export default function ExportOrdersPage() {
                 unitPrice: values.unitPrice,
             };
 
-            if (editingExport) {
-                // EDIT MODE - Update in database
-                const updatedExport = {
-                    customer: values.customer,
-                    exportDate: values.exportDate.format('YYYY-MM-DD HH:mm:ss'),
-                    status: values.status,
-                    notes: values.notes,
-                    totalAmount,
-                    items: [exportItem],
-                };
-                await window.electronAPI.exportOrders.update(editingExport.id, updatedExport);
-            } else {
-                // CREATE MODE - Save to database
-                const newExport = {
-                    customer: values.customer,
-                    exportDate: values.exportDate.format('YYYY-MM-DD HH:mm:ss'),
-                    status: values.status,
-                    notes: values.notes,
-                    totalAmount,
-                    items: [exportItem],
-                };
-                await window.electronAPI.exportOrders.create(newExport);
-            }
-
-            // Reload from database
-            await loadExports();
-
             // ========================================
-            // UPDATE STOCK
+            // 1. CẬP NHẬT STOCK TRƯỚC (tránh lệch data)
             // ========================================
-            if (editingExport) {
-                // EDIT MODE: Hoàn lại stock cũ, trừ stock mới
-                const oldItem = editingExport.items[0];
+            if (isEditing && currentEditingExport) {
+                // EDIT MODE: Chỉ trừ/cộng phần CHÊNH LỆCH
+                const oldItem = currentEditingExport.items[0];
 
-                // Hoàn lại stock cũ
-                await window.electronAPI.products.updateStock({
-                    sku: oldItem.sku,
-                    quantity: oldItem.quantity,
-                    isAdd: true, // CỘNG lại
-                });
-
-                // Trừ stock mới
-                await window.electronAPI.products.updateStock({
-                    sku: finalSku,
-                    quantity: values.quantity,
-                    isAdd: false, // TRỪ đi
-                });
-
-                console.log(`📦 Stock updated: Hoàn ${oldItem.sku} +${oldItem.quantity}, Trừ ${finalSku} -${values.quantity}`);
+                if (oldItem.sku === finalSku) {
+                    // Cùng SKU → chỉ xử lý chênh lệch số lượng
+                    const diff = values.quantity - oldItem.quantity;
+                    if (diff !== 0) {
+                        await window.electronAPI.products.updateStock({
+                            sku: finalSku,
+                            quantity: Math.abs(diff),
+                            isAdd: diff < 0, // diff < 0 = giảm SL → cộng stock, diff > 0 = tăng SL → trừ stock
+                        });
+                        console.log(`📦 Stock updated (sửa): ${finalSku} ${diff > 0 ? '-' : '+'}${Math.abs(diff)} (${oldItem.quantity} → ${values.quantity})`);
+                    } else {
+                        console.log(`📦 Stock unchanged: SL không đổi (${values.quantity})`);
+                    }
+                } else {
+                    // Đổi SKU → hoàn lại SKU cũ, trừ SKU mới
+                    await window.electronAPI.products.updateStock({
+                        sku: oldItem.sku,
+                        quantity: oldItem.quantity,
+                        isAdd: true,
+                    });
+                    await window.electronAPI.products.updateStock({
+                        sku: finalSku,
+                        quantity: values.quantity,
+                        isAdd: false,
+                    });
+                    console.log(`📦 Stock updated (đổi SP): Hoàn ${oldItem.sku} +${oldItem.quantity}, Trừ ${finalSku} -${values.quantity}`);
+                }
 
                 // Log activity
                 await window.electronAPI.activityLog.create({
@@ -274,16 +282,16 @@ export default function ExportOrdersPage() {
                             newQuantity: values.quantity
                         }
                     },
-                    description: `Xuất hàng (Cập nhật): Hoàn ${oldItem.sku} +${oldItem.quantity}, Xuất ${finalSku} -${values.quantity}`,
+                    description: `Sửa phiếu xuất PX${currentEditingExport.id.toString().padStart(4, '0')}: ${oldItem.quantity} → ${values.quantity}`,
                     userName: currentUser,
                     severity: 'INFO'
                 });
             } else {
-                // CREATE MODE: Chỉ trừ stock
+                // CREATE MODE: Trừ stock
                 await window.electronAPI.products.updateStock({
                     sku: finalSku,
                     quantity: values.quantity,
-                    isAdd: false, // TRỪ đi
+                    isAdd: false,
                 });
 
                 console.log(`📦 Stock updated: Trừ ${finalSku} -${values.quantity}`);
@@ -307,7 +315,35 @@ export default function ExportOrdersPage() {
                 });
             }
 
-            message.success(editingExport ? '✅ Đã cập nhật phiếu xuất!' : '✅ Đã tạo phiếu xuất thành công!');
+            // ========================================
+            // 2. LƯU/CẬP NHẬT PHIẾU XUẤT
+            // ========================================
+            if (isEditing && currentEditingExport) {
+                // EDIT MODE - Update in database
+                const updatedExport = {
+                    customer: values.customer,
+                    exportDate: values.exportDate.format('YYYY-MM-DD HH:mm:ss'),
+                    status: values.status,
+                    notes: values.notes,
+                    totalAmount,
+                    items: [exportItem],
+                };
+                await window.electronAPI.exportOrders.update(currentEditingExport.id, updatedExport);
+            } else {
+                // CREATE MODE - Save to database
+                const newExport = {
+                    customer: values.customer,
+                    exportDate: values.exportDate.format('YYYY-MM-DD HH:mm:ss'),
+                    status: values.status,
+                    notes: values.notes,
+                    totalAmount,
+                    items: [exportItem],
+                    createdBy: currentUser || null,
+                };
+                await window.electronAPI.exportOrders.create(newExport);
+            }
+
+            message.success(isEditing ? '✅ Đã cập nhật phiếu xuất!' : '✅ Đã tạo phiếu xuất thành công!');
             setModalVisible(false);
             form.resetFields();
             setSelectedProduct(null);
@@ -315,7 +351,8 @@ export default function ExportOrdersPage() {
             setSelectedProductSku('');
             setEditingExport(null);
 
-            // Reload products để cập nhật stock hiển thị
+            // Reload CUỐI CÙNG để cập nhật UI
+            await loadExports();
             await loadProducts();
         } catch (error) {
             console.error('Validation error:', error);
@@ -533,6 +570,7 @@ export default function ExportOrdersPage() {
                         notes: 'POS Scan',
                         totalAmount,
                         items: posItems,
+                        createdBy: currentUser || null,
                     };
                     await window.electronAPI.exportOrders.create(newExport);
                     await loadExports();
@@ -595,6 +633,18 @@ export default function ExportOrdersPage() {
             },
         },
         {
+            title: 'Người xuất',
+            dataIndex: 'createdBy',
+            width: 130,
+            render: (createdBy) => createdBy ? (
+                <Tooltip title={createdBy}>
+                    <Tag icon={<UserOutlined />} color="geekblue" style={{ fontSize: 11 }}>
+                        {createdBy}
+                    </Tag>
+                </Tooltip>
+            ) : <span style={{ color: '#bfbfbf' }}>—</span>,
+        },
+        {
             title: 'Trạng thái',
             dataIndex: 'status',
             width: 130,
@@ -613,13 +663,35 @@ export default function ExportOrdersPage() {
         },
         {
             title: '',
-            width: 120,
+            width: 60,
             align: 'center',
             render: (_, record) => (
-                <Space>
-                    <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)}>Sửa</Button>
-                    <Button type="link" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDelete(record)}>Xóa</Button>
-                </Space>
+                <Dropdown
+                    menu={{
+                        items: [
+                            {
+                                key: 'edit',
+                                label: 'Sửa',
+                                icon: <EditOutlined />,
+                                onClick: () => handleEdit(record),
+                            },
+                            {
+                                type: 'divider',
+                            },
+                            {
+                                key: 'delete',
+                                label: 'Xóa',
+                                icon: <DeleteOutlined />,
+                                danger: true,
+                                onClick: () => handleDelete(record),
+                            },
+                        ],
+                    }}
+                    trigger={['click']}
+                    placement="bottomRight"
+                >
+                    <Button type="text" size="small" icon={<MoreOutlined style={{ fontSize: 18 }} />} />
+                </Dropdown>
             ),
         },
     ];
@@ -980,7 +1052,7 @@ export default function ExportOrdersPage() {
                             size="large"
                             style={{ background: '#00ab56', borderColor: '#00ab56' }}
                         >
-                            ✅ Tạo phiếu xuất
+                            {editingExport ? '✅ Cập nhật phiếu xuất' : '✅ Tạo phiếu xuất'}
                         </Button>
                     </div>
                 </Form>
