@@ -70,7 +70,10 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
             if (purRes.success && purRes.data) {
                 const now = dayjs();
                 const missing = purRes.data.filter((p: any) =>
-                    p.vatInvoiceStatus !== 'uploaded' && now.diff(dayjs(p.purchaseDate), 'day') >= 3
+                    p.vatInvoiceStatus !== 'uploaded' &&
+                    p.vatInvoiceStatus !== 'thht' &&
+                    p.vatInvoiceStatus !== 'no_vat' &&
+                    now.diff(dayjs(p.purchaseDate), 'day') >= 3
                 );
                 if (missing.length > 0) {
                     const maxDays = Math.max(...missing.map((p: any) => now.diff(dayjs(p.purchaseDate), 'day')));

@@ -130,7 +130,7 @@ function AppContent() {
 
         // Tools submenu
         const toolsChildren: MenuItem[] = [];
-        if (accessibleKeys.includes('fee-calculator')) {
+        if (accessibleKeys.includes('fee-calculator') && hasPermission('permissions')) {
             toolsChildren.push(createMenuItem('Tính phí sản', 'fee-calculator', <CalculatorOutlined />));
         }
         toolsChildren.push(createMenuItem('Nhặt hàng', 'order-picking', <ScanOutlined />));
