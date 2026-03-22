@@ -47,7 +47,7 @@ function createWindow() {
             sandbox: false,
             preload: path.join(__dirname, 'preload.js'),
         },
-        title: 'QuanLyPOS - Quản lý bán hàng',
+        title: 'DBY POS - Quản lý bán hàng',
         icon: app.isPackaged
             ? path.join(__dirname, '../dist/app_icon.ico')
             : path.join(__dirname, '../public/app_icon.ico'),
@@ -91,7 +91,9 @@ app.whenReady().then(() => {
 
     // Import IPC handlers SAU - bọc try-catch để không crash app
     try {
+        console.time('⚡ ipc-handlers load');
         require('./ipc-handlers');
+        console.timeEnd('⚡ ipc-handlers load');
         console.log('✅ IPC handlers loaded');
     } catch (err) {
         console.error('❌ IPC handlers failed:', err.message);

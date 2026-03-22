@@ -1,6 +1,6 @@
 {
   "name": "quan-ly-ban-hang-desktop",
-  "version": "1.0.104",
+  "version": "1.0.108",
   "description": "Hệ thống quản lý bán hàng - Desktop App",
   "main": "electron/main.js",
   "scripts": {
@@ -31,8 +31,8 @@
     "wait-on": "^9.0.3"
   },
   "build": {
-    "appId": "com.airclean.quanlypos",
-    "productName": "QuanLyPOS",
+    "appId": "com.dby.pos",
+    "productName": "DBY POS",
     "directories": {
       "output": "release4"
     },
@@ -60,8 +60,7 @@
     ],
     "win": {
       "target": "dir",
-      "icon": "favicon/favicon.png",
-      "signAndEditExecutable": false
+      "icon": "public/app_icon.ico"
     },
     "asar": false
   },

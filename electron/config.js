@@ -9,7 +9,7 @@ module.exports = {
     DIRECT_URL: "postgresql://[REDACTED]@supabase/postgres-direct",
     
     // App Metadata
-    APP_NAME: "QuanLyPOS",
+    APP_NAME: "DBY POS",
     APP_VERSION: "1.0.6",
     ENVIRONMENT: "production"
 };

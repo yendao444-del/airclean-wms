@@ -50,7 +50,7 @@ ipcMain.handle('update:check', async () => {
 
         // Lấy thông tin download
         const zipAsset = latestRelease.assets.find(asset =>
-            asset.name.endsWith('.zip') && asset.name.includes('QuanLyPOS')
+            asset.name.endsWith('.zip') && asset.name.includes('DBYPOS')
         );
 
         const updateInfo = {
@@ -95,7 +95,7 @@ function fetchLatestRelease() {
             path: `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`,
             method: 'GET',
             headers: {
-                'User-Agent': 'QuanLyPOS-Desktop-App',
+                'User-Agent': 'DBYPOS-Desktop-App',
                 'Accept': 'application/vnd.github.v3+json'
             }
         };
@@ -192,7 +192,7 @@ function downloadFile(url, destPath, onProgress) {
             const protocol = currentUrl.startsWith('https') ? https : http;
 
             protocol.get(currentUrl, {
-                headers: { 'User-Agent': 'QuanLyPOS-Desktop-App' }
+                headers: { 'User-Agent': 'DBYPOS-Desktop-App' }
             }, (res) => {
                 // Handle redirects
                 if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307) {
@@ -254,7 +254,7 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
         console.log('   URL:', downloadUrl);
 
         // 1. Tạo thư mục tạm
-        const tempDir = path.join(os.tmpdir(), `QuanLyPOS-update-${Date.now()}`);
+        const tempDir = path.join(os.tmpdir(), `DBYPOS-update-${Date.now()}`);
         fs.mkdirSync(tempDir, { recursive: true });
 
         const zipPath = path.join(tempDir, 'update.zip');
@@ -283,8 +283,8 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
         console.log('✅ Giải nén xong');
 
         // 4. Xác định thư mục gốc ứng dụng
-        //    ZIP chứa nội dung của win-unpacked/ (QuanLyPOS.exe, resources/, ...)
-        //    → cần copy vào thư mục chứa QuanLyPOS.exe
+        //    ZIP chứa nội dung của win-unpacked/ (DBY POS.exe, resources/, ...)
+        //    → cần copy vào thư mục chứa DBY POS.exe
         const appRoot = path.dirname(process.execPath);
         console.log('📂 App install dir:', appRoot);
         console.log('📂 __dirname:', __dirname);

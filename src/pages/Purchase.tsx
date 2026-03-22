@@ -107,6 +107,38 @@ export default function PurchasePage() {
     const [vatFiles, setVatFiles] = useState<File[]>([]);
     const [vatUploading, setVatUploading] = useState(false);
 
+    // 👁️ State cho xem HĐ VAT (Google Drive preview)
+    const [vatPreviewVisible, setVatPreviewVisible] = useState(false);
+    const [vatPreviewData, setVatPreviewData] = useState<{
+        driveUrls: string[];
+        invoiceNumber: string;
+        invoiceDate: string;
+        purchaseId: number;
+        supplierName: string;
+    } | null>(null);
+    const [vatPreviewIndex, setVatPreviewIndex] = useState(0);
+
+    // Mở modal xem HĐ VAT qua Google Drive
+    const openVatPreview = (record: any) => {
+        const driveUrl = record.vatInvoiceDriveUrl;
+        if (!driveUrl) {
+            message.warning('Phiếu này chưa có link Google Drive. Vui lòng upload lại HĐ VAT.');
+            openVatModal(record.id, record);
+            return;
+        }
+        // Tách multi-URL (các URL cách nhau bằng \n)
+        const urls = driveUrl.split('\n').map((u: string) => u.trim()).filter(Boolean);
+        setVatPreviewIndex(0);
+        setVatPreviewData({
+            driveUrls: urls,
+            invoiceNumber: record.vatInvoiceNumber || '',
+            invoiceDate: record.vatInvoiceDate ? dayjs(record.vatInvoiceDate).format('DD/MM/YYYY') : '',
+            purchaseId: record.id,
+            supplierName: record.supplierName || '',
+        });
+        setVatPreviewVisible(true);
+    };
+
     // Ref cho trường màu sắc để tự động focus
     const colorSelectRef = useRef<any>(null);
     // Ref cho trường chọn sản phẩm để tự động focus sau khi thêm
@@ -241,6 +273,7 @@ export default function PurchasePage() {
             notes: purchase.notes,
             createdBy: purchase.createdBy || currentUser,
             isThht: (purchase as any).vatInvoiceStatus === 'thht', // 📦 Tích sẵn nếu đã là THHT
+            isNoVat: (purchase as any).vatInvoiceStatus === 'no_vat', // 🏷️ Tích sẵn nếu là Không VAT
         });
         setModalVisible(true);
     };
@@ -334,6 +367,7 @@ export default function PurchasePage() {
                 totalAmount,
                 createdBy: editingPurchase ? editingPurchase.createdBy : currentUser,
                 isThht: values.isThht || false, // 📦 Gửi flag THHT
+                isNoVat: values.isNoVat || false, // 🏷️ Gửi flag Không VAT
             };
 
             let result;
@@ -682,6 +716,9 @@ export default function PurchasePage() {
                 if (result.data?.driveUrls?.length > 0) {
                     message.info('☁️ Đã backup lên Google Drive');
                 }
+                if (result.driveWarning) {
+                    message.warning(result.driveWarning, 8);
+                }
                 setVatModalVisible(false);
                 loadPurchases();
             } else {
@@ -757,7 +794,7 @@ export default function PurchasePage() {
                 if (r.vatInvoiceStatus === 'uploaded') {
                     return (
                         <Tag color="success" style={{ fontWeight: 600, fontSize: 12, cursor: 'pointer' }}
-                            onClick={(e) => { e.stopPropagation(); openVatModal(record.id, r); }}
+                            onClick={(e) => { e.stopPropagation(); openVatPreview(r); }}
                         >
                             ✅ Đã có HĐ
                         </Tag>
@@ -767,6 +804,13 @@ export default function PurchasePage() {
                     return (
                         <Tag color="purple" style={{ fontWeight: 600, fontSize: 12 }}>
                             📦 Đơn THHT
+                        </Tag>
+                    );
+                }
+                if (r.vatInvoiceStatus === 'no_vat') {
+                    return (
+                        <Tag color="default" style={{ fontWeight: 600, fontSize: 12, border: '1px dashed #d9d9d9', color: '#595959' }}>
+                            🏷️ Không VAT
                         </Tag>
                     );
                 }
@@ -825,23 +869,42 @@ export default function PurchasePage() {
                     >
                         Xóa
                     </Button>
-                    {/* 🧾 Nút Upload HĐ VAT */}
-                    {(record as any).vatInvoiceStatus !== 'thht' && (
-                        <Button
-                            icon={<UploadOutlined />}
-                            onClick={() => openVatModal(record.id, record)}
-                            style={{
-                                background: (record as any).vatInvoiceStatus === 'uploaded' ? '#f6ffed' : '#fff7e6',
-                                borderColor: (record as any).vatInvoiceStatus === 'uploaded' ? '#52c41a' : '#faad14',
-                                color: (record as any).vatInvoiceStatus === 'uploaded' ? '#52c41a' : '#d48806',
-                            }}
-                        >
-                            {(record as any).vatInvoiceStatus === 'uploaded' ? '✅ Đã có HĐ VAT' : '🧾 Upload HĐ VAT'}
-                        </Button>
+                    {/* 🧾 Nút Upload / Xem HĐ VAT */}
+                    {['thht', 'no_vat'].includes((record as any).vatInvoiceStatus) ? null : (
+                        (record as any).vatInvoiceStatus === 'uploaded' ? (
+                            <Button
+                                icon={<EyeOutlined />}
+                                onClick={() => openVatPreview(record as any)}
+                                style={{
+                                    background: '#f6ffed',
+                                    borderColor: '#52c41a',
+                                    color: '#52c41a',
+                                }}
+                            >
+                                👁️ Xem HĐ VAT
+                            </Button>
+                        ) : (
+                            <Button
+                                icon={<UploadOutlined />}
+                                onClick={() => openVatModal(record.id, record)}
+                                style={{
+                                    background: '#fff7e6',
+                                    borderColor: '#faad14',
+                                    color: '#d48806',
+                                }}
+                            >
+                                🧾 Upload HĐ VAT
+                            </Button>
+                        )
                     )}
                     {(record as any).vatInvoiceStatus === 'thht' && (
                         <Tag color="purple" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px', lineHeight: '22px' }}>
                             📦 Đơn THHT
+                        </Tag>
+                    )}
+                    {(record as any).vatInvoiceStatus === 'no_vat' && (
+                        <Tag color="default" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px', lineHeight: '22px', border: '1px dashed #d9d9d9', color: '#595959' }}>
+                            🏷️ Không VAT
                         </Tag>
                     )}
                 </div>
@@ -1293,48 +1356,52 @@ export default function PurchasePage() {
                         </Form.Item>
                     </div>
 
-                    <Form.Item
-                        label="👤 Người tạo phiếu"
-                        name="createdBy"
-                        initialValue={currentUser}
-                        tooltip="Người tạo phiếu nhập này"
-                    >
-                        <Input
-                            size="large"
-                            disabled
-                            placeholder={currentUser}
-                            style={{
-                                background: '#f0f9f4',
-                                color: '#00ab56',
-                                fontWeight: 600,
-                                cursor: 'not-allowed'
-                            }}
-                        />
-                    </Form.Item>
-
-                    {/* 📦 Checkbox đánh dấu Đơn THHT */}
-                    <Form.Item
-                        name="isThht"
-                        valuePropName="checked"
-                        style={{ marginBottom: 16 }}
-                    >
-                        <Checkbox
-                            style={{
-                                fontSize: 14,
-                                fontWeight: 600,
-                                padding: '8px 16px',
-                                background: form.getFieldValue('isThht') ? '#f9f0ff' : '#fafafa',
-                                borderRadius: 8,
-                                border: form.getFieldValue('isThht') ? '2px solid #b37feb' : '1px solid #d9d9d9',
-                                transition: 'all 0.3s',
-                            }}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: 16, alignItems: 'center' }}>
+                        <Form.Item
+                            label="👤 Người tạo phiếu"
+                            name="createdBy"
+                            initialValue={currentUser}
+                            tooltip="Người tạo phiếu nhập này"
+                            style={{ marginBottom: 16 }}
                         >
-                            <span style={{ color: '#722ed1' }}>📦 Phiếu THHT</span>
-                            <span style={{ color: '#8c8c8c', fontWeight: 400, marginLeft: 8, fontSize: 12 }}>
-                                (Đơn thay hàng/hàng tặng — không cần HĐ VAT)
-                            </span>
-                        </Checkbox>
-                    </Form.Item>
+                            <Input
+                                size="large"
+                                disabled
+                                placeholder={currentUser}
+                                style={{
+                                    background: '#f0f9f4',
+                                    color: '#00ab56',
+                                    fontWeight: 600,
+                                    cursor: 'not-allowed'
+                                }}
+                            />
+                        </Form.Item>
+
+                        {/* 📦 Checkboxes tùy chọn VAT / THHT */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 8 }}>
+                            <Form.Item
+                                name="isThht"
+                                valuePropName="checked"
+                                style={{ marginBottom: 0 }}
+                            >
+                                <Checkbox onChange={(e) => { if (e.target.checked) form.setFieldsValue({ isNoVat: false }); }}>
+                                    <span style={{ color: '#722ed1', fontWeight: 600 }}>📦 Phiếu THHT</span>
+                                    <span style={{ color: '#8c8c8c', marginLeft: 8, fontSize: 12 }}>(Đơn thay hàng/hàng tặng)</span>
+                                </Checkbox>
+                            </Form.Item>
+
+                            <Form.Item
+                                name="isNoVat"
+                                valuePropName="checked"
+                                style={{ marginBottom: 0 }}
+                            >
+                                <Checkbox onChange={(e) => { if (e.target.checked) form.setFieldsValue({ isThht: false }); }}>
+                                    <span style={{ color: '#595959', fontWeight: 600 }}>🏷️ Không VAT</span>
+                                    <span style={{ color: '#8c8c8c', marginLeft: 8, fontSize: 12 }}>(Không lấy hóa đơn GTGT)</span>
+                                </Checkbox>
+                            </Form.Item>
+                        </div>
+                    </div>
 
                     {/* Add Product Section */}
                     <div style={{
@@ -1476,9 +1543,32 @@ export default function PurchasePage() {
                                             <td style={{ padding: 12, textAlign: 'center' }}>
                                                 <Tag color="green">{item.unit || 'Cái'}</Tag>
                                             </td>
-                                            <td style={{ padding: 12, textAlign: 'right' }}>{item.quantity}</td>
-                                            <td style={{ padding: 12, textAlign: 'right' }}>
-                                                {new Intl.NumberFormat('vi-VN').format(item.unitPrice)} ₫
+                                            <td style={{ padding: '8px 12px', textAlign: 'right' }}>
+                                                <InputNumber
+                                                    value={item.quantity}
+                                                    min={1}
+                                                    size="small"
+                                                    style={{ width: 80 }}
+                                                    onChange={(val) => {
+                                                        const newItems = [...purchaseItems];
+                                                        newItems[index] = { ...newItems[index], quantity: val || 1, total: (val || 1) * newItems[index].unitPrice };
+                                                        setPurchaseItems(newItems);
+                                                    }}
+                                                />
+                                            </td>
+                                            <td style={{ padding: '8px 12px', textAlign: 'right' }}>
+                                                <InputNumber
+                                                    value={item.unitPrice}
+                                                    min={0}
+                                                    size="small"
+                                                    style={{ width: 120 }}
+                                                    formatter={value => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                                                    onChange={(val) => {
+                                                        const newItems = [...purchaseItems];
+                                                        newItems[index] = { ...newItems[index], unitPrice: val || 0, total: newItems[index].quantity * (val || 0) };
+                                                        setPurchaseItems(newItems);
+                                                    }}
+                                                />
                                             </td>
                                             <td style={{ padding: 12, textAlign: 'right', fontWeight: 700 }}>
                                                 {new Intl.NumberFormat('vi-VN').format(item.total)} ₫
@@ -1810,6 +1900,124 @@ export default function PurchasePage() {
                     </Form.Item>
                 </Form>
             </Modal>
+
+            {/* === 👁️ MODAL XEM HĐ VAT (Google Drive Preview) — Hỗ trợ nhiều file === */}
+            <Modal
+                title={
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <span style={{ fontSize: 18 }}>🧾</span>
+                        <div>
+                            <div style={{ fontWeight: 700, fontSize: 16, color: '#262626' }}>
+                                Hóa đơn VAT: #{vatPreviewData?.invoiceNumber}
+                                {(vatPreviewData?.driveUrls?.length || 0) > 1 && (
+                                    <Tag color="blue" style={{ marginLeft: 8 }}>
+                                        {vatPreviewIndex + 1} / {vatPreviewData?.driveUrls?.length} file
+                                    </Tag>
+                                )}
+                            </div>
+                            <div style={{ fontSize: 12, color: '#8c8c8c', fontWeight: 400 }}>
+                                📅 {vatPreviewData?.invoiceDate} · 🏢 {vatPreviewData?.supplierName} · Phiếu #{vatPreviewData?.purchaseId}
+                            </div>
+                        </div>
+                    </div>
+                }
+                open={vatPreviewVisible}
+                onCancel={() => { setVatPreviewVisible(false); setVatPreviewData(null); setVatPreviewIndex(0); }}
+                width={900}
+                style={{ top: 20 }}
+                footer={
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Button
+                            icon={<EditOutlined />}
+                            onClick={() => {
+                                setVatPreviewVisible(false);
+                                if (vatPreviewData) {
+                                    const record = purchases.find(p => p.id === vatPreviewData.purchaseId);
+                                    openVatModal(vatPreviewData.purchaseId, record);
+                                }
+                            }}
+                        >
+                            ✏️ Sửa HĐ VAT
+                        </Button>
+                        <Space>
+                            {/* Nút chuyển file khi có nhiều file */}
+                            {(vatPreviewData?.driveUrls?.length || 0) > 1 && (
+                                <>
+                                    <Button
+                                        disabled={vatPreviewIndex === 0}
+                                        onClick={() => setVatPreviewIndex(i => i - 1)}
+                                    >
+                                        ◀ Trước
+                                    </Button>
+                                    <Button
+                                        disabled={vatPreviewIndex >= (vatPreviewData?.driveUrls?.length || 1) - 1}
+                                        onClick={() => setVatPreviewIndex(i => i + 1)}
+                                    >
+                                        Sau ▶
+                                    </Button>
+                                </>
+                            )}
+                            {vatPreviewData?.driveUrls?.[vatPreviewIndex] && (
+                                <Button
+                                    type="primary"
+                                    icon={<LinkOutlined />}
+                                    onClick={() => window.open(vatPreviewData!.driveUrls[vatPreviewIndex], '_blank')}
+                                    style={{ background: '#1890ff' }}
+                                >
+                                    Mở trên Google Drive
+                                </Button>
+                            )}
+                            <Button onClick={() => { setVatPreviewVisible(false); setVatPreviewData(null); setVatPreviewIndex(0); }}>
+                                Đóng
+                            </Button>
+                        </Space>
+                    </div>
+                }
+            >
+                {/* Thumbnail strip khi có nhiều file */}
+                {(vatPreviewData?.driveUrls?.length || 0) > 1 && (
+                    <div style={{
+                        display: 'flex', gap: 8, marginBottom: 12, padding: '8px 0',
+                        overflowX: 'auto', borderBottom: '1px solid #f0f0f0',
+                    }}>
+                        {vatPreviewData?.driveUrls?.map((_url, idx) => (
+                            <Button
+                                key={idx}
+                                size="small"
+                                type={idx === vatPreviewIndex ? 'primary' : 'default'}
+                                onClick={() => setVatPreviewIndex(idx)}
+                                style={{
+                                    minWidth: 48, fontWeight: idx === vatPreviewIndex ? 700 : 400,
+                                    ...(idx === vatPreviewIndex ? {
+                                        background: 'linear-gradient(135deg, #52c41a, #389e0d)',
+                                        borderColor: '#389e0d',
+                                    } : {})
+                                }}
+                            >
+                                📄 {idx + 1}
+                            </Button>
+                        ))}
+                    </div>
+                )}
+                <div style={{
+                    width: '100%',
+                    height: (vatPreviewData?.driveUrls?.length || 0) > 1 ? '65vh' : '70vh',
+                    borderRadius: 8,
+                    overflow: 'hidden',
+                    border: '2px solid #f0f0f0',
+                    background: '#fafafa',
+                }}>
+                    {vatPreviewData?.driveUrls?.[vatPreviewIndex] && (
+                        <iframe
+                            src={vatPreviewData.driveUrls[vatPreviewIndex].replace('/view', '/preview')}
+                            style={{ width: '100%', height: '100%', border: 'none' }}
+                            title={`HĐ VAT ${vatPreviewData?.invoiceNumber} - File ${vatPreviewIndex + 1}`}
+                            allow="autoplay"
+                        />
+                    )}
+                </div>
+            </Modal>
         </div>
     );
 }
+

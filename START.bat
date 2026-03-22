@@ -3,7 +3,7 @@ chcp 65001 >nul
 cls
 echo.
 echo ╔════════════════════════════════════════╗
-echo ║   🚀 QUAN LY POS - DESKTOP APP        ║
+echo ║   🚀 DBY POS - DESKTOP APP            ║
 echo ╚════════════════════════════════════════╝
 echo.
 echo [+] Đang khởi động Electron App...

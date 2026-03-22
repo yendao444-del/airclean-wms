@@ -10,11 +10,27 @@ process.env.DIRECT_URL = config.DIRECT_URL;
 
 const { PrismaClient } = require('@prisma/client');
 const fs = require('fs');
-const XLSX = require('xlsx');
 const https = require('https');
 const http = require('http');
-const bcrypt = require('bcryptjs');
-const { google } = require('googleapis');
+
+// ⚡ LAZY LOADING — Module nặng chỉ load khi cần, không block startup
+// googleapis (~3-5s), xlsx (~1-2s), bcryptjs (~0.5s) → tiết kiệm ~5-7s
+function lazyRequire(moduleName) {
+    let mod = null;
+    return new Proxy({}, {
+        get(_, prop) {
+            if (!mod) {
+                console.time(`⚡ lazy-load ${moduleName}`);
+                mod = require(moduleName);
+                console.timeEnd(`⚡ lazy-load ${moduleName}`);
+            }
+            return mod[prop];
+        }
+    });
+}
+
+const XLSX = lazyRequire('xlsx');
+const bcrypt = lazyRequire('bcryptjs');
 
 // ========================================
 // GOOGLE DRIVE + TELEGRAM — HĐĐT BACKUP
@@ -38,6 +54,8 @@ function getDriveClient() {
             console.warn('⚠️ Google Drive token not found:', tokenPath);
             return null;
         }
+        // ⚡ Lazy load googleapis (~3-5s) — chỉ khi thật sự cần Drive backup
+        const { google } = require('googleapis');
         const tokens = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
         const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET);
         oauth2Client.setCredentials(tokens);
@@ -106,7 +124,21 @@ async function uploadToDrive(drive, folderId, fileName, content, mimeType) {
             },
             fields: 'id, webViewLink',
         });
-        console.log(`☁️ Uploaded to Drive: ${fileName} (${file.data.id})`);
+
+        // Set quyền "Anyone with link can view" → nhân viên xem được không cần đăng nhập Google
+        try {
+            await drive.permissions.create({
+                fileId: file.data.id,
+                requestBody: {
+                    role: 'reader',
+                    type: 'anyone',
+                },
+            });
+        } catch (permErr) {
+            console.warn(`⚠️ Could not set public permission for ${fileName}:`, permErr.message);
+        }
+
+        console.log(`☁️ Uploaded to Drive: ${fileName} (${file.data.id}) [public]`);
         return { fileId: file.data.id, webViewLink: file.data.webViewLink };
     } catch (err) {
         console.error(`❌ Drive upload error (${fileName}):`, err.message);
@@ -1813,7 +1845,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
                 note: data.notes,
                 receivedAt: new Date(data.purchaseDate),
                 createdBy: data.createdBy || 'Admin',
-                vatInvoiceStatus: data.isThht ? 'thht' : 'pending', // 📦 THHT flag
+                vatInvoiceStatus: data.isThht ? 'thht' : (data.isNoVat ? 'no_vat' : 'pending'), // 📦 THHT / Không VAT flag
                 items: {
                     create: items.map(item => ({
                         productId: item.productId,
@@ -1896,7 +1928,9 @@ ipcMain.handle('purchases:update', async (event, { id, data }) => {
                 total: data.totalAmount,
                 note: data.notes,
                 receivedAt: new Date(data.purchaseDate),
-                ...(data.isThht !== undefined ? { vatInvoiceStatus: data.isThht ? 'thht' : 'pending' } : {}), // 📦 THHT
+                ...(data.isThht !== undefined || data.isNoVat !== undefined ? { 
+                    vatInvoiceStatus: data.isThht ? 'thht' : (data.isNoVat ? 'no_vat' : 'pending')
+                } : {}), // 📦 THHT / Không VAT
             }
         });
 
@@ -1986,6 +2020,12 @@ async function getOrCreateVatDriveFolder() {
         return vatDriveFolderId;
     } catch (err) {
         console.error('❌ VAT Drive folder error:', err.message);
+        if (err.response) {
+            console.error('❌ Drive API response:', err.response.status, JSON.stringify(err.response.data));
+        }
+        if (err.code) {
+            console.error('❌ Drive error code:', err.code);
+        }
         return null;
     }
 }
@@ -2158,8 +2198,14 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
                         if (result) {
                             driveUrls.push(result.webViewLink);
                             console.log(`☁️ Uploaded to Drive [${i+1}]: ${result.webViewLink}`);
+                        } else {
+                            console.error(`⚠️ Drive upload returned null for file ${i+1}`);
                         }
+                    } else {
+                        console.error('⚠️ Drive folder creation failed - folderId is null');
                     }
+                } else {
+                    console.error('⚠️ Google Drive client not available (token missing or expired)');
                 }
             } catch (driveErr) {
                 console.error(`⚠️ Drive upload failed for file ${i+1}:`, driveErr.message);
@@ -2220,8 +2266,12 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
             userName: 'System',
         });
 
-        console.log(`✅ VAT invoice uploaded for PO#${purchaseId}: ${invoiceNumber} (${filesList.length} files)`);
-        return { success: true, data: { localPaths, driveUrls, invoiceNumber } };
+        const driveWarning = driveUrls.length === 0 && filesList.length > 0
+            ? '⚠️ File đã lưu local + Telegram, nhưng Google Drive upload THẤT BẠI. Kiểm tra kết nối Google Drive.'
+            : null;
+        if (driveWarning) console.warn(driveWarning);
+        console.log(`✅ VAT invoice uploaded for PO#${purchaseId}: ${invoiceNumber} (${filesList.length} files, Drive: ${driveUrls.length > 0 ? 'OK' : 'FAILED'})`);
+        return { success: true, data: { localPaths, driveUrls, invoiceNumber }, driveWarning };
     } catch (error) {
         console.error('❌ Upload VAT invoice error:', error);
         return { success: false, error: error.message };
@@ -2244,6 +2294,45 @@ ipcMain.handle('purchases:markAsThht', async (event, { purchaseId, revert }) => 
         });
         return { success: true };
     } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// 👁️ Đọc file HĐ VAT local → trả về base64 data URL để hiển thị trong app
+ipcMain.handle('purchases:getVATFileData', async (event, { purchaseId }) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const purchase = await prisma.purchaseOrder.findUnique({ where: { id: purchaseId } });
+        if (!purchase || !purchase.vatInvoiceFile) {
+            return { success: false, error: 'Không tìm thấy file HĐ VAT' };
+        }
+
+        // vatInvoiceFile có thể là 1 path hoặc JSON array nhiều paths
+        let filePaths = [];
+        try {
+            filePaths = JSON.parse(purchase.vatInvoiceFile);
+        } catch {
+            filePaths = [purchase.vatInvoiceFile];
+        }
+
+        // Đọc từng file → trả về array data URLs
+        const filesData = [];
+        for (const fp of filePaths) {
+            if (!fs.existsSync(fp)) continue;
+            const buffer = fs.readFileSync(fp);
+            const ext = path.extname(fp).toLowerCase().replace('.', '');
+            const mimeType = ext === 'pdf' ? 'application/pdf' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+            const dataUrl = `data:${mimeType};base64,${buffer.toString('base64')}`;
+            filesData.push({ dataUrl, fileName: path.basename(fp), mimeType, ext });
+        }
+
+        if (filesData.length === 0) {
+            return { success: false, error: 'File không tồn tại trên máy' };
+        }
+
+        return { success: true, data: filesData };
+    } catch (error) {
+        console.error('❌ Get VAT file data error:', error);
         return { success: false, error: error.message };
     }
 });
