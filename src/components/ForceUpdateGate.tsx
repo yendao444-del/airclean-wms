@@ -115,8 +115,8 @@ export default function ForceUpdateGate({ children }: ForceUpdateGateProps) {
         checkAndAutoUpdate();
     }, []);
 
-    // Idle → render app bình thường
-    if (status === 'idle') {
+    // Idle hoặc đang checking → render app bình thường (checking chạy ngầm, không chặn)
+    if (status === 'idle' || status === 'checking') {
         return <>{children}</>;
     }
 
