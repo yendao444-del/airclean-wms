@@ -7,7 +7,21 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { app, ipcMain, shell } = require('electron');
+const { app, ipcMain, shell, BrowserWindow } = require('electron');
+
+/**
+ * Gửi event tới tất cả renderer windows
+ */
+function sendToRenderer(channel, data) {
+    try {
+        const wins = BrowserWindow.getAllWindows();
+        wins.forEach(win => {
+            if (win && win.webContents && !win.isDestroyed()) {
+                win.webContents.send(channel, data);
+            }
+        });
+    } catch (e) { }
+}
 
 // Prisma được truyền vào từ ipc-handlers.js
 let prisma = null;
@@ -256,6 +270,8 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
         console.log('📥 ========================================');
         console.log('   URL:', downloadUrl);
 
+        sendToRenderer('update:step', { step: 'downloading', message: 'Đang tải bản cập nhật...' });
+
         // 1. Tạo thư mục tạm
         const tempDir = path.join(os.tmpdir(), `DBYPOS-update-${Date.now()}`);
         fs.mkdirSync(tempDir, { recursive: true });
@@ -267,15 +283,25 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
 
         // 2. Tải file ZIP từ GitHub
         console.log('⬇️  Đang tải bản cập nhật...');
+        const dlStartTime = Date.now();
 
         await downloadFile(downloadUrl, zipPath, (downloaded, total, percent) => {
             const dlMB = (downloaded / 1024 / 1024).toFixed(1);
             const totalMB = (total / 1024 / 1024).toFixed(1);
+            const elapsedSec = Math.max(1, (Date.now() - dlStartTime) / 1000);
+            const speedKBs = Math.round(downloaded / 1024 / elapsedSec);
+            const etaSec = speedKBs > 0 ? Math.round((total - downloaded) / 1024 / speedKBs) : 0;
             console.log(`   ⏳ ${percent}% (${dlMB}/${totalMB} MB)`);
+            sendToRenderer('update:progress', {
+                percent, downloaded, total,
+                dlMB, totalMB, speedKBs, etaSec,
+                elapsed: Math.round(elapsedSec),
+            });
         });
 
         const zipStats = fs.statSync(zipPath);
         console.log(`✅ Tải xong: ${(zipStats.size / 1024 / 1024).toFixed(1)} MB`);
+        sendToRenderer('update:step', { step: 'extracting', message: 'Đang giải nén...' });
 
         // 3. Giải nén ZIP
         console.log('📦 Đang giải nén...');
@@ -284,6 +310,7 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
         fs.mkdirSync(extractDir, { recursive: true });
         zip.extractAllTo(extractDir, true);
         console.log('✅ Giải nén xong');
+        sendToRenderer('update:step', { step: 'installing', message: 'Đang cài đặt...' });
 
         // 4. Xác định thư mục gốc ứng dụng
         //    ZIP chứa nội dung của win-unpacked/ (DBY POS.exe, resources/, ...)
@@ -431,6 +458,7 @@ exit
 
         setTimeout(() => {
             console.log('🔄 Đang khởi động lại ứng dụng...');
+            sendToRenderer('update:step', { step: 'restarting', message: 'Đang khởi động lại...' });
             if (copyErrors.length > 0) {
                 // Có file bị khóa → .bat ẩn sẽ lo restart
                 app.quit();

@@ -185,6 +185,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
         download: (downloadUrl) => ipcRenderer.invoke('update:download', downloadUrl),
         restart: () => ipcRenderer.invoke('update:restart'),
         getHistory: () => ipcRenderer.invoke('update:getHistory'),
+        onProgress: (callback) => {
+            ipcRenderer.on('update:progress', (event, data) => callback(data));
+            return () => ipcRenderer.removeAllListeners('update:progress');
+        },
+        onStep: (callback) => {
+            ipcRenderer.on('update:step', (event, data) => callback(data));
+            return () => ipcRenderer.removeAllListeners('update:step');
+        },
     },
 
     // E-Invoice (HÓA ĐƠN ĐIỆN TỬ)
