@@ -48,10 +48,13 @@ ipcMain.handle('update:check', async () => {
         console.log(`   Latest version: v${latestVersion}`);
         console.log(`   Has update: ${hasUpdate}`);
 
-        // Lấy thông tin download
-        const zipAsset = latestRelease.assets.find(asset =>
-            asset.name.endsWith('.zip') && asset.name.includes('DBYPOS')
-        );
+        // Lấy thông tin download - ưu tiên PATCH zip (nhỏ ~4MB), fallback FULL zip
+        const allZips = latestRelease.assets.filter(asset => asset.name.endsWith('.zip'));
+        const patchZip = allZips.find(a => a.name.toUpperCase().includes('PATCH'));
+        const fullZip = allZips.find(a => a.name.toUpperCase().includes('DBYPOS') || a.name.toUpperCase().includes('DBY'));
+        const zipAsset = patchZip || fullZip || allZips[0] || null;
+        console.log(`   Available zips: ${allZips.map(a => a.name).join(', ') || 'NONE'}`);
+        console.log(`   Selected zip: ${zipAsset ? zipAsset.name : 'NULL'}`);
 
         const updateInfo = {
             currentVersion,
@@ -379,9 +382,9 @@ exit
 `;
             fs.writeFileSync(batPath, batContent);
 
-            // Chạy .bat ẨN hoàn toàn qua VBScript (không hiện CMD)
+            // Chạy .bat ẨN hoàn toàn qua VBScript YÊU CẦU QUYỀN ADMIN (runas)
             const vbsPath = path.join(tempDir, 'update-silent.vbs');
-            const vbsContent = `Set WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run """${batPath}""", 0, False`;
+            const vbsContent = `Set UAC = CreateObject("Shell.Application")\r\nUAC.ShellExecute """${batPath}""", "", "", "runas", 0`;
             fs.writeFileSync(vbsPath, vbsContent);
 
             const { spawn } = require('child_process');

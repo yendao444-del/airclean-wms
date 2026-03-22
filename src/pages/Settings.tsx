@@ -768,7 +768,7 @@ const Settings = () => {
                     loading={downloading}
                     size="large"
                   >
-                    Tải lại
+                    Cập nhật ngay
                   </Button>
                 )
               }
