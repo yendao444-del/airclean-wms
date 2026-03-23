@@ -1,11 +1,12 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
-    Card, Table, Tag, Typography, Spin, Input, Space, Row, Col, Statistic, Button, Select, message, DatePicker,
+    Card, Table, Tag, Typography, Spin, Input, Space, Row, Col, Button, message, DatePicker,
+    Modal, Form, InputNumber, Popconfirm, Tooltip,
 } from 'antd';
 import {
     OrderedListOutlined, SearchOutlined, DownloadOutlined,
     ArrowUpOutlined, ArrowDownOutlined, FireOutlined,
-    CalendarOutlined, TrophyOutlined,
+    CalendarOutlined, TrophyOutlined, EditOutlined, DeleteOutlined, PlusOutlined, MinusCircleOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { Dayjs } from 'dayjs';
@@ -45,6 +46,12 @@ export default function OrdersPage() {
     const [sourceFilter, setSourceFilter] = useState<'all' | 'pos' | 'export' | 'tmdt'>('all');
     const [datePreset, setDatePreset] = useState<DatePreset>('today');
     const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
+
+    // Edit/Delete state
+    const [editOrder, setEditOrder] = useState<UnifiedOrder | null>(null);
+    const [editForm] = Form.useForm();
+    const [editSaving, setEditSaving] = useState(false);
+    const [editItems, setEditItems] = useState<any[]>([]);
 
     useEffect(() => {
         loadAllOrders();
@@ -237,6 +244,86 @@ export default function OrdersPage() {
             .slice(0, 10);
     }, [filteredOrders]);
 
+    const openEdit = (record: UnifiedOrder) => {
+        let items: any[] = [];
+        try { items = JSON.parse(record.items); } catch { }
+        const mappedItems = items.map(it => ({
+            productId: it.productId,
+            sku: it.variantSku || it.sku || '',
+            name: it.productName || it.name || '',
+            price: it.unitPrice || it.price || 0,
+            cost: it.cost || 0,
+            qty: it.quantity || it.qty || 1,
+            variant: it.variant || '',
+        }));
+        setEditItems(mappedItems);
+        setEditOrder(record);
+        editForm.setFieldsValue({
+            customer: record.customer !== 'Khách lẻ' ? record.customer : '',
+            note: record.notes || '',
+            discount: 0,
+            paymentMethod: 'cash',
+        });
+    };
+
+    const updateEditItem = (index: number, field: string, value: any) => {
+        setEditItems(prev => prev.map((it, i) => {
+            if (i !== index) return it;
+            const updated = { ...it, [field]: value };
+            return updated;
+        }));
+    };
+
+    const removeEditItem = (index: number) => {
+        setEditItems(prev => prev.filter((_, i) => i !== index));
+    };
+
+    const editSubtotal = editItems.reduce((s, it) => s + it.price * it.qty, 0);
+
+    const handleEditSave = async () => {
+        if (!editOrder) return;
+        if (!editItems.length) { message.warning('Đơn hàng phải có ít nhất 1 sản phẩm!'); return; }
+        const values = editForm.getFieldsValue();
+        setEditSaving(true);
+        try {
+            const api = (window as any).electronAPI;
+            const result = await api.posOrder.update({
+                id: editOrder.originalId,
+                note: values.note,
+                discount: values.discount || 0,
+                paymentMethod: values.paymentMethod,
+                items: editItems,
+                userName: 'Admin',
+            });
+            if (result.success) {
+                message.success('✅ Đã cập nhật đơn hàng!');
+                setEditOrder(null);
+                loadAllOrders();
+            } else {
+                message.error(result.error || 'Lỗi cập nhật');
+            }
+        } catch (e: any) {
+            message.error(e.message);
+        } finally {
+            setEditSaving(false);
+        }
+    };
+
+    const handleDelete = async (record: UnifiedOrder) => {
+        try {
+            const api = (window as any).electronAPI;
+            const result = await api.posOrder.delete({ id: record.originalId, userName: 'Admin' });
+            if (result.success) {
+                message.success('✅ Đã xóa đơn hàng và hoàn kho!');
+                loadAllOrders();
+            } else {
+                message.error(result.error || 'Lỗi xóa');
+            }
+        } catch (e: any) {
+            message.error(e.message);
+        }
+    };
+
     // Export Excel
     const handleExportExcel = () => {
         if (filteredOrders.length === 0) { message.warning('Không có dữ liệu!'); return; }
@@ -327,6 +414,29 @@ export default function OrdersPage() {
                     👤 {v}
                 </Tag>
             ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
+        },
+        {
+            title: '', key: 'actions', width: 70, fixed: 'right' as const,
+            render: (_: any, record: UnifiedOrder) => {
+                if (record.source !== 'pos') return null;
+                return (
+                    <Space size={4}>
+                        <Tooltip title="Sửa đơn">
+                            <Button size="small" type="text" icon={<EditOutlined />} onClick={() => openEdit(record)} />
+                        </Tooltip>
+                        <Popconfirm
+                            title="Xóa đơn hàng?"
+                            description="Kho sẽ được hoàn lại. Không thể khôi phục!"
+                            onConfirm={() => handleDelete(record)}
+                            okText="Xóa" cancelText="Hủy" okButtonProps={{ danger: true }}
+                        >
+                            <Tooltip title="Xóa đơn">
+                                <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                            </Tooltip>
+                        </Popconfirm>
+                    </Space>
+                );
+            },
         },
     ];
 
@@ -546,7 +656,7 @@ export default function OrdersPage() {
                     rowKey="id"
                     size="small"
                     pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `${t} đơn hàng` }}
-                    scroll={{ x: 900 }}
+                    scroll={{ x: 1000 }}
                     expandable={{
                         expandedRowRender: (record) => {
                             let items: any[] = [];
@@ -604,6 +714,120 @@ export default function OrdersPage() {
                     }}
                 />
             </Card>
+
+            {/* Modal Sửa Đơn POS */}
+            <Modal
+                title={<span>✏️ Sửa đơn hàng <Text type="secondary" style={{ fontSize: 13 }}>{editOrder?.orderNumber}</Text></span>}
+                open={!!editOrder}
+                onCancel={() => setEditOrder(null)}
+                onOk={handleEditSave}
+                confirmLoading={editSaving}
+                okText="Lưu thay đổi" cancelText="Hủy"
+                width={720}
+                destroyOnClose
+            >
+                <Form form={editForm} layout="vertical" size="small">
+                    <Row gutter={12}>
+                        <Col span={12}>
+                            <Form.Item name="customer" label="Khách hàng">
+                                <Input placeholder="Khách lẻ" />
+                            </Form.Item>
+                        </Col>
+                        <Col span={6}>
+                            <Form.Item name="paymentMethod" label="Thanh toán">
+                                <select style={{ width: '100%', height: 32, border: '1px solid #d9d9d9', borderRadius: 6, padding: '0 8px', fontSize: 13 }}>
+                                    <option value="cash">Tiền mặt</option>
+                                    <option value="transfer">Chuyển khoản</option>
+                                    <option value="card">Thẻ</option>
+                                    <option value="mixed">Kết hợp</option>
+                                </select>
+                            </Form.Item>
+                        </Col>
+                        <Col span={6}>
+                            <Form.Item name="discount" label="Giảm giá (đ)">
+                                <InputNumber min={0} style={{ width: '100%' }} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={v => Number(v?.replace(/,/g, '') || 0)} />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                    <Form.Item name="note" label="Ghi chú">
+                        <Input placeholder="Ghi chú đơn hàng..." />
+                    </Form.Item>
+                </Form>
+
+                {/* Bảng sản phẩm */}
+                <div style={{ marginTop: 4 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                        <Text strong>Danh sách sản phẩm</Text>
+                        <Button size="small" icon={<PlusOutlined />}
+                            onClick={() => setEditItems(prev => [...prev, { productId: null, sku: '', name: '', price: 0, cost: 0, qty: 1, variant: '' }])}>
+                            Thêm dòng
+                        </Button>
+                    </div>
+                    <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                        <thead>
+                            <tr style={{ background: '#f0f5ff' }}>
+                                <th style={{ padding: '7px 10px', textAlign: 'left', color: '#1890ff', fontWeight: 600, borderBottom: '1px solid #e8e8e8' }}>SKU</th>
+                                <th style={{ padding: '7px 10px', textAlign: 'left', color: '#1890ff', fontWeight: 600, borderBottom: '1px solid #e8e8e8' }}>Tên sản phẩm</th>
+                                <th style={{ padding: '7px 10px', textAlign: 'center', color: '#1890ff', fontWeight: 600, borderBottom: '1px solid #e8e8e8', width: 70 }}>SL</th>
+                                <th style={{ padding: '7px 10px', textAlign: 'right', color: '#1890ff', fontWeight: 600, borderBottom: '1px solid #e8e8e8', width: 120 }}>Đơn giá</th>
+                                <th style={{ padding: '7px 10px', textAlign: 'right', color: '#1890ff', fontWeight: 600, borderBottom: '1px solid #e8e8e8', width: 110 }}>Thành tiền</th>
+                                <th style={{ width: 32, borderBottom: '1px solid #e8e8e8' }}></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {editItems.map((it, i) => (
+                                <tr key={i} style={{ borderBottom: '1px solid #f5f5f5' }}>
+                                    <td style={{ padding: '5px 10px' }}>
+                                        <Tag color="cyan" style={{ fontSize: 11 }}>{it.sku || '—'}</Tag>
+                                    </td>
+                                    <td style={{ padding: '5px 10px' }}>
+                                        <Input value={it.name} onChange={e => updateEditItem(i, 'name', e.target.value)} style={{ fontSize: 12 }} />
+                                    </td>
+                                    <td style={{ padding: '5px 10px' }}>
+                                        <InputNumber min={1} value={it.qty} onChange={v => updateEditItem(i, 'qty', v || 1)} style={{ width: '100%', fontSize: 12 }} />
+                                    </td>
+                                    <td style={{ padding: '5px 10px' }}>
+                                        <InputNumber min={0} value={it.price} onChange={v => updateEditItem(i, 'price', v || 0)}
+                                            style={{ width: '100%', fontSize: 12 }}
+                                            formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                                            parser={v => Number(v?.replace(/,/g, '') || 0)} />
+                                    </td>
+                                    <td style={{ padding: '5px 10px', textAlign: 'right', fontWeight: 600, color: '#00ab56' }}>
+                                        {(it.price * it.qty).toLocaleString('vi-VN')}đ
+                                    </td>
+                                    <td style={{ padding: '5px 10px', textAlign: 'center' }}>
+                                        <MinusCircleOutlined style={{ color: '#ff4d4f', cursor: 'pointer', fontSize: 15 }} onClick={() => removeEditItem(i)} />
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+
+                    {/* Tổng kết */}
+                    {editItems.length > 0 && (() => {
+                        const discount = editForm.getFieldValue('discount') || 0;
+                        const total = editSubtotal - discount;
+                        return (
+                            <div style={{ marginTop: 12, padding: '10px 14px', background: '#f6ffed', borderRadius: 8, border: '1px solid #b7eb8f' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#595959', marginBottom: 4 }}>
+                                    <span>Tạm tính:</span>
+                                    <span>{editSubtotal.toLocaleString('vi-VN')}đ</span>
+                                </div>
+                                {discount > 0 && (
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#ff4d4f', marginBottom: 4 }}>
+                                        <span>Giảm giá:</span>
+                                        <span>-{discount.toLocaleString('vi-VN')}đ</span>
+                                    </div>
+                                )}
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 15, fontWeight: 800, color: '#00ab56' }}>
+                                    <span>Tổng cộng:</span>
+                                    <span>{total.toLocaleString('vi-VN')}đ</span>
+                                </div>
+                            </div>
+                        );
+                    })()}
+                </div>
+            </Modal>
         </div>
     );
 }

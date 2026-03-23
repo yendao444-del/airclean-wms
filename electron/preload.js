@@ -108,6 +108,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         create: (data) => ipcRenderer.invoke('posOrder:create', data),
         getAll: (filters) => ipcRenderer.invoke('posOrder:getAll', filters),
         getById: (id) => ipcRenderer.invoke('posOrder:getById', id),
+        update: (data) => ipcRenderer.invoke('posOrder:update', data),
+        delete: (data) => ipcRenderer.invoke('posOrder:delete', data),
     },
 
     // Returns (TRẢ HÀNG)

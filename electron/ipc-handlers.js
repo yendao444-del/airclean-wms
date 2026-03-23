@@ -1629,6 +1629,98 @@ ipcMain.handle('posOrder:getById', async (event, id) => {
     }
 });
 
+// Sửa đơn hàng POS (note, discount, items)
+ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, paymentMethod, userName }) => {
+    try {
+        if (!prisma) throw new Error('Database chưa được khởi tạo.');
+
+        // Lấy đơn cũ để hoàn kho
+        const oldOrder = await prisma.order.findUnique({
+            where: { id },
+            include: { items: true },
+        });
+        if (!oldOrder) throw new Error('Không tìm thấy đơn hàng.');
+
+        // Hoàn lại kho theo items cũ
+        for (const oldItem of oldOrder.items) {
+            try { await updateSingleProductStock(oldItem.sku, oldItem.quantity, true); } catch (e) { }
+        }
+
+        // Tính lại tổng tiền
+        const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
+        const disc = discount ?? 0;
+        const total = subtotal - disc;
+        const totalCost = items.reduce((s, it) => s + (it.cost || 0) * it.qty, 0);
+        const profit = total - totalCost;
+
+        await prisma.$transaction(async (tx) => {
+            // Cập nhật order
+            await tx.order.update({
+                where: { id },
+                data: { note: note ?? null, discount: disc, subtotal, total, profit, paymentMethod: paymentMethod || oldOrder.paymentMethod },
+            });
+            // Xóa items cũ, thêm items mới
+            await tx.orderItem.deleteMany({ where: { orderId: id } });
+            for (const it of items) {
+                await tx.orderItem.create({
+                    data: {
+                        orderId: id, productId: it.productId, sku: it.sku,
+                        productName: it.name, variant: it.variant || null,
+                        quantity: it.qty, price: it.price, cost: it.cost || 0,
+                        subtotal: it.price * it.qty,
+                    },
+                });
+            }
+            // Cập nhật payment
+            await tx.payment.updateMany({
+                where: { orderId: id },
+                data: { method: paymentMethod || oldOrder.paymentMethod, amount: total },
+            });
+        });
+
+        // Trừ kho theo items mới
+        for (const it of items) {
+            try { await updateSingleProductStock(it.sku, it.qty, false); } catch (e) { }
+        }
+
+        await logActivity({ module: 'sales', action: 'UPDATE', description: `Sửa đơn POS #${oldOrder.orderNumber}`, userName: userName || 'System' });
+        return { success: true };
+    } catch (error) {
+        console.error('❌ [POS] Update order error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
+// Xóa đơn hàng POS (hoàn kho)
+ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
+    try {
+        if (!prisma) throw new Error('Database chưa được khởi tạo.');
+
+        const order = await prisma.order.findUnique({
+            where: { id },
+            include: { items: true },
+        });
+        if (!order) throw new Error('Không tìm thấy đơn hàng.');
+
+        // Hoàn kho
+        for (const item of order.items) {
+            try { await updateSingleProductStock(item.sku, item.quantity, true); } catch (e) { }
+        }
+
+        await prisma.$transaction(async (tx) => {
+            await tx.orderItem.deleteMany({ where: { orderId: id } });
+            await tx.payment.deleteMany({ where: { orderId: id } });
+            await tx.order.delete({ where: { id } });
+        });
+
+        await logActivity({ module: 'sales', action: 'DELETE', description: `Xóa đơn POS #${order.orderNumber}`, userName: userName || 'System' });
+        return { success: true };
+    } catch (error) {
+        console.error('❌ [POS] Delete order error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
 // ========================================
 // ACTIVITY LOG HANDLERS
 // ========================================

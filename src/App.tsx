@@ -78,6 +78,14 @@ function AppContent() {
     // Filter menu items based on user permissions
     const accessibleKeys = getAccessibleMenuKeys();
 
+    // Redirect về trang đầu tiên có quyền khi user không có quyền xem dashboard
+    useEffect(() => {
+        if (user && !accessibleKeys.includes('dashboard')) {
+            const firstAccessible = accessibleKeys[0];
+            if (firstAccessible) setSelectedKey(firstAccessible);
+        }
+    }, [user]);
+
     const createMenuItem = (
         label: React.ReactNode,
         key: React.Key,
