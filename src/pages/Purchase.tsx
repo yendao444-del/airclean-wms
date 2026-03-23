@@ -107,6 +107,12 @@ export default function PurchasePage() {
     const [vatFiles, setVatFiles] = useState<File[]>([]);
     const [vatUploading, setVatUploading] = useState(false);
 
+    // 📦 State cho upload Phiếu Nhập Kho
+    const [importReceiptModalVisible, setImportReceiptModalVisible] = useState(false);
+    const [importReceiptPurchaseId, setImportReceiptPurchaseId] = useState<number | null>(null);
+    const [importReceiptFiles, setImportReceiptFiles] = useState<any[]>([]);
+    const [importReceiptUploading, setImportReceiptUploading] = useState(false);
+
     // 👁️ State cho xem HĐ VAT (Google Drive preview)
     const [vatPreviewVisible, setVatPreviewVisible] = useState(false);
     const [vatPreviewData, setVatPreviewData] = useState<{
@@ -731,6 +737,73 @@ export default function PurchasePage() {
         }
     };
 
+    // 📦 Upload Phiếu Nhập Kho
+    const openImportReceiptModal = (purchaseId: number) => {
+        setImportReceiptPurchaseId(purchaseId);
+        setImportReceiptFiles([]);
+        setImportReceiptModalVisible(true);
+    };
+
+    const handleImportReceiptUpload = async () => {
+        if (!importReceiptPurchaseId) return;
+
+        if (importReceiptFiles.length === 0) {
+            message.warning('Vui lòng chọn ít nhất 1 file Phiếu Nhập!');
+            return;
+        }
+
+        setImportReceiptUploading(true);
+        try {
+            const filesData = await Promise.all(importReceiptFiles.map(async (file) => {
+                const base64 = await new Promise<string>((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => resolve((reader.result as string).split(',')[1]);
+                    reader.onerror = reject;
+                    reader.readAsDataURL(file);
+                });
+                return { fileBase64: base64, fileName: file.name };
+            }));
+
+            const payload: any = {
+                purchaseId: importReceiptPurchaseId,
+                files: filesData,
+            };
+
+            const result = await (window.electronAPI as any).purchases.uploadImportReceipt(payload);
+
+            if (result.success) {
+                message.success('✅ Đã upload Phiếu Nhập Kho thành công!');
+                setImportReceiptModalVisible(false);
+                loadPurchases();
+            } else {
+                message.error(result.error || 'Lỗi upload Phiếu Nhập');
+            }
+        } catch (err: any) {
+            message.error('Lỗi: ' + (err.message || 'Không xác định'));
+        } finally {
+            setImportReceiptUploading(false);
+        }
+    };
+
+    const handleDeleteImportReceipt = (id: number) => {
+        Modal.confirm({
+            title: '🗑️ Xóa Phiếu Nhập Kho',
+            content: 'Bạn có chắc chắn muốn xóa bản lưu Phiếu Nhập Kho của đơn này (sau đó trạng thái sẽ về Chưa có Phiếu Nhập)?',
+            okText: 'Xóa',
+            cancelText: 'Hủy',
+            okType: 'danger',
+            onOk: async () => {
+                const result = await (window.electronAPI as any).purchases.deleteImportReceipt(id);
+                if (result.success) {
+                    message.success('Đã xóa phiếu nhập kho thành công!');
+                    loadPurchases();
+                } else {
+                    message.error(result.error || 'Lỗi xóa phiếu nhập kho');
+                }
+            }
+        });
+    };
+
     const columns: ColumnsType<Purchase> = [
         {
             title: 'Mã phiếu',
@@ -785,40 +858,57 @@ export default function PurchasePage() {
             ),
         },
         {
-            title: '🧾 HĐ VAT',
-            key: 'vatStatus',
-            width: 130,
+            title: '📦 Trạng thái',
+            key: 'documentStatus',
+            width: 170,
             align: 'center' as const,
             render: (_: any, record: Purchase) => {
                 const r = record as any;
-                if (r.vatInvoiceStatus === 'uploaded') {
-                    return (
-                        <Tag color="success" style={{ fontWeight: 600, fontSize: 12, cursor: 'pointer' }}
-                            onClick={(e) => { e.stopPropagation(); openVatPreview(r); }}
-                        >
-                            ✅ Đã có HĐ
-                        </Tag>
-                    );
-                }
                 if (r.vatInvoiceStatus === 'thht') {
                     return (
-                        <Tag color="purple" style={{ fontWeight: 600, fontSize: 12 }}>
+                        <Tag color="purple" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px' }}>
                             📦 Đơn THHT
                         </Tag>
                     );
                 }
                 if (r.vatInvoiceStatus === 'no_vat') {
                     return (
-                        <Tag color="default" style={{ fontWeight: 600, fontSize: 12, border: '1px dashed #d9d9d9', color: '#595959' }}>
+                        <Tag color="default" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px', border: '1px dashed #d9d9d9', color: '#595959' }}>
                             🏷️ Không VAT
                         </Tag>
                     );
                 }
+                
+                const hasVat = r.vatInvoiceStatus === 'uploaded';
+                const hasRc = r.importReceiptStatus === 'uploaded';
+
+                if (hasVat && hasRc) {
+                    return (
+                        <Tag color="success" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px' }}>
+                            ✅ Đã đủ Phiếu + VAT
+                        </Tag>
+                    );
+                }
+                
+                if (hasVat && !hasRc) {
+                    return (
+                        <Tag color="warning" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px', color: '#d46b08', backgroundColor: '#fff7e6', borderColor: '#ffd591' }}>
+                            ⏳ Có VAT / Thiếu Phiếu Kho
+                        </Tag>
+                    );
+                }
+
+                if (!hasVat && hasRc) {
+                    return (
+                        <Tag color="warning" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px', color: '#faad14', backgroundColor: '#fffbe6', borderColor: '#ffe58f' }}>
+                            ⏳ Đợi HĐ VAT
+                        </Tag>
+                    );
+                }
+
                 return (
-                    <Tag color="warning" style={{ fontWeight: 600, fontSize: 12, cursor: 'pointer' }}
-                        onClick={(e) => { e.stopPropagation(); openVatModal(record.id); }}
-                    >
-                        ⏳ Chưa có
+                    <Tag color="error" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px' }}>
+                        🚨 Chưa có Chứng từ
                     </Tag>
                 );
             },
@@ -847,7 +937,7 @@ export default function PurchasePage() {
                 margin: '8px 0',
             }}>
                 {/* Actions */}
-                <div style={{ marginBottom: 12, display: 'flex', gap: 8 }}>
+                <div style={{ marginBottom: 16, display: 'flex', gap: 8 }}>
                     <Button
                         type="primary"
                         icon={<EyeOutlined />}
@@ -869,73 +959,84 @@ export default function PurchasePage() {
                     >
                         Xóa
                     </Button>
-                    {/* 🧾 Nút Upload / Xem HĐ VAT */}
-                    {['thht', 'no_vat'].includes((record as any).vatInvoiceStatus) ? null : (
-                        (record as any).vatInvoiceStatus === 'uploaded' ? (
-                            <Button
-                                icon={<EyeOutlined />}
-                                onClick={() => openVatPreview(record as any)}
-                                style={{
-                                    background: '#f6ffed',
-                                    borderColor: '#52c41a',
-                                    color: '#52c41a',
-                                }}
-                            >
-                                👁️ Xem HĐ VAT
-                            </Button>
-                        ) : (
-                            <Button
-                                icon={<UploadOutlined />}
-                                onClick={() => openVatModal(record.id, record)}
-                                style={{
-                                    background: '#fff7e6',
-                                    borderColor: '#faad14',
-                                    color: '#d48806',
-                                }}
-                            >
-                                🧾 Upload HĐ VAT
-                            </Button>
-                        )
-                    )}
-                    {(record as any).vatInvoiceStatus === 'thht' && (
-                        <Tag color="purple" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px', lineHeight: '22px' }}>
-                            📦 Đơn THHT
-                        </Tag>
-                    )}
-                    {(record as any).vatInvoiceStatus === 'no_vat' && (
-                        <Tag color="default" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px', lineHeight: '22px', border: '1px dashed #d9d9d9', color: '#595959' }}>
-                            🏷️ Không VAT
-                        </Tag>
-                    )}
                 </div>
 
-                {/* 🧾 VAT Invoice Info (nếu đã upload) */}
-                {(record as any).vatInvoiceNumber && (
-                    <div style={{
-                        marginBottom: 12, padding: '10px 14px', borderRadius: 8,
-                        background: 'linear-gradient(135deg, #f6ffed 0%, #e8f5e0 100%)',
-                        border: '1px solid #b7eb8f',
-                        display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap',
-                    }}>
-                        <CheckCircleOutlined style={{ fontSize: 20, color: '#52c41a' }} />
-                        <div style={{ flex: 1 }}>
-                            <div style={{ fontWeight: 700, fontSize: 13, color: '#262626' }}>
-                                🧾 HĐ VAT: <span style={{ color: '#1890ff' }}>#{(record as any).vatInvoiceNumber}</span>
+                {/* KHU VỰC THAO TÁC / XEM CHỨNG TỪ THEO DEMO */}
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 24, background: '#fff', padding: 16, borderRadius: 8, border: '1px solid #91d5ff', marginBottom: 16 }}>
+                    
+                    {/* CỘT 1: CHỨNG TỪ KHO */}
+                    <div style={{ flex: 1 }}>
+                        <h4 style={{ fontWeight: 700, color: '#595959', marginBottom: 8, fontSize: 13 }}>1. Chứng từ Nhập Kho (Thủ kho)</h4>
+                        {((record as any).importReceiptStatus === 'uploaded') ? (
+                            <div style={{ padding: 12, background: '#f0f5ff', border: '1px solid #adc6ff', borderRadius: 6 }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#1d39c4', fontWeight: 600, fontSize: 13 }}>
+                                    <CheckCircleOutlined style={{ fontSize: 16 }} /> Đã tải Phiếu Nhập Kho
+                                </div>
+                                <div style={{ marginTop: 6, paddingLeft: 24, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                                    {((record as any).importReceiptDriveUrl) && ((record as any).importReceiptDriveUrl).split('\n').filter(Boolean).map((url: string, index: number, arr: string[]) => (
+                                        <a key={index} href={url} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#1890ff', whiteSpace: 'nowrap' }}>
+                                            <LinkOutlined /> Xem file {arr.length > 1 ? index + 1 : ''}
+                                        </a>
+                                    ))}
+                                    {((record as any).importReceiptDriveUrl) && <div style={{ width: '1px', height: 12, background: '#d9d9d9', margin: '0 4px' }}></div>}
+                                    <Button type="link" size="small" onClick={() => openImportReceiptModal(record.id)} style={{ padding: 0 }}>Sửa</Button>
+                                    <Button type="link" danger size="small" onClick={() => handleDeleteImportReceipt(record.id)} style={{ padding: 0 }}>Xóa</Button>
+                                </div>
                             </div>
-                            <div style={{ fontSize: 12, color: '#595959' }}>
-                                📅 {dayjs((record as any).vatInvoiceDate).format('DD/MM/YYYY')}
-                                {(record as any).vatInvoiceDriveUrl && (
-                                    <a href={(record as any).vatInvoiceDriveUrl} target="_blank" rel="noreferrer"
-                                        style={{ marginLeft: 12, color: '#1890ff' }}
-                                    >
-                                        <LinkOutlined /> Xem trên Drive
-                                    </a>
-                                )}
+                        ) : (
+                            <div>
+                                <Button 
+                                    onClick={() => openImportReceiptModal(record.id)}
+                                    style={{ background: '#f0f5ff', borderColor: '#adc6ff', color: '#2f54eb', fontWeight: 500 }}
+                                    icon={<UploadOutlined />}
+                                >
+                                    📤 Tải lên Phiếu Nhập Kho
+                                </Button>
+                                <div style={{ fontSize: 12, color: '#8c8c8c', marginTop: 8 }}>Yêu cầu có chữ ký xác nhận của thủ kho.</div>
                             </div>
-                        </div>
-                        <Tag color="success">Đã upload</Tag>
+                        )}
                     </div>
-                )}
+
+                    {/* CỘT 2: VAT */}
+                    <div style={{ flex: 1 }}>
+                        <h4 style={{ fontWeight: 700, color: '#595959', marginBottom: 8, fontSize: 13 }}>2. Hóa đơn Tài chính (Kế toán)</h4>
+                        {['thht', 'no_vat'].includes((record as any).vatInvoiceStatus) ? (
+                            <div style={{ padding: 12, background: '#f9f0ff', border: '1px solid #d3adf7', borderRadius: 6 }}>
+                                <div style={{ color: '#722ed1', fontWeight: 600, fontSize: 13 }}>📦 Đơn THHT / Không VAT</div>
+                                <Button type="link" size="small" onClick={() => handleMarkThht(record.id, true)} style={{ padding: 0, marginTop: 4, color: '#1890ff' }}>↩️ Hoàn tác</Button>
+                            </div>
+                        ) : (
+                            (record as any).vatInvoiceStatus === 'uploaded' ? (
+                                <div style={{ padding: 12, background: '#fff7e6', border: '1px solid #ffd591', borderRadius: 6 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#d46b08', fontWeight: 600, fontSize: 13 }}>
+                                        <CheckCircleOutlined style={{ fontSize: 16 }} /> Đã tải HĐ VAT
+                                    </div>
+                                    <div style={{ fontSize: 12, color: '#595959', marginTop: 4, paddingLeft: 24 }}>
+                                        Tra cứu mã: <b>{(record as any).vatInvoiceNumber}</b>
+                                        <Button type="link" size="small" onClick={() => openVatPreview(record as any)}>
+                                            👁️ Xem
+                                        </Button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div>
+                                    <Space>
+                                        <Button 
+                                            onClick={() => openVatModal(record.id, record)}
+                                            style={{ background: '#fff7e6', borderColor: '#faad14', color: '#d48806', fontWeight: 500 }}
+                                            icon={<UploadOutlined />}
+                                        >
+                                            🧾 Cập nhật HĐ VAT (Hóa đơn đỏ)
+                                        </Button>
+                                        <Button onClick={() => handleMarkThht(record.id, false)} style={{ fontWeight: 500 }}>
+                                            📦 Đánh dấu THHT / Không VAT
+                                        </Button>
+                                    </Space>
+                                </div>
+                            )
+                        )}
+                    </div>
+                </div>
 
                 {/* Product Table */}
                 <div style={{ overflowX: 'auto', overflowY: 'hidden' }}>
@@ -1055,6 +1156,10 @@ export default function PurchasePage() {
 
     return (
         <div>
+            <style>{`
+                @keyframes flash { from { opacity: 1; } to { opacity: 0.6; } }
+                .blink { animation: flash 1s infinite alternate; }
+            `}</style>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
                 <Title level={2} style={{ color: '#262626', margin: 0 }}>
                     📦 Nhập hàng
@@ -1808,6 +1913,41 @@ export default function PurchasePage() {
                         </div>
                     </div>
                 )}
+            </Modal>
+
+            {/* === 📦 MODAL UPLOAD PHIẾU NHẬP KHO === */}
+            <Modal
+                title="📦 Upload Phiếu Nhập Kho"
+                open={importReceiptModalVisible}
+                onCancel={() => setImportReceiptModalVisible(false)}
+                footer={null}
+                width={480}
+            >
+                <Alert message="Lưu ý quan trọng" description="File phiếu nhập kho phải có chữ ký xác nhận của thủ kho và người giao hàng." type="info" showIcon style={{ marginBottom: 16 }} />
+                <div style={{ marginBottom: 16 }}>
+                    <Upload.Dragger
+                        multiple
+                        beforeUpload={(file) => {
+                            setImportReceiptFiles(prev => [...prev, file]);
+                            return false; 
+                        }}
+                        onRemove={(file) => {
+                            setImportReceiptFiles(prev => prev.filter(f => f.uid !== file.uid));
+                        }}
+                        fileList={importReceiptFiles as any}
+                    >
+                        <p className="ant-upload-drag-icon">
+                            <UploadOutlined style={{ color: '#1890ff' }} />
+                        </p>
+                        <p className="ant-upload-text">Nhấp hoặc kéo thả file Phiếu Nhập Kho vào đây</p>
+                    </Upload.Dragger>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
+                    <Button onClick={() => setImportReceiptModalVisible(false)} size="large">Hủy</Button>
+                    <Button type="primary" onClick={handleImportReceiptUpload} loading={importReceiptUploading} size="large">
+                        📤 Tải lên
+                    </Button>
+                </div>
             </Modal>
 
             {/* === 🧾 MODAL UPLOAD HĐ VAT === */}

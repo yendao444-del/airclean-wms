@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bản Demo Tương Tác: Luồng Chứng Từ</title>
+    <!-- TailwindCSS & Inter Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background: #f0f2f5; color: #262626; padding: 40px; }
+        
+        /* Ant Design Card & Table */
+        .ant-card { background: white; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); padding: 24px; max-width: 1200px; margin: 0 auto; }
+        .ant-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        .ant-table th { padding: 16px; background: #fafafa; border-bottom: 2px solid #f0f0f0; color: #262626; font-weight: 600; text-align: left; }
+        .ant-table td { padding: 16px; border-bottom: 1px solid #f0f0f0; }
+
+        /* Fake Ant-Tag */
+        .ant-tag {
+            display: inline-flex; justify-content: center; align-items: center;
+            font-size: 13px; font-weight: 600; padding: 4px 12px; border-radius: 6px;
+            white-space: nowrap; border: 1px solid transparent; width: 160px; transition: all 0.3s;
+        }
+        .tag-error { background: #fff1f0; border-color: #ffa39a; color: #f5222d; }
+        .tag-warning { background: #fffbe6; border-color: #ffe58f; color: #faad14; }
+        .tag-success { background: #f6ffed; border-color: #b7eb8f; color: #52c41a; }
+        .tag-blue { background: #e6f7ff; border-color: #91d5ff; color: #1890ff; width: auto; }
+        .tag-purple { background: #f9f0ff; border-color: #d3adf7; color: #722ed1; width: auto; }
+
+        /* Buttons */
+        .btn-upload { background: #fff; padding: 8px 16px; border-radius: 6px; font-weight: 500; font-size: 14px; cursor: pointer; transition: 0.2s; border: 1px solid currentColor; display: inline-flex; align-items: center; gap: 8px; }
+        .btn-phieu { color: #2f54eb; border-color: #adc6ff; background: #f0f5ff; }
+        .btn-phieu:hover { background: #d6e4ff; }
+        .btn-vat { color: #d48806; border-color: #faad14; background: #fff7e6; }
+        .btn-vat:hover { background: #ffe58f; }
+
+        /* Expanded Row */
+        .expanded-row { background: #e6f7ff; border: 2px solid #1890ff; border-radius: 8px; padding: 16px; margin-top: 12px; transition: all 0.3s; }
+        
+        /* Helpers */
+        .money { font-weight: 700; color: #00ab56; }
+        .blink { animation: flash 1s infinite alternate; }
+        @keyframes flash { from { opacity: 1; } to { opacity: 0.6; } }
+
+        /* Loading overlay mini */
+        .loader-overlay { display: none; position: absolute; inset: 0; background: rgba(255,255,255,0.7); align-items: center; justify-content: center; font-weight: bold; color: #1890ff; z-index: 10; border-radius: 8px;}
+    </style>
+</head>
+<body>
+
+<div class="ant-card relative" id="card-container">
+    <div class="loader-overlay" id="loader">Đang tải file lên hệ thống... ⏳</div>
+    
+    <div class="flex items-center gap-3 mb-8 pb-4 border-b border-gray-100">
+        <h2 class="text-2xl font-bold">Mô phỏng Trực quan tiến trình nhập liệu Chứng Từ</h2>
+        <span class="bg-blue-100 text-blue-700 font-bold px-3 py-1 rounded-full text-sm">Interactive Demo</span>
+    </div>
+
+    <table class="ant-table">
+        <thead>
+            <tr>
+                <th style="width: 40px;"><input type="checkbox"></th>
+                <th>Mã phiếu</th>
+                <th>Nhà cung cấp</th>
+                <th>Người tạo</th>
+                <th>Tổng tiền</th>
+                <th style="text-align: center;">📦 TIẾN ĐỘ CHỨNG TỪ</th>
+            </tr>
+        </thead>
+        <tbody>
+            <!-- DÒNG DUY NHẤT CHUYỂN ĐỘNG THEO STATE -->
+            <tr class="hover:bg-gray-50 bg-white" style="transition: 0.5s;">
+                <td><input type="checkbox"></td>
+                <td><span class="ant-tag tag-blue">#1024</span></td>
+                <td class="font-medium text-gray-700">Công ty TNHH Unicare</td>
+                <td><span class="ant-tag tag-purple">admin_kho</span></td>
+                <td class="money">25.500.000 đ</td>
+                
+                <!-- Tag Trạng Thái Nhảy Số Ở Đây -->
+                <td style="text-align: center;">
+                    <div id="status-tag" class="ant-tag tag-error blink">🚨 Chưa có Phiếu Nhập</div>
+                </td>
+            </tr>
+        </tbody>
+    </table>
+
+    <!-- KHU VỰC THAO TÁC BÊN DƯỚI (TƯƠNG ĐƯƠNG KHI BẤM EXPAND VIEW) -->
+    <div class="expanded-row relative">
+        <div class="text-blue-600 font-bold mb-3 flex items-center gap-2">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            Khu vực xem chi tiết / Thao tác
+        </div>
+        
+        <div class="flex items-start gap-12 bg-white p-4 rounded-lg border border-blue-200">
+            <!-- CỘT 1: Hóa đơn Kho -->
+            <div class="flex-1">
+                <h4 class="font-bold text-gray-700 mb-2">1. Chứng từ Nhập Kho (Thủ kho)</h4>
+                <div id="action-phieu-kho">
+                    <button class="btn-upload btn-phieu shadow-sm" onclick="uploadPhieuKho()">
+                        📤 Tải lên Phiếu Nhập Kho
+                    </button>
+                    <p class="text-xs text-gray-400 mt-2">Yêu cầu có chữ ký xác nhận của thủ kho.</p>
+                </div>
+                <!-- Box kết quả (ẩn lúc đầu) -->
+                <div id="result-phieu-kho" class="hidden mt-2 p-3 bg-blue-50 border border-blue-200 rounded-md">
+                    <div class="flex items-center gap-2 text-blue-700 font-medium text-sm">
+                        <span class="text-xl">✅</span> Đã tải Phiếu Nhập Kho
+                    </div>
+                    <div class="text-xs text-gray-500 mt-1 pl-7">File: phieu-xuat-kho-unicare.pdf</div>
+                </div>
+            </div>
+
+            <!-- CỘT 2: VAT -->
+            <div class="flex-1 opacity-40 pointer-events-none transition-all duration-500" id="box-vat">
+                <h4 class="font-bold text-gray-700 mb-2">2. Hóa đơn Tài chính (Kế toán)</h4>
+                <div id="action-vat">
+                    <button class="btn-upload btn-vat shadow-sm" onclick="uploadVAT()">
+                        🧾 Cập nhật HĐ VAT (Hóa đơn đỏ)
+                    </button>
+                    <p class="text-xs text-red-500 font-medium mt-2" id="vat-warning">⚠️ Phải có phiếu kho trước mới được up VAT.</p>
+                </div>
+                <!-- Box kết quả (ẩn lúc đầu) -->
+                <div id="result-vat" class="hidden mt-2 p-3 bg-orange-50 border border-orange-200 rounded-md">
+                    <div class="flex items-center gap-2 text-orange-700 font-medium text-sm">
+                        <span class="text-xl">✅</span> Đã tải HĐ VAT
+                    </div>
+                    <div class="text-xs text-gray-500 mt-1 pl-7">Tra cứu mã: VAT-2026-99120</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <button onclick="resetFlow()" class="mt-6 text-sm text-gray-400 underline hover:text-gray-800">↻ Reset lại từ đầu</button>
+</div>
+
+<script>
+    const elStatus = document.getElementById('status-tag');
+    const elBoxVat = document.getElementById('box-vat');
+    const elLoader = document.getElementById('loader');
+
+    function simulateUpload(callback) {
+        elLoader.style.display = 'flex';
+        setTimeout(() => {
+            elLoader.style.display = 'none';
+            callback();
+        }, 1200); // 1.2s delay giả lập mạng
+    }
+
+    function uploadPhieuKho() {
+        simulateUpload(() => {
+            // Đổi UI khu vực Action 1
+            document.getElementById('action-phieu-kho').classList.add('hidden');
+            document.getElementById('result-phieu-kho').classList.remove('hidden');
+
+            // Mở khóa UI khu vực Action 2 (VAT)
+            elBoxVat.classList.remove('opacity-40', 'pointer-events-none');
+            document.getElementById('vat-warning').style.display = 'none';
+
+            // ⚠️ ĐỒNG THỜI CẬP NHẬT TAG TRẠNG THÁI CHÍNH TRÊN BẢNG
+            elStatus.className = 'ant-tag tag-warning blink';
+            elStatus.innerHTML = '⏳ Đợi HĐ VAT';
+        });
+    }
+
+    function uploadVAT() {
+        simulateUpload(() => {
+            // Đổi UI khu vực Action 2
+            document.getElementById('action-vat').classList.add('hidden');
+            document.getElementById('result-vat').classList.remove('hidden');
+
+            // ⚠️ CẬP NHẬT TAG TRẠNG THÁI HOÀN TẤT
+            elStatus.className = 'ant-tag tag-success'; // Hết blink
+            elStatus.innerHTML = '✅ Đã đủ Phiếu + VAT';
+        });
+    }
+
+    function resetFlow() {
+        // Khôi phục box 1
+        document.getElementById('action-phieu-kho').classList.remove('hidden');
+        document.getElementById('result-phieu-kho').classList.add('hidden');
+        
+        // Khôi phục box 2
+        document.getElementById('action-vat').classList.remove('hidden');
+        document.getElementById('result-vat').classList.add('hidden');
+        elBoxVat.classList.add('opacity-40', 'pointer-events-none');
+        document.getElementById('vat-warning').style.display = 'block';
+
+        // Tag về ban đầu
+        elStatus.className = 'ant-tag tag-error blink';
+        elStatus.innerHTML = '🚨 Chưa có Phiếu Nhập';
+    }
+</script>
+
+</body>
+</html>

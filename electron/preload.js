@@ -35,6 +35,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         update: (id, data) => ipcRenderer.invoke('purchases:update', { id, data }),
         delete: (id) => ipcRenderer.invoke('purchases:delete', id),
         uploadVATInvoice: (data) => ipcRenderer.invoke('purchases:uploadVATInvoice', data),
+        uploadImportReceipt: (data) => ipcRenderer.invoke('purchases:uploadImportReceipt', data),
+        deleteImportReceipt: (id) => ipcRenderer.invoke('purchases:deleteImportReceipt', id),
         markAsThht: (purchaseId, revert) => ipcRenderer.invoke('purchases:markAsThht', { purchaseId, revert }),
         getVATFileData: (purchaseId) => ipcRenderer.invoke('purchases:getVATFileData', { purchaseId }),
     },

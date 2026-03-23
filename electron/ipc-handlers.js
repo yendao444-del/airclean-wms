@@ -2030,6 +2030,41 @@ async function getOrCreateVatDriveFolder() {
     }
 }
 
+const IMPORT_RECEIPT_DRIVE_FOLDER_NAME = 'LUUTRU-PHIEUNHAPKHO';
+let importReceiptDriveFolderId = null;
+
+async function getOrCreateImportReceiptDriveFolder() {
+    if (importReceiptDriveFolderId) return importReceiptDriveFolderId;
+    const drive = getDriveClient();
+    if (!drive) return null;
+
+    try {
+        const search = await drive.files.list({
+            q: `name='${IMPORT_RECEIPT_DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+            fields: 'files(id)',
+        });
+        if (search.data.files && search.data.files.length > 0) {
+            importReceiptDriveFolderId = search.data.files[0].id;
+            console.log(`📁 Found Drive folder ${IMPORT_RECEIPT_DRIVE_FOLDER_NAME}: ${importReceiptDriveFolderId}`);
+            return importReceiptDriveFolderId;
+        }
+
+        const folder = await drive.files.create({
+            requestBody: {
+                name: IMPORT_RECEIPT_DRIVE_FOLDER_NAME,
+                mimeType: 'application/vnd.google-apps.folder',
+            },
+            fields: 'id',
+        });
+        importReceiptDriveFolderId = folder.data.id;
+        console.log(`📁 Created Drive folder ${IMPORT_RECEIPT_DRIVE_FOLDER_NAME}: ${importReceiptDriveFolderId}`);
+        return importReceiptDriveFolderId;
+    } catch (err) {
+        console.error('❌ Import Receipt Drive folder error:', err.message);
+        return null;
+    }
+}
+
 // Gửi Telegram bằng bot HĐ cũ
 function sendVatTelegramMessage(text) {
     return new Promise((resolve) => {
@@ -2278,6 +2313,117 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
     }
 });
 
+// Upload Phiếu Nhập Kho
+ipcMain.handle('purchases:uploadImportReceipt', async (event, { purchaseId, files = [], fileBase64, fileName }) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+
+        // 1. Lấy thông tin phiếu nhập
+        const purchase = await prisma.purchaseOrder.findUnique({
+            where: { id: purchaseId },
+            include: { supplier: true },
+        });
+        if (!purchase) throw new Error(`Không tìm thấy phiếu nhập #${purchaseId}`);
+
+        // Normalize: hỗ trợ cả nhiều file (files[]) và 1 file (fileBase64/fileName)
+        const filesList = files.length > 0 ? files : (fileBase64 ? [{ fileBase64, fileName }] : []);
+
+        const userDataPath = app.getPath('userData');
+        const receiptDir = path.join(userDataPath, 'import-receipts');
+        if (!fs.existsSync(receiptDir)) fs.mkdirSync(receiptDir, { recursive: true });
+
+        const localPaths = [];
+        const driveUrls = [];
+
+        // 2. Lưu từng file local + upload Drive
+        for (let i = 0; i < filesList.length; i++) {
+            const { fileBase64: b64, fileName: fn } = filesList[i];
+            const ext = (fn || 'jpg').split('.').pop() || 'jpg';
+            const suffix = filesList.length > 1 ? `_${i + 1}` : '';
+            const localFileName = `PN_PO${purchaseId}_${Date.now()}${suffix}.${ext}`;
+            const localPath = path.join(receiptDir, localFileName);
+
+            const fileBuffer = Buffer.from(b64, 'base64');
+            fs.writeFileSync(localPath, fileBuffer);
+            console.log(`📁 Saved Import Receipt [${i+1}/${filesList.length}]: ${localPath}`);
+            localPaths.push(localPath);
+
+            // Upload lên Google Drive
+            try {
+                const drive = getDriveClient();
+                if (drive) {
+                    const folderId = await getOrCreateImportReceiptDriveFolder(); // Separated folder
+                    if (folderId) {
+                        const driveFileName = `Phiếu_Nhập_${purchase.supplier?.name || 'NCC'}_PO${purchaseId}${suffix}.${ext}`;
+                        const result = await uploadToDrive(drive, folderId, driveFileName, fileBuffer, ext === 'pdf' ? 'application/pdf' : 'image/jpeg');
+                        if (result) {
+                            driveUrls.push(result.webViewLink);
+                            console.log(`☁️ Uploaded Receipt to Drive [${i+1}]: ${result.webViewLink}`);
+                        }
+                    }
+                }
+            } catch (driveErr) {
+                console.error(`⚠️ Drive upload failed for Receipt file ${i+1}:`, driveErr.message);
+            }
+        }
+
+        // 3. Cập nhật DB
+        const dbUpdate = {
+            importReceiptStatus: 'uploaded',
+        };
+        if (localPaths.length > 0) {
+            dbUpdate.importReceiptFile = localPaths.length === 1 ? localPaths[0] : JSON.stringify(localPaths);
+        }
+        if (driveUrls.length > 0) {
+            dbUpdate.importReceiptDriveUrl = driveUrls.length === 1 ? driveUrls[0] : driveUrls.join('\n');
+        }
+        await prisma.purchaseOrder.update({ where: { id: purchaseId }, data: dbUpdate });
+
+        await logActivity({
+            module: 'purchases', action: 'RECEIPT_UPLOAD',
+            description: `Upload Phiếu Nhập của phiếu #${purchaseId} (${purchase.supplier?.name})`,
+            userName: 'System',
+        });
+
+        return { success: true, data: { localPaths, driveUrls } };
+    } catch (error) {
+        console.error('❌ Upload Import Receipt error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// Xóa Phiếu Nhập Kho
+ipcMain.handle('purchases:deleteImportReceipt', async (event, purchaseId) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const purchase = await prisma.purchaseOrder.findUnique({
+            where: { id: purchaseId },
+            include: { supplier: true },
+        });
+        if (!purchase) throw new Error(`Không tìm thấy phiếu nhập #${purchaseId}`);
+
+        // Chỉ cập nhật DB để bỏ mapping
+        await prisma.purchaseOrder.update({
+            where: { id: purchaseId },
+            data: {
+                importReceiptStatus: 'pending',
+                importReceiptFile: null,
+                importReceiptDriveUrl: null
+            }
+        });
+
+        await logActivity({
+            module: 'purchases', action: 'RECEIPT_DELETE',
+            description: `Xóa Phiếu Nhập của phiếu #${purchaseId} (${purchase.supplier?.name})`,
+            userName: 'System',
+        });
+
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Delete Import Receipt error:', error);
+        return { success: false, error: error.message };
+    }
+});
 // Đánh dấu phiếu nhập là "Đơn THHT" (không cần HĐ VAT)
 ipcMain.handle('purchases:markAsThht', async (event, { purchaseId, revert }) => {
     try {

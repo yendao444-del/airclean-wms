@@ -117,6 +117,8 @@ export interface ElectronAPI {
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         uploadVATInvoice: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        uploadImportReceipt: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        deleteImportReceipt: (id: number) => Promise<{ success: boolean; error?: string }>;
         markAsThht: (purchaseId: number, revert?: boolean) => Promise<{ success: boolean; error?: string }>;
     };
     suppliers: {

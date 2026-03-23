@@ -171,6 +171,11 @@ model PurchaseOrder {
   vatInvoiceDriveUrl String?  // URL Google Drive (backup cloud)
   vatInvoiceStatus  String    @default("pending") // pending | uploaded | verified
   
+  // Chứng từ kho (Phiếu nhập)
+  importReceiptFile     String?   // Path file ảnh/PDF Phiếu nhập kho (local)
+  importReceiptDriveUrl  String?  // URL Google Drive 
+  importReceiptStatus   String    @default("pending") // pending | uploaded
+  
   items      PurchaseItem[]
 }
 
