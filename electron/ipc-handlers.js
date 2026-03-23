@@ -125,18 +125,11 @@ async function uploadToDrive(drive, folderId, fileName, content, mimeType) {
             fields: 'id, webViewLink',
         });
 
-        // Set quyền "Anyone with link can view" → nhân viên xem được không cần đăng nhập Google
-        try {
-            await drive.permissions.create({
-                fileId: file.data.id,
-                requestBody: {
-                    role: 'reader',
-                    type: 'anyone',
-                },
-            });
-        } catch (permErr) {
-            console.warn(`⚠️ Could not set public permission for ${fileName}:`, permErr.message);
-        }
+        // Set quyền "Anyone with link can view" — fire-and-forget, không block upload
+        drive.permissions.create({
+            fileId: file.data.id,
+            requestBody: { role: 'reader', type: 'anyone' },
+        }).catch(permErr => console.warn(`⚠️ Could not set public permission for ${fileName}:`, permErr.message));
 
         console.log(`☁️ Uploaded to Drive: ${fileName} (${file.data.id}) [public]`);
         return { fileId: file.data.id, webViewLink: file.data.webViewLink };

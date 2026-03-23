@@ -66,6 +66,39 @@ interface Purchase {
     createdAt: Date;
 }
 
+// Nén ảnh trước khi upload — giảm từ 5-10MB xuống ~300KB, tăng tốc upload 10-20x
+async function compressImageToBase64(file: File, maxWidth = 1600, quality = 0.75): Promise<{ fileBase64: string; fileName: string }> {
+    if (!file.type.startsWith('image/')) {
+        // PDF hoặc file khác: không nén, đọc thẳng
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve({ fileBase64: (reader.result as string).split(',')[1], fileName: file.name });
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+        });
+    }
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        const url = URL.createObjectURL(file);
+        img.onload = () => {
+            URL.revokeObjectURL(url);
+            let { width, height } = img;
+            if (width > maxWidth) {
+                height = Math.round(height * maxWidth / width);
+                width = maxWidth;
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            canvas.getContext('2d')!.drawImage(img, 0, 0, width, height);
+            const dataUrl = canvas.toDataURL('image/jpeg', quality);
+            resolve({ fileBase64: dataUrl.split(',')[1], fileName: file.name.replace(/\.[^.]+$/, '.jpg') });
+        };
+        img.onerror = reject;
+        img.src = url;
+    });
+}
+
 export default function PurchasePage() {
     const currentUser = useCurrentUser();
     const [purchases, setPurchases] = useState<Purchase[]>([]);
@@ -696,16 +729,7 @@ export default function PurchasePage() {
 
         setVatUploading(true);
         try {
-            // Convert tất cả files sang base64
-            const filesData = await Promise.all(vatFiles.map(async (file) => {
-                const base64 = await new Promise<string>((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = () => resolve((reader.result as string).split(',')[1]);
-                    reader.onerror = reject;
-                    reader.readAsDataURL(file);
-                });
-                return { fileBase64: base64, fileName: file.name };
-            }));
+            const filesData = await Promise.all(vatFiles.map(file => compressImageToBase64(file)));
 
             const payload: any = {
                 purchaseId: vatPurchaseId,
@@ -754,15 +778,7 @@ export default function PurchasePage() {
 
         setImportReceiptUploading(true);
         try {
-            const filesData = await Promise.all(importReceiptFiles.map(async (file) => {
-                const base64 = await new Promise<string>((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = () => resolve((reader.result as string).split(',')[1]);
-                    reader.onerror = reject;
-                    reader.readAsDataURL(file);
-                });
-                return { fileBase64: base64, fileName: file.name };
-            }));
+            const filesData = await Promise.all(importReceiptFiles.map(file => compressImageToBase64(file)));
 
             const payload: any = {
                 purchaseId: importReceiptPurchaseId,
