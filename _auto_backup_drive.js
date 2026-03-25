@@ -24,40 +24,24 @@ async function main() {
 
     const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const dayName = days[new Date().getDay()];
-    // Su dung file RAR thay vi ZIP mang thuan WinRAR Console cho an toan cham soc
-    const rarName = `AIRCLEAN_WMS_Backup_${dayName}.rar`;
+    const bundleName = `AIRCLEAN_WMS_Backup_${dayName}.bundle`;
 
-    console.log(`\n[1/4] Dang goi Trinh WinRAR (Console) chuan 100% thanh: ${rarName}`);
-    console.log("      (Bat dau nen: loai dist, node_modules, .git...)");
-    
-    if (fs.existsSync(rarName)) fs.unlinkSync(rarName);
+    console.log(`\n[1/3] Tao git bundle: ${bundleName}`);
+    console.log("      (Chua toan bo source code + lich su commit, khong co node_modules)");
+
+    if (fs.existsSync(bundleName)) fs.unlinkSync(bundleName);
 
     try {
-        const rarPath = '"C:\\Program Files\\WinRAR\\rar.exe"';
-        // Xóa thuộc tính -inul và đặt stdio: inherit để vọt Log Output báo từng file nén ra Terminal chống tình trạng Freeze Cứng Ảo
-        const cmd = `${rarPath} a -r -dh ${rarName} src electron prisma public .env .gitignore package.json package-lock.json *config* index.html *.bat _*.js tsconfig.json tsconfig.node.json node_modules dev.db`;
-        execSync(cmd, { stdio: 'inherit' });
+        execSync(`git bundle create ${bundleName} --all`, { stdio: 'inherit' });
     } catch (err) {
-        console.error("❌ LOI: Nen Cung that bai. Chi tiet:");
-        console.error(err.stdout ? err.stdout.toString() : '');
-        console.error(err.stderr ? err.stderr.toString() : '');
+        console.error("LOI: git bundle that bai!");
         process.exit(1);
     }
 
-    const stats = fs.statSync(rarName);
-    console.log(`      ✅ Xong ! Do lon file nén RAR: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+    const stats = fs.statSync(bundleName);
+    console.log(`      OK! Kich thuoc bundle: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
 
-    console.log(`\n[2/4] TU DONG GOI LENH EXTRACT DE TEST FILE NGAY TREN MAY (Giong Kiem Dinh Chat Luong 2 Vong)...`);
-    try {
-        const rarPath = '"C:\\Program Files\\WinRAR\\rar.exe"';
-        execSync(`${rarPath} t ${rarName}`, { stdio: 'inherit' });
-        console.log(`      ✅ 100% OK! WinRAR bao file tuyet doi khong co loi Internal Error nao ca!`);
-    } catch (err) {
-        console.error("❌ LOI: File xui xeo bi loi nén luc ghi. Nghiem cam Up len!");
-        process.exit(1);
-    }
-
-    console.log(`\n[3/4] Kiem tra thu muc sao luu tren Google Drive...`);
+    console.log(`\n[2/3] Kiem tra thu muc sao luu tren Google Drive...`);
     let folderId = null;
     try {
         const folderRes = await drive.files.list({
@@ -79,14 +63,14 @@ async function main() {
         process.exit(1);
     }
 
-    console.log(`\n[4/4] Tai file RAR (Da Kiem Dinh Chuan 100%) len Drive...`);
+    console.log(`\n[3/3] Upload bundle len Google Drive...`);
     const fileRes = await drive.files.list({
-        q: `name='${rarName}' and '${folderId}' in parents and trashed=false`,
+        q: `name='${bundleName}' and '${folderId}' in parents and trashed=false`,
         spaces: 'drive',
     });
 
-    const fileMetadata = { name: rarName, parents: [folderId] };
-    const media = { mimeType: 'application/vnd.rar', body: fs.createReadStream(rarName) };
+    const fileMetadata = { name: bundleName, parents: [folderId] };
+    const media = { mimeType: 'application/octet-stream', body: fs.createReadStream(bundleName) };
 
     const totalBytes = stats.size;
     let lastPercent = -1;
@@ -124,8 +108,8 @@ async function main() {
         console.error("❌ Loi Tai len:", err.message);
     }
     
-    // Don rac de tra lai may sach se
-    if (fs.existsSync(rarName)) fs.unlinkSync(rarName);
+    // Don rac
+    if (fs.existsSync(bundleName)) fs.unlinkSync(bundleName);
     console.log("\n✅ AUTO BACKUP HOAN TAT TOAN TAP. Test luong mượt mà.");
 }
 
