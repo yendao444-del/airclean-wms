@@ -13,11 +13,11 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Generate Timestamp and Zip Code
+      - name: Generate Zip Code
         run: |
-          # Create timestamp for the filename
-          TIMESTAMP=$(date +'%Y-%m-%d_%H-%M-%S')
-          ZIP_FILENAME="SourceCodeBackup_${TIMESTAMP}.zip"
+          # Use Day of Week (Monday, Tuesday...) to rotate backups automatically
+          DAY_OF_WEEK=$(date +'%A')
+          ZIP_FILENAME="AIRCLEAN_WMS_Backup_${DAY_OF_WEEK}.zip"
           
           # Compress everything EXCEPT the release4 folder and .git folder
           zip -r $ZIP_FILENAME . -x "release4/*" -x ".git/*"
