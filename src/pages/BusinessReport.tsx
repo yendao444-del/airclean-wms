@@ -44,14 +44,18 @@ const DEFAULT_CONFIG = {
 
 type PNLConfig = typeof DEFAULT_CONFIG;
 
-// Default fees riêng cho từng sàn (Ngành Sức Khỏe - T3/2026)
-// Ref: phi_san_2026.md
+// Default fees riêng cho từng sàn (T3/2026)
+// Shopee: theo screenshot thực tế đơn hàng Seller Center
+// TikTok: theo phi_san_2026.md
 const DEFAULT_SHOPEE_FEES = [
+    { id: 'troGia', name: 'Trợ giá (Đồng Tài Trợ)', type: 'percent', value: 4.50, icon: '🎁', color: '#ff4d4f' },
     { id: 'phiCoDinh', name: 'Phí cố định', type: 'percent', value: 12.50, icon: '💳', color: '#1890ff' },
-    { id: 'phiThanhToan', name: 'Phí thanh toán', type: 'percent', value: 5.00, icon: '💰', color: '#fa8c16' },
-    { id: 'voucherXtra', name: 'Phí DV Voucher Xtra', type: 'percent', value: 3.00, icon: '🎫', color: '#722ed1' },
-    { id: 'freeshipXtra', name: 'Phí DV Freeship Xtra', type: 'percent', value: 6.00, icon: '🚚', color: '#52c41a' },
-    { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#13c2c2' },
+    { id: 'piShip', name: 'Phí dịch vụ PiShip', type: 'fixed', value: 1620, icon: '🚚', color: '#52c41a' },
+    { id: 'phiDichVu', name: 'Phí Dịch Vụ', type: 'fixed', value: 3000, icon: '⚙️', color: '#722ed1' },
+    { id: 'phiThanhToan', name: 'Phí thanh toán', type: 'percent', value: 4.69, icon: '💰', color: '#fa8c16' },
+    { id: 'thueGTGT', name: 'Thuế GTGT', type: 'percent', value: 0.96, icon: '🏛️', color: '#eb2f96' },
+    { id: 'thueTNCN', name: 'Thuế TNCN', type: 'percent', value: 0.48, icon: '📊', color: '#13c2c2' },
+    { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#52c41a' },
 ];
 
 const DEFAULT_TIKTOK_FEES = [
@@ -151,39 +155,21 @@ export default function BusinessReportPage() {
                 setConfig({ ...DEFAULT_CONFIG, ...cfgRes.data });
             }
 
-            // Load phí sàn riêng cho Shopee
-            const shopeeDefaultIds = new Set(DEFAULT_SHOPEE_FEES.map(f => f.id));
-            const shopeeFeesRes = await window.electronAPI.appConfig.get('shopee_fees_config');
+            // Load phí sàn Shopee (dùng key v2 để reset config cũ)
+            const shopeeFeesRes = await window.electronAPI.appConfig.get('shopee_fees_v2');
             if (shopeeFeesRes.success && shopeeFeesRes.data && Array.isArray(shopeeFeesRes.data)) {
-                const saved = shopeeFeesRes.data as any[];
-                const savedIds = new Set(saved.map((f: any) => f.id));
-                // Kiểm tra format mới: ít nhất 1 ID phải khớp với default
-                const isNewFormat = saved.some((f: any) => shopeeDefaultIds.has(f.id));
-                if (isNewFormat) {
-                    setShopeeFeeConfig([...saved.filter((f: any) => shopeeDefaultIds.has(f.id) || !DEFAULT_SHOPEE_FEES.find(d => d.id === f.id)), ...DEFAULT_SHOPEE_FEES.filter(d => !savedIds.has(d.id))]);
-                } else {
-                    // Format cũ → reset về default mới, auto-save
-                    await window.electronAPI.appConfig.set('shopee_fees_config', DEFAULT_SHOPEE_FEES);
-                }
+                setShopeeFeeConfig(shopeeFeesRes.data);
             } else {
-                // Chưa có config → save default mới
-                await window.electronAPI.appConfig.set('shopee_fees_config', DEFAULT_SHOPEE_FEES);
+                // Lần đầu hoặc config cũ → dùng default mới
+                await window.electronAPI.appConfig.set('shopee_fees_v2', DEFAULT_SHOPEE_FEES);
             }
 
-            // Load phí sàn riêng cho TikTok
-            const tiktokDefaultIds = new Set(DEFAULT_TIKTOK_FEES.map(f => f.id));
-            const tiktokFeesRes = await window.electronAPI.appConfig.get('tiktok_fees_config');
+            // Load phí sàn TikTok (dùng key v2)
+            const tiktokFeesRes = await window.electronAPI.appConfig.get('tiktok_fees_v2');
             if (tiktokFeesRes.success && tiktokFeesRes.data && Array.isArray(tiktokFeesRes.data)) {
-                const saved = tiktokFeesRes.data as any[];
-                const savedIds = new Set(saved.map((f: any) => f.id));
-                const isNewFormat = saved.some((f: any) => tiktokDefaultIds.has(f.id));
-                if (isNewFormat) {
-                    setTiktokFeeConfig([...saved.filter((f: any) => tiktokDefaultIds.has(f.id) || !DEFAULT_TIKTOK_FEES.find(d => d.id === f.id)), ...DEFAULT_TIKTOK_FEES.filter(d => !savedIds.has(d.id))]);
-                } else {
-                    await window.electronAPI.appConfig.set('tiktok_fees_config', DEFAULT_TIKTOK_FEES);
-                }
+                setTiktokFeeConfig(tiktokFeesRes.data);
             } else {
-                await window.electronAPI.appConfig.set('tiktok_fees_config', DEFAULT_TIKTOK_FEES);
+                await window.electronAPI.appConfig.set('tiktok_fees_v2', DEFAULT_TIKTOK_FEES);
             }
         } catch (err) {
             console.error('Load data error:', err);
@@ -406,9 +392,9 @@ export default function BusinessReportPage() {
             await window.electronAPI.appConfig.set(CONFIG_KEY_PNL, newConfig);
             setConfig(newConfig);
 
-            // Lưu phí sàn riêng cho từng sàn
-            await window.electronAPI.appConfig.set('shopee_fees_config', shopeeFeeConfig);
-            await window.electronAPI.appConfig.set('tiktok_fees_config', tiktokFeeConfig);
+            // Lưu phí sàn riêng cho từng sàn (v2)
+            await window.electronAPI.appConfig.set('shopee_fees_v2', shopeeFeeConfig);
+            await window.electronAPI.appConfig.set('tiktok_fees_v2', tiktokFeeConfig);
 
             setConfigModalOpen(false);
             message.success('Đã lưu cấu hình P&L!');
