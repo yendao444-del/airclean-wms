@@ -152,26 +152,38 @@ export default function BusinessReportPage() {
             }
 
             // Load phí sàn riêng cho Shopee
+            const shopeeDefaultIds = new Set(DEFAULT_SHOPEE_FEES.map(f => f.id));
             const shopeeFeesRes = await window.electronAPI.appConfig.get('shopee_fees_config');
-            if (shopeeFeesRes.success && shopeeFeesRes.data) {
+            if (shopeeFeesRes.success && shopeeFeesRes.data && Array.isArray(shopeeFeesRes.data)) {
                 const saved = shopeeFeesRes.data as any[];
                 const savedIds = new Set(saved.map((f: any) => f.id));
-                setShopeeFeeConfig([...saved, ...DEFAULT_SHOPEE_FEES.filter(d => !savedIds.has(d.id))]);
-            } else {
-                // Migration: nếu có fees_config cũ, dùng làm Shopee config
-                const oldRes = await window.electronAPI.appConfig.get('fees_config');
-                if (oldRes.success && oldRes.data && Array.isArray(oldRes.data)) {
-                    const saved = oldRes.data as any[];
-                    const savedIds = new Set(saved.map((f: any) => f.id));
-                    setShopeeFeeConfig([...saved.filter((f: any) => !f.isCustom), ...DEFAULT_SHOPEE_FEES.filter(d => !savedIds.has(d.id))]);
+                // Kiểm tra format mới: ít nhất 1 ID phải khớp với default
+                const isNewFormat = saved.some((f: any) => shopeeDefaultIds.has(f.id));
+                if (isNewFormat) {
+                    setShopeeFeeConfig([...saved.filter((f: any) => shopeeDefaultIds.has(f.id) || !DEFAULT_SHOPEE_FEES.find(d => d.id === f.id)), ...DEFAULT_SHOPEE_FEES.filter(d => !savedIds.has(d.id))]);
+                } else {
+                    // Format cũ → reset về default mới, auto-save
+                    await window.electronAPI.appConfig.set('shopee_fees_config', DEFAULT_SHOPEE_FEES);
                 }
+            } else {
+                // Chưa có config → save default mới
+                await window.electronAPI.appConfig.set('shopee_fees_config', DEFAULT_SHOPEE_FEES);
             }
+
             // Load phí sàn riêng cho TikTok
+            const tiktokDefaultIds = new Set(DEFAULT_TIKTOK_FEES.map(f => f.id));
             const tiktokFeesRes = await window.electronAPI.appConfig.get('tiktok_fees_config');
-            if (tiktokFeesRes.success && tiktokFeesRes.data) {
+            if (tiktokFeesRes.success && tiktokFeesRes.data && Array.isArray(tiktokFeesRes.data)) {
                 const saved = tiktokFeesRes.data as any[];
                 const savedIds = new Set(saved.map((f: any) => f.id));
-                setTiktokFeeConfig([...saved, ...DEFAULT_TIKTOK_FEES.filter(d => !savedIds.has(d.id))]);
+                const isNewFormat = saved.some((f: any) => tiktokDefaultIds.has(f.id));
+                if (isNewFormat) {
+                    setTiktokFeeConfig([...saved.filter((f: any) => tiktokDefaultIds.has(f.id) || !DEFAULT_TIKTOK_FEES.find(d => d.id === f.id)), ...DEFAULT_TIKTOK_FEES.filter(d => !savedIds.has(d.id))]);
+                } else {
+                    await window.electronAPI.appConfig.set('tiktok_fees_config', DEFAULT_TIKTOK_FEES);
+                }
+            } else {
+                await window.electronAPI.appConfig.set('tiktok_fees_config', DEFAULT_TIKTOK_FEES);
             }
         } catch (err) {
             console.error('Load data error:', err);
