@@ -1,6 +1,0 @@
-1257: Thêm nhà cung cấp mới
-1397: ➕ Thêm sản phẩm
-1481: Thêm
-1601: title={editingSupplier ? '✏️ Sửa nhà cung cấp' : '➕ Thêm nhà cung cấp mới'}
-1639: {editingSupplier ? 'Cập nhật' : 'Thêm mới'}
-1823: 📎 {isEdit ? 'Thêm / thay thế file (không bắt buộc)' : 'Ảnh / PDF hóa đơn VAT'}
