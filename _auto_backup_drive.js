@@ -88,25 +88,40 @@ async function main() {
     const fileMetadata = { name: rarName, parents: [folderId] };
     const media = { mimeType: 'application/vnd.rar', body: fs.createReadStream(rarName) };
 
+    const totalBytes = stats.size;
+    let lastPercent = -1;
+
+    const onUploadProgress = (evt) => {
+        const percent = Math.floor((evt.bytesRead / totalBytes) * 100);
+        if (percent !== lastPercent && percent % 5 === 0) {
+            const filled = Math.floor(percent / 5);
+            const bar = '█'.repeat(filled) + '░'.repeat(20 - filled);
+            process.stdout.write(`\r      [${bar}] ${percent}% (${(evt.bytesRead / 1024 / 1024).toFixed(1)}MB / ${(totalBytes / 1024 / 1024).toFixed(1)}MB)`);
+            lastPercent = percent;
+        }
+    };
+
     try {
         if (fileRes.data.files.length > 0) {
-            console.log(`      ♻️  Da tim thay file ghi de. Google Drive dang tich hop thay the...`);
+            console.log(`      ♻️  Da tim thay file ghi de. Google Drive dang thay the...`);
             await drive.files.update({
                 fileId: fileRes.data.files[0].id,
-                media: media,
+                media: { ...media, body: fs.createReadStream(rarName) },
                 supportsAllDrives: true
-            });
+            }, { onUploadProgress });
         } else {
             console.log(`      ✨ Dang tao file hoan toan moi...`);
             await drive.files.create({
                 resource: fileMetadata,
-                media: media,
+                media: { ...media, body: fs.createReadStream(rarName) },
                 fields: 'id'
-            });
+            }, { onUploadProgress });
         }
-        console.log("      ✅ THANH CONG BO LA! DUYET!");
+        process.stdout.write('\n');
+        console.log("      ✅ THANH CONG! Upload hoan tat.");
     } catch (err) {
-        console.error("❌ Lỗi Tải lên:", err.message);
+        process.stdout.write('\n');
+        console.error("❌ Loi Tai len:", err.message);
     }
     
     // Don rac de tra lai may sach se
