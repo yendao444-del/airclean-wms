@@ -34,10 +34,9 @@ async function main() {
 
     try {
         const rarPath = '"C:\\Program Files\\WinRAR\\rar.exe"';
-        // Nen full khung: src, electron, cac config, CODE THU VIEN (node_modules) va file CHUA DU LIEU LICH SU (dev.db) - Khong the loi C++!
-        // -dh: doc file ke ca khi dang bi phan mem khac khoa/su dung (Chong vấp Database dev.db)
-        const cmd = `${rarPath} a -r -dh -inul ${rarName} src electron prisma public .env .gitignore package.json package-lock.json *config* index.html *.bat _*.js tsconfig.json tsconfig.node.json node_modules dev.db`;
-        execSync(cmd, { stdio: 'pipe' });
+        // Xóa thuộc tính -inul và đặt stdio: inherit để vọt Log Output báo từng file nén ra Terminal chống tình trạng Freeze Cứng Ảo
+        const cmd = `${rarPath} a -r -dh ${rarName} src electron prisma public .env .gitignore package.json package-lock.json *config* index.html *.bat _*.js tsconfig.json tsconfig.node.json node_modules dev.db`;
+        execSync(cmd, { stdio: 'inherit' });
     } catch (err) {
         console.error("❌ LOI: Nen Cung that bai. Chi tiet:");
         console.error(err.stdout ? err.stdout.toString() : '');
@@ -48,10 +47,10 @@ async function main() {
     const stats = fs.statSync(rarName);
     console.log(`      ✅ Xong ! Do lon file nén RAR: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
 
-    console.log(`\n[2/4] TU DONG GOI LENH EXTRACT DE TEST FILE NGAY TREN MAY...`);
+    console.log(`\n[2/4] TU DONG GOI LENH EXTRACT DE TEST FILE NGAY TREN MAY (Giong Kiem Dinh Chat Luong 2 Vong)...`);
     try {
         const rarPath = '"C:\\Program Files\\WinRAR\\rar.exe"';
-        execSync(`${rarPath} t -inul ${rarName}`, { stdio: 'pipe' });
+        execSync(`${rarPath} t ${rarName}`, { stdio: 'inherit' });
         console.log(`      ✅ 100% OK! WinRAR bao file tuyet doi khong co loi Internal Error nao ca!`);
     } catch (err) {
         console.error("❌ LOI: File xui xeo bi loi nén luc ghi. Nghiem cam Up len!");
