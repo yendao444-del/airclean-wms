@@ -26,9 +26,9 @@ jobs:
           echo "ZIP_FILENAME=${ZIP_FILENAME}" >> $GITHUB_ENV
 
       - name: Upload to Google Drive
-        uses: adityak74/google-drive-upload-action@main
+        uses: willo32/google-drive-upload-action@v1
         with:
+          target: ${{ secrets.GDRIVE_FOLDER_ID }}
           credentials: ${{ secrets.GDRIVE_CREDENTIALS_JSON }}
           filename: ${{ env.ZIP_FILENAME }}
-          folderId: ${{ secrets.GDRIVE_FOLDER_ID }}
           overwrite: "true"
