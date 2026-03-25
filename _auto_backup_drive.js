@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const archiver = require('archiver');
+const { execSync } = require('child_process');
 const { google } = require('googleapis');
 
 const OAUTH_CLIENT_ID = '470025984975-s63vgvnb1ds58fmagk9iqq0f9ufhkktr.apps.googleusercontent.com';
@@ -9,7 +9,7 @@ const TOKEN_PATH = path.join(__dirname, 'electron', 'gdrive-token.json');
 
 async function main() {
     console.log("=========================================");
-    console.log("    AIRCLEAN WMS - AUTO BACKUP DRIVE     ");
+    console.log("    AIRCLEAN WMS - AUTO BACKUP (THEP)    ");
     console.log("=========================================");
 
     if (!fs.existsSync(TOKEN_PATH)) {
@@ -24,41 +24,41 @@ async function main() {
 
     const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const dayName = days[new Date().getDay()];
-    const zipName = `AIRCLEAN_WMS_Backup_${dayName}.zip`;
+    // Su dung file RAR thay vi ZIP mang thuan WinRAR Console cho an toan cham soc
+    const rarName = `AIRCLEAN_WMS_Backup_${dayName}.rar`;
 
-    console.log(`\n[1/3] Dang nen Source Code bang archiver thanh: ${zipName}`);
-    console.log("      (Tu dong loai bo dist, node_modules, .git, release4...)");
+    console.log(`\n[1/4] Dang goi Trinh WinRAR (Console) chuan 100% thanh: ${rarName}`);
+    console.log("      (Bat dau nen: loai dist, node_modules, .git...)");
     
-    if (fs.existsSync(zipName)) fs.unlinkSync(zipName);
+    if (fs.existsSync(rarName)) fs.unlinkSync(rarName);
 
-    // ZIP CREATION WITH ARCHIVER
-    await new Promise((resolve, reject) => {
-        const output = fs.createWriteStream(zipName);
-        const archive = archiver('zip', {
-            zlib: { level: 9 } // Muc do nen toi da
-        });
+    try {
+        const rarPath = '"C:\\Program Files\\WinRAR\\rar.exe"';
+        // Nen full khung: src, electron, cac config, CODE THU VIEN (node_modules) va file CHUA DU LIEU LICH SU (dev.db) - Khong the loi C++!
+        // -dh: doc file ke ca khi dang bi phan mem khac khoa/su dung (Chong vấp Database dev.db)
+        const cmd = `${rarPath} a -r -dh -inul ${rarName} src electron prisma public .env .gitignore package.json package-lock.json *config* index.html *.bat _*.js tsconfig.json tsconfig.node.json node_modules dev.db`;
+        execSync(cmd, { stdio: 'pipe' });
+    } catch (err) {
+        console.error("❌ LOI: Nen Cung that bai. Chi tiet:");
+        console.error(err.stdout ? err.stdout.toString() : '');
+        console.error(err.stderr ? err.stderr.toString() : '');
+        process.exit(1);
+    }
 
-        output.on('close', function() {
-            console.log(`      ✅ Xong! Do lon ZIP: ${(archive.pointer() / 1024 / 1024).toFixed(2)} MB`);
-            resolve();
-        });
+    const stats = fs.statSync(rarName);
+    console.log(`      ✅ Xong ! Do lon file nén RAR: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
 
-        archive.on('error', function(err) {
-            reject(err);
-        });
+    console.log(`\n[2/4] TU DONG GOI LENH EXTRACT DE TEST FILE NGAY TREN MAY...`);
+    try {
+        const rarPath = '"C:\\Program Files\\WinRAR\\rar.exe"';
+        execSync(`${rarPath} t -inul ${rarName}`, { stdio: 'pipe' });
+        console.log(`      ✅ 100% OK! WinRAR bao file tuyet doi khong co loi Internal Error nao ca!`);
+    } catch (err) {
+        console.error("❌ LOI: File xui xeo bi loi nén luc ghi. Nghiem cam Up len!");
+        process.exit(1);
+    }
 
-        archive.pipe(output);
-
-        // Append all files except ignored heavy folders
-        archive.glob('**/*', {
-            cwd: __dirname,
-            ignore: ['node_modules/**', 'dist/**', 'release4/**', '.git/**', '_patch_temp/**', zipName]
-        });
-
-        archive.finalize();
-    });
-
-    console.log(`\n[2/3] Kiem tra thu muc sao luu tren Google Drive...`);
+    console.log(`\n[3/4] Kiem tra thu muc sao luu tren Google Drive...`);
     let folderId = null;
     try {
         const folderRes = await drive.files.list({
@@ -80,14 +80,14 @@ async function main() {
         process.exit(1);
     }
 
-    console.log(`\n[3/3] Tai file ZIP len Drive vao thu muc vua roi...`);
+    console.log(`\n[4/4] Tai file RAR (Da Kiem Dinh Chuan 100%) len Drive...`);
     const fileRes = await drive.files.list({
-        q: `name='${zipName}' and '${folderId}' in parents and trashed=false`,
+        q: `name='${rarName}' and '${folderId}' in parents and trashed=false`,
         spaces: 'drive',
     });
 
-    const fileMetadata = { name: zipName, parents: [folderId] };
-    const media = { mimeType: 'application/zip', body: fs.createReadStream(zipName) };
+    const fileMetadata = { name: rarName, parents: [folderId] };
+    const media = { mimeType: 'application/vnd.rar', body: fs.createReadStream(rarName) };
 
     try {
         if (fileRes.data.files.length > 0) {
@@ -105,14 +105,14 @@ async function main() {
                 fields: 'id'
             });
         }
-        console.log("      ✅ THANH CONG! DUYET!");
+        console.log("      ✅ THANH CONG BO LA! DUYET!");
     } catch (err) {
         console.error("❌ Lỗi Tải lên:", err.message);
     }
     
-    // Clean up
-    if (fs.existsSync(zipName)) fs.unlinkSync(zipName);
-    console.log("\n✅ AUTO BACKUP HOAN TAT. Da xoa file zip tam tren may.");
+    // Don rac de tra lai may sach se
+    if (fs.existsSync(rarName)) fs.unlinkSync(rarName);
+    console.log("\n✅ AUTO BACKUP HOAN TAT TOAN TAP. Test luong mượt mà.");
 }
 
-main();
+main().catch(console.error);

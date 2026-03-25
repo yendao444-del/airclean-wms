@@ -11,3 +11,5 @@ release*
 /src/generated/prisma
 /prisma/dev.db
 nul
+
+AIRCLEAN_WMS_Backup_*.rar

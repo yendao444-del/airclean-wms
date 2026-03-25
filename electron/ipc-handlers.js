@@ -5948,15 +5948,22 @@ ipcMain.handle('einvoice:getStats', async () => {
     try {
         if (!prisma) throw new Error('Database not initialized');
 
-        // 🚀 Gộp thành 2 queries thay vì 5
+        // 🚀 Gộp thành 2 queries thay vì 5 + ÁP DỤNG BỘ LỌC 3 NGÀY CHỐNG ĐẾM TRÀN RÁC (842 bills cũ)
+        const dateThreshold = new Date();
+        dateThreshold.setDate(dateThreshold.getDate() - 3);
+
         const [statusCounts, totalAmount] = await Promise.all([
             prisma.eInvoice.groupBy({
                 by: ['status'],
+                where: { createdAt: { gte: dateThreshold } },
                 _count: { status: true },
             }),
             prisma.eInvoice.aggregate({
                 _sum: { totalAmount: true },
-                where: { status: 'issued' },
+                where: { 
+                    status: 'issued',
+                    createdAt: { gte: dateThreshold }
+                },
             }),
         ]);
 
