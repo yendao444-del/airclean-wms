@@ -59,10 +59,12 @@ const DEFAULT_SHOPEE_FEES = [
 ];
 
 const DEFAULT_TIKTOK_FEES = [
-    { id: 'phiHoaHong', name: 'Phí hoa hồng nền tảng', type: 'percent', value: 11.00, icon: '💳', color: '#1890ff' },
     { id: 'phiGiaoDich', name: 'Phí giao dịch', type: 'percent', value: 5.00, icon: '💰', color: '#fa8c16' },
+    { id: 'phiHoaHong', name: 'Phí hoa hồng TikTok Shop', type: 'percent', value: 10.31, icon: '💳', color: '#1890ff' },
     { id: 'phiXuLyDon', name: 'Phí xử lý đơn hàng', type: 'fixed', value: 3000, icon: '⚙️', color: '#722ed1' },
-    { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#13c2c2' },
+    { id: 'thueGTGT', name: 'Thuế GTGT (TikTok khấu trừ)', type: 'percent', value: 1.00, icon: '🏛️', color: '#eb2f96' },
+    { id: 'thueTNCN', name: 'Thuế TNCN (TikTok khấu trừ)', type: 'percent', value: 0.50, icon: '📊', color: '#13c2c2' },
+    { id: 'affiliate', name: 'Hoa hồng liên kết', type: 'percent', value: 15.00, icon: '🤝', color: '#52c41a' },
 ];
 
 // ============================================
