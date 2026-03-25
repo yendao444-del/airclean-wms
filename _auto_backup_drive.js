@@ -63,7 +63,20 @@ async function main() {
         process.exit(1);
     }
 
-    const uploadFile = async (localPath, remoteName, mimeType) => {
+    const MAX_BACKUPS = 20;
+    const now = new Date();
+    const dateStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`;
+
+    // Tao subfolder theo ngay: AIRCLEAN_WMS_SOURCE_BACKUP/2026-03-25_2010/
+    console.log(`\n[3/4] Tao thu muc backup: ${dateStr}`);
+    const dayFolder = await drive.files.create({
+        resource: { name: dateStr, mimeType: 'application/vnd.google-apps.folder', parents: [folderId] },
+        fields: 'id'
+    });
+    const dayFolderId = dayFolder.data.id;
+
+    // Upload file vao subfolder
+    const uploadToFolder = async (localPath, remoteName, mimeType, targetFolderId) => {
         const fileSize = fs.statSync(localPath).size;
         let lastPercent = -1;
         const onUploadProgress = (evt) => {
@@ -75,37 +88,40 @@ async function main() {
                 lastPercent = percent;
             }
         };
-        const existing = await drive.files.list({
-            q: `name='${remoteName}' and '${folderId}' in parents and trashed=false`,
-            spaces: 'drive',
-        });
         const media = { mimeType, body: fs.createReadStream(localPath) };
-        try {
-            if (existing.data.files.length > 0) {
-                console.log(`      Ghi de: ${remoteName}`);
-                await drive.files.update({ fileId: existing.data.files[0].id, media, supportsAllDrives: true }, { onUploadProgress });
-            } else {
-                console.log(`      Tao moi: ${remoteName}`);
-                await drive.files.create({ resource: { name: remoteName, parents: [folderId] }, media, fields: 'id' }, { onUploadProgress });
-            }
-            process.stdout.write('\n');
-            console.log(`      OK! ${remoteName} upload xong.`);
-        } catch (err) {
-            process.stdout.write('\n');
-            console.error(`LOI upload ${remoteName}:`, err.message);
-        }
+        await drive.files.create({ resource: { name: remoteName, parents: [targetFolderId] }, media, fields: 'id' }, { onUploadProgress });
+        process.stdout.write('\n');
+        console.log(`      OK! ${remoteName} upload xong.`);
     };
 
-    console.log(`\n[3/4] Upload bundle len Google Drive...`);
-    await uploadFile(bundleName, bundleName, 'application/octet-stream');
+    console.log(`\n[4/5] Upload bundle...`);
+    await uploadToFolder(bundleName, bundleName, 'application/octet-stream', dayFolderId);
 
-    console.log(`\n[4/4] Upload RESTORE.bat len Google Drive...`);
+    console.log(`\n[5/5] Upload RESTORE.bat...`);
     const restoreBat = path.join(__dirname, 'RESTORE.bat');
-    await uploadFile(restoreBat, 'RESTORE.bat', 'text/plain');
+    await uploadToFolder(restoreBat, 'RESTORE.bat', 'text/plain', dayFolderId);
+
+    // Xoa ban cu neu qua 20 ban
+    console.log(`\n      Kiem tra so luong backup...`);
+    const allFolders = await drive.files.list({
+        q: `'${folderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+        orderBy: 'createdTime asc',
+        fields: 'files(id, name)',
+        spaces: 'drive',
+    });
+    const folders = allFolders.data.files;
+    if (folders.length > MAX_BACKUPS) {
+        const toDelete = folders.slice(0, folders.length - MAX_BACKUPS);
+        for (const f of toDelete) {
+            await drive.files.delete({ fileId: f.id });
+            console.log(`      Xoa ban cu: ${f.name}`);
+        }
+    }
+    console.log(`      Hien co ${Math.min(folders.length, MAX_BACKUPS)} / ${MAX_BACKUPS} ban backup.`);
 
     // Don rac
     if (fs.existsSync(bundleName)) fs.unlinkSync(bundleName);
-    console.log("\nAUTO BACKUP HOAN TAT! Drive co du: bundle + RESTORE.bat");
+    console.log("\nAUTO BACKUP HOAN TAT!");
 }
 
 main().catch(console.error);
