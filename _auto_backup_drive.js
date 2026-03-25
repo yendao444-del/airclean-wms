@@ -63,54 +63,49 @@ async function main() {
         process.exit(1);
     }
 
-    console.log(`\n[3/3] Upload bundle len Google Drive...`);
-    const fileRes = await drive.files.list({
-        q: `name='${bundleName}' and '${folderId}' in parents and trashed=false`,
-        spaces: 'drive',
-    });
-
-    const fileMetadata = { name: bundleName, parents: [folderId] };
-    const media = { mimeType: 'application/octet-stream', body: fs.createReadStream(bundleName) };
-
-    const totalBytes = stats.size;
-    let lastPercent = -1;
-
-    const onUploadProgress = (evt) => {
-        const percent = Math.floor((evt.bytesRead / totalBytes) * 100);
-        if (percent !== lastPercent && percent % 5 === 0) {
-            const filled = Math.floor(percent / 5);
-            const bar = '█'.repeat(filled) + '░'.repeat(20 - filled);
-            process.stdout.write(`\r      [${bar}] ${percent}% (${(evt.bytesRead / 1024 / 1024).toFixed(1)}MB / ${(totalBytes / 1024 / 1024).toFixed(1)}MB)`);
-            lastPercent = percent;
+    const uploadFile = async (localPath, remoteName, mimeType) => {
+        const fileSize = fs.statSync(localPath).size;
+        let lastPercent = -1;
+        const onUploadProgress = (evt) => {
+            const percent = Math.floor((evt.bytesRead / fileSize) * 100);
+            if (percent !== lastPercent && percent % 5 === 0) {
+                const filled = Math.floor(percent / 5);
+                const bar = '#'.repeat(filled) + '-'.repeat(20 - filled);
+                process.stdout.write(`\r      [${bar}] ${percent}% (${(evt.bytesRead/1024/1024).toFixed(1)}MB / ${(fileSize/1024/1024).toFixed(1)}MB)`);
+                lastPercent = percent;
+            }
+        };
+        const existing = await drive.files.list({
+            q: `name='${remoteName}' and '${folderId}' in parents and trashed=false`,
+            spaces: 'drive',
+        });
+        const media = { mimeType, body: fs.createReadStream(localPath) };
+        try {
+            if (existing.data.files.length > 0) {
+                console.log(`      Ghi de: ${remoteName}`);
+                await drive.files.update({ fileId: existing.data.files[0].id, media, supportsAllDrives: true }, { onUploadProgress });
+            } else {
+                console.log(`      Tao moi: ${remoteName}`);
+                await drive.files.create({ resource: { name: remoteName, parents: [folderId] }, media, fields: 'id' }, { onUploadProgress });
+            }
+            process.stdout.write('\n');
+            console.log(`      OK! ${remoteName} upload xong.`);
+        } catch (err) {
+            process.stdout.write('\n');
+            console.error(`LOI upload ${remoteName}:`, err.message);
         }
     };
 
-    try {
-        if (fileRes.data.files.length > 0) {
-            console.log(`      ♻️  Da tim thay file ghi de. Google Drive dang thay the...`);
-            await drive.files.update({
-                fileId: fileRes.data.files[0].id,
-                media: { ...media, body: fs.createReadStream(bundleName) },
-                supportsAllDrives: true
-            }, { onUploadProgress });
-        } else {
-            console.log(`      ✨ Dang tao file hoan toan moi...`);
-            await drive.files.create({
-                resource: fileMetadata,
-                media: { ...media, body: fs.createReadStream(bundleName) },
-                fields: 'id'
-            }, { onUploadProgress });
-        }
-        process.stdout.write('\n');
-        console.log("      ✅ THANH CONG! Upload hoan tat.");
-    } catch (err) {
-        process.stdout.write('\n');
-        console.error("❌ Loi Tai len:", err.message);
-    }
-    
+    console.log(`\n[3/4] Upload bundle len Google Drive...`);
+    await uploadFile(bundleName, bundleName, 'application/octet-stream');
+
+    console.log(`\n[4/4] Upload RESTORE.bat len Google Drive...`);
+    const restoreBat = path.join(__dirname, 'RESTORE.bat');
+    await uploadFile(restoreBat, 'RESTORE.bat', 'text/plain');
+
     // Don rac
     if (fs.existsSync(bundleName)) fs.unlinkSync(bundleName);
-    console.log("\n✅ AUTO BACKUP HOAN TAT TOAN TAP. Test luong mượt mà.");
+    console.log("\nAUTO BACKUP HOAN TAT! Drive co du: bundle + RESTORE.bat");
 }
 
 main().catch(console.error);
