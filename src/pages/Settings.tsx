@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import {
   Button,
   Card,
@@ -41,6 +41,8 @@ import {
   InfoCircleOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
+
+const SystemLogsPage = lazy(() => import('./SystemLogs'));
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -910,6 +912,19 @@ const Settings = () => {
             <Alert message="Không thể tải thông tin hệ thống" description={sysInfoError || 'Lỗi không xác định'} type="error" showIcon />
           )}
         </div>
+      ),
+    },
+    {
+      key: 'history',
+      label: (
+        <span>
+          <HistoryOutlined /> Lịch sử hệ thống
+        </span>
+      ),
+      children: (
+        <Suspense fallback={<div style={{ textAlign: 'center', padding: 48 }}><Spin size="large" /></div>}>
+          <SystemLogsPage />
+        </Suspense>
       ),
     },
   ];

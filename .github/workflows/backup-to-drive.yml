@@ -1,0 +1,34 @@
+name: Auto Backup to Google Drive
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Generate Timestamp and Zip Code
+        run: |
+          # Create timestamp for the filename
+          TIMESTAMP=$(date +'%Y-%m-%d_%H-%M-%S')
+          ZIP_FILENAME="SourceCodeBackup_${TIMESTAMP}.zip"
+          
+          # Compress everything EXCEPT the release4 folder and .git folder
+          zip -r $ZIP_FILENAME . -x "release4/*" -x ".git/*"
+          
+          # Save filename to output for next steps
+          echo "ZIP_FILENAME=${ZIP_FILENAME}" >> $GITHUB_ENV
+
+      - name: Upload to Google Drive
+        uses: adityak74/google-drive-upload-action@main
+        with:
+          credentials: ${{ secrets.GDRIVE_CREDENTIALS_JSON }}
+          filename: ${{ env.ZIP_FILENAME }}
+          folderId: ${{ secrets.GDRIVE_FOLDER_ID }}
+          overwrite: "true"

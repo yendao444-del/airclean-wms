@@ -46,7 +46,6 @@ const FeeCalculatorPage = lazy(() => import('./pages/FeeCalculator'));
 const ExportOrdersPage = lazy(() => import('./pages/ExportOrders'));
 const StockBalancePage = lazy(() => import('./pages/StockBalance'));
 const PermissionsPage = lazy(() => import('./pages/Permissions'));
-const SystemLogsPage = lazy(() => import('./pages/SystemLogs'));
 const SettingsPage = lazy(() => import('./pages/Settings'));
 const DailyTasksPage = lazy(() => import('./pages/DailyTasks'));
 const ProductsPage = lazy(() => import('./pages/Products'));
@@ -206,10 +205,7 @@ function AppContent() {
             items.push(createMenuItem('Admin', 'permissions', <UserOutlined />));
         }
 
-        // Lịch sử (Admin only)
-        if (hasPermission('permissions')) {
-            items.push(createMenuItem('Lịch sử', 'system-logs', <HistoryOutlined />));
-        }
+
 
         // Settings
         if (accessibleKeys.includes('settings')) {
@@ -286,7 +282,7 @@ function AppContent() {
             case 'permissions':
                 return <PermissionsPage />;
             case 'system-logs':
-                return <SystemLogsPage />;
+                return <SettingsPage />;
             case 'settings':
                 return <SettingsPage />;
 

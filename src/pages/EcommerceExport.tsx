@@ -839,6 +839,10 @@ Thời gian: ${currentTime}`;
                 } else if (isShopee) {
                     // ===== XỬ LÝ SHOPEE =====
                     console.log('🛒 Processing Shopee data...');
+                    if (jsonData.length > 0) {
+                        console.log('📋 Shopee columns:', Object.keys(jsonData[0]));
+                        console.log('📋 Shopee row[0] sample:', jsonData[0]);
+                    }
 
                     jsonData.forEach((row: any) => {
                         const orderId = row['Mã đơn hàng'] || '';
@@ -850,7 +854,10 @@ Thời gian: ${currentTime}`;
                         const shippingProvider = row['Đơn Vị Vận Chuyển'] || '';
                         const trackingId = row['Mã vận đơn'] || '';
                         const ecommerceExportReason = row['Trạng Thái Đơn Hàng'] || 'Hủy đơn Shopee';
-                        const totalAmount = parseFloat(row['Tổng giá bán (sản phẩm)'] || row['Tổng cộng'] || '0');
+                        const rawAmount = row['Tổng số tiền Người mua thanh toán'] ?? row['Tổng giá trị đơn hàng (VND)'] ?? row['Tổng giá bán (sản phẩm)'] ?? row['Tổng đơn hàng'] ?? row['Thành tiền'] ?? row['Tổng cộng'] ?? 0;
+                        const totalAmount = typeof rawAmount === 'number' ? rawAmount : parseFloat(String(rawAmount).replace(/,/g, '')) || 0;
+                        const unitPriceRaw = row['Giá ưu đãi'] ?? row['Giá gốc'] ?? 0;
+                        const unitPrice = typeof unitPriceRaw === 'number' ? unitPriceRaw : parseFloat(String(unitPriceRaw).replace(/,/g, '')) || 0;
 
                         if (!orderId || !productName) {
                             console.warn('⚠️ Skip row: missing Mã đơn hàng or Tên sản phẩm', row);
@@ -864,8 +871,8 @@ Thời gian: ${currentTime}`;
                             color: variation || undefined,
                             variantSku: sku,
                             quantity: quantity,
-                            unitPrice: totalAmount / quantity || 0,
-                            total: totalAmount || 0,
+                            unitPrice: unitPrice,
+                            total: unitPrice * quantity || totalAmount,
                         };
 
                         // Group by order
@@ -1101,7 +1108,10 @@ Thời gian: ${currentTime}`;
                             const shippingProvider = row['Đơn Vị Vận Chuyển'] || '';
                             const trackingId = row['Mã vận đơn'] || '';
                             const ecommerceExportReason = row['Trạng Thái Đơn Hàng'] || 'Hủy đơn Shopee';
-                            const totalAmount = parseFloat(row['Tổng giá bán (sản phẩm)'] || row['Tổng cộng'] || '0');
+                            const rawAmount2 = row['Tổng số tiền Người mua thanh toán'] ?? row['Tổng giá trị đơn hàng (VND)'] ?? row['Tổng giá bán (sản phẩm)'] ?? row['Tổng đơn hàng'] ?? row['Thành tiền'] ?? row['Tổng cộng'] ?? 0;
+                            const totalAmount = typeof rawAmount2 === 'number' ? rawAmount2 : parseFloat(String(rawAmount2).replace(/,/g, '')) || 0;
+                            const unitPriceRaw2 = row['Giá ưu đãi'] ?? row['Giá gốc'] ?? 0;
+                            const unitPrice2 = typeof unitPriceRaw2 === 'number' ? unitPriceRaw2 : parseFloat(String(unitPriceRaw2).replace(/,/g, '')) || 0;
 
                             if (!orderId || !productName) {
                                 return;
@@ -1113,8 +1123,8 @@ Thời gian: ${currentTime}`;
                                 color: variation || undefined,
                                 variantSku: sku,
                                 quantity: quantity,
-                                unitPrice: totalAmount / quantity || 0,
-                                total: totalAmount || 0,
+                                unitPrice: unitPrice2,
+                                total: unitPrice2 * quantity || totalAmount,
                             };
 
                             if (!orderMap.has(orderId)) {

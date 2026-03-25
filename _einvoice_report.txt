@@ -1,0 +1,20 @@
+=== STATUS COUNTS ===
+  pending: 842
+  TOTAL: 842
+
+=== SAMPLE PENDING (latest 5) ===
+  #5356 | 260204S9Y7H6M6 | Shopee | 47000 | delivery=2026-03-10 | created=2026-03-10 | file=Order.completed.20260204_20260306.xlsx
+  #5357 | 260204REANJRUQ | Shopee | 28000 | delivery=2026-03-10 | created=2026-03-10 | file=Order.completed.20260204_20260306.xlsx
+  #5358 | 260204SMG8NBJE | Shopee | 90000 | delivery=2026-03-10 | created=2026-03-10 | file=Order.completed.20260204_20260306.xlsx
+  #5359 | 260204RDAU09T1 | Shopee | 150000 | delivery=2026-03-10 | created=2026-03-10 | file=Order.completed.20260204_20260306.xlsx
+  #5355 | 260204SFM0GAKR | Shopee | 112000 | delivery=2026-03-10 | created=2026-03-10 | file=Order.completed.20260204_20260306.xlsx
+
+=== PENDING BY PLATFORM ===
+  Shopee: 842
+
+=== PENDING DELIVERY DATE RANGE ===
+  Earliest delivery: 2026-03-10
+  Latest delivery: 2026-03-10
+
+=== PENDING BY SOURCE FILE ===
+  Order.completed.20260204_20260306.xlsx: 842

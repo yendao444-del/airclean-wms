@@ -4131,8 +4131,7 @@ ipcMain.handle('ecommerceExports:getAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const exports = await prisma.ecommerceExport.findMany({
-            orderBy: { createdAt: 'desc' },
-            take: 500 // ⚡ Giới hạn 500 đơn TMDT gần nhất
+            orderBy: { createdAt: 'desc' }
         });
         // Format dates for frontend
         const formatted = exports.map(e => ({
@@ -4265,8 +4264,7 @@ ipcMain.handle('exportOrders:getAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const orders = await prisma.exportOrder.findMany({
-            orderBy: { createdAt: 'desc' },
-            take: 500 // ⚡ Giới hạn 500 đơn xuất hàng gần nhất
+            orderBy: { createdAt: 'desc' }
         });
         const formatted = orders.map(o => ({
             ...o,
@@ -4487,8 +4485,7 @@ ipcMain.handle('refunds:getAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const refunds = await prisma.refund.findMany({
-            orderBy: { createdAt: 'desc' },
-            take: 500 // ⚡ Giới hạn 500 phiếu hoàn gần nhất
+            orderBy: { createdAt: 'desc' }
         });
         const formatted = refunds.map(r => ({
             ...r,
