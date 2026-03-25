@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const archiver = require('archiver');
+const { google } = require('googleapis');
 
 const OAUTH_CLIENT_ID = '470025984975-s63vgvnb1ds58fmagk9iqq0f9ufhkktr.apps.googleusercontent.com';
 const OAUTH_CLIENT_SECRET = '***REDACTED_OAUTH_SECRET***';
@@ -16,8 +17,6 @@ async function main() {
         process.exit(1);
     }
     
-    // Lazy load googleapis
-    const { google } = require('googleapis');
     const tokens = JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf-8'));
     const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET);
     oauth2Client.setCredentials(tokens);
@@ -25,28 +24,39 @@ async function main() {
 
     const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const dayName = days[new Date().getDay()];
-    const rarName = `AIRCLEAN_WMS_Backup_${dayName}.rar`;
+    const zipName = `AIRCLEAN_WMS_Backup_${dayName}.zip`;
 
-    console.log(`\n[1/3] Dang nen Source Code thanh: ${rarName}`);
+    console.log(`\n[1/3] Dang nen Source Code bang archiver thanh: ${zipName}`);
     console.log("      (Tu dong loai bo dist, node_modules, .git, release4...)");
     
-    if (fs.existsSync(rarName)) fs.unlinkSync(rarName);
+    if (fs.existsSync(zipName)) fs.unlinkSync(zipName);
 
-    try {
-        const rarPath = '"C:\\Program Files\\WinRAR\\rar.exe"';
-        // -r -> Đưa cả thư mục con vào 
-        // -x -> Loại trừ
-        const cmd = `${rarPath} a -r -x*\\node_modules\\* -x*\\dist\\* -x*\\release4\\* -x*\\.git\\* -x*\\_patch_temp\\* ${rarName} *`;
-        execSync(cmd, { stdio: 'pipe' });
-    } catch (err) {
-        console.error("❌ LOI: Nen RAR that bai. Chi tiet loi WinRAR: ", err.message);
-        console.error(err.stdout ? err.stdout.toString() : '');
-        console.error(err.stderr ? err.stderr.toString() : '');
-        process.exit(1);
-    }
+    // ZIP CREATION WITH ARCHIVER
+    await new Promise((resolve, reject) => {
+        const output = fs.createWriteStream(zipName);
+        const archive = archiver('zip', {
+            zlib: { level: 9 } // Muc do nen toi da
+        });
 
-    const stats = fs.statSync(rarName);
-    console.log(`      ✅ Xong! Do lon file nén: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+        output.on('close', function() {
+            console.log(`      ✅ Xong! Do lon ZIP: ${(archive.pointer() / 1024 / 1024).toFixed(2)} MB`);
+            resolve();
+        });
+
+        archive.on('error', function(err) {
+            reject(err);
+        });
+
+        archive.pipe(output);
+
+        // Append all files except ignored heavy folders
+        archive.glob('**/*', {
+            cwd: __dirname,
+            ignore: ['node_modules/**', 'dist/**', 'release4/**', '.git/**', '_patch_temp/**', zipName]
+        });
+
+        archive.finalize();
+    });
 
     console.log(`\n[2/3] Kiem tra thu muc sao luu tren Google Drive...`);
     let folderId = null;
@@ -70,15 +80,14 @@ async function main() {
         process.exit(1);
     }
 
-    console.log(`\n[3/3] Tai file RAR len Drive vao thu muc vua roi...`);
+    console.log(`\n[3/3] Tai file ZIP len Drive vao thu muc vua roi...`);
     const fileRes = await drive.files.list({
-        // Chi tim trong folder nay
-        q: `name='${rarName}' and '${folderId}' in parents and trashed=false`,
+        q: `name='${zipName}' and '${folderId}' in parents and trashed=false`,
         spaces: 'drive',
     });
 
-    const fileMetadata = { name: rarName, parents: [folderId] };
-    const media = { mimeType: 'application/vnd.rar', body: fs.createReadStream(rarName) };
+    const fileMetadata = { name: zipName, parents: [folderId] };
+    const media = { mimeType: 'application/zip', body: fs.createReadStream(zipName) };
 
     try {
         if (fileRes.data.files.length > 0) {
@@ -101,9 +110,9 @@ async function main() {
         console.error("❌ Lỗi Tải lên:", err.message);
     }
     
-    // Don rac
-    if (fs.existsSync(rarName)) fs.unlinkSync(rarName);
-    console.log("\n✅ AUTO BACKUP HOAN TAT. Da xoa file nén tam tren may.");
+    // Clean up
+    if (fs.existsSync(zipName)) fs.unlinkSync(zipName);
+    console.log("\n✅ AUTO BACKUP HOAN TAT. Da xoa file zip tam tren may.");
 }
 
 main();
