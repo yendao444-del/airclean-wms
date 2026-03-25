@@ -44,25 +44,21 @@ const DEFAULT_CONFIG = {
 
 type PNLConfig = typeof DEFAULT_CONFIG;
 
-// Default fees riêng cho từng sàn
+// Default fees riêng cho từng sàn (Ngành Sức Khỏe - T3/2026)
+// Ref: phi_san_2026.md
 const DEFAULT_SHOPEE_FEES = [
     { id: 'phiCoDinh', name: 'Phí cố định', type: 'percent', value: 12.50, icon: '💳', color: '#1890ff' },
-    { id: 'piShip', name: 'Phí dịch vụ FiShip', type: 'fixed', value: 1620, icon: '🚚', color: '#52c41a' },
-    { id: 'phiHaTang', name: 'Phí Dịch Vụ', type: 'fixed', value: 3000, icon: '⚙️', color: '#722ed1' },
-    { id: 'phiThanhToan', name: 'Phí thanh toán', type: 'percent', value: 4.73, icon: '💰', color: '#fa8c16' },
-    { id: 'thueGTGT', name: 'Thuế GTGT', type: 'percent', value: 0.96, icon: '🏛️', color: '#eb2f96' },
-    { id: 'thueTNCN', name: 'Thuế TNCN', type: 'percent', value: 0.48, icon: '📊', color: '#13c2c2' },
-    { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#52c41a' },
+    { id: 'phiThanhToan', name: 'Phí thanh toán', type: 'percent', value: 5.00, icon: '💰', color: '#fa8c16' },
+    { id: 'voucherXtra', name: 'Phí DV Voucher Xtra', type: 'percent', value: 3.00, icon: '🎫', color: '#722ed1' },
+    { id: 'freeshipXtra', name: 'Phí DV Freeship Xtra', type: 'percent', value: 6.00, icon: '🚚', color: '#52c41a' },
+    { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#13c2c2' },
 ];
 
 const DEFAULT_TIKTOK_FEES = [
-    { id: 'phiCoDinh', name: 'Phí cố định', type: 'percent', value: 6.00, icon: '💳', color: '#1890ff' },
-    { id: 'piShip', name: 'Phí vận chuyển', type: 'fixed', value: 1500, icon: '🚚', color: '#52c41a' },
-    { id: 'phiHaTang', name: 'Phí Dịch Vụ', type: 'fixed', value: 2000, icon: '⚙️', color: '#722ed1' },
-    { id: 'phiThanhToan', name: 'Phí thanh toán', type: 'percent', value: 2.00, icon: '💰', color: '#fa8c16' },
-    { id: 'thueGTGT', name: 'Thuế GTGT', type: 'percent', value: 0.96, icon: '🏛️', color: '#eb2f96' },
-    { id: 'thueTNCN', name: 'Thuế TNCN', type: 'percent', value: 0.48, icon: '📊', color: '#13c2c2' },
-    { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#52c41a' },
+    { id: 'phiHoaHong', name: 'Phí hoa hồng nền tảng', type: 'percent', value: 11.00, icon: '💳', color: '#1890ff' },
+    { id: 'phiGiaoDich', name: 'Phí giao dịch', type: 'percent', value: 5.00, icon: '💰', color: '#fa8c16' },
+    { id: 'phiXuLyDon', name: 'Phí xử lý đơn hàng', type: 'fixed', value: 3000, icon: '⚙️', color: '#722ed1' },
+    { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#13c2c2' },
 ];
 
 // ============================================
