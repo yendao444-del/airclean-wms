@@ -12,6 +12,8 @@ import {
     InfoCircleOutlined,
     BarChartOutlined,
     EditOutlined,
+    EyeOutlined,
+    CloseOutlined,
 } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
 import isBetween from 'dayjs/plugin/isBetween';
@@ -84,6 +86,12 @@ export default function BusinessReportPage() {
     const [adsDate, setAdsDate] = useState<Dayjs>(dayjs());
     const [form] = Form.useForm();
     const [adsForm] = Form.useForm();
+
+    // Drill-down modal state
+    const [drillDownOpen, setDrillDownOpen] = useState(false);
+    const [drillDownTitle, setDrillDownTitle] = useState('');
+    const [drillDownData, setDrillDownData] = useState<any[]>([]);
+    const [drillDownType, setDrillDownType] = useState<'orders' | 'ecom' | 'items' | 'expenses'>('orders');
 
     // ============================================
     // LOAD DATA
@@ -424,84 +432,262 @@ export default function BusinessReportPage() {
     const pct = (val: number) => pnl.netRevenue > 0 ? (val / pnl.netRevenue * 100).toFixed(1) : '0.0';
 
     // ============================================
-    // P&L TABLE DATA
+    // P&L TABLE DATA (FLAT - no expand)
     // ============================================
-    const pnlTableData = useMemo(() => [
-        // A. DOANH THU — collapsed by default
-        {
-            key: 'rev-header', name: '💰 A. DOANH THU', amount: pnl.totalRevenue, pctVal: '', isGroup: true, color: '#00ab56',
-            children: [
-                { key: 'rev-pos', name: 'Bán hàng POS', amount: pnl.revenuePOS, pctVal: pct(pnl.revenuePOS), isChild: true },
-                { key: 'rev-shopee', name: 'Shopee', amount: pnl.shopeeRevenue, pctVal: pct(pnl.shopeeRevenue), isChild: true },
-                { key: 'rev-tiktok', name: 'TikTok', amount: pnl.tiktokRevenue, pctVal: pct(pnl.tiktokRevenue), isChild: true },
-                ...(pnl.otherTMDTRevenue > 0 ? [{ key: 'rev-other', name: 'TMDT khác', amount: pnl.otherTMDTRevenue, pctVal: pct(pnl.otherTMDTRevenue), isChild: true }] : []),
-            ],
-        },
+    const pnlTableData = useMemo(() => {
+        const rows: any[] = [];
 
-        // Doanh thu thuần — luôn hiện
-        { key: 'rev-net', name: '🟢 DOANH THU THUẦN', amount: pnl.netRevenue, pctVal: '100.0', isSubtotal: true, color: '#00ab56' },
+        // A. DOANH THU
+        rows.push({ key: 'rev-header', name: '💰 A. DOANH THU', amount: pnl.totalRevenue, pctVal: '', isGroup: true, color: '#00ab56' });
+        rows.push({ key: 'rev-pos', name: 'Bán hàng POS', amount: pnl.revenuePOS, pctVal: pct(pnl.revenuePOS), isChild: true, indent: 1, drillable: true });
+        rows.push({ key: 'rev-shopee', name: 'Shopee', amount: pnl.shopeeRevenue, pctVal: pct(pnl.shopeeRevenue), isChild: true, indent: 1, drillable: true });
+        rows.push({ key: 'rev-tiktok', name: 'TikTok', amount: pnl.tiktokRevenue, pctVal: pct(pnl.tiktokRevenue), isChild: true, indent: 1, drillable: true });
+        if (pnl.otherTMDTRevenue > 0) rows.push({ key: 'rev-other', name: 'TMDT khác', amount: pnl.otherTMDTRevenue, pctVal: pct(pnl.otherTMDTRevenue), isChild: true, indent: 1, drillable: true });
 
-        // B. TỔNG CHI PHÍ — collapsed by default
-        {
-            key: 'cost-header', name: '📉 B. TỔNG CHI PHÍ', amount: pnl.totalCost, pctVal: pct(pnl.totalCost), isGroup: true, color: '#f5222d',
-            children: [
-                // B1. COGS
-                {
-                    key: 'cogs', name: 'B1. Giá vốn hàng bán (COGS)', amount: pnl.totalCOGS, pctVal: pct(pnl.totalCOGS), isParent: true,
-                    children: [
-                        { key: 'cogs-pos', name: 'Giá vốn POS', amount: pnl.cogsPOS, pctVal: pct(pnl.cogsPOS), isChild: true },
-                        { key: 'cogs-tmdt', name: 'Giá vốn TMDT', amount: pnl.cogsTMDT, pctVal: pct(pnl.cogsTMDT), isChild: true },
-                    ],
-                },
-                // B2. Phí sàn
-                {
-                    key: 'platform', name: 'B2. Phí sàn TMĐT', amount: pnl.totalPlatformFees, pctVal: pct(pnl.totalPlatformFees), isParent: true,
-                    children: pnl.platformFeeDetails.map((fee: any) => ({
-                        key: `plat-${fee.id}`,
-                        name: fee.type === 'percent'
-                            ? `${fee.icon || ''} ${fee.name} (${fee.value}%)`
-                            : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
-                        amount: fee.amount,
-                        pctVal: pct(fee.amount),
-                        isChild: true,
-                    })),
-                },
-                // B3. Marketing
-                {
-                    key: 'ads', name: 'B3. Chi phí Marketing (Ads)', amount: pnl.totalAds, pctVal: pct(pnl.totalAds), isParent: true,
-                    children: [
-                        { key: 'ads-shopee', name: 'Shopee Ads', amount: pnl.totalShopeeAds, pctVal: pct(pnl.totalShopeeAds), isChild: true },
-                        { key: 'ads-tiktok', name: 'TikTok Ads', amount: pnl.totalTiktokAds, pctVal: pct(pnl.totalTiktokAds), isChild: true },
-                    ],
-                },
-                // B4. Ship & Hoàn
-                {
-                    key: 'ship', name: 'B4. Vận chuyển & Hoàn', amount: pnl.totalShipReturn, pctVal: pct(pnl.totalShipReturn), isParent: true,
-                    children: [
-                        { key: 'ship-out', name: 'Phí ship gửi', amount: pnl.totalShipping, pctVal: pct(pnl.totalShipping), isChild: true },
-                        { key: 'ship-return', name: 'Phí hoàn + hàng hỏng', amount: pnl.totalReturnCost, pctVal: pct(pnl.totalReturnCost), isChild: true },
-                    ],
-                },
-                // B5. Vận hành
-                {
-                    key: 'opex', name: `B5. Chi phí vận hành (${fmt(pnl.monthlyTotal)}đ/tháng)`, amount: pnl.totalOpex, pctVal: pct(pnl.totalOpex), isParent: true,
-                    children: pnl.opexDetails.map((d: any) => ({
-                        key: `opex-${d.key}`,
-                        name: `${d.name} (${fmt(d.monthly)}đ/th)`,
-                        amount: d.amount,
-                        pctVal: pct(d.amount),
-                        isChild: true,
-                    })),
-                },
-                // B6. Khác
-                ...(pnl.totalOtherExpense > 0 ? [{ key: 'other-exp', name: 'B6. Chi phí khác', amount: pnl.totalOtherExpense, pctVal: pct(pnl.totalOtherExpense), isParent: true }] : []),
-            ],
-        },
+        // Doanh thu thuần
+        rows.push({ key: 'rev-net', name: '🟢 DOANH THU THUẦN', amount: pnl.netRevenue, pctVal: '100.0', isSubtotal: true, color: '#00ab56' });
 
-        // KẾT QUẢ — luôn hiện
-        { key: 'gross', name: '💚 LỢI NHUẬN GỘP (DT − COGS)', amount: pnl.grossProfit, pctVal: pnl.grossMargin.toFixed(1), isSubtotal: true, color: '#1890ff' },
-        { key: 'net', name: '🎯 LỢI NHUẬN RÒNG', amount: pnl.netProfit, pctVal: pnl.netMargin.toFixed(1), isTotal: true, color: pnl.netProfit >= 0 ? '#00ab56' : '#f5222d' },
-    ], [pnl, config, feeConfig]);
+        // B. TỔNG CHI PHÍ
+        rows.push({ key: 'cost-header', name: '📉 B. TỔNG CHI PHÍ', amount: pnl.totalCost, pctVal: pct(pnl.totalCost), isGroup: true, color: '#f5222d' });
+
+        // B1. COGS
+        rows.push({ key: 'cogs', name: 'B1. Giá vốn hàng bán (COGS)', amount: pnl.totalCOGS, pctVal: pct(pnl.totalCOGS), isParent: true, indent: 1 });
+        rows.push({ key: 'cogs-pos', name: 'Giá vốn POS', amount: pnl.cogsPOS, pctVal: pct(pnl.cogsPOS), isChild: true, indent: 2, drillable: true });
+        rows.push({ key: 'cogs-tmdt', name: 'Giá vốn TMDT', amount: pnl.cogsTMDT, pctVal: pct(pnl.cogsTMDT), isChild: true, indent: 2, drillable: true });
+
+        // B2. Phí sàn
+        rows.push({ key: 'platform', name: 'B2. Phí sàn TMĐT', amount: pnl.totalPlatformFees, pctVal: pct(pnl.totalPlatformFees), isParent: true, indent: 1 });
+        pnl.platformFeeDetails.forEach((fee: any) => {
+            rows.push({
+                key: `plat-${fee.id}`,
+                name: fee.type === 'percent'
+                    ? `${fee.icon || ''} ${fee.name} (${fee.value}%)`
+                    : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
+                amount: fee.amount,
+                pctVal: pct(fee.amount),
+                isChild: true, indent: 2,
+            });
+        });
+
+        // B3. Marketing
+        rows.push({ key: 'ads', name: 'B3. Chi phí Marketing (Ads)', amount: pnl.totalAds, pctVal: pct(pnl.totalAds), isParent: true, indent: 1 });
+        rows.push({ key: 'ads-shopee', name: 'Shopee Ads', amount: pnl.totalShopeeAds, pctVal: pct(pnl.totalShopeeAds), isChild: true, indent: 2 });
+        rows.push({ key: 'ads-tiktok', name: 'TikTok Ads', amount: pnl.totalTiktokAds, pctVal: pct(pnl.totalTiktokAds), isChild: true, indent: 2 });
+
+        // B4. Ship & Hoàn
+        rows.push({ key: 'ship', name: 'B4. Vận chuyển & Hoàn', amount: pnl.totalShipReturn, pctVal: pct(pnl.totalShipReturn), isParent: true, indent: 1 });
+        rows.push({ key: 'ship-out', name: 'Phí ship gửi', amount: pnl.totalShipping, pctVal: pct(pnl.totalShipping), isChild: true, indent: 2 });
+        rows.push({ key: 'ship-return', name: 'Phí hoàn + hàng hỏng', amount: pnl.totalReturnCost, pctVal: pct(pnl.totalReturnCost), isChild: true, indent: 2 });
+
+        // B5. Vận hành
+        rows.push({ key: 'opex', name: `B5. Chi phí vận hành (${fmt(pnl.monthlyTotal)}đ/tháng)`, amount: pnl.totalOpex, pctVal: pct(pnl.totalOpex), isParent: true, indent: 1 });
+        pnl.opexDetails.forEach((d: any) => {
+            rows.push({
+                key: `opex-${d.key}`,
+                name: `${d.name} (${fmt(d.monthly)}đ/th)`,
+                amount: d.amount,
+                pctVal: pct(d.amount),
+                isChild: true, indent: 2,
+            });
+        });
+
+        // B6. Khác
+        if (pnl.totalOtherExpense > 0) {
+            rows.push({ key: 'other-exp', name: 'B6. Chi phí khác', amount: pnl.totalOtherExpense, pctVal: pct(pnl.totalOtherExpense), isParent: true, indent: 1 });
+        }
+
+        // KẾT QUẢ
+        rows.push({ key: 'gross', name: '💚 LỢI NHUẬN GỘP (DT − COGS)', amount: pnl.grossProfit, pctVal: pnl.grossMargin.toFixed(1), isSubtotal: true, color: '#1890ff' });
+        rows.push({ key: 'net', name: '🎯 LỢI NHUẬN RÒNG', amount: pnl.netProfit, pctVal: pnl.netMargin.toFixed(1), isTotal: true, color: pnl.netProfit >= 0 ? '#00ab56' : '#f5222d' });
+
+        return rows;
+    }, [pnl, config, feeConfig]);
+
+    // ============================================
+    // DRILL-DOWN LOGIC
+    // ============================================
+    const openDrillDown = useCallback((rowKey: string, rowName: string) => {
+        let data: any[] = [];
+        let type: 'orders' | 'ecom' | 'items' | 'expenses' = 'orders';
+        let title = '';
+
+        switch (rowKey) {
+            case 'rev-pos': {
+                title = `Chi tiết Doanh thu POS (${fmt(pnl.revenuePOS)}đ)`;
+                type = 'orders';
+                data = filteredExports.map((e, i) => ({
+                    key: i,
+                    date: dayjs(e.exportDate).format('DD/MM/YYYY'),
+                    code: e.exportCode || `POS-${i + 1}`,
+                    customer: e.customerName || 'Khách lẻ',
+                    amount: e.totalAmount || 0,
+                    items: (() => { try { const its = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []); return its.length; } catch { return 0; } })(),
+                }));
+                break;
+            }
+            case 'rev-shopee': {
+                title = `Chi tiết Doanh thu Shopee (${fmt(pnl.shopeeRevenue)}đ)`;
+                type = 'ecom';
+                data = filteredEcom
+                    .filter(e => (e.customerName || '').toLowerCase().includes('shopee'))
+                    .map((e, i) => ({
+                        key: i,
+                        date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'),
+                        code: e.ecommerceExportCode || `ECOM-${i + 1}`,
+                        customer: e.customerName || '',
+                        platform: 'Shopee',
+                        amount: e.totalAmount || 0,
+                        items: (() => { try { const its = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []); return its.length; } catch { return 0; } })(),
+                    }));
+                break;
+            }
+            case 'rev-tiktok': {
+                title = `Chi tiết Doanh thu TikTok (${fmt(pnl.tiktokRevenue)}đ)`;
+                type = 'ecom';
+                data = filteredEcom
+                    .filter(e => (e.customerName || '').toLowerCase().includes('tik'))
+                    .map((e, i) => ({
+                        key: i,
+                        date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'),
+                        code: e.ecommerceExportCode || `ECOM-${i + 1}`,
+                        customer: e.customerName || '',
+                        platform: 'TikTok',
+                        amount: e.totalAmount || 0,
+                        items: (() => { try { const its = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []); return its.length; } catch { return 0; } })(),
+                    }));
+                break;
+            }
+            case 'rev-other': {
+                title = `Chi tiết Doanh thu TMDT khác (${fmt(pnl.otherTMDTRevenue)}đ)`;
+                type = 'ecom';
+                data = filteredEcom
+                    .filter(e => {
+                        const name = (e.customerName || '').toLowerCase();
+                        return !name.includes('shopee') && !name.includes('tik') && !name.includes('lazada');
+                    })
+                    .map((e, i) => ({
+                        key: i,
+                        date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'),
+                        code: e.ecommerceExportCode || `ECOM-${i + 1}`,
+                        customer: e.customerName || '',
+                        platform: 'Khác',
+                        amount: e.totalAmount || 0,
+                        items: (() => { try { const its = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []); return its.length; } catch { return 0; } })(),
+                    }));
+                break;
+            }
+            case 'cogs-pos': {
+                title = `Chi tiết Giá vốn POS (${fmt(pnl.cogsPOS)}đ)`;
+                type = 'items';
+                const itemList: any[] = [];
+                filteredExports.forEach(e => {
+                    try {
+                        const items = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []);
+                        items.forEach((item: any) => {
+                            const sku = item.sku || item.variantSku || '';
+                            const cost = costMap[sku] ?? item.cost ?? 0;
+                            const qty = item.quantity || 0;
+                            itemList.push({
+                                key: `${e.exportCode}-${sku}`,
+                                date: dayjs(e.exportDate).format('DD/MM/YYYY'),
+                                orderCode: e.exportCode || 'N/A',
+                                sku,
+                                productName: item.productName || item.name || sku,
+                                quantity: qty,
+                                unitCost: cost,
+                                totalCost: cost * qty,
+                            });
+                        });
+                    } catch { /* skip */ }
+                });
+                data = itemList;
+                break;
+            }
+            case 'cogs-tmdt': {
+                title = `Chi tiết Giá vốn TMDT (${fmt(pnl.cogsTMDT)}đ)`;
+                type = 'items';
+                const itemList2: any[] = [];
+                filteredEcom.forEach(e => {
+                    try {
+                        const items = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []);
+                        items.forEach((item: any) => {
+                            const sku = item.sku || item.variantSku || '';
+                            const cost = costMap[sku] ?? item.cost ?? 0;
+                            const qty = item.quantity || 0;
+                            itemList2.push({
+                                key: `${e.ecommerceExportCode}-${sku}`,
+                                date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'),
+                                orderCode: e.ecommerceExportCode || 'N/A',
+                                customer: e.customerName || '',
+                                sku,
+                                productName: item.productName || item.name || sku,
+                                quantity: qty,
+                                unitCost: cost,
+                                totalCost: cost * qty,
+                            });
+                        });
+                    } catch { /* skip */ }
+                });
+                data = itemList2;
+                break;
+            }
+            default:
+                return; // Not drillable
+        }
+
+        setDrillDownTitle(title);
+        setDrillDownData(data);
+        setDrillDownType(type);
+        setDrillDownOpen(true);
+    }, [filteredExports, filteredEcom, pnl, costMap]);
+
+    // Drill-down table columns
+    const drillDownColumns = useMemo(() => {
+        if (drillDownType === 'orders') {
+            return [
+                { title: 'Ngày', dataIndex: 'date', key: 'date', width: 100 },
+                { title: 'Mã đơn', dataIndex: 'code', key: 'code', width: 140 },
+                { title: 'Khách hàng', dataIndex: 'customer', key: 'customer' },
+                { title: 'SP', dataIndex: 'items', key: 'items', width: 50, align: 'center' as const },
+                { title: 'Thành tiền', dataIndex: 'amount', key: 'amount', width: 130, align: 'right' as const,
+                    render: (v: number) => <Text strong style={{ color: '#00ab56' }}>{fmt(v)}đ</Text>,
+                    sorter: (a: any, b: any) => a.amount - b.amount,
+                },
+            ];
+        }
+        if (drillDownType === 'ecom') {
+            return [
+                { title: 'Ngày', dataIndex: 'date', key: 'date', width: 100 },
+                { title: 'Mã đơn', dataIndex: 'code', key: 'code', width: 140 },
+                { title: 'Sàn', dataIndex: 'platform', key: 'platform', width: 80,
+                    render: (v: string) => <Tag color={v === 'Shopee' ? 'orange' : v === 'TikTok' ? 'magenta' : 'blue'}>{v}</Tag>,
+                },
+                { title: 'Khách hàng', dataIndex: 'customer', key: 'customer', ellipsis: true },
+                { title: 'SP', dataIndex: 'items', key: 'items', width: 50, align: 'center' as const },
+                { title: 'Thành tiền', dataIndex: 'amount', key: 'amount', width: 130, align: 'right' as const,
+                    render: (v: number) => <Text strong style={{ color: '#00ab56' }}>{fmt(v)}đ</Text>,
+                    sorter: (a: any, b: any) => a.amount - b.amount,
+                },
+            ];
+        }
+        if (drillDownType === 'items') {
+            return [
+                { title: 'Ngày', dataIndex: 'date', key: 'date', width: 90 },
+                { title: 'Mã đơn', dataIndex: 'orderCode', key: 'orderCode', width: 120 },
+                { title: 'SKU', dataIndex: 'sku', key: 'sku', width: 110 },
+                { title: 'Sản phẩm', dataIndex: 'productName', key: 'productName', ellipsis: true },
+                { title: 'SL', dataIndex: 'quantity', key: 'quantity', width: 50, align: 'center' as const },
+                { title: 'Giá vốn/sp', dataIndex: 'unitCost', key: 'unitCost', width: 100, align: 'right' as const,
+                    render: (v: number) => <Text type="secondary">{fmt(v)}đ</Text>,
+                },
+                { title: 'Tổng giá vốn', dataIndex: 'totalCost', key: 'totalCost', width: 120, align: 'right' as const,
+                    render: (v: number) => <Text strong style={{ color: '#f5222d' }}>{fmt(v)}đ</Text>,
+                    sorter: (a: any, b: any) => a.totalCost - b.totalCost,
+                },
+            ];
+        }
+        return [];
+    }, [drillDownType]);
 
     // ============================================
     // DAILY EXPENSES TABLE
@@ -659,7 +845,7 @@ export default function BusinessReportPage() {
                 </Col>
             </Row>
 
-            {/* === P&L TABLE === */}
+            {/* === P&L TABLE (FLAT - no expand) === */}
             <Card
                 title={<span><BarChartOutlined /> Bảng Kết quả Kinh doanh (P&L)</span>}
                 size="small"
@@ -670,8 +856,7 @@ export default function BusinessReportPage() {
                     pagination={false}
                     size="small"
                     loading={loading}
-                    defaultExpandedRowKeys={[]}
-                    indentSize={20}
+                    expandable={{ childrenColumnName: '__none__' }}
                     rowClassName={(r) => {
                         if (r.isTotal) return 'pnl-row-total';
                         if (r.isSubtotal) return 'pnl-row-subtotal';
@@ -690,6 +875,7 @@ export default function BusinessReportPage() {
                                     fontWeight: r.isGroup || r.isSubtotal || r.isTotal || r.isParent ? 700 : 400,
                                     fontSize: r.isTotal ? 15 : r.isGroup || r.isSubtotal ? 14 : r.isChild ? 12 : 13,
                                     color: r.color || (r.isChild ? '#595959' : '#262626'),
+                                    paddingLeft: r.indent ? r.indent * 20 : 0,
                                 }}>
                                     {r.isChild && '↳ '}
                                     {text}
@@ -701,16 +887,31 @@ export default function BusinessReportPage() {
                             dataIndex: 'amount',
                             key: 'amount',
                             align: 'right' as const,
-                            render: (val: number, r: any) => (
-                                <span style={{
+                            render: (val: number, r: any) => {
+                                const style: React.CSSProperties = {
                                     fontWeight: r.isTotal || r.isSubtotal || r.isGroup ? 800 : r.isParent ? 600 : 400,
                                     fontSize: r.isTotal ? 16 : r.isGroup || r.isSubtotal ? 14 : 13,
                                     color: r.isNegative || val < 0 ? '#f5222d' : (r.isTotal || r.isSubtotal ? (r.color || '#00ab56') : '#262626'),
                                     fontVariantNumeric: 'tabular-nums',
-                                }}>
-                                    {val < 0 ? '−' : ''}{fmt(Math.abs(val))}đ
-                                </span>
-                            ),
+                                };
+                                if (r.drillable && val !== 0) {
+                                    return (
+                                        <span
+                                            style={{ ...style, cursor: 'pointer', borderBottom: '1px dashed #1890ff', color: '#1890ff', transition: 'all 0.2s' }}
+                                            onClick={() => openDrillDown(r.key, r.name)}
+                                            title="Click để xem chi tiết đơn hàng"
+                                        >
+                                            {val < 0 ? '−' : ''}{fmt(Math.abs(val))}đ
+                                            <EyeOutlined style={{ marginLeft: 4, fontSize: 11, opacity: 0.6 }} />
+                                        </span>
+                                    );
+                                }
+                                return (
+                                    <span style={style}>
+                                        {val < 0 ? '−' : ''}{fmt(Math.abs(val))}đ
+                                    </span>
+                                );
+                            },
                         },
                         {
                             title: '% DT',
@@ -996,6 +1197,64 @@ export default function BusinessReportPage() {
                         💾 Lưu cấu hình
                     </Button>
                 </Form>
+            </Modal>
+
+            {/* === MODAL DRILL-DOWN CHI TIẾT === */}
+            <Modal
+                title={null}
+                open={drillDownOpen}
+                onCancel={() => setDrillDownOpen(false)}
+                footer={null}
+                width={900}
+                styles={{ body: { padding: '0 24px 24px' } }}
+                closable={true}
+            >
+                <div style={{
+                    textAlign: 'center',
+                    padding: '20px 0 14px',
+                    borderBottom: '1px solid #f0f0f0',
+                    marginBottom: 16,
+                }}>
+                    <div style={{
+                        width: 44, height: 44, borderRadius: 12,
+                        background: 'linear-gradient(135deg, #1890ff 0%, #096dd9 100%)',
+                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                        marginBottom: 8, boxShadow: '0 4px 14px rgba(24,144,255,0.3)',
+                    }}>
+                        <EyeOutlined style={{ fontSize: 20, color: '#fff' }} />
+                    </div>
+                    <Title level={4} style={{ margin: 0, fontWeight: 700 }}>
+                        {drillDownTitle}
+                    </Title>
+                    <Text type="secondary" style={{ fontSize: 13 }}>
+                        {drillDownData.length} dòng dữ liệu
+                    </Text>
+                </div>
+
+                <Table
+                    dataSource={drillDownData}
+                    columns={drillDownColumns}
+                    pagination={drillDownData.length > 50 ? { pageSize: 50, showSizeChanger: true, showTotal: (t) => `Tổng ${t} dòng` } : false}
+                    size="small"
+                    scroll={{ y: 450 }}
+                    summary={() => {
+                        if (drillDownData.length === 0) return null;
+                        const totalKey = drillDownType === 'items' ? 'totalCost' : 'amount';
+                        const total = drillDownData.reduce((s, r) => s + (r[totalKey] || 0), 0);
+                        return (
+                            <Table.Summary fixed>
+                                <Table.Summary.Row>
+                                    <Table.Summary.Cell index={0} colSpan={drillDownType === 'items' ? 6 : (drillDownType === 'ecom' ? 5 : 4)}>
+                                        <Text strong>TỔNG CỘNG</Text>
+                                    </Table.Summary.Cell>
+                                    <Table.Summary.Cell index={1} align="right">
+                                        <Text strong style={{ color: '#f5222d', fontSize: 14 }}>{fmt(total)}đ</Text>
+                                    </Table.Summary.Cell>
+                                </Table.Summary.Row>
+                            </Table.Summary>
+                        );
+                    }}
+                />
             </Modal>
 
             {/* === INLINE STYLE for table rows === */}
