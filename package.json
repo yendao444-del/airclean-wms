@@ -1,6 +1,6 @@
 {
   "name": "quan-ly-ban-hang-desktop",
-  "version": "1.0.149",
+  "version": "1.0.150",
   "description": "Hệ thống quản lý bán hàng - Desktop App",
   "main": "electron/main.js",
   "scripts": {
