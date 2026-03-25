@@ -90,14 +90,14 @@ async function main() {
             console.log(`      ♻️  Da tim thay file ghi de. Google Drive dang thay the...`);
             await drive.files.update({
                 fileId: fileRes.data.files[0].id,
-                media: { ...media, body: fs.createReadStream(rarName) },
+                media: { ...media, body: fs.createReadStream(bundleName) },
                 supportsAllDrives: true
             }, { onUploadProgress });
         } else {
             console.log(`      ✨ Dang tao file hoan toan moi...`);
             await drive.files.create({
                 resource: fileMetadata,
-                media: { ...media, body: fs.createReadStream(rarName) },
+                media: { ...media, body: fs.createReadStream(bundleName) },
                 fields: 'id'
             }, { onUploadProgress });
         }
