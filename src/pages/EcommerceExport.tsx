@@ -856,8 +856,7 @@ Thời gian: ${currentTime}`;
                         const ecommerceExportReason = row['Trạng Thái Đơn Hàng'] || 'Hủy đơn Shopee';
                         const rawAmount = row['Tổng số tiền Người mua thanh toán'] ?? row['Tổng giá trị đơn hàng (VND)'] ?? row['Tổng giá bán (sản phẩm)'] ?? row['Tổng đơn hàng'] ?? row['Thành tiền'] ?? row['Tổng cộng'] ?? 0;
                         const totalAmount = typeof rawAmount === 'number' ? rawAmount : parseFloat(String(rawAmount).replace(/,/g, '')) || 0;
-                        const unitPriceRaw = row['Giá ưu đãi'] ?? row['Giá gốc'] ?? 0;
-                        const unitPrice = typeof unitPriceRaw === 'number' ? unitPriceRaw : parseFloat(String(unitPriceRaw).replace(/,/g, '')) || 0;
+                        const unitPrice = quantity > 0 ? totalAmount / quantity : totalAmount;
 
                         if (!orderId || !productName) {
                             console.warn('⚠️ Skip row: missing Mã đơn hàng or Tên sản phẩm', row);
@@ -872,7 +871,7 @@ Thời gian: ${currentTime}`;
                             variantSku: sku,
                             quantity: quantity,
                             unitPrice: unitPrice,
-                            total: unitPrice * quantity || totalAmount,
+                            total: totalAmount,
                         };
 
                         // Group by order
@@ -1110,8 +1109,7 @@ Thời gian: ${currentTime}`;
                             const ecommerceExportReason = row['Trạng Thái Đơn Hàng'] || 'Hủy đơn Shopee';
                             const rawAmount2 = row['Tổng số tiền Người mua thanh toán'] ?? row['Tổng giá trị đơn hàng (VND)'] ?? row['Tổng giá bán (sản phẩm)'] ?? row['Tổng đơn hàng'] ?? row['Thành tiền'] ?? row['Tổng cộng'] ?? 0;
                             const totalAmount = typeof rawAmount2 === 'number' ? rawAmount2 : parseFloat(String(rawAmount2).replace(/,/g, '')) || 0;
-                            const unitPriceRaw2 = row['Giá ưu đãi'] ?? row['Giá gốc'] ?? 0;
-                            const unitPrice2 = typeof unitPriceRaw2 === 'number' ? unitPriceRaw2 : parseFloat(String(unitPriceRaw2).replace(/,/g, '')) || 0;
+                            const unitPrice2 = quantity > 0 ? totalAmount / quantity : totalAmount;
 
                             if (!orderId || !productName) {
                                 return;
@@ -1124,7 +1122,7 @@ Thời gian: ${currentTime}`;
                                 variantSku: sku,
                                 quantity: quantity,
                                 unitPrice: unitPrice2,
-                                total: unitPrice2 * quantity || totalAmount,
+                                total: totalAmount,
                             };
 
                             if (!orderMap.has(orderId)) {

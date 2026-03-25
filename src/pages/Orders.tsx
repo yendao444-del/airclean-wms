@@ -658,6 +658,12 @@ export default function OrdersPage() {
                     pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `${t} đơn hàng` }}
                     scroll={{ x: 1000 }}
                     expandable={{
+                        rowExpandable: (record) => {
+                            try {
+                                const items = JSON.parse(record.items);
+                                return items.length > 1 || record.source === 'pos';
+                            } catch { return false; }
+                        },
                         expandedRowRender: (record) => {
                             let items: any[] = [];
                             try { items = JSON.parse(record.items); } catch { }

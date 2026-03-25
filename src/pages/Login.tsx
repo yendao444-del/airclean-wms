@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Form, Input, Button, Card, Typography, message, Checkbox } from 'antd';
+import { Form, Input, Button, Card, Typography, message } from 'antd';
 import { UserOutlined, LockOutlined, LoginOutlined } from '@ant-design/icons';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -10,10 +10,10 @@ export default function Login() {
     const { login } = useAuth();
     const [form] = Form.useForm();
 
-    const handleLogin = async (values: { username: string; password: string; rememberMe?: boolean }) => {
+    const handleLogin = async (values: { username: string; password: string }) => {
         setLoading(true);
         try {
-            const success = await login(values.username, values.password, values.rememberMe);
+            const success = await login(values.username, values.password);
 
             if (success) {
                 message.success('Đăng nhập thành công!');
@@ -137,16 +137,6 @@ export default function Login() {
                                 fontSize: 15,
                             }}
                         />
-                    </Form.Item>
-
-                    <Form.Item
-                        name="rememberMe"
-                        valuePropName="checked"
-                        style={{ marginBottom: 24 }}
-                    >
-                        <Checkbox style={{ fontSize: 14, color: '#595959' }}>
-                            Ghi nhớ đăng nhập
-                        </Checkbox>
                     </Form.Item>
 
                     <Form.Item style={{ marginBottom: 0 }}>

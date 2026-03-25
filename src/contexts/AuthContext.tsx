@@ -56,7 +56,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
     }, []);
 
-    const login = async (username: string, password: string, rememberMe = false): Promise<boolean> => {
+    const doLogout = () => {
+        sessionStorage.removeItem('currentUser');
+        localStorage.removeItem('rememberedUser');
+        setUser(null);
+        window.electronAPI.users.logout().catch(() => {});
+    };
+
+    const login = async (username: string, password: string): Promise<boolean> => {
         try {
             const result = await window.electronAPI.users.login(username, password);
 
@@ -67,12 +74,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             const foundUser = result.data;
             const { password: _, ...userWithoutPassword } = foundUser;
 
-            // Save to session
             sessionStorage.setItem('currentUser', JSON.stringify(userWithoutPassword));
 
-            // Save to localStorage if "remember me"
-            if (rememberMe) {
+            // Chỉ admin mới được lưu localStorage (tự động đăng nhập lại)
+            if (userWithoutPassword.role === 'admin') {
                 localStorage.setItem('rememberedUser', JSON.stringify(userWithoutPassword));
+            } else {
+                localStorage.removeItem('rememberedUser');
             }
 
             setUser(userWithoutPassword);
@@ -83,12 +91,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
     };
 
-    const logout = () => {
-        sessionStorage.removeItem('currentUser');
-        localStorage.removeItem('rememberedUser');
-        setUser(null);
-        window.electronAPI.users.logout().catch(() => {});
-    };
+    const logout = () => doLogout();
 
     return (
         <AuthContext.Provider value={{
