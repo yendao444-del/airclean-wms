@@ -158,20 +158,20 @@ export default function BusinessReportPage() {
             }
 
             // Load phí sàn Shopee (dùng key v2 để reset config cũ)
-            const shopeeFeesRes = await window.electronAPI.appConfig.get('shopee_fees_v2');
+            const shopeeFeesRes = await window.electronAPI.appConfig.get('shopee_fees_v3');
             if (shopeeFeesRes.success && shopeeFeesRes.data && Array.isArray(shopeeFeesRes.data)) {
                 setShopeeFeeConfig(shopeeFeesRes.data);
             } else {
                 // Lần đầu hoặc config cũ → dùng default mới
-                await window.electronAPI.appConfig.set('shopee_fees_v2', DEFAULT_SHOPEE_FEES);
+                await window.electronAPI.appConfig.set('shopee_fees_v3', DEFAULT_SHOPEE_FEES);
             }
 
             // Load phí sàn TikTok (dùng key v2)
-            const tiktokFeesRes = await window.electronAPI.appConfig.get('tiktok_fees_v2');
+            const tiktokFeesRes = await window.electronAPI.appConfig.get('tiktok_fees_v3');
             if (tiktokFeesRes.success && tiktokFeesRes.data && Array.isArray(tiktokFeesRes.data)) {
                 setTiktokFeeConfig(tiktokFeesRes.data);
             } else {
-                await window.electronAPI.appConfig.set('tiktok_fees_v2', DEFAULT_TIKTOK_FEES);
+                await window.electronAPI.appConfig.set('tiktok_fees_v3', DEFAULT_TIKTOK_FEES);
             }
         } catch (err) {
             console.error('Load data error:', err);
@@ -395,8 +395,8 @@ export default function BusinessReportPage() {
             setConfig(newConfig);
 
             // Lưu phí sàn riêng cho từng sàn (v2)
-            await window.electronAPI.appConfig.set('shopee_fees_v2', shopeeFeeConfig);
-            await window.electronAPI.appConfig.set('tiktok_fees_v2', tiktokFeeConfig);
+            await window.electronAPI.appConfig.set('shopee_fees_v3', shopeeFeeConfig);
+            await window.electronAPI.appConfig.set('tiktok_fees_v3', tiktokFeeConfig);
 
             setConfigModalOpen(false);
             message.success('Đã lưu cấu hình P&L!');
