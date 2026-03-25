@@ -9,69 +9,82 @@ import {
     Typography,
     Space,
     Tag,
-    Divider,
     Button,
     Modal,
-    Input
+    Input,
+    Segmented,
+    Divider
 } from 'antd';
 import {
     DollarOutlined,
-    PercentageOutlined,
     ShoppingOutlined,
     RocketOutlined,
     EditOutlined,
-    CheckOutlined
 } from '@ant-design/icons';
 
 const { Title, Text } = Typography;
 
-const DEFAULT_FEES = [
+// Dùng chung fee defaults với BusinessReport
+const DEFAULT_SHOPEE_FEES = [
+    { id: 'troGia', name: 'Trợ giá (Đồng Tài Trợ)', type: 'percent', value: 4.50, icon: '🎁', color: '#ff4d4f' },
     { id: 'phiCoDinh', name: 'Phí cố định', type: 'percent', value: 12.50, icon: '💳', color: '#1890ff' },
-    { id: 'piShip', name: 'Phí dịch vụ FiShip', type: 'fixed', value: 1620, icon: '🚚', color: '#52c41a' },
-    { id: 'phiHaTang', name: 'Phí Dịch Vụ', type: 'fixed', value: 3000, icon: '⚙️', color: '#722ed1' },
-    { id: 'phiThanhToan', name: 'Phí thanh toán', type: 'percent', value: 4.73, icon: '💰', color: '#fa8c16' },
+    { id: 'piShip', name: 'Phí dịch vụ PiShip', type: 'fixed', value: 1620, icon: '🚚', color: '#52c41a' },
+    { id: 'phiDichVu', name: 'Phí Dịch Vụ', type: 'fixed', value: 3000, icon: '⚙️', color: '#722ed1' },
+    { id: 'phiThanhToan', name: 'Phí thanh toán', type: 'percent', value: 4.69, icon: '💰', color: '#fa8c16' },
     { id: 'thueGTGT', name: 'Thuế GTGT', type: 'percent', value: 0.96, icon: '🏛️', color: '#eb2f96' },
     { id: 'thueTNCN', name: 'Thuế TNCN', type: 'percent', value: 0.48, icon: '📊', color: '#13c2c2' },
-    { id: 'ads', name: 'ADS', type: 'fixed', value: 0, isCustom: true, icon: '📢', color: '#f5222d' }
+    { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#52c41a' },
 ];
 
-const CONFIG_VERSION = '2.0';
+const DEFAULT_TIKTOK_FEES = [
+    { id: 'phiGiaoDich', name: 'Phí giao dịch', type: 'percent', value: 5.00, icon: '💰', color: '#fa8c16' },
+    { id: 'phiHoaHong', name: 'Phí hoa hồng TikTok Shop', type: 'percent', value: 10.31, icon: '💳', color: '#1890ff' },
+    { id: 'phiXuLyDon', name: 'Phí xử lý đơn hàng', type: 'fixed', value: 3000, icon: '⚙️', color: '#722ed1' },
+    { id: 'thueGTGT', name: 'Thuế GTGT (TikTok khấu trừ)', type: 'percent', value: 1.00, icon: '🏛️', color: '#eb2f96' },
+    { id: 'thueTNCN', name: 'Thuế TNCN (TikTok khấu trừ)', type: 'percent', value: 0.50, icon: '📊', color: '#13c2c2' },
+    { id: 'affiliate', name: 'Hoa hồng liên kết', type: 'percent', value: 15.00, icon: '🤝', color: '#52c41a' },
+];
 
 export default function FeeCalculator() {
-    const [fees, setFees] = useState(DEFAULT_FEES);
-    const [doanhThu, setDoanhThu] = useState(112000);
+    const [platform, setPlatform] = useState<'shopee' | 'tiktok'>('shopee');
+    const [shopeeFees, setShopeeFees] = useState(DEFAULT_SHOPEE_FEES);
+    const [tiktokFees, setTiktokFees] = useState(DEFAULT_TIKTOK_FEES);
+    const [doanhThu, setDoanhThu] = useState(149999);
     const [giaNhap, setGiaNhap] = useState(0);
     const [vatRate, setVatRate] = useState(8);
     const [vatEnabled, setVatEnabled] = useState(false);
-    const [editingId, setEditingId] = useState<string | null>(null);
     const [editModalVisible, setEditModalVisible] = useState(false);
     const [editingFee, setEditingFee] = useState<any>(null);
 
+    // Load config
     useEffect(() => {
         (async () => {
             try {
-                const savedVersion = await window.electronAPI.appConfig.get('config_version');
-                const version = savedVersion.success ? savedVersion.data : null;
-
-                if (version !== CONFIG_VERSION) {
-                    console.log('🔄 Phát hiện version mới, reset về config mặc định');
-                    await window.electronAPI.appConfig.set('config_version', CONFIG_VERSION);
-                    await window.electronAPI.appConfig.set('fees_config', DEFAULT_FEES);
-                    setFees(DEFAULT_FEES);
+                // Load Shopee fees (v3 - đồng bộ với BusinessReport)
+                const shopeeRes = await window.electronAPI.appConfig.get('shopee_fees_v3');
+                if (shopeeRes.success && shopeeRes.data && Array.isArray(shopeeRes.data)) {
+                    setShopeeFees(shopeeRes.data);
                 } else {
-                    const savedFees = await window.electronAPI.appConfig.get('fees_config');
-                    if (savedFees.success && savedFees.data) {
-                        setFees(savedFees.data);
-                    }
+                    await window.electronAPI.appConfig.set('shopee_fees_v3', DEFAULT_SHOPEE_FEES);
                 }
 
-                const savedInputs = await window.electronAPI.appConfig.get('calculator_inputs');
+                // Load TikTok fees (v3)
+                const tiktokRes = await window.electronAPI.appConfig.get('tiktok_fees_v3');
+                if (tiktokRes.success && tiktokRes.data && Array.isArray(tiktokRes.data)) {
+                    setTiktokFees(tiktokRes.data);
+                } else {
+                    await window.electronAPI.appConfig.set('tiktok_fees_v3', DEFAULT_TIKTOK_FEES);
+                }
+
+                // Load inputs
+                const savedInputs = await window.electronAPI.appConfig.get('calculator_inputs_v2');
                 if (savedInputs.success && savedInputs.data) {
                     const inputs = savedInputs.data;
-                    setDoanhThu(inputs.doanhThu || 0);
+                    setDoanhThu(inputs.doanhThu || 149999);
                     setGiaNhap(inputs.giaNhap || 0);
                     setVatRate(inputs.vatRate !== undefined ? inputs.vatRate : 8);
                     setVatEnabled(inputs.vatEnabled !== undefined ? inputs.vatEnabled : false);
+                    if (inputs.platform) setPlatform(inputs.platform);
                 }
             } catch (error) {
                 console.error('Error loading fee config:', error);
@@ -79,42 +92,31 @@ export default function FeeCalculator() {
         })();
     }, []);
 
+    // Save inputs when changed
     useEffect(() => {
-        const inputs = { doanhThu, giaNhap, vatRate, vatEnabled };
-        window.electronAPI.appConfig.set('calculator_inputs', inputs);
-    }, [doanhThu, giaNhap, vatRate, vatEnabled]);
+        window.electronAPI.appConfig.set('calculator_inputs_v2', { doanhThu, giaNhap, vatRate, vatEnabled, platform });
+    }, [doanhThu, giaNhap, vatRate, vatEnabled, platform]);
+
+    const currentFees = platform === 'shopee' ? shopeeFees : tiktokFees;
+    const setCurrentFees = platform === 'shopee' ? setShopeeFees : setTiktokFees;
 
     const saveFees = async (newFees: any[]) => {
-        await window.electronAPI.appConfig.set('fees_config', newFees);
-        setFees(newFees);
+        const key = platform === 'shopee' ? 'shopee_fees_v3' : 'tiktok_fees_v3';
+        await window.electronAPI.appConfig.set(key, newFees);
+        setCurrentFees(newFees);
     };
 
     const calculateFee = (fee: any) => {
-        if (fee.type === 'percent') {
-            return (doanhThu * fee.value) / 100;
-        }
+        if (fee.type === 'percent') return (doanhThu * fee.value) / 100;
         return fee.value;
     };
 
-    const regularFees = fees.filter(f => !f.isCustom);
-    const adsFee = fees.find(f => f.id === 'ads');
-
-    const totalFees = regularFees.reduce((sum, fee) => sum + calculateFee(fee), 0);
-    const adsAmount = adsFee ? calculateFee(adsFee) : 0;
+    const totalFees = currentFees.reduce((sum, fee) => sum + calculateFee(fee), 0);
     const vatAmount = vatEnabled ? (giaNhap * vatRate) / 100 : 0;
-    const conLai = doanhThu - totalFees - adsAmount - giaNhap - vatAmount;
+    const conLai = doanhThu - totalFees - giaNhap - vatAmount;
+    const feePercent = doanhThu > 0 ? (totalFees / doanhThu * 100) : 0;
 
-    const formatCurrency = (value: number) => {
-        return new Intl.NumberFormat('vi-VN').format(value);
-    };
-
-    const getPercentDisplay = (fee: any) => {
-        if (fee.type === 'percent') {
-            return fee.value;
-        }
-        const percent = doanhThu > 0 ? (calculateFee(fee) / doanhThu * 100) : 0;
-        return parseFloat(percent.toFixed(2));
-    };
+    const fmt = (v: number) => new Intl.NumberFormat('vi-VN').format(Math.round(v));
 
     const openEditModal = (fee: any) => {
         setEditingFee({ ...fee });
@@ -123,27 +125,39 @@ export default function FeeCalculator() {
 
     const saveEditedFee = () => {
         if (!editingFee) return;
-
-        const newFees = fees.map(f =>
-            f.id === editingFee.id ? editingFee : f
-        );
+        const newFees = currentFees.map(f => f.id === editingFee.id ? editingFee : f);
         saveFees(newFees);
         setEditModalVisible(false);
         setEditingFee(null);
     };
 
+    const platformColor = platform === 'shopee' ? '#ff6633' : '#1a1a2e';
+    const platformIcon = platform === 'shopee' ? '🛒' : '🎵';
+
     return (
         <div style={{ padding: '24px', background: '#f0f2f5', minHeight: '100vh' }}>
-            <Title level={2} style={{ marginBottom: 24 }}>
-                💰 Tính phí sản phẩm
-            </Title>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+                <Title level={2} style={{ margin: 0 }}>
+                    💰 Tính phí sản phẩm
+                </Title>
+                <Segmented
+                    size="large"
+                    value={platform}
+                    onChange={(val) => setPlatform(val as 'shopee' | 'tiktok')}
+                    options={[
+                        { label: '🛒 Shopee', value: 'shopee' },
+                        { label: '🎵 TikTok', value: 'tiktok' },
+                    ]}
+                    style={{ fontWeight: 600 }}
+                />
+            </div>
 
-            {/* Input chính */}
+            {/* Input + Kết quả */}
             <Row gutter={16} style={{ marginBottom: 24 }}>
-                <Col xs={24} sm={12} lg={8}>
+                <Col xs={24} sm={8}>
                     <Card>
                         <Statistic
-                            title="Doanh thu"
+                            title="Doanh thu (Giá bán)"
                             value={doanhThu}
                             precision={0}
                             prefix={<DollarOutlined />}
@@ -161,7 +175,7 @@ export default function FeeCalculator() {
                         />
                     </Card>
                 </Col>
-                <Col xs={24} sm={12} lg={8}>
+                <Col xs={24} sm={8}>
                     <Card>
                         <Statistic
                             title="Giá nhập"
@@ -182,7 +196,7 @@ export default function FeeCalculator() {
                         />
                     </Card>
                 </Col>
-                <Col xs={24} sm={12} lg={8}>
+                <Col xs={24} sm={8}>
                     <Card style={{
                         background: conLai >= 0
                             ? 'linear-gradient(135deg, #52c41a 0%, #73d13d 100%)'
@@ -190,7 +204,7 @@ export default function FeeCalculator() {
                         border: 'none'
                     }}>
                         <Statistic
-                            title={<span style={{ color: '#fff' }}>Lợi nhuận</span>}
+                            title={<span style={{ color: '#fff' }}>Lợi nhuận ước tính</span>}
                             value={conLai}
                             precision={0}
                             prefix={<RocketOutlined />}
@@ -205,100 +219,91 @@ export default function FeeCalculator() {
             </Row>
 
             {/* Các khoản phí */}
-            <Card title="📊 Chi phí" style={{ marginBottom: 16 }}>
-                <Row gutter={[16, 16]}>
-                    {regularFees.map((fee) => {
+            <Card
+                title={
+                    <span>
+                        {platformIcon} Chi phí {platform === 'shopee' ? 'Shopee' : 'TikTok'}
+                        <Tag color={platform === 'shopee' ? 'orange' : 'default'} style={{ marginLeft: 8 }}>
+                            Tổng: {fmt(totalFees)}₫ ({feePercent.toFixed(2)}%)
+                        </Tag>
+                    </span>
+                }
+                style={{ marginBottom: 16, borderTop: `3px solid ${platformColor}` }}
+            >
+                {/* Bảng chi tiết phí */}
+                <div style={{ marginBottom: 16 }}>
+                    {currentFees.map((fee) => {
                         const amount = calculateFee(fee);
-                        const percent = getPercentDisplay(fee);
+                        const pct = doanhThu > 0 ? (amount / doanhThu * 100) : 0;
 
                         return (
-                            <Col xs={24} sm={12} lg={6} key={fee.id}>
-                                <Card
-                                    size="small"
-                                    style={{
-                                        background: `linear-gradient(135deg, ${fee.color}15 0%, ${fee.color}05 100%)`,
-                                        borderLeft: `4px solid ${fee.color}`,
-                                        position: 'relative'
-                                    }}
-                                >
-                                    <Space direction="vertical" style={{ width: '100%' }} size={4}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                            <Text type="secondary" style={{ fontSize: 12 }}>
-                                                {fee.icon} {fee.name}
-                                            </Text>
-                                            <Button
-                                                type="text"
-                                                size="small"
-                                                icon={<EditOutlined />}
-                                                onClick={() => openEditModal(fee)}
-                                            />
-                                        </div>
-                                        <Text strong style={{ fontSize: 18, color: fee.color }}>
-                                            {formatCurrency(amount)} ₫
-                                        </Text>
-                                        <Tag color={fee.type === 'percent' ? 'blue' : 'green'} style={{ width: 'fit-content' }}>
-                                            {percent}%
-                                        </Tag>
-                                    </Space>
-                                </Card>
-                            </Col>
+                            <div
+                                key={fee.id}
+                                style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    padding: '10px 12px',
+                                    borderBottom: '1px solid #f0f0f0',
+                                    transition: 'background 0.2s',
+                                    cursor: 'pointer',
+                                }}
+                                onClick={() => openEditModal(fee)}
+                                onMouseEnter={(e) => (e.currentTarget.style.background = '#fafafa')}
+                                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                            >
+                                <div style={{
+                                    width: 28, height: 28, borderRadius: 6,
+                                    background: `${fee.color}15`,
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    fontSize: 14, marginRight: 10,
+                                    border: `1px solid ${fee.color}30`,
+                                }}>{fee.icon}</div>
+                                <div style={{ flex: 1 }}>
+                                    <Text style={{ fontSize: 13 }}>{fee.name}</Text>
+                                    <Text type="secondary" style={{ fontSize: 11, marginLeft: 6 }}>
+                                        {fee.type === 'percent' ? `${fee.value}%` : `${fmt(fee.value)}₫/đơn`}
+                                    </Text>
+                                </div>
+                                <div style={{ textAlign: 'right' }}>
+                                    <Text strong style={{ fontSize: 14, color: fee.color }}>
+                                        -{fmt(amount)}₫
+                                    </Text>
+                                    <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                                        {pct.toFixed(2)}%
+                                    </Text>
+                                </div>
+                                <EditOutlined style={{ marginLeft: 8, color: '#bfbfbf', fontSize: 12 }} />
+                            </div>
                         );
                     })}
+                </div>
 
-                    {/* ADS */}
-                    {adsFee && (() => {
-                        const amount = calculateFee(adsFee);
-                        const percent = getPercentDisplay(adsFee);
-
-                        return (
-                            <Col xs={24} sm={12} lg={6} key={adsFee.id}>
-                                <Card
-                                    size="small"
-                                    style={{
-                                        background: `linear-gradient(135deg, ${adsFee.color}15 0%, ${adsFee.color}05 100%)`,
-                                        borderLeft: `4px solid ${adsFee.color}`,
-                                        position: 'relative'
-                                    }}
-                                >
-                                    <Space direction="vertical" style={{ width: '100%' }} size={4}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                            <Text type="secondary" style={{ fontSize: 12 }}>
-                                                {adsFee.icon} {adsFee.name}
-                                            </Text>
-                                            <Button
-                                                type="text"
-                                                size="small"
-                                                icon={<EditOutlined />}
-                                                onClick={() => openEditModal(adsFee)}
-                                            />
-                                        </div>
-                                        <Text strong style={{ fontSize: 18, color: adsFee.color }}>
-                                            {formatCurrency(amount)} ₫
-                                        </Text>
-                                        <Tag color={adsFee.type === 'percent' ? 'blue' : 'green'} style={{ width: 'fit-content' }}>
-                                            {percent}%
-                                        </Tag>
-                                    </Space>
-                                </Card>
-                            </Col>
-                        );
-                    })()}
-                </Row>
+                {/* Tổng kết */}
+                <Divider style={{ margin: '8px 0' }} />
+                <div style={{ padding: '8px 12px' }}>
+                    <Row justify="space-between" align="middle">
+                        <Text strong style={{ fontSize: 14 }}>Tổng phí sàn:</Text>
+                        <Text strong style={{ fontSize: 16, color: '#ff4d4f' }}>-{fmt(totalFees)}₫</Text>
+                    </Row>
+                    <Row justify="space-between" align="middle" style={{ marginTop: 4 }}>
+                        <Text strong style={{ fontSize: 14, color: '#52c41a' }}>
+                            Doanh thu ước tính sau phí:
+                        </Text>
+                        <Text strong style={{ fontSize: 18, color: '#52c41a' }}>
+                            {fmt(doanhThu - totalFees)}₫
+                        </Text>
+                    </Row>
+                </div>
             </Card>
 
             {/* VAT */}
-            <Card title="🧾 VAT" style={{ marginBottom: 16 }}>
+            <Card title="🧾 VAT (Giá nhập)" style={{ marginBottom: 16 }}>
                 <Space direction="vertical" style={{ width: '100%' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <Space>
-                            <Switch
-                                checked={vatEnabled}
-                                onChange={setVatEnabled}
-                            />
+                            <Switch checked={vatEnabled} onChange={setVatEnabled} />
                             <Text strong>Hóa đơn VAT</Text>
-                            {vatEnabled && (
-                                <Tag color="orange">{vatRate}% × Giá nhập</Tag>
-                            )}
+                            {vatEnabled && <Tag color="orange">{vatRate}% × Giá nhập</Tag>}
                         </Space>
                         {vatEnabled && (
                             <Button
@@ -315,12 +320,7 @@ export default function FeeCalculator() {
                         )}
                     </div>
                     {vatEnabled && (
-                        <Statistic
-                            value={vatAmount}
-                            precision={0}
-                            suffix="₫"
-                            valueStyle={{ color: '#fa8c16' }}
-                        />
+                        <Statistic value={vatAmount} precision={0} suffix="₫" valueStyle={{ color: '#fa8c16' }} />
                     )}
                 </Space>
             </Card>
@@ -350,8 +350,10 @@ export default function FeeCalculator() {
                                 style={{ width: '100%', marginTop: 8 }}
                                 value={editingFee.value}
                                 onChange={(value) => setEditingFee({ ...editingFee, value: value || 0 })}
-                                step={editingFee.type === 'percent' ? 0.1 : 100}
+                                step={editingFee.type === 'percent' ? 0.01 : 100}
                                 addonAfter={editingFee.type === 'percent' ? '%' : '₫'}
+                                formatter={editingFee.type === 'fixed' ? (v: any) => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : undefined}
+                                parser={editingFee.type === 'fixed' ? ((v: any) => v.replace(/,/g, '')) : undefined}
                             />
                         </div>
                         <div>
