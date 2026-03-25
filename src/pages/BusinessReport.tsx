@@ -44,8 +44,8 @@ const DEFAULT_CONFIG = {
 
 type PNLConfig = typeof DEFAULT_CONFIG;
 
-// Default fees từ FeeCalculator
-const DEFAULT_FEES = [
+// Default fees riêng cho từng sàn
+const DEFAULT_SHOPEE_FEES = [
     { id: 'phiCoDinh', name: 'Phí cố định', type: 'percent', value: 12.50, icon: '💳', color: '#1890ff' },
     { id: 'piShip', name: 'Phí dịch vụ FiShip', type: 'fixed', value: 1620, icon: '🚚', color: '#52c41a' },
     { id: 'phiHaTang', name: 'Phí Dịch Vụ', type: 'fixed', value: 3000, icon: '⚙️', color: '#722ed1' },
@@ -53,7 +53,16 @@ const DEFAULT_FEES = [
     { id: 'thueGTGT', name: 'Thuế GTGT', type: 'percent', value: 0.96, icon: '🏛️', color: '#eb2f96' },
     { id: 'thueTNCN', name: 'Thuế TNCN', type: 'percent', value: 0.48, icon: '📊', color: '#13c2c2' },
     { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#52c41a' },
-    { id: 'ads', name: 'ADS', type: 'fixed', value: 0, isCustom: true, icon: '📢', color: '#f5222d' },
+];
+
+const DEFAULT_TIKTOK_FEES = [
+    { id: 'phiCoDinh', name: 'Phí cố định', type: 'percent', value: 6.00, icon: '💳', color: '#1890ff' },
+    { id: 'piShip', name: 'Phí vận chuyển', type: 'fixed', value: 1500, icon: '🚚', color: '#52c41a' },
+    { id: 'phiHaTang', name: 'Phí Dịch Vụ', type: 'fixed', value: 2000, icon: '⚙️', color: '#722ed1' },
+    { id: 'phiThanhToan', name: 'Phí thanh toán', type: 'percent', value: 2.00, icon: '💰', color: '#fa8c16' },
+    { id: 'thueGTGT', name: 'Thuế GTGT', type: 'percent', value: 0.96, icon: '🏛️', color: '#eb2f96' },
+    { id: 'thueTNCN', name: 'Thuế TNCN', type: 'percent', value: 0.48, icon: '📊', color: '#13c2c2' },
+    { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#52c41a' },
 ];
 
 // ============================================
@@ -76,8 +85,9 @@ export default function BusinessReportPage() {
     // Map SKU → giá vốn (từ Products + ComboProducts)
     const [costMap, setCostMap] = useState<Record<string, number>>({});
 
-    // Phí sàn từ FeeCalculator
-    const [feeConfig, setFeeConfig] = useState<any[]>(DEFAULT_FEES);
+    // Phí sàn riêng cho từng sàn
+    const [shopeeFeeConfig, setShopeeFeeConfig] = useState<any[]>(DEFAULT_SHOPEE_FEES);
+    const [tiktokFeeConfig, setTiktokFeeConfig] = useState<any[]>(DEFAULT_TIKTOK_FEES);
 
     // Config
     const [config, setConfig] = useState<PNLConfig>(DEFAULT_CONFIG);
@@ -145,17 +155,27 @@ export default function BusinessReportPage() {
                 setConfig({ ...DEFAULT_CONFIG, ...cfgRes.data });
             }
 
-            // Load phí sàn từ FeeCalculator
-            const feesRes = await window.electronAPI.appConfig.get('fees_config');
-            if (feesRes.success && feesRes.data) {
-                // Merge: lấy giá trị đã lưu + thêm các mục mới từ defaults (vd: affiliate)
-                const saved = feesRes.data as any[];
+            // Load phí sàn riêng cho Shopee
+            const shopeeFeesRes = await window.electronAPI.appConfig.get('shopee_fees_config');
+            if (shopeeFeesRes.success && shopeeFeesRes.data) {
+                const saved = shopeeFeesRes.data as any[];
                 const savedIds = new Set(saved.map((f: any) => f.id));
-                const merged = [
-                    ...saved,
-                    ...DEFAULT_FEES.filter(d => !savedIds.has(d.id)),
-                ];
-                setFeeConfig(merged);
+                setShopeeFeeConfig([...saved, ...DEFAULT_SHOPEE_FEES.filter(d => !savedIds.has(d.id))]);
+            } else {
+                // Migration: nếu có fees_config cũ, dùng làm Shopee config
+                const oldRes = await window.electronAPI.appConfig.get('fees_config');
+                if (oldRes.success && oldRes.data && Array.isArray(oldRes.data)) {
+                    const saved = oldRes.data as any[];
+                    const savedIds = new Set(saved.map((f: any) => f.id));
+                    setShopeeFeeConfig([...saved.filter((f: any) => !f.isCustom), ...DEFAULT_SHOPEE_FEES.filter(d => !savedIds.has(d.id))]);
+                }
+            }
+            // Load phí sàn riêng cho TikTok
+            const tiktokFeesRes = await window.electronAPI.appConfig.get('tiktok_fees_config');
+            if (tiktokFeesRes.success && tiktokFeesRes.data) {
+                const saved = tiktokFeesRes.data as any[];
+                const savedIds = new Set(saved.map((f: any) => f.id));
+                setTiktokFeeConfig([...saved, ...DEFAULT_TIKTOK_FEES.filter(d => !savedIds.has(d.id))]);
             }
         } catch (err) {
             console.error('Load data error:', err);
@@ -263,22 +283,40 @@ export default function BusinessReportPage() {
         console.log('🔍 [COGS DEBUG] Result: cogsPOS=', cogsPOS, 'cogsTMDT=', cogsTMDT);
         const totalCOGS = cogsPOS + cogsTMDT;
 
-        // === C. PHÍ SÀN (lấy từ FeeCalculator - Công cụ hỗ trợ > Tính phí sàn) ===
+        // === C. PHÍ SÀN (riêng cho từng sàn) ===
         const totalOrders = filteredExports.length + filteredEcom.length;
         const ecomOrders = filteredEcom.length;
-        // Tính từng loại phí (bỏ qua ADS vì đã tính riêng ở mục D)
-        const platformFeeDetails = feeConfig
-            .filter(f => !f.isCustom)
-            .map(fee => {
-                let amount = 0;
-                if (fee.type === 'percent') {
-                    amount = revenueTMDT * fee.value / 100;
-                } else {
-                    amount = fee.value * ecomOrders;
-                }
-                return { ...fee, amount };
-            });
-        const totalPlatformFees = platformFeeDetails.reduce((sum, f) => sum + f.amount, 0);
+
+        // Đếm đơn từng sàn
+        const shopeeOrders = filteredEcom.filter(e => (e.customerName || '').toLowerCase().includes('shopee')).length;
+        const tiktokOrders = filteredEcom.filter(e => (e.customerName || '').toLowerCase().includes('tik')).length;
+
+        // Tính phí Shopee
+        const shopeeFeeDetails = shopeeFeeConfig.map(fee => {
+            let amount = 0;
+            if (fee.type === 'percent') {
+                amount = shopeeRevenue * fee.value / 100;
+            } else {
+                amount = fee.value * shopeeOrders;
+            }
+            return { ...fee, amount, platform: 'shopee' };
+        });
+        const totalShopeeFees = shopeeFeeDetails.reduce((sum, f) => sum + f.amount, 0);
+
+        // Tính phí TikTok
+        const tiktokFeeDetails = tiktokFeeConfig.map(fee => {
+            let amount = 0;
+            if (fee.type === 'percent') {
+                amount = tiktokRevenue * fee.value / 100;
+            } else {
+                amount = fee.value * tiktokOrders;
+            }
+            return { ...fee, amount, platform: 'tiktok' };
+        });
+        const totalTiktokFees = tiktokFeeDetails.reduce((sum, f) => sum + f.amount, 0);
+
+        const platformFeeDetails = [...shopeeFeeDetails, ...tiktokFeeDetails];
+        const totalPlatformFees = totalShopeeFees + totalTiktokFees;
 
         // Affiliate đã được gộp vào platformFeeDetails ở trên
 
@@ -334,6 +372,8 @@ export default function BusinessReportPage() {
             cogsPOS, cogsTMDT, totalCOGS,
             // Platform fees
             platformFeeDetails, totalPlatformFees, ecomOrders,
+            shopeeFeeDetails, totalShopeeFees, shopeeOrders,
+            tiktokFeeDetails, totalTiktokFees, tiktokOrders,
             // Ads
             totalShopeeAds, totalTiktokAds, totalAds,
             // Shipping
@@ -347,7 +387,7 @@ export default function BusinessReportPage() {
             totalCost, grossProfit, netProfit, grossMargin, netMargin,
             totalOrders, numDays,
         };
-    }, [filteredExports, filteredEcom, filteredRefunds, filteredDailyExpenses, config, numDays, filteredPurchases, feeConfig, costMap]);
+    }, [filteredExports, filteredEcom, filteredRefunds, filteredDailyExpenses, config, numDays, filteredPurchases, shopeeFeeConfig, tiktokFeeConfig, costMap]);
 
     // ============================================
     // SAVE CONFIG
@@ -358,8 +398,9 @@ export default function BusinessReportPage() {
             await window.electronAPI.appConfig.set(CONFIG_KEY_PNL, newConfig);
             setConfig(newConfig);
 
-            // Lưu phí sàn vào fees_config (đồng bộ với Tính phí sàn)
-            await window.electronAPI.appConfig.set('fees_config', feeConfig);
+            // Lưu phí sàn riêng cho từng sàn
+            await window.electronAPI.appConfig.set('shopee_fees_config', shopeeFeeConfig);
+            await window.electronAPI.appConfig.set('tiktok_fees_config', tiktokFeeConfig);
 
             setConfigModalOpen(false);
             message.success('Đã lưu cấu hình P&L!');
@@ -368,9 +409,12 @@ export default function BusinessReportPage() {
         }
     };
 
-    // Cập nhật giá trị 1 loại phí trong feeConfig
-    const updateFeeValue = (feeId: string, newValue: number) => {
-        setFeeConfig(prev => prev.map(f => f.id === feeId ? { ...f, value: newValue } : f));
+    // Cập nhật giá trị phí cho từng sàn
+    const updateShopeeFee = (feeId: string, newValue: number) => {
+        setShopeeFeeConfig(prev => prev.map(f => f.id === feeId ? { ...f, value: newValue } : f));
+    };
+    const updateTiktokFee = (feeId: string, newValue: number) => {
+        setTiktokFeeConfig(prev => prev.map(f => f.id === feeId ? { ...f, value: newValue } : f));
     };
 
     // ============================================
@@ -455,19 +499,40 @@ export default function BusinessReportPage() {
         rows.push({ key: 'cogs-pos', name: 'Giá vốn POS', amount: pnl.cogsPOS, pctVal: pct(pnl.cogsPOS), isChild: true, indent: 2, drillable: true });
         rows.push({ key: 'cogs-tmdt', name: 'Giá vốn TMDT', amount: pnl.cogsTMDT, pctVal: pct(pnl.cogsTMDT), isChild: true, indent: 2, drillable: true });
 
-        // B2. Phí sàn
+        // B2. Phí sàn (tách riêng Shopee & TikTok)
         rows.push({ key: 'platform', name: 'B2. Phí sàn TMĐT', amount: pnl.totalPlatformFees, pctVal: pct(pnl.totalPlatformFees), isParent: true, indent: 1 });
-        pnl.platformFeeDetails.forEach((fee: any) => {
-            rows.push({
-                key: `plat-${fee.id}`,
-                name: fee.type === 'percent'
-                    ? `${fee.icon || ''} ${fee.name} (${fee.value}%)`
-                    : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
-                amount: fee.amount,
-                pctVal: pct(fee.amount),
-                isChild: true, indent: 2,
+
+        // Shopee fees
+        if (pnl.totalShopeeFees > 0) {
+            rows.push({ key: 'plat-shopee-header', name: '🛒 Shopee (' + pnl.shopeeOrders + ' đơn)', amount: pnl.totalShopeeFees, pctVal: pct(pnl.totalShopeeFees), isParent: true, indent: 2, color: '#ff6633' });
+            pnl.shopeeFeeDetails.forEach((fee: any) => {
+                if (fee.amount > 0) rows.push({
+                    key: `plat-shopee-${fee.id}`,
+                    name: fee.type === 'percent'
+                        ? `${fee.icon || ''} ${fee.name} (${fee.value}%)`
+                        : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
+                    amount: fee.amount,
+                    pctVal: pct(fee.amount),
+                    isChild: true, indent: 3,
+                });
             });
-        });
+        }
+
+        // TikTok fees
+        if (pnl.totalTiktokFees > 0) {
+            rows.push({ key: 'plat-tiktok-header', name: '🎵 TikTok (' + pnl.tiktokOrders + ' đơn)', amount: pnl.totalTiktokFees, pctVal: pct(pnl.totalTiktokFees), isParent: true, indent: 2, color: '#1a1a2e' });
+            pnl.tiktokFeeDetails.forEach((fee: any) => {
+                if (fee.amount > 0) rows.push({
+                    key: `plat-tiktok-${fee.id}`,
+                    name: fee.type === 'percent'
+                        ? `${fee.icon || ''} ${fee.name} (${fee.value}%)`
+                        : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
+                    amount: fee.amount,
+                    pctVal: pct(fee.amount),
+                    isChild: true, indent: 3,
+                });
+            });
+        }
 
         // B3. Marketing
         rows.push({ key: 'ads', name: 'B3. Chi phí Marketing (Ads)', amount: pnl.totalAds, pctVal: pct(pnl.totalAds), isParent: true, indent: 1 });
@@ -501,7 +566,7 @@ export default function BusinessReportPage() {
         rows.push({ key: 'net', name: '🎯 LỢI NHUẬN RÒNG', amount: pnl.netProfit, pctVal: pnl.netMargin.toFixed(1), isTotal: true, color: pnl.netProfit >= 0 ? '#00ab56' : '#f5222d' });
 
         return rows;
-    }, [pnl, config, feeConfig]);
+    }, [pnl, config, shopeeFeeConfig, tiktokFeeConfig]);
 
     // ============================================
     // DRILL-DOWN LOGIC
@@ -1143,16 +1208,16 @@ export default function BusinessReportPage() {
                 width={600}
             >
                 <Form form={form} layout="vertical" onFinish={handleSaveConfig}>
-                    <Collapse defaultActiveKey={['fees-info', 'opex']} ghost>
-                        <Panel header="📦 Phí sàn TMĐT" key="fees-info">
-                            <div style={{ padding: '6px 10px', background: '#e6f7ff', borderRadius: 6, marginBottom: 12, border: '1px solid #91d5ff' }}>
+                    <Collapse defaultActiveKey={['shopee-fees', 'tiktok-fees', 'opex']} ghost>
+                        <Panel header="🛒 Phí sàn Shopee" key="shopee-fees">
+                            <div style={{ padding: '6px 10px', background: '#fff7e6', borderRadius: 6, marginBottom: 12, border: '1px solid #ffd591' }}>
                                 <Text style={{ fontSize: 12, color: '#595959' }}>
-                                    <InfoCircleOutlined style={{ color: '#1890ff', marginRight: 4 }} />
-                                    Đồng bộ với <Text strong>Công cụ hỗ trợ → Tính phí sàn</Text>
+                                    <InfoCircleOutlined style={{ color: '#ff6633', marginRight: 4 }} />
+                                    Cấu hình phí riêng cho <Text strong style={{ color: '#ff6633' }}>Shopee</Text>
                                 </Text>
                             </div>
                             <Row gutter={[12, 8]}>
-                                {feeConfig.filter(f => !f.isCustom).map(fee => (
+                                {shopeeFeeConfig.map(fee => (
                                     <Col span={12} key={fee.id}>
                                         <div style={{ marginBottom: 8 }}>
                                             <Text style={{ fontSize: 12, color: '#595959', display: 'block', marginBottom: 4 }}>
@@ -1162,7 +1227,38 @@ export default function BusinessReportPage() {
                                                 style={{ width: '100%' }}
                                                 size="small"
                                                 value={fee.value}
-                                                onChange={(val) => updateFeeValue(fee.id, val || 0)}
+                                                onChange={(val) => updateShopeeFee(fee.id, val || 0)}
+                                                min={0}
+                                                step={fee.type === 'percent' ? 0.1 : 100}
+                                                addonAfter={fee.type === 'percent' ? '%' : 'đ'}
+                                                formatter={fee.type === 'fixed' ? (v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')) : undefined}
+                                                parser={fee.type === 'fixed' ? ((v: any) => v.replace(/,/g, '')) : undefined}
+                                            />
+                                        </div>
+                                    </Col>
+                                ))}
+                            </Row>
+                        </Panel>
+
+                        <Panel header="🎵 Phí sàn TikTok" key="tiktok-fees">
+                            <div style={{ padding: '6px 10px', background: '#f0f0f0', borderRadius: 6, marginBottom: 12, border: '1px solid #d9d9d9' }}>
+                                <Text style={{ fontSize: 12, color: '#595959' }}>
+                                    <InfoCircleOutlined style={{ color: '#1a1a2e', marginRight: 4 }} />
+                                    Cấu hình phí riêng cho <Text strong style={{ color: '#1a1a2e' }}>TikTok</Text>
+                                </Text>
+                            </div>
+                            <Row gutter={[12, 8]}>
+                                {tiktokFeeConfig.map(fee => (
+                                    <Col span={12} key={fee.id}>
+                                        <div style={{ marginBottom: 8 }}>
+                                            <Text style={{ fontSize: 12, color: '#595959', display: 'block', marginBottom: 4 }}>
+                                                {fee.icon} {fee.name}
+                                            </Text>
+                                            <InputNumber
+                                                style={{ width: '100%' }}
+                                                size="small"
+                                                value={fee.value}
+                                                onChange={(val) => updateTiktokFee(fee.id, val || 0)}
                                                 min={0}
                                                 step={fee.type === 'percent' ? 0.1 : 100}
                                                 addonAfter={fee.type === 'percent' ? '%' : 'đ'}
