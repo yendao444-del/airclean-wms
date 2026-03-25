@@ -53,6 +53,9 @@ export default function OrdersPage() {
     const [editSaving, setEditSaving] = useState(false);
     const [editItems, setEditItems] = useState<any[]>([]);
 
+    // Product detail modal state
+    const [productDetailName, setProductDetailName] = useState<string | null>(null);
+
     useEffect(() => {
         loadAllOrders();
         const interval = setInterval(() => loadAllOrders(true), 30000);
@@ -243,6 +246,23 @@ export default function OrdersPage() {
             .sort((a, b) => b.qty - a.qty)
             .slice(0, 10);
     }, [filteredOrders]);
+
+    // === Orders containing a specific product (for product detail modal) ===
+    const productDetailOrders = useMemo(() => {
+        if (!productDetailName) return [];
+        return filteredOrders
+            .map(order => {
+                let items: any[] = [];
+                try { items = JSON.parse(order.items); } catch { }
+                const matched = items.filter(it => (it.productName || it.name || 'N/A') === productDetailName);
+                if (matched.length === 0) return null;
+                const totalQty = matched.reduce((s: number, it: any) => s + (it.quantity || it.qty || 1), 0);
+                const totalRev = matched.reduce((s: number, it: any) => s + (it.total || it.subtotal || (it.unitPrice || it.price || 0) * (it.quantity || it.qty || 1)), 0);
+                const unitPrice = matched[0]?.unitPrice || matched[0]?.price || 0;
+                return { order, totalQty, totalRev, unitPrice };
+            })
+            .filter(Boolean) as { order: UnifiedOrder; totalQty: number; totalRev: number; unitPrice: number }[];
+    }, [productDetailName, filteredOrders]);
 
     const openEdit = (record: UnifiedOrder) => {
         let items: any[] = [];
@@ -632,9 +652,15 @@ export default function OrdersPage() {
                                             }} />
                                         </div>
                                     </div>
-                                    {/* Qty */}
-                                    <div style={{ textAlign: 'center', flexShrink: 0, minWidth: 50 }}>
-                                        <Text strong style={{ fontSize: 13, color: i < 3 ? '#ff4d4f' : '#1a1a2e' }}>{p.qty}</Text>
+                                    {/* Qty - clickable */}
+                                    <div
+                                        style={{ textAlign: 'center', flexShrink: 0, minWidth: 50, cursor: 'pointer', borderRadius: 6, padding: '2px 6px', transition: 'background 0.2s' }}
+                                        onClick={() => setProductDetailName(p.name)}
+                                        onMouseEnter={e => (e.currentTarget.style.background = '#fff1f0')}
+                                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                                        title="Click để xem chi tiết đơn hàng"
+                                    >
+                                        <Text strong style={{ fontSize: 13, color: i < 3 ? '#ff4d4f' : '#1890ff', textDecoration: 'underline', textDecorationStyle: 'dotted' }}>{p.qty}</Text>
                                         <div style={{ fontSize: 10, color: '#8c8c8c' }}>đã bán</div>
                                     </div>
                                     {/* Revenue */}
@@ -833,6 +859,122 @@ export default function OrdersPage() {
                         );
                     })()}
                 </div>
+            </Modal>
+
+            {/* Modal Chi tiết sản phẩm - Đơn hàng chứa SP */}
+            <Modal
+                title={
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div style={{ width: 28, height: 28, borderRadius: 6, background: 'linear-gradient(135deg, #ff4d4f, #ff7875)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <FireOutlined style={{ color: '#fff', fontSize: 14 }} />
+                        </div>
+                        <div>
+                            <div style={{ fontSize: 14, fontWeight: 700 }}>Chi tiết đơn hàng</div>
+                            <div style={{ fontSize: 11, color: '#8c8c8c', fontWeight: 400 }}>{productDetailName}</div>
+                        </div>
+                    </div>
+                }
+                open={!!productDetailName}
+                onCancel={() => setProductDetailName(null)}
+                footer={null}
+                width={800}
+                destroyOnClose
+            >
+                {productDetailName && (
+                    <div>
+                        {/* Summary */}
+                        <div style={{ display: 'flex', gap: 16, marginBottom: 16, flexWrap: 'wrap' }}>
+                            <div style={{ padding: '10px 16px', background: '#fff1f0', borderRadius: 8, flex: 1, minWidth: 120 }}>
+                                <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Tổng đơn hàng</Text>
+                                <Text strong style={{ fontSize: 20, color: '#ff4d4f' }}>{productDetailOrders.length}</Text>
+                            </div>
+                            <div style={{ padding: '10px 16px', background: '#e6f7ff', borderRadius: 8, flex: 1, minWidth: 120 }}>
+                                <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Tổng SL bán</Text>
+                                <Text strong style={{ fontSize: 20, color: '#1890ff' }}>{productDetailOrders.reduce((s, d) => s + d.totalQty, 0)}</Text>
+                            </div>
+                            <div style={{ padding: '10px 16px', background: '#f6ffed', borderRadius: 8, flex: 1, minWidth: 120 }}>
+                                <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Tổng doanh thu</Text>
+                                <Text strong style={{ fontSize: 20, color: '#00ab56' }}>{fmtShort(productDetailOrders.reduce((s, d) => s + d.totalRev, 0))}đ</Text>
+                            </div>
+                        </div>
+
+                        {/* Orders table */}
+                        <div style={{ maxHeight: 400, overflow: 'auto', borderRadius: 8, border: '1px solid #f0f0f0' }}>
+                            <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse', background: '#fff' }}>
+                                <thead>
+                                    <tr style={{ background: '#f0f5ff', position: 'sticky', top: 0, zIndex: 1 }}>
+                                        <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 600, color: '#1890ff', borderBottom: '1px solid #e8e8e8' }}>#</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 600, color: '#1890ff', borderBottom: '1px solid #e8e8e8' }}>Ngày</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 600, color: '#1890ff', borderBottom: '1px solid #e8e8e8' }}>Nguồn</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 600, color: '#1890ff', borderBottom: '1px solid #e8e8e8' }}>Mã đơn</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 600, color: '#1890ff', borderBottom: '1px solid #e8e8e8' }}>Khách hàng</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 600, color: '#1890ff', borderBottom: '1px solid #e8e8e8' }}>SL mua</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600, color: '#1890ff', borderBottom: '1px solid #e8e8e8' }}>Đơn giá</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600, color: '#1890ff', borderBottom: '1px solid #e8e8e8' }}>Thành tiền</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {productDetailOrders.map((d, i) => (
+                                        <tr key={d.order.id} style={{
+                                            borderBottom: '1px solid #f5f5f5',
+                                            transition: 'background 0.15s',
+                                        }}
+                                            onMouseEnter={e => (e.currentTarget.style.background = '#fafafa')}
+                                            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                                        >
+                                            <td style={{ padding: '7px 10px', color: '#8c8c8c' }}>{i + 1}</td>
+                                            <td style={{ padding: '7px 10px' }}>
+                                                {dayjs(d.order.date).format('DD/MM/YY HH:mm')}
+                                            </td>
+                                            <td style={{ padding: '7px 10px' }}>
+                                                <Tag style={{
+                                                    fontWeight: 600, fontSize: 10, borderRadius: 6,
+                                                    background: sourceColors[d.order.sourceLabel] || '#8c8c8c',
+                                                    color: '#fff', border: 'none', margin: 0,
+                                                }}>
+                                                    {d.order.sourceLabel}
+                                                </Tag>
+                                            </td>
+                                            <td style={{ padding: '7px 10px' }}>
+                                                <Text strong style={{ fontSize: 12 }}>{d.order.orderNumber}</Text>
+                                            </td>
+                                            <td style={{ padding: '7px 10px' }}>
+                                                <Text style={{ fontSize: 12 }}>{d.order.customer}</Text>
+                                            </td>
+                                            <td style={{ padding: '7px 10px', textAlign: 'center', fontWeight: 700, color: '#1890ff' }}>
+                                                {d.totalQty}
+                                            </td>
+                                            <td style={{ padding: '7px 10px', textAlign: 'right' }}>
+                                                {fmt(d.unitPrice)}đ
+                                            </td>
+                                            <td style={{ padding: '7px 10px', textAlign: 'right', fontWeight: 700, color: '#00ab56' }}>
+                                                {fmt(d.totalRev)}đ
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                                <tfoot>
+                                    <tr style={{ background: '#f6ffed' }}>
+                                        <td colSpan={5} style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700 }}>Tổng cộng:</td>
+                                        <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 800, color: '#1890ff' }}>
+                                            {productDetailOrders.reduce((s, d) => s + d.totalQty, 0)}
+                                        </td>
+                                        <td style={{ padding: '8px 10px' }}></td>
+                                        <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 800, color: '#00ab56', fontSize: 14 }}>
+                                            {fmt(productDetailOrders.reduce((s, d) => s + d.totalRev, 0))}đ
+                                        </td>
+                                    </tr>
+                                </tfoot>
+                            </table>
+                        </div>
+
+                        {productDetailOrders.length === 0 && (
+                            <div style={{ textAlign: 'center', padding: 30, color: '#8c8c8c' }}>
+                                Không tìm thấy đơn hàng nào chứa sản phẩm này.
+                            </div>
+                        )}
+                    </div>
+                )}
             </Modal>
         </div>
     );
