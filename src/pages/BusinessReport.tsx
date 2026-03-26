@@ -1069,9 +1069,8 @@ export default function BusinessReportPage() {
                             key: 'amount',
                             align: 'right' as const,
                             render: (val: number, r: any) => {
-                                const isCostSection = ['cogs','platform','ads','ship','opex','other'].includes(r.section);
                                 const style: React.CSSProperties = {
-                                    fontWeight: r.isTotal || r.isSubtotal || r.isGroup || isCostSection ? 700 : 400,
+                                    fontWeight: r.isTotal || r.isSubtotal || r.isGroup || r.isParent ? 700 : 400,
                                     fontSize: r.isTotal ? 16 : r.isGroup || r.isSubtotal ? 14 : 13,
                                     color: r.isTotal || r.isSubtotal ? (r.color || '#00ab56') : '#262626',
                                     fontVariantNumeric: 'tabular-nums',

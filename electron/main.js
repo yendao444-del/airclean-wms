@@ -55,18 +55,17 @@ function createWindow() {
     });
 
     // Load React app
-    const fs = require('fs');
-    const indexPath = path.join(__dirname, '../dist/index.html');
-    const isDev = !app.isPackaged && !fs.existsSync(indexPath);
+    // Nếu chạy qua "electron:dev" (concurrently) → luôn dùng dev server
+    // Nếu chạy trực tiếp "electron ." → dùng dist/
+    const VITE_DEV_SERVER = 'http://localhost:5173';
+    const isDev = !app.isPackaged && (process.env.VITE_DEV_SERVER_URL || process.argv.includes('--dev'));
 
-    console.log('app.isPackaged:', app.isPackaged);
-    console.log('indexPath:', indexPath);
-    console.log('indexPath exists:', fs.existsSync(indexPath));
-    console.log('isDev:', isDev);
+    console.log('isDev:', isDev, '| isPackaged:', app.isPackaged);
 
     if (isDev) {
-        mainWindow.loadURL('http://localhost:5173');
+        mainWindow.loadURL(VITE_DEV_SERVER);
     } else {
+        const indexPath = path.join(__dirname, '../dist/index.html');
         mainWindow.loadFile(indexPath);
     }
     // 🔒 SECURITY: DevTools control based on packaging
