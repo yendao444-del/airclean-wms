@@ -4779,12 +4779,8 @@ ipcMain.handle('appConfig:set', async (event, key, value) => {
 ipcMain.handle('users:getAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
-        const users = await prisma.user.findMany({
-            orderBy: { id: 'asc' }
-        });
-        // Format for frontend - map DB fields to frontend fields
-        // 🔒 SECURITY FIX: KHÔNG trả password về frontend
-        // Login đã xử lý server-side qua users:login handler
+        // Dùng raw SQL để luôn lấy được lastActiveAt kể cả khi Prisma client cũ chưa generate lại
+        const users = await prisma.$queryRaw`SELECT id, username, "fullName", email, role, status, "createdAt", "lastActiveAt" FROM "User" ORDER BY id ASC`;
         const formatted = users.map(u => ({
             id: u.id,
             username: u.username,
@@ -4792,8 +4788,8 @@ ipcMain.handle('users:getAll', async () => {
             email: u.email,
             role: u.role,
             isActive: u.status === 'active',
-            createdAt: u.createdAt.toISOString(),
-            lastActiveAt: u.lastActiveAt ? u.lastActiveAt.toISOString() : null,
+            createdAt: new Date(u.createdAt).toISOString(),
+            lastActiveAt: u.lastActiveAt ? new Date(u.lastActiveAt).toISOString() : null,
         }));
         return { success: true, data: formatted };
     } catch (error) {
@@ -4900,7 +4896,7 @@ ipcMain.handle('users:login', async (event, username, password) => {
         const { password: _, ...userWithoutPassword } = user;
         // Lưu session phía backend
         currentSession = { id: user.id, username: user.username, role: user.role };
-        prisma.user.update({ where: { id: user.id }, data: { lastActiveAt: new Date() } }).catch(() => {});
+        prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(() => {});
         await logActivity({ module: 'users', action: 'LOGIN', description: `Đăng nhập: ${user.username}`, recordName: user.username, userName: user.username });
         return { success: true, data: { ...userWithoutPassword, isActive: user.status === 'active' } };
     } catch (error) {
@@ -4911,7 +4907,7 @@ ipcMain.handle('users:login', async (event, username, password) => {
 
 ipcMain.handle('users:logout', async () => {
     if (currentSession?.id) {
-        await prisma.user.update({ where: { id: currentSession.id }, data: { lastActiveAt: null } }).catch(() => {});
+        await prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NULL WHERE id = ${currentSession.id}`.catch(() => {});
     }
     currentSession = null;
     return { success: true };
@@ -4924,7 +4920,7 @@ ipcMain.handle('users:restoreSession', async (event, userId) => {
         const user = await prisma.user.findUnique({ where: { id: userId } });
         if (!user || user.status !== 'active') return { success: false };
         currentSession = { id: user.id, username: user.username, role: user.role };
-        prisma.user.update({ where: { id: user.id }, data: { lastActiveAt: new Date() } }).catch(() => {});
+        prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(() => {});
         return { success: true };
     } catch {
         return { success: false };
@@ -4934,7 +4930,7 @@ ipcMain.handle('users:restoreSession', async (event, userId) => {
 ipcMain.handle('users:heartbeat', async () => {
     try {
         if (!currentSession?.id || !prisma) return { success: false };
-        await prisma.user.update({ where: { id: currentSession.id }, data: { lastActiveAt: new Date() } }).catch(() => {});
+        await prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${currentSession.id}`.catch(() => {});
         return { success: true };
     } catch {
         return { success: false };
