@@ -1065,22 +1065,19 @@ export default function BusinessReportPage() {
                                     'net': 'Lợi nhuận ròng = Lợi nhuận gộp − Chi phí bán hàng − Chi phí quản lý. Đây là số tiền thực lãi.',
                                 };
                                 const tooltip = PNL_TOOLTIPS[r.key];
-                                return (
+                                const content = (
                                     <span style={{
                                         fontWeight: r.isGroup || r.isSubtotal || r.isTotal || r.isParent ? 700 : 400,
                                         fontSize: r.isTotal ? 15 : r.isGroup || r.isSubtotal ? 14 : r.isChild ? 12 : 13,
                                         color: r.color || (r.isChild ? '#595959' : '#262626'),
                                         paddingLeft: r.indent ? r.indent * 20 : 0,
+                                        cursor: tooltip ? 'help' : undefined,
                                     }}>
                                         {r.isChild && '↳ '}
                                         {text}
-                                        {tooltip && (
-                                            <Tooltip title={tooltip} placement="right">
-                                                <InfoCircleOutlined style={{ marginLeft: 6, fontSize: 12, color: '#bfbfbf', cursor: 'help' }} />
-                                            </Tooltip>
-                                        )}
                                     </span>
                                 );
+                                return tooltip ? <Tooltip title={tooltip} placement="right">{content}</Tooltip> : content;
                             },
                         },
                         {
