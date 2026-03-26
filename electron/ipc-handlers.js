@@ -410,7 +410,7 @@ async function logActivity({ module, action, description, recordId, recordName, 
                 recordId: recordId || null,
                 recordName: recordName || null,
                 changes: changes ? (typeof changes === 'string' ? changes : JSON.stringify(changes)) : null,
-                userName: userName || 'System',
+                userName: userName || currentSession?.username || 'System',
                 severity: severity || 'INFO',
             }
         });
@@ -4792,7 +4792,8 @@ ipcMain.handle('users:getAll', async () => {
             email: u.email,
             role: u.role,
             isActive: u.status === 'active',
-            createdAt: u.createdAt.toISOString()
+            createdAt: u.createdAt.toISOString(),
+            lastActiveAt: u.lastActiveAt ? u.lastActiveAt.toISOString() : null,
         }));
         return { success: true, data: formatted };
     } catch (error) {
@@ -4899,6 +4900,7 @@ ipcMain.handle('users:login', async (event, username, password) => {
         const { password: _, ...userWithoutPassword } = user;
         // Lưu session phía backend
         currentSession = { id: user.id, username: user.username, role: user.role };
+        prisma.user.update({ where: { id: user.id }, data: { lastActiveAt: new Date() } }).catch(() => {});
         await logActivity({ module: 'users', action: 'LOGIN', description: `Đăng nhập: ${user.username}`, recordName: user.username, userName: user.username });
         return { success: true, data: { ...userWithoutPassword, isActive: user.status === 'active' } };
     } catch (error) {
@@ -4908,6 +4910,9 @@ ipcMain.handle('users:login', async (event, username, password) => {
 });
 
 ipcMain.handle('users:logout', async () => {
+    if (currentSession?.id) {
+        await prisma.user.update({ where: { id: currentSession.id }, data: { lastActiveAt: null } }).catch(() => {});
+    }
     currentSession = null;
     return { success: true };
 });
@@ -4919,6 +4924,17 @@ ipcMain.handle('users:restoreSession', async (event, userId) => {
         const user = await prisma.user.findUnique({ where: { id: userId } });
         if (!user || user.status !== 'active') return { success: false };
         currentSession = { id: user.id, username: user.username, role: user.role };
+        prisma.user.update({ where: { id: user.id }, data: { lastActiveAt: new Date() } }).catch(() => {});
+        return { success: true };
+    } catch {
+        return { success: false };
+    }
+});
+
+ipcMain.handle('users:heartbeat', async () => {
+    try {
+        if (!currentSession?.id || !prisma) return { success: false };
+        await prisma.user.update({ where: { id: currentSession.id }, data: { lastActiveAt: new Date() } }).catch(() => {});
         return { success: true };
     } catch {
         return { success: false };

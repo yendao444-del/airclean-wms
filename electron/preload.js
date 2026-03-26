@@ -174,6 +174,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         login: (username, password) => ipcRenderer.invoke('users:login', username, password),
         logout: () => ipcRenderer.invoke('users:logout'),
         restoreSession: (userId) => ipcRenderer.invoke('users:restoreSession', userId),
+        heartbeat: () => ipcRenderer.invoke('users:heartbeat'),
         ensureAdmin: () => ipcRenderer.invoke('users:ensureAdmin'),
     },
 

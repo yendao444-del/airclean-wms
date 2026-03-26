@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
     Card,
     Button,
@@ -27,6 +27,13 @@ interface User {
     role: 'admin' | 'manager' | 'staff' | 'viewer';
     isActive: boolean;
     createdAt: string;
+    lastActiveAt?: string | null;
+}
+
+// User được coi là online nếu lastActiveAt trong vòng 3 phút
+function isOnline(lastActiveAt?: string | null): boolean {
+    if (!lastActiveAt) return false;
+    return (Date.now() - new Date(lastActiveAt).getTime()) < 3 * 60 * 1000;
 }
 
 const ROLES = {
@@ -65,8 +72,27 @@ export default function PermissionsPage() {
     const [changingPasswordUser, setChangingPasswordUser] = useState<User | null>(null);
     const [passwordForm] = Form.useForm();
 
+    const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
     useEffect(() => {
         loadUsers();
+
+        // Heartbeat: cập nhật lastActiveAt mỗi 2 phút
+        const heartbeatInterval = setInterval(() => {
+            window.electronAPI.users.heartbeat?.();
+        }, 2 * 60 * 1000);
+
+        // Refresh danh sách mỗi 30 giây để cập nhật trạng thái online của mọi người
+        refreshTimerRef.current = setInterval(() => {
+            window.electronAPI.users.getAll().then(r => {
+                if (r.success && r.data) setUsers(r.data);
+            });
+        }, 30 * 1000);
+
+        return () => {
+            clearInterval(heartbeatInterval);
+            if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
+        };
     }, []);
 
     const loadUsers = async () => {
@@ -207,8 +233,25 @@ export default function PermissionsPage() {
             title: 'Tên đăng nhập',
             dataIndex: 'username',
             key: 'username',
-            width: 150,
-            render: (text) => <Tag color="blue">{text}</Tag>,
+            width: 160,
+            render: (text, record) => (
+                <Space size={6}>
+                    <span style={{
+                        display: 'inline-block',
+                        width: 10, height: 10,
+                        borderRadius: '50%',
+                        background: isOnline(record.lastActiveAt) ? '#52c41a' : '#d9d9d9',
+                        flexShrink: 0,
+                        boxShadow: isOnline(record.lastActiveAt) ? '0 0 0 3px rgba(82,196,26,0.2)' : 'none',
+                    }} title={isOnline(record.lastActiveAt)
+                        ? 'Đang online'
+                        : record.lastActiveAt
+                            ? `Lần cuối: ${new Date(record.lastActiveAt).toLocaleString('vi-VN')}`
+                            : 'Chưa đăng nhập'
+                    } />
+                    <Tag color="blue">{text}</Tag>
+                </Space>
+            ),
         },
         {
             title: 'Họ và tên',

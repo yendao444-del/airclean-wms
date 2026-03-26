@@ -309,7 +309,9 @@ model User {
   role        String   @default("staff") // admin, manager, staff
   permissions String?  // JSON array of permissions
   status      String   @default("active") // active, inactive
-  
+
+  lastActiveAt DateTime? // Heartbeat — cập nhật mỗi 2 phút khi đang dùng app
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   
