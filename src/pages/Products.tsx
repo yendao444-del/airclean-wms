@@ -189,10 +189,21 @@ export default function ProductsPage() {
                                             variants[item.variantIndex].combos = [];
                                         }
 
-                                        // Calculate combo cost/price from parent variant × quantity if not set
+                                        // Luôn tính cost từ variant cha × số lượng (không dùng giá cũ trong DB)
                                         const parentVariant = variants[item.variantIndex];
-                                        const comboCost = combo.cost || (parentVariant.cost || 0) * (item.quantity || 1);
+                                        const expectedCost = (parentVariant.cost || 0) * (item.quantity || 1);
                                         const comboPrice = combo.price || (parentVariant.price || 0) * (item.quantity || 1);
+
+                                        // Nếu cost trong DB lệch với giá hiện tại → update DB ngầm
+                                        if (combo.cost !== expectedCost) {
+                                            window.electronAPI.combos.update(combo.id, {
+                                                sku: combo.sku,
+                                                name: combo.name,
+                                                items: undefined,
+                                                price: comboPrice,
+                                                cost: expectedCost,
+                                            }).catch(() => {});
+                                        }
 
                                         // Add combo info to variant
                                         variants[item.variantIndex].combos.push({
@@ -200,7 +211,7 @@ export default function ProductsPage() {
                                             sku: combo.sku,
                                             name: combo.name,
                                             price: comboPrice,
-                                            cost: comboCost,
+                                            cost: expectedCost,
                                             stock: combo.stock,
                                             quantity: item.quantity
                                         });
@@ -512,9 +523,18 @@ export default function ProductsPage() {
     const handleSubmit = async (values: any) => {
         try {
             // ✨ Filter out empty/invalid variants (variants without color name)
-            const validVariants = variants.filter(v =>
-                v.color && v.color.trim() !== ''
-            );
+            // Tự động tính lại combo.cost = variant.cost × combo.quantity khi save
+            const validVariants = variants
+                .filter(v => v.color && v.color.trim() !== '')
+                .map(v => ({
+                    ...v,
+                    combos: Array.isArray(v.combos)
+                        ? v.combos.map((c: any) => ({
+                            ...c,
+                            cost: (v.cost || 0) * (c.quantity || 1),
+                        }))
+                        : v.combos,
+                }));
 
             // Add variants to payload if exists
             const payload = {
@@ -531,6 +551,28 @@ export default function ProductsPage() {
             if (editingProduct) {
                 const result = await window.electronAPI.products.update(editingProduct.id, payload);
                 if (result.success) {
+                    // Đồng bộ giá vốn combo số lượng trong bảng combos
+                    const comboUpdates: Promise<any>[] = [];
+                    validVariants.forEach(v => {
+                        if (Array.isArray(v.combos)) {
+                            v.combos.forEach((c: any) => {
+                                if (c.id) {
+                                    const newCost = (v.cost || 0) * (c.quantity || 1);
+                                    comboUpdates.push(
+                                        window.electronAPI.combos.update(c.id, {
+                                            sku: c.sku,
+                                            name: c.name,
+                                            items: undefined, // giữ nguyên items trong DB
+                                            price: c.price,
+                                            cost: newCost,
+                                        })
+                                    );
+                                }
+                            });
+                        }
+                    });
+                    if (comboUpdates.length > 0) await Promise.all(comboUpdates);
+
                     message.success('Đã cập nhật sản phẩm!');
 
                     // Log activity
@@ -686,17 +728,7 @@ export default function ProductsPage() {
                 return <strong style={{ color: '#00ab56' }}>{text}</strong>;
             },
         },
-        {
-            title: 'BARCODE',
-            dataIndex: 'barcode',
-            key: 'barcode',
-            width: 130,
-            minWidth: 110,
-            render: (text: string, record: Product) => {
-                if (expandedRowKeys.includes(record.id)) return null;
-                return text || '-';
-            },
-        },
+
         {
             title: 'Danh mục',
             dataIndex: ['category', 'name'],
@@ -1060,9 +1092,11 @@ export default function ProductsPage() {
                                                             <tr key={`variant-${idx}`} style={{
                                                                 background: rowBg,
                                                                 transition: 'background 0.2s',
+                                                                cursor: 'pointer',
                                                             }}
-                                                                onMouseEnter={(e) => e.currentTarget.style.background = '#e6f7ff'}
+                                                                onMouseEnter={(e) => e.currentTarget.style.background = '#bae7ff'}
                                                                 onMouseLeave={(e) => e.currentTarget.style.background = rowBg}
+                                                                onDoubleClick={() => handleEdit(record)}
                                                             >
                                                                 <td style={{ padding: '10px 8px', fontSize: 12 }}>
                                                                     <span style={{ fontWeight: 500, color: '#262626' }}>
@@ -1116,12 +1150,18 @@ export default function ProductsPage() {
 
                                                         // Add combo rows if they exist
                                                         if (variant.combos && variant.combos.length > 0) {
-                                                            variant.combos.forEach((combo: any, comboIdx: number) => {
+                                                            [...variant.combos].sort((a: any, b: any) => (a.quantity || 0) - (b.quantity || 0)).forEach((combo: any, comboIdx: number) => {
                                                                 rows.push(
                                                                     <tr key={`combo-${idx}-${comboIdx}`} style={{
                                                                         background: '#fff7e6',
                                                                         borderLeft: '4px solid #fa8c16',
-                                                                    }}>
+                                                                        cursor: 'pointer',
+                                                                        transition: 'background 0.2s',
+                                                                    }}
+                                                                        onMouseEnter={(e) => e.currentTarget.style.background = '#ffe7ba'}
+                                                                        onMouseLeave={(e) => e.currentTarget.style.background = '#fff7e6'}
+                                                                        onDoubleClick={() => handleEdit(record)}
+                                                                    >
                                                                         <td style={{ padding: '10px 8px 10px 32px', fontSize: 12 }}>
                                                                             <span style={{ fontWeight: 500, color: '#262626' }}>
                                                                                 ↳ {record.name}

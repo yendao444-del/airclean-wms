@@ -40,6 +40,9 @@ const DEFAULT_CONFIG = {
     monthlyEquipment: 0,    // Khấu hao
     monthlySoftware: 0,     // Phần mềm
     monthlyOther: 0,        // Khác
+    // Chi phí Ads hàng tháng (tự chia đều theo ngày trong kỳ)
+    monthlyShopeeAds: 0,    // Ngân sách Shopee Ads/tháng
+    monthlyTiktokAds: 0,    // Ngân sách TikTok Ads/tháng
 };
 
 type PNLConfig = typeof DEFAULT_CONFIG;
@@ -94,10 +97,7 @@ export default function BusinessReportPage() {
     // Config
     const [config, setConfig] = useState<PNLConfig>(DEFAULT_CONFIG);
     const [configModalOpen, setConfigModalOpen] = useState(false);
-    const [adsModalOpen, setAdsModalOpen] = useState(false);
-    const [adsDate, setAdsDate] = useState<Dayjs>(dayjs());
     const [form] = Form.useForm();
-    const [adsForm] = Form.useForm();
 
     // Drill-down modal state
     const [drillDownOpen, setDrillDownOpen] = useState(false);
@@ -142,7 +142,10 @@ export default function BusinessReportPage() {
             }
             if (comboRes.success && comboRes.data) {
                 for (const c of comboRes.data) {
-                    skuCostMap[c.sku] = c.cost || 0;
+                    // Chỉ ghi nếu SKU chưa có từ Products (tránh combo đè giá sản phẩm gốc)
+                    if (skuCostMap[c.sku] === undefined) {
+                        skuCostMap[c.sku] = c.cost || 0;
+                    }
                 }
             }
             setCostMap(skuCostMap);
@@ -349,9 +352,9 @@ export default function BusinessReportPage() {
 
         // Affiliate đã được gộp vào platformFeeDetails ở trên
 
-        // === D. CHI PHÍ ADS (từ dailyExpenses) ===
-        const totalShopeeAds = filteredDailyExpenses.reduce((s, d) => s + (d.shopeeAds || 0), 0);
-        const totalTiktokAds = filteredDailyExpenses.reduce((s, d) => s + (d.tiktokAds || 0), 0);
+        // === D. CHI PHÍ ADS (ngân sách tháng từ config, chia theo ngày) ===
+        const totalShopeeAds = ((config.monthlyShopeeAds || 0) / 30) * numDays;
+        const totalTiktokAds = ((config.monthlyTiktokAds || 0) / 30) * numDays;
         const totalAds = totalShopeeAds + totalTiktokAds;
 
         // === E. VẬN CHUYỂN & HOÀN (từ dailyExpenses) ===
@@ -446,52 +449,7 @@ export default function BusinessReportPage() {
         setTiktokFeeConfig(prev => prev.map(f => f.id === feeId ? { ...f, value: newValue } : f));
     };
 
-    // ============================================
-    // SAVE ADS
-    // ============================================
-    const handleSaveAds = async (values: any) => {
-        try {
-            const data = {
-                date: adsDate.format('YYYY-MM-DD'),
-                shopeeAds: values.shopeeAds || 0,
-                tiktokAds: values.tiktokAds || 0,
-                facebookAds: 0,
-                otherAds: 0,
-                shippingCost: values.shippingCost || 0,
-                returnCost: values.returnCost || 0,
-                otherExpense: values.otherExpense || 0,
-                otherNote: values.otherNote || '',
-            };
-            const res = await window.electronAPI.dailyExpenses.upsert(data);
-            if (res.success) {
-                message.success(`Đã lưu chi phí ngày ${adsDate.format('DD/MM/YYYY')}!`);
-                setAdsModalOpen(false);
-                // Reload
-                const deRes = await window.electronAPI.dailyExpenses.getAll();
-                if (deRes.success) setDailyExpenses(deRes.data || []);
-            } else {
-                message.error(res.error || 'Lỗi lưu');
-            }
-        } catch (err) {
-            message.error('Lỗi lưu chi phí');
-        }
-    };
 
-    const openAdsModal = (date?: Dayjs) => {
-        const d = date || (viewMode === 'daily' ? selectedDate : dayjs());
-        setAdsDate(d);
-        // Check if data exists for this date
-        const existing = dailyExpenses.find(de => de.date === d.format('YYYY-MM-DD'));
-        adsForm.setFieldsValue({
-            shopeeAds: existing?.shopeeAds || 0,
-            tiktokAds: existing?.tiktokAds || 0,
-            shippingCost: existing?.shippingCost || 0,
-            returnCost: existing?.returnCost || 0,
-            otherExpense: existing?.otherExpense || 0,
-            otherNote: existing?.otherNote || '',
-        });
-        setAdsModalOpen(true);
-    };
 
     // ============================================
     // FORMAT HELPERS
@@ -511,91 +469,88 @@ export default function BusinessReportPage() {
         const rows: any[] = [];
 
         // A. DOANH THU
-        rows.push({ key: 'rev-header', name: '💰 A. DOANH THU', amount: pnl.totalRevenue, pctVal: '', isGroup: true, color: '#00ab56' });
-        rows.push({ key: 'rev-pos', name: 'Bán hàng POS', amount: pnl.revenuePOS, pctVal: pct(pnl.revenuePOS), isChild: true, indent: 1, drillable: true });
-        rows.push({ key: 'rev-shopee', name: 'Shopee', amount: pnl.shopeeRevenue, pctVal: pct(pnl.shopeeRevenue), isChild: true, indent: 1, drillable: true });
-        rows.push({ key: 'rev-tiktok', name: 'TikTok', amount: pnl.tiktokRevenue, pctVal: pct(pnl.tiktokRevenue), isChild: true, indent: 1, drillable: true });
-        if (pnl.otherTMDTRevenue > 0) rows.push({ key: 'rev-other', name: 'TMDT khác', amount: pnl.otherTMDTRevenue, pctVal: pct(pnl.otherTMDTRevenue), isChild: true, indent: 1, drillable: true });
+        rows.push({ key: 'rev-header', name: '💰 A. DOANH THU', amount: pnl.totalRevenue, pctVal: '', isGroup: true, color: '#00ab56', section: 'rev' });
+        rows.push({ key: 'rev-pos', name: 'Bán hàng POS', amount: pnl.revenuePOS, pctVal: pct(pnl.revenuePOS), isChild: true, indent: 1, drillable: true, section: 'rev' });
+        rows.push({ key: 'rev-shopee', name: 'Shopee', amount: pnl.shopeeRevenue, pctVal: pct(pnl.shopeeRevenue), isChild: true, indent: 1, drillable: true, section: 'rev' });
+        rows.push({ key: 'rev-tiktok', name: 'TikTok', amount: pnl.tiktokRevenue, pctVal: pct(pnl.tiktokRevenue), isChild: true, indent: 1, drillable: true, section: 'rev' });
+        if (pnl.otherTMDTRevenue > 0) rows.push({ key: 'rev-other', name: 'TMDT khác', amount: pnl.otherTMDTRevenue, pctVal: pct(pnl.otherTMDTRevenue), isChild: true, indent: 1, drillable: true, section: 'rev' });
 
         // Doanh thu thuần
-        rows.push({ key: 'rev-net', name: '🟢 DOANH THU THUẦN', amount: pnl.netRevenue, pctVal: '100.0', isSubtotal: true, color: '#00ab56' });
+        rows.push({ key: 'rev-net', name: '🟢 DOANH THU THUẦN', amount: pnl.netRevenue, pctVal: '100.0', isSubtotal: true, color: '#00ab56', section: 'rev' });
 
         // B. TỔNG CHI PHÍ
-        rows.push({ key: 'cost-header', name: '📉 B. TỔNG CHI PHÍ', amount: pnl.totalCost, pctVal: pct(pnl.totalCost), isGroup: true, color: '#f5222d' });
+        rows.push({ key: 'cost-header', name: '📉 B. TỔNG CHI PHÍ', amount: pnl.totalCost, pctVal: pct(pnl.totalCost), isGroup: true, color: '#f5222d', section: 'cost' });
 
         // B1. COGS
-        rows.push({ key: 'cogs', name: 'B1. Giá vốn hàng bán (COGS)', amount: pnl.totalCOGS, pctVal: pct(pnl.totalCOGS), isParent: true, indent: 1 });
-        rows.push({ key: 'cogs-pos', name: 'Giá vốn POS', amount: pnl.cogsPOS, pctVal: pct(pnl.cogsPOS), isChild: true, indent: 2, drillable: true });
-        rows.push({ key: 'cogs-tmdt', name: 'Giá vốn TMDT', amount: pnl.cogsTMDT, pctVal: pct(pnl.cogsTMDT), isChild: true, indent: 2, drillable: true });
+        rows.push({ key: 'cogs', name: 'B1. Giá vốn hàng bán (COGS)', amount: pnl.totalCOGS, pctVal: pct(pnl.totalCOGS), isParent: true, indent: 1, section: 'cogs' });
+        rows.push({ key: 'cogs-pos', name: 'Giá vốn POS', amount: pnl.cogsPOS, pctVal: pct(pnl.cogsPOS), isChild: true, indent: 2, drillable: true, section: 'cogs' });
+        rows.push({ key: 'cogs-tmdt', name: 'Giá vốn TMDT', amount: pnl.cogsTMDT, pctVal: pct(pnl.cogsTMDT), isChild: true, indent: 2, drillable: true, section: 'cogs' });
 
         // B2. Phí sàn (tách riêng Shopee & TikTok)
-        rows.push({ key: 'platform', name: 'B2. Phí sàn TMĐT', amount: pnl.totalPlatformFees, pctVal: pct(pnl.totalPlatformFees), isParent: true, indent: 1 });
+        rows.push({ key: 'platform', name: 'B2. Phí sàn TMĐT', amount: pnl.totalPlatformFees, pctVal: pct(pnl.totalPlatformFees), isParent: true, indent: 1, section: 'platform' });
 
         // Shopee fees
         if (pnl.totalShopeeFees > 0) {
-            rows.push({ key: 'plat-shopee-header', name: '🛒 Shopee (' + pnl.shopeeOrders + ' đơn)', amount: pnl.totalShopeeFees, pctVal: pct(pnl.totalShopeeFees), isParent: true, indent: 2, color: '#ff6633', drillable: true });
+            rows.push({ key: 'plat-shopee-header', name: '🛒 Shopee (' + pnl.shopeeOrders + ' đơn)', amount: pnl.totalShopeeFees, pctVal: pct(pnl.totalShopeeFees), isParent: true, indent: 2, color: '#ff6633', drillable: true, section: 'platform' });
             pnl.shopeeFeeDetails.forEach((fee: any) => {
                 if (fee.amount > 0) rows.push({
                     key: `plat-shopee-${fee.id}`,
                     name: fee.type === 'percent'
                         ? `${fee.icon || ''} ${fee.name} (${fee.value}%)`
                         : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
-                    amount: fee.amount,
-                    pctVal: pct(fee.amount),
+                    amount: fee.amount, pctVal: pct(fee.amount),
                     isChild: true, indent: 3, drillable: true,
-                    _fee: fee, _platform: 'shopee',
+                    _fee: fee, _platform: 'shopee', section: 'platform',
                 });
             });
         }
 
         // TikTok fees
         if (pnl.totalTiktokFees > 0) {
-            rows.push({ key: 'plat-tiktok-header', name: '🎵 TikTok (' + pnl.tiktokOrders + ' đơn)', amount: pnl.totalTiktokFees, pctVal: pct(pnl.totalTiktokFees), isParent: true, indent: 2, color: '#1a1a2e', drillable: true });
+            rows.push({ key: 'plat-tiktok-header', name: '🎵 TikTok (' + pnl.tiktokOrders + ' đơn)', amount: pnl.totalTiktokFees, pctVal: pct(pnl.totalTiktokFees), isParent: true, indent: 2, color: '#1a1a2e', drillable: true, section: 'platform' });
             pnl.tiktokFeeDetails.forEach((fee: any) => {
                 if (fee.amount > 0) rows.push({
                     key: `plat-tiktok-${fee.id}`,
                     name: fee.type === 'percent'
                         ? `${fee.icon || ''} ${fee.name} (${fee.value}%)`
                         : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
-                    amount: fee.amount,
-                    pctVal: pct(fee.amount),
+                    amount: fee.amount, pctVal: pct(fee.amount),
                     isChild: true, indent: 3, drillable: true,
-                    _fee: fee, _platform: 'tiktok',
+                    _fee: fee, _platform: 'tiktok', section: 'platform',
                 });
             });
         }
 
         // B3. Marketing
-        rows.push({ key: 'ads', name: 'B3. Chi phí Marketing (Ads)', amount: pnl.totalAds, pctVal: pct(pnl.totalAds), isParent: true, indent: 1 });
-        rows.push({ key: 'ads-shopee', name: 'Shopee Ads', amount: pnl.totalShopeeAds, pctVal: pct(pnl.totalShopeeAds), isChild: true, indent: 2, drillable: pnl.totalShopeeAds > 0 });
-        rows.push({ key: 'ads-tiktok', name: 'TikTok Ads', amount: pnl.totalTiktokAds, pctVal: pct(pnl.totalTiktokAds), isChild: true, indent: 2, drillable: pnl.totalTiktokAds > 0 });
+        rows.push({ key: 'ads', name: 'B3. Chi phí Marketing (Ads)', amount: pnl.totalAds, pctVal: pct(pnl.totalAds), isParent: true, indent: 1, section: 'ads' });
+        rows.push({ key: 'ads-shopee', name: 'Shopee Ads', amount: pnl.totalShopeeAds, pctVal: pct(pnl.totalShopeeAds), isChild: true, indent: 2, drillable: pnl.totalShopeeAds > 0, section: 'ads' });
+        rows.push({ key: 'ads-tiktok', name: 'TikTok Ads', amount: pnl.totalTiktokAds, pctVal: pct(pnl.totalTiktokAds), isChild: true, indent: 2, drillable: pnl.totalTiktokAds > 0, section: 'ads' });
 
         // B4. Ship & Hoàn
-        rows.push({ key: 'ship', name: 'B4. Vận chuyển & Hoàn', amount: pnl.totalShipReturn, pctVal: pct(pnl.totalShipReturn), isParent: true, indent: 1 });
-        rows.push({ key: 'ship-out', name: 'Phí ship gửi', amount: pnl.totalShipping, pctVal: pct(pnl.totalShipping), isChild: true, indent: 2, drillable: pnl.totalShipping > 0 });
-        rows.push({ key: 'ship-return', name: 'Phí hoàn + hàng hỏng', amount: pnl.totalReturnCost, pctVal: pct(pnl.totalReturnCost), isChild: true, indent: 2, drillable: pnl.totalReturnCost > 0 });
+        rows.push({ key: 'ship', name: 'B4. Vận chuyển & Hoàn', amount: pnl.totalShipReturn, pctVal: pct(pnl.totalShipReturn), isParent: true, indent: 1, section: 'ship' });
+        rows.push({ key: 'ship-out', name: 'Phí ship gửi', amount: pnl.totalShipping, pctVal: pct(pnl.totalShipping), isChild: true, indent: 2, drillable: pnl.totalShipping > 0, section: 'ship' });
+        rows.push({ key: 'ship-return', name: 'Phí hoàn + hàng hỏng', amount: pnl.totalReturnCost, pctVal: pct(pnl.totalReturnCost), isChild: true, indent: 2, drillable: pnl.totalReturnCost > 0, section: 'ship' });
 
         // B5. Vận hành
-        rows.push({ key: 'opex', name: `B5. Chi phí vận hành (${fmt(pnl.monthlyTotal)}đ/tháng)`, amount: pnl.totalOpex, pctVal: pct(pnl.totalOpex), isParent: true, indent: 1, drillable: pnl.totalOpex > 0 });
+        rows.push({ key: 'opex', name: `B5. Chi phí vận hành (${fmt(pnl.monthlyTotal)}đ/tháng)`, amount: pnl.totalOpex, pctVal: pct(pnl.totalOpex), isParent: true, indent: 1, drillable: pnl.totalOpex > 0, section: 'opex' });
         pnl.opexDetails.forEach((d: any) => {
             rows.push({
                 key: `opex-${d.key}`,
                 name: `${d.name} (${fmt(d.monthly)}đ/th)`,
-                amount: d.amount,
-                pctVal: pct(d.amount),
+                amount: d.amount, pctVal: pct(d.amount),
                 isChild: true, indent: 2, drillable: true,
-                _opex: d,
+                _opex: d, section: 'opex',
             });
         });
 
         // B6. Khác
         if (pnl.totalOtherExpense > 0) {
-            rows.push({ key: 'other-exp', name: 'B6. Chi phí khác', amount: pnl.totalOtherExpense, pctVal: pct(pnl.totalOtherExpense), isParent: true, indent: 1, drillable: true });
+            rows.push({ key: 'other-exp', name: 'B6. Chi phí khác', amount: pnl.totalOtherExpense, pctVal: pct(pnl.totalOtherExpense), isParent: true, indent: 1, drillable: true, section: 'other' });
         }
 
         // KẾT QUẢ
-        rows.push({ key: 'gross', name: '💚 LỢI NHUẬN GỘP (DT − COGS)', amount: pnl.grossProfit, pctVal: pnl.grossMargin.toFixed(1), isSubtotal: true, color: '#1890ff' });
-        rows.push({ key: 'net', name: '🎯 LỢI NHUẬN RÒNG', amount: pnl.netProfit, pctVal: pnl.netMargin.toFixed(1), isTotal: true, color: pnl.netProfit >= 0 ? '#00ab56' : '#f5222d' });
+        rows.push({ key: 'gross', name: '💚 LỢI NHUẬN GỘP (DT − COGS)', amount: pnl.grossProfit, pctVal: pnl.grossMargin.toFixed(1), isSubtotal: true, color: '#1890ff', section: 'profit' });
+        rows.push({ key: 'net', name: '🎯 LỢI NHUẬN RÒNG', amount: pnl.netProfit, pctVal: pnl.netMargin.toFixed(1), isTotal: true, color: pnl.netProfit >= 0 ? '#00ab56' : '#f5222d', section: 'profit' });
 
         return rows;
     }, [pnl, config, shopeeFeeConfig, tiktokFeeConfig]);
@@ -939,31 +894,7 @@ export default function BusinessReportPage() {
         return [];
     }, [drillDownType, pnl.numDays]);
 
-    // ============================================
-    // DAILY EXPENSES TABLE
-    // ============================================
-    const dailyExpenseCols = [
-        { title: 'Ngày', dataIndex: 'date', key: 'date', width: 110, render: (v: string) => dayjs(v).format('DD/MM/YYYY') },
-        { title: 'Shopee Ads', dataIndex: 'shopeeAds', key: 'shopeeAds', render: (v: number) => v > 0 ? <span style={{ color: '#ff6633' }}>{fmt(v)}đ</span> : '—' },
-        { title: 'TikTok Ads', dataIndex: 'tiktokAds', key: 'tiktokAds', render: (v: number) => v > 0 ? <span style={{ color: '#1a1a2e' }}>{fmt(v)}đ</span> : '—' },
-        {
-            title: 'Tổng Ads', key: 'totalAds', render: (_: any, r: any) => {
-                const total = (r.shopeeAds || 0) + (r.tiktokAds || 0);
-                return <Text strong style={{ color: '#f5222d' }}>{fmt(total)}đ</Text>;
-            }
-        },
-        {
-            title: 'Ship/Hoàn', key: 'shipReturn', render: (_: any, r: any) => {
-                const total = (r.shippingCost || 0) + (r.returnCost || 0);
-                return total > 0 ? fmt(total) + 'đ' : '—';
-            }
-        },
-        {
-            title: '', key: 'action', width: 50, render: (_: any, r: any) => (
-                <Button type="link" size="small" icon={<EditOutlined />} onClick={() => openAdsModal(dayjs(r.date))} />
-            )
-        },
-    ];
+
 
     // ============================================
     // RENDER
@@ -978,9 +909,6 @@ export default function BusinessReportPage() {
                     <Text type="secondary">Phân tích chi tiết lãi/lỗ theo doanh thu, chi phí, phí sàn</Text>
                 </div>
                 <Space>
-                    <Button icon={<PlusOutlined />} type="primary" onClick={() => openAdsModal()}>
-                        Nhập chi phí Ads
-                    </Button>
                     <Button icon={<SettingOutlined />} onClick={() => {
                         form.setFieldsValue(config);
                         setConfigModalOpen(true);
@@ -1108,12 +1036,13 @@ export default function BusinessReportPage() {
                     loading={loading}
                     expandable={{ childrenColumnName: '__none__' }}
                     rowClassName={(r) => {
-                        if (r.isTotal) return 'pnl-row-total';
-                        if (r.isSubtotal) return 'pnl-row-subtotal';
-                        if (r.isGroup) return 'pnl-row-group';
-                        if (r.isParent) return 'pnl-row-parent';
-                        if (r.isChild) return 'pnl-row-child';
-                        return '';
+                        const sectionClass = r.section ? `pnl-sec-${r.section}` : '';
+                        if (r.isTotal) return `pnl-row-total ${sectionClass}`;
+                        if (r.isSubtotal) return `pnl-row-subtotal ${sectionClass}`;
+                        if (r.isGroup) return `pnl-row-group ${sectionClass}`;
+                        if (r.isParent) return `pnl-row-parent ${sectionClass}`;
+                        if (r.isChild) return `pnl-row-child ${sectionClass}`;
+                        return sectionClass;
                     }}
                     columns={[
                         {
@@ -1179,210 +1108,9 @@ export default function BusinessReportPage() {
                 />
             </Card>
 
-            {/* === CHI PHÍ ADS HÀNG NGÀY === */}
-            <Card
-                title={<span>💸 Chi phí Ads & Phát sinh hàng ngày</span>}
-                size="small"
-                extra={
-                    <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => openAdsModal()}>
-                        Nhập chi phí
-                    </Button>
-                }
-            >
-                <Table
-                    dataSource={filteredDailyExpenses}
-                    columns={dailyExpenseCols}
-                    pagination={false}
-                    size="small"
-                    rowKey="id"
-                    locale={{ emptyText: 'Chưa có chi phí. Bấm "Nhập chi phí Ads" để thêm.' }}
-                />
-            </Card>
 
-            {/* === MODAL NHẬP CHI PHÍ === */}
-            <Modal
-                title={null}
-                open={adsModalOpen}
-                onCancel={() => setAdsModalOpen(false)}
-                footer={null}
-                width={520}
-                styles={{ body: { padding: '0 24px 24px' } }}
-                closable={true}
-            >
-                {/* Modal Header */}
-                <div style={{
-                    textAlign: 'center',
-                    padding: '24px 0 16px',
-                    borderBottom: '1px solid #f0f0f0',
-                    marginBottom: 20,
-                }}>
-                    <div style={{
-                        width: 48, height: 48, borderRadius: 12,
-                        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                        marginBottom: 10, boxShadow: '0 4px 14px rgba(102,126,234,0.35)',
-                    }}>
-                        <DollarOutlined style={{ fontSize: 22, color: '#fff' }} />
-                    </div>
-                    <Title level={4} style={{ margin: 0, fontWeight: 700 }}>
-                        Nhập chi phí ngày {adsDate.format('DD/MM/YYYY')}
-                    </Title>
-                    <Text type="secondary" style={{ fontSize: 13 }}>Cập nhật chi phí quảng cáo, vận chuyển & phát sinh</Text>
-                </div>
 
-                <Form form={adsForm} layout="vertical" onFinish={handleSaveAds} requiredMark={false}>
-                    {/* === SECTION 1: CHI PHÍ ADS === */}
-                    <div style={{
-                        border: '1px solid #e8e8e8',
-                        borderRadius: 12,
-                        padding: '16px 16px 4px',
-                        marginBottom: 16,
-                        background: 'linear-gradient(135deg, #fff5f0 0%, #fff 100%)',
-                        borderLeft: '4px solid #ff6633',
-                    }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-                            <div style={{
-                                width: 30, height: 30, borderRadius: 8,
-                                background: 'linear-gradient(135deg, #ff6633, #ff4500)',
-                                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                fontSize: 15,
-                            }}>📢</div>
-                            <Text strong style={{ fontSize: 14, color: '#262626' }}>Chi phí Quảng cáo</Text>
-                        </div>
-                        <Row gutter={12}>
-                            <Col span={12}>
-                                <Form.Item name="shopeeAds" label={<span style={{ fontSize: 13, color: '#595959' }}>🛒 Shopee Ads</span>} style={{ marginBottom: 12 }}>
-                                    <InputNumber
-                                        style={{ width: '100%' }}
-                                        min={0} step={10000}
-                                        formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                                        parser={(v: any) => v.replace(/,/g, '')}
-                                        addonAfter="đ"
-                                        placeholder="0"
-                                    />
-                                </Form.Item>
-                            </Col>
-                            <Col span={12}>
-                                <Form.Item name="tiktokAds" label={<span style={{ fontSize: 13, color: '#595959' }}>🎵 TikTok Ads</span>} style={{ marginBottom: 12 }}>
-                                    <InputNumber
-                                        style={{ width: '100%' }}
-                                        min={0} step={10000}
-                                        formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                                        parser={(v: any) => v.replace(/,/g, '')}
-                                        addonAfter="đ"
-                                        placeholder="0"
-                                    />
-                                </Form.Item>
-                            </Col>
-                        </Row>
-                    </div>
 
-                    {/* === SECTION 2: VẬN CHUYỂN & HOÀN === */}
-                    <div style={{
-                        border: '1px solid #e8e8e8',
-                        borderRadius: 12,
-                        padding: '16px 16px 4px',
-                        marginBottom: 16,
-                        background: 'linear-gradient(135deg, #f0f9ff 0%, #fff 100%)',
-                        borderLeft: '4px solid #1890ff',
-                    }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-                            <div style={{
-                                width: 30, height: 30, borderRadius: 8,
-                                background: 'linear-gradient(135deg, #1890ff, #096dd9)',
-                                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                fontSize: 15,
-                            }}>🚚</div>
-                            <Text strong style={{ fontSize: 14, color: '#262626' }}>Vận chuyển & Hoàn hàng</Text>
-                        </div>
-                        <Row gutter={12}>
-                            <Col span={12}>
-                                <Form.Item name="shippingCost" label={<span style={{ fontSize: 13, color: '#595959' }}>📦 Phí ship gửi</span>} style={{ marginBottom: 12 }}>
-                                    <InputNumber
-                                        style={{ width: '100%' }}
-                                        min={0} step={10000}
-                                        formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                                        parser={(v: any) => v.replace(/,/g, '')}
-                                        addonAfter="đ"
-                                        placeholder="0"
-                                    />
-                                </Form.Item>
-                            </Col>
-                            <Col span={12}>
-                                <Form.Item name="returnCost" label={<span style={{ fontSize: 13, color: '#595959' }}>↩️ Phí hoàn + hàng hỏng</span>} style={{ marginBottom: 12 }}>
-                                    <InputNumber
-                                        style={{ width: '100%' }}
-                                        min={0} step={10000}
-                                        formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                                        parser={(v: any) => v.replace(/,/g, '')}
-                                        addonAfter="đ"
-                                        placeholder="0"
-                                    />
-                                </Form.Item>
-                            </Col>
-                        </Row>
-                    </div>
-
-                    {/* === SECTION 3: PHÁT SINH KHÁC === */}
-                    <div style={{
-                        border: '1px solid #e8e8e8',
-                        borderRadius: 12,
-                        padding: '16px 16px 4px',
-                        marginBottom: 20,
-                        background: 'linear-gradient(135deg, #f9f0ff 0%, #fff 100%)',
-                        borderLeft: '4px solid #722ed1',
-                    }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-                            <div style={{
-                                width: 30, height: 30, borderRadius: 8,
-                                background: 'linear-gradient(135deg, #722ed1, #531dab)',
-                                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                fontSize: 15,
-                            }}>💡</div>
-                            <Text strong style={{ fontSize: 14, color: '#262626' }}>Phát sinh khác</Text>
-                        </div>
-                        <Row gutter={12}>
-                            <Col span={12}>
-                                <Form.Item name="otherExpense" label={<span style={{ fontSize: 13, color: '#595959' }}>💰 Chi phí khác</span>} style={{ marginBottom: 12 }}>
-                                    <InputNumber
-                                        style={{ width: '100%' }}
-                                        min={0} step={10000}
-                                        formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                                        parser={(v: any) => v.replace(/,/g, '')}
-                                        addonAfter="đ"
-                                        placeholder="0"
-                                    />
-                                </Form.Item>
-                            </Col>
-                            <Col span={12}>
-                                <Form.Item name="otherNote" label={<span style={{ fontSize: 13, color: '#595959' }}>📝 Ghi chú</span>} style={{ marginBottom: 12 }}>
-                                    <Input placeholder="VD: Bao bì, đóng gói..." style={{ height: 32 }} />
-                                </Form.Item>
-                            </Col>
-                        </Row>
-                    </div>
-
-                    {/* === SAVE BUTTON === */}
-                    <Button
-                        type="primary"
-                        htmlType="submit"
-                        icon={<SaveOutlined />}
-                        block
-                        size="large"
-                        style={{
-                            height: 48,
-                            borderRadius: 10,
-                            fontWeight: 700,
-                            fontSize: 15,
-                            background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                            border: 'none',
-                            boxShadow: '0 4px 14px rgba(102,126,234,0.4)',
-                        }}
-                    >
-                        💾 Lưu chi phí ngày {adsDate.format('DD/MM')}
-                    </Button>
-                </Form>
-            </Modal>
 
             {/* === MODAL CẤU HÌNH === */}
             <Modal
@@ -1453,6 +1181,30 @@ export default function BusinessReportPage() {
                                         </div>
                                     </Col>
                                 ))}
+                            </Row>
+                        </Panel>
+
+                        <Panel header="📣 Chi phí Quảng cáo hàng tháng" key="ads">
+                            <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 12 }}>
+                                <InfoCircleOutlined /> Nhập tổng ngân sách ads/tháng — hệ thống tự chia đều theo số ngày trong kỳ báo cáo
+                            </Text>
+                            <Row gutter={12}>
+                                <Col span={12}>
+                                    <Form.Item name="monthlyShopeeAds" label="🛍️ Shopee Ads / tháng">
+                                        <InputNumber style={{ width: '100%' }} min={0} step={100000}
+                                            formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                                            parser={(v: any) => v.replace(/,/g, '')}
+                                            addonAfter="đ" />
+                                    </Form.Item>
+                                </Col>
+                                <Col span={12}>
+                                    <Form.Item name="monthlyTiktokAds" label="🎵 TikTok Ads / tháng">
+                                        <InputNumber style={{ width: '100%' }} min={0} step={100000}
+                                            formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                                            parser={(v: any) => v.replace(/,/g, '')}
+                                            addonAfter="đ" />
+                                    </Form.Item>
+                                </Col>
                             </Row>
                         </Panel>
 
@@ -1544,11 +1296,11 @@ export default function BusinessReportPage() {
 
             {/* === INLINE STYLE for table rows === */}
             <style>{`
-                .pnl-row-total td { border-top: 3px double #1a1a2e !important; border-bottom: 3px double #1a1a2e !important; background: #f6ffed !important; }
+                .pnl-row-total td    { border-top: 3px double #1a1a2e !important; border-bottom: 3px double #1a1a2e !important; background: #f6ffed !important; }
                 .pnl-row-subtotal td { background: #e6f7ff !important; }
-                .pnl-row-group td { background: #f0f5ff !important; border-bottom: 2px solid #d6e4ff !important; }
-                .pnl-row-parent td { background: #fafafa !important; }
-                .pnl-row-child td { border-bottom: 1px solid #f9f9f9 !important; }
+                .pnl-row-group td    { background: #f0f5ff !important; border-bottom: 2px solid #d6e4ff !important; }
+                .pnl-row-parent td   { background: #fafafa !important; }
+                .pnl-row-child td    { border-bottom: 1px solid #f9f9f9 !important; }
             `}</style>
         </div>
     );

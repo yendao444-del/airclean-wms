@@ -58,7 +58,7 @@ export default function OrdersPage() {
     const [productDetailName, setProductDetailName] = useState<string | null>(null);
 
     // Ref để interval luôn gọi version loadAllOrders mới nhất (tránh stale closure)
-    const loadAllOrdersRef = useRef<(silent?: boolean) => Promise<void>>();
+    const loadAllOrdersRef = useRef<((silent?: boolean) => Promise<void>) | undefined>(undefined);
 
     useEffect(() => {
         loadAllOrdersRef.current = loadAllOrders;
@@ -812,7 +812,7 @@ export default function OrdersPage() {
                         </Col>
                         <Col span={6}>
                             <Form.Item name="discount" label="Giảm giá (đ)">
-                                <InputNumber min={0} style={{ width: '100%' }} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={v => Number(v?.replace(/,/g, '') || 0)} />
+                                <InputNumber<number> min={0} style={{ width: '100%' }} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={v => Number(v?.toString().replace(/,/g, '') || 0)} />
                             </Form.Item>
                         </Col>
                     </Row>

@@ -4042,9 +4042,11 @@ ipcMain.handle('combos:create', async (event, data) => {
 ipcMain.handle('combos:update', async (event, id, data) => {
     try {
         if (!prisma) throw new Error('Database not initialized');
+        const updateData = { sku: data.sku, name: data.name, price: data.price, cost: data.cost };
+        if (data.items !== undefined) updateData.items = JSON.stringify(data.items);
         const combo = await prisma.comboProduct.update({
             where: { id: parseInt(id) },
-            data: { sku: data.sku, name: data.name, items: JSON.stringify(data.items), price: data.price, cost: data.cost }
+            data: updateData,
         });
         await logActivity({ module: 'products', action: 'UPDATE', description: `Cập nhật combo "${combo.name}"`, recordName: combo.name });
         return { success: true, data: combo };

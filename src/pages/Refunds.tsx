@@ -1334,7 +1334,7 @@ export default function RefundsPage() {
 
 
     return (
-        <Spin spinning={loading || importLoading} tip="⏳ Đang import dữ liệu..." size="large">
+        <Spin spinning={importLoading} tip="⏳ Đang import dữ liệu..." size="large">
             <div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
                     <Title level={2} style={{ color: '#262626', margin: 0 }}>
