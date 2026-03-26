@@ -36,13 +36,13 @@ const bcrypt = lazyRequire('bcryptjs');
 // GOOGLE DRIVE + TELEGRAM — HĐĐT BACKUP
 // ========================================
 
-const GDRIVE_FOLDER_ID = '1pEblyEPQjwluSEHIAS-kOkSohrw_Efsv';
-const TELEGRAM_BOT_TOKEN = '***REDACTED_TELEGRAM_TOKEN***';
-const TELEGRAM_CHAT_ID = '1397184795';
+const GDRIVE_FOLDER_ID = config.GDRIVE_FOLDER_ID;
+const TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID;
 
 // OAuth2 Client credentials
-const OAUTH_CLIENT_ID = '470025984975-s63vgvnb1ds58fmagk9iqq0f9ufhkktr.apps.googleusercontent.com';
-const OAUTH_CLIENT_SECRET = '***REDACTED_OAUTH_SECRET***';
+const OAUTH_CLIENT_ID = config.OAUTH_CLIENT_ID;
+const OAUTH_CLIENT_SECRET = config.OAUTH_CLIENT_SECRET;
 
 // Google Drive auth (OAuth2 — dùng storage của user, không bị quota limit)
 let driveClient = null;
@@ -1344,6 +1344,41 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
     }
 });
 
+// Helper: deduct stock within a Prisma transaction (atomic, no race condition)
+async function deductStockInTx(tx, sku, qty) {
+    const product = await tx.product.findUnique({ where: { sku } });
+
+    if (product) {
+        // Regular product — atomic decrement
+        await tx.product.update({
+            where: { id: product.id },
+            data: { stock: Math.max(0, (product.stock || 0) - qty) }
+        });
+        return;
+    }
+
+    // Find via variant JSON
+    const products = await tx.product.findMany({
+        where: { variants: { contains: sku } }
+    });
+    for (const p of products) {
+        if (!p.variants) continue;
+        try {
+            const variants = JSON.parse(p.variants);
+            const vIdx = variants.findIndex(v => v.sku === sku);
+            if (vIdx >= 0) {
+                variants[vIdx].stock = Math.max(0, (variants[vIdx].stock || 0) - qty);
+                await tx.product.update({
+                    where: { id: p.id },
+                    data: { variants: JSON.stringify(variants) }
+                });
+                return;
+            }
+        } catch { /* corrupt JSON — skip */ }
+    }
+    console.warn(`⚠️ deductStockInTx: SKU not found: ${sku}`);
+}
+
 // Helper function to update single product/variant stock
 async function updateSingleProductStock(sku, quantity, isAdd) {
     let product = await prisma.product.findUnique({ where: { sku } });
@@ -1379,7 +1414,12 @@ async function updateSingleProductStock(sku, quantity, isAdd) {
 
     // Cập nhật stock
     if (isVariant) {
-        const variants = JSON.parse(product.variants);
+        let variants;
+        try {
+            variants = JSON.parse(product.variants);
+        } catch {
+            return { success: false, error: `Dữ liệu variant bị lỗi cho SKU: ${sku}` };
+        }
         const variantIndex = variants.findIndex(v => v.sku === sku);
 
         if (variantIndex < 0) {
@@ -1396,7 +1436,6 @@ async function updateSingleProductStock(sku, quantity, isAdd) {
         });
 
         console.log(`✅ [DATABASE] Updated variant ${sku}: ${oldStock} → ${variants[variantIndex].stock}`);
-        product = await prisma.product.findUnique({ where: { id: product.id } });
     } else {
         const oldStock = product.stock;
         const newStock = isAdd ? oldStock + quantity : oldStock - quantity;
@@ -1518,18 +1557,18 @@ ipcMain.handle('posOrder:create', async (event, data) => {
                 }
             });
 
+            // 4. Deduct stock inside transaction (atomic — không bị race condition)
+            // Nếu bất kỳ SKU nào lỗi, toàn bộ transaction rollback
+            for (const item of items) {
+                try {
+                    await deductStockInTx(tx, item.sku, item.qty);
+                } catch (stockErr) {
+                    throw new Error(`Không thể trừ tồn kho SKU ${item.sku}: ${stockErr.message}`);
+                }
+            }
+
             return newOrder;
         });
-
-        // 4. Deduct stock for each item (outside transaction for flexibility)
-        for (const item of items) {
-            try {
-                await updateSingleProductStock(item.sku, item.qty, false);
-                console.log(`  ✅ Stock deducted: ${item.sku} × ${item.qty}`);
-            } catch (stockErr) {
-                console.error(`  ⚠️ Stock deduct failed for ${item.sku}:`, stockErr.message);
-            }
-        }
 
         // 5. Activity Log
         try {
@@ -1910,12 +1949,15 @@ ipcMain.handle('purchases:create', async (event, data) => {
         const items = JSON.parse(data.items);
         console.log('📦 Items to create:', items);
 
-        // Validate all productIds exist
+        // Validate all productIds exist (single batch query)
+        const productIds = items.map(i => i.productId);
+        const existingProducts = await prisma.product.findMany({
+            where: { id: { in: productIds } },
+            select: { id: true }
+        });
+        const existingIds = new Set(existingProducts.map(p => p.id));
         for (const item of items) {
-            const product = await prisma.product.findUnique({
-                where: { id: item.productId }
-            });
-            if (!product) {
+            if (!existingIds.has(item.productId)) {
                 throw new Error(`Product ID ${item.productId} not found. Item: ${item.productName}`);
             }
         }
@@ -1949,14 +1991,17 @@ ipcMain.handle('purchases:create', async (event, data) => {
 
         await logActivity({ module: 'purchases', action: 'CREATE', description: `Tạo phiếu nhập ${purchase.poNumber} - ${new Intl.NumberFormat('vi-VN').format(data.totalAmount)}đ`, recordName: purchase.poNumber, userName: data.createdBy || 'Admin' });
 
-        // 🔥 CẬP NHẬT TỒN KHO
+        // 🔥 CẬP NHẬT TỒN KHO (batch fetch rồi update song song)
         console.log('📊 Updating stock for purchased items...');
-        for (const item of items) {
-            const product = await prisma.product.findUnique({
-                where: { id: item.productId }
-            });
+        const purchaseProductIds = [...new Set(items.map(i => i.productId))];
+        const purchaseProducts = await prisma.product.findMany({
+            where: { id: { in: purchaseProductIds } }
+        });
+        const productMap = new Map(purchaseProducts.map(p => [p.id, p]));
 
-            if (!product) continue;
+        await Promise.all(items.map(async (item) => {
+            const product = productMap.get(item.productId);
+            if (!product) return;
 
             // Nếu có variantSku (phân loại), cập nhật stock trong JSON
             if (item.variantSku && product.variants) {
@@ -1990,7 +2035,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
 
                 console.log(`  ✅ Updated product stock: ${product.sku} (${oldStock} → ${newStock})`);
             }
-        }
+        }));
 
         return { success: true, data: purchase };
     } catch (error) {
@@ -3242,15 +3287,22 @@ ipcMain.handle('users:changePassword', async (event, { userId, oldPassword, newP
             return { success: false, error: 'Người dùng không tồn tại' };
         }
 
-        // Verify old password
-        if (user.password !== oldPassword) {
+        // Verify old password (bcrypt compare — hỗ trợ cả plaintext legacy)
+        let passwordValid = false;
+        if (user.password && user.password.startsWith('$2')) {
+            passwordValid = await bcrypt.compare(oldPassword, user.password);
+        } else {
+            passwordValid = user.password === oldPassword;
+        }
+        if (!passwordValid) {
             return { success: false, error: 'Mật khẩu hiện tại không đúng' };
         }
 
-        // Update password
+        // Hash new password before storing
+        const hashedNew = await bcrypt.hash(newPassword, 10);
         await prisma.user.update({
             where: { id: userId },
-            data: { password: newPassword }
+            data: { password: hashedNew }
         });
 
         console.log(`✅ Changed password for user: ${user.username}`);
@@ -3952,7 +4004,8 @@ ipcMain.handle('combos:getAll', async () => {
             items.forEach(item => {
                 const product = products.find(p => p.id === item.productId);
                 if (product && product.variants) {
-                    const variants = JSON.parse(product.variants);
+                    let variants;
+                    try { variants = JSON.parse(product.variants); } catch { variants = []; }
                     const variant = variants[item.variantIndex];
                     if (variant) {
                         const possibleCombos = Math.floor((variant.stock || 0) / item.quantity);
@@ -4127,10 +4180,11 @@ require('./update-handlers')(prisma);
 // ECOMMERCE EXPORTS HANDLERS (XUẤT HÀNG TMDT)
 // ========================================
 
-ipcMain.handle('ecommerceExports:getAll', async () => {
+ipcMain.handle('ecommerceExports:getAll', async (event, { since } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const exports = await prisma.ecommerceExport.findMany({
+            where: since ? { createdAt: { gte: new Date(since) } } : undefined,
             orderBy: { createdAt: 'desc' }
         });
         // Format dates for frontend
@@ -4260,10 +4314,11 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
 // EXPORT ORDERS HANDLERS (XUẤT HÀNG POS)
 // ========================================
 
-ipcMain.handle('exportOrders:getAll', async () => {
+ipcMain.handle('exportOrders:getAll', async (event, { since } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const orders = await prisma.exportOrder.findMany({
+            where: since ? { createdAt: { gte: new Date(since) } } : undefined,
             orderBy: { createdAt: 'desc' }
         });
         const formatted = orders.map(o => ({

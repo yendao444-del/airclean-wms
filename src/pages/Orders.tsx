@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import '../App.css';
 import {
     Card, Table, Tag, Typography, Spin, Input, Space, Row, Col, Button, message, DatePicker,
     Modal, Form, InputNumber, Popconfirm, Tooltip,
@@ -56,20 +57,47 @@ export default function OrdersPage() {
     // Product detail modal state
     const [productDetailName, setProductDetailName] = useState<string | null>(null);
 
+    // Ref để interval luôn gọi version loadAllOrders mới nhất (tránh stale closure)
+    const loadAllOrdersRef = useRef<(silent?: boolean) => Promise<void>>();
+
+    useEffect(() => {
+        loadAllOrdersRef.current = loadAllOrders;
+    });
+
     useEffect(() => {
         loadAllOrders();
-        const interval = setInterval(() => loadAllOrders(true), 30000);
+        const interval = setInterval(() => loadAllOrdersRef.current?.(true), 30000);
         return () => clearInterval(interval);
-    }, []);
+    }, [datePreset, customRange]);
+
+    const getSince = () => {
+        const today = dayjs().startOf('day');
+        // Tải gấp đôi khoảng thời gian để có đủ data so sánh kỳ trước
+        switch (datePreset) {
+            case 'today': return today.subtract(2, 'day').toISOString();
+            case '7days': return today.subtract(14, 'day').toISOString();
+            case '30days': return today.subtract(60, 'day').toISOString();
+            case 'month': return today.subtract(2, 'month').startOf('month').toISOString();
+            case 'custom': {
+                if (customRange) {
+                    const days = customRange[1].diff(customRange[0], 'day') + 1;
+                    return customRange[0].subtract(days, 'day').toISOString();
+                }
+                return today.subtract(60, 'day').toISOString();
+            }
+            default: return today.subtract(2, 'day').toISOString();
+        }
+    };
 
     const loadAllOrders = async (silent = false) => {
         if (!silent) setLoading(true);
         try {
             const api = (window as any).electronAPI;
+            const since = getSince();
             const [posRes, exRes, ecRes] = await Promise.all([
                 api.posOrder.getAll({}),
-                api.exportOrders.getAll(),
-                api.ecommerceExports.getAll(),
+                api.exportOrders.getAll({ since }),
+                api.ecommerceExports.getAll({ since }),
             ]);
 
             const unified: UnifiedOrder[] = [];
@@ -389,21 +417,28 @@ export default function OrdersPage() {
             ),
         },
         {
+            title: 'Mã vận đơn', dataIndex: 'tracking', key: 'tracking', width: 155,
+            ellipsis: true,
+            render: (v) => v ? (
+                <Text copyable style={{ fontSize: 12, fontFamily: 'monospace' }}>{v}</Text>
+            ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
+        },
+        {
             title: 'Mã đơn', dataIndex: 'orderNumber', key: 'orderNumber', width: 170,
             ellipsis: true, render: (v) => <Text strong style={{ fontSize: 12 }}>{v}</Text>,
         },
         {
-            title: 'Khách hàng', dataIndex: 'customer', key: 'customer', width: 130,
-            ellipsis: true, render: (v) => <Text style={{ fontSize: 12 }}>{v}</Text>,
-        },
-        {
-            title: 'Sản phẩm', key: 'items', ellipsis: true,
+            title: 'Sản phẩm', key: 'items', width: 280,
             render: (_, record) => {
                 let items: any[] = [];
                 try { items = JSON.parse(record.items); } catch { }
                 const firstName = items[0]?.productName || items[0]?.name || '-';
                 const more = items.length > 1 ? ` (+${items.length - 1})` : '';
-                return <Text style={{ fontSize: 12 }}>{firstName}{more && <Text type="secondary">{more}</Text>}</Text>;
+                return (
+                    <div style={{ whiteSpace: 'normal', lineHeight: '1.4', fontSize: 12 }}>
+                        {firstName}{more && <Text type="secondary">{more}</Text>}
+                    </div>
+                );
             },
         },
         {
@@ -427,11 +462,11 @@ export default function OrdersPage() {
             render: (v) => <Text strong style={{ color: '#00ab56' }}>{fmt(v)}đ</Text>,
         },
         {
-            title: 'Người thực hiện', dataIndex: 'createdBy', key: 'createdBy', width: 120,
+            title: 'Vận chuyển', dataIndex: 'shipping', key: 'shipping', width: 120,
             ellipsis: true,
             render: (v) => v ? (
-                <Tag style={{ fontSize: 11, borderRadius: 6, background: '#f0f5ff', color: '#1890ff', border: '1px solid #adc6ff', fontWeight: 500 }}>
-                    👤 {v}
+                <Tag style={{ fontSize: 11, borderRadius: 6, background: '#fff7e6', color: '#d46b08', border: '1px solid #ffd591', fontWeight: 500 }}>
+                    🚚 {v}
                 </Tag>
             ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
         },
@@ -461,7 +496,7 @@ export default function OrdersPage() {
     ];
 
     if (loading) {
-        return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 400 }}><Spin size="large" tip="Đang tải..." /></div>;
+        return <div className="page-loading-center"><Spin size="large" /></div>;
     }
 
     const presetBtnStyle = (active: boolean) => ({

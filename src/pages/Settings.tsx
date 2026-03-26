@@ -1,4 +1,5 @@
 import { useState, useEffect, lazy, Suspense } from 'react';
+import '../App.css';
 import {
   Button,
   Card,
@@ -38,11 +39,14 @@ import {
   RocketOutlined,
   DesktopOutlined,
   ApiOutlined,
-  InfoCircleOutlined
+  InfoCircleOutlined,
+  TeamOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import { useAuth } from '../contexts/AuthContext';
 
 const SystemLogsPage = lazy(() => import('./SystemLogs'));
+const PermissionsPage = lazy(() => import('./Permissions'));
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -84,6 +88,8 @@ interface SystemInfo {
 }
 
 const Settings = () => {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [loading, setLoading] = useState(false);
   const [backupLoading, setBackupLoading] = useState(false);
   const [backups, setBackups] = useState<BackupFile[]>([]);
@@ -835,7 +841,7 @@ const Settings = () => {
       children: (
         <div>
           {loadingSystemInfo ? (
-            <div style={{ textAlign: 'center', padding: 48 }}><Spin size="large" /></div>
+            <div className="page-loading-center"><Spin size="large" /></div>
           ) : systemInfo ? (
             <>
               {/* DB + Machine + Env */}
@@ -922,11 +928,24 @@ const Settings = () => {
         </span>
       ),
       children: (
-        <Suspense fallback={<div style={{ textAlign: 'center', padding: 48 }}><Spin size="large" /></div>}>
+        <Suspense fallback={<div className="page-loading-center"><Spin size="large" /></div>}>
           <SystemLogsPage />
         </Suspense>
       ),
     },
+    ...(isAdmin ? [{
+      key: 'admin',
+      label: (
+        <span>
+          <TeamOutlined /> Quản trị
+        </span>
+      ),
+      children: (
+        <Suspense fallback={<div className="page-loading-center"><Spin size="large" /></div>}>
+          <PermissionsPage />
+        </Suspense>
+      ),
+    }] : []),
   ];
 
   return (

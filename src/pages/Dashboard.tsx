@@ -1,4 +1,5 @@
 import { Card, Row, Col, Statistic, Typography, Spin, Tag, Table, Progress, Timeline, Divider, Select } from 'antd';
+import '../App.css';
 import {
     DollarOutlined,
     ShoppingOutlined,
@@ -77,10 +78,12 @@ export default function DashboardPage() {
         try {
             if (!silent) setLoading(true);
             const api = (window as any).electronAPI;
+            // Chỉ tải 60 ngày gần nhất để Dashboard không load toàn bộ lịch sử
+            const since60 = dayjs().subtract(60, 'day').toISOString();
             const [pRes, exRes, ecRes, puRes, rtRes, rfRes, sbRes, tkRes] = await Promise.all([
                 api.products.getAll(),
-                api.exportOrders.getAll(),
-                api.ecommerceExports.getAll(),
+                api.exportOrders.getAll({ since: since60 }),
+                api.ecommerceExports.getAll({ since: since60 }),
                 api.purchases.getAll(),
                 api.returns.getAll(),
                 api.refunds.getAll(),
@@ -216,7 +219,7 @@ export default function DashboardPage() {
     const fmtShort = (n: number) => n >= 1000000 ? (n / 1000000).toFixed(1) + 'tr' : n >= 1000 ? (n / 1000).toFixed(0) + 'k' : n.toString();
 
     if (loading) {
-        return (<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '400px' }}><Spin size="large" tip="Đang tải dữ liệu..." /></div>);
+        return (<div className="page-loading-center"><Spin size="large" /></div>);
     }
 
     if (user?.role !== 'admin') {

@@ -3,26 +3,37 @@
     height: 100%;
 }
 
+/* Full-screen centered loading overlay — dùng cho các page load lần đầu */
+.page-loading-center {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: rgba(255, 255, 255, 0.88);
+    z-index: 9998;
+}
+
 /* Logo Spin Animation - Custom loading indicator */
 .logo-spin-wrapper {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 10px;
+    gap: 20px;
 }
 .logo-spin-img {
-    width: 40px;
-    height: 40px;
+    width: 80px;
+    height: 80px;
     object-fit: contain;
     animation: logoSpin 1.2s ease-in-out infinite;
 }
 .logo-spin-dots {
     display: flex;
-    gap: 5px;
+    gap: 10px;
 }
 .logo-spin-dots span {
-    width: 7px;
-    height: 7px;
+    width: 14px;
+    height: 14px;
     border-radius: 50%;
     background: #00ab56;
     animation: logoDotBounce 1.2s ease-in-out infinite;
@@ -36,6 +47,39 @@
 @keyframes logoDotBounce {
     0%, 80%, 100% { transform: scale(0.5); opacity: 0.3; }
     40% { transform: scale(1); opacity: 1; }
+}
+
+/* ============= LOGO SHEEN EFFECT ============= */
+.logo-sheen-wrapper {
+    position: relative;
+    overflow: hidden;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+}
+.logo-sheen-wrapper::after {
+    content: '';
+    position: absolute;
+    top: -20%;
+    left: -60%;
+    width: 40%;
+    height: 140%;
+    background: linear-gradient(
+        105deg,
+        transparent 30%,
+        rgba(255, 255, 255, 0.55) 50%,
+        transparent 70%
+    );
+    transform: skewX(-15deg);
+    animation: logoSheen 5s ease-in-out infinite;
+    pointer-events: none;
+}
+@keyframes logoSheen {
+    0%   { left: -60%; opacity: 0; }
+    4%   { opacity: 1; }
+    18%  { left: 130%; opacity: 0; }
+    100% { left: 130%; opacity: 0; }
 }
 
 /* ============= SIDEBAR COLLAPSE BUTTON ============= */

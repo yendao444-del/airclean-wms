@@ -1,5 +1,5 @@
-import { useState, useEffect, lazy, Suspense } from 'react';
-import { Layout, Menu, Button, Typography, ConfigProvider, Space, Spin } from 'antd';
+import { useState, useEffect, lazy, Suspense, Component, ErrorInfo, ReactNode } from 'react';
+import { Layout, Menu, Button, Typography, ConfigProvider, Space } from 'antd';
 import AntAppProvider from './components/AntAppProvider';
 import {
     DashboardOutlined,
@@ -63,6 +63,35 @@ const BusinessReportPage = lazy(() => import('./pages/BusinessReport'));
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
+
+// ===== ERROR BOUNDARY =====
+interface ErrorBoundaryState { hasError: boolean; error?: Error; }
+class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
+    constructor(props: { children: ReactNode }) {
+        super(props);
+        this.state = { hasError: false };
+    }
+    static getDerivedStateFromError(error: Error) {
+        return { hasError: true, error };
+    }
+    componentDidCatch(error: Error, info: ErrorInfo) {
+        console.error('❌ App crashed:', error, info.componentStack);
+    }
+    render() {
+        if (this.state.hasError) {
+            return (
+                <div style={{ padding: 48, textAlign: 'center' }}>
+                    <Title level={3} type="danger">Ứng dụng gặp lỗi</Title>
+                    <p style={{ color: '#666' }}>{this.state.error?.message}</p>
+                    <Button type="primary" onClick={() => this.setState({ hasError: false })}>
+                        Thử lại
+                    </Button>
+                </div>
+            );
+        }
+        return this.props.children;
+    }
+}
 
 type MenuItem = Required<MenuProps>['items'][number];
 
@@ -200,13 +229,6 @@ function AppContent() {
         // Daily Tasks
         items.push(createMenuItem('Công việc hàng ngày', 'daily-tasks', <CheckCircleOutlined />));
 
-        // Admin (Permissions)
-        if (hasPermission('permissions')) {
-            items.push(createMenuItem('Admin', 'permissions', <UserOutlined />));
-        }
-
-
-
         // Settings
         if (accessibleKeys.includes('settings')) {
             items.push(createMenuItem('Cài đặt', 'settings', <SettingOutlined />));
@@ -280,7 +302,7 @@ function AppContent() {
                 return <DailyTasksPage />;
 
             case 'permissions':
-                return <PermissionsPage />;
+                return <SettingsPage />;
             case 'system-logs':
                 return <SettingsPage />;
             case 'settings':
@@ -312,18 +334,6 @@ function AppContent() {
                     borderRadius: 8,
                     colorBgContainer: '#ffffff',
                 },
-            }}
-            spin={{
-                indicator: <div className="logo-spin-wrapper">
-                    <img
-                        src="./logo_splash.png"
-                        alt="Loading"
-                        className="logo-spin-img"
-                    />
-                    <div className="logo-spin-dots">
-                        <span></span><span></span><span></span>
-                    </div>
-                </div>,
             }}
         >
             <AntAppProvider>
@@ -357,15 +367,17 @@ function AppContent() {
                                 padding: '0 12px',
                             }}
                         >
-                            <img
-                                src="./logo-ngang.png"
-                                alt="AIRCLEAN WMS"
-                                style={{
-                                    height: collapsed ? 28 : 40,
-                                    maxWidth: collapsed ? 50 : '100%',
-                                    objectFit: 'contain',
-                                }}
-                            />
+                            <div className="logo-sheen-wrapper">
+                                <img
+                                    src="./logo-ngang.png"
+                                    alt="AIRCLEAN WMS"
+                                    style={{
+                                        height: collapsed ? 28 : 40,
+                                        maxWidth: collapsed ? 50 : '100%',
+                                        objectFit: 'contain',
+                                    }}
+                                />
+                            </div>
                         </div>
                         <Menu
                             defaultSelectedKeys={['dashboard']}
@@ -426,12 +438,20 @@ function AppContent() {
                         >
                             <Suspense fallback={
                                 <div style={{
+                                    position: 'fixed',
+                                    inset: 0,
                                     display: 'flex',
                                     justifyContent: 'center',
                                     alignItems: 'center',
-                                    minHeight: '400px'
+                                    background: 'rgba(255,255,255,0.85)',
+                                    zIndex: 9999,
                                 }}>
-                                    <Spin size="large" tip="Đang tải..." />
+                                    <div className="logo-spin-wrapper">
+                                        <img src="./logo_splash.png" alt="Loading" className="logo-spin-img" />
+                                        <div className="logo-spin-dots">
+                                            <span></span><span></span><span></span>
+                                        </div>
+                                    </div>
                                 </div>
                             }>
                                 {renderContent()}
@@ -446,10 +466,14 @@ function AppContent() {
 
 export default function App() {
     return (
-        <ForceUpdateGate>
-            <AuthProvider>
-                <AppContent />
-            </AuthProvider>
-        </ForceUpdateGate>
+        <ErrorBoundary>
+            <ForceUpdateGate>
+                <AuthProvider>
+                    <ErrorBoundary>
+                        <AppContent />
+                    </ErrorBoundary>
+                </AuthProvider>
+            </ForceUpdateGate>
+        </ErrorBoundary>
     );
 }

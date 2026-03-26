@@ -103,7 +103,7 @@ export default function BusinessReportPage() {
     const [drillDownOpen, setDrillDownOpen] = useState(false);
     const [drillDownTitle, setDrillDownTitle] = useState('');
     const [drillDownData, setDrillDownData] = useState<any[]>([]);
-    const [drillDownType, setDrillDownType] = useState<'orders' | 'ecom' | 'items' | 'expenses'>('orders');
+    const [drillDownType, setDrillDownType] = useState<'orders' | 'ecom' | 'items' | 'expenses' | 'fee-detail' | 'opex-detail'>('orders');
 
     // ============================================
     // LOAD DATA
@@ -212,7 +212,7 @@ export default function BusinessReportPage() {
         [exportOrders, isInRange]);
 
     const filteredEcom = useMemo(() =>
-        ecomExports.filter(e => isInRange(e.ecommerceExportDate)),
+        ecomExports.filter(e => e.status === 'completed' && isInRange(e.ecommerceExportDate)),
         [ecomExports, isInRange]);
 
     const filteredRefunds = useMemo(() =>
@@ -226,6 +226,47 @@ export default function BusinessReportPage() {
     const filteredDailyExpenses = useMemo(() =>
         dailyExpenses.filter(d => isInRange(d.date)),
         [dailyExpenses, isInRange]);
+
+    // ============================================
+    // PURCHASE PRICE TIMELINE (dùng chung cho P&L và drill-down)
+    // ============================================
+
+    // Build SKU → [{date, unitPrice}] từ toàn bộ purchases, sort tăng dần theo ngày
+    const purchasePriceTimeline = useMemo(() => {
+        const timeline: Record<string, Array<{ date: string; unitPrice: number }>> = {};
+        purchases.forEach((p: any) => {
+            const pDate = p.purchaseDate || p.receivedAt || p.createdAt;
+            if (!pDate) return;
+            try {
+                const items = typeof p.items === 'string' ? JSON.parse(p.items) : (p.items || []);
+                items.forEach((item: any) => {
+                    const sku = item.variantSku || item.sku || '';
+                    if (!sku || !item.unitPrice) return;
+                    if (!timeline[sku]) timeline[sku] = [];
+                    timeline[sku].push({ date: pDate, unitPrice: item.unitPrice });
+                });
+            } catch { /* skip */ }
+        });
+        Object.values(timeline).forEach(entries =>
+            entries.sort((a, b) => dayjs(a.date).valueOf() - dayjs(b.date).valueOf())
+        );
+        return timeline;
+    }, [purchases]);
+
+    // Lấy giá nhập gần nhất trước hoặc bằng ngày bán; fallback về costMap
+    const getPurchaseCost = useCallback((sku: string, saleDate: string): number => {
+        const entries = purchasePriceTimeline[sku];
+        if (entries?.length) {
+            const saleDayVal = dayjs(saleDate).valueOf();
+            let lastPrice: number | null = null;
+            for (const entry of entries) {
+                if (dayjs(entry.date).valueOf() <= saleDayVal) lastPrice = entry.unitPrice;
+                else break;
+            }
+            if (lastPrice !== null) return lastPrice;
+        }
+        return costMap[sku] ?? 0;
+    }, [purchasePriceTimeline, costMap]);
 
     // ============================================
     // TÍNH P&L
@@ -245,12 +286,7 @@ export default function BusinessReportPage() {
         const otherTMDTRevenue = revenueTMDT - shopeeRevenue - tiktokRevenue - lazadaRevenue;
 
         // === B. GIÁ VỐN (COGS) ===
-        // Lookup giá vốn từ costMap (SKU → cost) × quantity
-        // ExportOrder items dùng trường "sku", EcommerceExport items dùng "variantSku"
-        console.log('🔍 [COGS DEBUG] costMap:', costMap);
-        console.log('🔍 [COGS DEBUG] costMap keys:', Object.keys(costMap));
-        console.log('🔍 [COGS DEBUG] filteredEcom count:', filteredEcom.length);
-
+        // Dùng costMap (giá vốn hiện tại trên sản phẩm) — đơn giản và ổn định
         let cogsPOS = 0;
         filteredExports.forEach(e => {
             try {
@@ -264,28 +300,25 @@ export default function BusinessReportPage() {
         });
 
         let cogsTMDT = 0;
-        filteredEcom.forEach((e, idx) => {
+        filteredEcom.forEach(e => {
             try {
                 const items = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []);
-                if (idx < 3) console.log(`🔍 [COGS DEBUG] Ecom #${idx} items:`, items.map((i: any) => ({ sku: i.sku, variantSku: i.variantSku, qty: i.quantity, keys: Object.keys(i) })));
                 items.forEach((item: any) => {
                     const sku = item.sku || item.variantSku || '';
                     const cost = costMap[sku] ?? item.cost ?? 0;
-                    if (idx < 3) console.log(`🔍 [COGS DEBUG] SKU="${sku}" → cost=${cost}, qty=${item.quantity}`);
                     cogsTMDT += cost * (item.quantity || 0);
                 });
             } catch { /* skip */ }
         });
-        console.log('🔍 [COGS DEBUG] Result: cogsPOS=', cogsPOS, 'cogsTMDT=', cogsTMDT);
         const totalCOGS = cogsPOS + cogsTMDT;
 
         // === C. PHÍ SÀN (riêng cho từng sàn) ===
         const totalOrders = filteredExports.length + filteredEcom.length;
         const ecomOrders = filteredEcom.length;
 
-        // Đếm đơn từng sàn
-        const shopeeOrders = filteredEcom.filter(e => (e.customerName || '').toLowerCase().includes('shopee')).length;
-        const tiktokOrders = filteredEcom.filter(e => (e.customerName || '').toLowerCase().includes('tik')).length;
+        // Đếm đơn từng sàn — chỉ tính đơn có totalAmount > 0 cho fixed fees
+        const shopeeOrders = filteredEcom.filter(e => (e.customerName || '').toLowerCase().includes('shopee') && (e.totalAmount || 0) > 0).length;
+        const tiktokOrders = filteredEcom.filter(e => (e.customerName || '').toLowerCase().includes('tik') && (e.totalAmount || 0) > 0).length;
 
         // Tính phí Shopee
         const shopeeFeeDetails = shopeeFeeConfig.map(fee => {
@@ -383,7 +416,7 @@ export default function BusinessReportPage() {
             totalCost, grossProfit, netProfit, grossMargin, netMargin,
             totalOrders, numDays,
         };
-    }, [filteredExports, filteredEcom, filteredRefunds, filteredDailyExpenses, config, numDays, filteredPurchases, shopeeFeeConfig, tiktokFeeConfig, costMap]);
+    }, [filteredExports, filteredEcom, filteredRefunds, filteredDailyExpenses, config, numDays, filteredPurchases, getPurchaseCost, shopeeFeeConfig, tiktokFeeConfig, costMap]);
 
     // ============================================
     // SAVE CONFIG
@@ -500,7 +533,7 @@ export default function BusinessReportPage() {
 
         // Shopee fees
         if (pnl.totalShopeeFees > 0) {
-            rows.push({ key: 'plat-shopee-header', name: '🛒 Shopee (' + pnl.shopeeOrders + ' đơn)', amount: pnl.totalShopeeFees, pctVal: pct(pnl.totalShopeeFees), isParent: true, indent: 2, color: '#ff6633' });
+            rows.push({ key: 'plat-shopee-header', name: '🛒 Shopee (' + pnl.shopeeOrders + ' đơn)', amount: pnl.totalShopeeFees, pctVal: pct(pnl.totalShopeeFees), isParent: true, indent: 2, color: '#ff6633', drillable: true });
             pnl.shopeeFeeDetails.forEach((fee: any) => {
                 if (fee.amount > 0) rows.push({
                     key: `plat-shopee-${fee.id}`,
@@ -509,14 +542,15 @@ export default function BusinessReportPage() {
                         : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
                     amount: fee.amount,
                     pctVal: pct(fee.amount),
-                    isChild: true, indent: 3,
+                    isChild: true, indent: 3, drillable: true,
+                    _fee: fee, _platform: 'shopee',
                 });
             });
         }
 
         // TikTok fees
         if (pnl.totalTiktokFees > 0) {
-            rows.push({ key: 'plat-tiktok-header', name: '🎵 TikTok (' + pnl.tiktokOrders + ' đơn)', amount: pnl.totalTiktokFees, pctVal: pct(pnl.totalTiktokFees), isParent: true, indent: 2, color: '#1a1a2e' });
+            rows.push({ key: 'plat-tiktok-header', name: '🎵 TikTok (' + pnl.tiktokOrders + ' đơn)', amount: pnl.totalTiktokFees, pctVal: pct(pnl.totalTiktokFees), isParent: true, indent: 2, color: '#1a1a2e', drillable: true });
             pnl.tiktokFeeDetails.forEach((fee: any) => {
                 if (fee.amount > 0) rows.push({
                     key: `plat-tiktok-${fee.id}`,
@@ -525,36 +559,38 @@ export default function BusinessReportPage() {
                         : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
                     amount: fee.amount,
                     pctVal: pct(fee.amount),
-                    isChild: true, indent: 3,
+                    isChild: true, indent: 3, drillable: true,
+                    _fee: fee, _platform: 'tiktok',
                 });
             });
         }
 
         // B3. Marketing
         rows.push({ key: 'ads', name: 'B3. Chi phí Marketing (Ads)', amount: pnl.totalAds, pctVal: pct(pnl.totalAds), isParent: true, indent: 1 });
-        rows.push({ key: 'ads-shopee', name: 'Shopee Ads', amount: pnl.totalShopeeAds, pctVal: pct(pnl.totalShopeeAds), isChild: true, indent: 2 });
-        rows.push({ key: 'ads-tiktok', name: 'TikTok Ads', amount: pnl.totalTiktokAds, pctVal: pct(pnl.totalTiktokAds), isChild: true, indent: 2 });
+        rows.push({ key: 'ads-shopee', name: 'Shopee Ads', amount: pnl.totalShopeeAds, pctVal: pct(pnl.totalShopeeAds), isChild: true, indent: 2, drillable: pnl.totalShopeeAds > 0 });
+        rows.push({ key: 'ads-tiktok', name: 'TikTok Ads', amount: pnl.totalTiktokAds, pctVal: pct(pnl.totalTiktokAds), isChild: true, indent: 2, drillable: pnl.totalTiktokAds > 0 });
 
         // B4. Ship & Hoàn
         rows.push({ key: 'ship', name: 'B4. Vận chuyển & Hoàn', amount: pnl.totalShipReturn, pctVal: pct(pnl.totalShipReturn), isParent: true, indent: 1 });
-        rows.push({ key: 'ship-out', name: 'Phí ship gửi', amount: pnl.totalShipping, pctVal: pct(pnl.totalShipping), isChild: true, indent: 2 });
-        rows.push({ key: 'ship-return', name: 'Phí hoàn + hàng hỏng', amount: pnl.totalReturnCost, pctVal: pct(pnl.totalReturnCost), isChild: true, indent: 2 });
+        rows.push({ key: 'ship-out', name: 'Phí ship gửi', amount: pnl.totalShipping, pctVal: pct(pnl.totalShipping), isChild: true, indent: 2, drillable: pnl.totalShipping > 0 });
+        rows.push({ key: 'ship-return', name: 'Phí hoàn + hàng hỏng', amount: pnl.totalReturnCost, pctVal: pct(pnl.totalReturnCost), isChild: true, indent: 2, drillable: pnl.totalReturnCost > 0 });
 
         // B5. Vận hành
-        rows.push({ key: 'opex', name: `B5. Chi phí vận hành (${fmt(pnl.monthlyTotal)}đ/tháng)`, amount: pnl.totalOpex, pctVal: pct(pnl.totalOpex), isParent: true, indent: 1 });
+        rows.push({ key: 'opex', name: `B5. Chi phí vận hành (${fmt(pnl.monthlyTotal)}đ/tháng)`, amount: pnl.totalOpex, pctVal: pct(pnl.totalOpex), isParent: true, indent: 1, drillable: pnl.totalOpex > 0 });
         pnl.opexDetails.forEach((d: any) => {
             rows.push({
                 key: `opex-${d.key}`,
                 name: `${d.name} (${fmt(d.monthly)}đ/th)`,
                 amount: d.amount,
                 pctVal: pct(d.amount),
-                isChild: true, indent: 2,
+                isChild: true, indent: 2, drillable: true,
+                _opex: d,
             });
         });
 
         // B6. Khác
         if (pnl.totalOtherExpense > 0) {
-            rows.push({ key: 'other-exp', name: 'B6. Chi phí khác', amount: pnl.totalOtherExpense, pctVal: pct(pnl.totalOtherExpense), isParent: true, indent: 1 });
+            rows.push({ key: 'other-exp', name: 'B6. Chi phí khác', amount: pnl.totalOtherExpense, pctVal: pct(pnl.totalOtherExpense), isParent: true, indent: 1, drillable: true });
         }
 
         // KẾT QUẢ
@@ -569,7 +605,7 @@ export default function BusinessReportPage() {
     // ============================================
     const openDrillDown = useCallback((rowKey: string, rowName: string) => {
         let data: any[] = [];
-        let type: 'orders' | 'ecom' | 'items' | 'expenses' = 'orders';
+        let type: 'orders' | 'ecom' | 'items' | 'expenses' | 'fee-detail' | 'opex-detail' = 'orders';
         let title = '';
 
         switch (rowKey) {
@@ -692,15 +728,128 @@ export default function BusinessReportPage() {
                 data = itemList2;
                 break;
             }
-            default:
+            // ---- Platform fee sub-items ----
+            case 'plat-shopee-header': {
+                title = `Chi tiết Phí sàn Shopee (${fmt(pnl.totalShopeeFees)}đ - ${pnl.shopeeOrders} đơn)`;
+                type = 'fee-detail';
+                const shopeeOrders = filteredEcom.filter(e => (e.customerName || '').toLowerCase().includes('shopee'));
+                data = shopeeOrders.map((e, i) => {
+                    const rev = e.totalAmount || 0;
+                    const totalFee = pnl.shopeeFeeDetails.reduce((s: number, f: any) =>
+                        s + (f.type === 'percent' ? rev * f.value / 100 : f.value), 0);
+                    return { key: i, date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'), code: e.ecommerceExportCode || `ECOM-${i+1}`, customer: e.customerName || '', revenue: rev, feeAmount: totalFee };
+                });
+                break;
+            }
+            case 'plat-tiktok-header': {
+                title = `Chi tiết Phí sàn TikTok (${fmt(pnl.totalTiktokFees)}đ - ${pnl.tiktokOrders} đơn)`;
+                type = 'fee-detail';
+                const tiktokOrders = filteredEcom.filter(e => (e.customerName || '').toLowerCase().includes('tik'));
+                data = tiktokOrders.map((e, i) => {
+                    const rev = e.totalAmount || 0;
+                    const totalFee = pnl.tiktokFeeDetails.reduce((s: number, f: any) =>
+                        s + (f.type === 'percent' ? rev * f.value / 100 : f.value), 0);
+                    return { key: i, date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'), code: e.ecommerceExportCode || `ECOM-${i+1}`, customer: e.customerName || '', revenue: rev, feeAmount: totalFee };
+                });
+                break;
+            }
+            // ---- Ads ----
+            case 'ads-shopee': {
+                title = `Chi tiết Shopee Ads (${fmt(pnl.totalShopeeAds)}đ)`;
+                type = 'expenses';
+                data = filteredDailyExpenses.filter(d => d.shopeeAds > 0).map((d, i) => ({
+                    key: i, date: dayjs(d.date).format('DD/MM/YYYY'), label: 'Shopee Ads', amount: d.shopeeAds || 0, note: d.otherNote || '',
+                }));
+                break;
+            }
+            case 'ads-tiktok': {
+                title = `Chi tiết TikTok Ads (${fmt(pnl.totalTiktokAds)}đ)`;
+                type = 'expenses';
+                data = filteredDailyExpenses.filter(d => d.tiktokAds > 0).map((d, i) => ({
+                    key: i, date: dayjs(d.date).format('DD/MM/YYYY'), label: 'TikTok Ads', amount: d.tiktokAds || 0, note: d.otherNote || '',
+                }));
+                break;
+            }
+
+            // ---- Ship & Hoàn ----
+            case 'ship-out': {
+                title = `Chi tiết Phí ship gửi (${fmt(pnl.totalShipping)}đ)`;
+                type = 'expenses';
+                data = filteredDailyExpenses.filter(d => d.shippingCost > 0).map((d, i) => ({
+                    key: i, date: dayjs(d.date).format('DD/MM/YYYY'), label: 'Phí ship', amount: d.shippingCost || 0, note: d.otherNote || '',
+                }));
+                break;
+            }
+            case 'ship-return': {
+                title = `Chi tiết Phí hoàn + hàng hỏng (${fmt(pnl.totalReturnCost)}đ)`;
+                type = 'expenses';
+                data = filteredDailyExpenses.filter(d => d.returnCost > 0).map((d, i) => ({
+                    key: i, date: dayjs(d.date).format('DD/MM/YYYY'), label: 'Phí hoàn', amount: d.returnCost || 0, note: d.otherNote || '',
+                }));
+                break;
+            }
+
+            // ---- Chi phí khác ----
+            case 'other-exp': {
+                title = `Chi tiết Chi phí khác (${fmt(pnl.totalOtherExpense)}đ)`;
+                type = 'expenses';
+                data = filteredDailyExpenses.filter(d => d.otherExpense > 0).map((d, i) => ({
+                    key: i, date: dayjs(d.date).format('DD/MM/YYYY'), label: d.otherNote || 'Chi phí khác', amount: d.otherExpense || 0, note: d.otherNote || '',
+                }));
+                break;
+            }
+            default: {
+                // Platform fee individual line (plat-shopee-xxx / plat-tiktok-xxx)
+                if (rowKey.startsWith('plat-shopee-') || rowKey.startsWith('plat-tiktok-')) {
+                    const isPlatShopee = rowKey.startsWith('plat-shopee-');
+                    const platform = isPlatShopee ? 'shopee' : 'tiktok';
+                    const feeDetails = isPlatShopee ? pnl.shopeeFeeDetails : pnl.tiktokFeeDetails;
+                    const feeId = rowKey.replace(`plat-${platform}-`, '');
+                    const fee = feeDetails.find((f: any) => f.id === feeId);
+                    if (!fee) return;
+                    title = `Chi tiết: ${fee.icon || ''} ${fee.name}`;
+                    type = 'fee-detail';
+                    const orders = filteredEcom.filter(e => {
+                        const name = (e.customerName || '').toLowerCase();
+                        return isPlatShopee ? name.includes('shopee') : name.includes('tik');
+                    });
+                    data = orders.map((e, i) => {
+                        const rev = e.totalAmount || 0;
+                        const feeAmt = fee.type === 'percent' ? rev * fee.value / 100 : fee.value;
+                        return { key: i, date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'), code: e.ecommerceExportCode || `ECOM-${i+1}`, customer: e.customerName || '', revenue: rev, feeAmount: feeAmt };
+                    });
+                    break;
+                }
+                // Opex individual line
+                if (rowKey.startsWith('opex-') && rowKey !== 'opex') {
+                    const opexItem = pnl.opexDetails.find((d: any) => `opex-${d.key}` === rowKey);
+                    title = opexItem ? `Chi tiết: ${opexItem.name}` : 'Chi tiết vận hành';
+                    type = 'opex-detail';
+                    data = opexItem ? [{
+                        key: 0, name: opexItem.name, monthly: opexItem.monthly,
+                        numDays: pnl.numDays, daily: opexItem.monthly / 30, total: opexItem.amount,
+                    }] : [];
+                    break;
+                }
+                // Opex total
+                if (rowKey === 'opex') {
+                    title = `Chi tiết Chi phí vận hành (${fmt(pnl.monthlyTotal)}đ/tháng)`;
+                    type = 'opex-detail';
+                    data = pnl.opexDetails.map((d: any, i: number) => ({
+                        key: i, name: d.name, monthly: d.monthly,
+                        numDays: pnl.numDays, daily: d.monthly / 30, total: d.amount,
+                    }));
+                    break;
+                }
                 return; // Not drillable
+            }
         }
 
         setDrillDownTitle(title);
         setDrillDownData(data);
         setDrillDownType(type);
         setDrillDownOpen(true);
-    }, [filteredExports, filteredEcom, pnl, costMap]);
+    }, [filteredExports, filteredEcom, filteredDailyExpenses, pnl, costMap, getPurchaseCost]);
 
     // Drill-down table columns
     const drillDownColumns = useMemo(() => {
@@ -747,8 +896,48 @@ export default function BusinessReportPage() {
                 },
             ];
         }
+        if (drillDownType === 'expenses') {
+            return [
+                { title: 'Ngày', dataIndex: 'date', key: 'date', width: 110 },
+                { title: 'Khoản mục', dataIndex: 'label', key: 'label' },
+                { title: 'Ghi chú', dataIndex: 'note', key: 'note', ellipsis: true, render: (v: string) => v || '—' },
+                { title: 'Số tiền', dataIndex: 'amount', key: 'amount', width: 140, align: 'right' as const,
+                    render: (v: number) => <Text strong style={{ color: '#f5222d' }}>{fmt(v)}đ</Text>,
+                    sorter: (a: any, b: any) => a.amount - b.amount,
+                },
+            ];
+        }
+        if (drillDownType === 'fee-detail') {
+            return [
+                { title: 'Ngày', dataIndex: 'date', key: 'date', width: 100 },
+                { title: 'Mã đơn', dataIndex: 'code', key: 'code', width: 140 },
+                { title: 'Khách hàng', dataIndex: 'customer', key: 'customer', ellipsis: true },
+                { title: 'Doanh thu', dataIndex: 'revenue', key: 'revenue', width: 130, align: 'right' as const,
+                    render: (v: number) => <Text style={{ color: '#00ab56' }}>{fmt(v)}đ</Text>,
+                    sorter: (a: any, b: any) => a.revenue - b.revenue,
+                },
+                { title: 'Phí tính được', dataIndex: 'feeAmount', key: 'feeAmount', width: 140, align: 'right' as const,
+                    render: (v: number) => <Text strong style={{ color: '#f5222d' }}>{fmt(v)}đ</Text>,
+                    sorter: (a: any, b: any) => a.feeAmount - b.feeAmount,
+                },
+            ];
+        }
+        if (drillDownType === 'opex-detail') {
+            return [
+                { title: 'Khoản mục', dataIndex: 'name', key: 'name' },
+                { title: 'Định mức/tháng', dataIndex: 'monthly', key: 'monthly', width: 150, align: 'right' as const,
+                    render: (v: number) => <Text>{fmt(v)}đ</Text>,
+                },
+                { title: 'Trung bình/ngày', dataIndex: 'daily', key: 'daily', width: 140, align: 'right' as const,
+                    render: (v: number) => <Text type="secondary">{fmt(v)}đ</Text>,
+                },
+                { title: `Phân bổ (${pnl.numDays} ngày)`, dataIndex: 'total', key: 'total', width: 160, align: 'right' as const,
+                    render: (v: number) => <Text strong style={{ color: '#f5222d' }}>{fmt(v)}đ</Text>,
+                },
+            ];
+        }
         return [];
-    }, [drillDownType]);
+    }, [drillDownType, pnl.numDays]);
 
     // ============================================
     // DAILY EXPENSES TABLE
@@ -1300,6 +1489,7 @@ export default function BusinessReportPage() {
                 width={900}
                 styles={{ body: { padding: '0 24px 24px' } }}
                 closable={true}
+                destroyOnClose
             >
                 <div style={{
                     textAlign: 'center',
@@ -1331,12 +1521,15 @@ export default function BusinessReportPage() {
                     scroll={{ y: 450 }}
                     summary={() => {
                         if (drillDownData.length === 0) return null;
-                        const totalKey = drillDownType === 'items' ? 'totalCost' : 'amount';
+                        const totalKey = drillDownType === 'items' ? 'totalCost'
+                            : drillDownType === 'fee-detail' ? 'feeAmount'
+                            : drillDownType === 'opex-detail' ? 'total'
+                            : 'amount';
                         const total = drillDownData.reduce((s, r) => s + (r[totalKey] || 0), 0);
                         return (
                             <Table.Summary fixed>
                                 <Table.Summary.Row>
-                                    <Table.Summary.Cell index={0} colSpan={drillDownType === 'items' ? 6 : (drillDownType === 'ecom' ? 5 : 4)}>
+                                    <Table.Summary.Cell index={0} colSpan={drillDownType === 'items' ? 6 : drillDownType === 'ecom' ? 5 : (drillDownType === 'expenses' || drillDownType === 'opex-detail') ? 3 : 4}>
                                         <Text strong>TỔNG CỘNG</Text>
                                     </Table.Summary.Cell>
                                     <Table.Summary.Cell index={1} align="right">
