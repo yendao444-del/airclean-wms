@@ -898,6 +898,11 @@ export default function PurchasePage() {
                 const hasVat = r.vatInvoiceStatus === 'uploaded';
                 const hasRc = r.importReceiptStatus === 'uploaded';
 
+                // Phiếu nhập trước 19/03/2026 không bắt buộc chứng từ
+                const CUTOFF = new Date('2026-03-19T00:00:00');
+                const purchaseDate = new Date(r.invoiceDate || r.createdAt);
+                const isOldRecord = purchaseDate < CUTOFF;
+
                 if (hasVat && hasRc) {
                     return (
                         <Tag color="success" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px' }}>
@@ -905,7 +910,20 @@ export default function PurchasePage() {
                         </Tag>
                     );
                 }
-                
+
+                if (isOldRecord) {
+                    // Phiếu cũ: chỉ cần VAT, không cần phiếu nhập kho
+                    return hasVat ? (
+                        <Tag color="success" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px' }}>
+                            ✅ Đã có HĐ VAT
+                        </Tag>
+                    ) : (
+                        <Tag color="error" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px' }}>
+                            ⏳ Đợi HĐ VAT
+                        </Tag>
+                    );
+                }
+
                 if (hasVat && !hasRc) {
                     return (
                         <Tag color="warning" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px', color: '#d46b08', backgroundColor: '#fff7e6', borderColor: '#ffd591' }}>

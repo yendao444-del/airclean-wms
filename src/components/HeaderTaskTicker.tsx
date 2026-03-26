@@ -68,12 +68,14 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
         try {
             const purRes = await (window as any).electronAPI.purchases.getAll();
             if (purRes.success && purRes.data) {
+                const CUTOFF = dayjs('2026-03-19');
                 const now = dayjs();
                 const missing = purRes.data.filter((p: any) =>
                     p.vatInvoiceStatus !== 'uploaded' &&
                     p.vatInvoiceStatus !== 'thht' &&
                     p.vatInvoiceStatus !== 'no_vat' &&
-                    now.diff(dayjs(p.purchaseDate), 'day') >= 3
+                    now.diff(dayjs(p.purchaseDate || p.invoiceDate || p.createdAt), 'day') >= 3 &&
+                    dayjs(p.purchaseDate || p.invoiceDate || p.createdAt).isAfter(CUTOFF)
                 );
                 if (missing.length > 0) {
                     const maxDays = Math.max(...missing.map((p: any) => now.diff(dayjs(p.purchaseDate), 'day')));
@@ -105,17 +107,7 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
             }
         } catch { }
 
-        try {
-            const eiRes = await (window as any).electronAPI.einvoice.getStats();
-            if (eiRes.success && eiRes.data && eiRes.data.pending >= 20) {
-                result.push({
-                    key: 'einvoice', icon: '📋', navTo: 'einvoice', priority: 5,
-                    color: eiRes.data.pending >= 100 ? '#ff4d4f' : '#faad14',
-                    text: `${eiRes.data.pending} đơn HĐĐT chưa xuất`,
-                    badge: 'cần xử lý',
-                });
-            }
-        } catch { }
+        // Không thông báo module Xuất HĐĐT
 
         result.sort((a, b) => a.priority - b.priority);
         setAlerts(result);
