@@ -708,21 +708,23 @@ export default function BusinessReportPage() {
                 });
                 break;
             }
-            // ---- Ads ----
+            // ---- Ads (từ cấu hình tháng) ----
             case 'ads-shopee': {
                 title = `Chi tiết Shopee Ads (${fmt(pnl.totalShopeeAds)}đ)`;
                 type = 'expenses';
-                data = filteredDailyExpenses.filter(d => d.shopeeAds > 0).map((d, i) => ({
-                    key: i, date: dayjs(d.date).format('DD/MM/YYYY'), label: 'Shopee Ads', amount: d.shopeeAds || 0, note: d.otherNote || '',
-                }));
+                data = config.monthlyShopeeAds > 0 ? [{
+                    key: 0, date: `Ngân sách tháng`, label: 'Shopee Ads', amount: pnl.totalShopeeAds,
+                    note: `${fmt(config.monthlyShopeeAds)}đ/tháng ÷ 30 × ${numDays} ngày`,
+                }] : [];
                 break;
             }
             case 'ads-tiktok': {
                 title = `Chi tiết TikTok Ads (${fmt(pnl.totalTiktokAds)}đ)`;
                 type = 'expenses';
-                data = filteredDailyExpenses.filter(d => d.tiktokAds > 0).map((d, i) => ({
-                    key: i, date: dayjs(d.date).format('DD/MM/YYYY'), label: 'TikTok Ads', amount: d.tiktokAds || 0, note: d.otherNote || '',
-                }));
+                data = config.monthlyTiktokAds > 0 ? [{
+                    key: 0, date: `Ngân sách tháng`, label: 'TikTok Ads', amount: pnl.totalTiktokAds,
+                    note: `${fmt(config.monthlyTiktokAds)}đ/tháng ÷ 30 × ${numDays} ngày`,
+                }] : [];
                 break;
             }
 
@@ -1067,21 +1069,22 @@ export default function BusinessReportPage() {
                             key: 'amount',
                             align: 'right' as const,
                             render: (val: number, r: any) => {
+                                const isCostSection = ['cogs','platform','ads','ship','opex','other'].includes(r.section);
                                 const style: React.CSSProperties = {
-                                    fontWeight: r.isTotal || r.isSubtotal || r.isGroup ? 800 : r.isParent ? 600 : 400,
+                                    fontWeight: r.isTotal || r.isSubtotal || r.isGroup || isCostSection ? 700 : 400,
                                     fontSize: r.isTotal ? 16 : r.isGroup || r.isSubtotal ? 14 : 13,
-                                    color: r.isNegative || val < 0 ? '#f5222d' : (r.isTotal || r.isSubtotal ? (r.color || '#00ab56') : '#262626'),
+                                    color: r.isTotal || r.isSubtotal ? (r.color || '#00ab56') : '#262626',
                                     fontVariantNumeric: 'tabular-nums',
                                 };
                                 if (r.drillable && val !== 0) {
                                     return (
                                         <span
-                                            style={{ ...style, cursor: 'pointer', borderBottom: '1px dashed #1890ff', color: '#1890ff', transition: 'all 0.2s' }}
+                                            style={{ ...style, cursor: 'pointer', borderBottom: '1px dashed #bfbfbf', transition: 'all 0.2s' }}
                                             onClick={() => openDrillDown(r.key, r.name)}
-                                            title="Click để xem chi tiết đơn hàng"
+                                            title="Click để xem chi tiết"
                                         >
                                             {val < 0 ? '−' : ''}{fmt(Math.abs(val))}đ
-                                            <EyeOutlined style={{ marginLeft: 4, fontSize: 11, opacity: 0.6 }} />
+                                            <EyeOutlined style={{ marginLeft: 4, fontSize: 11, opacity: 0.4 }} />
                                         </span>
                                     );
                                 }
