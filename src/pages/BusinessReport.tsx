@@ -1119,13 +1119,13 @@ export default function BusinessReportPage() {
                             width: 80,
                             render: (v: string, r: any) => {
                                 if (!v) return null;
-                                // Hạng mục quan trọng: isGroup (A,B,D,E), isSubtotal (C), isTotal (F)
-                                const isImportant = r.isGroup || r.isSubtotal || r.isTotal;
+                                // Hạng mục quan trọng: isGroup (A,B,D,E), isSubtotal (C), isTotal (F), isParent (D1 Shopee/TikTok...)
+                                const isImportant = r.isGroup || r.isSubtotal || r.isTotal || r.isParent;
                                 if (isImportant) {
                                     // Chọn màu theo section
                                     const PCT_COLORS: Record<string, string> = {
                                         rev: 'green', cogs: 'red', profit: r.color === '#f5222d' ? 'red' : 'green',
-                                        platform: 'orange', opex: 'gold', cost: 'red',
+                                        platform: 'orange', ads: 'purple', ship: 'blue', opex: 'gold', other: 'default', cost: 'red',
                                     };
                                     const tagColor = PCT_COLORS[r.section] || 'blue';
                                     return (
