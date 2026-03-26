@@ -352,9 +352,11 @@ export default function BusinessReportPage() {
 
         // Affiliate đã được gộp vào platformFeeDetails ở trên
 
-        // === D. CHI PHÍ ADS (ngân sách tháng từ config, chia theo ngày) ===
-        const totalShopeeAds = ((config.monthlyShopeeAds || 0) / 30) * numDays;
-        const totalTiktokAds = ((config.monthlyTiktokAds || 0) / 30) * numDays;
+        // === D. CHI PHÍ ADS (daily thực tế + ngân sách tháng từ config chia theo ngày) ===
+        const dailyShopeeAds = filteredDailyExpenses.reduce((s, d) => s + (d.shopeeAds || 0), 0);
+        const dailyTiktokAds = filteredDailyExpenses.reduce((s, d) => s + (d.tiktokAds || 0), 0);
+        const totalShopeeAds = dailyShopeeAds + ((config.monthlyShopeeAds || 0) / 30) * numDays;
+        const totalTiktokAds = dailyTiktokAds + ((config.monthlyTiktokAds || 0) / 30) * numDays;
         const totalAds = totalShopeeAds + totalTiktokAds;
 
         // === E. VẬN CHUYỂN & HOÀN (từ dailyExpenses) ===
@@ -697,23 +699,33 @@ export default function BusinessReportPage() {
                 });
                 break;
             }
-            // ---- Ads (từ cấu hình tháng) ----
+            // ---- Ads (daily thực tế + ngân sách tháng) ----
             case 'ads-shopee': {
                 title = `Chi tiết Shopee Ads (${fmt(pnl.totalShopeeAds)}đ)`;
                 type = 'expenses';
-                data = config.monthlyShopeeAds > 0 ? [{
-                    key: 0, date: `Ngân sách tháng`, label: 'Shopee Ads', amount: pnl.totalShopeeAds,
-                    note: `${fmt(config.monthlyShopeeAds)}đ/tháng ÷ 30 × ${numDays} ngày`,
-                }] : [];
+                data = [
+                    ...filteredDailyExpenses.filter(d => (d.shopeeAds || 0) > 0).map((d, i) => ({
+                        key: i, date: dayjs(d.date).format('DD/MM/YYYY'), label: 'Shopee Ads (thực tế)', amount: d.shopeeAds || 0, note: d.otherNote || '',
+                    })),
+                    ...(config.monthlyShopeeAds > 0 ? [{
+                        key: 9999, date: 'Ngân sách tháng', label: 'Shopee Ads (config)', amount: ((config.monthlyShopeeAds || 0) / 30) * numDays,
+                        note: `${fmt(config.monthlyShopeeAds)}đ/tháng ÷ 30 × ${numDays} ngày`,
+                    }] : []),
+                ];
                 break;
             }
             case 'ads-tiktok': {
                 title = `Chi tiết TikTok Ads (${fmt(pnl.totalTiktokAds)}đ)`;
                 type = 'expenses';
-                data = config.monthlyTiktokAds > 0 ? [{
-                    key: 0, date: `Ngân sách tháng`, label: 'TikTok Ads', amount: pnl.totalTiktokAds,
-                    note: `${fmt(config.monthlyTiktokAds)}đ/tháng ÷ 30 × ${numDays} ngày`,
-                }] : [];
+                data = [
+                    ...filteredDailyExpenses.filter(d => (d.tiktokAds || 0) > 0).map((d, i) => ({
+                        key: i, date: dayjs(d.date).format('DD/MM/YYYY'), label: 'TikTok Ads (thực tế)', amount: d.tiktokAds || 0, note: d.otherNote || '',
+                    })),
+                    ...(config.monthlyTiktokAds > 0 ? [{
+                        key: 9999, date: 'Ngân sách tháng', label: 'TikTok Ads (config)', amount: ((config.monthlyTiktokAds || 0) / 30) * numDays,
+                        note: `${fmt(config.monthlyTiktokAds)}đ/tháng ÷ 30 × ${numDays} ngày`,
+                    }] : []),
+                ];
                 break;
             }
 
@@ -1040,17 +1052,36 @@ export default function BusinessReportPage() {
                             title: 'Hạng mục',
                             dataIndex: 'name',
                             key: 'name',
-                            render: (text: string, r: any) => (
-                                <span style={{
-                                    fontWeight: r.isGroup || r.isSubtotal || r.isTotal || r.isParent ? 700 : 400,
-                                    fontSize: r.isTotal ? 15 : r.isGroup || r.isSubtotal ? 14 : r.isChild ? 12 : 13,
-                                    color: r.color || (r.isChild ? '#595959' : '#262626'),
-                                    paddingLeft: r.indent ? r.indent * 20 : 0,
-                                }}>
-                                    {r.isChild && '↳ '}
-                                    {text}
-                                </span>
-                            ),
+                            render: (text: string, r: any) => {
+                                const PNL_TOOLTIPS: Record<string, string> = {
+                                    'rev-header': 'Doanh thu thuần = Tổng tiền bán hàng (POS + TMĐT) sau khi trừ giảm giá, chiết khấu.',
+                                    'cogs-header': 'Giá vốn hàng bán (COGS) = Tổng chi phí nhập hàng của các sản phẩm đã bán trong kỳ.',
+                                    'gross': 'Lợi nhuận gộp = Doanh thu thuần − Giá vốn hàng bán. Thể hiện biên lợi nhuận trước chi phí.',
+                                    'selling-header': 'Chi phí bán hàng = Phí sàn TMĐT + Chi phí quảng cáo (Ads) + Phí vận chuyển & hoàn hàng.',
+                                    'platform': 'Phí sàn = Hoa hồng, phí thanh toán, phí xử lý... mà Shopee/TikTok trừ trên mỗi đơn hàng.',
+                                    'ads': 'Chi phí Marketing = Ngân sách quảng cáo Shopee Ads + TikTok Ads (nhập trong Cấu hình).',
+                                    'ship': 'Phí ship gửi hàng cho khách + chi phí xử lý đơn hoàn, hàng hỏng.',
+                                    'ga-header': 'Chi phí quản lý = Thuê kho, điện, nước, lương, bảo hiểm, phần mềm... (nhập trong Cấu hình).',
+                                    'net': 'Lợi nhuận ròng = Lợi nhuận gộp − Chi phí bán hàng − Chi phí quản lý. Đây là số tiền thực lãi.',
+                                };
+                                const tooltip = PNL_TOOLTIPS[r.key];
+                                return (
+                                    <span style={{
+                                        fontWeight: r.isGroup || r.isSubtotal || r.isTotal || r.isParent ? 700 : 400,
+                                        fontSize: r.isTotal ? 15 : r.isGroup || r.isSubtotal ? 14 : r.isChild ? 12 : 13,
+                                        color: r.color || (r.isChild ? '#595959' : '#262626'),
+                                        paddingLeft: r.indent ? r.indent * 20 : 0,
+                                    }}>
+                                        {r.isChild && '↳ '}
+                                        {text}
+                                        {tooltip && (
+                                            <Tooltip title={tooltip} placement="right">
+                                                <InfoCircleOutlined style={{ marginLeft: 6, fontSize: 12, color: '#bfbfbf', cursor: 'help' }} />
+                                            </Tooltip>
+                                        )}
+                                    </span>
+                                );
+                            },
                         },
                         {
                             title: 'Số tiền',
