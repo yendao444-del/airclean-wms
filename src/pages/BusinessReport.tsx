@@ -396,6 +396,13 @@ export default function BusinessReportPage() {
         const grossMargin = netRevenue > 0 ? (grossProfit / netRevenue * 100) : 0;
         const netMargin = netRevenue > 0 ? (netProfit / netRevenue * 100) : 0;
 
+        // Chi phí bán hàng (D): phí sàn + ads + ship/hoàn
+        const sellingExpenses = totalPlatformFees + totalAds + totalShipReturn;
+        // Chi phí quản lý (E): vận hành + khác
+        const gaExpenses = totalOpex + totalOtherExpense;
+        // Lợi nhuận từ HĐKD = Lợi nhuận gộp - Chi phí bán hàng - Chi phí quản lý
+        const operatingProfit = grossProfit - sellingExpenses - gaExpenses;
+
         return {
             // Revenue detail
             revenuePOS, revenueTMDT, totalRevenue, netRevenue,
@@ -416,6 +423,7 @@ export default function BusinessReportPage() {
             // Other
             totalOtherExpense,
             // Summary
+            sellingExpenses, gaExpenses, operatingProfit,
             totalCost, grossProfit, netProfit, grossMargin, netMargin,
             totalOrders, numDays,
         };
@@ -468,89 +476,70 @@ export default function BusinessReportPage() {
     const pnlTableData = useMemo(() => {
         const rows: any[] = [];
 
-        // A. DOANH THU
-        rows.push({ key: 'rev-header', name: '💰 A. DOANH THU', amount: pnl.totalRevenue, pctVal: '', isGroup: true, color: '#00ab56', section: 'rev' });
-        rows.push({ key: 'rev-pos', name: 'Bán hàng POS', amount: pnl.revenuePOS, pctVal: pct(pnl.revenuePOS), isChild: true, indent: 1, drillable: true, section: 'rev' });
-        rows.push({ key: 'rev-shopee', name: 'Shopee', amount: pnl.shopeeRevenue, pctVal: pct(pnl.shopeeRevenue), isChild: true, indent: 1, drillable: true, section: 'rev' });
-        rows.push({ key: 'rev-tiktok', name: 'TikTok', amount: pnl.tiktokRevenue, pctVal: pct(pnl.tiktokRevenue), isChild: true, indent: 1, drillable: true, section: 'rev' });
-        if (pnl.otherTMDTRevenue > 0) rows.push({ key: 'rev-other', name: 'TMDT khác', amount: pnl.otherTMDTRevenue, pctVal: pct(pnl.otherTMDTRevenue), isChild: true, indent: 1, drillable: true, section: 'rev' });
+        // ── A. DOANH THU THUẦN ──────────────────────────────────────
+        rows.push({ key: 'rev-header', name: 'A. DOANH THU THUẦN', amount: pnl.netRevenue, pctVal: '100.0', isGroup: true, color: '#00ab56', section: 'rev' });
+        rows.push({ key: 'rev-pos',    name: 'Bán hàng POS',   amount: pnl.revenuePOS,        pctVal: pct(pnl.revenuePOS),        isChild: true, indent: 1, drillable: true, section: 'rev' });
+        rows.push({ key: 'rev-shopee', name: 'Shopee',          amount: pnl.shopeeRevenue,     pctVal: pct(pnl.shopeeRevenue),     isChild: true, indent: 1, drillable: true, section: 'rev' });
+        rows.push({ key: 'rev-tiktok', name: 'TikTok',          amount: pnl.tiktokRevenue,     pctVal: pct(pnl.tiktokRevenue),     isChild: true, indent: 1, drillable: true, section: 'rev' });
+        if (pnl.otherTMDTRevenue > 0)
+            rows.push({ key: 'rev-other', name: 'TMDT khác',   amount: pnl.otherTMDTRevenue,  pctVal: pct(pnl.otherTMDTRevenue),  isChild: true, indent: 1, drillable: true, section: 'rev' });
 
-        // Doanh thu thuần
-        rows.push({ key: 'rev-net', name: '🟢 DOANH THU THUẦN', amount: pnl.netRevenue, pctVal: '100.0', isSubtotal: true, color: '#00ab56', section: 'rev' });
+        // ── B. GIÁ VỐN HÀNG BÁN (COGS) ─────────────────────────────
+        rows.push({ key: 'cogs-header', name: 'B. GIÁ VỐN HÀNG BÁN (COGS)', amount: pnl.totalCOGS, pctVal: pct(pnl.totalCOGS), isGroup: true, section: 'cogs' });
+        rows.push({ key: 'cogs-pos',  name: 'Giá vốn POS',  amount: pnl.cogsPOS,   pctVal: pct(pnl.cogsPOS),   isChild: true, indent: 1, drillable: true, section: 'cogs' });
+        rows.push({ key: 'cogs-tmdt', name: 'Giá vốn TMDT', amount: pnl.cogsTMDT,  pctVal: pct(pnl.cogsTMDT),  isChild: true, indent: 1, drillable: true, section: 'cogs' });
 
-        // B. TỔNG CHI PHÍ
-        rows.push({ key: 'cost-header', name: '📉 B. TỔNG CHI PHÍ', amount: pnl.totalCost, pctVal: pct(pnl.totalCost), isGroup: true, color: '#f5222d', section: 'cost' });
+        // ── C. LỢI NHUẬN GỘP ────────────────────────────────────────
+        rows.push({ key: 'gross', name: 'C. LỢI NHUẬN GỘP  (A − B)', amount: pnl.grossProfit, pctVal: pnl.grossMargin.toFixed(1), isSubtotal: true, color: pnl.grossProfit >= 0 ? '#00ab56' : '#f5222d', section: 'profit' });
 
-        // B1. COGS
-        rows.push({ key: 'cogs', name: 'B1. Giá vốn hàng bán (COGS)', amount: pnl.totalCOGS, pctVal: pct(pnl.totalCOGS), isParent: true, indent: 1, section: 'cogs' });
-        rows.push({ key: 'cogs-pos', name: 'Giá vốn POS', amount: pnl.cogsPOS, pctVal: pct(pnl.cogsPOS), isChild: true, indent: 2, drillable: true, section: 'cogs' });
-        rows.push({ key: 'cogs-tmdt', name: 'Giá vốn TMDT', amount: pnl.cogsTMDT, pctVal: pct(pnl.cogsTMDT), isChild: true, indent: 2, drillable: true, section: 'cogs' });
+        // ── D. CHI PHÍ BÁN HÀNG ─────────────────────────────────────
+        rows.push({ key: 'selling-header', name: 'D. CHI PHÍ BÁN HÀNG', amount: pnl.sellingExpenses, pctVal: pct(pnl.sellingExpenses), isGroup: true, section: 'platform' });
 
-        // B2. Phí sàn (tách riêng Shopee & TikTok)
-        rows.push({ key: 'platform', name: 'B2. Phí sàn TMĐT', amount: pnl.totalPlatformFees, pctVal: pct(pnl.totalPlatformFees), isParent: true, indent: 1, section: 'platform' });
-
-        // Shopee fees
+        // D1. Phí sàn
+        rows.push({ key: 'platform', name: 'D1. Phí sàn TMĐT', amount: pnl.totalPlatformFees, pctVal: pct(pnl.totalPlatformFees), isParent: true, indent: 1, section: 'platform' });
         if (pnl.totalShopeeFees > 0) {
             rows.push({ key: 'plat-shopee-header', name: '🛒 Shopee (' + pnl.shopeeOrders + ' đơn)', amount: pnl.totalShopeeFees, pctVal: pct(pnl.totalShopeeFees), isParent: true, indent: 2, color: '#ff6633', drillable: true, section: 'platform' });
             pnl.shopeeFeeDetails.forEach((fee: any) => {
                 if (fee.amount > 0) rows.push({
                     key: `plat-shopee-${fee.id}`,
-                    name: fee.type === 'percent'
-                        ? `${fee.icon || ''} ${fee.name} (${fee.value}%)`
-                        : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
-                    amount: fee.amount, pctVal: pct(fee.amount),
-                    isChild: true, indent: 3, drillable: true,
-                    _fee: fee, _platform: 'shopee', section: 'platform',
+                    name: fee.type === 'percent' ? `${fee.icon || ''} ${fee.name} (${fee.value}%)` : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
+                    amount: fee.amount, pctVal: pct(fee.amount), isChild: true, indent: 3, drillable: true, _fee: fee, _platform: 'shopee', section: 'platform',
                 });
             });
         }
-
-        // TikTok fees
         if (pnl.totalTiktokFees > 0) {
             rows.push({ key: 'plat-tiktok-header', name: '🎵 TikTok (' + pnl.tiktokOrders + ' đơn)', amount: pnl.totalTiktokFees, pctVal: pct(pnl.totalTiktokFees), isParent: true, indent: 2, color: '#1a1a2e', drillable: true, section: 'platform' });
             pnl.tiktokFeeDetails.forEach((fee: any) => {
                 if (fee.amount > 0) rows.push({
                     key: `plat-tiktok-${fee.id}`,
-                    name: fee.type === 'percent'
-                        ? `${fee.icon || ''} ${fee.name} (${fee.value}%)`
-                        : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
-                    amount: fee.amount, pctVal: pct(fee.amount),
-                    isChild: true, indent: 3, drillable: true,
-                    _fee: fee, _platform: 'tiktok', section: 'platform',
+                    name: fee.type === 'percent' ? `${fee.icon || ''} ${fee.name} (${fee.value}%)` : `${fee.icon || ''} ${fee.name} (${fmt(fee.value)}đ/đơn)`,
+                    amount: fee.amount, pctVal: pct(fee.amount), isChild: true, indent: 3, drillable: true, _fee: fee, _platform: 'tiktok', section: 'platform',
                 });
             });
         }
 
-        // B3. Marketing
-        rows.push({ key: 'ads', name: 'B3. Chi phí Marketing (Ads)', amount: pnl.totalAds, pctVal: pct(pnl.totalAds), isParent: true, indent: 1, section: 'ads' });
+        // D2. Ads
+        rows.push({ key: 'ads', name: 'D2. Chi phí Marketing (Ads)', amount: pnl.totalAds, pctVal: pct(pnl.totalAds), isParent: true, indent: 1, section: 'ads' });
         rows.push({ key: 'ads-shopee', name: 'Shopee Ads', amount: pnl.totalShopeeAds, pctVal: pct(pnl.totalShopeeAds), isChild: true, indent: 2, drillable: pnl.totalShopeeAds > 0, section: 'ads' });
         rows.push({ key: 'ads-tiktok', name: 'TikTok Ads', amount: pnl.totalTiktokAds, pctVal: pct(pnl.totalTiktokAds), isChild: true, indent: 2, drillable: pnl.totalTiktokAds > 0, section: 'ads' });
 
-        // B4. Ship & Hoàn
-        rows.push({ key: 'ship', name: 'B4. Vận chuyển & Hoàn', amount: pnl.totalShipReturn, pctVal: pct(pnl.totalShipReturn), isParent: true, indent: 1, section: 'ship' });
-        rows.push({ key: 'ship-out', name: 'Phí ship gửi', amount: pnl.totalShipping, pctVal: pct(pnl.totalShipping), isChild: true, indent: 2, drillable: pnl.totalShipping > 0, section: 'ship' });
-        rows.push({ key: 'ship-return', name: 'Phí hoàn + hàng hỏng', amount: pnl.totalReturnCost, pctVal: pct(pnl.totalReturnCost), isChild: true, indent: 2, drillable: pnl.totalReturnCost > 0, section: 'ship' });
+        // D3. Vận chuyển & Hoàn
+        rows.push({ key: 'ship', name: 'D3. Vận chuyển & Hoàn hàng', amount: pnl.totalShipReturn, pctVal: pct(pnl.totalShipReturn), isParent: true, indent: 1, section: 'ship' });
+        rows.push({ key: 'ship-out',    name: 'Phí ship gửi',           amount: pnl.totalShipping,   pctVal: pct(pnl.totalShipping),   isChild: true, indent: 2, drillable: pnl.totalShipping > 0,   section: 'ship' });
+        rows.push({ key: 'ship-return', name: 'Phí hoàn + hàng hỏng',   amount: pnl.totalReturnCost, pctVal: pct(pnl.totalReturnCost), isChild: true, indent: 2, drillable: pnl.totalReturnCost > 0, section: 'ship' });
 
-        // B5. Vận hành
-        rows.push({ key: 'opex', name: `B5. Chi phí vận hành (${fmt(pnl.monthlyTotal)}đ/tháng)`, amount: pnl.totalOpex, pctVal: pct(pnl.totalOpex), isParent: true, indent: 1, drillable: pnl.totalOpex > 0, section: 'opex' });
+        // ── E. CHI PHÍ QUẢN LÝ ──────────────────────────────────────
+        rows.push({ key: 'ga-header', name: 'E. CHI PHÍ QUẢN LÝ DOANH NGHIỆP', amount: pnl.gaExpenses, pctVal: pct(pnl.gaExpenses), isGroup: true, section: 'opex' });
+
+        rows.push({ key: 'opex', name: `E1. Chi phí vận hành (${fmt(pnl.monthlyTotal)}đ/tháng)`, amount: pnl.totalOpex, pctVal: pct(pnl.totalOpex), isParent: true, indent: 1, drillable: pnl.totalOpex > 0, section: 'opex' });
         pnl.opexDetails.forEach((d: any) => {
-            rows.push({
-                key: `opex-${d.key}`,
-                name: `${d.name} (${fmt(d.monthly)}đ/th)`,
-                amount: d.amount, pctVal: pct(d.amount),
-                isChild: true, indent: 2, drillable: true,
-                _opex: d, section: 'opex',
-            });
+            rows.push({ key: `opex-${d.key}`, name: `${d.name} (${fmt(d.monthly)}đ/th)`, amount: d.amount, pctVal: pct(d.amount), isChild: true, indent: 2, drillable: true, _opex: d, section: 'opex' });
         });
+        if (pnl.totalOtherExpense > 0)
+            rows.push({ key: 'other-exp', name: 'E2. Chi phí khác', amount: pnl.totalOtherExpense, pctVal: pct(pnl.totalOtherExpense), isParent: true, indent: 1, drillable: true, section: 'other' });
 
-        // B6. Khác
-        if (pnl.totalOtherExpense > 0) {
-            rows.push({ key: 'other-exp', name: 'B6. Chi phí khác', amount: pnl.totalOtherExpense, pctVal: pct(pnl.totalOtherExpense), isParent: true, indent: 1, drillable: true, section: 'other' });
-        }
-
-        // KẾT QUẢ
-        rows.push({ key: 'gross', name: '💚 LỢI NHUẬN GỘP (DT − COGS)', amount: pnl.grossProfit, pctVal: pnl.grossMargin.toFixed(1), isSubtotal: true, color: '#1890ff', section: 'profit' });
-        rows.push({ key: 'net', name: '🎯 LỢI NHUẬN RÒNG', amount: pnl.netProfit, pctVal: pnl.netMargin.toFixed(1), isTotal: true, color: pnl.netProfit >= 0 ? '#00ab56' : '#f5222d', section: 'profit' });
+        // ── F. LỢI NHUẬN RÒNG ───────────────────────────────────────
+        rows.push({ key: 'net', name: 'F. LỢI NHUẬN RÒNG  (C − D − E)', amount: pnl.netProfit, pctVal: pnl.netMargin.toFixed(1), isTotal: true, color: pnl.netProfit >= 0 ? '#00ab56' : '#f5222d', section: 'profit' });
 
         return rows;
     }, [pnl, config, shopeeFeeConfig, tiktokFeeConfig]);
@@ -1100,11 +1089,29 @@ export default function BusinessReportPage() {
                             key: 'pct',
                             align: 'center' as const,
                             width: 80,
-                            render: (v: string, r: any) => v ? (
-                                <Tag color={r.isSubtotal || r.isTotal ? 'blue' : 'default'} style={{ minWidth: 50, textAlign: 'center' }}>
-                                    {v}%
-                                </Tag>
-                            ) : null,
+                            render: (v: string, r: any) => {
+                                if (!v) return null;
+                                // Hạng mục quan trọng: isGroup (A,B,D,E), isSubtotal (C), isTotal (F)
+                                const isImportant = r.isGroup || r.isSubtotal || r.isTotal;
+                                if (isImportant) {
+                                    // Chọn màu theo section
+                                    const PCT_COLORS: Record<string, string> = {
+                                        rev: 'green', cogs: 'red', profit: r.color === '#f5222d' ? 'red' : 'green',
+                                        platform: 'orange', opex: 'gold', cost: 'red',
+                                    };
+                                    const tagColor = PCT_COLORS[r.section] || 'blue';
+                                    return (
+                                        <Tag color={tagColor} style={{ minWidth: 54, textAlign: 'center', fontWeight: 700, fontSize: 13 }}>
+                                            {v}%
+                                        </Tag>
+                                    );
+                                }
+                                return (
+                                    <Tag color="default" style={{ minWidth: 50, textAlign: 'center' }}>
+                                        {v}%
+                                    </Tag>
+                                );
+                            },
                         },
                     ]}
                 />
