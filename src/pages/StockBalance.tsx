@@ -111,7 +111,7 @@ interface ProductRow {
 export default function StockBalancePage() {
     const currentUser = useCurrentUser();
     const { user } = useAuth();
-    const isManager = user?.role === 'admin' || user?.role === 'manager';
+    const isAdmin = user?.role === 'admin';
     
     const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const [products, setProducts] = useState<Product[]>([]);
@@ -502,7 +502,7 @@ export default function StockBalancePage() {
                     <p><strong>SKU:</strong> <Tag color="cyan">{item.sku}</Tag></p>
                     <p><strong>Sản phẩm:</strong> {item.productName}</p>
                     {item.color && <p><strong>Màu:</strong> <Tag color="blue">🎨 {item.color}</Tag></p>}
-                    {isManager ? (
+                    {isAdmin ? (
                         <>
                             <p><strong>Tồn hệ thống:</strong> {item.systemStock}</p>
                             <p><strong>Tồn thực tế:</strong> {item.actualStock}</p>
@@ -671,7 +671,7 @@ export default function StockBalancePage() {
                         <p><strong>Sản phẩm:</strong> {quickBalanceItem.productName}</p>
                         {quickBalanceItem.color && <p><strong>Màu:</strong> {quickBalanceItem.color}</p>}
                         
-                        {isManager ? (
+                        {isAdmin ? (
                             <>
                                 <p><strong>Tồn hệ thống:</strong> {quickBalanceItem.systemStock}</p>
                                 <p><strong>Tồn thực tế:</strong> {actualStock}</p>
@@ -825,7 +825,7 @@ export default function StockBalancePage() {
             width: 110,
             align: 'center',
             render: (stock: number, record: ProductRow) => {
-                if (!isManager) {
+                if (!isAdmin) {
                     return (
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
                             <div style={{ background: '#d9d9d9', color: '#595959', padding: '6px 16px', borderRadius: 8, fontWeight: 900, fontSize: 16, display: 'inline-block', minWidth: 50, textAlign: 'center', cursor: 'help' }} title="Chế độ Kiểm kê mù. Bạn lấy sản phẩm vật lý đếm để điền.">
@@ -1125,7 +1125,7 @@ export default function StockBalancePage() {
                                                                                         </span>
                                                                                     </td>
                                                                                     <td style={{ padding: '10px 8px', textAlign: 'center' }}>
-                                                                                        {!isManager ? (
+                                                                                        {!isAdmin ? (
                                                                                             <div style={{ background: '#d9d9d9', color: '#595959', padding: '6px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 14, display: 'inline-block', minWidth: 45 }}>
                                                                                                 ***
                                                                                             </div>
@@ -1225,7 +1225,7 @@ export default function StockBalancePage() {
                                                                         {variant.color ? <Tag color="blue">🎨 {variant.color}</Tag> : <span style={{ color: '#bfbfbf' }}>—</span>}
                                                                     </td>
                                                                     <td style={{ padding: '10px 8px', textAlign: 'right', borderBottom: '1px solid #f0f0f0', fontWeight: 700 }}>
-                                                                        {isManager ? variant.systemStock : <span style={{ color: '#d9d9d9' }}>***</span>}
+                                                                        {isAdmin ? variant.systemStock : <span style={{ color: '#d9d9d9' }}>***</span>}
                                                                     </td>
                                                                     {units.map((_, unitIdx) => (
                                                                         <td key={unitIdx} style={{ padding: '6px 4px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
@@ -1243,7 +1243,7 @@ export default function StockBalancePage() {
                                                                         </td>
                                                                     )}
                                                                     <td style={{ padding: '10px 8px', textAlign: 'right', borderBottom: '1px solid #f0f0f0' }}>
-                                                                        {isManager ? (
+                                                                        {isAdmin ? (
                                                                             <Tag color={variant.difference === 0 ? 'default' : variant.difference > 0 ? 'success' : 'error'} style={{ fontWeight: 700, fontSize: 13 }}>
                                                                                 {variant.difference > 0 ? `+${variant.difference}` : variant.difference}
                                                                             </Tag>
@@ -1316,9 +1316,9 @@ export default function StockBalancePage() {
                                                             </span>
                                                         );
                                                     } },
-                                                    { title: "Tồn đầu", dataIndex: "oldStock", width: 80, align: "right" as const, render: (s: number) => <span style={{ fontWeight: 500, color: "#8c8c8c" }}>{isManager ? s : '***'}</span> },
+                                                    { title: "Tồn đầu", dataIndex: "oldStock", width: 80, align: "right" as const, render: (s: number) => <span style={{ fontWeight: 500, color: "#8c8c8c" }}>{isAdmin ? s : '***'}</span> },
                                                     { title: "Thay đổi", dataIndex: "quantity", width: 90, align: "right" as const, render: (qty: number) => <span style={{ fontWeight: 800, fontSize: 14, color: qty > 0 ? "#1890ff" : qty < 0 ? "#ff4d4f" : "#8c8c8c" }}>{qty > 0 ? "+" + qty : qty}</span> },
-                                                    { title: "Tồn cuối", dataIndex: "newStock", width: 80, align: "right" as const, render: (s: number) => <span style={{ fontWeight: 600 }}>{isManager ? s : '***'}</span> },
+                                                    { title: "Tồn cuối", dataIndex: "newStock", width: 80, align: "right" as const, render: (s: number) => <span style={{ fontWeight: 600 }}>{isAdmin ? s : '***'}</span> },
                                                     { title: "Ghi chú", dataIndex: "note", ellipsis: true, render: (note: string) => note ? <span style={{ fontSize: 12, color: "#595959" }}>{note}</span> : <span style={{ color: "#d9d9d9" }}>—</span> },
                                                 ]}
                                             />
@@ -1420,7 +1420,7 @@ export default function StockBalancePage() {
                         )}
                         <div style={{ marginBottom: 8 }}>
                             <Text strong>Tồn hệ thống: </Text>
-                            {isManager ? (
+                            {isAdmin ? (
                                 <Text style={{ fontSize: 16, fontWeight: 700, color: '#1890ff' }}>{quickBalanceItem.systemStock}</Text>
                             ) : (
                                 <Text style={{ fontSize: 13, fontWeight: 700, color: '#fa8c16', background: '#fff7e6', padding: '2px 8px', borderRadius: 4, display: 'inline-block' }}>*** (Chế độ Kiểm Kê Mù)</Text>
