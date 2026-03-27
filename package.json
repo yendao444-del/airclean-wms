@@ -1,13 +1,13 @@
 {
   "name": "quan-ly-ban-hang-desktop",
-  "version": "1.0.159",
+  "version": "1.0.160",
   "description": "Hệ thống quản lý bán hàng - Desktop App",
   "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && set VITE_DEV_SERVER_URL=http://localhost:5173 && electron .\"",
-    "electron:build": "npm run build && electron-builder"
+    "electron:build": "prisma generate && npm run build && electron-builder"
   },
   "keywords": [
     "pos",
