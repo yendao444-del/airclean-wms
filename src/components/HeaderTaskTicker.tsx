@@ -89,23 +89,7 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
             }
         } catch { }
 
-        try {
-            const prodRes = await (window as any).electronAPI.products.getAll();
-            if (prodRes.success && prodRes.data) {
-                const low = prodRes.data.filter((p: any) =>
-                    p.status === 'active' && p.minStock > 0 && p.stock < p.minStock
-                );
-                if (low.length > 0) {
-                    const outOfStock = low.filter((p: any) => p.stock === 0).length;
-                    result.push({
-                        key: 'stock', icon: '📦', navTo: 'products', priority: 4,
-                        color: outOfStock > 0 ? '#ff4d4f' : '#faad14',
-                        text: `${low.length} SP tồn kho thấp${outOfStock > 0 ? ` (${outOfStock} hết hàng)` : ''}`,
-                        badge: 'cần nhập thêm',
-                    });
-                }
-            }
-        } catch { }
+        // Không thông báo tồn kho thấp
 
         // Không thông báo module Xuất HĐĐT
 

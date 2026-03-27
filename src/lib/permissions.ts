@@ -90,6 +90,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'combos.view',
         'combos.create',
         'einvoice.view',
+        'stock-balance.view',
 
         'fee-calculator',
         'settings',

@@ -96,7 +96,7 @@ export interface ElectronAPI {
         create: (data: Partial<Product>) => Promise<{ success: boolean; data?: Product; error?: string }>;
         update: (id: number, data: Partial<Product>) => Promise<{ success: boolean; data?: Product; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
-        updateStock: (data: { sku: string; quantity: number; isAdd?: boolean }) => Promise<{ success: boolean; data?: Product; error?: string }>;
+        updateStock: (data: { sku: string; quantity: number; isAdd?: boolean; logContext?: any }) => Promise<{ success: boolean; data?: Product; error?: string }>;
     };
     categories: {
         getAll: () => Promise<{ success: boolean; data?: Category[]; error?: string }>;
@@ -190,6 +190,11 @@ export interface ElectronAPI {
         getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     };
+    inventoryLogs: {
+        getAll: (filters?: { sku?: string; type?: string; referenceType?: string; search?: string; startDate?: string; endDate?: string; limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getBySku: (params: { sku: string; limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+    };
     pickup: {
         sendTelegram: (data: { token: string; chatId: string; message: string }) => Promise<{ success: boolean; error?: string }>;
         selectAndWatch: () => Promise<{ success: boolean; data?: { folderPath: string; existingFiles: number }; error?: string }>;
@@ -216,6 +221,7 @@ export interface ElectronAPI {
         logout: () => Promise<{ success: boolean }>;
         restoreSession: (userId: number) => Promise<{ success: boolean }>;
         ensureAdmin: () => Promise<{ success: boolean; error?: string }>;
+        heartbeat: () => Promise<{ success: boolean }>;
     };
     combos: {
         getAll: () => Promise<{ success: boolean; data?: ComboProduct[]; error?: string }>;

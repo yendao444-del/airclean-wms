@@ -1,0 +1,18 @@
+﻿--- KH├öI PHß╗ñC THß║║ KHO Bß╗è THIß║╛U TRONG NG├ÇY ---
+[+] ─Éang tß║ío thß║╗ kho cho: TMDT 583244121980700107 - SKU: CB-5TRANG-5DEN-5DUNI
+[!] Bß╗Å qua CB-5TRANG-5DEN-5DUNI v├¼ kh├┤ng t├¼m thß║Ñy Product gß╗æc chß╗⌐a ID trong DB.
+[+] ─Éang tß║ío thß║╗ kho cho: TMDT 583247360865044026 - SKU: CB-5DEN-5XAM-5DTHINHPHAT
+[!] Bß╗Å qua CB-5DEN-5XAM-5DTHINHPHAT v├¼ kh├┤ng t├¼m thß║Ñy Product gß╗æc chß╗⌐a ID trong DB.
+[+] ─Éang tß║ío thß║╗ kho cho: TMDT 583247417179342641 - SKU: CB-5TRANG-5DEN-5DUNI
+[!] Bß╗Å qua CB-5TRANG-5DEN-5DUNI v├¼ kh├┤ng t├¼m thß║Ñy Product gß╗æc chß╗⌐a ID trong DB.
+[+] ─Éang tß║ío thß║╗ kho cho: TMDT 583246211878323335 - SKU: CB-5TRANG-5DEN-5DUNI
+[!] Bß╗Å qua CB-5TRANG-5DEN-5DUNI v├¼ kh├┤ng t├¼m thß║Ñy Product gß╗æc chß╗⌐a ID trong DB.
+[+] ─Éang tß║ío thß║╗ kho cho: TMDT 583252759334585841 - SKU: 20-5DUNI-TRANG
+[+] ─Éang tß║ío thß║╗ kho cho: TMDT 583244751869478613 - SKU: 10-5DTHINHPHAT-TRANG
+[!] Bß╗Å qua 10-5DTHINHPHAT-TRANG v├¼ kh├┤ng t├¼m thß║Ñy Product gß╗æc chß╗⌐a ID trong DB.
+[+] ─Éang tß║ío thß║╗ kho cho: TMDT 583245615463892550 - SKU: 10-5DTHINHPHAT-XAM
+[+] ─Éang tß║ío thß║╗ kho cho: TMDT 583247642071631685 - SKU: 10-5DTHINHPHAT-TRANG
+[!] Bß╗Å qua 10-5DTHINHPHAT-TRANG v├¼ kh├┤ng t├¼m thß║Ñy Product gß╗æc chß╗⌐a ID trong DB.
+[+] ─Éang tß║ío thß║╗ kho cho: TMDT 583251853330056778 - SKU: CB-5TRANG-5DEN-5DUNI
+[!] Bß╗Å qua CB-5TRANG-5DEN-5DUNI v├¼ kh├┤ng t├¼m thß║Ñy Product gß╗æc chß╗⌐a ID trong DB.
+[+] ─Éang tß║ío thß║╗ kho cho: TMDT 583251646216963083 - SKU: 10-5DUNI-DEN

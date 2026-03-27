@@ -1303,7 +1303,7 @@ ipcMain.handle('pickup:startWatch', async (event, folderPath) => {
 // ========================================
 
 // Update stock khi export hoặc cân bằng kho
-ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = false }) => {
+ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = false, logContext = null }) => {
     try {
         requireRole('admin', 'manager', 'staff');
         console.log(`📦 Update stock: SKU=${sku}, Qty=${quantity}, Add=${isAdd}`);
@@ -1312,88 +1312,59 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
             throw new Error('Database chưa được khởi tạo.');
         }
 
-        // 🎁 CHECK IF SKU IS A COMBO
-        const combo = await prisma.comboProduct.findUnique({
-            where: { sku }
-        });
+        const delta = isAdd ? quantity : -quantity;
 
-        if (combo && !isAdd) {
-            // ⭐ THIS IS A COMBO - Deduct stock from components
-            console.log(`🎁 Detected COMBO: ${combo.name}`);
-            const items = JSON.parse(combo.items || '[]');
+        // Bọc toàn bộ vào 1 Transaction duy nhất
+        return await prisma.$transaction(async (tx) => {
+            // 🎁 CHECK IF SKU IS A COMBO
+            const combo = await tx.comboProduct.findUnique({
+                where: { sku }
+            });
 
-            const deductResults = [];
-            for (const item of items) {
-                const componentQty = item.quantity * quantity; // Qty per combo × combos sold
-                console.log(`  → Deducting ${componentQty} from ${item.sku}`);
+            if (combo && !isAdd) {
+                // ⭐ THIS IS A COMBO - Deduct stock from components
+                console.log(`🎁 Detected COMBO: ${combo.name}`);
+                const items = JSON.parse(combo.items || '[]');
 
-                // Deduct component stock (recursive call via same handler)
-                const deductResult = await updateSingleProductStock(item.sku, componentQty, false);
-                deductResults.push(deductResult);
+                const deductResults = [];
+                for (const item of items) {
+                    const componentQty = item.quantity * quantity; // Qty per combo × combos sold
+                    console.log(`  → Deducting ${componentQty} from ${item.sku}`);
+
+                    const deductResult = await updateProductStockInTx(tx, item.sku, -componentQty, logContext);
+                    deductResults.push(deductResult);
+                }
+
+                console.log(`✅ Combo ${sku}: Deducted ${quantity} combo(s)`);
+                return { success: true, isCombo: true, deductResults };
             }
 
-            console.log(`✅ Combo ${sku}: Deducted ${quantity} combo(s)`);
-            return { success: true, isCombo: true, deductResults };
-        }
-
-        // Regular product/variant stock update
-        return await updateSingleProductStock(sku, quantity, isAdd);
+            // Regular product/variant stock update
+            const result = await updateProductStockInTx(tx, sku, delta, logContext);
+            return { success: true, data: result };
+        });
     } catch (error) {
         console.error('❌ Update stock error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// Helper: deduct stock within a Prisma transaction (atomic, no race condition)
-async function deductStockInTx(tx, sku, qty) {
-    const product = await tx.product.findUnique({ where: { sku } });
-
-    if (product) {
-        // Regular product — atomic decrement
-        await tx.product.update({
-            where: { id: product.id },
-            data: { stock: Math.max(0, (product.stock || 0) - qty) }
-        });
-        return;
+/**
+ * Hàm lõi do AI Agent cập nhật theo "Mệnh lệnh tối cao":
+ * Bắt buộc 100% chạy trong Prisma Transaction, kèm logContext.
+ */
+async function updateProductStockInTx(tx, sku, quantity, logContext) {
+    if (!logContext || !logContext.type || !logContext.referenceType || !logContext.reference) {
+        throw new Error(`[Inventory Error] Thiếu logContext cho SKU: ${sku}. Không thể cập nhật kho mà không có lý do.`);
     }
 
-    // Find via variant JSON
-    const products = await tx.product.findMany({
-        where: { variants: { contains: sku } }
-    });
-    for (const p of products) {
-        if (!p.variants) continue;
-        try {
-            const variants = JSON.parse(p.variants);
-            const vIdx = variants.findIndex(v => v.sku === sku);
-            if (vIdx >= 0) {
-                variants[vIdx].stock = Math.max(0, (variants[vIdx].stock || 0) - qty);
-                await tx.product.update({
-                    where: { id: p.id },
-                    data: { variants: JSON.stringify(variants) }
-                });
-                return;
-            }
-        } catch { /* corrupt JSON — skip */ }
-    }
-    console.warn(`⚠️ deductStockInTx: SKU not found: ${sku}`);
-}
-
-// Helper function to update single product/variant stock
-async function updateSingleProductStock(sku, quantity, isAdd) {
-    let product = await prisma.product.findUnique({ where: { sku } });
+    let product = await tx.product.findUnique({ where: { sku } });
     let isVariant = false;
 
     if (!product) {
-        // Tìm trong variants
-        const products = await prisma.product.findMany({
-            where: {
-                variants: {
-                    contains: sku
-                }
-            }
+        const products = await tx.product.findMany({
+            where: { variants: { contains: sku } }
         });
-
         for (const p of products) {
             if (p.variants) {
                 try {
@@ -1408,47 +1379,67 @@ async function updateSingleProductStock(sku, quantity, isAdd) {
         }
     }
 
-    if (!product) {
-        return { success: false, error: `Không tìm thấy SKU: ${sku}` };
-    }
+    if (!product) throw new Error(`Sản phẩm với SKU ${sku} không tồn tại.`);
 
-    // Cập nhật stock
+    let oldStock = 0;
+    let newStock = 0;
+    let variantColor = null;
+
     if (isVariant) {
-        let variants;
-        try {
-            variants = JSON.parse(product.variants);
-        } catch {
-            return { success: false, error: `Dữ liệu variant bị lỗi cho SKU: ${sku}` };
-        }
+        let variants = JSON.parse(product.variants);
         const variantIndex = variants.findIndex(v => v.sku === sku);
+        if (variantIndex < 0) throw new Error(`Variant ${sku} không tìm thấy`);
 
-        if (variantIndex < 0) {
-            return { success: false, error: `Variant ${sku} không tìm thấy` };
-        }
+        oldStock = variants[variantIndex].stock || 0;
+        newStock = Math.max(0, oldStock + quantity);
+        variants[variantIndex].stock = newStock;
+        variantColor = variants[variantIndex].color || variants[variantIndex].name || null;
 
-        const oldStock = variants[variantIndex].stock || 0;
-        const newStock = isAdd ? oldStock + quantity : oldStock - quantity;
-        variants[variantIndex].stock = Math.max(0, newStock);
-
-        await prisma.product.update({
+        // Lưu biến thể: Bắt buộc serialize xuống JSON, phó thác cho Transaction Sequential của SQLite
+        await tx.product.update({
             where: { id: product.id },
             data: { variants: JSON.stringify(variants) }
         });
-
-        console.log(`✅ [DATABASE] Updated variant ${sku}: ${oldStock} → ${variants[variantIndex].stock}`);
     } else {
-        const oldStock = product.stock;
-        const newStock = isAdd ? oldStock + quantity : oldStock - quantity;
-
-        product = await prisma.product.update({
+        // [VÁ LỖI RACE CONDITION] Dùng cơ chế Atomic Increment của Database cho trường Integer Native
+        oldStock = product.stock || 0;
+        const op = quantity >= 0 ? { increment: quantity } : { decrement: Math.abs(quantity) };
+        const updatedProduct = await tx.product.update({
             where: { id: product.id },
-            data: { stock: Math.max(0, newStock) }
+            data: { stock: op }
         });
-
-        console.log(`✅ [DATABASE] Updated product ${sku}: ${oldStock} → ${product.stock}`);
+        newStock = updatedProduct.stock;
     }
 
-    return { success: true, data: product };
+    // Tạo bản ghi Thẻ kho NẰM TRONG TRANSACTION
+    let createdById = null;
+    if (logContext.createdBy) {
+        if (typeof logContext.createdBy === 'string') {
+            const user = await tx.user.findUnique({ where: { username: logContext.createdBy } });
+            createdById = user ? user.id : null;
+        } else if (typeof logContext.createdBy === 'number') {
+            createdById = logContext.createdBy;
+        }
+    }
+
+    await tx.inventoryLog.create({
+        data: {
+            productId: product.id,
+            productName: product.name,
+            variantColor: variantColor,
+            sku: sku,
+            type: logContext.type,
+            referenceType: logContext.referenceType,
+            reference: logContext.reference,
+            quantity: quantity,
+            oldStock: oldStock,
+            newStock: newStock,
+            note: logContext.note || '',
+            createdBy: createdById
+        }
+    });
+
+    return { oldStock, newStock };
 }
 
 // ========================================
@@ -1557,13 +1548,18 @@ ipcMain.handle('posOrder:create', async (event, data) => {
                 }
             });
 
-            // 4. Deduct stock inside transaction (atomic — không bị race condition)
-            // Nếu bất kỳ SKU nào lỗi, toàn bộ transaction rollback
+            // 4. Deduct stock and log inside transaction (atomic)
             for (const item of items) {
                 try {
-                    await deductStockInTx(tx, item.sku, item.qty);
+                    await updateProductStockInTx(tx, item.sku, -item.qty, {
+                        type: 'pos_sale',
+                        referenceType: 'POS',
+                        reference: orderNumber,
+                        note: `Bán POS: ${item.name} x${item.qty}`,
+                        createdBy: createdByUserId
+                    });
                 } catch (stockErr) {
-                    throw new Error(`Không thể trừ tồn kho SKU ${item.sku}: ${stockErr.message}`);
+                    throw new Error(`Kho lỗi SKU ${item.sku}: ${stockErr.message}`);
                 }
             }
 
@@ -1673,17 +1669,13 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
     try {
         if (!prisma) throw new Error('Database chưa được khởi tạo.');
 
-        // Lấy đơn cũ để hoàn kho
+        // Lấy đơn cũ
         const oldOrder = await prisma.order.findUnique({
             where: { id },
             include: { items: true },
         });
         if (!oldOrder) throw new Error('Không tìm thấy đơn hàng.');
-
-        // Hoàn lại kho theo items cũ
-        for (const oldItem of oldOrder.items) {
-            try { await updateSingleProductStock(oldItem.sku, oldItem.quantity, true); } catch (e) { }
-        }
+        if (oldOrder.status === 'cancelled') throw new Error('Đơn hàng đã hủy, không thể sửa.');
 
         // Tính lại tổng tiền
         const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
@@ -1693,12 +1685,24 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
         const profit = total - totalCost;
 
         await prisma.$transaction(async (tx) => {
-            // Cập nhật order
+            // 1. Hoàn lại kho theo items cũ
+            for (const oldItem of oldOrder.items) {
+                await updateProductStockInTx(tx, oldItem.sku, oldItem.quantity, {
+                    type: 'adjustment',
+                    referenceType: 'POS_EDIT',
+                    reference: oldOrder.orderNumber,
+                    note: `Hoàn tồn (sửa đơn POS #${oldOrder.orderNumber})`,
+                    createdBy: userName || 'System'
+                });
+            }
+
+            // 2. Cập nhật order
             await tx.order.update({
                 where: { id },
                 data: { note: note ?? null, discount: disc, subtotal, total, profit, paymentMethod: paymentMethod || oldOrder.paymentMethod },
             });
-            // Xóa items cũ, thêm items mới
+
+            // 3. Xóa items cũ, thêm items mới
             await tx.orderItem.deleteMany({ where: { orderId: id } });
             for (const it of items) {
                 await tx.orderItem.create({
@@ -1709,18 +1713,23 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
                         subtotal: it.price * it.qty,
                     },
                 });
+
+                // 4. Trừ kho theo items mới
+                await updateProductStockInTx(tx, it.sku, -it.qty, {
+                    type: 'pos_sale',
+                    referenceType: 'POS_EDIT',
+                    reference: oldOrder.orderNumber,
+                    note: `Trừ tồn mới (sửa đơn POS #${oldOrder.orderNumber})`,
+                    createdBy: userName || 'System'
+                });
             }
-            // Cập nhật payment
+
+            // 5. Cập nhật payment
             await tx.payment.updateMany({
                 where: { orderId: id },
                 data: { method: paymentMethod || oldOrder.paymentMethod, amount: total },
             });
         });
-
-        // Trừ kho theo items mới
-        for (const it of items) {
-            try { await updateSingleProductStock(it.sku, it.qty, false); } catch (e) { }
-        }
 
         await logActivity({ module: 'sales', action: 'UPDATE', description: `Sửa đơn POS #${oldOrder.orderNumber}`, userName: userName || 'System' });
         return { success: true };
@@ -1730,7 +1739,7 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
     }
 });
 
-// Xóa đơn hàng POS (hoàn kho)
+// Xóa đơn hàng POS (hoàn kho) - KHÔNG XÓA CỨNG (Soft Cancel)
 ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
     try {
         if (!prisma) throw new Error('Database chưa được khởi tạo.');
@@ -1740,22 +1749,30 @@ ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
             include: { items: true },
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng.');
-
-        // Hoàn kho
-        for (const item of order.items) {
-            try { await updateSingleProductStock(item.sku, item.quantity, true); } catch (e) { }
-        }
+        if (order.status === 'cancelled') return { success: true };
 
         await prisma.$transaction(async (tx) => {
-            await tx.orderItem.deleteMany({ where: { orderId: id } });
-            await tx.payment.deleteMany({ where: { orderId: id } });
-            await tx.order.delete({ where: { id } });
+            // Hoàn kho có ghi log rõ ràng
+            for (const item of order.items) {
+                await updateProductStockInTx(tx, item.sku, item.quantity, {
+                    type: 'adjustment',
+                    referenceType: 'POS_CANCEL',
+                    reference: order.orderNumber,
+                    note: `Hoàn tồn do hủy đơn POS ${order.orderNumber}`,
+                    createdBy: userName || 'System'
+                });
+            }
+            // Cập nhật trạng thái phiếu thay vì xóa cứng
+            await tx.order.update({ where: { id }, data: { status: 'cancelled' } });
+            
+            // Xóa payment liên quan nếu cần thiết hoặc đánh dấu hủy (tạm comment delete payment)
+            // await tx.payment.deleteMany({ where: { orderId: id } });
         });
 
-        await logActivity({ module: 'sales', action: 'DELETE', description: `Xóa đơn POS #${order.orderNumber}`, userName: userName || 'System' });
+        await logActivity({ module: 'sales', action: 'DELETE', description: `Hủy đơn POS #${order.orderNumber}`, userName: userName || 'System' });
         return { success: true };
     } catch (error) {
-        console.error('❌ [POS] Delete order error:', error.message);
+        console.error('❌ [POS] Cancel order error:', error.message);
         return { success: false, error: error.message };
     }
 });
@@ -1962,80 +1979,60 @@ ipcMain.handle('purchases:create', async (event, data) => {
             }
         }
 
-        const purchase = await prisma.purchaseOrder.create({
-            data: {
-                poNumber: `PO${Date.now()}`,
-                supplierId: data.supplierId,
-                status: data.status || 'completed',
-                subtotal: data.totalAmount,
-                total: data.totalAmount,
-                note: data.notes,
-                receivedAt: new Date(data.purchaseDate),
-                createdBy: data.createdBy || 'Admin',
-                vatInvoiceStatus: data.isThht ? 'thht' : (data.isNoVat ? 'no_vat' : 'pending'), // 📦 THHT / Không VAT flag
-                items: {
-                    create: items.map(item => ({
-                        productId: item.productId,
-                        quantity: item.quantity,
-                        price: item.unitPrice,
-                        subtotal: item.total,
-                        variantSku: item.variantSku || null,
-                        color: item.color || null
-                    }))
-                }
-            },
-            include: { supplier: true, items: true }
+        const purchase = await prisma.$transaction(async (tx) => {
+            const newOrder = await tx.purchaseOrder.create({
+                data: {
+                    poNumber: `PO${Date.now()}`,
+                    supplierId: data.supplierId,
+                    status: data.status || 'completed',
+                    subtotal: data.totalAmount,
+                    total: data.totalAmount,
+                    note: data.notes,
+                    receivedAt: new Date(data.purchaseDate),
+                    createdBy: data.createdBy || 'Admin',
+                    vatInvoiceStatus: data.isThht ? 'thht' : (data.isNoVat ? 'no_vat' : 'pending'), // 📦 THHT / Không VAT flag
+                    items: {
+                        create: items.map(item => ({
+                            productId: item.productId,
+                            quantity: item.quantity,
+                            price: item.unitPrice,
+                            subtotal: item.total,
+                            variantSku: item.variantSku || null,
+                            color: item.color || null
+                        }))
+                    }
+                },
+                include: { supplier: true, items: true }
+            });
+
+            // 🌟 Lấy map Product SKU để cập nhật tồn
+            const purchaseProducts = await tx.product.findMany({
+                where: { id: { in: productIds } }
+            });
+            const productMap = new Map(purchaseProducts.map(p => [p.id, p]));
+
+            for (const item of items) {
+                const product = productMap.get(item.productId);
+                if (!product) continue;
+                
+                const skuToUpdate = item.variantSku || product.sku;
+                if (!skuToUpdate) continue;
+
+                // 🌟 Gọi hàm Mệnh lệnh tối cao để tăng tồn kho an toàn & sinh thẻ kho
+                await updateProductStockInTx(tx, skuToUpdate, item.quantity, {
+                    type: 'purchase',
+                    referenceType: 'NHAP',
+                    reference: newOrder.poNumber,
+                    note: `Nhập hàng: ${item.productName || product.name} x${item.quantity}`,
+                    createdBy: data.createdBy || 'Admin'
+                });
+            }
+
+            return newOrder;
         });
 
         console.log(`✅ Created purchase order: ${purchase.poNumber}`);
-
         await logActivity({ module: 'purchases', action: 'CREATE', description: `Tạo phiếu nhập ${purchase.poNumber} - ${new Intl.NumberFormat('vi-VN').format(data.totalAmount)}đ`, recordName: purchase.poNumber, userName: data.createdBy || 'Admin' });
-
-        // 🔥 CẬP NHẬT TỒN KHO (batch fetch rồi update song song)
-        console.log('📊 Updating stock for purchased items...');
-        const purchaseProductIds = [...new Set(items.map(i => i.productId))];
-        const purchaseProducts = await prisma.product.findMany({
-            where: { id: { in: purchaseProductIds } }
-        });
-        const productMap = new Map(purchaseProducts.map(p => [p.id, p]));
-
-        await Promise.all(items.map(async (item) => {
-            const product = productMap.get(item.productId);
-            if (!product) return;
-
-            // Nếu có variantSku (phân loại), cập nhật stock trong JSON
-            if (item.variantSku && product.variants) {
-                try {
-                    const variants = JSON.parse(product.variants);
-                    const variantIndex = variants.findIndex(v => v.sku === item.variantSku);
-
-                    if (variantIndex >= 0) {
-                        const oldStock = variants[variantIndex].stock || 0;
-                        variants[variantIndex].stock = oldStock + item.quantity;
-
-                        await prisma.product.update({
-                            where: { id: item.productId },
-                            data: { variants: JSON.stringify(variants) }
-                        });
-
-                        console.log(`  ✅ Updated variant stock: ${item.variantSku} (${oldStock} → ${variants[variantIndex].stock})`);
-                    }
-                } catch (err) {
-                    console.error(`  ⚠️  Failed to update variant stock for ${item.variantSku}:`, err.message);
-                }
-            } else {
-                // Sản phẩm không có variant → cập nhật stock trực tiếp
-                const oldStock = product.stock;
-                const newStock = oldStock + item.quantity;
-
-                await prisma.product.update({
-                    where: { id: item.productId },
-                    data: { stock: newStock }
-                });
-
-                console.log(`  ✅ Updated product stock: ${product.sku} (${oldStock} → ${newStock})`);
-            }
-        }));
 
         return { success: true, data: purchase };
     } catch (error) {
@@ -2073,30 +2070,53 @@ ipcMain.handle('purchases:update', async (event, { id, data }) => {
     }
 });
 
-// Delete purchase
+// Delete purchase (Soft-delete & Hoàn kho)
 ipcMain.handle('purchases:delete', async (event, id) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
 
-        console.log(`🗑️  Deleting purchase order #${id}...`);
+        console.log(`🗑️  Soft-deleting purchase order #${id}...`);
 
-        // Dùng transaction để xóa an toàn
+        const order = await prisma.purchaseOrder.findUnique({
+            where: { id },
+            include: { items: true }
+        });
+        if (!order) throw new Error(`Không tìm thấy phiếu nhập #${id}`);
+        if (order.status === 'cancelled') return { success: true };
+
         await prisma.$transaction(async (tx) => {
-            // Bước 1: Xóa tất cả PurchaseItems
-            const deletedItems = await tx.purchaseItem.deleteMany({
-                where: { purchaseOrderId: id }
+            const productIds = [...new Set(order.items.map(i => i.productId))];
+            const products = await tx.product.findMany({
+                where: { id: { in: productIds } }
             });
-            console.log(`  ✅ Deleted ${deletedItems.count} purchase items`);
+            const productMap = new Map(products.map(p => [p.id, p]));
 
-            // Bước 2: Xóa PurchaseOrder
-            await tx.purchaseOrder.delete({
-                where: { id }
+            // 1. Hoàn lượng tồn kho đã nhập (âm quantity) - ghi thẻ kho Reversal
+            for (const item of order.items) {
+                const product = productMap.get(item.productId);
+                if (!product) continue;
+
+                const skuToRevert = item.variantSku || product.sku;
+                if (!skuToRevert) continue;
+
+                await updateProductStockInTx(tx, skuToRevert, -item.quantity, {
+                    type: 'adjustment',
+                    referenceType: 'NHAP_CANCEL',
+                    reference: order.poNumber,
+                    note: `Hoàn tồn do hủy phiếu nhập ${order.poNumber}`,
+                    createdBy: 'System'
+                });
+            }
+
+            // 2. Chuyển trạng thái sang cancelled thay vì xóa vật lý khối item
+            await tx.purchaseOrder.update({
+                where: { id },
+                data: { status: 'cancelled' }
             });
-            console.log(`  ✅ Deleted purchase order #${id}`);
-            await logActivity({ module: 'purchases', action: 'DELETE', description: `Xóa phiếu nhập #${id}` });
         });
 
-        console.log(`✅ Successfully deleted purchase order #${id}`);
+        console.log(`✅ Successfully cancelled purchase order #${id}`);
+        await logActivity({ module: 'purchases', action: 'DELETE', description: `Hủy phiếu nhập #${id}`, recordName: order.poNumber });
         return { success: true };
     } catch (error) {
         console.error('❌ Delete purchase error:', error);
@@ -4205,89 +4225,10 @@ ipcMain.handle('ecommerceExports:getAll', async (event, { since } = {}) => {
 ipcMain.handle('ecommerceExports:create', async (event, data) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
-        const record = await prisma.ecommerceExport.create({
-            data: {
-                customerName: data.customerName,
-                ecommerceExportCode: data.ecommerceExportCode || null,
-                orderNumber: data.orderNumber || null,
-                ecommerceExportReason: data.ecommerceExportReason || null,
-                ecommerceExportDate: new Date(data.ecommerceExportDate),
-                items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
-                totalAmount: data.totalAmount || 0,
-                notes: data.notes || null,
-                status: data.status || 'processing',
-                createdBy: data.createdBy || null
-            }
-        });
-        console.log(`✅ Created ecommerce export #${record.id}`);
-        await logActivity({ module: 'export', action: 'CREATE', description: `Tạo bàn giao TMDT #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
-        return { success: true, data: record };
-    } catch (error) {
-        console.error('❌ Create ecommerce export error:', error);
-        return { success: false, error: error.message };
-    }
-});
+        const isCompleted = data.status === 'completed';
 
-ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
-    try {
-        if (!prisma) throw new Error('Prisma not available');
-        const record = await prisma.ecommerceExport.update({
-            where: { id },
-            data: {
-                customerName: data.customerName,
-                ecommerceExportCode: data.ecommerceExportCode || null,
-                orderNumber: data.orderNumber || null,
-                ecommerceExportReason: data.ecommerceExportReason || null,
-                ecommerceExportDate: data.ecommerceExportDate ? new Date(data.ecommerceExportDate) : undefined,
-                items: data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : undefined,
-                totalAmount: data.totalAmount,
-                notes: data.notes || null,
-                status: data.status
-            }
-        });
-        console.log(`✅ Updated ecommerce export #${record.id}`);
-        await logActivity({ module: 'export', action: 'UPDATE', description: `Cập nhật bàn giao TMDT #${record.id}`, recordId: String(record.id) });
-        return { success: true, data: record };
-    } catch (error) {
-        console.error('❌ Update ecommerce export error:', error);
-        return { success: false, error: error.message };
-    }
-});
-
-ipcMain.handle('ecommerceExports:delete', async (event, id) => {
-    try {
-        if (!prisma) throw new Error('Prisma not available');
-        await prisma.ecommerceExport.delete({ where: { id } });
-        console.log(`✅ Deleted ecommerce export #${id}`);
-        await logActivity({ module: 'export', action: 'DELETE', description: `Xóa bàn giao TMDT #${id}` });
-        return { success: true };
-    } catch (error) {
-        console.error('❌ Delete ecommerce export error:', error);
-        return { success: false, error: error.message };
-    }
-});
-
-ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
-    try {
-        if (!prisma) throw new Error('Prisma not available');
-        const result = await prisma.ecommerceExport.deleteMany({
-            where: { id: { in: ids } }
-        });
-        console.log(`✅ Bulk deleted ${result.count} ecommerce exports`);
-        await logActivity({ module: 'export', action: 'DELETE', description: `Xóa hàng loạt ${result.count} bàn giao TMDT` });
-        return { success: true, data: result.count };
-    } catch (error) {
-        console.error('❌ Bulk delete ecommerce exports error:', error);
-        return { success: false, error: error.message };
-    }
-});
-
-ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
-    try {
-        if (!prisma) throw new Error('Prisma not available');
-        const created = [];
-        for (const data of records) {
-            const record = await prisma.ecommerceExport.create({
+        const record = await prisma.$transaction(async (tx) => {
+            const newRecord = await tx.ecommerceExport.create({
                 data: {
                     customerName: data.customerName,
                     ecommerceExportCode: data.ecommerceExportCode || null,
@@ -4301,8 +4242,213 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
                     createdBy: data.createdBy || null
                 }
             });
-            created.push(record);
-        }
+
+            if (isCompleted) {
+                const itemsList = typeof data.items === 'string' ? JSON.parse(data.items) : data.items;
+                for (const item of itemsList) {
+                    if (item.variantSku) {
+                        await updateProductStockInTx(tx, item.variantSku, -item.quantity, {
+                            type: 'ecom_sale',
+                            referenceType: 'TMDT',
+                            reference: data.orderNumber || data.ecommerceExportCode || 'Lưu thủ công',
+                            note: `Tạo đơn TMDT: ${data.customerName}`,
+                            createdBy: data.createdBy || 'System'
+                        });
+                    }
+                }
+            }
+            return newRecord;
+        });
+
+        console.log(`✅ Created ecommerce export #${record.id}`);
+        await logActivity({ module: 'export', action: 'CREATE', description: `Tạo bàn giao TMDT #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
+        return { success: true, data: record };
+    } catch (error) {
+        console.error('❌ Create ecommerce export error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+
+        const record = await prisma.$transaction(async (tx) => {
+            const oldRecord = await tx.ecommerceExport.findUnique({ where: { id } });
+            if (!oldRecord) throw new Error('Không tìm thấy phiếu xuất.');
+
+            // Hoàn kho nếu phiếu cũ đã trừ kho
+            if (oldRecord.status === 'completed') {
+                const oldItems = JSON.parse(oldRecord.items || '[]');
+                for (const old of oldItems) {
+                    if (old.variantSku) {
+                        await updateProductStockInTx(tx, old.variantSku, old.quantity, {
+                            type: 'adjustment',
+                            referenceType: 'TMDT_EDIT',
+                            reference: oldRecord.orderNumber || oldRecord.ecommerceExportCode || 'Sửa thủ công',
+                            note: `Hoàn tồn (sửa đơn TMDT #${oldRecord.id})`,
+                            createdBy: data.createdBy || 'System'
+                        });
+                    }
+                }
+            }
+
+            const newRecord = await tx.ecommerceExport.update({
+                where: { id },
+                data: {
+                    customerName: data.customerName,
+                    ecommerceExportCode: data.ecommerceExportCode || null,
+                    orderNumber: data.orderNumber || null,
+                    ecommerceExportReason: data.ecommerceExportReason || null,
+                    ecommerceExportDate: data.ecommerceExportDate ? new Date(data.ecommerceExportDate) : undefined,
+                    items: data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : undefined,
+                    totalAmount: data.totalAmount,
+                    notes: data.notes || null,
+                    status: data.status
+                }
+            });
+
+            // Trừ kho mới nếu phiếu trạng thái hoàn thành
+            if (data.status === 'completed') {
+                const newItems = data.items ? (typeof data.items === 'string' ? JSON.parse(data.items) : data.items) : JSON.parse(oldRecord.items || '[]');
+                for (const item of newItems) {
+                    if (item.variantSku) {
+                        await updateProductStockInTx(tx, item.variantSku, -item.quantity, {
+                            type: 'ecom_sale',
+                            referenceType: 'TMDT_EDIT',
+                            reference: data.orderNumber || data.ecommerceExportCode || 'Sửa thủ công',
+                            note: `Trừ tồn mới (sửa đơn TMDT #${id})`,
+                            createdBy: data.createdBy || 'System'
+                        });
+                    }
+                }
+            }
+            return newRecord;
+        });
+
+        console.log(`✅ Updated ecommerce export #${record.id}`);
+        await logActivity({ module: 'export', action: 'UPDATE', description: `Cập nhật bàn giao TMDT #${record.id}`, recordId: String(record.id) });
+        return { success: true, data: record };
+    } catch (error) {
+        console.error('❌ Update ecommerce export error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('ecommerceExports:delete', async (event, id) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        
+        await prisma.$transaction(async (tx) => {
+            const doc = await tx.ecommerceExport.findUnique({ where: { id } });
+            if (!doc) return;
+
+            if (doc.status === 'completed') {
+                const items = JSON.parse(doc.items || '[]');
+                for (const item of items) {
+                    if (item.variantSku) {
+                        await updateProductStockInTx(tx, item.variantSku, item.quantity, {
+                            type: 'adjustment',
+                            referenceType: 'TMDT_CANCEL',
+                            reference: doc.orderNumber || doc.ecommerceExportCode || 'Xóa thủ công',
+                            note: `Hoàn tồn do xóa đơn TMDT #${id}`,
+                            createdBy: 'System'
+                        });
+                    }
+                }
+            }
+            await tx.ecommerceExport.delete({ where: { id } });
+        });
+
+        console.log(`✅ Deleted ecommerce export #${id}`);
+        await logActivity({ module: 'export', action: 'DELETE', description: `Xóa bàn giao TMDT #${id}` });
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Delete ecommerce export error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        
+        const count = await prisma.$transaction(async (tx) => {
+            let deletedCount = 0;
+            for (const id of ids) {
+                const doc = await tx.ecommerceExport.findUnique({ where: { id } });
+                if (!doc) continue;
+
+                if (doc.status === 'completed') {
+                    const items = JSON.parse(doc.items || '[]');
+                    for (const item of items) {
+                        if (item.variantSku) {
+                            await updateProductStockInTx(tx, item.variantSku, item.quantity, {
+                                type: 'adjustment',
+                                referenceType: 'TMDT_CANCEL',
+                                reference: doc.orderNumber || doc.ecommerceExportCode || 'Xóa hàng loạt',
+                                note: `Hoàn tồn do xóa đơn TMDT #${id}`,
+                                createdBy: 'System'
+                            });
+                        }
+                    }
+                }
+                await tx.ecommerceExport.delete({ where: { id } });
+                deletedCount++;
+            }
+            return deletedCount;
+        });
+
+        console.log(`✅ Bulk deleted ${count} ecommerce exports`);
+        await logActivity({ module: 'export', action: 'DELETE', description: `Xóa hàng loạt ${count} bàn giao TMDT` });
+        return { success: true, data: count };
+    } catch (error) {
+        console.error('❌ Bulk delete ecommerce exports error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        
+        const created = await prisma.$transaction(async (tx) => {
+            const batchCreated = [];
+            for (const data of records) {
+                const record = await tx.ecommerceExport.create({
+                    data: {
+                        customerName: data.customerName,
+                        ecommerceExportCode: data.ecommerceExportCode || null,
+                        orderNumber: data.orderNumber || null,
+                        ecommerceExportReason: data.ecommerceExportReason || null,
+                        ecommerceExportDate: new Date(data.ecommerceExportDate),
+                        items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
+                        totalAmount: data.totalAmount || 0,
+                        notes: data.notes || null,
+                        status: data.status || 'processing',
+                        createdBy: data.createdBy || null
+                    }
+                });
+
+                if (data.status === 'completed') {
+                    const itemsList = typeof data.items === 'string' ? JSON.parse(data.items) : data.items;
+                    for (const item of itemsList) {
+                        if (item.variantSku) {
+                            await updateProductStockInTx(tx, item.variantSku, -item.quantity, {
+                                type: 'ecom_sale',
+                                referenceType: 'TMDT',
+                                reference: data.orderNumber || data.ecommerceExportCode || 'Nhập hàng loạt',
+                                note: `Tạo đơn TMDT: ${data.customerName}`,
+                                createdBy: data.createdBy || 'System'
+                            });
+                        }
+                    }
+                }
+                batchCreated.push(record);
+            }
+            return batchCreated;
+        });
+
         console.log(`✅ Bulk created ${created.length} ecommerce exports`);
         await logActivity({ module: 'export', action: 'CREATE', description: `Tạo hàng loạt ${created.length} bàn giao TMDT` });
         return { success: true, data: created };
@@ -4735,6 +4881,193 @@ ipcMain.handle('stockBalance:create', async (event, data) => {
         return { success: false, error: error.message };
     }
 });
+
+// ========================================
+// INVENTORY LOGS / THẺ KHO
+// ========================================
+
+// Helper: Ghi log thẻ kho — được gọi từ tất cả module (POS, Purchase, Export, Returns, Refunds, StockBalance)
+async function createInventoryLog({ sku, productId, productName, variantColor, type, referenceType, reference, quantity, oldStock, newStock, note, createdBy }) {
+    try {
+        if (!prisma) return null;
+
+        let reporterId = null;
+        if (typeof createdBy === 'string') {
+            const user = await prisma.user.findUnique({ where: { username: createdBy } });
+            if (user) reporterId = user.id;
+        } else if (typeof createdBy === 'number') {
+            reporterId = createdBy;
+        }
+
+        const log = await prisma.inventoryLog.create({
+            data: {
+                productId: productId || 0,
+                sku: sku || '',
+                productName: productName || null,
+                variantColor: variantColor || null,
+                type: type || 'adjustment',
+                referenceType: referenceType || null,
+                reference: reference || null,
+                quantity: quantity || 0,
+                oldStock: oldStock || 0,
+                newStock: newStock || 0,
+                note: note || null,
+                createdBy: reporterId,
+            }
+        });
+        console.log(`📋 [ThẻKho] ${referenceType || type}: ${sku} ${quantity > 0 ? '+' : ''}${quantity} → Tồn cuối: ${newStock}`);
+        return log;
+    } catch (err) {
+        console.error('❌ [ThẻKho] Error:', err.message);
+        return null;
+    }
+}
+
+// Helper: Lấy stock hiện tại của SKU (product hoặc variant)
+async function getCurrentStock(sku) {
+    try {
+        if (!prisma) return 0;
+        
+        // Tìm product trực tiếp
+        const product = await prisma.product.findUnique({ where: { sku } });
+        if (product) return product.stock || 0;
+        
+        // Tìm trong variants
+        const products = await prisma.product.findMany({
+            where: { variants: { contains: sku } }
+        });
+        for (const p of products) {
+            if (!p.variants) continue;
+            try {
+                const variants = JSON.parse(p.variants);
+                const v = variants.find(v => v.sku === sku);
+                if (v) return v.stock || 0;
+            } catch { }
+        }
+        return 0;
+    } catch {
+        return 0;
+    }
+}
+
+// Helper: Lấy productId + product info từ SKU
+async function getProductInfoBySku(sku) {
+    try {
+        if (!prisma) return null;
+        
+        const product = await prisma.product.findUnique({ where: { sku } });
+        if (product) {
+            return { productId: product.id, productName: product.name, variantColor: null };
+        }
+        
+        // Tìm trong variants
+        const products = await prisma.product.findMany({
+            where: { variants: { contains: sku } }
+        });
+        for (const p of products) {
+            if (!p.variants) continue;
+            try {
+                const variants = JSON.parse(p.variants);
+                const v = variants.find(v => v.sku === sku);
+                if (v) {
+                    return { productId: p.id, productName: p.name, variantColor: v.color || v.name || null };
+                }
+            } catch { }
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+// Lấy tất cả inventory logs (có filter + phân trang)
+ipcMain.handle('inventoryLogs:getAll', async (event, filters = {}) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        
+        const where = {};
+        if (filters.sku) where.sku = filters.sku;
+        if (filters.type) where.type = filters.type;
+        if (filters.referenceType) where.referenceType = filters.referenceType;
+        if (filters.search) {
+            where.OR = [
+                { sku: { contains: filters.search, mode: 'insensitive' } },
+                { productName: { contains: filters.search, mode: 'insensitive' } },
+                { reference: { contains: filters.search, mode: 'insensitive' } },
+            ];
+        }
+        if (filters.startDate || filters.endDate) {
+            where.createdAt = {};
+            if (filters.startDate) where.createdAt.gte = new Date(filters.startDate);
+            if (filters.endDate) {
+                const end = new Date(filters.endDate);
+                end.setHours(23, 59, 59, 999);
+                where.createdAt.lte = end;
+            }
+        }
+        
+        const logs = await prisma.inventoryLog.findMany({
+            where,
+            orderBy: { createdAt: 'desc' },
+            take: filters.limit || 500,
+            include: {
+                user: { select: { username: true, fullName: true } },
+            }
+        });
+        
+        const formatted = logs.map(l => ({
+            ...l,
+            createdAt: l.createdAt.toISOString(),
+            userName: l.user?.fullName || l.user?.username || null,
+        }));
+        
+        console.log(`📋 [ThẻKho] Loaded ${formatted.length} logs`);
+        return { success: true, data: formatted };
+    } catch (error) {
+        console.error('❌ Get inventory logs error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// Lấy log theo SKU (thẻ kho 1 sản phẩm)
+ipcMain.handle('inventoryLogs:getBySku', async (event, { sku, limit = 100 }) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        
+        const logs = await prisma.inventoryLog.findMany({
+            where: { sku },
+            orderBy: { createdAt: 'desc' },
+            take: limit,
+            include: {
+                user: { select: { username: true, fullName: true } },
+            }
+        });
+        
+        const formatted = logs.map(l => ({
+            ...l,
+            createdAt: l.createdAt.toISOString(),
+            userName: l.user?.fullName || l.user?.username || null,
+        }));
+        
+        return { success: true, data: formatted };
+    } catch (error) {
+        console.error('❌ Get inventory logs by SKU error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// Tạo inventory log thủ công (điều chỉnh / cân bằng kho)
+ipcMain.handle('inventoryLogs:create', async (event, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const log = await createInventoryLog(data);
+        return { success: true, data: log };
+    } catch (error) {
+        console.error('❌ Create inventory log error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 
 // ========================================
 // APP CONFIG HANDLERS (CẤU HÌNH ỨNG DỤNG)

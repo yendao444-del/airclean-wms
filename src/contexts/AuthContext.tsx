@@ -22,12 +22,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const [user, setUser] = useState<User | null>(null);
 
     const ensureAdminExists = async () => {
+        // Chỉ chạy 1 lần mỗi phiên (cache trong sessionStorage)
+        if (sessionStorage.getItem('adminEnsured')) return;
         try {
             await window.electronAPI.users.ensureAdmin();
-            console.log('✅ Admin user ensured via database');
-        } catch (error) {
-            console.error('❌ Error ensuring admin user:', error);
-        }
+            sessionStorage.setItem('adminEnsured', '1');
+        } catch { }
     };
 
     useEffect(() => {

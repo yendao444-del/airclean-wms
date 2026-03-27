@@ -248,6 +248,13 @@ export default function ExportOrdersPage() {
                             sku: finalSku,
                             quantity: Math.abs(diff),
                             isAdd: diff < 0, // diff < 0 = giảm SL → cộng stock, diff > 0 = tăng SL → trừ stock
+                            logContext: {
+                                type: 'export',
+                                referenceType: 'XUAT',
+                                reference: `PX${currentEditingExport.id.toString().padStart(4, '0')}`,
+                                note: `Sửa phiếu xuất: ${diff > 0 ? '-' : '+'}${Math.abs(diff)} (${oldItem.quantity} → ${values.quantity})`,
+                                createdBy: currentUser
+                            }
                         });
                         console.log(`📦 Stock updated (sửa): ${finalSku} ${diff > 0 ? '-' : '+'}${Math.abs(diff)} (${oldItem.quantity} → ${values.quantity})`);
                     } else {
@@ -259,11 +266,25 @@ export default function ExportOrdersPage() {
                         sku: oldItem.sku,
                         quantity: oldItem.quantity,
                         isAdd: true,
+                        logContext: {
+                            type: 'export',
+                            referenceType: 'XUAT',
+                            reference: `PX${currentEditingExport.id.toString().padStart(4, '0')}`,
+                            note: `Đổi SP: Hoàn lại ${oldItem.sku}`,
+                            createdBy: currentUser
+                        }
                     });
                     await window.electronAPI.products.updateStock({
                         sku: finalSku,
                         quantity: values.quantity,
                         isAdd: false,
+                        logContext: {
+                            type: 'export',
+                            referenceType: 'XUAT',
+                            reference: `PX${currentEditingExport.id.toString().padStart(4, '0')}`,
+                            note: `Đổi SP: Trừ SP mới ${finalSku}`,
+                            createdBy: currentUser
+                        }
                     });
                     console.log(`📦 Stock updated (đổi SP): Hoàn ${oldItem.sku} +${oldItem.quantity}, Trừ ${finalSku} -${values.quantity}`);
                 }
@@ -292,6 +313,13 @@ export default function ExportOrdersPage() {
                     sku: finalSku,
                     quantity: values.quantity,
                     isAdd: false,
+                    logContext: {
+                        type: 'export',
+                        referenceType: 'XUAT',
+                        reference: `Tạo mới`,
+                        note: `Xuất kho: ${values.customer}`,
+                        createdBy: currentUser
+                    }
                 });
 
                 console.log(`📦 Stock updated: Trừ ${finalSku} -${values.quantity}`);
@@ -413,6 +441,13 @@ export default function ExportOrdersPage() {
                     sku: item.sku,
                     quantity: item.quantity,
                     isAdd: true, // CỘNG lại
+                    logContext: {
+                        type: 'export',
+                        referenceType: 'XUAT',
+                        reference: `PX${record.id.toString().padStart(4, '0')}`,
+                        note: `Xóa phiếu xuất: Hủy hoàn kho`,
+                        createdBy: currentUser
+                    }
                 });
 
                 console.log(`📦 Stock restored: Hoàn ${item.sku} +${item.quantity}`);
@@ -581,6 +616,13 @@ export default function ExportOrdersPage() {
                             sku: item.sku,
                             quantity: item.quantity,
                             isAdd: false,
+                            logContext: {
+                                type: 'export',
+                                referenceType: 'XUAT',
+                                reference: `POS_Xuất`,
+                                note: `Xuất POS/Lấy hàng nhanh`,
+                                createdBy: currentUser
+                            }
                         });
                     }
 

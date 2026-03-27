@@ -40,6 +40,7 @@ import HeaderTaskTicker from './components/HeaderTaskTicker';
 
 import Login from './pages/Login';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { PageHeaderProvider, usePageHeader } from './contexts/PageHeaderContext';
 
 // ⚡ LAZY LOADING - Tất cả pages còn lại (load on demand)
 const FeeCalculatorPage = lazy(() => import('./pages/FeeCalculator'));
@@ -113,6 +114,16 @@ function AppContent() {
             if (firstAccessible) setSelectedKey(firstAccessible);
         }
     }, [user]);
+
+    // Lắng nghe sự kiện navigate từ các component không có state selectedKey
+    useEffect(() => {
+        const handleNavigate = (e: Event) => {
+            const customEvent = e as CustomEvent;
+            if (customEvent.detail) setSelectedKey(customEvent.detail);
+        };
+        window.addEventListener('navigate', handleNavigate);
+        return () => window.removeEventListener('navigate', handleNavigate);
+    }, []);
 
     const createMenuItem = (
         label: React.ReactNode,
@@ -188,6 +199,9 @@ function AppContent() {
 
         // 📋 Quản lý kho submenu
         const inventoryChildren: MenuItem[] = [];
+        if (accessibleKeys.includes('stock-balance')) {
+            inventoryChildren.push(createMenuItem('Tồn kho', 'stock-balance', <DatabaseOutlined />));
+        }
         if (accessibleKeys.includes('purchase')) {
             inventoryChildren.push(createMenuItem('Nhập hàng', 'purchase', <ImportOutlined />));
         }
@@ -199,9 +213,6 @@ function AppContent() {
         }
         if (accessibleKeys.includes('refunds')) {
             inventoryChildren.push(createMenuItem('Hàng hoàn', 'refunds', <RollbackOutlined />));
-        }
-        if (accessibleKeys.includes('stock-balance')) {
-            inventoryChildren.push(createMenuItem('Cân bằng kho', 'stock-balance', <SwapOutlined />));
         }
         if (inventoryChildren.length > 0) {
             items.push(createMenuItem('Quản lý kho', 'inventory', <InboxOutlined />, inventoryChildren));
@@ -323,6 +334,8 @@ function AppContent() {
         return <Login />;
     }
 
+    const { headerExtra } = usePageHeader();
+
     return (
         <ConfigProvider
             locale={viVN}
@@ -407,6 +420,11 @@ function AppContent() {
                             <Title level={4} style={{ margin: 0, color: '#262626', flexShrink: 0 }}>
                                 {getMenuLabel(selectedKey)}
                             </Title>
+                            {headerExtra && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 16, flex: 1 }}>
+                                    {headerExtra}
+                                </div>
+                            )}
                             <HeaderTaskTicker onNavigate={(key) => setSelectedKey(key)} />
                             <Space size={16}>
                                 <Text strong>{user?.username || 'User'}</Text>
@@ -469,9 +487,11 @@ export default function App() {
         <ErrorBoundary>
             <ForceUpdateGate>
                 <AuthProvider>
-                    <ErrorBoundary>
-                        <AppContent />
-                    </ErrorBoundary>
+                    <PageHeaderProvider>
+                        <ErrorBoundary>
+                            <AppContent />
+                        </ErrorBoundary>
+                    </PageHeaderProvider>
                 </AuthProvider>
             </ForceUpdateGate>
         </ErrorBoundary>

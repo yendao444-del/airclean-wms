@@ -140,6 +140,9 @@ export default function PurchasePage() {
     const [vatFiles, setVatFiles] = useState<File[]>([]);
     const [vatUploading, setVatUploading] = useState(false);
 
+    // 🔒 State cho submit chống double click
+    const [submitting, setSubmitting] = useState(false);
+
     // 📦 State cho upload Phiếu Nhập Kho
     const [importReceiptModalVisible, setImportReceiptModalVisible] = useState(false);
     const [importReceiptPurchaseId, setImportReceiptPurchaseId] = useState<number | null>(null);
@@ -396,6 +399,7 @@ export default function PurchasePage() {
             return;
         }
 
+        setSubmitting(true);
         try {
             const totalAmount = purchaseItems.reduce((sum, item) => sum + item.total, 0);
 
@@ -442,6 +446,8 @@ export default function PurchasePage() {
             }
         } catch (error) {
             message.error('Lỗi khi lưu phiếu nhập');
+        } finally {
+            setSubmitting(false);
         }
     };
 
@@ -1743,10 +1749,10 @@ export default function PurchasePage() {
                     </Form.Item>
 
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
-                        <Button onClick={() => setModalVisible(false)} size="large">
+                        <Button onClick={() => setModalVisible(false)} size="large" disabled={submitting}>
                             Hủy
                         </Button>
-                        <Button type="primary" htmlType="submit" size="large">
+                        <Button type="primary" htmlType="submit" size="large" loading={submitting}>
                             {editingPurchase ? 'Cập nhật' : 'Tạo phiếu nhập'}
                         </Button>
                     </div>

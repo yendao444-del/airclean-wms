@@ -19,12 +19,15 @@ import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined } from '@ant
 import type { Product, Category } from '../types/electron';
 import type { MenuProps } from 'antd';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
+import { useAuth } from '../contexts/AuthContext';
 import './Products.css';
 
 const { Title } = Typography;
 
 export default function ProductsPage() {
     const currentUser = useCurrentUser();
+    const { user } = useAuth();
+    const isManager = user?.role === 'admin' || user?.role === 'manager';
     const [products, setProducts] = useState<Product[]>([]);
     const [categories, setCategories] = useState<Category[]>([]);
     const [loading, setLoading] = useState(false);
@@ -843,6 +846,29 @@ export default function ProductsPage() {
                         ? 'linear-gradient(135deg, #faad14 0%, #ffc53d 100%)'
                         : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)';
 
+                if (!isManager) {
+                    return (
+                        <div
+                            style={{
+                                background: '#d9d9d9',
+                                color: '#595959',
+                                padding: '8px 12px',
+                                borderRadius: 8,
+                                textAlign: 'center',
+                                fontWeight: 900,
+                                fontSize: 18,
+                                boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+                                display: 'inline-block',
+                                minWidth: 60,
+                                cursor: 'help'
+                            }}
+                            title="Chế độ Kiểm kê mù. Bạn lấy sản phẩm vật lý đếm để điền lúc cân bằng"
+                        >
+                            ***
+                        </div>
+                    );
+                }
+
                 return (
                     <div
                         style={{
@@ -1129,21 +1155,27 @@ export default function ProductsPage() {
                                                                     </span>
                                                                 </td>
                                                                 <td style={{ padding: '10px 8px', textAlign: 'center' }}>
-                                                                    <div style={{
-                                                                        background: variant.stock <= 20
-                                                                            ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
-                                                                            : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)',
-                                                                        color: '#fff',
-                                                                        padding: '6px 10px',
-                                                                        borderRadius: 6,
-                                                                        textAlign: 'center',
-                                                                        fontWeight: 900,
-                                                                        fontSize: 14,
-                                                                        display: 'inline-block',
-                                                                        minWidth: 45,
-                                                                    }}>
-                                                                        {variant.stock}
-                                                                    </div>
+                                                                    {!isManager ? (
+                                                                        <div style={{ background: '#d9d9d9', color: '#595959', padding: '6px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 14, display: 'inline-block', minWidth: 45 }}>
+                                                                            ***
+                                                                        </div>
+                                                                    ) : (
+                                                                        <div style={{
+                                                                            background: variant.stock <= 20
+                                                                                ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
+                                                                                : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)',
+                                                                            color: '#fff',
+                                                                            padding: '6px 10px',
+                                                                            borderRadius: 6,
+                                                                            textAlign: 'center',
+                                                                            fontWeight: 900,
+                                                                            fontSize: 14,
+                                                                            display: 'inline-block',
+                                                                            minWidth: 45,
+                                                                        }}>
+                                                                            {variant.stock}
+                                                                        </div>
+                                                                    )}
                                                                 </td>
                                                             </tr>
                                                         ];
@@ -1201,19 +1233,25 @@ export default function ProductsPage() {
                                                                             </span>
                                                                         </td>
                                                                         <td style={{ padding: '10px 8px', textAlign: 'center' }}>
-                                                                            <div style={{
-                                                                                background: 'linear-gradient(135deg, #ffa940 0%, #ffc069 100%)',
-                                                                                color: '#fff',
-                                                                                padding: '6px 10px',
-                                                                                borderRadius: 6,
-                                                                                textAlign: 'center',
-                                                                                fontWeight: 900,
-                                                                                fontSize: 14,
-                                                                                display: 'inline-block',
-                                                                                minWidth: 45,
-                                                                            }}>
-                                                                                {combo.stock || 0}
-                                                                            </div>
+                                                                            {!isManager ? (
+                                                                                <div style={{ background: '#d9d9d9', color: '#595959', padding: '6px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 14, display: 'inline-block', minWidth: 45 }}>
+                                                                                    ***
+                                                                                </div>
+                                                                            ) : (
+                                                                                <div style={{
+                                                                                    background: 'linear-gradient(135deg, #ffa940 0%, #ffc069 100%)',
+                                                                                    color: '#fff',
+                                                                                    padding: '6px 10px',
+                                                                                    borderRadius: 6,
+                                                                                    textAlign: 'center',
+                                                                                    fontWeight: 900,
+                                                                                    fontSize: 14,
+                                                                                    display: 'inline-block',
+                                                                                    minWidth: 45,
+                                                                                }}>
+                                                                                    {combo.stock || 0}
+                                                                                </div>
+                                                                            )}
                                                                         </td>
                                                                     </tr>
                                                                 );
@@ -1320,19 +1358,25 @@ export default function ProductsPage() {
                                                                     </strong>
                                                                 </td>
                                                                 <td style={{ padding: '8px', textAlign: 'center' }}>
-                                                                    <div style={{
-                                                                        background: 'linear-gradient(135deg, #ffa940 0%, #ffc069 100%)',
-                                                                        color: '#fff',
-                                                                        padding: '4px 10px',
-                                                                        borderRadius: 6,
-                                                                        textAlign: 'center',
-                                                                        fontWeight: 900,
-                                                                        fontSize: 13,
-                                                                        display: 'inline-block',
-                                                                        minWidth: 40,
-                                                                    }}>
-                                                                        {mixCombo.stock || 0}
-                                                                    </div>
+                                                                    {!isManager ? (
+                                                                        <div style={{ background: '#d9d9d9', color: '#595959', padding: '4px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 13, display: 'inline-block', minWidth: 40 }}>
+                                                                            ***
+                                                                        </div>
+                                                                    ) : (
+                                                                        <div style={{
+                                                                            background: 'linear-gradient(135deg, #ffa940 0%, #ffc069 100%)',
+                                                                            color: '#fff',
+                                                                            padding: '4px 10px',
+                                                                            borderRadius: 6,
+                                                                            textAlign: 'center',
+                                                                            fontWeight: 900,
+                                                                            fontSize: 13,
+                                                                            display: 'inline-block',
+                                                                            minWidth: 40,
+                                                                        }}>
+                                                                            {mixCombo.stock || 0}
+                                                                        </div>
+                                                                    )}
                                                                 </td>
                                                             </tr>
                                                         ))}

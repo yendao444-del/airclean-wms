@@ -435,7 +435,14 @@ Thời gian: ${currentTime}`;
                                     await window.electronAPI.products.updateStock({
                                         sku: item.variantSku,
                                         quantity: item.quantity,
-                                        isAdd: false // TRỪ tồn kho
+                                        isAdd: false, // TRỪ tồn kho
+                                        logContext: {
+                                            type: 'ecom_sale',
+                                            referenceType: 'TMDT',
+                                            reference: foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode || `Phiếu ${foundEcommerceExport.id}`,
+                                            note: `Scan mã VĐ: Giao hàng ${foundEcommerceExport.customerName}`,
+                                            createdBy: null
+                                        }
                                     });
                                     console.log(`✅ Đã trừ tồn kho: ${item.variantSku} -${item.quantity}`);
                                 } catch (error) {
@@ -648,24 +655,8 @@ Thời gian: ${currentTime}`;
                 updatedEcommerceExports = [newEcommerceExport, ...ecommerceExports];
             }
 
-            // 📦 TRỪ TỒN KHO nếu status = completed (hoặc chuyển sang completed)
-            if (shouldUpdateStock) {
-                for (const item of ecommerceExportItems) {
-                    if (item.variantSku) {
-                        try {
-                            await window.electronAPI.products.updateStock({
-                                sku: item.variantSku,
-                                quantity: item.quantity,
-                                isAdd: false // TRỪ tồn kho
-                            });
-                            console.log(`✅ Đã trừ tồn kho: ${item.variantSku} -${item.quantity}`);
-                        } catch (error) {
-                            console.error(`❌ Lỗi trừ tồn kho cho SKU ${item.variantSku}:`, error);
-                            message.error(`Lỗi khi trừ tồn kho cho SKU ${item.variantSku}`);
-                        }
-                    }
-                }
-            }
+            // 🚫 GỠ BỎ TÍNH NĂNG TRỪ KHỎI FRONTEND (Theo Mệnh Lệnh Tối Cao)
+            // Backend (ipc-handlers.js) sẽ tự độc lập xử lý và Transactional Atomicity
 
             // Save to database
             saveEcommerceExports(updatedEcommerceExports);

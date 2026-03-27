@@ -446,6 +446,13 @@ export default function RefundsPage() {
                             sku: item.variantSku,
                             quantity: item.quantity,
                             isAdd: true,
+                            logContext: {
+                                type: 'refund',
+                                referenceType: 'HOAN',
+                                reference: refundRecord.orderNumber || refundRecord.refundCode || `P.Hoàn ${refundRecord.id}`,
+                                note: `Xác nhận nhận hoàn/trả về kho (${refundRecord.customerName})`,
+                                createdBy: null
+                            }
                         });
                         console.log(`✅ Cộng kho: ${item.variantSku} +${item.quantity}`);
                     } catch (err) {
@@ -497,6 +504,13 @@ export default function RefundsPage() {
                         sku: item.sku,
                         quantity: item.qty,
                         isAdd: true,
+                        logContext: {
+                            type: 'refund',
+                            referenceType: 'HOAN',
+                            reference: refundRecord.orderNumber || refundRecord.refundCode || `P.Hoàn ${refundRecord.id}`,
+                            note: `Xác nhận hoàn lệch/custom (${refundRecord.customerName})`,
+                            createdBy: null
+                        }
                     });
                     console.log(`✅ Cộng kho (custom): ${item.sku} +${item.qty}`);
                 } catch (err) {

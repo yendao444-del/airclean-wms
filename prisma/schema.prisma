@@ -107,20 +107,35 @@ model ComboProduct {
 // ========================================
 
 model InventoryLog {
-  id         Int      @id @default(autoincrement())
-  productId  Int
-  product    Product  @relation(fields: [productId], references: [id])
+  id            Int      @id @default(autoincrement())
+  productId     Int
+  product       Product  @relation(fields: [productId], references: [id])
   
-  type       String   // purchase, sale, adjustment, return
-  quantity   Int      // Positive for in, negative for out
-  oldStock   Int
-  newStock   Int
-  reference  String?  // Reference to order/purchase order ID
-  note       String?
+  // Denormalized fields — truy vấn thẻ kho nhanh, không cần JOIN
+  sku           String   // SKU sản phẩm/variant
+  productName   String?  // Tên sản phẩm
+  variantColor  String?  // Màu variant (nếu có)
   
-  createdAt  DateTime @default(now())
-  createdBy  Int?
-  user       User?    @relation(fields: [createdBy], references: [id])
+  // Loại giao dịch
+  type          String   // purchase, pos_sale, ecom_sale, export, adjustment, return, refund
+  referenceType String?  // NHAP, POS, TMDT, XUAT, TRA, HOAN, CAN_BANG
+  reference     String?  // Mã chứng từ: POS-20260327-001, #PN_001, #SHP_99, etc.
+  
+  // Số liệu
+  quantity      Int      // +300 cho nhập, -5 cho bán
+  oldStock      Int      // Tồn trước giao dịch
+  newStock      Int      // Tồn cuối sau giao dịch (balance_after)
+  
+  note          String?
+  createdAt     DateTime @default(now())
+  createdBy     Int?
+  user          User?    @relation(fields: [createdBy], references: [id])
+  
+  @@index([sku, createdAt])
+  @@index([type, createdAt])
+  @@index([productId, createdAt])
+  @@index([reference])
+  @@index([createdAt])
 }
 
 // ========================================

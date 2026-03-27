@@ -138,6 +138,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         create: (data) => ipcRenderer.invoke('stockBalance:create', data),
     },
 
+    // Inventory Logs (THẺ KHO)
+    inventoryLogs: {
+        getAll: (filters) => ipcRenderer.invoke('inventoryLogs:getAll', filters),
+        getBySku: (params) => ipcRenderer.invoke('inventoryLogs:getBySku', params),
+        create: (data) => ipcRenderer.invoke('inventoryLogs:create', data),
+    },
+
     // Pickup (NHẶT HÀNG)
     pickup: {
         sendTelegram: (data) => ipcRenderer.invoke('pickup:sendTelegram', data),

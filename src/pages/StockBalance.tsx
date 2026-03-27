@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { usePageHeader } from '../contexts/PageHeaderContext';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
+import { useAuth } from '../contexts/AuthContext';
 import {
     Card,
     Button,
@@ -16,6 +18,10 @@ import {
     Row,
     Col,
     Divider,
+    Tabs,
+    Badge,
+    Empty,
+    Select,
 } from 'antd';
 import {
     ReloadOutlined,
@@ -23,6 +29,8 @@ import {
     CheckCircleOutlined,
     SyncOutlined,
     BarcodeOutlined,
+    SearchOutlined,
+    FileTextOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -35,8 +43,11 @@ interface Product {
     name: string;
     sku: string;
     stock: number;
+    cost?: number;
     unit?: string;
     variants?: string;
+    minStock?: number;
+    category?: { id: number, name: string };
 }
 
 interface Variant {
@@ -44,6 +55,7 @@ interface Variant {
     sku: string;
     stock: number;
     price?: number;
+    cost?: number;
 }
 
 interface StockBalanceItem {
@@ -53,6 +65,7 @@ interface StockBalanceItem {
     systemStock: number;
     actualStock: number;
     difference: number;
+    cost?: number;
 }
 
 interface StockBalanceRecord {
@@ -63,20 +76,44 @@ interface StockBalanceRecord {
     notes?: string;
 }
 
+interface InventoryLogItem {
+    id: number;
+    sku: string;
+    productName: string | null;
+    variantColor: string | null;
+    type: string;
+    referenceType: string | null;
+    reference: string | null;
+    quantity: number;
+    oldStock: number;
+    newStock: number;
+    note: string | null;
+    createdAt: string;
+    userName: string | null;
+}
+
 // Product-level row for grouped display
 interface ProductRow {
     key: string;
     productId: number;
     productName: string;
+    sku: string;
     unit: string;
+    categoryName: string;
     totalSystemStock: number;
     totalSold: number; // Doanh số bán
     variantCount: number;
     variants: StockBalanceItem[];
+    cost?: number;
+    minStock: number;
 }
 
 export default function StockBalancePage() {
     const currentUser = useCurrentUser();
+    const { user } = useAuth();
+    const isManager = user?.role === 'admin' || user?.role === 'manager';
+    
+    const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const [products, setProducts] = useState<Product[]>([]);
     const [balanceItems, setBalanceItems] = useState<StockBalanceItem[]>([]);
     const [productRows, setProductRows] = useState<ProductRow[]>([]);
@@ -88,14 +125,20 @@ export default function StockBalancePage() {
     const [balanceNotes, setBalanceNotes] = useState<Record<string, string>>({});
     const [form] = Form.useForm();
     const [quickBalanceForm] = Form.useForm();
+    // === EXPANDABLE ROW STATE ===
     const [expandedRowKeys, setExpandedRowKeys] = useState<string[]>([]);
+    const [drawerTab, setDrawerTab] = useState<'overview' | 'check' | 'stock'>('overview');
+    const [drawerLogs, setDrawerLogs] = useState<InventoryLogItem[]>([]);
+    const [drawerLogsLoading, setDrawerLogsLoading] = useState(false);
 
     // Quick balance state
     const [quickBalanceItem, setQuickBalanceItem] = useState<StockBalanceItem | null>(null);
     const [searchText, setSearchText] = useState('');
+    const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
 
     // Sales data for sorting
     const [salesMap, setSalesMap] = useState<Map<string, number>>(new Map());
+    const productsRef = useRef<any[]>([]); // ref để background task dùng được
 
     // Statistics
     const [stats, setStats] = useState({
@@ -112,6 +155,7 @@ export default function StockBalancePage() {
     // Counting inputs per SKU: { "SKU-123": { unitCounts: [10, 3], le: 30 } }
     const [countingInputs, setCountingInputs] = useState<Record<string, { unitCounts: number[]; le: number }>>({});
     const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const lastExpandTime = useRef<{ key: string; time: number }>({ key: '', time: 0 });
 
     const getProductUnits = (productName: string): ConversionUnit[] => {
         return conversionRates[productName]?.units || [];
@@ -223,18 +267,36 @@ export default function StockBalancePage() {
     }, []);
 
     const initData = async () => {
-        const sales = await loadSalesData();
-        await loadProducts(sales);
+        setLoading(true);
+        try {
+            // Load song song: products + sales (90 ngày) → render 1 lần, không background re-render
+            const [productsResult, sales] = await Promise.all([
+                window.electronAPI.products.getAll(),
+                loadSalesData(),
+            ]);
+            if (productsResult.success && productsResult.data) {
+                productsRef.current = productsResult.data;
+                setProducts(productsResult.data);
+                generateBalanceItems(productsResult.data, sales);
+            } else {
+                message.error('Lỗi khi tải sản phẩm');
+            }
+        } catch {
+            message.error('Lỗi khi tải dữ liệu');
+        } finally {
+            setLoading(false);
+        }
     };
 
-    // Load doanh số bán từ POS + TMDT để sắp xếp
+    // Load doanh số bán từ POS + TMDT để sắp xếp (chỉ 90 ngày gần nhất)
     const loadSalesData = async (): Promise<Map<string, number>> => {
         try {
             const api = (window as any).electronAPI;
             const skuSales = new Map<string, number>();
+            const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
 
             // 1. POS orders
-            const posRes = await api.posOrder.getAll({});
+            const posRes = await api.posOrder.getAll({ since: since90 });
             if (posRes.success && posRes.data) {
                 for (const order of posRes.data) {
                     const items = order.items || [];
@@ -247,8 +309,8 @@ export default function StockBalancePage() {
                 }
             }
 
-            // 2. Ecommerce exports (completed)
-            const ecRes = await api.ecommerceExports.getAll();
+            // 2. Ecommerce exports (completed, 90 ngày)
+            const ecRes = await api.ecommerceExports.getAll({ since: since90 });
             if (ecRes.success && ecRes.data) {
                 for (const ec of ecRes.data) {
                     if (ec.status !== 'completed') continue;
@@ -277,6 +339,7 @@ export default function StockBalancePage() {
         try {
             const result = await window.electronAPI.products.getAll();
             if (result.success && result.data) {
+                productsRef.current = result.data;
                 setProducts(result.data);
                 generateBalanceItems(result.data, sales || salesMap);
             } else {
@@ -307,6 +370,7 @@ export default function StockBalancePage() {
                             systemStock: variant.stock,
                             actualStock: variant.stock,
                             difference: 0,
+                            cost: variant.cost ?? product.cost,
                         };
                         items.push(item);
                         productItems.push(item);
@@ -337,15 +401,27 @@ export default function StockBalancePage() {
             // Tính tổng doanh số cho product — dùng param truyền vào
             const totalSold = productItems.reduce((sum, pi) => sum + (currentSalesMap.get(pi.sku) || 0), 0);
 
+            // Derive base SKU: use product.sku if set, otherwise strip last segment from first variant SKU
+            const firstVariantSku = productItems[0]?.sku || '';
+            const baseSku = product.sku || (
+                firstVariantSku.includes('-')
+                    ? firstVariantSku.split('-').slice(0, -1).join('-')
+                    : firstVariantSku
+            );
+
             rows.push({
                 key: `product-${product.id}`,
                 productId: product.id,
                 productName: product.name,
+                sku: baseSku,
                 unit: product.unit || 'Cái',
+                categoryName: product.category?.name || 'Không phân loại',
                 totalSystemStock: productItems.reduce((sum, pi) => sum + pi.systemStock, 0),
                 totalSold,
                 variantCount: productItems.length,
                 variants: productItems,
+                cost: product.cost,
+                minStock: product.minStock || 0,
             });
         });
 
@@ -426,11 +502,27 @@ export default function StockBalancePage() {
                     <p><strong>SKU:</strong> <Tag color="cyan">{item.sku}</Tag></p>
                     <p><strong>Sản phẩm:</strong> {item.productName}</p>
                     {item.color && <p><strong>Màu:</strong> <Tag color="blue">🎨 {item.color}</Tag></p>}
-                    <p><strong>Tồn hệ thống:</strong> {item.systemStock}</p>
-                    <p><strong>Tồn thực tế:</strong> {item.actualStock}</p>
-                    <p style={{ color: item.difference > 0 ? '#52c41a' : '#ff4d4f', fontWeight: 700, fontSize: 16 }}>
-                        <strong>Chênh lệch:</strong> {item.difference > 0 ? `+${item.difference}` : item.difference}
-                    </p>
+                    {isManager ? (
+                        <>
+                            <p><strong>Tồn hệ thống:</strong> {item.systemStock}</p>
+                            <p><strong>Tồn thực tế:</strong> {item.actualStock}</p>
+                            <p style={{ color: item.difference > 0 ? '#52c41a' : '#ff4d4f', fontWeight: 700, fontSize: 16 }}>
+                                <strong>Chênh lệch:</strong> {item.difference > 0 ? `+${item.difference}` : item.difference}
+                            </p>
+                        </>
+                    ) : (
+                        <div style={{ background: '#fffbe6', padding: '12px', border: '1px solid #ffe58f', borderRadius: 6, marginTop: 12 }}>
+                            <span style={{ color: '#d48806', fontWeight: 700, fontSize: 13 }}>⚠️ CẢNH BÁO LỆCH KHO:</span>
+                            <div style={{ marginTop: 8, fontSize: 14 }}>
+                                <p style={{ margin: '4px 0' }}>Hệ thống đang có: <strong>{item.systemStock}</strong></p>
+                                <p style={{ margin: '4px 0' }}>Bạn đếm được: <strong>{item.actualStock}</strong></p>
+                                <p style={{ margin: '4px 0', color: item.difference > 0 ? '#52c41a' : '#ff4d4f', fontWeight: 700 }}>
+                                    Chênh lệch: {item.difference > 0 ? `+${item.difference}` : item.difference}
+                                </p>
+                            </div>
+                            <p style={{ margin: '12px 0 0 0', color: '#595959', fontSize: 13, fontWeight: 600 }}>Cân bằng này sẽ được lưu lại lịch sử. Bạn có chắc chắn với kết quả này chưa?</p>
+                        </div>
+                    )}
                     <Divider style={{ margin: '8px 0' }} />
                     <p><strong>📝 Lý do:</strong> {note}</p>
                 </div>
@@ -445,6 +537,13 @@ export default function StockBalancePage() {
                         sku: item.sku,
                         quantity: Math.abs(item.difference),
                         isAdd: item.difference > 0,
+                        logContext: {
+                            type: 'adjustment',
+                            referenceType: 'CAN_BANG',
+                            reference: `Khớp lẻ ${dayjs().format('DDMMYY-HHmm')}`,
+                            note: `Cân bằng lẻ. Hệ thống ${item.systemStock} → Thực tế ${item.actualStock}. Lý do: ${note}`,
+                            createdBy: null
+                        }
                     });
 
                     const newRecord = {
@@ -501,6 +600,13 @@ export default function StockBalancePage() {
                                 sku: item.sku,
                                 quantity: Math.abs(item.difference),
                                 isAdd: item.difference > 0,
+                                logContext: {
+                                    type: 'adjustment',
+                                    referenceType: 'CAN_BANG',
+                                    reference: `Khớp lô ${dayjs().format('DDMMYY-HHmm')}`,
+                                    note: `Cân bằng lô. Khác biệt: ${item.difference > 0 ? '+' : ''}${item.difference}. Lý do: ${form.getFieldValue('notes') || 'Không nhập'}`,
+                                    createdBy: null
+                                }
                             });
                             successCount++;
                         } catch {
@@ -564,11 +670,28 @@ export default function StockBalancePage() {
                         <p><strong>SKU:</strong> {quickBalanceItem.sku}</p>
                         <p><strong>Sản phẩm:</strong> {quickBalanceItem.productName}</p>
                         {quickBalanceItem.color && <p><strong>Màu:</strong> {quickBalanceItem.color}</p>}
-                        <p><strong>Tồn hệ thống:</strong> {quickBalanceItem.systemStock}</p>
-                        <p><strong>Tồn thực tế:</strong> {actualStock}</p>
-                        <p style={{ color: difference > 0 ? '#52c41a' : '#ff4d4f', fontWeight: 700 }}>
-                            <strong>Chênh lệch:</strong> {difference > 0 ? `+${difference}` : difference}
-                        </p>
+                        
+                        {isManager ? (
+                            <>
+                                <p><strong>Tồn hệ thống:</strong> {quickBalanceItem.systemStock}</p>
+                                <p><strong>Tồn thực tế:</strong> {actualStock}</p>
+                                <p style={{ color: difference > 0 ? '#52c41a' : '#ff4d4f', fontWeight: 700 }}>
+                                    <strong>Chênh lệch:</strong> {difference > 0 ? `+${difference}` : difference}
+                                </p>
+                            </>
+                        ) : (
+                            <div style={{ background: '#fffbe6', padding: '12px', border: '1px solid #ffe58f', borderRadius: 6, marginTop: 12 }}>
+                                <span style={{ color: '#d48806', fontWeight: 700, fontSize: 13 }}>⚠️ CẢNH BÁO LỆCH KHO:</span>
+                                <div style={{ marginTop: 8, fontSize: 14 }}>
+                                    <p style={{ margin: '4px 0' }}>Hệ thống đang có: <strong>{quickBalanceItem.systemStock}</strong></p>
+                                    <p style={{ margin: '4px 0' }}>Bạn đếm được: <strong>{actualStock}</strong></p>
+                                    <p style={{ margin: '4px 0', color: difference > 0 ? '#52c41a' : '#ff4d4f', fontWeight: 700 }}>
+                                        Chênh lệch: {difference > 0 ? `+${difference}` : difference}
+                                    </p>
+                                </div>
+                                <p style={{ margin: '12px 0 0 0', color: '#595959', fontSize: 13, fontWeight: 600 }}>Cân bằng này sẽ được lưu lại lịch sử. Bạn có chắc chắn với kết quả này chưa?</p>
+                            </div>
+                        )}
                     </div>
                 ),
                 okText: 'Xác nhận',
@@ -581,6 +704,13 @@ export default function StockBalancePage() {
                             sku: quickBalanceItem.sku,
                             quantity: Math.abs(difference),
                             isAdd: difference > 0,
+                            logContext: {
+                                type: 'adjustment',
+                                referenceType: 'CAN_BANG',
+                                reference: `Nhanh ${dayjs().format('DDMMYY-HHmm')}`,
+                                note: `Cân bằng nhanh. Hệ thống ${quickBalanceItem.systemStock} → Thực tế ${actualStock}. Lý do: ${values.notes || 'Không nhập'}`,
+                                createdBy: null
+                            }
                         });
 
                         const adjustedItem = {
@@ -620,54 +750,114 @@ export default function StockBalancePage() {
     // Columns cho bảng product-level (grouped)
     const productColumns: ColumnsType<ProductRow> = [
         {
-            title: 'Sản phẩm',
+            title: 'Mã SKU',
+            dataIndex: 'sku',
+            key: 'sku',
+            width: 160,
+            render: (sku: string) => (
+                <span style={{ fontFamily: 'monospace', fontSize: 13, color: '#1677ff', background: '#e6f4ff', padding: '2px 8px', borderRadius: 5 }}>
+                    {sku}
+                </span>
+            ),
+        },
+        {
+            title: 'Tên sản phẩm',
             dataIndex: 'productName',
             key: 'productName',
-            render: (name, record) => (
+            render: (name: string, record) => (
                 <div>
-                    <span style={{ fontWeight: 600, color: '#262626' }}>{name}</span>
-                    <div style={{ fontSize: 11, color: '#8c8c8c' }}>
-                        {record.variantCount} phân loại
+                    <span style={{ fontWeight: 600, color: '#262626', fontSize: 14 }}>{name}</span>
+                    <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 2 }}>
+                        {record.variantCount} phân loại · {record.unit}
                     </div>
                 </div>
             ),
         },
         {
-            title: 'Tổng tồn',
+            title: 'Danh mục',
+            dataIndex: 'categoryName',
+            key: 'categoryName',
+            width: 140,
+            render: (cat: string) => {
+                if (cat === 'Không phân loại') {
+                    return <Tag color="default" style={{ borderRadius: 6 }}>{cat}</Tag>;
+                }
+                const presetColors = ['blue', 'cyan', 'geekblue', 'purple', 'magenta', 'red', 'volcano', 'orange', 'gold', 'green', 'lime'];
+                let hash = 0;
+                for (let i = 0; i < cat.length; i++) {
+                    hash = cat.charCodeAt(i) + ((hash << 5) - hash);
+                }
+                const index = Math.abs(hash) % presetColors.length;
+                return (
+                    <Tag color={presetColors[index]} style={{ fontWeight: 500, padding: '2px 8px', borderRadius: 6, fontSize: 13 }}>
+                        {cat}
+                    </Tag>
+                );
+            },
+        },
+        {
+            title: 'Giá vốn',
+            dataIndex: 'cost',
+            key: 'cost',
+            width: 130,
+            align: 'right',
+            render: (_cost: any, record: ProductRow) => {
+                const costs = record.variants.map(v => v.cost || 0).filter(c => c > 0);
+                if (costs.length > 0) {
+                    const min = Math.min(...costs);
+                    const max = Math.max(...costs);
+                    const fmt = (n: number) => new Intl.NumberFormat('vi-VN').format(n);
+                    return (
+                        <span style={{ fontWeight: 600, color: '#595959' }}>
+                            {min === max ? `${fmt(min)}đ` : `${fmt(min)}đ - ${fmt(max)}đ`}
+                        </span>
+                    );
+                }
+                return record.cost && record.cost > 0
+                    ? <span style={{ fontWeight: 600, color: '#595959' }}>{new Intl.NumberFormat('vi-VN').format(record.cost)}đ</span>
+                    : <span style={{ color: '#bfbfbf' }}>—</span>;
+            },
+        },
+        {
+            title: 'Tồn kho',
             dataIndex: 'totalSystemStock',
             key: 'totalSystemStock',
-            width: 120,
+            width: 110,
             align: 'center',
-            render: (stock) => (
-                <div style={{
-                    background: stock <= 10
-                        ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
-                        : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)',
-                    color: '#fff',
-                    padding: '6px 12px',
-                    borderRadius: 8,
-                    fontWeight: 900,
-                    fontSize: 16,
-                    display: 'inline-block',
-                    minWidth: 50,
-                    textAlign: 'center',
-                }}>
-                    {stock}
-                </div>
-            ),
-        },
-
-        {
-            title: 'Trạng thái',
-            key: 'status',
-            width: 130,
-            align: 'center',
-            render: (_, record) => {
-                const needAdjust = record.variants.filter(v => v.difference !== 0).length;
-                return needAdjust > 0 ? (
-                    <Tag color="warning" style={{ fontWeight: 600 }}>⚠️ {needAdjust} cần CB</Tag>
-                ) : (
-                    <Tag color="success">✅ Khớp</Tag>
+            render: (stock: number, record: ProductRow) => {
+                if (!isManager) {
+                    return (
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                            <div style={{ background: '#d9d9d9', color: '#595959', padding: '6px 16px', borderRadius: 8, fontWeight: 900, fontSize: 16, display: 'inline-block', minWidth: 50, textAlign: 'center', cursor: 'help' }} title="Chế độ Kiểm kê mù. Bạn lấy sản phẩm vật lý đếm để điền.">
+                                ***
+                            </div>
+                        </div>
+                    );
+                }
+                const isUnderMinStock = stock <= record.minStock;
+                return (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                        <div style={{
+                            background: isUnderMinStock
+                                ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
+                                : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)',
+                            color: '#fff',
+                            padding: '6px 12px',
+                            borderRadius: 8,
+                            fontWeight: 900,
+                            fontSize: 16,
+                            display: 'inline-block',
+                            minWidth: 50,
+                            textAlign: 'center',
+                        }}>
+                            {stock}
+                        </div>
+                        {isUnderMinStock && (
+                            <div style={{ fontSize: 10, color: '#ff4d4f', fontWeight: 600, background: '#fff1f0', padding: '2px 6px', borderRadius: 4, border: '1px solid #ffa39e' }}>
+                                ⚠️ Sắp hết (Min: {record.minStock})
+                            </div>
+                        )}
+                    </div>
                 );
             },
         },
@@ -675,53 +865,97 @@ export default function StockBalancePage() {
 
     const recordColumns: ColumnsType<StockBalanceRecord> = [
         {
-            title: 'Mã',
-            dataIndex: 'id',
-            width: 80,
-            render: (id) => <Tag color="blue">#{id}</Tag>,
-        },
-        {
-            title: 'Ngày cân bằng',
+            title: 'Thời gian',
             dataIndex: 'date',
-            width: 180,
-            render: (date) => dayjs(date).format('DD/MM/YYYY HH:mm'),
-        },
-        {
-            title: 'Người thực hiện',
-            dataIndex: 'adjustedBy',
-            width: 150,
-        },
-        {
-            title: 'Số lượng điều chỉnh',
-            dataIndex: 'items',
-            width: 180,
-            render: (items: StockBalanceItem[]) => (
-                <Tag color="orange">{items.length} sản phẩm</Tag>
+            width: 130,
+            render: (date) => (
+                <div>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{dayjs(date).format('DD/MM/YYYY')}</div>
+                    <div style={{ fontSize: 12, color: '#8c8c8c' }}>{dayjs(date).format('HH:mm')}</div>
+                </div>
             ),
+        },
+        {
+            title: 'Sản phẩm',
+            dataIndex: 'items',
+            render: (items: StockBalanceItem[]) => {
+                if (!items || items.length === 0) return <span style={{ color: '#bfbfbf' }}>—</span>;
+                return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {items.map((item, idx) => (
+                            <div key={idx}>
+                                <div style={{ fontWeight: 700, fontSize: 15, color: '#262626' }}>{item.productName}</div>
+                                <div style={{ fontSize: 12, color: '#8c8c8c' }}>
+                                    {item.sku}{item.color ? ` · ${item.color}` : ''}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                );
+            },
+        },
+        {
+            title: 'Chênh lệch',
+            dataIndex: 'items',
+            width: 110,
+            align: 'center' as const,
+            render: (items: StockBalanceItem[]) => {
+                if (!items || items.length === 0) return null;
+                return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'center' }}>
+                        {items.map((item, idx) => (
+                            <div key={idx} style={{
+                                fontWeight: 800,
+                                fontSize: 16,
+                                color: item.difference > 0 ? '#00ab56' : item.difference < 0 ? '#ff4d4f' : '#8c8c8c',
+                            }}>
+                                {item.difference > 0 ? `+${item.difference}` : item.difference}
+                            </div>
+                        ))}
+                    </div>
+                );
+            },
         },
         {
             title: 'Ghi chú',
             dataIndex: 'notes',
+            width: 200,
             render: (notes) => notes ? (
-                <div style={{
-                    background: '#fffbe6',
-                    border: '1px solid #ffe58f',
-                    borderRadius: 6,
-                    padding: '4px 10px',
-                    fontSize: 13,
-                    color: '#ad6800',
-                    maxWidth: 350,
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                }}>
-                    📝 {notes}
-                </div>
+                <span style={{ fontSize: 13, color: '#ad6800' }}>📝 {notes}</span>
             ) : <span style={{ color: '#bfbfbf' }}>—</span>,
+        },
+        {
+            title: 'Người thực hiện',
+            dataIndex: 'adjustedBy',
+            width: 140,
+            render: (name) => (
+                <span style={{ fontWeight: 600, color: '#1890ff' }}>{name}</span>
+            ),
         },
     ];
 
+    // === LOAD LOGS KHI MỞ ROW ===
+    const loadProductLogs = async (row: ProductRow) => {
+        setDrawerTab('overview');
+        setDrawerLogs([]);
+        setDrawerLogsLoading(true);
+        try {
+            const allLogs: InventoryLogItem[] = [];
+            const skus = row.variants.map(v => v.sku);
+            await Promise.all(skus.map(async (sku) => {
+                const r = await window.electronAPI.inventoryLogs.getBySku({ sku, limit: 100 });
+                if (r.success && r.data) allLogs.push(...r.data);
+            }));
+            allLogs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            setDrawerLogs(allLogs);
+        } catch { }
+        finally { setDrawerLogsLoading(false); }
+    };
+
     // Filter products based on search
     const filteredProductRows = productRows.filter(row => {
+        if (selectedCategory && row.categoryName !== selectedCategory) return false;
+        
         if (!searchText.trim()) return true;
         const search = searchText.toLowerCase();
         return (
@@ -733,80 +967,38 @@ export default function StockBalancePage() {
         );
     });
 
-    return (
-        <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-                <Title level={2} style={{ color: '#262626', margin: 0 }}>
-                    ⚖️ Cân bằng kho
-                </Title>
-                <Space>
-                    <Button
-                        icon={<ReloadOutlined />}
-                        onClick={() => { initData(); loadBalanceRecords(); }}
-                        loading={loading}
-                    >
-                        Tải lại
-                    </Button>
-                    <Button
-                        type="primary"
-                        icon={<SyncOutlined />}
-                        size="large"
-                        onClick={() => setModalVisible(true)}
-                        style={{ background: '#00ab56', borderColor: '#00ab56' }}
-                    >
-                        Xác nhận cân bằng
-                    </Button>
-                </Space>
-            </div>
-
-            {/* Statistics */}
-            <Row gutter={16} style={{ marginBottom: 24 }}>
-                <Col span={8}>
-                    <Card>
-                        <Statistic
-                            title="Tổng sản phẩm"
-                            value={stats.totalProducts}
-                            valueStyle={{ color: '#1890ff' }}
-                            prefix={<CheckCircleOutlined />}
-                        />
-                    </Card>
-                </Col>
-                <Col span={8}>
-                    <Card>
-                        <Statistic
-                            title="Cần điều chỉnh"
-                            value={stats.needAdjustment}
-                            valueStyle={{ color: '#ff4d4f' }}
-                            prefix={<WarningOutlined />}
-                        />
-                    </Card>
-                </Col>
-                <Col span={8}>
-                    <Card>
-                        <Statistic
-                            title="Đã cân bằng"
-                            value={stats.balanced}
-                            valueStyle={{ color: '#00ab56' }}
-                            prefix={<CheckCircleOutlined />}
-                        />
-                    </Card>
-                </Col>
-            </Row>
-
-            {/* Search Bar */}
-            <div style={{ marginBottom: 16 }}>
+    // Inject search + button into app header
+    useEffect(() => {
+        const uniqueCategories = Array.from(new Set(productRows.map(r => r.categoryName))).sort();
+        
+        setHeaderExtra(
+            <>
+                <Select
+                    showSearch
+                    allowClear
+                    placeholder="Lọc danh mục"
+                    value={selectedCategory}
+                    onChange={setSelectedCategory}
+                    style={{ width: 180, marginRight: 8 }}
+                    options={uniqueCategories.map(c => ({ value: c, label: c }))}
+                />
                 <Input.Search
-                    placeholder="🔍 Tìm theo SKU, Barcode, Tên..."
+                    placeholder="Tìm SKU, tên sản phẩm..."
                     value={searchText}
                     onChange={(e) => setSearchText(e.target.value)}
-                    onSearch={(value) => setSearchText(value)}
+                    onSearch={(v) => setSearchText(v)}
                     allowClear
-                    size="large"
-                    style={{ width: '100%', maxWidth: 500 }}
+                    style={{ width: 280 }}
+                    size="middle"
                 />
-            </div>
+            </>
+        );
+        return () => clearHeaderExtra();
+    }, [searchText, selectedCategory, productRows, setHeaderExtra, clearHeaderExtra]);
 
-            <Card title="🔍 Kiểm tra tồn kho">
+    return (
+        <div>
+            <Card>
                 <Table
                     columns={productColumns}
                     dataSource={filteredProductRows}
@@ -817,305 +1009,332 @@ export default function StockBalancePage() {
                         showSizeChanger: true,
                         showTotal: (total) => searchText ? `Tìm thấy ${total} / ${productRows.length} sản phẩm` : `Tổng ${total} sản phẩm`,
                     }}
-                    expandable={{
-                        expandedRowKeys,
-                        onExpand: (expanded, record) => {
-                            if (expanded) {
-                                setExpandedRowKeys([...expandedRowKeys, record.key]);
-                            } else {
-                                setExpandedRowKeys(expandedRowKeys.filter(k => k !== record.key));
-                            }
-                        },
-                        expandedRowRender: (record) => {
-                            const units = getProductUnits(record.productName);
-                            return (
-                                <div style={{
-                                    padding: 12,
-                                    background: '#e6f7ff',
-                                    border: '2px solid #1890ff',
-                                    borderRadius: 8,
-                                    margin: '4px 0',
-                                }}>
-                                    {/* CONFIG BAR — dynamic units per product */}
-                                    <div style={{
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: 12,
-                                        padding: '10px 16px',
-                                        background: '#fffbe6',
-                                        border: '1px solid #ffe58f',
-                                        borderRadius: 8,
-                                        marginBottom: 12,
-                                        flexWrap: 'wrap',
-                                    }}>
-                                        <span style={{ fontSize: 13, fontWeight: 600, color: '#d48806' }}>⚙️ Quy đổi:</span>
-                                        {units.map((unit, i) => (
-                                            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 13, background: '#fff', padding: '4px 8px', borderRadius: 6, border: '1px solid #ffe58f' }}>
-                                                <span>1</span>
-                                                <input
-                                                    value={unit.label}
-                                                    style={{ width: 55, border: '1px solid #d9d9d9', borderRadius: 4, padding: '2px 6px', fontWeight: 600, fontSize: 13, textAlign: 'center', fontFamily: 'inherit' }}
-                                                    onChange={(e) => updateConversionUnit(record.productName, i, 'label', e.target.value)}
-                                                />
-                                                <span>=</span>
-                                                <InputNumber
-                                                    value={unit.rate || undefined}
-                                                    min={1}
-                                                    placeholder="0"
-                                                    style={{ width: 65, fontWeight: 700 }}
-                                                    onChange={(v) => updateConversionUnit(record.productName, i, 'rate', v || 0)}
-                                                />
-                                                <span style={{ color: '#595959' }}>{record.unit}</span>
-                                                <Button
-                                                    type="text"
-                                                    size="small"
-                                                    danger
-                                                    onClick={() => removeConversionUnit(record.productName, i)}
-                                                    style={{ padding: '0 4px', fontSize: 12, minWidth: 0 }}
-                                                >🗑️</Button>
-                                            </div>
-                                        ))}
-                                        <Button
-                                            size="small"
-                                            onClick={() => addConversionUnit(record.productName)}
-                                            style={{ fontWeight: 600, borderStyle: 'dashed' }}
-                                        >➕ Thêm đơn vị</Button>
-                                        {units.length > 0 && <span style={{ fontSize: 11, color: '#bfbfbf', fontStyle: 'italic' }}>* Tự lưu</span>}
-                                    </div>
-
-                                    <div style={{ overflowX: 'auto' }}>
-                                        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                                            <thead>
-                                                <tr style={{ background: '#bae7ff' }}>
-                                                    <th style={{ padding: '10px 8px', textAlign: 'left', fontSize: 12, fontWeight: 700, color: '#262626' }}>SKU</th>
-                                                    <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#262626' }}>Màu sắc</th>
-                                                    <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: 12, fontWeight: 700, color: '#262626' }}>Tồn HT</th>
-                                                    {units.map((unit, i) => (
-                                                        <th key={i} style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#262626', minWidth: 70 }}>
-                                                            📦 {unit.label}
-                                                            {unit.rate > 0 && <div style={{ fontSize: 10, color: '#1890ff', fontWeight: 500 }}>(×{unit.rate})</div>}
-                                                        </th>
-                                                    ))}
-                                                    <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#262626', minWidth: 70 }}>📦 Lẻ ({record.unit})</th>
-                                                    {units.length > 0 && <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#096dd9', minWidth: 90 }}>Tổng TT</th>}
-                                                    <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: 12, fontWeight: 700, color: '#262626' }}>Chênh lệch</th>
-                                                    <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#262626', minWidth: 180 }}>📝 Ghi chú <span style={{ color: '#ff4d4f' }}>*</span></th>
-                                                    <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#262626', minWidth: 100 }}></th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {record.variants.map((variant, idx) => {
-                                                    const rowBg = idx % 2 === 0 ? '#fff' : '#fafafa';
-                                                    const ci = countingInputs[variant.sku] || { unitCounts: [], le: 0 };
-                                                    const hasCountInput = (ci.unitCounts || []).some(v => v > 0) || ci.le > 0;
-                                                    let calcTotal: number | null = null;
-                                                    if (hasCountInput) {
-                                                        calcTotal = ci.le || 0;
-                                                        units.forEach((unit, i) => { calcTotal! += (ci.unitCounts?.[i] || 0) * (unit.rate || 0); });
-                                                    }
-                                                    return (
-                                                        <tr key={variant.sku} style={{ background: rowBg }}>
-                                                            <td style={{ padding: '10px 8px', borderBottom: '1px solid #f0f0f0' }}>
-                                                                <Tag color="cyan">{variant.sku}</Tag>
-                                                            </td>
-                                                            <td style={{ padding: '10px 8px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
-                                                                {variant.color ? (
-                                                                    <Tag color="blue">🎨 {variant.color}</Tag>
-                                                                ) : (
-                                                                    <span style={{ color: '#bfbfbf' }}>—</span>
-                                                                )}
-                                                            </td>
-                                                            <td style={{ padding: '10px 8px', textAlign: 'right', borderBottom: '1px solid #f0f0f0', fontWeight: 700 }}>
-                                                                {variant.systemStock}
-                                                            </td>
-                                                            {/* DYNAMIC UNIT COLUMNS */}
-                                                            {units.map((_, unitIdx) => (
-                                                                <td key={unitIdx} style={{ padding: '6px 4px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
-                                                                    <InputNumber
-                                                                        value={ci.unitCounts?.[unitIdx] || undefined}
-                                                                        min={0}
-                                                                        placeholder="—"
-                                                                        style={{ width: 56, fontWeight: 700 }}
-                                                                        onChange={(v) => updateCountingInput(variant.sku, record.productName, unitIdx, v || 0)}
-                                                                    />
-                                                                </td>
-                                                            ))}
-                                                            {/* CỘT LẺ */}
-                                                            <td style={{ padding: '6px 4px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
-                                                                <InputNumber
-                                                                    value={ci.le || undefined}
-                                                                    min={0}
-                                                                    placeholder="—"
-                                                                    style={{ width: 56, fontWeight: 700 }}
-                                                                    onChange={(v) => updateCountingInput(variant.sku, record.productName, 'le', v || 0)}
-                                                                />
-                                                            </td>
-                                                            {/* TỔNG TT (chỉ hiện nếu có units) */}
-                                                            {units.length > 0 && (
-                                                                <td style={{ padding: '10px 8px', textAlign: 'center', borderBottom: '1px solid #f0f0f0', fontWeight: 900, fontSize: 16, color: '#096dd9' }}>
-                                                                    {calcTotal !== null ? calcTotal.toLocaleString('vi-VN') : <span style={{ color: '#bfbfbf', fontWeight: 400, fontSize: 13 }}>—</span>}
-                                                                </td>
-                                                            )}
-                                                            {/* CHÊNH LỆCH */}
-                                                            <td style={{ padding: '10px 8px', textAlign: 'right', borderBottom: '1px solid #f0f0f0' }}>
-                                                                <Tag
-                                                                    color={variant.difference === 0 ? 'default' : variant.difference > 0 ? 'success' : 'error'}
-                                                                    style={{ fontWeight: 700, fontSize: 13 }}
-                                                                >
-                                                                    {variant.difference > 0 ? `+${variant.difference}` : variant.difference}
-                                                                </Tag>
-                                                            </td>
-                                                            {/* GHI CHÚ - bắt buộc khi chênh lệch */}
-                                                            <td style={{ padding: '6px 4px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
-                                                                {variant.difference !== 0 ? (
-                                                                    <Input.TextArea
-                                                                        value={balanceNotes[variant.sku] || ''}
-                                                                        onChange={(e) => setBalanceNotes(prev => ({ ...prev, [variant.sku]: e.target.value }))}
-                                                                        placeholder="Nhập lý do..."
-                                                                        rows={1}
-                                                                        autoSize={{ minRows: 1, maxRows: 3 }}
-                                                                        style={{
-                                                                            width: '100%',
-                                                                            minWidth: 140,
-                                                                            fontSize: 12,
-                                                                            borderColor: (balanceNotes[variant.sku]?.trim()) ? '#52c41a' : '#ff4d4f',
-                                                                        }}
-                                                                        status={!(balanceNotes[variant.sku]?.trim()) ? 'error' : undefined}
-                                                                    />
-                                                                ) : (
-                                                                    <span style={{ color: '#bfbfbf', fontSize: 12 }}>—</span>
-                                                                )}
-                                                            </td>
-                                                            {/* CÂN BẰNG */}
-                                                            <td style={{ padding: '10px 8px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
-                                                                {variant.difference !== 0 ? (
-                                                                    <Button
-                                                                        type="primary"
-                                                                        size="small"
-                                                                        icon={<SyncOutlined />}
-                                                                        onClick={() => handleSingleBalance(variant)}
-                                                                        style={{ background: '#faad14', borderColor: '#faad14', fontWeight: 600 }}
-                                                                    >
-                                                                        Cân bằng
-                                                                    </Button>
-                                                                ) : (
-                                                                    <Tag color="success">✅</Tag>
-                                                                )}
-                                                            </td>
-                                                        </tr>
-                                                    );
-                                                })}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            );
-                        },
-                        rowExpandable: (record) => record.variantCount > 0,
-                    }}
                     onRow={(record) => ({
-                        onClick: () => {
-                            if (expandedRowKeys.includes(record.key)) {
-                                setExpandedRowKeys(expandedRowKeys.filter(k => k !== record.key));
+                        onClick: (e) => {
+                            const target = e.target as HTMLElement;
+                            if (target.closest('input, textarea, .ant-input-number')) return;
+                            const isExpanded = expandedRowKeys.includes(record.key);
+                            const now = Date.now();
+                            // Guard: ignore spurious close events within 800ms of opening
+                            if (isExpanded && lastExpandTime.current.key === record.key && now - lastExpandTime.current.time < 800) return;
+                            if (isExpanded) {
+                                setExpandedRowKeys([]);
+                                setDrawerLogs([]);
                             } else {
-                                setExpandedRowKeys([...expandedRowKeys, record.key]);
+                                lastExpandTime.current = { key: record.key, time: now };
+                                setExpandedRowKeys([record.key]);
+                                loadProductLogs(record);
                             }
                         },
                         style: { cursor: 'pointer' },
                     })}
-                    rowClassName={(record) => {
-                        const hasAdjust = record.variants.some(v => v.difference !== 0);
-                        return hasAdjust ? 'stock-difference-row' : '';
-                    }}
-                />
-            </Card>
-
-            <Divider />
-
-            {/* History */}
-            <Card title="📋 Lịch sử cân bằng kho" style={{ marginTop: 24 }}>
-                <Table
-                    columns={recordColumns}
-                    dataSource={balanceRecords}
-                    rowKey="id"
-                    pagination={{
-                        pageSize: 10,
-                        showTotal: (total) => `Tổng ${total} lần`,
-                    }}
                     expandable={{
+                        expandedRowKeys,
+                        showExpandColumn: false,
                         expandedRowRender: (record) => {
-                            if (!record.items || record.items.length === 0) {
-                                return <div style={{ padding: 16, color: '#8c8c8c' }}>Không có chi tiết</div>;
-                            }
-
+                            const units = getProductUnits(record.productName);
                             return (
                                 <div style={{
-                                    background: '#f0f2f5',
-                                    padding: 16,
+                                    margin: '0 -8px',
+                                    background: '#f8faff',
+                                    border: '2px solid #1890ff',
                                     borderRadius: 8,
+                                    overflow: 'hidden',
                                 }}>
-                                    <table style={{
-                                        width: '100%',
-                                        borderCollapse: 'collapse',
-                                        background: '#fff',
-                                        borderRadius: 8,
-                                        overflow: 'hidden',
-                                    }}>
-                                        <thead>
-                                            <tr style={{ background: 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)' }}>
-                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'left', fontWeight: 600 }}>SKU</th>
-                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'left', fontWeight: 600 }}>Tên sản phẩm</th>
-                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'center', fontWeight: 600 }}>Màu sắc</th>
-                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'right', fontWeight: 600 }}>Tồn cũ</th>
-                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'right', fontWeight: 600 }}>Tồn mới</th>
-                                                <th style={{ padding: '12px', color: '#fff', textAlign: 'right', fontWeight: 600 }}>Chênh lệch</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {record.items.map((item: StockBalanceItem, idx: number) => {
-                                                const rowBg = idx % 2 === 0 ? '#fff' : '#fafafa';
-                                                const diffColor = item.difference > 0 ? '#52c41a' : item.difference < 0 ? '#ff4d4f' : '#8c8c8c';
+                                    <Tabs
+                                        activeKey={drawerTab}
+                                        onChange={(k) => setDrawerTab(k as any)}
+                                        style={{ padding: '0 16px' }}
+                                        items={[
+                                            {
+                                                key: 'overview',
+                                                label: '📊 Tổng quan',
+                                                children: (
+                                                    <div style={{ padding: '0' }}>
+                                                        {/* Variant overview table matching Products.tsx */}
+                                                        <div style={{
+                                                            padding: '12px',
+                                                            background: '#e6f7ff',
+                                                            border: '3px solid #1890ff',
+                                                            borderRadius: '8px',
+                                                            margin: '8px 0',
+                                                        }}>
+                                                            <div style={{ overflowX: 'auto', overflowY: 'hidden' }}>
+                                                                <table style={{
+                                                                    width: '100%',
+                                                                    minWidth: 800,
+                                                                    borderCollapse: 'collapse',
+                                                                }}>
+                                                                    <thead>
+                                                                        <tr style={{ background: 'linear-gradient(135deg, #1890ff 0%, #096dd9 100%)' }}>
+                                                                            <th style={{ padding: '10px 8px', textAlign: 'left', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 150 }}>
+                                                                                Sản phẩm
+                                                                            </th>
+                                                                            <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 100 }}>
+                                                                                Màu sắc
+                                                                            </th>
+                                                                            <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 120 }}>
+                                                                                Mã hàng
+                                                                            </th>
+                                                                            <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 100 }}>
+                                                                                Giá vốn
+                                                                            </th>
+                                                                            <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 60 }}>
+                                                                                DVT
+                                                                            </th>
+                                                                            <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 80 }}>
+                                                                                📦 Tồn kho
+                                                                            </th>
+                                                                        </tr>
+                                                                    </thead>
+                                                                    <tbody>
+                                                                        {record.variants.map((v, idx) => {
+                                                                            const rowBg = idx % 2 === 0 ? '#fff' : '#fafafa';
+                                                                            return (
+                                                                                <tr key={v.sku} style={{
+                                                                                    background: rowBg,
+                                                                                    transition: 'background 0.2s',
+                                                                                    cursor: 'default',
+                                                                                }}
+                                                                                    onMouseEnter={(e) => e.currentTarget.style.background = '#bae7ff'}
+                                                                                    onMouseLeave={(e) => e.currentTarget.style.background = rowBg}
+                                                                                >
+                                                                                    <td style={{ padding: '10px 8px', fontSize: 12 }}>
+                                                                                        <span style={{ fontWeight: 500, color: '#262626' }}>
+                                                                                            {record.productName}
+                                                                                        </span>
+                                                                                    </td>
+                                                                                    <td style={{ padding: '10px 8px', textAlign: 'center' }}>
+                                                                                        <span style={{ fontSize: 12, fontWeight: 600, color: '#1890ff' }}>
+                                                                                            {v.color || '—'}
+                                                                                        </span>
+                                                                                    </td>
+                                                                                    <td style={{ padding: '10px 8px', textAlign: 'center' }}>
+                                                                                        <strong style={{ color: '#00ab56', fontSize: 11 }}>
+                                                                                            {v.sku}
+                                                                                        </strong>
+                                                                                    </td>
+                                                                                    <td style={{ padding: '10px 8px', textAlign: 'right' }}>
+                                                                                        <span style={{ fontSize: 11, color: '#595959' }}>
+                                                                                            {v.cost != null ? `${v.cost.toLocaleString('vi-VN')}đ` : '—'}
+                                                                                        </span>
+                                                                                    </td>
+                                                                                    <td style={{ padding: '10px 8px', textAlign: 'center' }}>
+                                                                                        <span style={{ fontSize: 11, fontWeight: 600, color: '#722ed1' }}>
+                                                                                            {record.unit || 'Cái'}
+                                                                                        </span>
+                                                                                    </td>
+                                                                                    <td style={{ padding: '10px 8px', textAlign: 'center' }}>
+                                                                                        {!isManager ? (
+                                                                                            <div style={{ background: '#d9d9d9', color: '#595959', padding: '6px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 14, display: 'inline-block', minWidth: 45 }}>
+                                                                                                ***
+                                                                                            </div>
+                                                                                        ) : (
+                                                                                            <div style={{
+                                                                                                background: v.systemStock <= record.minStock
+                                                                                                    ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
+                                                                                                    : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)',
+                                                                                                color: '#fff',
+                                                                                                padding: '6px 10px',
+                                                                                                borderRadius: 6,
+                                                                                                textAlign: 'center',
+                                                                                                fontWeight: 900,
+                                                                                                fontSize: 14,
+                                                                                                display: 'inline-block',
+                                                                                                minWidth: 45,
+                                                                                            }}>
+                                                                                                {v.systemStock}
+                                                                                            </div>
+                                                                                        )}
+                                                                                    </td>
+                                                                                </tr>
+                                                                            );
+                                                                        })}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                ),
+                                            },
+                                            {
+                                                key: 'check',
+                                                label: '⚖️ Kiểm hàng',
+                                                children: (() => {
+                                    const units = getProductUnits(record.productName);
+                                    return (
+                                        <div style={{ padding: '12px 0' }}>
+                                            {/* CONFIG BAR — dynamic units per product */}
+                                            <div style={{
+                                                display: 'flex', alignItems: 'center', gap: 12,
+                                                padding: '10px 16px', background: '#fffbe6',
+                                                border: '1px solid #ffe58f', borderRadius: 8,
+                                                marginBottom: 12, flexWrap: 'wrap',
+                                            }}>
+                                                <span style={{ fontSize: 13, fontWeight: 600, color: '#d48806' }}>⚙️ Quy đổi:</span>
+                                                {units.map((unit, i) => (
+                                                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 13, background: '#fff', padding: '4px 8px', borderRadius: 6, border: '1px solid #ffe58f' }}>
+                                                        <span>1</span>
+                                                        <input value={unit.label} style={{ width: 55, border: '1px solid #d9d9d9', borderRadius: 4, padding: '2px 6px', fontWeight: 600, fontSize: 13, textAlign: 'center', fontFamily: 'inherit' }}
+                                                            onChange={(e) => updateConversionUnit(record.productName, i, 'label', e.target.value)} />
+                                                        <span>=</span>
+                                                        <InputNumber value={unit.rate || undefined} min={1} placeholder="0" style={{ width: 65, fontWeight: 700 }}
+                                                            onChange={(v) => updateConversionUnit(record.productName, i, 'rate', v || 0)} />
+                                                        <span style={{ color: '#595959' }}>{record.unit}</span>
+                                                        <Button type="text" size="small" danger onClick={() => removeConversionUnit(record.productName, i)} style={{ padding: '0 4px', fontSize: 12, minWidth: 0 }}>🗑️</Button>
+                                                    </div>
+                                                ))}
+                                                <Button size="small" onClick={() => addConversionUnit(record.productName)} style={{ fontWeight: 600, borderStyle: 'dashed' }}>➕ Thêm đơn vị</Button>
+                                                {units.length > 0 && <span style={{ fontSize: 11, color: '#bfbfbf', fontStyle: 'italic' }}>* Tự lưu</span>}
+                                            </div>
 
-                                                return (
-                                                    <tr key={item.sku} style={{ background: rowBg }}>
-                                                        <td style={{ padding: '10px', borderBottom: '1px solid #f0f0f0' }}>
-                                                            <Tag color="cyan">{item.sku}</Tag>
-                                                        </td>
-                                                        <td style={{ padding: '10px', borderBottom: '1px solid #f0f0f0', fontWeight: 500 }}>
-                                                            {item.productName}
-                                                        </td>
-                                                        <td style={{ padding: '10px', borderBottom: '1px solid #f0f0f0', textAlign: 'center' }}>
-                                                            {item.color ? (
-                                                                <Tag color="blue">🎨 {item.color}</Tag>
-                                                            ) : (
-                                                                <span style={{ color: '#bfbfbf' }}>—</span>
-                                                            )}
-                                                        </td>
-                                                        <td style={{ padding: '10px', borderBottom: '1px solid #f0f0f0', textAlign: 'right' }}>
-                                                            <Tag color="default">{item.systemStock}</Tag>
-                                                        </td>
-                                                        <td style={{ padding: '10px', borderBottom: '1px solid #f0f0f0', textAlign: 'right' }}>
-                                                            <Tag color="green">{item.actualStock}</Tag>
-                                                        </td>
-                                                        <td style={{ padding: '10px', borderBottom: '1px solid #f0f0f0', textAlign: 'right' }}>
-                                                            <Tag color={diffColor === '#52c41a' ? 'success' : diffColor === '#ff4d4f' ? 'error' : 'default'}>
-                                                                {item.difference > 0 ? `+${item.difference}` : item.difference}
-                                                            </Tag>
-                                                        </td>
-                                                    </tr>
-                                                );
-                                            })}
-                                        </tbody>
-                                    </table>
+                                            <div style={{ overflowX: 'auto' }}>
+                                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                                    <thead>
+                                                        <tr style={{ background: '#bae7ff' }}>
+                                                            <th style={{ padding: '10px 8px', textAlign: 'left', fontSize: 12, fontWeight: 700 }}>SKU</th>
+                                                            <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700 }}>Màu sắc</th>
+                                                            <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: 12, fontWeight: 700 }}>Tồn HT</th>
+                                                            {units.map((unit, i) => (
+                                                                <th key={i} style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, minWidth: 70 }}>
+                                                                    📦 {unit.label}
+                                                                    {unit.rate > 0 && <div style={{ fontSize: 10, color: '#1890ff', fontWeight: 500 }}>(×{unit.rate})</div>}
+                                                                </th>
+                                                            ))}
+                                                            <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, minWidth: 70 }}>📦 Lẻ ({record.unit})</th>
+                                                            {units.length > 0 && <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#096dd9', minWidth: 90 }}>Tổng TT</th>}
+                                                            <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: 12, fontWeight: 700 }}>Chênh lệch</th>
+                                                            <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, minWidth: 150 }}>📝 Ghi chú <span style={{ color: '#ff4d4f' }}>*</span></th>
+                                                            <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, minWidth: 100 }}></th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {record.variants.map((variant, idx) => {
+                                                            const rowBg = idx % 2 === 0 ? '#fff' : '#fafafa';
+                                                            const ci = countingInputs[variant.sku] || { unitCounts: [], le: 0 };
+                                                            const hasCountInput = (ci.unitCounts || []).some(v => v > 0) || ci.le > 0;
+                                                            let calcTotal: number | null = null;
+                                                            if (hasCountInput) {
+                                                                calcTotal = ci.le || 0;
+                                                                units.forEach((unit, i) => { calcTotal! += (ci.unitCounts?.[i] || 0) * (unit.rate || 0); });
+                                                            }
+                                                            return (
+                                                                <tr key={variant.sku} style={{ background: rowBg }}>
+                                                                    <td style={{ padding: '10px 8px', borderBottom: '1px solid #f0f0f0' }}><Tag color="cyan">{variant.sku}</Tag></td>
+                                                                    <td style={{ padding: '10px 8px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
+                                                                        {variant.color ? <Tag color="blue">🎨 {variant.color}</Tag> : <span style={{ color: '#bfbfbf' }}>—</span>}
+                                                                    </td>
+                                                                    <td style={{ padding: '10px 8px', textAlign: 'right', borderBottom: '1px solid #f0f0f0', fontWeight: 700 }}>
+                                                                        {isManager ? variant.systemStock : <span style={{ color: '#d9d9d9' }}>***</span>}
+                                                                    </td>
+                                                                    {units.map((_, unitIdx) => (
+                                                                        <td key={unitIdx} style={{ padding: '6px 4px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
+                                                                            <InputNumber value={ci.unitCounts?.[unitIdx] || undefined} min={0} placeholder="—" style={{ width: 56, fontWeight: 700 }}
+                                                                                onChange={(v) => updateCountingInput(variant.sku, record.productName, unitIdx, v || 0)} />
+                                                                        </td>
+                                                                    ))}
+                                                                    <td style={{ padding: '6px 4px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
+                                                                        <InputNumber value={ci.le || undefined} min={0} placeholder="—" style={{ width: 56, fontWeight: 700 }}
+                                                                            onChange={(v) => updateCountingInput(variant.sku, record.productName, 'le', v || 0)} />
+                                                                    </td>
+                                                                    {units.length > 0 && (
+                                                                        <td style={{ padding: '10px 8px', textAlign: 'center', borderBottom: '1px solid #f0f0f0', fontWeight: 900, fontSize: 16, color: '#096dd9' }}>
+                                                                            {calcTotal !== null ? calcTotal.toLocaleString('vi-VN') : <span style={{ color: '#bfbfbf', fontWeight: 400, fontSize: 13 }}>—</span>}
+                                                                        </td>
+                                                                    )}
+                                                                    <td style={{ padding: '10px 8px', textAlign: 'right', borderBottom: '1px solid #f0f0f0' }}>
+                                                                        {isManager ? (
+                                                                            <Tag color={variant.difference === 0 ? 'default' : variant.difference > 0 ? 'success' : 'error'} style={{ fontWeight: 700, fontSize: 13 }}>
+                                                                                {variant.difference > 0 ? `+${variant.difference}` : variant.difference}
+                                                                            </Tag>
+                                                                        ) : (
+                                                                            calcTotal !== null ? (
+                                                                                <Tag color={variant.difference > 0 ? 'success' : 'error'} style={{ fontWeight: 700, fontSize: 12 }}>
+                                                                                    {variant.difference > 0 ? 'Thừa hàng' : 'Thiếu hàng'}
+                                                                                </Tag>
+                                                                            ) : (
+                                                                                <span style={{ color: '#bfbfbf' }}>—</span>
+                                                                            )
+                                                                        )}
+                                                                    </td>
+                                                                    <td style={{ padding: '6px 4px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
+                                                                        {variant.difference !== 0 ? (
+                                                                            <Input.TextArea value={balanceNotes[variant.sku] || ''} onChange={(e) => setBalanceNotes(prev => ({ ...prev, [variant.sku]: e.target.value }))}
+                                                                                placeholder="Nhập lý do..." rows={1} autoSize={{ minRows: 1, maxRows: 3 }}
+                                                                                style={{ width: '100%', minWidth: 120, fontSize: 12, borderColor: balanceNotes[variant.sku]?.trim() ? '#52c41a' : '#ff4d4f' }}
+                                                                                status={!balanceNotes[variant.sku]?.trim() ? 'error' : undefined} />
+                                                                        ) : <span style={{ color: '#bfbfbf', fontSize: 12 }}>—</span>}
+                                                                    </td>
+                                                                    <td style={{ padding: '10px 8px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
+                                                                        {variant.difference !== 0 ? (
+                                                                            <Button type="primary" size="small" icon={<SyncOutlined />} onClick={() => handleSingleBalance(variant)}
+                                                                                style={{ background: '#faad14', borderColor: '#faad14', fontWeight: 600 }}>Cân bằng</Button>
+                                                                        ) : <Tag color="success">✅</Tag>}
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        })}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    );
+                                })(),
+                            },
+                            {
+                                key: 'ledger',
+                                label: '📋 Thẻ kho',
+                                children: (
+                                    <div style={{ padding: "12px 0" }}>
+                                        {!drawerLogsLoading && drawerLogs.length === 0 ? (
+                                            <Empty description="Chưa có biến động tồn kho" style={{ padding: 40 }} />
+                                        ) : (
+                                            <Table
+                                                dataSource={drawerLogs}
+                                                loading={drawerLogsLoading}
+                                                rowKey="id"
+                                                size="small"
+                                                pagination={{ pageSize: 30, showSizeChanger: false }}
+                                                columns={[
+                                                    { title: "Thời gian / Nhân sự", dataIndex: "createdAt", width: 140, render: (d: string, r: InventoryLogItem) => <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}><span style={{ fontSize: 12, color: "#595959", fontWeight: 500 }}>{dayjs(d).format("DD/MM/YY HH:mm")}</span><span style={{ fontSize: 11, color: "#1677ff" }}>👤 {r.userName || 'Hệ thống'}</span></div> },
+                                                    { title: "SKU", dataIndex: "sku", width: 140, render: (sku: string, r: InventoryLogItem) => <div><Tag color="cyan" style={{ fontSize: 11 }}>{sku}</Tag>{r.variantColor && <span style={{ fontSize: 11, color: "#8c8c8c" }}> ({r.variantColor})</span>}</div> },
+                                                    { title: "Loại", dataIndex: "referenceType", width: 110, render: (ref: string, r: InventoryLogItem) => { const m: Record<string, {color:string;label:string}> = { NHAP:{color:"green",label:"📦 Nhập"}, POS:{color:"blue",label:"💰 POS"}, TMDT:{color:"purple",label:"🛒 TMĐT"}, XUAT:{color:"orange",label:"📤 Xuất"}, TRA:{color:"gold",label:"🔄 Trả"}, HOAN:{color:"cyan",label:"↩️ Hoàn"}, CAN_BANG:{color:"geekblue",label:"⚖️ CB"} }; const info = m[ref||""]||{color:"default",label:r.type}; return <Tag color={info.color} style={{ fontSize: 11 }}>{info.label}</Tag>; } },
+                                                    { title: "Mã CT", dataIndex: "reference", width: 140, render: (ref: string, r: InventoryLogItem) => {
+                                                        if (!ref) return <span style={{ color: "#d9d9d9" }}>—</span>;
+                                                        return (
+                                                            <span 
+                                                                onClick={() => {
+                                                                    const eEvent = new CustomEvent('navigate', { 
+                                                                        detail: r.referenceType === 'NHAP' ? 'purchase' : r.referenceType === 'POS' ? 'sales-history' : r.referenceType === 'TMDT' ? 'ecommerce-export' : r.referenceType === 'XUAT' ? 'order-picking' : r.referenceType === 'TRA' ? 'returns' : r.referenceType === 'HOAN' ? 'refunds' : 'stock-balance' 
+                                                                    });
+                                                                    window.dispatchEvent(eEvent);
+                                                                }}
+                                                                style={{ fontSize: 11, fontFamily: "monospace", color: "#1890ff", cursor: "pointer", textDecoration: "underline", display: "inline-block", padding: "4px 0" }}
+                                                                title="Nhấp để đi đến chứng từ gốc"
+                                                            >
+                                                                {ref}
+                                                            </span>
+                                                        );
+                                                    } },
+                                                    { title: "Tồn đầu", dataIndex: "oldStock", width: 80, align: "right" as const, render: (s: number) => <span style={{ fontWeight: 500, color: "#8c8c8c" }}>{isManager ? s : '***'}</span> },
+                                                    { title: "Thay đổi", dataIndex: "quantity", width: 90, align: "right" as const, render: (qty: number) => <span style={{ fontWeight: 800, fontSize: 14, color: qty > 0 ? "#1890ff" : qty < 0 ? "#ff4d4f" : "#8c8c8c" }}>{qty > 0 ? "+" + qty : qty}</span> },
+                                                    { title: "Tồn cuối", dataIndex: "newStock", width: 80, align: "right" as const, render: (s: number) => <span style={{ fontWeight: 600 }}>{isManager ? s : '***'}</span> },
+                                                    { title: "Ghi chú", dataIndex: "note", ellipsis: true, render: (note: string) => note ? <span style={{ fontSize: 12, color: "#595959" }}>{note}</span> : <span style={{ color: "#d9d9d9" }}>—</span> },
+                                                ]}
+                                            />
+                                        )}
+                                    </div>
+                                ),
+                            },
+                        ]}
+                                    />
                                 </div>
                             );
                         },
-                        rowExpandable: (record) => record.items && record.items.length > 0,
                     }}
                 />
             </Card>
 
-            {/* Confirmation Modal */}
             <Modal
                 title="✅ Xác nhận cân bằng kho"
                 open={modalVisible}
@@ -1201,7 +1420,11 @@ export default function StockBalancePage() {
                         )}
                         <div style={{ marginBottom: 8 }}>
                             <Text strong>Tồn hệ thống: </Text>
-                            <Text style={{ fontSize: 16, fontWeight: 700, color: '#1890ff' }}>{quickBalanceItem.systemStock}</Text>
+                            {isManager ? (
+                                <Text style={{ fontSize: 16, fontWeight: 700, color: '#1890ff' }}>{quickBalanceItem.systemStock}</Text>
+                            ) : (
+                                <Text style={{ fontSize: 13, fontWeight: 700, color: '#fa8c16', background: '#fff7e6', padding: '2px 8px', borderRadius: 4, display: 'inline-block' }}>*** (Chế độ Kiểm Kê Mù)</Text>
+                            )}
                         </div>
                     </div>
                 )}
