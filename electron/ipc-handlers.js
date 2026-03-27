@@ -1905,6 +1905,7 @@ ipcMain.handle('purchases:getAll', async () => {
         if (!prisma) throw new Error('Prisma not available');
 
         const purchases = await prisma.purchaseOrder.findMany({
+            where: { status: { not: 'cancelled' } },
             include: {
                 supplier: true,
                 items: {
