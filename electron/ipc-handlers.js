@@ -323,6 +323,7 @@ async function backupInvoiceToCloudAndTelegram(order, invoiceNumber, taxCode) {
 // ========================================
 
 let prisma;
+let prismaDirectTx; // Dùng DIRECT_URL cho transactions nặng (bypass PgBouncer)
 
 try {
     console.log('🔄 Initializing Prisma Client...');
@@ -339,7 +340,22 @@ try {
             }
         }
     });
+
+    // Client riêng dùng DIRECT_URL (không qua PgBouncer) cho các transactions nhiều bước
+    prismaDirectTx = new PrismaClient({
+        log: ['error', 'warn'],
+        datasources: {
+            db: {
+                url: config.DIRECT_URL
+            }
+        }
+    });
     console.log('✅ Prisma Client initialized successfully');
+
+    // Connect direct client (silent - không block startup)
+    prismaDirectTx.$connect()
+        .then(() => console.log('✅ Connected Prisma Direct (for transactions)'))
+        .catch(err => console.error('⚠️ Prisma Direct connect failed:', err.message));
 
     // Test connection - REQUIRED
     prisma.$connect()
@@ -1980,7 +1996,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
             }
         }
 
-        const purchase = await prisma.$transaction(async (tx) => {
+        const purchase = await prismaDirectTx.$transaction(async (tx) => {
             const newOrder = await tx.purchaseOrder.create({
                 data: {
                     poNumber: `PO${Date.now()}`,
@@ -2030,7 +2046,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
             }
 
             return newOrder;
-        });
+        }, { timeout: 60000, maxWait: 10000 });
 
         console.log(`✅ Created purchase order: ${purchase.poNumber}`);
         await logActivity({ module: 'purchases', action: 'CREATE', description: `Tạo phiếu nhập ${purchase.poNumber} - ${new Intl.NumberFormat('vi-VN').format(data.totalAmount)}đ`, recordName: purchase.poNumber, userName: data.createdBy || 'Admin' });
@@ -2085,7 +2101,7 @@ ipcMain.handle('purchases:delete', async (event, id) => {
         if (!order) throw new Error(`Không tìm thấy phiếu nhập #${id}`);
         if (order.status === 'cancelled') return { success: true };
 
-        await prisma.$transaction(async (tx) => {
+        await prismaDirectTx.$transaction(async (tx) => {
             const productIds = [...new Set(order.items.map(i => i.productId))];
             const products = await tx.product.findMany({
                 where: { id: { in: productIds } }
