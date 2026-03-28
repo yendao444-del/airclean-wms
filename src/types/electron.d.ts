@@ -158,6 +158,10 @@ export interface ElectronAPI {
         bulkCreate: (records: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         selectFolder: () => Promise<{ success: boolean; data?: string; error?: string }>;
         loadExcelFiles: (folderPath: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+        selectAndWatch: () => Promise<{ success: boolean; data?: any; error?: string }>;
+        startWatch: (folderPath: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+        stopWatch: () => Promise<{ success: boolean; error?: string }>;
+        onNewFile: (callback: (data: { name: string; base64: string; path: string }) => void) => () => void;
     };
     exportOrders: {
         getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;

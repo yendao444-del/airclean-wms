@@ -523,8 +523,24 @@ ipcMain.handle('products:getAll', async () => {
         }
 
         const products = await prisma.product.findMany({
-            include: {
-                category: true
+            select: {
+                id: true,
+                name: true,
+                sku: true,
+                unit: true,
+                variants: true,
+                cost: true,
+                price: true,
+                stock: true,
+                minStock: true,
+                maxStock: true,
+                status: true,
+                barcode: true,
+                description: true,
+                categoryId: true,
+                createdAt: true,
+                updatedAt: true,
+                category: { select: { id: true, name: true } }
             },
             orderBy: { createdAt: 'desc' }
         });
@@ -1369,7 +1385,7 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
  * Hàm lõi do AI Agent cập nhật theo "Mệnh lệnh tối cao":
  * Bắt buộc 100% chạy trong Prisma Transaction, kèm logContext.
  */
-async function updateProductStockInTx(tx, sku, quantity, logContext) {
+async function updateProductStockInTx(tx, sku, quantity, logContext, options = {}) {
     if (!logContext || !logContext.type || !logContext.referenceType || !logContext.reference) {
         throw new Error(`[Inventory Error] Thiếu logContext cho SKU: ${sku}. Không thể cập nhật kho mà không có lý do.`);
     }
@@ -1395,7 +1411,13 @@ async function updateProductStockInTx(tx, sku, quantity, logContext) {
         }
     }
 
-    if (!product) throw new Error(`Sản phẩm với SKU ${sku} không tồn tại.`);
+    if (!product) {
+        if (options.allowMissing) {
+            console.warn(`⚠️ [Inventory Warning] Bỏ qua trừ kho - Sản phẩm với SKU ${sku} không tồn tại.`);
+            return false;
+        }
+        throw new Error(`Sản phẩm với SKU ${sku} không tồn tại.`);
+    }
 
     let oldStock = 0;
     let newStock = 0;
@@ -1922,16 +1944,40 @@ ipcMain.handle('purchases:getAll', async () => {
 
         const purchases = await prisma.purchaseOrder.findMany({
             where: { status: { not: 'cancelled' } },
-            include: {
-                supplier: true,
+            select: {
+                id: true,
+                poNumber: true,
+                status: true,
+                subtotal: true,
+                total: true,
+                note: true,
+                createdBy: true,
+                receivedAt: true,
+                createdAt: true,
+                vatInvoiceStatus: true,
+                vatInvoiceNumber: true,
+                vatInvoiceDate: true,
+                vatInvoiceFile: true,
+                vatInvoiceDriveUrl: true,
+                importReceiptStatus: true,
+                importReceiptFile: true,
+                importReceiptDriveUrl: true,
+                supplier: { select: { id: true, name: true, code: true } },
                 items: {
-                    include: {
-                        product: true
+                    select: {
+                        id: true,
+                        productId: true,
+                        quantity: true,
+                        price: true,
+                        subtotal: true,
+                        color: true,
+                        variantSku: true,
+                        product: { select: { name: true, sku: true, unit: true } }
                     }
                 }
             },
             orderBy: { createdAt: 'desc' },
-            take: 300 // ⚡ Giới hạn 300 phiếu nhập gần nhất
+            take: 100 // ⚡ Giảm từ 300 → 100 phiếu gần nhất
         });
 
         // Format data for frontend
@@ -1962,6 +2008,10 @@ ipcMain.handle('purchases:getAll', async () => {
                 vatInvoiceFile: p.vatInvoiceFile,
                 vatInvoiceDriveUrl: p.vatInvoiceDriveUrl,
                 vatInvoiceStatus: p.vatInvoiceStatus,
+                // Phiếu nhập kho
+                importReceiptStatus: p.importReceiptStatus,
+                importReceiptFile: p.importReceiptFile,
+                importReceiptDriveUrl: p.importReceiptDriveUrl,
             };
         });
 
@@ -1995,11 +2045,29 @@ ipcMain.handle('purchases:create', async (event, data) => {
                 throw new Error(`Product ID ${item.productId} not found. Item: ${item.productName}`);
             }
         }
-
         const purchase = await prismaDirectTx.$transaction(async (tx) => {
+            // Generate standard PN-YYMMDD-XXX
+            const today = new Date();
+            const dateStr = today.toISOString().slice(2, 10).replace(/-/g, '');
+            const prefix = `PN-${dateStr}-`;
+
+            const lastOrder = await tx.purchaseOrder.findFirst({
+                where: { poNumber: { startsWith: prefix } },
+                orderBy: { poNumber: 'desc' },
+                select: { poNumber: true }
+            });
+
+            let nextNum = 1;
+            if (lastOrder && lastOrder.poNumber) {
+                const lastNumStr = lastOrder.poNumber.replace(prefix, '');
+                const lastNum = parseInt(lastNumStr, 10);
+                if (!isNaN(lastNum)) nextNum = lastNum + 1;
+            }
+            const generatedPoNumber = `${prefix}${String(nextNum).padStart(3, '0')}`;
+
             const newOrder = await tx.purchaseOrder.create({
                 data: {
-                    poNumber: `PO${Date.now()}`,
+                    poNumber: generatedPoNumber,
                     supplierId: data.supplierId,
                     status: data.status || 'completed',
                     subtotal: data.totalAmount,
@@ -4106,8 +4174,217 @@ ipcMain.handle('combos:delete', async (event, id) => {
 });
 
 // ========================================
-// ECOMMERCE EXPORT - FOLDER IMPORT
+// ECOMMERCE EXPORT - FOLDER IMPORT & WATCHER
 // ========================================
+
+let ecommerceExportWatcher = null;
+let ecommerceExportKnownFiles = new Set();
+let ecommerceExportWatchFolder = '';
+
+// Kích hoạt dialog chọn thư mục và tự động start watcher
+ipcMain.handle('ecommerceExport:selectAndWatch', async () => {
+    try {
+        const result = await dialog.showOpenDialog({
+            properties: ['openDirectory'],
+            title: 'Chọn thư mục theo dõi file Excel TMĐT (Realtime)',
+        });
+
+        if (result.canceled || result.filePaths.length === 0) {
+            return { success: false, error: 'Không có thư mục được chọn' };
+        }
+
+        const folderPath = result.filePaths[0];
+
+        // Lấy danh sách file hiện có
+        const existingFiles = fs.readdirSync(folderPath).filter(f => {
+            const ext = path.extname(f).toLowerCase();
+            return ['.xlsx', '.xls', '.csv'].includes(ext) && !f.startsWith('~$');
+        });
+
+        ecommerceExportKnownFiles = new Set(existingFiles);
+        ecommerceExportWatchFolder = folderPath;
+
+        // Dừng watcher cũ nếu có
+        if (ecommerceExportWatcher) {
+            ecommerceExportWatcher.close();
+            ecommerceExportWatcher = null;
+        }
+
+        // Bắt đầu theo dõi thư mục
+        let debounceTimer = null;
+        ecommerceExportWatcher = fs.watch(folderPath, (eventType, filename) => {
+            if (!filename) return;
+            const ext = path.extname(filename).toLowerCase();
+            if (!['.xlsx', '.xls', '.csv'].includes(ext)) return;
+            if (filename.startsWith('~$')) return; // File tạm Excel
+
+            // Debounce 2 giây (file có thể đang copy)
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                const filePath = path.join(folderPath, filename);
+
+                // Chỉ xử lý file MỚI (chưa có trong danh sách)
+                if (!ecommerceExportKnownFiles.has(filename) && fs.existsSync(filePath)) {
+                    console.log(`📁 [TMDT Watcher] File mới: ${filename}`);
+                    ecommerceExportKnownFiles.add(filename);
+
+                    // Đọc file và gửi về frontend
+                    try {
+                        const fileBuffer = fs.readFileSync(filePath);
+                        const base64 = fileBuffer.toString('base64');
+
+                        // Gửi event về tất cả cửa sổ
+                        const { BrowserWindow } = require('electron');
+                        const windows = BrowserWindow.getAllWindows();
+                        for (const win of windows) {
+                            win.webContents.send('ecommerceExport:newFile', {
+                                name: filename,
+                                base64: base64,
+                                path: filePath
+                            });
+                        }
+                        console.log(`✅ [TMDT Watcher] Đã gửi ${filename} về frontend`);
+                    } catch (readErr) {
+                        console.error(`❌ [TMDT Watcher] Lỗi đọc file ${filename}:`, readErr.message);
+                    }
+                }
+            }, 2000);
+        });
+
+        // Đọc nội dung base64 của các file hiện có
+        const existingFileList = [];
+        for (const filename of existingFiles) {
+            try {
+                const filePath = path.join(folderPath, filename);
+                const stat = fs.statSync(filePath);
+                if (!stat.isFile()) continue;
+                const fileBuffer = fs.readFileSync(filePath);
+                existingFileList.push({
+                    name: filename,
+                    base64: fileBuffer.toString('base64'),
+                    path: filePath,
+                    size: stat.size
+                });
+            } catch (err) {
+                console.error(`❌ [TMDT Watcher] Lỗi đọc file cũ ${filename}:`, err);
+            }
+        }
+
+        console.log(`👁️ [TMDT Watcher] Đang theo dõi: ${folderPath} (${existingFiles.length} file có sẵn)`);
+
+        return {
+            success: true,
+            data: {
+                folderPath,
+                existingFiles: existingFiles.length,
+                existingFileList
+            }
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Bắt đầu theo dõi trực tiếp (không dialog — dùng khi auto-restore)
+ipcMain.handle('ecommerceExport:startWatch', async (event, folderPath) => {
+    try {
+        if (!folderPath || !fs.existsSync(folderPath)) {
+            return { success: false, error: 'Thư mục không tồn tại' };
+        }
+
+        // Lấy danh sách file hiện có
+        const existingFiles = fs.readdirSync(folderPath).filter(f => {
+            const ext = path.extname(f).toLowerCase();
+            return ['.xlsx', '.xls', '.csv'].includes(ext) && !f.startsWith('~$');
+        });
+
+        ecommerceExportKnownFiles = new Set(existingFiles);
+        ecommerceExportWatchFolder = folderPath;
+
+        // Dừng watcher cũ nếu có
+        if (ecommerceExportWatcher) {
+            ecommerceExportWatcher.close();
+            ecommerceExportWatcher = null;
+        }
+
+        // Bắt đầu theo dõi
+        let debounceTimer = null;
+        ecommerceExportWatcher = fs.watch(folderPath, (eventType, filename) => {
+            if (!filename) return;
+            const ext = path.extname(filename).toLowerCase();
+            if (!['.xlsx', '.xls', '.csv'].includes(ext)) return;
+            if (filename.startsWith('~$')) return;
+
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                const filePath = path.join(folderPath, filename);
+
+                if (!ecommerceExportKnownFiles.has(filename) && fs.existsSync(filePath)) {
+                    console.log(`📁 [TMDT Watcher] File mới: ${filename}`);
+                    ecommerceExportKnownFiles.add(filename);
+
+                    try {
+                        const fileBuffer = fs.readFileSync(filePath);
+                        const base64 = fileBuffer.toString('base64');
+
+                        const { BrowserWindow } = require('electron');
+                        const windows = BrowserWindow.getAllWindows();
+                        for (const win of windows) {
+                            win.webContents.send('ecommerceExport:newFile', {
+                                name: filename,
+                                base64: base64,
+                                path: filePath
+                            });
+                        }
+                    } catch (readErr) {
+                        console.error(`❌ [TMDT Watcher] Lỗi đọc file ${filename}:`, readErr.message);
+                    }
+                }
+            }, 2000);
+        });
+
+        // Đọc nội dung base64 của các file hiện có
+        const existingFileList = [];
+        for (const filename of existingFiles) {
+            try {
+                const filePath = path.join(folderPath, filename);
+                const stat = fs.statSync(filePath);
+                if (!stat.isFile()) continue;
+                const fileBuffer = fs.readFileSync(filePath);
+                existingFileList.push({
+                    name: filename,
+                    base64: fileBuffer.toString('base64'),
+                    path: filePath,
+                    size: stat.size
+                });
+            } catch (err) {
+                console.error(`❌ [TMDT Watcher] Lỗi đọc file cũ ${filename}:`, err);
+            }
+        }
+
+        console.log(`👁️ [TMDT Watcher] Đã khôi phục session theo dõi: ${folderPath}`);
+
+        return {
+            success: true,
+            data: { folderPath, existingFiles: existingFiles.length, existingFileList }
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Dừng theo dõi
+ipcMain.handle('ecommerceExport:stopWatch', async () => {
+    if (ecommerceExportWatcher) {
+        ecommerceExportWatcher.close();
+        ecommerceExportWatcher = null;
+        ecommerceExportWatchFolder = '';
+        ecommerceExportKnownFiles.clear();
+        console.log('🛑 [TMDT Watcher] Đã dừng theo dõi');
+        return { success: true };
+    }
+    return { success: false, error: 'Không có watcher nào đang chạy' };
+});
 
 // Chọn thư mục chứa file Excel xuất hàng TMDT
 ipcMain.handle('ecommerceExport:selectFolder', async () => {
@@ -4223,8 +4500,8 @@ ipcMain.handle('ecommerceExports:getAll', async (event, { since } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const exports = await prisma.ecommerceExport.findMany({
-            where: since ? { createdAt: { gte: new Date(since) } } : undefined,
-            orderBy: { createdAt: 'desc' }
+            where: since ? { updatedAt: { gte: new Date(since) } } : undefined,
+            orderBy: { updatedAt: 'desc' }
         });
         // Format dates for frontend
         const formatted = exports.map(e => ({
@@ -4268,14 +4545,14 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
                             type: 'ecom_sale',
                             referenceType: 'TMDT',
                             reference: data.orderNumber || data.ecommerceExportCode || 'Lưu thủ công',
-                            note: `Tạo đơn TMDT: ${data.customerName}`,
+                            note: `Xuất hàng TMDT: ${data.customerName}`,
                             createdBy: data.createdBy || 'System'
-                        });
+                        }, { allowMissing: true });
                     }
                 }
             }
             return newRecord;
-        });
+        }, { timeout: 30000, maxWait: 10000 });
 
         console.log(`✅ Created ecommerce export #${record.id}`);
         await logActivity({ module: 'export', action: 'CREATE', description: `Tạo bàn giao TMDT #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
@@ -4305,7 +4582,7 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
                             reference: oldRecord.orderNumber || oldRecord.ecommerceExportCode || 'Sửa thủ công',
                             note: `Hoàn tồn (sửa đơn TMDT #${oldRecord.id})`,
                             createdBy: data.createdBy || 'System'
-                        });
+                        }, { allowMissing: true });
                     }
                 }
             }
@@ -4336,15 +4613,15 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
                             reference: data.orderNumber || data.ecommerceExportCode || 'Sửa thủ công',
                             note: `Trừ tồn mới (sửa đơn TMDT #${id})`,
                             createdBy: data.createdBy || 'System'
-                        });
+                        }, { allowMissing: true });
                     }
                 }
             }
             return newRecord;
-        });
+        }, { timeout: 30000, maxWait: 10000 });
 
         console.log(`✅ Updated ecommerce export #${record.id}`);
-        await logActivity({ module: 'export', action: 'UPDATE', description: `Cập nhật bàn giao TMDT #${record.id}`, recordId: String(record.id) });
+        await logActivity({ module: 'export', action: 'UPDATE', description: `Cập nhật bàn giao TMDT #${record.id}`, recordId: record.id });
         return { success: true, data: record };
     } catch (error) {
         console.error('❌ Update ecommerce export error:', error);
@@ -4370,12 +4647,12 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
                             reference: doc.orderNumber || doc.ecommerceExportCode || 'Xóa thủ công',
                             note: `Hoàn tồn do xóa đơn TMDT #${id}`,
                             createdBy: 'System'
-                        });
+                        }, { allowMissing: true });
                     }
                 }
             }
             await tx.ecommerceExport.delete({ where: { id } });
-        });
+        }, { timeout: 30000, maxWait: 10000 });
 
         console.log(`✅ Deleted ecommerce export #${id}`);
         await logActivity({ module: 'export', action: 'DELETE', description: `Xóa bàn giao TMDT #${id}` });
@@ -4406,7 +4683,7 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
                                 reference: doc.orderNumber || doc.ecommerceExportCode || 'Xóa hàng loạt',
                                 note: `Hoàn tồn do xóa đơn TMDT #${id}`,
                                 createdBy: 'System'
-                            });
+                            }, { allowMissing: true });
                         }
                     }
                 }
@@ -4414,7 +4691,7 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
                 deletedCount++;
             }
             return deletedCount;
-        });
+        }, { timeout: 30000, maxWait: 10000 });
 
         console.log(`✅ Bulk deleted ${count} ecommerce exports`);
         await logActivity({ module: 'export', action: 'DELETE', description: `Xóa hàng loạt ${count} bàn giao TMDT` });
@@ -4438,7 +4715,7 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
                         ecommerceExportCode: data.ecommerceExportCode || null,
                         orderNumber: data.orderNumber || null,
                         ecommerceExportReason: data.ecommerceExportReason || null,
-                        ecommerceExportDate: new Date(data.ecommerceExportDate),
+                        ecommerceExportDate: (data.ecommerceExportDate && !isNaN(new Date(data.ecommerceExportDate).getTime())) ? new Date(data.ecommerceExportDate) : new Date(),
                         items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
                         totalAmount: data.totalAmount || 0,
                         notes: data.notes || null,
@@ -4455,15 +4732,18 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
                                 type: 'ecom_sale',
                                 referenceType: 'TMDT',
                                 reference: data.orderNumber || data.ecommerceExportCode || 'Nhập hàng loạt',
-                                note: `Tạo đơn TMDT: ${data.customerName}`,
+                                note: `Xuất hàng TMDT: ${data.customerName}`,
                                 createdBy: data.createdBy || 'System'
-                            });
+                            }, { allowMissing: true });
                         }
                     }
                 }
                 batchCreated.push(record);
             }
             return batchCreated;
+        }, {
+            maxWait: 15000,
+            timeout: 120000,
         });
 
         console.log(`✅ Bulk created ${created.length} ecommerce exports`);
@@ -4483,8 +4763,8 @@ ipcMain.handle('exportOrders:getAll', async (event, { since } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const orders = await prisma.exportOrder.findMany({
-            where: since ? { createdAt: { gte: new Date(since) } } : undefined,
-            orderBy: { createdAt: 'desc' }
+            where: since ? { updatedAt: { gte: new Date(since) } } : undefined,
+            orderBy: { updatedAt: 'desc' }
         });
         const formatted = orders.map(o => ({
             ...o,
@@ -4885,13 +5165,14 @@ ipcMain.handle('stockBalance:create', async (event, data) => {
         const record = await prisma.stockBalance.create({
             data: {
                 date: new Date(data.date),
-                adjustedBy: data.adjustedBy,
+                adjustedBy: currentSession?.username || data.adjustedBy || 'System',
                 items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
                 notes: data.notes || null
             }
         });
         console.log(`✅ Created stock balance record #${record.id}`);
-        await logActivity({ module: 'products', action: 'UPDATE', description: `Cân bằng kho - ${data.adjustedBy}`, recordName: data.adjustedBy, userName: data.adjustedBy });
+        const effectiveUser = currentSession?.username || data.adjustedBy || 'System';
+        await logActivity({ module: 'products', action: 'UPDATE', description: `Cân bằng kho - ${effectiveUser}`, recordName: effectiveUser, userName: effectiveUser });
         return { success: true, data: record };
     } catch (error) {
         console.error('❌ Create stock balance error:', error);
@@ -4909,8 +5190,13 @@ async function createInventoryLog({ sku, productId, productName, variantColor, t
         if (!prisma) return null;
 
         let reporterId = null;
-        if (typeof createdBy === 'string') {
-            const user = await prisma.user.findUnique({ where: { username: createdBy } });
+        
+        // Đích danh user đang thao tác (chống ghi đè 'System' hay 'Admin' mù mờ)
+        let actualUsername = currentSession?.username;
+        if (!actualUsername && typeof createdBy === 'string') actualUsername = createdBy;
+
+        if (actualUsername) {
+            const user = await prisma.user.findUnique({ where: { username: actualUsername } });
             if (user) reporterId = user.id;
         } else if (typeof createdBy === 'number') {
             reporterId = createdBy;
@@ -5035,7 +5321,7 @@ ipcMain.handle('inventoryLogs:getAll', async (event, filters = {}) => {
         const formatted = logs.map(l => ({
             ...l,
             createdAt: l.createdAt.toISOString(),
-            userName: l.user?.fullName || l.user?.username || null,
+            userName: l.user?.username || null,
         }));
         
         console.log(`📋 [ThẻKho] Loaded ${formatted.length} logs`);
@@ -5063,12 +5349,59 @@ ipcMain.handle('inventoryLogs:getBySku', async (event, { sku, limit = 100 }) => 
         const formatted = logs.map(l => ({
             ...l,
             createdAt: l.createdAt.toISOString(),
-            userName: l.user?.fullName || l.user?.username || null,
+            userName: l.user?.username || null,
         }));
         
         return { success: true, data: formatted };
     } catch (error) {
         console.error('❌ Get inventory logs by SKU error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// Lấy chi tiết chứng từ gốc từ inventory log (click Mã CT)
+ipcMain.handle('inventoryLogs:getRefDetail', async (event, { referenceType, reference }) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        if (!reference) return { success: false, error: 'Không có mã chứng từ' };
+
+        const refType = (referenceType || '').toUpperCase();
+
+        // TMDT / TMDT_EDIT / TMDT_CANCEL
+        if (refType.startsWith('TMDT')) {
+            const doc = await prisma.ecommerceExport.findFirst({
+                where: { OR: [{ orderNumber: reference }, { ecommerceExportCode: reference }] }
+            });
+            if (!doc) return { success: false, error: `Chi tiết chứng từ gốc không còn trên hệ thống: ${reference}` };
+            let items = [];
+            try { items = typeof doc.items === 'string' ? JSON.parse(doc.items) : (doc.items || []); } catch {}
+            return { success: true, type: 'TMDT', data: { ...doc, items } };
+        }
+
+        // POS / POS_EDIT / POS_CANCEL
+        if (refType.startsWith('POS')) {
+            const order = await prisma.order.findFirst({
+                where: { orderNumber: reference },
+                include: { items: true, payments: true, customer: true }
+            });
+            if (!order) return { success: false, error: `Chi tiết chứng từ gốc không còn trên hệ thống: ${reference}` };
+            return { success: true, type: 'POS', data: order };
+        }
+
+        // NHAP (Purchase)
+        if (refType === 'NHAP') {
+            const po = await prisma.purchaseOrder.findFirst({
+                where: { poNumber: reference },
+                include: { supplier: true, items: { include: { product: { select: { name: true, sku: true, unit: true } } } } }
+            });
+            if (!po) return { success: false, error: `Chi tiết chứng từ gốc không còn trên hệ thống: ${reference}` };
+            return { success: true, type: 'PURCHASE', data: po };
+        }
+
+        // Adjustment / other — không có chứng từ gốc
+        return { success: false, error: 'Loại chứng từ này không có chi tiết để xem.' };
+    } catch (error) {
+        console.error('❌ getRefDetail error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6309,7 +6642,7 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
                     module: 'einvoice',
                     action: 'ERROR',
                     description: `Lỗi xuất HĐĐT MISA cho đơn ${order.orderId}: ${orderErr.message}`,
-                    recordId: order.id?.toString(),
+                    recordId: order.id,
                     severity: 'ERROR',
                     userName: 'System',
                 });

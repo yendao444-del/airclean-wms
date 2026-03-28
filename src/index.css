@@ -52,3 +52,29 @@ body {
 .status-row-refunded:hover {
     background-color: #ffd6e7 !important;
 }
+
+@keyframes scan-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+}
+
+.scan-input-wrap {
+    position: relative;
+    border-radius: 10px;
+}
+
+.scan-input-wrap::before {
+    content: '';
+    position: absolute;
+    inset: -2px;
+    border: 2px solid #52c41a;
+    border-radius: 10px;
+    pointer-events: none;
+    animation: scan-pulse 1.6s ease-in-out infinite;
+    will-change: opacity;
+}
+
+.scan-input-wrap:focus-within::before {
+    animation-play-state: paused;
+    opacity: 1;
+}

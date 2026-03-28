@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import {
     Card,
     Button,
@@ -61,6 +62,7 @@ interface EcommerceExport {
 
 export default function EcommerceExportPage() {
     const { user } = useAuth();
+    const currentUser = useCurrentUser();
     const isAdmin = user?.role === 'admin';
 
     const [ecommerceExports, setEcommerceExports] = useState<EcommerceExport[]>([]);
@@ -79,7 +81,6 @@ export default function EcommerceExportPage() {
     const [selectedRowKeys, setSelectedRowKeys] = useState<number[]>([]);
 
     // 📦 State cho quét mã vận đơn (inline - không dùng modal)
-    const [scanInput, setScanInput] = useState('');
     const [scanStatus, setScanStatus] = useState<{
         type: 'idle' | 'success' | 'error' | 'warning';
         message: string;
@@ -95,8 +96,15 @@ export default function EcommerceExportPage() {
     const [unmatchedScans, setUnmatchedScans] = useState<{ trackingId: string; scannedAt: string }[]>([]);
     const unmatchedDateRef = useRef(dayjs().format('YYYY-MM-DD')); // Ngày hiện tại để auto-reset
 
+    // Chống trùng lặp cho Realtime Watcher
+    const realtimeImportedOrdersRef = useRef<Set<string>>(new Set());
+
     // 🔎 State cho tìm kiếm mã vận đơn đi
     const [searchKeyword, setSearchKeyword] = useState('');
+
+    // 📂 State cho Folder Watcher
+    const [watchFolder, setWatchFolder] = useState<string>('');
+    const [isWatching, setIsWatching] = useState<boolean>(false);
 
     // ⚙️ State cho Settings Telegram
     const [settingsModalVisible, setSettingsModalVisible] = useState(false);
@@ -123,12 +131,39 @@ export default function EcommerceExportPage() {
                     chatId: chatIdResult.success && chatIdResult.data ? chatIdResult.data : '',
                     apiToken: apiTokenResult.success && apiTokenResult.data ? apiTokenResult.data : '',
                 });
+
+                // Khôi phục session theo dõi folder TMĐT
+                const watchFolderRs = await window.electronAPI.appConfig.get('ecommerceWatchFolder');
+                if (watchFolderRs.success && watchFolderRs.data) {
+                    const startRs = await window.electronAPI.ecommerceExports.startWatch(watchFolderRs.data);
+                    if (startRs.success) {
+                        setWatchFolder(watchFolderRs.data);
+                        setIsWatching(true);
+                        console.log(`✅ Khôi phục theo dõi TMĐT: ${watchFolderRs.data} (${startRs.data.existingFiles} file)`);
+                        
+                        if (startRs.data.existingFileList && startRs.data.existingFileList.length > 0) {
+                            for (const fileData of startRs.data.existingFileList) {
+                                handleImportFromWatcher(fileData);
+                            }
+                        }
+                    } else {
+                        await window.electronAPI.appConfig.set('ecommerceWatchFolder', ''); 
+                    }
+                }
             } catch (error) {
-                console.error('Error loading telegram settings:', error);
+                console.error('Error loading settings/watch_folder:', error);
             }
         })();
 
-        const interval = setInterval(() => loadEcommerceExports(true), 30000);
+        // Listener file mới (Realtime)
+        const cleanupWatch = window.electronAPI.ecommerceExports.onNewFile((data: any) => {
+            console.log('🆕 [TMDT Watcher] Nhận file:', data.name);
+            handleImportFromWatcher(data);
+        });
+
+        const interval = setInterval(() => {
+            loadEcommerceExports(true);
+        }, 30000);
 
         // ⚡ Auto-reset danh sách lệch đơn khi sang ngày mới (check mỗi phút)
         const dailyResetInterval = setInterval(() => {
@@ -143,8 +178,19 @@ export default function EcommerceExportPage() {
         return () => {
             clearInterval(interval);
             clearInterval(dailyResetInterval);
+            if (cleanupWatch) cleanupWatch();
         };
     }, []);
+
+    // Function to get current db state inside async watcher directly
+    // to avoid stale closures.
+    const getLatestExports = async () => {
+        try {
+            const result = await window.electronAPI.ecommerceExports.getAll();
+            if (result.success && result.data) return result.data;
+        } catch { }
+        return ecommerceExports;
+    };
 
     // 📊 Hàm phát âm thanh - clone mỗi lần để quét nhanh không bị chồng
     const playSound = (src: HTMLAudioElement | null) => {
@@ -406,50 +452,36 @@ Thời gian: ${currentTime}`;
                 playSuccess();
                 setScanStatus({
                     type: 'success',
-                    message: `✅ THÀNH CÔNG - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                    message: `✅ SẼ CẬP NHẬT - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                 });
-                message.success(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} gửi hàng thành công ✓`);
 
                 // Sau đó mới chạy async operations (không block UI)
                 (async () => {
                     try {
-                        // 🔧 FIX: Cập nhật status vào DATABASE trực tiếp thay vì dùng stale closure
-                        await window.electronAPI.ecommerceExports.update(foundEcommerceExport.id, {
+                        const updateRes = await window.electronAPI.ecommerceExports.update(foundEcommerceExport.id, {
                             ...foundEcommerceExport,
                             status: 'completed'
                         });
+
+                        if (!updateRes.success) {
+                            playAlert();
+                            setScanStatus({
+                                type: 'error',
+                                message: `❌ LỖI DATABASE: ${updateRes.error}`,
+                            });
+                            message.error(`Lỗi cập nhật: ${updateRes.error}`);
+                            return; // Stop here!
+                        }
+
                         console.log(`✅ Đã cập nhật status → completed cho đơn #${foundEcommerceExport.id}`);
+                        
+                        setScanStatus({
+                            type: 'success',
+                            message: `✅ THÀNH CÔNG - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                        });
+                        message.success(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} gửi hàng thành công ✓`);
 
-                        // Parse items để trừ tồn kho
-                        let items: ExportItem[] = [];
-                        try {
-                            items = JSON.parse(foundEcommerceExport.items);
-                        } catch {
-                            items = [];
-                        }
-
-                        // 📦 TRỪ TỒN KHO cho từng item
-                        for (const item of items) {
-                            if (item.variantSku) {
-                                try {
-                                    await window.electronAPI.products.updateStock({
-                                        sku: item.variantSku,
-                                        quantity: item.quantity,
-                                        isAdd: false, // TRỪ tồn kho
-                                        logContext: {
-                                            type: 'ecom_sale',
-                                            referenceType: 'TMDT',
-                                            reference: foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode || `Phiếu ${foundEcommerceExport.id}`,
-                                            note: `Scan mã VĐ: Giao hàng ${foundEcommerceExport.customerName}`,
-                                            createdBy: null
-                                        }
-                                    });
-                                    console.log(`✅ Đã trừ tồn kho: ${item.variantSku} -${item.quantity}`);
-                                } catch (error) {
-                                    console.error(`❌ Lỗi trừ tồn kho cho SKU ${item.variantSku}:`, error);
-                                }
-                            }
-                        }
+                        // 🚫 Gỡ bỏ Update Stock tại Frontend vì Backend đã lo transaction nguyên tử.
 
                         // 📱 Gửi thông báo Telegram
                         await sendTelegramNotification(foundEcommerceExport);
@@ -457,8 +489,9 @@ Thời gian: ${currentTime}`;
                         // 🔄 Reload từ DB sau khi tất cả operations hoàn tất
                         loadEcommerceExports();
                     } catch (error) {
-                        console.error('Error updating stock:', error);
-                        message.error('Lỗi khi cập nhật tồn kho!');
+                        console.error('Error updating stock/status:', error);
+                        message.error('Lỗi khi cập nhật!');
+                        playAlert();
                     }
                 })();
             }
@@ -480,18 +513,86 @@ Thời gian: ${currentTime}`;
             });
         }
 
-        setScanInput('');
+        if (scanInputRef.current?.input) scanInputRef.current.input.value = '';
         scanInputRef.current?.focus();
-    };
-
-    const handleScanInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        setScanInput(e.target.value);
     };
 
     const handleScanKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
-            handleScan(scanInput);
+            handleScan(scanInputRef.current?.input?.value || '');
         }
+    };
+
+    // 📤 Quét hàng loạt bằng file Excel
+    const handleImportScanExcel = () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.xlsx, .xls';
+        input.onchange = async (e: any) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                try {
+                    const data = event.target?.result;
+                    const workbook = XLSX.read(data, { type: 'binary' });
+                    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const json = XLSX.utils.sheet_to_json(sheet) as any[];
+
+                    if (json.length === 0) {
+                        message.warning('File Excel trống!');
+                        return;
+                    }
+
+                    // Tìm cột có từ khóa "Mã Vận Đơn", "Tracking", v.v.
+                    const firstRow = json[0] || {};
+                    let trackingKey = Object.keys(firstRow).find(k =>
+                        k.toLowerCase().includes('mã vận đơn') ||
+                        k.toLowerCase().includes('tracking') ||
+                        k.toLowerCase().includes('vận đơn') ||
+                        k.toLowerCase().includes('mã vd')
+                    );
+
+                    // Nếu không tìm thấy bằng keyword, hỏi người dùng hoặc lấy cột đầu tiên có vẻ chứa tracking
+                    if (!trackingKey) {
+                        trackingKey = Object.keys(firstRow)[0]; // Fallback lấy cột đầu tiên
+                        message.info(`Không tìm thấy cột 'Mã vận đơn', đang dùng cột: [${trackingKey}]`);
+                    }
+
+                    const trackings = json.map(row => String(row[trackingKey] || '').trim()).filter(Boolean);
+                    
+                    if (trackings.length === 0) {
+                        message.error('Không tìm thấy dữ liệu mã vận đơn trong file!');
+                        return;
+                    }
+
+                    message.loading({ content: `Đang xử lý ${trackings.length} mã vận đơn...`, key: 'bulkScan' });
+                    
+                    let successCount = 0;
+                    let errorCount = 0;
+
+                    for (const tracking of trackings) {
+                        // Chúng ta chạy tuần tự để Backend không bị Rate Limit / Race Condition trên SQLite/Supabase
+                        await new Promise(r => setTimeout(r, 100)); // Delay nhỏ để tránh spam API
+                        
+                        // Fake input ref value to avoid rewriting handleScan
+                        if (scanInputRef.current?.input) scanInputRef.current.input.value = tracking;
+                        
+                        // Gọi hàm xử lý quét (Nó sẽ tự auto skip nếu đã quét)
+                        await handleScan(tracking);
+                    }
+
+                    message.success({ content: `Đã xử lý xong file Excel (Nhập: ${trackings.length} mã).`, key: 'bulkScan', duration: 4 });
+
+                } catch (error) {
+                    console.error('Scan Excel Error:', error);
+                    message.error({ content: 'Lỗi đọc file Excel!', key: 'bulkScan' });
+                }
+            };
+            reader.readAsBinaryString(file);
+        };
+        input.click();
     };
 
     // 📤 Xuất Excel với bộ lọc trạng thái
@@ -946,7 +1047,8 @@ Thời gian: ${currentTime}`;
 
                 // 🔧 FIX: Lưu vào DATABASE thay vì chỉ reload (saveEcommerceExports chỉ reload)
                 try {
-                    await window.electronAPI.ecommerceExports.bulkCreate(newEcommerceExports);
+                    const result = await window.electronAPI.ecommerceExports.bulkCreate(newEcommerceExports);
+                    if (!result.success) throw new Error(result.error || 'Lỗi DB');
                     console.log(`✅ Đã lưu ${newEcommerceExports.length} đơn vào database`);
                     loadEcommerceExports();
                 } catch (dbError) {
@@ -1191,11 +1293,12 @@ Thời gian: ${currentTime}`;
                         // Trước đây chỉ gọi setEcommerceExports → data chỉ ở memory
                         // → Khi handleScan gọi loadEcommerceExports() reload từ DB → mất hết data
                         try {
-                            await window.electronAPI.ecommerceExports.bulkCreate(newEcommerceExports);
+                            const result = await window.electronAPI.ecommerceExports.bulkCreate(newEcommerceExports);
+                            if (!result.success) throw new Error(result.error || 'Lỗi DB');
                             console.log(`✅ Đã lưu ${newEcommerceExports.length} đơn vào database`);
                         } catch (dbError) {
                             console.error('❌ Lỗi lưu vào database:', dbError);
-                            message.error(`Lỗi lưu ${newEcommerceExports.length} đơn vào database`);
+                            message.error(`Lỗi lưu ${newEcommerceExports.length} đơn: ${dbError instanceof Error ? dbError.message : 'Unknown'}`);
                         }
                     }
 
@@ -1219,6 +1322,169 @@ Thời gian: ${currentTime}`;
         } catch (error) {
             console.error('Folder import error:', error);
             message.error({ content: 'Lỗi khi import từ thư mục!', key: 'import-folder' });
+        }
+    };
+
+    // ⚡ Xử lý 1 file từ Realtime Watcher
+    const handleImportFromWatcher = async (fileData: any) => {
+        try {
+            const binaryString = atob(fileData.base64);
+            const workbook = XLSX.read(binaryString, { type: 'binary' });
+            const sheetName = workbook.SheetNames[0];
+            const worksheet = workbook.Sheets[sheetName];
+            const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+            const firstRow: any = jsonData[0] || {};
+            const isTikTok = 'Order ID' in firstRow || 'Cancelled Time' in firstRow;
+            const isShopee = 'Mã đơn hàng' in firstRow || 'Đơn Vị Vận Chuyển' in firstRow;
+
+            if (!isTikTok && !isShopee) return;
+
+            const orderMap = new Map<string, any[]>();
+            let shopeeSkuHeader = '';
+            if (isShopee) {
+                const skuCell = worksheet['T1'];
+                shopeeSkuHeader = skuCell ? (skuCell.v || skuCell.w || '') : '';
+            }
+
+            if (isTikTok) {
+                jsonData.forEach((row: any) => {
+                    const orderId = row['Order ID'] || '';
+                    const productName = row['Product Name'] || '';
+                    const variation = row['Variation'] || '';
+                    const sku = row['Seller SKU'] || '';
+                    const quantity = parseInt(row['Quantity'] || row['Quantity of return'] || row['Quantity of Return'] || '1');
+                    const cancelledTime = row['Cancelled Time'] || row['Cancelled time'] || '';
+                    const shippingProvider = row['Shipping Provider Name'] || '';
+                    const trackingId = row['Tracking ID'] || '';
+                    const orderAmount = parseFloat(row['Order Amount'] || '0');
+
+                    if (orderId.includes('Platform unique') || trackingId.includes("order's tracking")) return;
+                    if (!orderId || !productName || !trackingId) return;
+
+                    const item = {
+                        productId: 0,
+                        productName: variation ? `${productName} - ${variation}` : productName,
+                        color: variation || undefined,
+                        variantSku: sku,
+                        quantity: quantity,
+                        unitPrice: orderAmount / quantity || 0,
+                        total: orderAmount || 0,
+                    };
+                    if (!orderMap.has(orderId)) orderMap.set(orderId, []);
+                    orderMap.get(orderId)!.push({ item, cancelledTime, shippingProvider, trackingId, ecommerceExportReason: 'Hủy đơn TikTok', customerName: 'TikTok', totalAmount: orderAmount });
+                });
+            } else if (isShopee) {
+                jsonData.forEach((row: any) => {
+                    const orderId = row['Mã đơn hàng'] || '';
+                    const productName = row['Tên sản phẩm'] || row['Tên Sản Phẩm'] || '';
+                    const variation = row['Tên phân loại hàng'] || row['Phân loại hàng'] || '';
+                    const sku = row[shopeeSkuHeader] || '';
+                    const quantity = parseInt(row['Số lượng'] || '1');
+                    const cancelledTime = row['Ngày gửi hàng'] || row['Thời gian tạo đơn hàng'] || '';
+                    const shippingProvider = row['Đơn Vị Vận Chuyển'] || '';
+                    const trackingId = row['Mã vận đơn'] || '';
+                    const ecommerceExportReason = row['Trạng Thái Đơn Hàng'] || 'Hủy đơn Shopee';
+                    const rawAmount2 = row['Tổng số tiền Người mua thanh toán'] ?? row['Tổng giá trị đơn hàng (VND)'] ?? row['Tổng giá bán (sản phẩm)'] ?? row['Tổng đơn hàng'] ?? row['Thành tiền'] ?? row['Tổng cộng'] ?? 0;
+                    const totalAmount = typeof rawAmount2 === 'number' ? rawAmount2 : parseFloat(String(rawAmount2).replace(/,/g, '')) || 0;
+                    const unitPrice2 = quantity > 0 ? totalAmount / quantity : totalAmount;
+
+                    if (!orderId || !productName) return;
+
+                    const item = {
+                        productId: 0,
+                        productName: variation ? `${productName} - ${variation}` : productName,
+                        color: variation || undefined,
+                        variantSku: sku,
+                        quantity: quantity,
+                        unitPrice: unitPrice2,
+                        total: totalAmount,
+                    };
+                    if (!orderMap.has(orderId)) orderMap.set(orderId, []);
+                    orderMap.get(orderId)!.push({ item, cancelledTime, shippingProvider, trackingId, ecommerceExportReason, customerName: 'Shopee', totalAmount });
+                });
+            }
+
+            const currentDbExports = await getLatestExports(); // Avoid stale state
+            const newEcommerceExports: EcommerceExport[] = [];
+            let startId = currentDbExports.length > 0 ? Math.max(...currentDbExports.map(r => r.id)) + 1 : 1;
+            let skippedCount = 0;
+
+            orderMap.forEach((orderItems, orderId) => {
+                const isDuplicateInDB = currentDbExports.some(existing => existing.orderNumber === orderId || existing.ecommerceExportCode === orderId);
+                const isDuplicateInSession = realtimeImportedOrdersRef.current.has(orderId);
+                
+                if (isDuplicateInDB || isDuplicateInSession) { skippedCount++; return; }
+
+                const firstItem = orderItems[0];
+                const trackingId = firstItem.trackingId?.toString().trim();
+                const hasTracking = trackingId && trackingId !== 'N/A' && trackingId !== '—' && trackingId !== '';
+                if (!hasTracking) { skippedCount++; return; }
+
+                const allItems = orderItems.map(data => data.item);
+                const totalQuantity = allItems.reduce((sum, item) => sum + item.quantity, 0);
+                const skuCount = allItems.length;
+
+                newEcommerceExports.push({
+                    id: startId++,
+                    ecommerceExportCode: orderId,
+                    customerName: firstItem.customerName,
+                    orderNumber: orderId,
+                    ecommerceExportDate: firstItem.cancelledTime ? dayjs(firstItem.cancelledTime).format('YYYY-MM-DD HH:mm:ss') : dayjs().format('YYYY-MM-DD HH:mm:ss'),
+                    notes: `Shipping: ${firstItem.shippingProvider || 'N/A'} | Tracking: ${firstItem.trackingId || 'N/A'} | ${skuCount} SKU | SL: ${totalQuantity}`,
+                    totalAmount: firstItem.totalAmount,
+                    items: JSON.stringify(allItems),
+                    ecommerceExportReason: firstItem.ecommerceExportReason,
+                    status: 'pending',
+                });
+                // Đánh dấu đã import trong session realtime để tránh file sau trùng
+                realtimeImportedOrdersRef.current.add(orderId);
+            });
+
+            if (newEcommerceExports.length > 0) {
+                const result = await window.electronAPI.ecommerceExports.bulkCreate(newEcommerceExports);
+                if (result.success) {
+                    message.success(`✅ Realtime: Đã thêm ${newEcommerceExports.length} đơn`);
+                    loadEcommerceExports();
+                } else {
+                    message.error(`Lỗi Database: ${result.error || 'Unknown error'}`);
+                }
+            } else if (orderMap.size > 0) {
+                message.info(`Realtime: Bỏ qua đơn trùng (${skippedCount}) từ ${fileData.name}`);
+            }
+        } catch (error) {
+            console.error('Realtime import error:', error);
+        }
+    };
+
+    const toggleWatchFolder = async () => {
+        if (isWatching) {
+            const rs = await window.electronAPI.ecommerceExports.stopWatch();
+            if (rs.success) {
+                setIsWatching(false);
+                setWatchFolder('');
+                await window.electronAPI.appConfig.set('ecommerceWatchFolder', '');
+                message.success('Đã dừng theo dõi thư mục');
+            } else {
+                message.error('Lỗi khi dừng theo dõi');
+            }
+        } else {
+            const rs = await window.electronAPI.ecommerceExports.selectAndWatch();
+            if (rs.success) {
+                setIsWatching(true);
+                setWatchFolder(rs.data.folderPath);
+                await window.electronAPI.appConfig.set('ecommerceWatchFolder', rs.data.folderPath);
+                message.success(`Đang theo dõi: ${rs.data.folderPath}. Đã nạp ${rs.data.existingFiles} file có sẵn.`);
+                
+                // Nạp tự động các file hiện có (giống tính năng DBY)
+                if (rs.data.existingFileList && rs.data.existingFileList.length > 0) {
+                    for (const fileData of rs.data.existingFileList) {
+                        handleImportFromWatcher(fileData);
+                    }
+                }
+            } else if (rs.error !== 'Không có thư mục được chọn') {
+                message.error(rs.error);
+            }
         }
     };
 
@@ -1578,241 +1844,185 @@ Thời gian: ${currentTime}`;
 
     return (
         <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
-                    <Title level={2} style={{ color: '#262626', margin: 0 }}>
-                        <SendOutlined style={{ marginRight: 12, color: '#52c41a' }} />
-                        Xuất hàng TMDT
-                    </Title>
+            {/* Dòng 1: Stats + Search + Actions */}
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'nowrap' }}>
+                <Tag
+                    onClick={() => setStatusFilter('pending')}
+                    style={{
+                        cursor: 'pointer', flexShrink: 0,
+                        padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                        borderRadius: 8, border: 'none',
+                        background: statusFilter === 'pending'
+                            ? 'linear-gradient(135deg, #fa8c16 0%, #faad14 100%)'
+                            : 'linear-gradient(135deg, #ffd591 0%, #ffe7ba 100%)',
+                        color: '#fff',
+                    }}
+                >
+                    📦 Chờ: {ecommerceExports.filter(r => r.status !== 'completed').length}
+                </Tag>
+                <Tag
+                    onClick={() => setStatusFilter('overdue')}
+                    style={{
+                        cursor: 'pointer', flexShrink: 0,
+                        padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                        borderRadius: 8, border: 'none',
+                        background: statusFilter === 'overdue'
+                            ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
+                            : 'linear-gradient(135deg, #ffccc7 0%, #ffd8d6 100%)',
+                        color: '#fff',
+                    }}
+                >
+                    ⚠️ Quá hạn: {ecommerceExports.filter(r => {
+                        const ecommerceExportDate = dayjs(r.ecommerceExportDate).startOf('day');
+                        const today = dayjs().startOf('day');
+                        return ecommerceExportDate.isBefore(today) && r.status !== 'completed';
+                    }).length}
+                </Tag>
+                <Tag
+                    onClick={() => setStatusFilter('no_data')}
+                    style={{
+                        cursor: 'pointer', flexShrink: 0,
+                        padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                        borderRadius: 8, border: 'none',
+                        background: statusFilter === 'no_data'
+                            ? 'linear-gradient(135deg, #8c8c8c 0%, #595959 100%)'
+                            : 'linear-gradient(135deg, #d9d9d9 0%, #bfbfbf 100%)',
+                        color: '#fff',
+                    }}
+                >
+                    ⚡ Lệch: {unmatchedScans.length}
+                </Tag>
 
-                    {/* 📊 Statistics Tags */}
-                    <Space size={8} wrap>
-                        <Tag
-                            onClick={() => setStatusFilter('pending')}
-                            style={{
-                                cursor: 'pointer',
-                                padding: '6px 14px',
-                                fontSize: 13,
-                                fontWeight: 600,
-                                borderRadius: 8,
-                                border: 'none',
-                                background: statusFilter === 'pending'
-                                    ? 'linear-gradient(135deg, #fa8c16 0%, #faad14 100%)'
-                                    : 'linear-gradient(135deg, #ffd591 0%, #ffe7ba 100%)',
-                                color: '#fff',
-                                boxShadow: statusFilter === 'pending'
-                                    ? '0 2px 8px rgba(250, 173, 20, 0.4)'
-                                    : '0 1px 4px rgba(250, 173, 20, 0.2)',
-                                transition: 'all 0.3s',
-                            }}
-                        >
-                            📦 Chờ: {ecommerceExports.filter(r => r.status !== 'completed').length}
-                        </Tag>
-                        <Tag
-                            onClick={() => setStatusFilter('overdue')}
-                            style={{
-                                cursor: 'pointer',
-                                padding: '6px 14px',
-                                fontSize: 13,
-                                fontWeight: 600,
-                                borderRadius: 8,
-                                border: 'none',
-                                background: statusFilter === 'overdue'
-                                    ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
-                                    : 'linear-gradient(135deg, #ffccc7 0%, #ffd8d6 100%)',
-                                color: '#fff',
-                                boxShadow: statusFilter === 'overdue'
-                                    ? '0 2px 8px rgba(255, 77, 79, 0.4)'
-                                    : '0 1px 4px rgba(255, 77, 79, 0.2)',
-                                transition: 'all 0.3s',
-                            }}
-                        >
-                            ⚠️ Quá hạn: {ecommerceExports.filter(r => {
-                                const ecommerceExportDate = dayjs(r.ecommerceExportDate).startOf('day');
-                                const today = dayjs().startOf('day');
-                                const isNotToday = ecommerceExportDate.isBefore(today);
-                                return isNotToday && r.status !== 'completed';
-                            }).length}
-                        </Tag>
-                        <Tag
-                            onClick={() => setStatusFilter('no_data')}
-                            style={{
-                                cursor: 'pointer',
-                                padding: '6px 14px',
-                                fontSize: 13,
-                                fontWeight: 600,
-                                borderRadius: 8,
-                                border: 'none',
-                                background: statusFilter === 'no_data'
-                                    ? 'linear-gradient(135deg, #8c8c8c 0%, #595959 100%)'
-                                    : 'linear-gradient(135deg, #d9d9d9 0%, #bfbfbf 100%)',
-                                color: '#fff',
-                                boxShadow: statusFilter === 'no_data'
-                                    ? '0 2px 8px rgba(0, 0, 0, 0.3)'
-                                    : '0 1px 4px rgba(0, 0, 0, 0.1)',
-                                transition: 'all 0.3s',
-                            }}
-                        >
-                            ⚡ Lệch đơn: {unmatchedScans.length}
-                        </Tag>
-                    </Space>
+                <div style={{ width: 1, height: 24, background: '#d9d9d9', flexShrink: 0 }} />
 
-
-                    {selectedRowKeys.length > 0 && (
-                        <div style={{ fontSize: 14, fontWeight: 500, color: '#52c41a', marginLeft: 4 }}>
-                            ✓ Đã chọn {selectedRowKeys.length} phiếu
-                        </div>
-                    )}
-                </div>
-
-                <Space>
-                    {selectedRowKeys.length > 0 && (
-                        <Button
-                            danger
-                            icon={<DeleteOutlined />}
-                            onClick={handleBulkDelete}
-                            size="large"
-                        >
-                            Xóa đã chọn ({selectedRowKeys.length})
-                        </Button>
-                    )}
-                    <Dropdown
-                        menu={{
-                            items: [
-                                {
-                                    key: 'all',
-                                    label: '📋 Xuất tất cả',
-                                    onClick: () => handleExportExcel('all'),
-                                },
-                                {
-                                    key: 'completed',
-                                    label: '✅ Chỉ xuất đã hoàn',
-                                    onClick: () => handleExportExcel('completed'),
-                                },
-                                {
-                                    key: 'processing',
-                                    label: '⏳ Chỉ xuất đang xử lý',
-                                    onClick: () => handleExportExcel('processing'),
-                                },
-                            ],
-                        }}
-                        trigger={['click']}
-                    >
-                        <Button icon={<DownloadOutlined />} size="large">
-                            Xuất Excel
-                        </Button>
-                    </Dropdown>
-                    <Button
-                        type="primary"
-                        icon={<FolderOpenOutlined />}
-                        size="large"
-                        onClick={handleImportFolder}
-                        style={{ background: '#52c41a', borderColor: '#52c41a' }}
-                    >
-                        Nhập Excel
-                    </Button>
-                    <Button
-                        icon={<SettingOutlined />}
-                        onClick={() => setSettingsModalVisible(true)}
-                        title="Cài đặt Telegram"
-                        style={{ fontSize: 18 }}
-                    />
-                </Space>
-            </div>
-
-            {/* 🔍 SCAN INPUT - Ngay ngoài màn hình chính! */}
-            <Card
-                style={{
-                    marginBottom: 16,
-                    background: 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)',
-                    border: '2px solid #52c41a'
-                }}
-            >
-                <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                    <BarcodeOutlined style={{ fontSize: 32, color: '#52c41a' }} />
-                    <Input
-                        ref={scanInputRef}
-                        value={scanInput}
-                        onChange={handleScanInputChange}
-                        onKeyDown={handleScanKeyDown}
-                        placeholder="Quét hoặc nhập Tracking ID để kiểm tra đơn hàng..."
-                        size="large"
-                        autoFocus
-                        style={{
-                            flex: 1,
-                            fontSize: 16,
-                            fontWeight: 500,
-                            borderColor: '#52c41a',
-                            borderWidth: 2
-                        }}
-                        prefix={<ScanOutlined style={{ color: '#52c41a', fontSize: 18 }} />}
-                    />
-                    <Button
-                        type="primary"
-                        size="large"
-                        icon={<ScanOutlined />}
-                        onClick={() => handleScan(scanInput)}
-                        style={{
-                            background: '#52c41a',
-                            borderColor: '#52c41a',
-                            minWidth: 100
-                        }}
-                    >
-                        Quét
-                    </Button>
-                </div>
-
-                {/* Status indicator */}
-                {scanStatus.type !== 'idle' && (
-                    <div
-                        style={{
-                            marginTop: 12,
-                            padding: '8px 16px',
-                            borderRadius: 6,
-                            background:
-                                scanStatus.type === 'success' ? '#f6ffed' :
-                                    scanStatus.type === 'error' ? '#fff1f0' :
-                                        scanStatus.type === 'warning' ? '#fffbe6' : '#f5f5f5',
-                            border: `1px solid ${scanStatus.type === 'success' ? '#b7eb8f' :
-                                scanStatus.type === 'error' ? '#ffccc7' :
-                                    scanStatus.type === 'warning' ? '#ffe58f' : '#d9d9d9'
-                                }`,
-                            color:
-                                scanStatus.type === 'success' ? '#52c41a' :
-                                    scanStatus.type === 'error' ? '#ff4d4f' :
-                                        scanStatus.type === 'warning' ? '#faad14' : '#8c8c8c',
-                            fontSize: 14,
-                            fontWeight: 600
-                        }}
-                    >
-                        {scanStatus.message}
-                    </div>
-                )}
-            </Card>
-
-            {/* 🔎 TÌM KIẾM MÃ VẬN ĐƠN ĐI */}
-            <div style={{ marginBottom: 16, display: 'flex', gap: 12, alignItems: 'center' }}>
                 <Input
                     value={searchKeyword}
                     onChange={(e) => setSearchKeyword(e.target.value)}
-                    placeholder="Tìm kiếm mã vận đơn đi (Tracking ID / Order ID)..."
-                    size="large"
+                    placeholder="Tìm Tracking / Order ID..."
                     allowClear
-                    style={{
-                        maxWidth: 500,
-                        fontSize: 14,
-                        borderColor: '#1890ff',
-                        borderWidth: 2,
-                        borderRadius: 8,
-                    }}
-                    prefix={<SearchOutlined style={{ color: '#1890ff', fontSize: 16 }} />}
+                    style={{ flex: 1, minWidth: 0, borderColor: '#1890ff', borderWidth: 2, borderRadius: 8 }}
+                    prefix={<SearchOutlined style={{ color: '#1890ff' }} />}
                 />
-                {searchKeyword.trim() && (
-                    <Tag color="blue" style={{ fontSize: 13, padding: '4px 12px' }}>
-                        Tìm thấy: {filteredEcommerceExports.length} kết quả
-                    </Tag>
+
+                <div style={{ width: 1, height: 24, background: '#d9d9d9', flexShrink: 0 }} />
+
+                {selectedRowKeys.length > 0 && (
+                    <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete} style={{ flexShrink: 0 }}>
+                        Xóa ({selectedRowKeys.length})
+                    </Button>
                 )}
+                <Dropdown
+                    menu={{
+                        items: [
+                            { key: 'all', label: '📋 Xuất tất cả', onClick: () => handleExportExcel('all') },
+                            { key: 'completed', label: '✅ Chỉ xuất đã hoàn', onClick: () => handleExportExcel('completed') },
+                            { key: 'processing', label: '⏳ Chỉ xuất đang xử lý', onClick: () => handleExportExcel('processing') },
+                        ],
+                    }}
+                    trigger={['click']}
+                >
+                    <Button icon={<DownloadOutlined />} style={{ flexShrink: 0 }}>Xuất Excel</Button>
+                </Dropdown>
+                <Button
+                    type="primary"
+                    icon={<FolderOpenOutlined />}
+                    onClick={handleImportFolder}
+                    style={{ background: '#52c41a', borderColor: '#52c41a', flexShrink: 0 }}
+                >
+                    Nhập Excel
+                </Button>
+                <Button
+                    type="primary"
+                    danger={isWatching}
+                    onClick={toggleWatchFolder}
+                    style={{ flexShrink: 0, fontWeight: 600, boxShadow: isWatching ? '0 0 10px rgba(255, 77, 79, 0.5)' : 'none' }}
+                >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={{
+                            width: 10, height: 10, borderRadius: '50%',
+                            background: isWatching ? '#fff' : '#52c41a',
+                            animation: isWatching ? 'pulse 1.5s infinite' : 'none'
+                        }} />
+                        {isWatching ? 'Stop Watch' : 'Realtime Thư Mục'}
+                    </div>
+                </Button>
+                <Button
+                    icon={<SettingOutlined />}
+                    onClick={() => setSettingsModalVisible(true)}
+                    title="Cài đặt Telegram"
+                    style={{ flexShrink: 0 }}
+                />
             </div>
+
+            {/* Dòng 2: Quét mã vận đơn */}
+            <div
+                className="scan-input-wrap"
+                style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8, padding: '8px 14px' }}
+            >
+                <BarcodeOutlined style={{ fontSize: 28, color: '#52c41a', flexShrink: 0 }} />
+                <Input
+                    ref={scanInputRef}
+                    onKeyDown={handleScanKeyDown}
+                    placeholder="Quét hoặc nhập Tracking ID để kiểm tra đơn hàng..."
+                    autoFocus
+                    size="large"
+                    style={{
+                        flex: 1, fontSize: 16, fontWeight: 500,
+                        border: 'none', boxShadow: 'none', background: 'transparent',
+                    }}
+                    prefix={<ScanOutlined style={{ color: '#52c41a', fontSize: 18 }} />}
+                />
+                <Button
+                    type="primary"
+                    size="large"
+                    icon={<ScanOutlined />}
+                    onClick={() => handleScan(scanInputRef.current?.input?.value || '')}
+                    style={{
+                        background: '#52c41a', borderColor: '#52c41a',
+                        flexShrink: 0, height: 44, paddingInline: 24, fontWeight: 600,
+                    }}
+                >
+                    Quét
+                </Button>
+                <Button
+                    size="large"
+                    icon={<FileExcelOutlined />}
+                    onClick={handleImportScanExcel}
+                    title="Quét hàng loạt từ file Excel"
+                    style={{
+                        flexShrink: 0, height: 44, fontWeight: 600,
+                        color: '#1d8f29', borderColor: '#1d8f29'
+                    }}
+                >
+                    Nhập Excel
+                </Button>
+            </div>
+
+            {/* Scan status indicator */}
+            {scanStatus.type !== 'idle' && (
+                <div
+                    style={{
+                        marginBottom: 8,
+                        padding: '5px 14px',
+                        borderRadius: 6,
+                        background:
+                            scanStatus.type === 'success' ? '#f6ffed' :
+                                scanStatus.type === 'error' ? '#fff1f0' :
+                                    scanStatus.type === 'warning' ? '#fffbe6' : '#f5f5f5',
+                        border: `1px solid ${scanStatus.type === 'success' ? '#b7eb8f' :
+                            scanStatus.type === 'error' ? '#ffccc7' :
+                                scanStatus.type === 'warning' ? '#ffe58f' : '#d9d9d9'}`,
+                        color:
+                            scanStatus.type === 'success' ? '#52c41a' :
+                                scanStatus.type === 'error' ? '#ff4d4f' :
+                                    scanStatus.type === 'warning' ? '#faad14' : '#8c8c8c',
+                        fontSize: 13,
+                        fontWeight: 600,
+                    }}
+                >
+                    {scanStatus.message}
+                </div>
+            )}
 
             {statusFilter === 'no_data' ? (
                 /* 🚫 BẢNG "KHÔNG CÓ DL" */

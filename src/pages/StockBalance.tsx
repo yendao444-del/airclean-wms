@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { usePageHeader } from '../contexts/PageHeaderContext';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
@@ -22,6 +22,7 @@ import {
     Badge,
     Empty,
     Select,
+    Spin,
 } from 'antd';
 import {
     ReloadOutlined,
@@ -34,6 +35,7 @@ import {
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -108,6 +110,512 @@ interface ProductRow {
     minStock: number;
 }
 
+interface FlowTraceabilityDashboardProps {
+    productRows: ProductRow[];
+    onRefresh: () => void;
+}
+
+const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ productRows, onRefresh }) => {
+    const [selectedParentObj, setSelectedParentObj] = useState<ProductRow | null>(null);
+    const [selectedVariantSku, setSelectedVariantSku] = useState<string>('all');
+    const [filterType, setFilterType] = useState<string>('all');
+    
+    const [logs, setLogs] = useState<InventoryLogItem[]>([]);
+    const [loadingLogs, setLoadingLogs] = useState(false);
+
+    // Inline ref detail: logId → { loading, data, type, error }
+    const [expandedRefId, setExpandedRefId] = useState<number | null>(null);
+    const [refDetailCache, setRefDetailCache] = useState<Record<number, { loading: boolean; data: any; type: string; error: string }>>({});
+
+    const toggleRefDetail = async (log: any) => {
+        if (!log.reference || !log.referenceType) return;
+        // Toggle off
+        if (expandedRefId === log.id) { setExpandedRefId(null); return; }
+        setExpandedRefId(log.id);
+        // Already cached
+        if (refDetailCache[log.id]?.data || refDetailCache[log.id]?.error) return;
+        // Load
+        setRefDetailCache(c => ({ ...c, [log.id]: { loading: true, data: null, type: '', error: '' } }));
+        try {
+            const res = await (window as any).electronAPI.inventoryLogs.getRefDetail({ referenceType: log.referenceType, reference: log.reference });
+            if (res.success) {
+                setRefDetailCache(c => ({ ...c, [log.id]: { loading: false, data: res.data, type: res.type, error: '' } }));
+            } else {
+                setRefDetailCache(c => ({ ...c, [log.id]: { loading: false, data: null, type: '', error: res.error || 'Không tìm thấy' } }));
+            }
+        } catch (e: any) {
+            setRefDetailCache(c => ({ ...c, [log.id]: { loading: false, data: null, type: '', error: e.message } }));
+        }
+    };
+
+    // Initial load
+    useEffect(() => {
+        if (!selectedParentObj && productRows.length > 0) {
+            handleSelectParent(productRows[0]);
+        }
+    }, [productRows]);
+
+    const handleSelectParent = (parent: ProductRow) => {
+        setSelectedParentObj(parent);
+        setSelectedVariantSku('all');
+        fetchLogsForParent(parent);
+    };
+
+    const fetchLogsForParent = async (parent: ProductRow) => {
+        setLoadingLogs(true);
+        try {
+            const result = await (window as any).electronAPI.inventoryLogs.getAll({});
+            if (result.success) {
+                const parentSkus = parent.variants.map(v => v.sku);
+                const relevantLogs = (result.data as InventoryLogItem[]).filter(
+                    log => parentSkus.includes(log.sku) || log.sku === parent.sku || log.type === 'combo'
+                );
+                // Sort newest first
+                setLogs(relevantLogs.sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
+            }
+        } catch (error) {
+            message.error('Lỗi khi tải nhật ký');
+        } finally {
+            setLoadingLogs(false);
+        }
+    };
+
+    const reloadData = () => {
+        onRefresh();
+        if (selectedParentObj) {
+            fetchLogsForParent(selectedParentObj);
+        }
+    };
+
+
+    const activeLogs = useMemo(() => {
+        let filtered = logs;
+        if (selectedParentObj && selectedVariantSku !== 'all') {
+            filtered = filtered.filter(l => l.sku === selectedVariantSku || l.type === 'combo');
+        }
+        if (filterType !== 'all') {
+            if (filterType === 'lech') filtered = filtered.filter(l => l.type === 'adjustment');
+            else if (filterType === 'check_in') filtered = filtered.filter(l => l.type === 'check_in' || l.type === 'purchase');
+            else if (filterType === 'tmdt') filtered = filtered.filter(l => l.type === 'tmdt' || l.type === 'ecom_sale');
+            else if (filterType === 'pos') filtered = filtered.filter(l => l.type === 'pos' || l.type === 'pos_sale');
+            else filtered = filtered.filter(l => l.type === filterType);
+        }
+        return filtered;
+    }, [logs, selectedParentObj, selectedVariantSku, filterType]);
+
+    // KPI Calcs
+    const kpi = useMemo(() => {
+        let totalIn = 0;
+        let totalOut = 0;
+        let discrepancy = 0;
+        activeLogs.forEach(l => {
+            if (l.quantity > 0) totalIn += l.quantity;
+            if (l.quantity < 0 && l.type !== 'adjustment') totalOut += Math.abs(l.quantity);
+            if (l.type === 'adjustment') discrepancy += l.quantity;
+        });
+        
+        // Find current stock
+        let currentStock = 0;
+        if (selectedParentObj) {
+            if (selectedVariantSku === 'all') {
+                currentStock = selectedParentObj.totalSystemStock;
+            } else {
+                const variant = selectedParentObj.variants.find(v => v.sku === selectedVariantSku);
+                if (variant) currentStock = variant.systemStock;
+            }
+        }
+
+        return { currentStock, totalIn, totalOut, txCount: activeLogs.length, discrepancy };
+    }, [activeLogs, selectedParentObj, selectedVariantSku]);
+
+    const inventoryValuation = useMemo(() => {
+        const list = productRows.map(p => {
+            // Ưu tiên tính từ variant.cost (chính xác hơn p.cost)
+            const value = p.variants.length > 0
+                ? p.variants.reduce((sum, v) => sum + (v.systemStock || 0) * (v.cost || p.cost || 0), 0)
+                : (p.totalSystemStock || 0) * (p.cost || 0);
+            const stock = p.totalSystemStock || 0;
+            const cost = stock > 0 ? Math.round(value / stock) : (p.cost || 0);
+            // Số ngày tồn = tồn kho / (doanh số 90 ngày / 90)
+            const dailySales = p.totalSold > 0 ? (p.totalSold / 90) : 0;
+            const daysInStock = dailySales > 0 ? Math.floor(stock / dailySales) : (stock > 0 ? 999 : 0);
+            return {
+                ...p,
+                cost,
+                value,
+                daysInStock
+            };
+        });
+        
+        list.sort((a, b) => b.value - a.value);
+        
+        const totalValue = list.reduce((sum, item) => sum + item.value, 0);
+        const totalStock = list.reduce((sum, item) => sum + item.totalSystemStock, 0);
+
+        return { list, totalValue, totalStock };
+    }, [productRows]);
+
+    const getTypeDisplay = (type: string) => {
+        switch (type) {
+            case 'check_in':
+            case 'purchase': return <span className="tx-type tx-nhap"><i className="fa-solid fa-truck-ramp-box"></i> Nhập hàng</span>;
+            case 'pos':
+            case 'pos_sale': return <span className="tx-type tx-pos"><i className="fa-solid fa-cash-register"></i> POS</span>;
+            case 'tmdt':
+            case 'ecom_sale': return <span className="tx-type tx-tmdt"><i className="fa-brands fa-shopee"></i> TMĐT</span>;
+            case 'adjustment': return <span className="tx-type tx-lech"><i className="fa-solid fa-scale-unbalanced"></i> Cân Kho</span>;
+            case 'combo': return <span className="tx-type tx-combo"><i className="fa-solid fa-gift"></i> Combo</span>;
+            case 'return': return <span className="tx-type tx-nhap"><i className="fa-solid fa-rotate-left"></i> Hoàn hàng</span>;
+            default: return <Tag>{type}</Tag>;
+        }
+    };
+
+    return (
+        <div style={{ padding: '0 24px 24px 24px', background: '#f8fafc', minHeight: 'calc(100vh - 120px)' }}>
+            <style>{`
+                .panel { background: #fff; border-radius: 8px; border: 1px solid #E2E8F0; box-shadow: 0 1px 3px 0 rgba(0,0,0,0.06), 0 1px 2px -1px rgba(0,0,0,0.04); overflow: hidden; margin-bottom: 24px; }
+                .panel-header { padding: 16px 20px; border-bottom: 1px solid #E2E8F0; background: #fff; display: flex; justify-content: space-between; align-items: center; }
+                .panel-header-title { font-weight: 600; font-size: 15px; color: #1E293B; display: flex; align-items: center; }
+                
+                .emp-select { appearance: none; padding: 8px 16px; border: 1px solid #E2E8F0; border-radius: 4px; background: #fff; font-size: 14px; color: #1E293B; font-weight: 500; cursor: pointer; transition: 0.15s; outline: none; }
+                .emp-select:hover { border-color: #0088FF; }
+                .emp-select:focus { border-color: #0088FF; box-shadow: 0 0 0 3px rgba(0,136,255,0.15); }
+                
+                .kpi-card { background: #fff; border-radius: 8px; border: 1px solid #E2E8F0; padding: 20px; position: relative; cursor: pointer; transition: 0.2s; box-shadow: 0 1px 3px 0 rgba(0,0,0,0.06), 0 1px 2px -1px rgba(0,0,0,0.04); overflow: hidden; }
+                .kpi-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.08); transform: translateY(-1px); }
+                .kpi-icon { width: 40px; height: 40px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 18px; margin-bottom: 12px; }
+                .kpi-label { font-size: 13px; font-weight: 500; color: #64748B; margin-bottom: 6px; }
+                .kpi-value { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; margin-bottom: 4px; color: #1E293B; }
+                .kpi-sub { font-size: 12px; color: #64748B; }
+                
+                .filter-row { display: flex; gap: 8px; padding: 16px 20px; background: #fff; border-bottom: 1px solid #E2E8F0; align-items: center; flex-wrap: wrap; }
+                .chip { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 4px; border: 1px solid #E2E8F0; font-size: 14px; font-weight: 500; color: #1E293B; background: #fff; cursor: pointer; transition: 0.15s; }
+                .chip:hover { border-color: #0088FF; color: #0088FF; }
+                .chip.active { background: #EFF6FF; border-color: #0088FF; color: #0088FF; }
+                .chip.active-danger { background: #FEF2F2; border-color: #EF4444; color: #EF4444; }
+                
+                .kv-table { width: 100%; border-collapse: collapse; }
+                .kv-table th { background: #F8FAFC; padding: 12px 16px; font-size: 12px; font-weight: 600; color: #64748B; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #E2E8F0; border-top: 1px solid #E2E8F0; text-align: left; }
+                .kv-table td { padding: 12px 16px; border-bottom: 1px solid #F1F5F9; font-size: 14px; color: #1E293B; vertical-align: middle; }
+                .kv-table tbody tr:hover td { background: #F8FAFC; }
+                
+                .tx-type { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 12px; }
+                .tx-nhap { background: #F0FDF4; color: #15803D; }
+                .tx-xuat { background: #FEF2F2; color: #EF4444; }
+                .tx-tmdt { background: #EFF6FF; color: #1D4ED8; }
+                .tx-pos { background: #FFFBEB; color: #D97706; }
+                .tx-lech { background: #F3E8FF; color: #7E22CE; }
+                .tx-combo { background: #E0F2FE; color: #0369A1; }
+
+                .badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 500; background: #F1F5F9; border: 1px solid #E2E8F0; color: #64748B; }
+                
+                /* Sapo Button defaults */
+                .ant-btn { font-weight: 500; }
+                .ant-btn-primary { background: #0088FF; border-color: #0088FF; }
+                .ant-btn-primary:hover { background: #006ACC; border-color: #006ACC; }
+            `}</style>
+            
+            {/* Top KPIs */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
+                <div className="kpi-card" onClick={() => setFilterType('all')} style={{ borderColor: filterType === 'all' ? '#0088FF' : '' }}>
+                    <div className="kpi-icon" style={{ background: '#EFF6FF', color: '#0088FF' }}><i className="fa-solid fa-file-invoice"></i></div>
+                    <div className="kpi-label">CHỨNG TỪ GIAO DỊCH</div>
+                    <div className="kpi-value">{kpi.txCount}</div>
+                    <div className="kpi-sub">Tổng số lần biến động</div>
+                </div>
+                <div className="kpi-card" onClick={() => setFilterType('check_in')} style={{ borderColor: filterType === 'check_in' ? '#22C55E' : '' }}>
+                    <div className="kpi-icon" style={{ background: '#F0FDF4', color: '#22C55E' }}><i className="fa-solid fa-arrow-right-to-bracket"></i></div>
+                    <div className="kpi-label">TỔNG NHẬP</div>
+                    <div className="kpi-value text-green" style={{ color: '#15803D' }}>+{kpi.totalIn}</div>
+                    <div className="kpi-sub">Từ NCC / Hoàn hàng</div>
+                </div>
+                <div className="kpi-card" onClick={() => setFilterType('xuat')} style={{ borderColor: filterType === 'xuat' ? '#F59E0B' : '' }}>
+                    <div className="kpi-icon" style={{ background: '#FFFBEB', color: '#F59E0B' }}><i className="fa-solid fa-arrow-right-from-bracket"></i></div>
+                    <div className="kpi-label">TỔNG XUẤT</div>
+                    <div className="kpi-value text-warning" style={{ color: '#D97706' }}>-{kpi.totalOut}</div>
+                    <div className="kpi-sub">TMĐT & POS</div>
+                </div>
+                <div className="kpi-card" onClick={() => setFilterType('lech')} style={{ borderColor: filterType === 'lech' ? '#EF4444' : '' }}>
+                    <div className="kpi-icon" style={{ background: '#FEF2F2', color: '#EF4444' }}><i className="fa-solid fa-scale-unbalanced"></i></div>
+                    <div className="kpi-label">LỆCH KHO</div>
+                    <div className="kpi-value text-danger" style={{ color: kpi.discrepancy < 0 ? '#DC2626' : (kpi.discrepancy > 0 ? '#15803D' : '#1E293B') }}>
+                        {kpi.discrepancy > 0 ? `+${kpi.discrepancy}` : kpi.discrepancy}
+                    </div>
+                    <div className="kpi-sub">Kết quả từ Kiểm kho</div>
+                </div>
+            </div>
+            {/* Main Feed Panel */}
+            <div className="panel" style={{ marginBottom: 20 }}>
+                <div className="panel-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 20px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 24, flex: 1 }}>
+                        <span className="panel-header-title" style={{ whiteSpace: 'nowrap' }}>
+                            <i className="fa-solid fa-list-check" style={{ color: '#0088ff', marginRight: 8 }}></i> 
+                            Nhật ký biến động
+                        </span>
+                        <Select 
+                            showSearch
+                            style={{ width: 450 }}
+                            placeholder="Chọn sản phẩm hoặc phân loại..."
+                            optionFilterProp="label"
+                            value={selectedVariantSku === 'all' ? `combo_${selectedParentObj?.sku}` : selectedVariantSku}
+                            onChange={(val) => {
+                                if (val.startsWith('combo_')) {
+                                    const sku = val.replace('combo_', '');
+                                    const parent = productRows.find(p => p.sku === sku);
+                                    if (parent) {
+                                        handleSelectParent(parent);
+                                    }
+                                } else {
+                                    const parent = productRows.find(p => p.variants.some(v => v.sku === val));
+                                    if (parent) {
+                                        setSelectedParentObj(parent);
+                                        setSelectedVariantSku(val);
+                                        fetchLogsForParent(parent);
+                                    }
+                                }
+                            }}
+                            options={productRows.flatMap(p => [
+                                { label: `📦 [Sản phẩm cha] ${p.productName}`, value: `combo_${p.sku}`, style: { fontWeight: 'bold', color: '#1d4ed8', background: '#f8fafc' } },
+                                ...p.variants.map(v => ({
+                                    label: `— Phân loại: ${v.color || v.sku} (Tồn: ${v.systemStock})`,
+                                    value: v.sku,
+                                    style: { paddingLeft: 20 }
+                                }))
+                            ])}
+                        />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <div style={{ textAlign: 'right', display: 'flex', alignItems: 'center', gap: 12, background: '#e6f3ff', padding: '6px 16px', borderRadius: 4, border: '1px solid #91d5ff' }}>
+                            <div style={{ fontSize: 13, color: '#0050b3', fontWeight: 600 }}>TỒN HIỆN TẠI</div>
+                            <div style={{ fontSize: 24, fontWeight: 700, color: '#0088ff', lineHeight: 1 }}>{kpi.currentStock}</div>
+                        </div>
+                        <Button icon={<ReloadOutlined />} onClick={reloadData} type="default" style={{ fontWeight: 500, color: '#454f5b', height: 38, borderRadius: 4 }}>Làm mới</Button>
+                    </div>
+                </div>
+
+                <div className="filter-row">
+                    <span style={{ fontSize: 13, color: '#212b36', fontWeight: 600, marginRight: 8 }}>BỘ LỌC:</span>
+                    <span className={`chip ${filterType === 'all' ? 'active' : ''}`} onClick={() => setFilterType('all')}>Tất cả</span>
+                    <span className={`chip ${filterType === 'tmdt' ? 'active' : ''}`} onClick={() => setFilterType('tmdt')}>TMĐT</span>
+                    <span className={`chip ${filterType === 'pos' ? 'active' : ''}`} onClick={() => setFilterType('pos')}>POS</span>
+                    <span className={`chip ${filterType === 'check_in' ? 'active' : ''}`} onClick={() => setFilterType('check_in')}>Nhập hàng</span>
+                    <span className={`chip ${filterType === 'lech' ? 'active-danger' : ''}`} onClick={() => setFilterType('lech')}>Lệch kho / Cân bằng</span>
+                </div>
+
+                <div style={{ overflowX: 'auto', maxHeight: 'calc(100vh - 350px)', overflowY: 'auto' }}>
+                    <Spin spinning={loadingLogs}>
+                        <table className="kv-table">
+                            <thead>
+                                <tr>
+                                    <th style={{ width: 140 }}>Thời gian</th>
+                                    <th style={{ width: 140 }}>SKU</th>
+                                    <th style={{ width: 100 }}>Loại</th>
+                                    <th style={{ width: 120 }}>Mã chứng từ</th>
+                                    <th style={{ textAlign: 'right', width: 80 }}>Tồn đầu</th>
+                                    <th style={{ textAlign: 'right', width: 80 }}>Thay đổi</th>
+                                    <th style={{ textAlign: 'right', width: 80 }}>Tồn cuối</th>
+                                    <th>Ghi chú</th>
+                                    <th style={{ width: 120 }}>Nhân sự</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {activeLogs.length > 0 ? activeLogs.map(log => (
+                                    <React.Fragment key={log.id}>
+                                    <tr>
+                                        <td style={{ fontFamily: 'monospace', color: '#64748b', fontWeight: 500 }}>
+                                            {dayjs(log.createdAt).format('DD/MM/YYYY HH:mm')}
+                                        </td>
+                                        <td>
+                                            <span className="badge" style={{ background: '#f1f5f9', color: '#475569' }}>{log.sku}</span>
+                                        </td>
+                                        <td>{getTypeDisplay(log.type)}</td>
+                                        <td>
+                                            {log.reference ? (
+                                                <span
+                                                    style={{ fontFamily: 'monospace', color: '#2563eb', fontWeight: 600, cursor: 'pointer', textDecoration: 'underline' }}
+                                                    onClick={() => toggleRefDetail(log)}
+                                                    title="Click để xem chi tiết"
+                                                >
+                                                    {log.reference.replace(/Khớp (lẻ|lô)|CBL|CBT|CBN/i, 'Điều chỉnh kho')}
+                                                </span>
+                                            ) : '-'}
+                                        </td>
+                                        <td style={{ textAlign: 'right', color: '#637381', fontFamily: 'monospace' }}>
+                                            {log.oldStock}
+                                        </td>
+                                        <td style={{ textAlign: 'right', fontWeight: 700, fontSize: 15, color: log.quantity > 0 ? '#00a854' : '#f04134', fontFamily: 'monospace' }}>
+                                            {log.quantity > 0 ? `+${log.quantity}` : log.quantity}
+                                        </td>
+                                        <td style={{ textAlign: 'right', fontWeight: 600, fontFamily: 'monospace' }}>
+                                            {log.newStock}
+                                        </td>
+                                        <td style={{ fontSize: 13, color: '#454f5b' }}>{log.note || '-'}</td>
+                                        <td style={{ fontSize: 13, color: (log.type === 'adjustment' && log.quantity < 0) ? '#f04134' : '#0088ff' }}>
+                                            {log.type === 'adjustment' && log.quantity < 0 && <i className="fa-solid fa-triangle-exclamation" style={{ marginRight: 4 }}></i>}
+                                            👤 {log.userName || 'Hệ thống'}
+                                        </td>
+                                    </tr>
+                                    {expandedRefId === log.id && (() => {
+                                        const rd = refDetailCache[log.id];
+                                        const items: any[] = rd?.data?.items || [];
+                                        return (
+                                            <tr>
+                                                <td colSpan={9} style={{ padding: 0, background: '#f8fafc', borderBottom: '2px solid #2563eb' }}>
+                                                    <div style={{ padding: '12px 16px' }}>
+                                                        {!rd || rd.loading ? (
+                                                            <Spin size="small" />
+                                                        ) : rd.error ? (
+                                                            <span style={{ color: '#ef4444', fontSize: 12 }}>⚠ {rd.error}</span>
+                                                        ) : (
+                                                            <>
+                                                                {/* Header info */}
+                                                                <div style={{ display: 'flex', gap: 24, marginBottom: 10, fontSize: 12, color: '#64748b' }}>
+                                                                    {rd.type === 'TMDT' && <>
+                                                                        <span><strong>Đơn:</strong> {rd.data.orderNumber || rd.data.ecommerceExportCode}</span>
+                                                                        <span><strong>Sàn:</strong> {rd.data.platform || '-'}</span>
+                                                                        <span><strong>Khách:</strong> {rd.data.customerName || '-'}</span>
+                                                                        <span><strong>Tổng:</strong> <b style={{ color: '#2563eb' }}>{(rd.data.totalAmount || 0).toLocaleString('vi-VN')}đ</b></span>
+                                                                    </>}
+                                                                    {rd.type === 'POS' && <>
+                                                                        <span><strong>Đơn:</strong> {rd.data.orderNumber}</span>
+                                                                        <span><strong>Khách:</strong> {rd.data.customer?.name || 'Khách lẻ'}</span>
+                                                                        <span><strong>Thu ngân:</strong> {rd.data.createdBy || '-'}</span>
+                                                                        <span><strong>Tổng:</strong> <b style={{ color: '#2563eb' }}>{(rd.data.total || 0).toLocaleString('vi-VN')}đ</b></span>
+                                                                    </>}
+                                                                    {rd.type === 'PURCHASE' && <>
+                                                                        <span><strong>Phiếu:</strong> {rd.data.poNumber}</span>
+                                                                        <span><strong>NCC:</strong> {rd.data.supplier?.name || '-'}</span>
+                                                                        <span><strong>Tổng:</strong> <b style={{ color: '#2563eb' }}>{(rd.data.total || 0).toLocaleString('vi-VN')}đ</b></span>
+                                                                    </>}
+                                                                </div>
+                                                                {/* Items table */}
+                                                                {items.length > 0 && (
+                                                                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                                                                        <thead>
+                                                                            <tr style={{ background: '#e2e8f0' }}>
+                                                                                <th style={{ padding: '4px 8px', textAlign: 'left' }}>SKU</th>
+                                                                                <th style={{ padding: '4px 8px', textAlign: 'left' }}>Tên sản phẩm</th>
+                                                                                <th style={{ padding: '4px 8px', textAlign: 'center' }}>SL</th>
+                                                                                <th style={{ padding: '4px 8px', textAlign: 'right' }}>Đơn giá</th>
+                                                                                <th style={{ padding: '4px 8px', textAlign: 'right' }}>Thành tiền</th>
+                                                                            </tr>
+                                                                        </thead>
+                                                                        <tbody>
+                                                                            {items.map((it: any, i: number) => {
+                                                                                const sku = it.variantSku || it.sku || it.product?.sku || '-';
+                                                                                const name = it.productName || it.name || it.product?.name || '-';
+                                                                                const qty = it.quantity || it.qty || 0;
+                                                                                const price = it.price || 0;
+                                                                                const total = it.subtotal || price * qty;
+                                                                                return (
+                                                                                    <tr key={i} style={{ borderBottom: '1px solid #e2e8f0', background: sku === log.sku ? '#eff6ff' : 'transparent' }}>
+                                                                                        <td style={{ padding: '4px 8px', fontFamily: 'monospace', color: '#2563eb', fontWeight: sku === log.sku ? 700 : 400 }}>{sku}</td>
+                                                                                        <td style={{ padding: '4px 8px' }}>{name}</td>
+                                                                                        <td style={{ padding: '4px 8px', textAlign: 'center', fontWeight: 700 }}>{qty}</td>
+                                                                                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace' }}>{price.toLocaleString('vi-VN')}</td>
+                                                                                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: 700 }}>{total.toLocaleString('vi-VN')}</td>
+                                                                                    </tr>
+                                                                                );
+                                                                            })}
+                                                                        </tbody>
+                                                                    </table>
+                                                                )}
+                                                            </>
+                                                        )}
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })()}
+                                    </React.Fragment>
+                                )) : (
+                                    <tr>
+                                        <td colSpan={9} style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>
+                                            Không có dữ liệu giao dịch phù hợp với bộ lọc hiện tại.
+                                        </td>
+                                    </tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </Spin>
+                </div>
+            </div>
+
+            {/* ======= PANEL: GIÁ TRỊ TỒN KHO THEO SẢN PHẨM ======= */}
+            <div className="panel" style={{ marginTop: 20 }}>
+                <div className="panel-header">
+                    <span className="panel-header-title"><i className="fa-solid fa-coins" style={{ color: '#8b5cf6', marginRight: 6 }}></i> Giá trị tồn kho theo sản phẩm</span>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <select className="emp-select"><option>Tất cả chi nhánh</option><option>Kho Tổng</option></select>
+                        <Button size="small" icon={<i className="fa-solid fa-file-export" />}>Xuất Excel</Button>
+                    </div>
+                </div>
+                <div className="filter-row">
+                    <input className="emp-select" placeholder="Tìm mã hàng, tên sản phẩm..." style={{ maxWidth: 240, width: '100%' }} />
+                    <select className="emp-select"><option>Sắp xếp: Giá trị giảm dần</option><option>Sắp xếp: SL tồn giảm dần</option><option>Sắp xếp: Tên A-Z</option></select>
+                </div>
+                <div style={{ overflowX: 'auto', maxHeight: 400 }}>
+                    <table className="kv-table" style={{ tableLayout: 'fixed', width: '100%' }}>
+                        <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
+                            <tr>
+                                <th style={{ width: 50, textAlign: 'center' }}>STT</th>
+                                <th style={{ width: 120 }}>Mã hàng</th>
+                                <th>Tên sản phẩm</th>
+                                <th style={{ textAlign: 'center', width: 100 }}>Số ngày tồn</th>
+                                <th style={{ textAlign: 'right', width: 80 }}>SL tồn</th>
+                                <th style={{ textAlign: 'right', width: 110 }}>Giá vốn</th>
+                                <th style={{ textAlign: 'right', width: 130 }}>Giá trị tồn kho</th>
+                                <th style={{ textAlign: 'right', width: 120 }}>Tỷ trọng</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {inventoryValuation.list.map((item, idx) => (
+                                <tr key={item.sku}>
+                                    <td style={{ textAlign: 'center' }}>{idx + 1}</td>
+                                    <td><a style={{ color: '#2563eb', cursor: 'pointer', fontWeight: 600 }}>{item.sku}</a></td>
+                                    <td>
+                                        <strong>{item.productName}</strong>
+                                        {item.categoryName && <span className="badge" style={{ background: '#e0f2fe', color: '#0369a1', marginLeft: 6, fontSize: 10 }}>{item.categoryName}</span>}
+                                    </td>
+                                    <td style={{ textAlign: 'center' }}>
+                                        {(() => {
+                                            const d = item.daysInStock;
+                                            // < 30: thiếu hàng (đỏ), 30-90: tốt (xanh), > 90: hàng chậm/chết (cam)
+                                            const bg = d === 0 ? '#f1f5f9' : d < 30 ? '#fef2f2' : d <= 90 ? '#ecfdf5' : '#fff7ed';
+                                            const color = d === 0 ? '#94a3b8' : d < 30 ? '#b91c1c' : d <= 90 ? '#047857' : '#c2410c';
+                                            const label = d === 0 ? 'Không bán' : d >= 365 ? '365+ ngày' : `${d} ngày`;
+                                            return <span className="badge" style={{ background: bg, color }}>{label}</span>;
+                                        })()}
+                                    </td>
+                                    <td style={{ textAlign: 'right', fontWeight: 700, fontFamily: 'monospace' }}>{item.totalSystemStock.toLocaleString()}</td>
+                                    <td style={{ textAlign: 'right', fontFamily: 'monospace' }}>{item.cost.toLocaleString()}</td>
+                                    <td style={{ textAlign: 'right', fontWeight: 700, color: '#2563eb', fontFamily: 'monospace' }}>{item.value.toLocaleString()}</td>
+                                    <td style={{ textAlign: 'right' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
+                                            <div style={{ width: 60, height: 6, background: '#e2e8f0', borderRadius: 3, overflow: 'hidden' }}>
+                                                <div style={{ width: `${inventoryValuation.totalValue > 0 ? (item.value / inventoryValuation.totalValue) * 100 : 0}%`, height: '100%', background: idx % 4 === 0 ? '#3b82f6' : (idx % 4 === 1 ? '#f59e0b' : (idx % 4 === 2 ? '#8b5cf6' : '#10b981')) }}></div>
+                                            </div>
+                                            <span style={{ fontSize: 11, fontFamily: 'monospace', width: 36 }}>{inventoryValuation.totalValue > 0 ? ((item.value / inventoryValuation.totalValue) * 100).toFixed(1) : 0}%</span>
+                                        </div>
+                                    </td>
+                                </tr>
+                            ))}
+                            <tr style={{ background: '#fefce8', fontWeight: 700, borderTop: '2px solid #fde047' }}>
+                                <td colSpan={4} style={{ textAlign: 'right' }}>TỔNG CỘNG ({inventoryValuation.list.length} sản phẩm):</td>
+                                <td style={{ textAlign: 'right', fontFamily: 'monospace', fontSize: 14 }}>{inventoryValuation.totalStock.toLocaleString()}</td>
+                                <td style={{ textAlign: 'right', fontFamily: 'monospace' }}>—</td>
+                                <td style={{ textAlign: 'right', fontWeight: 800, color: '#0f172a', fontFamily: 'monospace', fontSize: 14 }}>{inventoryValuation.totalValue.toLocaleString()}</td>
+                                <td style={{ textAlign: 'right', fontFamily: 'monospace' }}>100%</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+    );
+};
+
 export default function StockBalancePage() {
     const currentUser = useCurrentUser();
     const { user } = useAuth();
@@ -125,11 +633,47 @@ export default function StockBalancePage() {
     const [balanceNotes, setBalanceNotes] = useState<Record<string, string>>({});
     const [form] = Form.useForm();
     const [quickBalanceForm] = Form.useForm();
+    // === MAIN PAGE STATE ===
+    const [mainPage, setMainPage] = useState<'dashboard' | 'stock'>('dashboard');
+
     // === EXPANDABLE ROW STATE ===
     const [expandedRowKeys, setExpandedRowKeys] = useState<string[]>([]);
+    
+    // Inline ref detail: logId → { loading, data, type, error }
+    const [expandedRefId, setExpandedRefId] = useState<number | null>(null);
+    const [refDetailCache, setRefDetailCache] = useState<Record<number, { loading: boolean; data: any; type: string; error: string }>>({});
+
+    const toggleRefDetail = async (log: any) => {
+        if (!log.reference || !log.referenceType) return;
+        // Toggle off
+        if (expandedRefId === log.id) { setExpandedRefId(null); return; }
+        setExpandedRefId(log.id);
+
+        if (log.referenceType === 'CAN_BANG') {
+            setRefDetailCache(c => ({ ...c, [log.id]: { loading: false, data: log, type: 'CAN_BANG_LOCAL', error: '' } }));
+            return;
+        }
+
+        // Already cached
+        if (refDetailCache[log.id]?.data || refDetailCache[log.id]?.error) return;
+        // Load
+        setRefDetailCache(c => ({ ...c, [log.id]: { loading: true, data: null, type: '', error: '' } }));
+        try {
+            const res = await (window as any).electronAPI.inventoryLogs.getRefDetail({ referenceType: log.referenceType, reference: log.reference });
+            if (res.success) {
+                setRefDetailCache(c => ({ ...c, [log.id]: { loading: false, data: res.data, type: res.type, error: '' } }));
+            } else {
+                setRefDetailCache(c => ({ ...c, [log.id]: { loading: false, data: null, type: '', error: res.error || 'Không tìm thấy' } }));
+            }
+        } catch (e: any) {
+            setRefDetailCache(c => ({ ...c, [log.id]: { loading: false, data: null, type: '', error: e.message } }));
+        }
+    };
     const [drawerTab, setDrawerTab] = useState<'overview' | 'check' | 'stock'>('overview');
     const [drawerLogs, setDrawerLogs] = useState<InventoryLogItem[]>([]);
     const [drawerLogsLoading, setDrawerLogsLoading] = useState(false);
+    const [ledgerSkuFilter, setLedgerSkuFilter] = useState<string>('all');
+
 
     // Quick balance state
     const [quickBalanceItem, setQuickBalanceItem] = useState<StockBalanceItem | null>(null);
@@ -540,9 +1084,9 @@ export default function StockBalancePage() {
                         logContext: {
                             type: 'adjustment',
                             referenceType: 'CAN_BANG',
-                            reference: `Khớp lẻ ${dayjs().format('DDMMYY-HHmm')}`,
+                            reference: `CBL-${dayjs().format('YYMMDD-HHmm')}`,
                             note: `Cân bằng lẻ. Hệ thống ${item.systemStock} → Thực tế ${item.actualStock}. Lý do: ${note}`,
-                            createdBy: null
+                            createdBy: currentUser
                         }
                     });
 
@@ -603,9 +1147,9 @@ export default function StockBalancePage() {
                                 logContext: {
                                     type: 'adjustment',
                                     referenceType: 'CAN_BANG',
-                                    reference: `Khớp lô ${dayjs().format('DDMMYY-HHmm')}`,
+                                    reference: `CBT-${dayjs().format('YYMMDD-HHmm')}`,
                                     note: `Cân bằng lô. Khác biệt: ${item.difference > 0 ? '+' : ''}${item.difference}. Lý do: ${form.getFieldValue('notes') || 'Không nhập'}`,
-                                    createdBy: null
+                                    createdBy: currentUser
                                 }
                             });
                             successCount++;
@@ -707,9 +1251,9 @@ export default function StockBalancePage() {
                             logContext: {
                                 type: 'adjustment',
                                 referenceType: 'CAN_BANG',
-                                reference: `Nhanh ${dayjs().format('DDMMYY-HHmm')}`,
+                                reference: `CBN-${dayjs().format('YYMMDD-HHmm')}`,
                                 note: `Cân bằng nhanh. Hệ thống ${quickBalanceItem.systemStock} → Thực tế ${actualStock}. Lý do: ${values.notes || 'Không nhập'}`,
-                                createdBy: null
+                                createdBy: currentUser
                             }
                         });
 
@@ -938,6 +1482,7 @@ export default function StockBalancePage() {
     const loadProductLogs = async (row: ProductRow) => {
         setDrawerTab('overview');
         setDrawerLogs([]);
+        setLedgerSkuFilter('all');
         setDrawerLogsLoading(true);
         try {
             const allLogs: InventoryLogItem[] = [];
@@ -996,8 +1541,16 @@ export default function StockBalancePage() {
         return () => clearHeaderExtra();
     }, [searchText, selectedCategory, productRows, setHeaderExtra, clearHeaderExtra]);
 
+    // === DASHBOARD VIEW ===
+    const DashboardView = () => {
+        return <FlowTraceabilityDashboard productRows={productRows} onRefresh={loadProducts} />;
+    };
+
     return (
-        <div>
+        <div style={{ padding: '0 24px', paddingTop: '24px' }}>
+            {/* Removed Tổng quan Tabs, default to Tồn kho */}
+            <div>
+
             <Card>
                 <Table
                     columns={productColumns}
@@ -1048,7 +1601,7 @@ export default function StockBalancePage() {
                                         items={[
                                             {
                                                 key: 'overview',
-                                                label: '📊 Tổng quan',
+                                                label: '📊 Chi tiết',
                                                 children: (
                                                     <div style={{ padding: '0' }}>
                                                         {/* Variant overview table matching Products.tsx */}
@@ -1286,15 +1839,133 @@ export default function StockBalancePage() {
                                 label: '📋 Thẻ kho',
                                 children: (
                                     <div style={{ padding: "12px 0" }}>
+                                        {/* Lọc SKU */}
+                                        {drawerLogs.length > 0 && (
+                                            <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                <span style={{ fontSize: 13, color: '#595959', whiteSpace: 'nowrap' }}>Lọc SKU:</span>
+                                                <Select
+                                                    value={ledgerSkuFilter}
+                                                    onChange={setLedgerSkuFilter}
+                                                    size="small"
+                                                    style={{ minWidth: 200 }}
+                                                >
+                                                    <Select.Option value="all">Tất cả ({drawerLogs.length} bản ghi)</Select.Option>
+                                                    {[...new Set(drawerLogs.map(l => l.sku))].sort().map(sku => (
+                                                        <Select.Option key={sku} value={sku}>
+                                                            {sku} ({drawerLogs.filter(l => l.sku === sku).length})
+                                                        </Select.Option>
+                                                    ))}
+                                                </Select>
+                                            </div>
+                                        )}
                                         {!drawerLogsLoading && drawerLogs.length === 0 ? (
                                             <Empty description="Chưa có biến động tồn kho" style={{ padding: 40 }} />
                                         ) : (
                                             <Table
-                                                dataSource={drawerLogs}
+                                                dataSource={ledgerSkuFilter === 'all' ? drawerLogs : drawerLogs.filter(l => l.sku === ledgerSkuFilter)}
                                                 loading={drawerLogsLoading}
                                                 rowKey="id"
                                                 size="small"
                                                 pagination={{ pageSize: 30, showSizeChanger: false }}
+                                                onRow={(record) => ({
+                                                    onClick: () => {
+                                                        if (record.reference) {
+                                                            toggleRefDetail(record);
+                                                        }
+                                                    },
+                                                    style: { cursor: record.reference ? 'pointer' : 'default' }
+                                                })}
+                                                expandable={{
+                                                    expandedRowKeys: expandedRefId ? [expandedRefId] : [],
+                                                    showExpandColumn: false,
+                                                    expandedRowRender: (log) => {
+                                                        const rd = refDetailCache[log.id];
+                                                        const items: any[] = rd?.data?.items || [];
+                                                        return (
+                                                            <div style={{ padding: '12px 16px', background: '#f8fafc', borderLeft: '3px solid #1890ff', margin: '4px 0', borderBottom: '1px solid #e2e8f0' }}>
+                                                                {!rd || rd.loading ? (
+                                                                    <Spin size="small" />
+                                                                ) : rd.error ? (
+                                                                    <span style={{ color: '#ef4444', fontSize: 12 }}>⚠ {rd.error}</span>
+                                                                ) : (
+                                                                    <>
+                                                                        <div style={{ display: 'flex', gap: 24, marginBottom: 10, fontSize: 12, color: '#64748b' }}>
+                                                                            {rd.type === 'TMDT' && <>
+                                                                                <span><strong>Đơn:</strong> {rd.data.orderNumber || rd.data.ecommerceExportCode}</span>
+                                                                                <span><strong>Sàn:</strong> {rd.data.platform || '-'}</span>
+                                                                                <span><strong>Khách:</strong> {rd.data.customerName || '-'}</span>
+                                                                                <span><strong>Tổng:</strong> <b style={{ color: '#2563eb' }}>{(rd.data.totalAmount || 0).toLocaleString('vi-VN')}đ</b></span>
+                                                                            </>}
+                                                                            {rd.type === 'POS' && <>
+                                                                                <span><strong>Đơn:</strong> {rd.data.orderNumber}</span>
+                                                                                <span><strong>Khách:</strong> {rd.data.customer?.name || rd.data.customerName || 'Khách lẻ'}</span>
+                                                                                <span><strong>Thu ngân:</strong> {rd.data.createdBy || '-'}</span>
+                                                                                <span><strong>Tổng:</strong> <b style={{ color: '#2563eb' }}>{(rd.data.total || 0).toLocaleString('vi-VN')}đ</b></span>
+                                                                            </>}
+                                                                            {rd.type === 'PURCHASE' && <>
+                                                                                <span><strong>Phiếu:</strong> {rd.data.poNumber}</span>
+                                                                                <span><strong>NCC:</strong> {rd.data.supplier?.name || '-'}</span>
+                                                                                <span><strong>Tổng:</strong> <b style={{ color: '#2563eb' }}>{(rd.data.total || 0).toLocaleString('vi-VN')}đ</b></span>
+                                                                            </>}
+                                                                            {rd.type === 'CAN_BANG_LOCAL' && <>
+                                                                                <span><strong>Mã Cân Bằng:</strong> <span style={{ color: '#1677ff', fontWeight: 600 }}>{rd.data.reference}</span></span>
+                                                                                <span><strong>Thời gian:</strong> {dayjs(rd.data.createdAt).format('DD/MM/YYYY HH:mm:ss')}</span>
+                                                                                <span><strong>Người thực hiện:</strong> <b style={{ color: '#000' }}>{rd.data.userName || rd.data.createdBy || 'Hệ thống'}</b></span>
+                                                                            </>}
+                                                                        </div>
+                                                                        {items.length > 0 && (
+                                                                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                                                                                <thead>
+                                                                                    <tr style={{ background: '#e2e8f0' }}>
+                                                                                        <th style={{ padding: '4px 8px', textAlign: 'left' }}>SKU</th>
+                                                                                        <th style={{ padding: '4px 8px', textAlign: 'left' }}>Tên sản phẩm</th>
+                                                                                        <th style={{ padding: '4px 8px', textAlign: 'center' }}>SL</th>
+                                                                                        <th style={{ padding: '4px 8px', textAlign: 'right' }}>Đơn giá</th>
+                                                                                        <th style={{ padding: '4px 8px', textAlign: 'right' }}>Thành tiền</th>
+                                                                                    </tr>
+                                                                                </thead>
+                                                                                <tbody>
+                                                                                    {items.map((it: any, i: number) => {
+                                                                                        const sku = it.variantSku || it.sku || it.product?.sku || '-';
+                                                                                        const name = it.productName || it.name || it.product?.name || '-';
+                                                                                        const qty = it.quantity || it.qty || 0;
+                                                                                        const price = it.price || 0;
+                                                                                        const total = it.subtotal || price * qty;
+                                                                                        const isMatch = sku === log.sku;
+                                                                                        return (
+                                                                                            <tr key={i} style={{ 
+                                                                                                background: isMatch ? '#fffbe6' : 'transparent',
+                                                                                                borderTop: isMatch ? '2px solid #faad14' : 'none',
+                                                                                                borderBottom: isMatch ? '2px solid #faad14' : '1px solid #e2e8f0'
+                                                                                            }}>
+                                                                                                <td style={{ padding: isMatch ? '8px' : '4px 8px', fontFamily: 'monospace', color: isMatch ? '#d48806' : '#2563eb', fontWeight: isMatch ? 800 : 400, fontSize: isMatch ? 13 : 12 }}>
+                                                                                                    {isMatch && <span style={{marginRight: 6, fontSize: 14}}>👉</span>}
+                                                                                                    {sku}
+                                                                                                </td>
+                                                                                                <td style={{ padding: isMatch ? '8px' : '4px 8px', fontWeight: isMatch ? 700 : 400, color: isMatch ? '#d48806' : 'inherit', fontSize: isMatch ? 13 : 12 }}>
+                                                                                                    {name}
+                                                                                                </td>
+                                                                                                <td style={{ padding: isMatch ? '8px' : '4px 8px', textAlign: 'center', fontWeight: 800, fontSize: isMatch ? 16 : 12, color: isMatch ? '#cf1322' : 'inherit' }}>
+                                                                                                    {qty}
+                                                                                                </td>
+                                                                                                <td style={{ padding: isMatch ? '8px' : '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: isMatch ? 600 : 400, color: isMatch ? '#d48806' : 'inherit' }}>
+                                                                                                    {price.toLocaleString('vi-VN')}
+                                                                                                </td>
+                                                                                                <td style={{ padding: isMatch ? '8px' : '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: isMatch ? 800 : 700, color: isMatch ? '#d48806' : 'inherit', fontSize: isMatch ? 13 : 12 }}>
+                                                                                                    {total.toLocaleString('vi-VN')}
+                                                                                                </td>
+                                                                                            </tr>
+                                                                                        );
+                                                                                    })}
+                                                                                </tbody>
+                                                                            </table>
+                                                                        )}
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    }
+                                                }}
                                                 columns={[
                                                     { title: "Thời gian / Nhân sự", dataIndex: "createdAt", width: 140, render: (d: string, r: InventoryLogItem) => <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}><span style={{ fontSize: 12, color: "#595959", fontWeight: 500 }}>{dayjs(d).format("DD/MM/YY HH:mm")}</span><span style={{ fontSize: 11, color: "#1677ff" }}>👤 {r.userName || 'Hệ thống'}</span></div> },
                                                     { title: "SKU", dataIndex: "sku", width: 140, render: (sku: string, r: InventoryLogItem) => <div><Tag color="cyan" style={{ fontSize: 11 }}>{sku}</Tag>{r.variantColor && <span style={{ fontSize: 11, color: "#8c8c8c" }}> ({r.variantColor})</span>}</div> },
@@ -1303,22 +1974,17 @@ export default function StockBalancePage() {
                                                         if (!ref) return <span style={{ color: "#d9d9d9" }}>—</span>;
                                                         return (
                                                             <span 
-                                                                onClick={() => {
-                                                                    const eEvent = new CustomEvent('navigate', { 
-                                                                        detail: r.referenceType === 'NHAP' ? 'purchase' : r.referenceType === 'POS' ? 'sales-history' : r.referenceType === 'TMDT' ? 'ecommerce-export' : r.referenceType === 'XUAT' ? 'order-picking' : r.referenceType === 'TRA' ? 'returns' : r.referenceType === 'HOAN' ? 'refunds' : 'stock-balance' 
-                                                                    });
-                                                                    window.dispatchEvent(eEvent);
-                                                                }}
+                                                                onClick={(e) => { e.stopPropagation(); toggleRefDetail(r); }}
                                                                 style={{ fontSize: 11, fontFamily: "monospace", color: "#1890ff", cursor: "pointer", textDecoration: "underline", display: "inline-block", padding: "4px 0" }}
-                                                                title="Nhấp để đi đến chứng từ gốc"
+                                                                title="Nhấp để xem chi tiết chứng từ"
                                                             >
                                                                 {ref}
                                                             </span>
                                                         );
                                                     } },
-                                                    { title: "Tồn đầu", dataIndex: "oldStock", width: 80, align: "right" as const, render: (s: number) => <span style={{ fontWeight: 500, color: "#8c8c8c" }}>{isAdmin ? s : '***'}</span> },
+                                                    { title: "Tồn đầu", dataIndex: "oldStock", width: 80, align: "right" as const, render: (s: number) => <span style={{ fontWeight: 500, color: "#8c8c8c" }}>{s}</span> },
                                                     { title: "Thay đổi", dataIndex: "quantity", width: 90, align: "right" as const, render: (qty: number) => <span style={{ fontWeight: 800, fontSize: 14, color: qty > 0 ? "#1890ff" : qty < 0 ? "#ff4d4f" : "#8c8c8c" }}>{qty > 0 ? "+" + qty : qty}</span> },
-                                                    { title: "Tồn cuối", dataIndex: "newStock", width: 80, align: "right" as const, render: (s: number) => <span style={{ fontWeight: 600 }}>{isAdmin ? s : '***'}</span> },
+                                                    { title: "Tồn cuối", dataIndex: "newStock", width: 80, align: "right" as const, render: (s: number) => <span style={{ fontWeight: 600 }}>{s}</span> },
                                                     { title: "Ghi chú", dataIndex: "note", ellipsis: true, render: (note: string) => note ? <span style={{ fontSize: 12, color: "#595959" }}>{note}</span> : <span style={{ color: "#d9d9d9" }}>—</span> },
                                                 ]}
                                             />
@@ -1458,11 +2124,15 @@ export default function StockBalancePage() {
 
 
 
+
+
             <style>{`
                 .stock-difference-row {
                     background-color: #fff7e6;
                 }
             `}</style>
+            </div>
         </div>
     );
 }
+

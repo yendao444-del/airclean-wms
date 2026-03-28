@@ -85,7 +85,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // Ecommerce Export (XUẤT HÀNG TMDT)
     ecommerceExports: {
-        getAll: () => ipcRenderer.invoke('ecommerceExports:getAll'),
+        getAll: (args) => ipcRenderer.invoke('ecommerceExports:getAll', args),
         create: (data) => ipcRenderer.invoke('ecommerceExports:create', data),
         update: (id, data) => ipcRenderer.invoke('ecommerceExports:update', id, data),
         delete: (id) => ipcRenderer.invoke('ecommerceExports:delete', id),
@@ -93,6 +93,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         bulkCreate: (records) => ipcRenderer.invoke('ecommerceExports:bulkCreate', records),
         selectFolder: () => ipcRenderer.invoke('ecommerceExport:selectFolder'),
         loadExcelFiles: (folderPath) => ipcRenderer.invoke('ecommerceExport:loadExcelFiles', folderPath),
+        selectAndWatch: () => ipcRenderer.invoke('ecommerceExport:selectAndWatch'),
+        startWatch: (folderPath) => ipcRenderer.invoke('ecommerceExport:startWatch', folderPath),
+        stopWatch: () => ipcRenderer.invoke('ecommerceExport:stopWatch'),
+        onNewFile: (callback) => {
+            ipcRenderer.on('ecommerceExport:newFile', (event, data) => callback(data));
+            return () => ipcRenderer.removeAllListeners('ecommerceExport:newFile');
+        },
     },
 
     // Export Orders (XUẤT HÀNG POS)
@@ -143,6 +150,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getAll: (filters) => ipcRenderer.invoke('inventoryLogs:getAll', filters),
         getBySku: (params) => ipcRenderer.invoke('inventoryLogs:getBySku', params),
         create: (data) => ipcRenderer.invoke('inventoryLogs:create', data),
+        getRefDetail: (params) => ipcRenderer.invoke('inventoryLogs:getRefDetail', params),
     },
 
     // Pickup (NHẶT HÀNG)

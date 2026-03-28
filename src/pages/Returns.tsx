@@ -501,7 +501,8 @@ export default function ReturnsPage() {
                         status: r.status || 'pending',
                         packer: r.packer || null,
                     }));
-                    await window.electronAPI.returns.bulkCreate(dbRecords);
+                    const result = await window.electronAPI.returns.bulkCreate(dbRecords);
+                    if (!result.success) throw new Error(result.error || 'Lỗi DB');
                     console.log(`✅ Đã lưu ${uniqueReturns.length} phiếu trả vào database`);
 
                     // Reload data từ DB

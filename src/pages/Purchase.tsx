@@ -18,7 +18,7 @@ import {
     Upload,
     Checkbox,
 } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, EyeOutlined, HistoryOutlined, ClockCircleOutlined, UploadOutlined, FileTextOutlined, CheckCircleOutlined, LinkOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, EyeOutlined, HistoryOutlined, ClockCircleOutlined, UploadOutlined, FileTextOutlined, CheckCircleOutlined, LinkOutlined, InboxOutlined, AuditOutlined, GiftOutlined, TagOutlined, PaperClipOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import dayjs from 'dayjs';
@@ -56,6 +56,7 @@ interface PurchaseItem {
 interface Purchase {
     id: number;
     supplierId: number;
+    poNumber?: string;
     supplierName?: string;
     purchaseDate: string;
     items: string; // JSON string
@@ -188,6 +189,18 @@ export default function PurchasePage() {
     // Ref cho debounce timeout
     const autoAddTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+    // 📤 Inline upload trong modal (upload ngay khi tạo phiếu)
+    const [pendingImportFiles, setPendingImportFiles] = useState<File[]>([]);
+    const [pendingVatFiles, setPendingVatFiles] = useState<File[]>([]);
+    const [pendingVatNumber, setPendingVatNumber] = useState('');
+    const [pendingVatDate, setPendingVatDate] = useState<any>(null);
+    const [vatInlineVisible, setVatInlineVisible] = useState(false);
+    const [chungTuPickerVisible, setChungTuPickerVisible] = useState(false);
+    const isThhtWatch = Form.useWatch('isThht', form);
+    const isNoVatWatch = Form.useWatch('isNoVat', form);
+    const importFileInputRef = useRef<HTMLInputElement>(null);
+    const vatFileInputRef = useRef<HTMLInputElement>(null);
+
     useEffect(() => {
         loadPurchases();
         loadSuppliers();
@@ -274,6 +287,10 @@ export default function PurchasePage() {
         setEditingPurchase(null);
         setPurchaseItems([]);
         setSelectedProductVariants([]);
+        setPendingImportFiles([]);
+        setPendingVatFiles([]);
+        setPendingVatNumber('');
+        setPendingVatDate(null);
         form.resetFields();
 
         // ⚡ QUAN TRỌNG: Load data TRƯỚC
@@ -320,16 +337,16 @@ export default function PurchasePage() {
         setModalVisible(true);
     };
 
-    const handleDelete = (id: number) => {
+    const handleDelete = (purchase: Purchase) => {
         Modal.confirm({
             title: 'Xác nhận xóa',
-            content: 'Bạn có chắc muốn xóa phiếu nhập này?',
+            content: `Bạn có chắc muốn xóa phiếu nhập ${purchase.poNumber || '#' + purchase.id}?`,
             okText: 'Xóa',
             okType: 'danger',
             cancelText: 'Hủy',
             onOk: async () => {
                 try {
-                    const result = await window.electronAPI.purchases.delete(id);
+                    const result = await window.electronAPI.purchases.delete(purchase.id);
                     if (result.success) {
                         message.success('Đã xóa phiếu nhập!');
                         loadPurchases();
@@ -421,6 +438,31 @@ export default function PurchasePage() {
             }
 
             if (result.success) {
+                const savedId = result.data?.id || editingPurchase?.id;
+
+                // 📤 Auto-upload Phiếu nhập kho nếu có file pending
+                if (savedId && pendingImportFiles.length > 0) {
+                    try {
+                        const filesData = await Promise.all(pendingImportFiles.map(f => compressImageToBase64(f)));
+                        const upResult = await (window.electronAPI as any).purchases.uploadImportReceipt({ purchaseId: savedId, files: filesData });
+                        if (upResult.success) message.success('✅ Đã upload Phiếu Nhập Kho!');
+                        else message.warning('Upload Phiếu Nhập Kho chưa thành công, vào phiếu để thử lại.');
+                    } catch { message.warning('Lỗi upload Phiếu Nhập Kho.'); }
+                }
+
+                // 📤 Auto-upload HĐ VAT nếu có file pending
+                if (savedId && pendingVatFiles.length > 0) {
+                    try {
+                        const filesData = await Promise.all(pendingVatFiles.map(f => compressImageToBase64(f)));
+                        const now = dayjs();
+                        const invoiceNumber = pendingVatNumber || `VAT-PO${savedId}-${now.format('YYMMDDHHmm')}`;
+                        const invoiceDate = (pendingVatDate || now).format('YYYY-MM-DD');
+                        const upResult = await (window.electronAPI as any).purchases.uploadVATInvoice({ purchaseId: savedId, invoiceNumber, invoiceDate, files: filesData });
+                        if (upResult.success) message.success('✅ Đã upload HĐ VAT!');
+                        else message.warning('Upload HĐ VAT chưa thành công, vào phiếu để thử lại.');
+                    } catch { message.warning('Lỗi upload HĐ VAT.'); }
+                }
+
                 message.success(editingPurchase ? 'Đã cập nhật phiếu nhập!' : 'Đã tạo phiếu nhập mới!');
                 setModalVisible(false);
                 loadPurchases();
@@ -430,14 +472,14 @@ export default function PurchasePage() {
                     module: 'purchases',
                     action: editingPurchase ? 'UPDATE' : 'CREATE',
                     recordId: result.data?.id,
-                    recordName: `Phiếu nhập #${result.data?.id || 'N/A'}`,
+                    recordName: result.data?.poNumber || `Phiếu nhập #${result.data?.id || 'N/A'}`,
                     changes: editingPurchase ? {
                         items: { count: purchaseItems.length },
                         total: { value: totalAmount }
                     } : null,
                     description: editingPurchase
-                        ? `Cập nhật phiếu nhập #${editingPurchase.id} - Tổng: ${totalAmount.toLocaleString()}đ`
-                        : `Tạo phiếu nhập mới - Tổng: ${totalAmount.toLocaleString()}đ - ${purchaseItems.length} SP`,
+                        ? `Cập nhật phiếu nhập ${editingPurchase.poNumber || '#' + editingPurchase.id} - Tổng: ${totalAmount.toLocaleString()}đ`
+                        : `Tạo phiếu nhập mới ${result.data?.poNumber || ''} - Tổng: ${totalAmount.toLocaleString()}đ - ${purchaseItems.length} SP`,
                     userName: currentUser,
                     severity: 'INFO'
                 });
@@ -575,23 +617,53 @@ export default function PurchasePage() {
                 setSelectedProductVariants([]);
             }
         } else {
+            // Không có variants → tự động thêm luôn với SL=1
             setSelectedProductVariants([]);
-            // Nếu không có variants, set giá nhập mặc định từ sản phẩm
-            if (product) {
-                const costValue = (product as any).cost || 0;
-                form.setFieldsValue({ tempUnitPrice: costValue });
-            }
+            const costValue = (product as any)?.cost || 0;
+            const newItem: PurchaseItem = {
+                productId,
+                productName: product?.name || '',
+                sku: product?.sku || '',
+                unit: product?.unit || 'Cái',
+                quantity: 1,
+                unitPrice: costValue,
+                total: costValue,
+            };
+            setPurchaseItems(prev => [...prev, newItem]);
+            form.setFieldsValue({ tempProductId: undefined, tempColor: undefined });
+            setTimeout(() => {
+                if (productSelectRef.current) productSelectRef.current.focus();
+            }, 100);
+            return;
         }
         // Reset color when product changes
         form.setFieldsValue({ tempColor: undefined });
     };
 
-    // 💰 Handler khi chọn màu sắc → Auto-fill giá nhập của variant
+    // 💰 Handler khi chọn màu sắc → Auto-add xuống bảng, giữ sản phẩm
     const handleColorSelect = (color: string) => {
+        const productId = form.getFieldValue('tempProductId');
+        const product = products.find(p => p.id === productId);
         const variant = selectedProductVariants.find(v => v.color === color);
-        if (variant && variant.cost) {
-            form.setFieldsValue({ tempUnitPrice: variant.cost });
-        }
+
+        const newItem: PurchaseItem = {
+            productId,
+            productName: `${product?.name || ''} - ${color}`,
+            sku: (product as any)?.sku || '',
+            color,
+            variantSku: variant?.sku || '',
+            unit: form.getFieldValue('tempUnit') || 'Cái',
+            quantity: 1,
+            unitPrice: variant?.cost || 0,
+            total: variant?.cost || 0,
+        };
+
+        setPurchaseItems(prev => [...prev, newItem]);
+        form.resetFields(['tempColor']);
+
+        setTimeout(() => {
+            if (colorSelectRef.current) colorSelectRef.current.focus();
+        }, 100);
     };
 
     const handleRemoveItem = (index: number) => {
@@ -682,15 +754,15 @@ export default function PurchasePage() {
     };
 
     // 📦 Đánh dấu / hoàn tác Đơn THHT
-    const handleMarkThht = (purchaseId: number, revert: boolean) => {
+    const handleMarkThht = (purchase: Purchase, revert: boolean) => {
         Modal.confirm({
             title: revert ? '↩️ Hoàn tác Đơn THHT' : '📦 Đánh dấu là Đơn THHT',
-            content: `Bạn có chắc muốn ${revert ? 'hoàn tác' : 'đánh dấu'} phiếu nhập #${purchaseId} ${revert ? 'về trạng thái "Chưa có HĐ"' : 'là Đơn THHT (không cần HĐ VAT)'}?`,
+            content: `Bạn có chắc muốn ${revert ? 'hoàn tác' : 'đánh dấu'} phiếu nhập ${purchase.poNumber || '#' + purchase.id} ${revert ? 'về trạng thái "Chưa có HĐ"' : 'là Đơn THHT (không cần HĐ VAT)'}?`,
             okText: revert ? 'Hoàn tác' : 'Xác nhận',
             cancelText: 'Hủy',
             okButtonProps: { style: revert ? {} : { background: '#722ed1', borderColor: '#722ed1' } },
             onOk: async () => {
-                const result = await (window.electronAPI as any).purchases.markAsThht(purchaseId, revert);
+                const result = await (window.electronAPI as any).purchases.markAsThht(purchase.id, revert);
                 if (result.success) {
                     message.success(revert ? '↩️ Đã hoàn tác, phiếu trở về Chưa có HĐ' : '📦 Đã đánh dấu là Đơn THHT');
                     loadPurchases();
@@ -829,10 +901,10 @@ export default function PurchasePage() {
     const columns: ColumnsType<Purchase> = [
         {
             title: 'Mã phiếu',
-            dataIndex: 'id',
-            key: 'id',
-            width: 100,
-            render: (id) => <Tag color="blue">#{id}</Tag>,
+            dataIndex: 'poNumber',
+            key: 'poNumber',
+            width: 150,
+            render: (poNumber, record) => <Tag color="blue">{poNumber || `#${record.id}`}</Tag>,
         },
         {
             title: 'Nhà cung cấp',
@@ -995,7 +1067,7 @@ export default function PurchasePage() {
                     <Button
                         danger
                         icon={<DeleteOutlined />}
-                        onClick={() => handleDelete(record.id)}
+                        onClick={() => handleDelete(record)}
                     >
                         Xóa
                     </Button>
@@ -1043,7 +1115,7 @@ export default function PurchasePage() {
                         {['thht', 'no_vat'].includes((record as any).vatInvoiceStatus) ? (
                             <div style={{ padding: 12, background: '#f9f0ff', border: '1px solid #d3adf7', borderRadius: 6 }}>
                                 <div style={{ color: '#722ed1', fontWeight: 600, fontSize: 13 }}>📦 Đơn THHT / Không VAT</div>
-                                <Button type="link" size="small" onClick={() => handleMarkThht(record.id, true)} style={{ padding: 0, marginTop: 4, color: '#1890ff' }}>↩️ Hoàn tác</Button>
+                                <Button type="link" size="small" onClick={() => handleMarkThht(record, true)} style={{ padding: 0, marginTop: 4, color: '#1890ff' }}>↩️ Hoàn tác</Button>
                             </div>
                         ) : (
                             (record as any).vatInvoiceStatus === 'uploaded' ? (
@@ -1068,7 +1140,7 @@ export default function PurchasePage() {
                                         >
                                             🧾 Cập nhật HĐ VAT (Hóa đơn đỏ)
                                         </Button>
-                                        <Button onClick={() => handleMarkThht(record.id, false)} style={{ fontWeight: 500 }}>
+                                        <Button onClick={() => handleMarkThht(record, false)} style={{ fontWeight: 500 }}>
                                             📦 Đánh dấu THHT / Không VAT
                                         </Button>
                                     </Space>
@@ -1349,7 +1421,13 @@ export default function PurchasePage() {
             <Modal
                 title={editingPurchase ? '✏️ Sửa phiếu nhập' : '➕ Tạo phiếu nhập mới'}
                 open={modalVisible}
-                onCancel={() => setModalVisible(false)}
+                onCancel={() => {
+                    setModalVisible(false);
+                    setPendingImportFiles([]);
+                    setPendingVatFiles([]);
+                    setPendingVatNumber('');
+                    setPendingVatDate(null);
+                }}
                 footer={null}
                 width={900}
                 destroyOnClose
@@ -1522,29 +1600,29 @@ export default function PurchasePage() {
                             />
                         </Form.Item>
 
-                        {/* 📦 Checkboxes tùy chọn VAT / THHT */}
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 8 }}>
-                            <Form.Item
-                                name="isThht"
-                                valuePropName="checked"
-                                style={{ marginBottom: 0 }}
-                            >
-                                <Checkbox onChange={(e) => { if (e.target.checked) form.setFieldsValue({ isNoVat: false }); }}>
-                                    <span style={{ color: '#722ed1', fontWeight: 600 }}>📦 Phiếu THHT</span>
-                                    <span style={{ color: '#8c8c8c', marginLeft: 8, fontSize: 12 }}>(Đơn thay hàng/hàng tặng)</span>
-                                </Checkbox>
-                            </Form.Item>
+                        {/* Hidden form fields */}
+                        <Form.Item name="isThht" valuePropName="checked" hidden><Checkbox /></Form.Item>
+                        <Form.Item name="isNoVat" valuePropName="checked" hidden><Checkbox /></Form.Item>
 
-                            <Form.Item
-                                name="isNoVat"
-                                valuePropName="checked"
-                                style={{ marginBottom: 0 }}
-                            >
-                                <Checkbox onChange={(e) => { if (e.target.checked) form.setFieldsValue({ isThht: false }); }}>
-                                    <span style={{ color: '#595959', fontWeight: 600 }}>🏷️ Không VAT</span>
-                                    <span style={{ color: '#8c8c8c', marginLeft: 8, fontSize: 12 }}>(Không lấy hóa đơn GTGT)</span>
-                                </Checkbox>
-                            </Form.Item>
+                        {/* Hidden native file inputs */}
+                        <input type="file" ref={importFileInputRef} multiple accept="image/*,.pdf" style={{ display: 'none' }}
+                            onChange={(e) => { if (e.target.files) { setPendingImportFiles(prev => [...prev, ...Array.from(e.target.files!)]); e.target.value = ''; } }} />
+                        <input type="file" ref={vatFileInputRef} multiple accept="image/*,.pdf" style={{ display: 'none' }}
+                            onChange={(e) => { if (e.target.files) { setPendingVatFiles(prev => [...prev, ...Array.from(e.target.files!)]); e.target.value = ''; setVatInlineVisible(false); } }} />
+
+                        {/* 📎 Dropdown chứng từ */}
+                        <div style={{ marginTop: 8 }}>
+                            <Button icon={<PaperClipOutlined />} onClick={() => setChungTuPickerVisible(true)}>
+                                Đính kèm chứng từ
+                            </Button>
+
+                            {/* Status tags */}
+                            <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                {isThhtWatch && <Tag color="purple" closable onClose={() => form.setFieldsValue({ isThht: false })}>📦 THHT</Tag>}
+                                {isNoVatWatch && <Tag color="default" closable onClose={() => form.setFieldsValue({ isNoVat: false })}>🏷️ Không VAT</Tag>}
+                                {pendingImportFiles.length > 0 && <Tag color="blue" closable onClose={() => setPendingImportFiles([])}>📄 Phiếu Kho: {pendingImportFiles.length} file</Tag>}
+                                {pendingVatFiles.length > 0 && <Tag color="orange" closable onClose={() => setPendingVatFiles([])}>🧾 HĐ VAT: {pendingVatFiles.length} file</Tag>}
+                            </div>
                         </div>
                     </div>
 
@@ -1560,7 +1638,7 @@ export default function PurchasePage() {
                             ➕ Thêm sản phẩm
                         </Title>
 
-                        <div style={{ display: 'grid', gridTemplateColumns: '2.5fr 1.5fr 0.8fr 1fr 1.2fr auto', gap: 12, alignItems: 'end' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, alignItems: 'end' }}>
                             <Form.Item label={`Sản phẩm ${products.length > 0 ? `(${products.length})` : ''}`} name="tempProductId" style={{ marginBottom: 0 }}>
                                 <Select
                                     ref={productSelectRef}
@@ -1579,10 +1657,10 @@ export default function PurchasePage() {
                                 </Select>
                             </Form.Item>
 
-                            <Form.Item label="Màu sắc" name="tempColor" style={{ marginBottom: 0 }}>
+                            <Form.Item label="Màu sắc / Phân loại" name="tempColor" style={{ marginBottom: 0 }}>
                                 <Select
                                     ref={colorSelectRef}
-                                    placeholder="Chọn màu"
+                                    placeholder={selectedProductVariants.length === 0 ? '(Không có phân loại)' : 'Chọn màu để thêm'}
                                     size="large"
                                     disabled={selectedProductVariants.length === 0}
                                     allowClear
@@ -1604,45 +1682,6 @@ export default function PurchasePage() {
                                         ))}
                                 </Select>
                             </Form.Item>
-
-                            <Form.Item label="ĐVT" name="tempUnit" style={{ marginBottom: 0 }}>
-                                <Input
-                                    readOnly
-                                    size="large"
-                                    placeholder="—"
-                                    style={{ background: '#f5f5f5', textAlign: 'center' }}
-                                />
-                            </Form.Item>
-
-                            <Form.Item label="Số lượng" name="tempQuantity" style={{ marginBottom: 0 }}>
-                                <InputNumber
-                                    placeholder="0"
-                                    min={1}
-                                    style={{ width: '100%' }}
-                                    size="large"
-                                    onChange={handleQuantityChange}
-                                />
-                            </Form.Item>
-
-                            <Form.Item label="Giá nhập" name="tempUnitPrice" style={{ marginBottom: 0 }}>
-                                <InputNumber
-                                    placeholder="0"
-                                    min={0}
-                                    style={{ width: '100%' }}
-                                    size="large"
-                                    formatter={value => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                                    onChange={handlePriceChange}
-                                />
-                            </Form.Item>
-
-                            <Button
-                                type="primary"
-                                icon={<PlusOutlined />}
-                                onClick={handleAddItem}
-                                size="large"
-                            >
-                                Thêm
-                            </Button>
                         </div>
                     </div>
 
@@ -1803,6 +1842,132 @@ export default function PurchasePage() {
                         </Button>
                     </div>
                 </Form>
+            </Modal>
+
+            {/* 📎 Modal chọn loại chứng từ — buộc user đọc và chọn đúng */}
+            <Modal
+                title={<span style={{ fontSize: 16, fontWeight: 700 }}>📎 Bạn muốn đính kèm loại chứng từ nào?</span>}
+                open={chungTuPickerVisible}
+                onCancel={() => setChungTuPickerVisible(false)}
+                footer={null}
+                width={520}
+                destroyOnClose
+            >
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, padding: '8px 0 4px' }}>
+                    {/* Phiếu Nhập Kho */}
+                    <div
+                        onClick={() => { setChungTuPickerVisible(false); setTimeout(() => importFileInputRef.current?.click(), 100); }}
+                        style={{
+                            border: '2px solid #1d39c4',
+                            borderRadius: 12,
+                            padding: 20,
+                            cursor: 'pointer',
+                            textAlign: 'center',
+                            background: '#f0f5ff',
+                            transition: 'all 0.2s',
+                        }}
+                        onMouseEnter={e => (e.currentTarget.style.background = '#d6e4ff')}
+                        onMouseLeave={e => (e.currentTarget.style.background = '#f0f5ff')}
+                    >
+                        <InboxOutlined style={{ fontSize: 36, color: '#1d39c4', marginBottom: 10, display: 'block' }} />
+                        <div style={{ fontWeight: 700, fontSize: 15, color: '#1d39c4', marginBottom: 6 }}>Phiếu Nhập Kho</div>
+                        <div style={{ fontSize: 12, color: '#595959', lineHeight: 1.6 }}>
+                            Chứng từ nội bộ<br />
+                            Do <b>thủ kho</b> xác nhận<br />
+                            Ghi nhận hàng đã vào kho
+                        </div>
+                        {pendingImportFiles.length > 0 && (
+                            <div style={{ marginTop: 8, color: '#52c41a', fontWeight: 600, fontSize: 12 }}>
+                                ✅ Đã có {pendingImportFiles.length} file
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Hóa đơn VAT */}
+                    <div
+                        onClick={() => { setChungTuPickerVisible(false); setTimeout(() => setVatInlineVisible(true), 100); }}
+                        style={{
+                            border: '2px solid #d46b08',
+                            borderRadius: 12,
+                            padding: 20,
+                            cursor: 'pointer',
+                            textAlign: 'center',
+                            background: '#fff7e6',
+                            transition: 'all 0.2s',
+                        }}
+                        onMouseEnter={e => (e.currentTarget.style.background = '#ffe7ba')}
+                        onMouseLeave={e => (e.currentTarget.style.background = '#fff7e6')}
+                    >
+                        <AuditOutlined style={{ fontSize: 36, color: '#d46b08', marginBottom: 10, display: 'block' }} />
+                        <div style={{ fontWeight: 700, fontSize: 15, color: '#d46b08', marginBottom: 6 }}>Hóa đơn VAT</div>
+                        <div style={{ fontSize: 12, color: '#595959', lineHeight: 1.6 }}>
+                            Chứng từ tài chính<br />
+                            Do <b>nhà cung cấp</b> xuất<br />
+                            Hóa đơn đỏ / GTGT
+                        </div>
+                        {pendingVatFiles.length > 0 && (
+                            <div style={{ marginTop: 8, color: '#52c41a', fontWeight: 600, fontSize: 12 }}>
+                                ✅ Đã có {pendingVatFiles.length} file
+                            </div>
+                        )}
+                    </div>
+                </div>
+                <div style={{ borderTop: '1px dashed #d9d9d9', marginTop: 16, paddingTop: 12, display: 'flex', gap: 8, justifyContent: 'center' }}>
+                    <Button
+                        icon={<GiftOutlined />}
+                        style={isThhtWatch ? { background: '#f9f0ff', borderColor: '#722ed1', color: '#722ed1', fontWeight: 600 } : { color: '#722ed1', borderColor: '#722ed1' }}
+                        onClick={() => {
+                            const next = !isThhtWatch;
+                            form.setFieldsValue({ isThht: next, isNoVat: false });
+                            if (next) { setPendingImportFiles([]); setPendingVatFiles([]); }
+                            setChungTuPickerVisible(false);
+                        }}
+                    >
+                        {isThhtWatch ? '✅ Đã đánh dấu THHT' : 'Phiếu THHT'}
+                    </Button>
+                    <Button
+                        icon={<TagOutlined />}
+                        style={isNoVatWatch ? { background: '#fafafa', borderColor: '#595959', color: '#595959', fontWeight: 600 } : { color: '#595959' }}
+                        onClick={() => {
+                            const next = !isNoVatWatch;
+                            form.setFieldsValue({ isNoVat: next, isThht: false });
+                            if (next) { setPendingImportFiles([]); setPendingVatFiles([]); }
+                            setChungTuPickerVisible(false);
+                        }}
+                    >
+                        {isNoVatWatch ? '✅ Đã đánh dấu Không VAT' : 'Không VAT'}
+                    </Button>
+                </div>
+                <div style={{ textAlign: 'center', marginTop: 10, color: '#8c8c8c', fontSize: 11 }}>
+                    Chọn sai loại chứng từ sẽ ảnh hưởng đến báo cáo kế toán và kho.
+                </div>
+            </Modal>
+
+            {/* 🧾 Modal upload HĐ VAT inline (từ nút Đính kèm chứng từ) */}
+            <Modal
+                title="🧾 Upload Hóa đơn VAT"
+                open={vatInlineVisible}
+                onCancel={() => setVatInlineVisible(false)}
+                footer={null}
+                width={400}
+                destroyOnClose
+            >
+                <Space direction="vertical" style={{ width: '100%', paddingTop: 8 }}>
+                    <Button
+                        type="primary"
+                        icon={<AuditOutlined />}
+                        block
+                        size="large"
+                        onClick={() => vatFileInputRef.current?.click()}
+                    >
+                        Chọn file HĐ VAT (ảnh / PDF)
+                    </Button>
+                    {pendingVatFiles.length > 0 && (
+                        <div style={{ color: '#52c41a', fontWeight: 600 }}>
+                            ✅ Đã chọn {pendingVatFiles.length} file — sẽ upload khi lưu phiếu
+                        </div>
+                    )}
+                </Space>
             </Modal>
 
             {/* 👁️ Modal xem chi tiết phiếu nhập */}
