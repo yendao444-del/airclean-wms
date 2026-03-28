@@ -142,8 +142,14 @@ export default function BusinessReportPage() {
             }
             if (comboRes.success && comboRes.data) {
                 for (const c of comboRes.data) {
-                    // Chỉ ghi nếu SKU chưa có từ Products (tránh combo đè giá sản phẩm gốc)
-                    if (skuCostMap[c.sku] === undefined) {
+                    // Tính giá vốn combo từ components hiện tại (không dùng c.cost vì có thể lỗi thời)
+                    try {
+                        const comboItems = typeof c.items === 'string' ? JSON.parse(c.items) : (c.items || []);
+                        const calculatedCost = comboItems.reduce((sum: number, ci: any) => {
+                            return sum + (skuCostMap[ci.sku] || 0) * (ci.quantity || 1);
+                        }, 0);
+                        skuCostMap[c.sku] = calculatedCost || c.cost || 0;
+                    } catch {
                         skuCostMap[c.sku] = c.cost || 0;
                     }
                 }

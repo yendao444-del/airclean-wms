@@ -271,7 +271,7 @@ export default function ComboProductsPage() {
                                             <div style={{ fontWeight: 500, color: '#1890ff', minWidth: 180 }}>{combo.sku}</div>
                                             <div style={{ flex: 1, color: '#262626' }}>{combo.name}</div>
                                             <div style={{ fontWeight: 600, color: '#262626', minWidth: 100 }}>
-                                                {new Intl.NumberFormat('vi-VN').format(combo.price)}₫
+                                                {new Intl.NumberFormat('vi-VN').format(combo.cost)}₫
                                             </div>
                                             <div style={{ minWidth: 80 }}>
                                                 <Tag color={combo.stock > 15 ? 'success' : 'warning'}

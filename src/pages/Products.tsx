@@ -561,12 +561,13 @@ export default function ProductsPage() {
                             v.combos.forEach((c: any) => {
                                 if (c.id) {
                                     const newCost = (v.cost || 0) * (c.quantity || 1);
+                                    const newPrice = (v.price || 0) * (c.quantity || 1);
                                     comboUpdates.push(
                                         window.electronAPI.combos.update(c.id, {
                                             sku: c.sku,
                                             name: c.name,
                                             items: undefined, // giữ nguyên items trong DB
-                                            price: c.price,
+                                            price: newPrice,
                                             cost: newCost,
                                         })
                                     );

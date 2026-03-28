@@ -368,7 +368,7 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
                                     <span style={{ fontWeight: 600 }}>{new Intl.NumberFormat('vi-VN').format(autoPrice)}₫</span>
                                 </div>
                                 <div className="price-row total">
-                                    <span>Giá bán:</span>
+                                    <span>Giá vốn:</span>
                                     <span>{new Intl.NumberFormat('vi-VN').format(customPrice || autoPrice)}₫</span>
                                 </div>
                             </div>
@@ -386,7 +386,7 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
                             </div>
 
                             <div className="form-group">
-                                <label className="form-label">Giá bán (có thể chỉnh sửa)</label>
+                                <label className="form-label">Giá vốn (có thể chỉnh sửa)</label>
                                 <InputNumber
                                     style={{ width: '100%' }}
                                     value={customPrice}

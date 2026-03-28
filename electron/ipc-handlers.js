@@ -4125,6 +4125,7 @@ ipcMain.handle('combos:getAll', async () => {
         const combosWithStock = combos.map(combo => {
             const items = JSON.parse(combo.items || '[]');
             let availableStock = Infinity;
+            let calculatedCost = 0;
             items.forEach(item => {
                 const product = products.find(p => p.id === item.productId);
                 if (product && product.variants) {
@@ -4134,13 +4135,15 @@ ipcMain.handle('combos:getAll', async () => {
                     if (variant) {
                         const possibleCombos = Math.floor((variant.stock || 0) / item.quantity);
                         availableStock = Math.min(availableStock, possibleCombos);
+                        calculatedCost += (variant.cost || 0) * item.quantity;
                     }
                 } else if (product) {
                     const possibleCombos = Math.floor(product.stock / item.quantity);
                     availableStock = Math.min(availableStock, possibleCombos);
+                    calculatedCost += (product.cost || 0) * item.quantity;
                 }
             });
-            return { ...combo, stock: availableStock === Infinity ? 0 : availableStock };
+            return { ...combo, stock: availableStock === Infinity ? 0 : availableStock, cost: calculatedCost };
         });
         return { success: true, data: combosWithStock };
     } catch (error) {
