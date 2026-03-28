@@ -18,7 +18,7 @@ import {
     Upload,
     Checkbox,
 } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, EyeOutlined, HistoryOutlined, ClockCircleOutlined, UploadOutlined, FileTextOutlined, CheckCircleOutlined, LinkOutlined, InboxOutlined, AuditOutlined, GiftOutlined, TagOutlined, PaperClipOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, EyeOutlined, HistoryOutlined, ClockCircleOutlined, UploadOutlined, FileTextOutlined, CheckCircleOutlined, LinkOutlined, InboxOutlined, AuditOutlined, GiftOutlined, TagOutlined, PaperClipOutlined, SearchOutlined, FilterOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import dayjs from 'dayjs';
@@ -143,6 +143,11 @@ export default function PurchasePage() {
 
     // 🔒 State cho submit chống double click
     const [submitting, setSubmitting] = useState(false);
+
+    // 🔍 State cho tìm kiếm và lọc
+    const [searchText, setSearchText] = useState('');
+    const [filterVat, setFilterVat] = useState<'all' | 'uploaded' | 'thht' | 'pending'>('all');
+
 
     // 📦 State cho upload Phiếu Nhập Kho
     const [importReceiptModalVisible, setImportReceiptModalVisible] = useState(false);
@@ -1272,31 +1277,59 @@ export default function PurchasePage() {
                 @keyframes flash { from { opacity: 1; } to { opacity: 0.6; } }
                 .blink { animation: flash 1s infinite alternate; }
             `}</style>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-                <Title level={2} style={{ color: '#262626', margin: 0 }}>
+            {/* ===== HEADER + TOOLBAR (tích hợp tìm kiếm) ===== */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+                <Title level={2} style={{ color: '#262626', margin: 0, whiteSpace: 'nowrap' }}>
                     📦 Nhập hàng
                 </Title>
+
+                {/* Thanh tìm kiếm - chỉ hiện khi ở tab list */}
+                {activeTab === 'list' && (
+                    <Space style={{ flex: 1, maxWidth: 600 }}>
+                        <Input
+                            prefix={<SearchOutlined style={{ color: '#bfbfbf' }} />}
+                            placeholder="Tìm mã phiếu, NCC, người tạo..."
+                            value={searchText}
+                            onChange={(e) => setSearchText(e.target.value)}
+                            allowClear
+                            style={{ width: 280, borderRadius: 6 }}
+                        />
+                        <Select
+                            value={filterVat}
+                            onChange={setFilterVat}
+                            style={{ width: 190, borderRadius: 6 }}
+                            options={[
+                                { value: 'all', label: '📋 Tất cả VAT' },
+                                { value: 'uploaded', label: '✅ Đã có HĐ VAT' },
+                                { value: 'thht', label: '📦 THHT / Không VAT' },
+                                { value: 'pending', label: '⚠️ Chưa có HĐ' },
+                            ]}
+                        />
+                        {(searchText || filterVat !== 'all') && (
+                            <Button
+                                size="small"
+                                onClick={() => { setSearchText(''); setFilterVat('all'); }}
+                                style={{ color: '#ff4d4f', borderColor: '#ff4d4f' }}
+                            >
+                                Xóa lọc
+                            </Button>
+                        )}
+                    </Space>
+                )}
+
                 <Space>
                     {selectedRowKeys.length > 0 && (
                         <Button
                             danger
                             icon={<DeleteOutlined />}
                             onClick={handleBulkDelete}
-                            size="large"
                         >
                             Xóa đã chọn ({selectedRowKeys.length})
                         </Button>
                     )}
                     <Button
-                        icon={<ReloadOutlined />}
-                        onClick={loadPurchases}
-                        loading={loading}
-                    >
-                        Tải lại
-                    </Button>
-                    <Button
                         icon={<HistoryOutlined />}
-                        onClick={() => setActiveTab('history')}
+                        onClick={() => setActiveTab(activeTab === 'history' ? 'list' : 'history')}
                         type={activeTab === 'history' ? 'primary' : 'default'}
                     >
                         Lịch sử ({historyLogs.length})
@@ -1313,32 +1346,48 @@ export default function PurchasePage() {
                 </Space>
             </div>
 
-            {/* Hiển thị danh sách phiếu */}
-            {activeTab === 'list' && (
-                <Card>
-                    <Table
-                        columns={columns}
-                        dataSource={purchases}
-                        rowKey="id"
-                        loading={loading}
-                        expandable={{
-                            expandedRowRender,
-                            rowExpandable: (record) => true,
-                            expandRowByClick: true,
-                            showExpandColumn: false,
-                        }}
-                        rowSelection={{
-                            selectedRowKeys,
-                            onChange: (keys) => setSelectedRowKeys(keys),
-                        }}
-                        pagination={{
-                            pageSize: 10,
-                            showSizeChanger: true,
-                            showTotal: (total) => `Tổng ${total} phiếu`,
-                        }}
-                    />
-                </Card>
-            )}
+            {/* ===== DANH SÁCH PHIẾU NHẬP ===== */}
+            {activeTab === 'list' && (() => {
+                const kw = searchText.trim().toLowerCase();
+                const filteredPurchases = purchases.filter(p => {
+                    const matchText = !kw ||
+                        (p.poNumber || '').toLowerCase().includes(kw) ||
+                        (p.supplierName || '').toLowerCase().includes(kw) ||
+                        (p.createdBy || '').toLowerCase().includes(kw) ||
+                        (p.notes || '').toLowerCase().includes(kw);
+                    const vatStatus = (p as any).vatInvoiceStatus;
+                    const matchVat = filterVat === 'all' ||
+                        (filterVat === 'uploaded' && vatStatus === 'uploaded') ||
+                        (filterVat === 'thht' && ['thht', 'no_vat'].includes(vatStatus)) ||
+                        (filterVat === 'pending' && !vatStatus);
+                    return matchText && matchVat;
+                });
+                return (
+                    <Card>
+                        <Table
+                            columns={columns}
+                            dataSource={filteredPurchases}
+                            rowKey="id"
+                            loading={loading}
+                            expandable={{
+                                expandedRowRender,
+                                rowExpandable: () => true,
+                                expandRowByClick: true,
+                                showExpandColumn: false,
+                            }}
+                            rowSelection={{
+                                selectedRowKeys,
+                                onChange: (keys) => setSelectedRowKeys(keys),
+                            }}
+                            pagination={{
+                                pageSize: 10,
+                                showSizeChanger: true,
+                                showTotal: (total) => `Hiển thị ${total}/${purchases.length} phiếu`,
+                            }}
+                        />
+                    </Card>
+                );
+            })()}
 
             {/* Hiển thị lịch sử */}
             {activeTab === 'history' && (

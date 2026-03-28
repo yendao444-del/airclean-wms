@@ -54,16 +54,24 @@ function createWindow() {
         backgroundColor: '#1f1f1f',
     });
 
-    // Load React app
-    // Nếu chạy qua "electron:dev" (concurrently) → luôn dùng dev server
-    // Nếu chạy trực tiếp "electron ." → dùng dist/
+    // Load React app - auto-detect dev server
     const VITE_DEV_SERVER = 'http://localhost:5173';
-    const isDev = !app.isPackaged && (process.env.VITE_DEV_SERVER_URL || process.argv.includes('--dev'));
+    const isDev = !app.isPackaged;
 
     console.log('isDev:', isDev, '| isPackaged:', app.isPackaged);
 
     if (isDev) {
-        mainWindow.loadURL(VITE_DEV_SERVER);
+        // Thử kết nối Vite dev server trước (HMR - không cần rebuild)
+        const http = require('http');
+        http.get(VITE_DEV_SERVER, () => {
+            console.log('✅ Vite dev server detected → loading', VITE_DEV_SERVER);
+            mainWindow.loadURL(VITE_DEV_SERVER);
+        }).on('error', () => {
+            // Không có dev server → dùng dist (build tĩnh)
+            const indexPath = path.join(__dirname, '../dist/index.html');
+            console.log('📦 No dev server → loading dist:', indexPath);
+            mainWindow.loadFile(indexPath);
+        });
     } else {
         const indexPath = path.join(__dirname, '../dist/index.html');
         mainWindow.loadFile(indexPath);

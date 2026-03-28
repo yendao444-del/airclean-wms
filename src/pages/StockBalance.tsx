@@ -419,9 +419,21 @@ const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ p
                                 </tr>
                             </thead>
                             <tbody>
-                                {activeLogs.length > 0 ? activeLogs.map(log => (
+                                {activeLogs.length > 0 ? activeLogs.map(log => {
+                                    const isIncrease = log.quantity > 0;
+                                    const rowBg = isIncrease
+                                        ? 'rgba(0, 168, 84, 0.04)'
+                                        : log.type === 'adjustment'
+                                            ? 'rgba(240, 65, 52, 0.06)'
+                                            : 'rgba(240, 65, 52, 0.04)';
+                                    const rowBorderLeft = isIncrease
+                                        ? '3px solid #00a854'
+                                        : log.type === 'adjustment'
+                                            ? '3px solid #e53e3e'
+                                            : '3px solid #f04134';
+                                    return (
                                     <React.Fragment key={log.id}>
-                                    <tr>
+                                    <tr style={{ background: rowBg, borderLeft: rowBorderLeft, transition: 'background 0.15s' }}>
                                         <td style={{ fontFamily: 'monospace', color: '#64748b', fontWeight: 500 }}>
                                             {dayjs(log.createdAt).format('DD/MM/YYYY HH:mm')}
                                         </td>
@@ -440,13 +452,25 @@ const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ p
                                                 </span>
                                             ) : '-'}
                                         </td>
-                                        <td style={{ textAlign: 'right', color: '#637381', fontFamily: 'monospace' }}>
+                                        <td style={{ textAlign: 'right', color: '#94a3b8', fontFamily: 'monospace', fontSize: 13 }}>
                                             {log.oldStock}
                                         </td>
-                                        <td style={{ textAlign: 'right', fontWeight: 700, fontSize: 15, color: log.quantity > 0 ? '#00a854' : '#f04134', fontFamily: 'monospace' }}>
-                                            {log.quantity > 0 ? `+${log.quantity}` : log.quantity}
+                                        <td style={{ textAlign: 'right', fontFamily: 'monospace' }}>
+                                            <span style={{
+                                                display: 'inline-block',
+                                                background: isIncrease ? '#d1fae5' : '#fee2e2',
+                                                color: isIncrease ? '#065f46' : '#991b1b',
+                                                fontWeight: 700,
+                                                fontSize: 14,
+                                                borderRadius: 6,
+                                                padding: '2px 10px',
+                                                minWidth: 52,
+                                                textAlign: 'center',
+                                            }}>
+                                                {isIncrease ? `+${log.quantity}` : log.quantity}
+                                            </span>
                                         </td>
-                                        <td style={{ textAlign: 'right', fontWeight: 600, fontFamily: 'monospace' }}>
+                                        <td style={{ textAlign: 'right', fontWeight: 700, fontFamily: 'monospace', color: isIncrease ? '#065f46' : '#991b1b', fontSize: 14 }}>
                                             {log.newStock}
                                         </td>
                                         <td style={{ fontSize: 13, color: '#454f5b' }}>{log.note || '-'}</td>
@@ -468,25 +492,49 @@ const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ p
                                                             <span style={{ color: '#ef4444', fontSize: 12 }}>⚠ {rd.error}</span>
                                                         ) : (
                                                             <>
-                                                                {/* Header info */}
-                                                                <div style={{ display: 'flex', gap: 24, marginBottom: 10, fontSize: 12, color: '#64748b' }}>
-                                                                    {rd.type === 'TMDT' && <>
-                                                                        <span><strong>Đơn:</strong> {rd.data.orderNumber || rd.data.ecommerceExportCode}</span>
-                                                                        <span><strong>Sàn:</strong> {rd.data.platform || '-'}</span>
-                                                                        <span><strong>Khách:</strong> {rd.data.customerName || '-'}</span>
-                                                                        <span><strong>Tổng:</strong> <b style={{ color: '#2563eb' }}>{(rd.data.totalAmount || 0).toLocaleString('vi-VN')}đ</b></span>
-                                                                    </>}
-                                                                    {rd.type === 'POS' && <>
-                                                                        <span><strong>Đơn:</strong> {rd.data.orderNumber}</span>
-                                                                        <span><strong>Khách:</strong> {rd.data.customer?.name || 'Khách lẻ'}</span>
-                                                                        <span><strong>Thu ngân:</strong> {rd.data.createdBy || '-'}</span>
-                                                                        <span><strong>Tổng:</strong> <b style={{ color: '#2563eb' }}>{(rd.data.total || 0).toLocaleString('vi-VN')}đ</b></span>
-                                                                    </>}
-                                                                    {rd.type === 'PURCHASE' && <>
-                                                                        <span><strong>Phiếu:</strong> {rd.data.poNumber}</span>
-                                                                        <span><strong>NCC:</strong> {rd.data.supplier?.name || '-'}</span>
-                                                                        <span><strong>Tổng:</strong> <b style={{ color: '#2563eb' }}>{(rd.data.total || 0).toLocaleString('vi-VN')}đ</b></span>
-                                                                    </>}
+                                                                {/* Header info + SKU Banner */}
+                                                                <div style={{ marginBottom: 10 }}>
+                                                                    {/* Banner SKU bị ảnh hưởng */}
+                                                                    <div style={{
+                                                                        display: 'inline-flex', alignItems: 'center', gap: 8,
+                                                                        background: log.quantity > 0 ? '#f0fdf4' : '#fffbe6',
+                                                                        border: `1px solid ${log.quantity > 0 ? '#86efac' : '#fde68a'}`,
+                                                                        borderRadius: 6, padding: '4px 12px', marginBottom: 8,
+                                                                        fontSize: 12, fontWeight: 600,
+                                                                    }}>
+                                                                        <span style={{ color: '#6b7280' }}>{log.quantity > 0 ? '📥 Nhập vào SKU:' : '📤 Trừ tồn SKU:'}</span>
+                                                                        <span style={{
+                                                                            fontFamily: 'monospace', fontWeight: 700,
+                                                                            color: log.quantity > 0 ? '#15803d' : '#b45309',
+                                                                            background: log.quantity > 0 ? '#dcfce7' : '#fef3c7',
+                                                                            borderRadius: 4, padding: '1px 6px',
+                                                                        }}>{log.sku}</span>
+                                                                        <span style={{
+                                                                            fontFamily: 'monospace', fontWeight: 800, fontSize: 14,
+                                                                            color: log.quantity > 0 ? '#15803d' : '#dc2626',
+                                                                        }}>{log.quantity > 0 ? `+${log.quantity}` : log.quantity}</span>
+                                                                        <span style={{ color: '#9ca3af', fontWeight: 400 }}>SP</span>
+                                                                    </div>
+                                                                    {/* Info đơn */}
+                                                                    <div style={{ display: 'flex', gap: 24, fontSize: 12, color: '#64748b', flexWrap: 'wrap' }}>
+                                                                        {rd.type === 'TMDT' && <>
+                                                                            <span><strong>Đơn:</strong> {rd.data.orderNumber || rd.data.ecommerceExportCode}</span>
+                                                                            <span><strong>Sàn:</strong> {rd.data.platform || '-'}</span>
+                                                                            <span><strong>Khách:</strong> {rd.data.customerName || '-'}</span>
+                                                                            <span><strong>Tổng:</strong> <b style={{ color: '#2563eb' }}>{(rd.data.totalAmount || 0).toLocaleString('vi-VN')}đ</b></span>
+                                                                        </>}
+                                                                        {rd.type === 'POS' && <>
+                                                                            <span><strong>Đơn:</strong> {rd.data.orderNumber}</span>
+                                                                            <span><strong>Khách:</strong> {rd.data.customer?.name || 'Khách lẻ'}</span>
+                                                                            <span><strong>Thu ngân:</strong> {rd.data.createdBy || '-'}</span>
+                                                                            <span><strong>Tổng:</strong> <b style={{ color: '#2563eb' }}>{(rd.data.total || 0).toLocaleString('vi-VN')}đ</b></span>
+                                                                        </>}
+                                                                        {rd.type === 'PURCHASE' && <>
+                                                                            <span><strong>Phiếu:</strong> {rd.data.poNumber}</span>
+                                                                            <span><strong>NCC:</strong> {rd.data.supplier?.name || '-'}</span>
+                                                                            <span><strong>Tổng:</strong> <b style={{ color: '#2563eb' }}>{(rd.data.total || 0).toLocaleString('vi-VN')}đ</b></span>
+                                                                        </>}
+                                                                    </div>
                                                                 </div>
                                                                 {/* Items table */}
                                                                 {items.length > 0 && (
@@ -507,13 +555,24 @@ const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ p
                                                                                 const qty = it.quantity || it.qty || 0;
                                                                                 const price = it.price || 0;
                                                                                 const total = it.subtotal || price * qty;
+                                                                                // Dùng combo definition: item có chứa log.sku trong components không?
+                                                                                const _comboComponents: any[] = it.comboComponents || [];
+                                                                                const isMatchedSku = sku === log.sku
+                                                                                    || (_comboComponents.length > 0 && _comboComponents.some((c: any) => c.sku === log.sku));
                                                                                 return (
-                                                                                    <tr key={i} style={{ borderBottom: '1px solid #e2e8f0', background: sku === log.sku ? '#eff6ff' : 'transparent' }}>
-                                                                                        <td style={{ padding: '4px 8px', fontFamily: 'monospace', color: '#2563eb', fontWeight: sku === log.sku ? 700 : 400 }}>{sku}</td>
-                                                                                        <td style={{ padding: '4px 8px' }}>{name}</td>
-                                                                                        <td style={{ padding: '4px 8px', textAlign: 'center', fontWeight: 700 }}>{qty}</td>
-                                                                                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace' }}>{price.toLocaleString('vi-VN')}</td>
-                                                                                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: 700 }}>{total.toLocaleString('vi-VN')}</td>
+                                                                                    <tr key={i} style={{
+                                                                                        borderBottom: '1px solid #e2e8f0',
+                                                                                        background: isMatchedSku ? '#fffbe6' : 'transparent',
+                                                                                        borderLeft: isMatchedSku ? '4px solid #f59e0b' : '4px solid transparent',
+                                                                                    }}>
+                                                                                        <td style={{ padding: '5px 8px', fontFamily: 'monospace', fontWeight: isMatchedSku ? 700 : 500, color: isMatchedSku ? '#b45309' : '#2563eb' }}>
+                                                                                            {isMatchedSku && <span style={{ marginRight: 4 }}>📌</span>}
+                                                                                            {sku}
+                                                                                        </td>
+                                                                                        <td style={{ padding: '5px 8px', fontWeight: isMatchedSku ? 700 : 400, color: isMatchedSku ? '#92400e' : '#374151' }}>{name}</td>
+                                                                                        <td style={{ padding: '5px 8px', textAlign: 'center', fontWeight: 700, color: isMatchedSku ? '#b45309' : '#334155', fontSize: isMatchedSku ? 14 : 12 }}>{qty}</td>
+                                                                                        <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: 'monospace', color: isMatchedSku ? '#92400e' : '#6b7280' }}>{price.toLocaleString('vi-VN')}</td>
+                                                                                        <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: 700, color: isMatchedSku ? '#b45309' : '#374151' }}>{total.toLocaleString('vi-VN')}</td>
                                                                                     </tr>
                                                                                 );
                                                                             })}
@@ -528,7 +587,8 @@ const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ p
                                         );
                                     })()}
                                     </React.Fragment>
-                                )) : (
+                                    );
+                                }) : (
                                     <tr>
                                         <td colSpan={9} style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>
                                             Không có dữ liệu giao dịch phù hợp với bộ lọc hiện tại.
@@ -1931,7 +1991,10 @@ export default function StockBalancePage() {
                                                                                         const qty = it.quantity || it.qty || 0;
                                                                                         const price = it.price || 0;
                                                                                         const total = it.subtotal || price * qty;
-                                                                                        const isMatch = sku === log.sku;
+                                                                                        // Dùng combo definition: item có chứa log.sku trong components không?
+                                                                                        const comboComponents: any[] = it.comboComponents || [];
+                                                                                        const isMatch = sku === log.sku
+                                                                                            || (comboComponents.length > 0 && comboComponents.some((c: any) => c.sku === log.sku));
                                                                                         return (
                                                                                             <tr key={i} style={{ 
                                                                                                 background: isMatch ? '#fffbe6' : 'transparent',

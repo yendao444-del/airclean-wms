@@ -423,7 +423,7 @@ async function logActivity({ module, action, description, recordId, recordName, 
                 module: module || 'system',
                 action: action || 'UPDATE',
                 description: description || '',
-                recordId: recordId || null,
+                recordId: recordId != null ? (Number.isInteger(recordId) ? recordId : parseInt(recordId, 10) || null) : null,
                 recordName: recordName || null,
                 changes: changes ? (typeof changes === 'string' ? changes : JSON.stringify(changes)) : null,
                 userName: userName || currentSession?.username || 'System',
@@ -1380,6 +1380,25 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
         return { success: false, error: error.message };
     }
 });
+
+/**
+ * Deduct/restore stock cho 1 item — tự động expand nếu là ComboProduct.
+ * Dùng thay cho updateProductStockInTx khi xử lý TMDT/POS items.
+ */
+async function deductItemOrCombo(tx, variantSku, quantity, logContext, options = {}) {
+    const combo = await tx.comboProduct.findUnique({ where: { sku: variantSku } });
+    if (combo) {
+        let comboItems = [];
+        try { comboItems = typeof combo.items === 'string' ? JSON.parse(combo.items) : (combo.items || []); } catch {}
+        for (const ci of comboItems) {
+            const componentQty = ci.quantity * Math.abs(quantity);
+            const delta = quantity < 0 ? -componentQty : componentQty;
+            await updateProductStockInTx(tx, ci.sku, delta, logContext, options);
+        }
+    } else {
+        await updateProductStockInTx(tx, variantSku, quantity, logContext, options);
+    }
+}
 
 /**
  * Hàm lõi do AI Agent cập nhật theo "Mệnh lệnh tối cao":
@@ -4541,7 +4560,7 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
                 const itemsList = typeof data.items === 'string' ? JSON.parse(data.items) : data.items;
                 for (const item of itemsList) {
                     if (item.variantSku) {
-                        await updateProductStockInTx(tx, item.variantSku, -item.quantity, {
+                        await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
                             type: 'ecom_sale',
                             referenceType: 'TMDT',
                             reference: data.orderNumber || data.ecommerceExportCode || 'Lưu thủ công',
@@ -4576,7 +4595,7 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
                 const oldItems = JSON.parse(oldRecord.items || '[]');
                 for (const old of oldItems) {
                     if (old.variantSku) {
-                        await updateProductStockInTx(tx, old.variantSku, old.quantity, {
+                        await deductItemOrCombo(tx, old.variantSku, old.quantity, {
                             type: 'adjustment',
                             referenceType: 'TMDT_EDIT',
                             reference: oldRecord.orderNumber || oldRecord.ecommerceExportCode || 'Sửa thủ công',
@@ -4607,11 +4626,11 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
                 const newItems = data.items ? (typeof data.items === 'string' ? JSON.parse(data.items) : data.items) : JSON.parse(oldRecord.items || '[]');
                 for (const item of newItems) {
                     if (item.variantSku) {
-                        await updateProductStockInTx(tx, item.variantSku, -item.quantity, {
+                        await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
                             type: 'ecom_sale',
                             referenceType: 'TMDT_EDIT',
                             reference: data.orderNumber || data.ecommerceExportCode || 'Sửa thủ công',
-                            note: `Trừ tồn mới (sửa đơn TMDT #${id})`,
+                            note: `Tạo/Sửa đơn TMDT: ${data.customerName || oldRecord.customerName || 'TMDT'}`,
                             createdBy: data.createdBy || 'System'
                         }, { allowMissing: true });
                     }
@@ -4728,11 +4747,11 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
                     const itemsList = typeof data.items === 'string' ? JSON.parse(data.items) : data.items;
                     for (const item of itemsList) {
                         if (item.variantSku) {
-                            await updateProductStockInTx(tx, item.variantSku, -item.quantity, {
+                            await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
                                 type: 'ecom_sale',
                                 referenceType: 'TMDT',
                                 reference: data.orderNumber || data.ecommerceExportCode || 'Nhập hàng loạt',
-                                note: `Xuất hàng TMDT: ${data.customerName}`,
+                                note: `Tạo/Sửa đơn TMDT: ${data.customerName}`,
                                 createdBy: data.createdBy || 'System'
                             }, { allowMissing: true });
                         }
@@ -5375,7 +5394,20 @@ ipcMain.handle('inventoryLogs:getRefDetail', async (event, { referenceType, refe
             if (!doc) return { success: false, error: `Chi tiết chứng từ gốc không còn trên hệ thống: ${reference}` };
             let items = [];
             try { items = typeof doc.items === 'string' ? JSON.parse(doc.items) : (doc.items || []); } catch {}
-            return { success: true, type: 'TMDT', data: { ...doc, items } };
+            // Với mỗi item là combo, load combo definition để biết components
+            const itemsWithCombo = await Promise.all(items.map(async (item) => {
+                const sku = item.variantSku || item.sku || '';
+                console.log(`[getRefDetail] item sku: "${sku}"`);
+                if (!sku) return item;
+                const combo = await prisma.comboProduct.findUnique({ where: { sku } });
+                console.log(`[getRefDetail] combo found for "${sku}":`, combo ? `YES - items: ${combo.items}` : 'NO');
+                if (!combo) return item;
+                let comboComponents = [];
+                try { comboComponents = typeof combo.items === 'string' ? JSON.parse(combo.items) : (combo.items || []); } catch {}
+                console.log(`[getRefDetail] comboComponents for "${sku}":`, JSON.stringify(comboComponents));
+                return { ...item, comboComponents };
+            }));
+            return { success: true, type: 'TMDT', data: { ...doc, items: itemsWithCombo } };
         }
 
         // POS / POS_EDIT / POS_CANCEL

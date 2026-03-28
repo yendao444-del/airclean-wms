@@ -426,8 +426,9 @@ Thời gian: ${currentTime}`;
         const trimmed = code.trim();
         if (!trimmed) return;
 
-        // Chỉ tìm phiếu xuất theo Tracking ID
-        const foundEcommerceExport = ecommerceExports.find(r => {
+        // ⚡ Luôn lấy data mới nhất từ DB để tránh "stale closure" khi quét nhanh
+        const freshExports = await getLatestExports();
+        const foundEcommerceExport = freshExports.find((r: any) => {
             const trackingMatch = r.notes?.match(/Tracking: ([^|]+)/);
             const tracking = trackingMatch ? trackingMatch[1].trim() : '';
 
@@ -1983,18 +1984,6 @@ Thời gian: ${currentTime}`;
                     }}
                 >
                     Quét
-                </Button>
-                <Button
-                    size="large"
-                    icon={<FileExcelOutlined />}
-                    onClick={handleImportScanExcel}
-                    title="Quét hàng loạt từ file Excel"
-                    style={{
-                        flexShrink: 0, height: 44, fontWeight: 600,
-                        color: '#1d8f29', borderColor: '#1d8f29'
-                    }}
-                >
-                    Nhập Excel
                 </Button>
             </div>
 
