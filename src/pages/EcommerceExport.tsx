@@ -85,6 +85,7 @@ export default function EcommerceExportPage() {
         type: 'idle' | 'success' | 'error' | 'warning';
         message: string;
     }>({ type: 'idle', message: 'Sẵn sàng quét mã...' });
+    const [scanValue, setScanValue] = useState('');
     const scanInputRef = useRef<any>(null);
     const successSoundRef = useRef<HTMLAudioElement | null>(null);
     const alertSoundRef = useRef<HTMLAudioElement | null>(null);
@@ -426,6 +427,10 @@ Thời gian: ${currentTime}`;
         const trimmed = code.trim();
         if (!trimmed) return;
 
+        // 🧹 Clear input ngay lập tức (giống tool gốc: input.value = ''; input.focus();)
+        setScanValue('');
+        scanInputRef.current?.focus();
+
         // ⚡ Luôn lấy data mới nhất từ DB để tránh "stale closure" khi quét nhanh
         const freshExports = await getLatestExports();
         const foundEcommerceExport = freshExports.find((r: any) => {
@@ -514,13 +519,11 @@ Thời gian: ${currentTime}`;
             });
         }
 
-        if (scanInputRef.current?.input) scanInputRef.current.input.value = '';
-        scanInputRef.current?.focus();
     };
 
     const handleScanKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
-            handleScan(scanInputRef.current?.input?.value || '');
+            handleScan(scanValue);
         }
     };
 
@@ -1963,6 +1966,8 @@ Thời gian: ${currentTime}`;
                 <BarcodeOutlined style={{ fontSize: 28, color: '#52c41a', flexShrink: 0 }} />
                 <Input
                     ref={scanInputRef}
+                    value={scanValue}
+                    onChange={(e) => setScanValue(e.target.value)}
                     onKeyDown={handleScanKeyDown}
                     placeholder="Quét hoặc nhập Tracking ID để kiểm tra đơn hàng..."
                     autoFocus
@@ -1977,7 +1982,7 @@ Thời gian: ${currentTime}`;
                     type="primary"
                     size="large"
                     icon={<ScanOutlined />}
-                    onClick={() => handleScan(scanInputRef.current?.input?.value || '')}
+                    onClick={() => handleScan(scanValue)}
                     style={{
                         background: '#52c41a', borderColor: '#52c41a',
                         flexShrink: 0, height: 44, paddingInline: 24, fontWeight: 600,
