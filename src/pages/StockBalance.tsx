@@ -22,7 +22,7 @@ import {
     Badge,
     Empty,
     Select,
-    Spin,
+    Spin
 } from 'antd';
 import {
     ReloadOutlined,
@@ -676,6 +676,7 @@ const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ p
     );
 };
 
+
 export default function StockBalancePage() {
     const currentUser = useCurrentUser();
     const { user } = useAuth();
@@ -693,8 +694,7 @@ export default function StockBalancePage() {
     const [balanceNotes, setBalanceNotes] = useState<Record<string, string>>({});
     const [form] = Form.useForm();
     const [quickBalanceForm] = Form.useForm();
-    // === MAIN PAGE STATE ===
-    const [mainPage, setMainPage] = useState<'dashboard' | 'stock'>('dashboard');
+
 
     // === EXPANDABLE ROW STATE ===
     const [expandedRowKeys, setExpandedRowKeys] = useState<string[]>([]);
@@ -1575,7 +1575,7 @@ export default function StockBalancePage() {
     // Inject search + button into app header
     useEffect(() => {
         const uniqueCategories = Array.from(new Set(productRows.map(r => r.categoryName))).sort();
-        
+
         setHeaderExtra(
             <>
                 <Select
@@ -1608,7 +1608,6 @@ export default function StockBalancePage() {
 
     return (
         <div style={{ padding: '0 24px', paddingTop: '24px' }}>
-            {/* Removed Tổng quan Tabs, default to Tồn kho */}
             <div>
 
             <Card>

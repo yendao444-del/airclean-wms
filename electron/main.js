@@ -61,17 +61,24 @@ function createWindow() {
     console.log('isDev:', isDev, '| isPackaged:', app.isPackaged);
 
     if (isDev) {
-        // Thử kết nối Vite dev server trước (HMR - không cần rebuild)
         const http = require('http');
-        http.get(VITE_DEV_SERVER, () => {
-            console.log('✅ Vite dev server detected → loading', VITE_DEV_SERVER);
-            mainWindow.loadURL(VITE_DEV_SERVER);
-        }).on('error', () => {
-            // Không có dev server → dùng dist (build tĩnh)
-            const indexPath = path.join(__dirname, '../dist/index.html');
-            console.log('📦 No dev server → loading dist:', indexPath);
-            mainWindow.loadFile(indexPath);
-        });
+        const indexPath = path.join(__dirname, '../dist/index.html');
+        // Retry nhiều lần chờ Vite sẵn sàng
+        const tryLoad = (retriesLeft) => {
+            http.get(VITE_DEV_SERVER, () => {
+                console.log('✅ Vite dev server detected → loading', VITE_DEV_SERVER);
+                mainWindow.loadURL(VITE_DEV_SERVER);
+            }).on('error', () => {
+                if (retriesLeft > 0) {
+                    console.log(`⏳ Vite not ready, retrying... (${retriesLeft} left)`);
+                    setTimeout(() => tryLoad(retriesLeft - 1), 500);
+                } else {
+                    console.log('📦 No dev server → loading dist:', indexPath);
+                    mainWindow.loadFile(indexPath);
+                }
+            });
+        };
+        tryLoad(20); // thử tối đa 20 lần × 500ms = 10 giây
     } else {
         const indexPath = path.join(__dirname, '../dist/index.html');
         mainWindow.loadFile(indexPath);

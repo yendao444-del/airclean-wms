@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 const { google } = require('googleapis');
+const { backupDatabase } = require('./_backup_db');
 
 const OAUTH_CLIENT_ID = '470025984975-s63vgvnb1ds58fmagk9iqq0f9ufhkktr.apps.googleusercontent.com';
 const OAUTH_CLIENT_SECRET = '***REDACTED_OAUTH_SECRET***';
@@ -26,7 +27,17 @@ async function main() {
     const dayName = days[new Date().getDay()];
     const bundleName = `AIRCLEAN_WMS_Backup_${dayName}.bundle`;
 
-    console.log(`\n[1/3] Tao git bundle: ${bundleName}`);
+    // === BƯỚC 0: Backup Database → JSON ===
+    console.log(`\n[0/5] Backup database ra JSON...`);
+    let dbBackupPath = null;
+    try {
+        dbBackupPath = await backupDatabase(__dirname);
+    } catch (err) {
+        console.error('⚠️  CẢNH BÁO: Backup DB thất bại:', err.message);
+        console.error('   Tiếp tục backup source code...');
+    }
+
+    console.log(`\n[1/5] Tao git bundle: ${bundleName}`);
     console.log("      (Chua toan bo source code + lich su commit, khong co node_modules)");
 
     if (fs.existsSync(bundleName)) fs.unlinkSync(bundleName);
@@ -41,7 +52,7 @@ async function main() {
     const stats = fs.statSync(bundleName);
     console.log(`      OK! Kich thuoc bundle: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
 
-    console.log(`\n[2/3] Kiem tra thu muc sao luu tren Google Drive...`);
+    console.log(`\n[2/5] Kiem tra thu muc sao luu tren Google Drive...`);
     let folderId = null;
     try {
         const folderRes = await drive.files.list({
@@ -68,7 +79,7 @@ async function main() {
     const dateStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`;
 
     // Tao subfolder theo ngay: AIRCLEAN_WMS_SOURCE_BACKUP/2026-03-25_2010/
-    console.log(`\n[3/4] Tao thu muc backup: ${dateStr}`);
+    console.log(`\n[3/5] Tao thu muc backup: ${dateStr}`);
     const dayFolder = await drive.files.create({
         resource: { name: dateStr, mimeType: 'application/vnd.google-apps.folder', parents: [folderId] },
         fields: 'id'
@@ -97,9 +108,25 @@ async function main() {
     console.log(`\n[4/5] Upload bundle...`);
     await uploadToFolder(bundleName, bundleName, 'application/octet-stream', dayFolderId);
 
-    console.log(`\n[5/5] Upload RESTORE.bat...`);
-    const restoreBat = path.join(__dirname, 'RESTORE.bat');
-    await uploadToFolder(restoreBat, 'RESTORE.bat', 'text/plain', dayFolderId);
+    if (dbBackupPath && fs.existsSync(dbBackupPath)) {
+        const dbFilename = path.basename(dbBackupPath);
+        console.log(`\n      Upload DB backup: ${dbFilename}...`);
+        await uploadToFolder(dbBackupPath, dbFilename, 'application/json', dayFolderId);
+    }
+
+    console.log(`\n[5/5] Upload restore scripts...`);
+    const filesToUpload = [
+        'RESTORE.bat',
+        'RESTORE_DATABASE.bat',
+        '_restore_db.js',
+        '_backup_db.js',
+    ];
+    for (const fname of filesToUpload) {
+        const fpath = path.join(__dirname, fname);
+        if (fs.existsSync(fpath)) {
+            await uploadToFolder(fpath, fname, 'text/plain', dayFolderId);
+        }
+    }
 
     // Xoa ban cu neu qua 20 ban
     console.log(`\n      Kiem tra so luong backup...`);
@@ -121,7 +148,8 @@ async function main() {
 
     // Don rac
     if (fs.existsSync(bundleName)) fs.unlinkSync(bundleName);
-    console.log("\nAUTO BACKUP HOAN TAT!");
+    if (dbBackupPath && fs.existsSync(dbBackupPath)) fs.unlinkSync(dbBackupPath);
+    console.log("\nAUTO BACKUP HOAN TAT! (Code + Database)");
 }
 
 main().catch(console.error);

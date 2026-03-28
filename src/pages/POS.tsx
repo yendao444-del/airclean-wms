@@ -18,15 +18,77 @@ interface InvoiceTab {
 
 // === Helpers ===
 const fmt = (n: number) => new Intl.NumberFormat('vi-VN').format(n);
-const COLORS = [
-    '#43a047', '#1e88e5', '#e53935', '#fb8c00', '#8e24aa',
-    '#00897b', '#3949ab', '#d81b60', '#6d4c41', '#546e7a',
-    '#7cb342', '#039be5', '#f4511e', '#fdd835', '#00acc1',
+const GRADIENTS = [
+    'linear-gradient(135deg, #43a047 0%, #1de9b6 100%)',
+    'linear-gradient(135deg, #1e88e5 0%, #42a5f5 100%)',
+    'linear-gradient(135deg, #e53935 0%, #ef9a9a 100%)',
+    'linear-gradient(135deg, #fb8c00 0%, #ffd54f 100%)',
+    'linear-gradient(135deg, #8e24aa 0%, #ce93d8 100%)',
+    'linear-gradient(135deg, #00897b 0%, #4db6ac 100%)',
+    'linear-gradient(135deg, #3949ab 0%, #7986cb 100%)',
+    'linear-gradient(135deg, #d81b60 0%, #f48fb1 100%)',
+    'linear-gradient(135deg, #6d4c41 0%, #a1887f 100%)',
+    'linear-gradient(135deg, #546e7a 0%, #90a4ae 100%)',
+    'linear-gradient(135deg, #7cb342 0%, #c5e1a5 100%)',
+    'linear-gradient(135deg, #039be5 0%, #81d4fa 100%)',
+    'linear-gradient(135deg, #f4511e 0%, #ffab91 100%)',
+    'linear-gradient(135deg, #00acc1 0%, #80deea 100%)',
+    'linear-gradient(135deg, #5e35b1 0%, #9575cd 100%)',
 ];
-const getColor = (id: number) => COLORS[id % COLORS.length];
-const getInitials = (name: string) => {
-    const words = name.replace(/^(KT|Combo)\s*/i, '').trim().split(/\s+/);
-    return words.length >= 2 ? (words[0][0] + words[1][0]).toUpperCase() : name.substring(0, 2).toUpperCase();
+const getColor = (id: number) => GRADIENTS[id % GRADIENTS.length];
+const CATEGORY_EMOJI: Record<string, string> = {
+    'khẩu trang': '😷', 'khau trang': '😷', 'mask': '😷',
+    'giày': '👟', 'giay': '👟', 'dép': '🥿', 'dep': '🥿', 'shoes': '👟',
+    'sách': '📚', 'sach': '📚', 'book': '📚',
+    'vật liệu': '📦', 'vat lieu': '📦', 'vật tư': '📦',
+    'quần áo': '👕', 'quan ao': '👕', 'áo': '👕', 'quần': '👖',
+    'túi': '👜', 'tui': '👜', 'bag': '👜',
+    'mỹ phẩm': '💄', 'my pham': '💄', 'cosmetic': '💄',
+    'điện tử': '📱', 'dien tu': '📱', 'electronic': '📱',
+    'thực phẩm': '🍜', 'thuc pham': '🍜', 'food': '🍜',
+    'đồ chơi': '🧸', 'do choi': '🧸', 'toy': '🧸',
+    'combo': '🎁',
+    'phụ kiện': '⚙️', 'phu kien': '⚙️', 'accessory': '⚙️',
+    'văn phòng': '🖊️', 'van phong': '🖊️',
+    'giấy': '🧻', 'giay in': '🧻',
+};
+
+const normalize = (s: string) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd');
+
+// Ánh xạ tên sản phẩm → emoji (ưu tiên cao hơn danh mục)
+const PRODUCT_NAME_EMOJI: Array<{ keywords: string[]; emoji: string }> = [
+    { keywords: ['khau trang', 'kf94', 'n95', '5d', '3d', '6d', '9a', 'unicare', 'dimico', 'monji', 'ami ', 'medicalmask', 'upf'], emoji: '😷' },
+    { keywords: ['giay in', 'giay nhiet', 'giay in nhiet'], emoji: '🧻' },
+    { keywords: ['bang dinh', 'bang keo'], emoji: '🪡' },
+    { keywords: ['tui niem phong', 'tui goi hang'], emoji: '✉️' },
+    { keywords: ['tui zip', 'tui'], emoji: '👜' },
+    { keywords: ['thung'], emoji: '📦' },
+    { keywords: ['do decor', 'trang tri'], emoji: '🎨' },
+    { keywords: ['sach', 'book'], emoji: '📚' },
+    { keywords: ['combo'], emoji: '🎁' },
+    { keywords: ['giay', 'dep', 'shoe'], emoji: '👟' },
+];
+
+const getProductEmoji = (product: Product, categories: Category[]): { emoji: string; isEmoji: boolean } => {
+    // 1. Check product name keywords FIRST (higher priority)
+    const pName = normalize(product.name.toLowerCase());
+    for (const rule of PRODUCT_NAME_EMOJI) {
+        if (rule.keywords.some(kw => pName.includes(kw))) {
+            return { emoji: rule.emoji, isEmoji: true };
+        }
+    }
+    // 2. Check category name
+    const cat = categories.find(c => c.id === product.categoryId);
+    const catName = cat?.name?.toLowerCase() || '';
+    for (const [key, emoji] of Object.entries(CATEGORY_EMOJI)) {
+        if (catName.includes(key) || normalize(catName).includes(normalize(key))) {
+            return { emoji, isEmoji: true };
+        }
+    }
+    // 3. Fallback to initials
+    const words = product.name.replace(/^(KT|Combo)\s*/i, '').trim().split(/\s+/);
+    const initials = words.length >= 2 ? (words[0][0] + words[1][0]).toUpperCase() : product.name.substring(0, 2).toUpperCase();
+    return { emoji: initials, isEmoji: false };
 };
 
 const parseVariants = (product: Product): ProductVariant[] => {
@@ -340,12 +402,13 @@ export default function POSPage() {
                             </div>
                         ) : filteredProducts.map(p => {
                             const variants = parseVariants(p);
+                            const { emoji, isEmoji } = getProductEmoji(p, categories);
                             return (
                                 <div key={p.id} className="pos-product-card" onClick={() => handleProductClick(p)}>
                                     <span className={`pos-product-stock ${stockClass(p)}`}>{getTotalStock(p)}</span>
                                     {p.isCombo && <span className="pos-combo-tag">COMBO</span>}
-                                    <div className="pos-product-img" style={{ background: getColor(p.id) }}>
-                                        {getInitials(p.name)}
+                                    <div className="pos-product-img" style={{ background: getColor(p.id), fontSize: isEmoji ? 38 : 24, textShadow: isEmoji ? 'none' : '0 1px 3px rgba(0,0,0,0.25)' }}>
+                                        {emoji}
                                     </div>
                                     <div className="pos-product-name">{p.name}</div>
                                     <div className="pos-product-price">

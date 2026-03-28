@@ -870,22 +870,36 @@ export default function ProductsPage() {
                     );
                 }
 
+                // Smart formatting cho số tồn kho lớn
+                const formatStock = (n: number) => {
+                    if (n >= 100000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+                    if (n >= 10000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+                    return n.toLocaleString('vi-VN');
+                };
+                // Auto-scale font size: nhỏ lại cho số nhiều chữ số
+                const stockFontSize = displayStock >= 10000 ? 14 : displayStock >= 1000 ? 15 : 18;
+
                 return (
                     <div
                         style={{
                             background: bgColor,
                             color: '#fff',
-                            padding: '8px 12px',
+                            padding: '6px 14px',
                             borderRadius: 8,
                             textAlign: 'center',
                             fontWeight: 900,
-                            fontSize: 18,
+                            fontSize: stockFontSize,
                             boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
-                            display: 'inline-block',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
                             minWidth: 60,
+                            maxWidth: 90,
+                            letterSpacing: displayStock >= 1000 ? '-0.5px' : '0px',
                         }}
+                        title={`Tồn kho: ${displayStock.toLocaleString('vi-VN')}`}
                     >
-                        {displayStock}
+                        {formatStock(displayStock)}
                     </div>
                 );
             },
@@ -1160,23 +1174,34 @@ export default function ProductsPage() {
                                                                         <div style={{ background: '#d9d9d9', color: '#595959', padding: '6px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 14, display: 'inline-block', minWidth: 45 }}>
                                                                             ***
                                                                         </div>
-                                                                    ) : (
-                                                                        <div style={{
-                                                                            background: variant.stock <= 20
-                                                                                ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
-                                                                                : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)',
-                                                                            color: '#fff',
-                                                                            padding: '6px 10px',
-                                                                            borderRadius: 6,
-                                                                            textAlign: 'center',
-                                                                            fontWeight: 900,
-                                                                            fontSize: 14,
-                                                                            display: 'inline-block',
-                                                                            minWidth: 45,
-                                                                        }}>
-                                                                            {variant.stock}
-                                                                        </div>
-                                                                    )}
+                                                                    ) : (() => {
+                                                                        const vStock = variant.stock || 0;
+                                                                        const fmtVStock = vStock >= 10000 ? (vStock / 1000).toFixed(1).replace(/\.0$/, '') + 'K' : vStock.toLocaleString('vi-VN');
+                                                                        const vFontSize = vStock >= 10000 ? 11 : vStock >= 1000 ? 12 : 14;
+                                                                        return (
+                                                                            <div style={{
+                                                                                background: vStock <= 20
+                                                                                    ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
+                                                                                    : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)',
+                                                                                color: '#fff',
+                                                                                padding: '5px 10px',
+                                                                                borderRadius: 6,
+                                                                                textAlign: 'center',
+                                                                                fontWeight: 900,
+                                                                                fontSize: vFontSize,
+                                                                                display: 'inline-flex',
+                                                                                alignItems: 'center',
+                                                                                justifyContent: 'center',
+                                                                                minWidth: 45,
+                                                                                maxWidth: 72,
+                                                                                letterSpacing: vStock >= 1000 ? '-0.5px' : '0px',
+                                                                            }}
+                                                                                title={`Tồn: ${vStock.toLocaleString('vi-VN')}`}
+                                                                            >
+                                                                                {fmtVStock}
+                                                                            </div>
+                                                                        );
+                                                                    })()}
                                                                 </td>
                                                             </tr>
                                                         ];
@@ -1238,21 +1263,32 @@ export default function ProductsPage() {
                                                                                 <div style={{ background: '#d9d9d9', color: '#595959', padding: '6px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 14, display: 'inline-block', minWidth: 45 }}>
                                                                                     ***
                                                                                 </div>
-                                                                            ) : (
-                                                                                <div style={{
-                                                                                    background: 'linear-gradient(135deg, #ffa940 0%, #ffc069 100%)',
-                                                                                    color: '#fff',
-                                                                                    padding: '6px 10px',
-                                                                                    borderRadius: 6,
-                                                                                    textAlign: 'center',
-                                                                                    fontWeight: 900,
-                                                                                    fontSize: 14,
-                                                                                    display: 'inline-block',
-                                                                                    minWidth: 45,
-                                                                                }}>
-                                                                                    {combo.stock || 0}
-                                                                                </div>
-                                                                            )}
+                                                                            ) : (() => {
+                                                                                const cStock = combo.stock || 0;
+                                                                                const fmtCStock = cStock >= 10000 ? (cStock / 1000).toFixed(1).replace(/\.0$/, '') + 'K' : cStock.toLocaleString('vi-VN');
+                                                                                const cFontSize = cStock >= 10000 ? 11 : cStock >= 1000 ? 12 : 14;
+                                                                                return (
+                                                                                    <div style={{
+                                                                                        background: 'linear-gradient(135deg, #ffa940 0%, #ffc069 100%)',
+                                                                                        color: '#fff',
+                                                                                        padding: '5px 10px',
+                                                                                        borderRadius: 6,
+                                                                                        textAlign: 'center',
+                                                                                        fontWeight: 900,
+                                                                                        fontSize: cFontSize,
+                                                                                        display: 'inline-flex',
+                                                                                        alignItems: 'center',
+                                                                                        justifyContent: 'center',
+                                                                                        minWidth: 45,
+                                                                                        maxWidth: 72,
+                                                                                        letterSpacing: cStock >= 1000 ? '-0.5px' : '0px',
+                                                                                    }}
+                                                                                        title={`Tồn: ${cStock.toLocaleString('vi-VN')}`}
+                                                                                    >
+                                                                                        {fmtCStock}
+                                                                                    </div>
+                                                                                );
+                                                                            })()}
                                                                         </td>
                                                                     </tr>
                                                                 );

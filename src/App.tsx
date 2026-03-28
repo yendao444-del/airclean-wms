@@ -417,11 +417,13 @@ function AppContent() {
                                 boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
                             }}
                         >
-                            <Title level={4} style={{ margin: 0, color: '#262626', flexShrink: 0 }}>
-                                {getMenuLabel(selectedKey)}
-                            </Title>
+                            {selectedKey !== 'business-report' && (
+                                <Title level={4} style={{ margin: 0, color: '#262626', flexShrink: 0 }}>
+                                    {getMenuLabel(selectedKey)}
+                                </Title>
+                            )}
                             {headerExtra && (
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 16, flex: 1 }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: selectedKey !== 'business-report' ? 16 : 0, flex: 1 }}>
                                     {headerExtra}
                                 </div>
                             )}

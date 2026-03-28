@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { usePageHeader } from '../contexts/PageHeaderContext';
 import { Card, Row, Col, Statistic, DatePicker, Button, InputNumber, Modal, Form, Table, Tag, Tooltip, Typography, Divider, Space, Collapse, Input, message } from 'antd';
+import type { ColumnsType } from 'antd/es/table';
 import {
     DollarOutlined,
     RiseOutlined,
@@ -14,6 +16,7 @@ import {
     EditOutlined,
     EyeOutlined,
     CloseOutlined,
+    ReloadOutlined,
 } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
 import isBetween from 'dayjs/plugin/isBetween';
@@ -40,9 +43,9 @@ const DEFAULT_CONFIG = {
     monthlyEquipment: 0,    // Khấu hao
     monthlySoftware: 0,     // Phần mềm
     monthlyOther: 0,        // Khác
-    // Chi phí Ads hàng tháng (tự chia đều theo ngày trong kỳ)
-    monthlyShopeeAds: 0,    // Ngân sách Shopee Ads/tháng
-    monthlyTiktokAds: 0,    // Ngân sách TikTok Ads/tháng
+    // Chi phí Ads theo % doanh thu
+    shopeeAdsPercent: 0,    // % doanh thu Shopee
+    tiktokAdsPercent: 0,    // % doanh thu TikTok
 };
 
 type PNLConfig = typeof DEFAULT_CONFIG;
@@ -74,7 +77,612 @@ const DEFAULT_TIKTOK_FEES = [
 // COMPONENT
 // ============================================
 
+// ============================================
+// INVENTORY VALUE TAB COMPONENT
+// ============================================
+const SP_ORANGE = '#f5520c';
+const SP_ORANGE_BG = '#fff4f0';
+const SP_GREEN = '#1a9c3e';
+const SP_GREEN_BG = '#f0faf3';
+const SP_RED = '#e53935';
+const SP_YELLOW = '#f59e0b';
+const SP_TEXT = '#1a1a2e';
+const SP_MUTED = '#6b7280';
+const SP_BORDER = '#e5e7eb';
+const SP_BG = '#f5f6f8';
+const SP_WHITE = '#ffffff';
+
+function InventoryValueTab() {
+    const [products, setProducts] = useState<any[]>([]);
+    const [categories, setCategories] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [selectedCat, setSelectedCat] = useState<number | null>(null);
+    const [expandedKeys, setExpandedKeys] = useState<number[]>([]);
+    const [searchText, setSearchText] = useState('');
+    const fmtN = (n: number) => new Intl.NumberFormat('vi-VN').format(n);
+
+    useEffect(() => {
+        (async () => {
+            setLoading(true);
+            const [pr, cr] = await Promise.all([
+                window.electronAPI.products.getAll(),
+                window.electronAPI.categories.getAll(),
+            ]);
+            if (pr.success) setProducts(pr.data || []);
+            if (cr.success) setCategories(cr.data || []);
+            setLoading(false);
+        })();
+    }, []);
+
+    const getProductValue = (p: any) => {
+        try {
+            const variants = p.variants ? JSON.parse(p.variants) : [];
+            if (variants.length > 0) return variants.reduce((s: number, v: any) => s + (v.stock || 0) * (v.cost || p.cost || 0), 0);
+        } catch { /* */ }
+        return (p.stock || 0) * (p.cost || 0);
+    };
+
+    const getProductStock = (p: any) => {
+        try {
+            const variants = p.variants ? JSON.parse(p.variants) : [];
+            if (variants.length > 0) return variants.reduce((s: number, v: any) => s + (v.stock || 0), 0);
+        } catch { /* */ }
+        return p.stock || 0;
+    };
+
+    const filtered = products.filter(p => {
+        if (selectedCat !== null && p.categoryId !== selectedCat) return false;
+        if (searchText) {
+            const q = searchText.toLowerCase();
+            return p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q);
+        }
+        return true;
+    });
+
+    const grandTotal = filtered.reduce((s, p) => s + getProductValue(p), 0);
+    const grandStock = filtered.reduce((s, p) => s + getProductStock(p), 0);
+
+    const columns = [
+        {
+            title: 'Tên sản phẩm', dataIndex: 'name', key: 'name',
+            render: (v: string, r: any) => (
+                <span style={{ fontWeight: 600, color: expandedKeys.includes(r.id) ? SP_ORANGE : SP_TEXT, fontSize: 13 }}>{v}</span>
+            ),
+        },
+        {
+            title: 'Mã SKU', dataIndex: 'sku', key: 'sku', width: 140,
+            render: (v: string, r: any) => expandedKeys.includes(r.id) ? ''
+                : <span style={{ fontSize: 12, color: SP_GREEN, fontWeight: 600 }}>{v}</span>,
+        },
+        {
+            title: 'Danh mục', key: 'cat', width: 130,
+            render: (_: any, r: any) => r.category?.name
+                ? <span style={{ fontSize: 12, color: SP_MUTED }}>{r.category.name}</span>
+                : <span style={{ color: '#d1d5db' }}>—</span>,
+        },
+        {
+            title: 'Tồn kho', key: 'stock', width: 90, align: 'right' as const,
+            render: (_: any, r: any) => {
+                if (expandedKeys.includes(r.id)) return '';
+                const s = getProductStock(r);
+                const color = s <= 0 ? SP_RED : s < 10 ? SP_YELLOW : SP_GREEN;
+                return <span style={{ fontWeight: 700, color, fontSize: 13 }}>{fmtN(s)}</span>;
+            },
+        },
+        {
+            title: 'Giá vốn', key: 'cost', width: 140, align: 'right' as const,
+            render: (_: any, r: any) => {
+                if (expandedKeys.includes(r.id)) return '';
+                try {
+                    const vs = r.variants ? JSON.parse(r.variants) : [];
+                    if (vs.length > 0) {
+                        const costs = vs.map((v: any) => v.cost || 0).filter((c: number) => c > 0);
+                        if (costs.length) {
+                            const mn = Math.min(...costs), mx = Math.max(...costs);
+                            return <span style={{ fontSize: 12, color: SP_MUTED }}>{mn === mx ? `${fmtN(mn)}đ` : `${fmtN(mn)} – ${fmtN(mx)}đ`}</span>;
+                        }
+                    }
+                } catch { /* */ }
+                return <span style={{ fontSize: 12, color: SP_MUTED }}>{fmtN(r.cost || 0)}đ</span>;
+            },
+        },
+        {
+            title: 'Giá trị tồn', key: 'value', width: 150, align: 'right' as const,
+            render: (_: any, r: any) => {
+                const v = getProductValue(r);
+                return <span style={{ fontWeight: 700, fontSize: 13, color: v > 0 ? SP_ORANGE : '#d1d5db' }}>{fmtN(v)}đ</span>;
+            },
+        },
+    ];
+
+    return (
+        <div style={{ padding: '20px 24px', background: SP_BG, minHeight: '100%' }}>
+            <style>{`
+                .sp-inv-table .ant-table-thead > tr > th { background: #f3f4f6 !important; color: #374151 !important; font-size: 12px; font-weight: 600; border-bottom: 2px solid ${SP_BORDER} !important; padding: 10px 14px !important; }
+                .sp-inv-table .ant-table-tbody > tr > td { border-bottom: 1px solid #f3f4f6 !important; padding: 10px 14px !important; color: ${SP_TEXT}; }
+                .sp-inv-table .ant-table-tbody > tr:hover > td { background: #fff8f5 !important; }
+                .sp-inv-table .ant-table-tbody > tr.sp-row-expanded > td { background: #f5f6f8 !important; }
+                .sp-inv-table .ant-table-tbody > tr.sp-row-expanded > td:first-child { border-left: 3px solid ${SP_ORANGE} !important; padding-left: 11px !important; }
+                .sp-inv-table .ant-table-summary > tr > td { background: #fafafa !important; border-top: 2px solid ${SP_BORDER} !important; padding: 10px 14px !important; }
+                .sp-inv-table .ant-table-expanded-row > td { padding: 0 0 0 48px !important; background: #f5f6f8 !important; border-bottom: 2px solid ${SP_BORDER} !important; }
+                .sp-inv-table .ant-table-expanded-row .sp-inv-table { border-radius: 0 !important; border: none !important; border-top: 1px solid ${SP_BORDER} !important; }
+                .sp-inv-table .ant-table-expanded-row .sp-inv-table .ant-table-thead > tr > th { background: #eaecf0 !important; color: #374151 !important; font-size: 11px !important; font-weight: 600 !important; border-bottom: 1px solid #d1d5db !important; padding: 7px 14px !important; }
+                .sp-inv-table .ant-table-expanded-row .sp-inv-table .ant-table-tbody > tr > td { background: #fff !important; border-bottom: 1px solid #f3f4f6 !important; padding: 8px 14px !important; }
+                .sp-inv-table .ant-table-expanded-row .sp-inv-table .ant-table-tbody > tr:hover > td { background: #f9fafb !important; }
+                .sp-inv-table .ant-table-expanded-row .sp-inv-table .ant-table-summary > tr > td { background: #f3f4f6 !important; border-top: 1px solid #d1d5db !important; padding: 8px 14px !important; }
+                .sp-cat-btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid ${SP_BORDER}; background: ${SP_WHITE}; color: ${SP_MUTED}; transition: all 0.15s; user-select: none; }
+                .sp-cat-btn:hover { border-color: ${SP_ORANGE}; color: ${SP_ORANGE}; background: ${SP_ORANGE_BG}; }
+                .sp-cat-btn.active { background: ${SP_ORANGE}; color: #fff; border-color: ${SP_ORANGE}; }
+                .sp-cat-btn .cnt { font-size: 11px; background: rgba(0,0,0,0.1); border-radius: 10px; padding: 1px 7px; }
+                .sp-cat-btn.active .cnt { background: rgba(255,255,255,0.25); }
+            `}</style>
+
+            {/* KPI Cards */}
+            <Row gutter={14} style={{ marginBottom: 16 }}>
+                <Col span={8}>
+                    <div style={{ background: SP_WHITE, borderRadius: 8, padding: '16px 18px', border: `1px solid ${SP_BORDER}`, boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+                        <div style={{ fontSize: 12, color: SP_MUTED, marginBottom: 6 }}>Giá trị tồn kho</div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color: SP_ORANGE }}>{fmtN(grandTotal)}<span style={{ fontSize: 14 }}>đ</span></div>
+                    </div>
+                </Col>
+                <Col span={8}>
+                    <div style={{ background: SP_WHITE, borderRadius: 8, padding: '16px 18px', border: `1px solid ${SP_BORDER}`, boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+                        <div style={{ fontSize: 12, color: SP_MUTED, marginBottom: 6 }}>Tổng tồn kho</div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color: SP_GREEN }}>{fmtN(grandStock)}<span style={{ fontSize: 14, fontWeight: 400 }}> sp</span></div>
+                    </div>
+                </Col>
+                <Col span={8}>
+                    <div style={{ background: SP_WHITE, borderRadius: 8, padding: '16px 18px', border: `1px solid ${SP_BORDER}`, boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+                        <div style={{ fontSize: 12, color: SP_MUTED, marginBottom: 6 }}>Số mặt hàng</div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color: SP_TEXT }}>{filtered.length}<span style={{ fontSize: 14, fontWeight: 400 }}> sản phẩm</span></div>
+                    </div>
+                </Col>
+            </Row>
+
+            {/* Table card */}
+            <div style={{ background: SP_WHITE, borderRadius: 8, border: `1px solid ${SP_BORDER}`, boxShadow: '0 1px 3px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
+                {/* Toolbar */}
+                <div style={{ padding: '12px 16px', borderBottom: `1px solid ${SP_BORDER}`, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <Input
+                        placeholder="🔍  Tìm tên, SKU..."
+                        value={searchText}
+                        onChange={e => setSearchText(e.target.value)}
+                        allowClear
+                        style={{ width: 240, borderRadius: 6, fontSize: 13 }}
+                    />
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <span className={`sp-cat-btn${selectedCat === null ? ' active' : ''}`} onClick={() => setSelectedCat(null)}>
+                            Tất cả <span className="cnt">{products.length}</span>
+                        </span>
+                        {categories.map((c: any) => {
+                            const cnt = products.filter(p => p.categoryId === c.id).length;
+                            return (
+                                <span key={c.id} className={`sp-cat-btn${selectedCat === c.id ? ' active' : ''}`}
+                                    onClick={() => setSelectedCat(selectedCat === c.id ? null : c.id)}>
+                                    {c.name} <span className="cnt">{cnt}</span>
+                                </span>
+                            );
+                        })}
+                    </div>
+                </div>
+
+                <Table
+                    className="sp-inv-table"
+                    dataSource={[...filtered].sort((a, b) => getProductValue(b) - getProductValue(a))}
+                    rowKey="id"
+                    columns={columns}
+                    loading={loading}
+                    size="small"
+                    pagination={{ pageSize: 50, showSizeChanger: true, showTotal: t => `${t} sản phẩm`, style: { padding: '10px 16px' } }}
+                    rowClassName={(r) => expandedKeys.includes(r.id) ? 'sp-row-expanded' : ''}
+                    onRow={(r) => ({
+                        onClick: () => {
+                            if (!r.variants) return;
+                            setExpandedKeys(expandedKeys.includes(r.id)
+                                ? expandedKeys.filter(k => k !== r.id)
+                                : [...expandedKeys, r.id]);
+                        },
+                        style: { cursor: r.variants ? 'pointer' : 'default' },
+                    })}
+                    expandable={{
+                        expandedRowKeys: expandedKeys,
+                        onExpand: (expanded, r) => setExpandedKeys(expanded ? [...expandedKeys, r.id] : expandedKeys.filter(k => k !== r.id)),
+                        rowExpandable: r => !!(r.variants),
+                        showExpandColumn: false,
+                        expandedRowRender: (record) => {
+                            try {
+                                const vs = JSON.parse(record.variants || '[]');
+                                if (!vs.length) return null;
+                                const prodTotal = vs.reduce((s: number, v: any) => s + (v.stock || 0) * (v.cost || record.cost || 0), 0);
+                                const variantRows = vs.map((v: any, i: number) => ({
+                                    key: i,
+                                    color: v.color,
+                                    sku: v.sku,
+                                    cost: v.cost || record.cost || 0,
+                                    stock: v.stock || 0,
+                                    value: (v.stock || 0) * (v.cost || record.cost || 0),
+                                }));
+                                return (
+                                    <div style={{ margin: 0 }}>
+                                        <Table
+                                            className="sp-inv-table"
+                                            dataSource={variantRows}
+                                            rowKey="key"
+                                            size="small"
+                                            pagination={false}
+                                            showHeader={true}
+                                            style={{ borderRadius: 6, overflow: 'hidden', border: `1px solid #fcd9c8` }}
+                                            columns={[
+                                                {
+                                                    title: 'Phân loại', dataIndex: 'color', key: 'color',
+                                                    render: (v: string) => <span style={{ fontWeight: 600, color: SP_TEXT, fontSize: 13 }}>{v}</span>,
+                                                },
+                                                {
+                                                    title: 'SKU', dataIndex: 'sku', key: 'sku', width: 150,
+                                                    render: (v: string) => <span style={{ fontSize: 12, color: SP_GREEN, fontWeight: 600 }}>{v}</span>,
+                                                },
+                                                {
+                                                    title: 'Giá vốn', dataIndex: 'cost', key: 'cost', width: 130, align: 'right' as const,
+                                                    render: (v: number) => <span style={{ fontSize: 12, color: SP_MUTED }}>{fmtN(v)}đ</span>,
+                                                },
+                                                {
+                                                    title: 'Tồn kho', dataIndex: 'stock', key: 'stock', width: 90, align: 'right' as const,
+                                                    render: (v: number) => {
+                                                        const c = v <= 0 ? SP_RED : v < 10 ? SP_YELLOW : SP_GREEN;
+                                                        return <span style={{ fontWeight: 700, color: c }}>{fmtN(v)}</span>;
+                                                    },
+                                                },
+                                                {
+                                                    title: 'Tổng vốn', dataIndex: 'value', key: 'value', width: 150, align: 'right' as const,
+                                                    render: (v: number) => <span style={{ fontWeight: 700, fontSize: 13, color: v > 0 ? SP_ORANGE : '#d1d5db' }}>{fmtN(v)}đ</span>,
+                                                },
+                                            ]}
+                                            summary={() => (
+                                                <Table.Summary>
+                                                    <Table.Summary.Row>
+                                                        <Table.Summary.Cell index={0} colSpan={4}>
+                                                            <span style={{ fontWeight: 600, fontSize: 12, color: SP_MUTED }}>Tổng — {record.name}</span>
+                                                        </Table.Summary.Cell>
+                                                        <Table.Summary.Cell index={1} align="right">
+                                                            <span style={{ fontWeight: 700, fontSize: 13, color: SP_ORANGE }}>{fmtN(prodTotal)}đ</span>
+                                                        </Table.Summary.Cell>
+                                                    </Table.Summary.Row>
+                                                </Table.Summary>
+                                            )}
+                                        />
+                                    </div>
+                                );
+                            } catch { return null; }
+                        },
+                    }}
+                    summary={() => (
+                        <Table.Summary fixed>
+                            <Table.Summary.Row>
+                                <Table.Summary.Cell index={0} colSpan={3}>
+                                    <span style={{ fontWeight: 600, color: SP_TEXT, fontSize: 13 }}>Tổng cộng ({filtered.length} sản phẩm)</span>
+                                </Table.Summary.Cell>
+                                <Table.Summary.Cell index={1} align="right">
+                                    <span style={{ fontWeight: 700, color: SP_GREEN, fontSize: 13 }}>{fmtN(grandStock)}</span>
+                                </Table.Summary.Cell>
+                                <Table.Summary.Cell index={2} />
+                                <Table.Summary.Cell index={3} align="right">
+                                    <span style={{ fontWeight: 700, color: SP_ORANGE, fontSize: 14 }}>{fmtN(grandTotal)}đ</span>
+                                </Table.Summary.Cell>
+                            </Table.Summary.Row>
+                        </Table.Summary>
+                    )}
+                />
+            </div>
+        </div>
+    );
+}
+
+// ============================================================
+// XNT TAB - Tổng hợp Xuất Nhập Tồn
+// ============================================================
+interface XNTVariantRow {
+    key: string;
+    sku: string;
+    variantLabel: string;
+    openingStock: number;
+    imported: number;
+    exported: number;
+    closingStock: number;
+}
+
+interface XNTProductRow {
+    key: string;
+    productName: string;
+    categoryName: string;
+    sku: string; // for single-sku products
+    hasVariants: boolean;
+    openingStock: number;
+    imported: number;
+    exported: number;
+    closingStock: number;
+    variants: XNTVariantRow[];
+}
+
+const xntNum = (v: number, color?: string) => (
+    <span style={{ fontWeight: 600, color: color || (v < 0 ? '#ff4d4f' : v === 0 ? '#8c8c8c' : '#262626') }}>
+        {v.toLocaleString('vi-VN')}
+    </span>
+);
+
+function XNTTab({ dateRange }: { dateRange: [Dayjs, Dayjs] }) {
+    const [loading, setLoading] = useState(false);
+    const [rows, setRows] = useState<XNTProductRow[]>([]);
+    const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
+    const [searchText, setSearchText] = useState('');
+
+    const loadData = useCallback(async () => {
+        setLoading(true);
+        try {
+            const [prodRes, purRes, expRes, ecomRes] = await Promise.all([
+                window.electronAPI.products.getAll(),
+                window.electronAPI.purchases.getAll(),
+                window.electronAPI.exportOrders.getAll(),
+                window.electronAPI.ecommerceExports.getAll(),
+            ]);
+
+            if (!prodRes.success) return;
+            const products: any[] = prodRes.data || [];
+            const purchases: any[] = purRes.success ? (purRes.data || []) : [];
+            const exportOrders: any[] = expRes.success ? (expRes.data || []) : [];
+            const ecomExports: any[] = ecomRes.success ? (ecomRes.data || []) : [];
+
+            const [startDate, endDate] = dateRange;
+            const isInRange = (dateStr: string) => {
+                if (!dateStr) return false;
+                const d = dayjs(dateStr);
+                return d.isAfter(startDate.startOf('day').subtract(1, 'ms')) && d.isBefore(endDate.endOf('day').add(1, 'ms'));
+            };
+
+            const importedMap: Record<string, number> = {};
+            const exportedMap: Record<string, number> = {};
+
+            purchases.forEach((p: any) => {
+                const pDate = p.purchaseDate || p.receivedAt || p.createdAt;
+                if (!isInRange(pDate)) return;
+                try {
+                    const items = typeof p.items === 'string' ? JSON.parse(p.items) : (p.items || []);
+                    items.forEach((item: any) => {
+                        const sku = item.variantSku || item.sku || '';
+                        if (!sku) return;
+                        importedMap[sku] = (importedMap[sku] || 0) + (item.quantity || 0);
+                    });
+                } catch { /* skip */ }
+            });
+
+            exportOrders.forEach((e: any) => {
+                if (!isInRange(e.exportDate)) return;
+                try {
+                    const items = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []);
+                    items.forEach((item: any) => {
+                        const sku = item.sku || item.variantSku || '';
+                        if (!sku) return;
+                        exportedMap[sku] = (exportedMap[sku] || 0) + (item.quantity || 0);
+                    });
+                } catch { /* skip */ }
+            });
+
+            ecomExports.forEach((e: any) => {
+                if (e.status !== 'completed') return;
+                if (!isInRange(e.ecommerceExportDate)) return;
+                try {
+                    const items = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []);
+                    items.forEach((item: any) => {
+                        const sku = item.sku || item.variantSku || '';
+                        if (!sku) return;
+                        exportedMap[sku] = (exportedMap[sku] || 0) + (item.quantity || 0);
+                    });
+                } catch { /* skip */ }
+            });
+
+            const result: XNTProductRow[] = [];
+
+            for (const p of products) {
+                let categoryName = '';
+                try { categoryName = (p.categoryName || p.category?.name || ''); } catch { /**/ }
+
+                const variants: any[] = (() => {
+                    try { return p.variants ? JSON.parse(p.variants) : []; } catch { return []; }
+                })();
+
+                if (variants.length > 0) {
+                    const variantRows: XNTVariantRow[] = [];
+                    for (const v of variants) {
+                        const sku = v.sku || '';
+                        if (!sku) continue;
+                        const closingStock = v.stock || 0;
+                        const imported = importedMap[sku] || 0;
+                        const exported = exportedMap[sku] || 0;
+                        const openingStock = closingStock - imported + exported;
+                        if (closingStock === 0 && imported === 0 && exported === 0) continue;
+                        const label = [v.color, v.size].filter(Boolean).join(' / ') || sku;
+                        variantRows.push({ key: sku, sku, variantLabel: label, openingStock, imported, exported, closingStock });
+                    }
+                    if (variantRows.length === 0) continue;
+                    result.push({
+                        key: `prod-${p.id}`,
+                        productName: p.name,
+                        categoryName,
+                        sku: '',
+                        hasVariants: true,
+                        openingStock: variantRows.reduce((s, r) => s + r.openingStock, 0),
+                        imported: variantRows.reduce((s, r) => s + r.imported, 0),
+                        exported: variantRows.reduce((s, r) => s + r.exported, 0),
+                        closingStock: variantRows.reduce((s, r) => s + r.closingStock, 0),
+                        variants: variantRows,
+                    });
+                } else {
+                    const sku = p.sku || '';
+                    if (!sku) continue;
+                    const closingStock = p.stock || 0;
+                    const imported = importedMap[sku] || 0;
+                    const exported = exportedMap[sku] || 0;
+                    const openingStock = closingStock - imported + exported;
+                    if (closingStock === 0 && imported === 0 && exported === 0) continue;
+                    result.push({ key: `prod-${p.id}`, productName: p.name, categoryName, sku, hasVariants: false, openingStock, imported, exported, closingStock, variants: [] });
+                }
+            }
+
+            setRows(result);
+        } catch (err) {
+            console.error('XNT load error', err);
+        } finally {
+            setLoading(false);
+        }
+    }, [dateRange]);
+
+    useEffect(() => { loadData(); }, [loadData]);
+
+    const filtered = useMemo(() => {
+        if (!searchText.trim()) return rows;
+        const s = searchText.toLowerCase();
+        return rows.filter(r =>
+            r.productName.toLowerCase().includes(s) ||
+            r.categoryName.toLowerCase().includes(s) ||
+            r.sku.toLowerCase().includes(s) ||
+            r.variants.some(v => v.sku.toLowerCase().includes(s) || v.variantLabel.toLowerCase().includes(s))
+        );
+    }, [rows, searchText]);
+
+    const totals = useMemo(() => ({
+        openingStock: filtered.reduce((s, r) => s + r.openingStock, 0),
+        imported: filtered.reduce((s, r) => s + r.imported, 0),
+        exported: filtered.reduce((s, r) => s + r.exported, 0),
+        closingStock: filtered.reduce((s, r) => s + r.closingStock, 0),
+    }), [filtered]);
+
+    const columns: ColumnsType<XNTProductRow> = [
+        {
+            title: 'Tên sản phẩm',
+            dataIndex: 'productName',
+            key: 'productName',
+            render: (name, record) => (
+                <div>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{name}</div>
+                    {!record.hasVariants && record.sku && (
+                        <span style={{ fontFamily: 'monospace', fontSize: 11, background: '#e6f4ff', color: '#1677ff', padding: '1px 5px', borderRadius: 3 }}>
+                            {record.sku}
+                        </span>
+                    )}
+                    {record.hasVariants && (
+                        <span style={{ fontSize: 11, color: '#8c8c8c' }}>{record.variants.length} phân loại</span>
+                    )}
+                </div>
+            ),
+        },
+        {
+            title: 'Danh mục', dataIndex: 'categoryName', key: 'categoryName', width: 130, ellipsis: true,
+            render: (v) => v ? <Tag style={{ margin: 0 }}>{v}</Tag> : '',
+        },
+        {
+            title: 'Tồn đầu kỳ', dataIndex: 'openingStock', key: 'openingStock', width: 105, align: 'right',
+            render: (v) => xntNum(v),
+        },
+        {
+            title: 'Nhập kỳ', dataIndex: 'imported', key: 'imported', width: 95, align: 'right',
+            render: (v) => xntNum(v, v > 0 ? '#1a9c3e' : undefined),
+        },
+        {
+            title: 'Xuất kỳ', dataIndex: 'exported', key: 'exported', width: 95, align: 'right',
+            render: (v) => xntNum(v, v > 0 ? '#f5520c' : undefined),
+        },
+        {
+            title: 'Tồn cuối kỳ', dataIndex: 'closingStock', key: 'closingStock', width: 105, align: 'right',
+            render: (v) => <span style={{ fontWeight: 700, color: v < 0 ? '#ff4d4f' : '#1890ff' }}>{v.toLocaleString('vi-VN')}</span>,
+        },
+    ];
+
+    const variantColumns: ColumnsType<XNTVariantRow> = [
+        {
+            title: 'Phân loại', dataIndex: 'variantLabel', key: 'variantLabel',
+            render: (label, record) => (
+                <div>
+                    <span style={{ fontFamily: 'monospace', fontSize: 11, background: '#e6f4ff', color: '#1677ff', padding: '1px 5px', borderRadius: 3, marginRight: 6 }}>
+                        {record.sku}
+                    </span>
+                    <span style={{ color: '#595959', fontSize: 12 }}>{label}</span>
+                </div>
+            ),
+        },
+        { title: 'Tồn đầu kỳ', dataIndex: 'openingStock', key: 'openingStock', width: 105, align: 'right', render: (v) => xntNum(v) },
+        { title: 'Nhập kỳ', dataIndex: 'imported', key: 'imported', width: 95, align: 'right', render: (v) => xntNum(v, v > 0 ? '#1a9c3e' : undefined) },
+        { title: 'Xuất kỳ', dataIndex: 'exported', key: 'exported', width: 95, align: 'right', render: (v) => xntNum(v, v > 0 ? '#f5520c' : undefined) },
+        { title: 'Tồn cuối kỳ', dataIndex: 'closingStock', key: 'closingStock', width: 105, align: 'right', render: (v) => <span style={{ fontWeight: 700, color: v < 0 ? '#ff4d4f' : '#1890ff' }}>{v.toLocaleString('vi-VN')}</span> },
+    ];
+
+    return (
+        <Card>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <Text style={{ color: '#8c8c8c', fontSize: 13 }}>
+                    Kỳ: <strong>{dateRange[0].format('DD/MM/YYYY')}</strong> → <strong>{dateRange[1].format('DD/MM/YYYY')}</strong>
+                </Text>
+                <Space>
+                    <Input.Search
+                        placeholder="Tìm tên sản phẩm, SKU..."
+                        value={searchText}
+                        onChange={(e) => setSearchText(e.target.value)}
+                        allowClear
+                        style={{ width: 260 }}
+                    />
+                    <Button icon={<ReloadOutlined />} onClick={loadData} loading={loading}>Làm mới</Button>
+                </Space>
+            </div>
+            <Table
+                columns={columns}
+                dataSource={filtered}
+                rowKey="key"
+                loading={loading}
+                size="middle"
+                pagination={{ pageSize: 50, showSizeChanger: true, showTotal: (total) => `${total} sản phẩm` }}
+                onRow={(record) => ({
+                    onClick: () => {
+                        if (!record.hasVariants) return;
+                        setExpandedKeys(prev =>
+                            prev.includes(record.key) ? prev.filter(k => k !== record.key) : [...prev, record.key]
+                        );
+                    },
+                    style: { cursor: record.hasVariants ? 'pointer' : 'default' },
+                })}
+                expandable={{
+                    expandedRowKeys: expandedKeys,
+                    showExpandColumn: false,
+                    expandedRowRender: (record) => (
+                        <div style={{ margin: '0 0 0 24px', borderLeft: '3px solid #722ed1', paddingLeft: 12 }}>
+                            <Table
+                                columns={variantColumns}
+                                dataSource={record.variants}
+                                rowKey="key"
+                                size="small"
+                                pagination={false}
+                                showHeader={true}
+                            />
+                        </div>
+                    ),
+                    rowExpandable: (record) => record.hasVariants,
+                }}
+                summary={() => (
+                    <Table.Summary.Row style={{ background: '#f5f6f8', fontWeight: 700 }}>
+                        <Table.Summary.Cell index={0} colSpan={2}><strong>Tổng cộng ({filtered.length} sản phẩm)</strong></Table.Summary.Cell>
+                        <Table.Summary.Cell index={1} align="right"><span style={{ fontWeight: 700 }}>{totals.openingStock.toLocaleString('vi-VN')}</span></Table.Summary.Cell>
+                        <Table.Summary.Cell index={2} align="right"><span style={{ fontWeight: 700, color: '#1a9c3e' }}>{totals.imported.toLocaleString('vi-VN')}</span></Table.Summary.Cell>
+                        <Table.Summary.Cell index={3} align="right"><span style={{ fontWeight: 700, color: '#f5520c' }}>{totals.exported.toLocaleString('vi-VN')}</span></Table.Summary.Cell>
+                        <Table.Summary.Cell index={4} align="right"><span style={{ fontWeight: 700, color: '#1890ff' }}>{totals.closingStock.toLocaleString('vi-VN')}</span></Table.Summary.Cell>
+                    </Table.Summary.Row>
+                )}
+            />
+        </Card>
+    );
+}
+
 export default function BusinessReportPage() {
+    const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
+    const [activeTab, setActiveTab] = useState<'pnl' | 'inventory' | 'xnt'>('pnl');
+    const [allProducts, setAllProducts] = useState<any[]>([]);
+
     const [loading, setLoading] = useState(true);
     const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs().startOf('month'), dayjs().endOf('day')]);
     const [viewMode, setViewMode] = useState<'range' | 'daily'>('range');
@@ -104,6 +712,42 @@ export default function BusinessReportPage() {
     const [drillDownTitle, setDrillDownTitle] = useState('');
     const [drillDownData, setDrillDownData] = useState<any[]>([]);
     const [drillDownType, setDrillDownType] = useState<'orders' | 'ecom' | 'items' | 'expenses' | 'fee-detail' | 'opex-detail'>('orders');
+    const [expandedDrillKeys, setExpandedDrillKeys] = useState<string[]>([]);
+
+    // ============================================
+    // HEADER TABS
+    // ============================================
+    useEffect(() => {
+        setHeaderExtra(
+            <Space size={4}>
+                <Button
+                    type={activeTab === 'pnl' ? 'primary' : 'default'}
+                    size="middle"
+                    onClick={() => setActiveTab('pnl')}
+                    style={activeTab === 'pnl' ? { background: '#00ab56', borderColor: '#00ab56' } : {}}
+                >
+                    Báo cáo P&L
+                </Button>
+                <Button
+                    type={activeTab === 'inventory' ? 'primary' : 'default'}
+                    size="middle"
+                    onClick={() => setActiveTab('inventory')}
+                    style={activeTab === 'inventory' ? { background: '#1890ff', borderColor: '#1890ff' } : {}}
+                >
+                    Giá trị tồn kho
+                </Button>
+                <Button
+                    type={activeTab === 'xnt' ? 'primary' : 'default'}
+                    size="middle"
+                    onClick={() => setActiveTab('xnt')}
+                    style={activeTab === 'xnt' ? { background: '#722ed1', borderColor: '#722ed1' } : {}}
+                >
+                    Xuất Nhập Tồn
+                </Button>
+            </Space>
+        );
+        return () => clearHeaderExtra();
+    }, [activeTab, setHeaderExtra, clearHeaderExtra]);
 
     // ============================================
     // LOAD DATA
@@ -124,6 +768,7 @@ export default function BusinessReportPage() {
             if (ecomRes.success) setEcomExports(ecomRes.data || []);
             if (refRes.success) setRefunds(refRes.data || []);
             if (purRes.success) setPurchases(purRes.data || []);
+            if (prodRes.success) setAllProducts(prodRes.data || []);
 
             // Build map SKU → giá vốn từ Products + Variants + ComboProducts
             const skuCostMap: Record<string, number> = {};
@@ -361,8 +1006,8 @@ export default function BusinessReportPage() {
         // === D. CHI PHÍ ADS (daily thực tế + ngân sách tháng từ config chia theo ngày) ===
         const dailyShopeeAds = filteredDailyExpenses.reduce((s, d) => s + (d.shopeeAds || 0), 0);
         const dailyTiktokAds = filteredDailyExpenses.reduce((s, d) => s + (d.tiktokAds || 0), 0);
-        const totalShopeeAds = dailyShopeeAds + ((config.monthlyShopeeAds || 0) / 30) * numDays;
-        const totalTiktokAds = dailyTiktokAds + ((config.monthlyTiktokAds || 0) / 30) * numDays;
+        const totalShopeeAds = dailyShopeeAds + shopeeRevenue * ((config.shopeeAdsPercent || 0) / 100);
+        const totalTiktokAds = dailyTiktokAds + tiktokRevenue * ((config.tiktokAdsPercent || 0) / 100);
         const totalAds = totalShopeeAds + totalTiktokAds;
 
         // === E. VẬN CHUYỂN & HOÀN (từ dailyExpenses) ===
@@ -564,14 +1209,18 @@ export default function BusinessReportPage() {
             case 'rev-pos': {
                 title = `Chi tiết Doanh thu POS (${fmt(pnl.revenuePOS)}đ)`;
                 type = 'orders';
-                data = filteredExports.map((e, i) => ({
-                    key: i,
-                    date: dayjs(e.exportDate).format('DD/MM/YYYY'),
-                    code: e.exportCode || `POS-${i + 1}`,
-                    customer: e.customerName || 'Khách lẻ',
-                    amount: e.totalAmount || 0,
-                    items: (() => { try { const its = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []); return its.length; } catch { return 0; } })(),
-                }));
+                data = filteredExports.map((e, i) => {
+                    const its = (() => { try { return typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []); } catch { return []; } })();
+                    return {
+                        key: String(i),
+                        date: dayjs(e.exportDate).format('DD/MM/YYYY'),
+                        code: e.exportCode || `POS-${i + 1}`,
+                        customer: e.customerName || 'Khách lẻ',
+                        amount: e.totalAmount || 0,
+                        items: its.length,
+                        _orderItems: its,
+                    };
+                });
                 break;
             }
             case 'rev-shopee': {
@@ -579,15 +1228,10 @@ export default function BusinessReportPage() {
                 type = 'ecom';
                 data = filteredEcom
                     .filter(e => (e.customerName || '').toLowerCase().includes('shopee'))
-                    .map((e, i) => ({
-                        key: i,
-                        date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'),
-                        code: e.ecommerceExportCode || `ECOM-${i + 1}`,
-                        customer: e.customerName || '',
-                        platform: 'Shopee',
-                        amount: e.totalAmount || 0,
-                        items: (() => { try { const its = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []); return its.length; } catch { return 0; } })(),
-                    }));
+                    .map((e, i) => {
+                        const its = (() => { try { return typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []); } catch { return []; } })();
+                        return { key: String(i), date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'), code: e.ecommerceExportCode || `ECOM-${i + 1}`, customer: e.customerName || '', platform: 'Shopee', amount: e.totalAmount || 0, items: its.length, _orderItems: its };
+                    });
                 break;
             }
             case 'rev-tiktok': {
@@ -595,15 +1239,10 @@ export default function BusinessReportPage() {
                 type = 'ecom';
                 data = filteredEcom
                     .filter(e => (e.customerName || '').toLowerCase().includes('tik'))
-                    .map((e, i) => ({
-                        key: i,
-                        date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'),
-                        code: e.ecommerceExportCode || `ECOM-${i + 1}`,
-                        customer: e.customerName || '',
-                        platform: 'TikTok',
-                        amount: e.totalAmount || 0,
-                        items: (() => { try { const its = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []); return its.length; } catch { return 0; } })(),
-                    }));
+                    .map((e, i) => {
+                        const its = (() => { try { return typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []); } catch { return []; } })();
+                        return { key: String(i), date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'), code: e.ecommerceExportCode || `ECOM-${i + 1}`, customer: e.customerName || '', platform: 'TikTok', amount: e.totalAmount || 0, items: its.length, _orderItems: its };
+                    });
                 break;
             }
             case 'rev-other': {
@@ -614,15 +1253,10 @@ export default function BusinessReportPage() {
                         const name = (e.customerName || '').toLowerCase();
                         return !name.includes('shopee') && !name.includes('tik') && !name.includes('lazada');
                     })
-                    .map((e, i) => ({
-                        key: i,
-                        date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'),
-                        code: e.ecommerceExportCode || `ECOM-${i + 1}`,
-                        customer: e.customerName || '',
-                        platform: 'Khác',
-                        amount: e.totalAmount || 0,
-                        items: (() => { try { const its = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []); return its.length; } catch { return 0; } })(),
-                    }));
+                    .map((e, i) => {
+                        const its = (() => { try { return typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []); } catch { return []; } })();
+                        return { key: String(i), date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'), code: e.ecommerceExportCode || `ECOM-${i + 1}`, customer: e.customerName || '', platform: 'Khác', amount: e.totalAmount || 0, items: its.length, _orderItems: its };
+                    });
                 break;
             }
             case 'cogs-pos': {
@@ -713,9 +1347,9 @@ export default function BusinessReportPage() {
                     ...filteredDailyExpenses.filter(d => (d.shopeeAds || 0) > 0).map((d, i) => ({
                         key: i, date: dayjs(d.date).format('DD/MM/YYYY'), label: 'Shopee Ads (thực tế)', amount: d.shopeeAds || 0, note: d.otherNote || '',
                     })),
-                    ...(config.monthlyShopeeAds > 0 ? [{
-                        key: 9999, date: 'Ngân sách tháng', label: 'Shopee Ads (config)', amount: ((config.monthlyShopeeAds || 0) / 30) * numDays,
-                        note: `${fmt(config.monthlyShopeeAds)}đ/tháng ÷ 30 × ${numDays} ngày`,
+                    ...(config.shopeeAdsPercent > 0 ? [{
+                        key: 9999, date: 'Theo % DT', label: 'Shopee Ads (% doanh thu)', amount: pnl.shopeeRevenue * ((config.shopeeAdsPercent || 0) / 100),
+                        note: `${config.shopeeAdsPercent}% × ${fmt(pnl.shopeeRevenue)}đ doanh thu Shopee`,
                     }] : []),
                 ];
                 break;
@@ -727,9 +1361,9 @@ export default function BusinessReportPage() {
                     ...filteredDailyExpenses.filter(d => (d.tiktokAds || 0) > 0).map((d, i) => ({
                         key: i, date: dayjs(d.date).format('DD/MM/YYYY'), label: 'TikTok Ads (thực tế)', amount: d.tiktokAds || 0, note: d.otherNote || '',
                     })),
-                    ...(config.monthlyTiktokAds > 0 ? [{
-                        key: 9999, date: 'Ngân sách tháng', label: 'TikTok Ads (config)', amount: ((config.monthlyTiktokAds || 0) / 30) * numDays,
-                        note: `${fmt(config.monthlyTiktokAds)}đ/tháng ÷ 30 × ${numDays} ngày`,
+                    ...(config.tiktokAdsPercent > 0 ? [{
+                        key: 9999, date: 'Theo % DT', label: 'TikTok Ads (% doanh thu)', amount: pnl.tiktokRevenue * ((config.tiktokAdsPercent || 0) / 100),
+                        note: `${config.tiktokAdsPercent}% × ${fmt(pnl.tiktokRevenue)}đ doanh thu TikTok`,
                     }] : []),
                 ];
                 break;
@@ -812,6 +1446,7 @@ export default function BusinessReportPage() {
         setDrillDownTitle(title);
         setDrillDownData(data);
         setDrillDownType(type);
+        setExpandedDrillKeys([]);
         setDrillDownOpen(true);
     }, [filteredExports, filteredEcom, filteredDailyExpenses, pnl, costMap, getPurchaseCost]);
 
@@ -909,8 +1544,19 @@ export default function BusinessReportPage() {
     // RENDER
     // ============================================
 
+
     return (
         <div style={{ padding: '24px', background: '#f5f5f5', minHeight: '100%' }}>
+
+            {/* === TAB 2: INVENTORY === */}
+            {activeTab === 'inventory' && <InventoryValueTab />}
+
+            {/* === TAB 3: XNT === */}
+            {activeTab === 'xnt' && <XNTTab dateRange={dateRange} />}
+
+            {/* === TAB 1: P&L === */}
+            {activeTab === 'pnl' && <>
+
             {/* === HEADER === */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
                 <div>
@@ -1017,13 +1663,13 @@ export default function BusinessReportPage() {
                     </Card>
                 </Col>
                 <Col span={6}>
-                    <Card style={{ borderTop: '3px solid #722ed1' }}>
+                    <Card style={{ borderTop: '3px solid #13c2c2' }}>
                         <Statistic
                             title={<span>📈 Biên lợi nhuận</span>}
                             value={pnl.netMargin}
                             precision={1}
                             suffix="%"
-                            valueStyle={{ color: '#722ed1', fontSize: 22, fontWeight: 800 }}
+                            valueStyle={{ color: '#13c2c2', fontSize: 22, fontWeight: 800 }}
                         />
                         <Text type="secondary" style={{ fontSize: 11 }}>
                             Gross margin: {pnl.grossMargin.toFixed(1)}%
@@ -1065,7 +1711,7 @@ export default function BusinessReportPage() {
                                     'gross': 'Lợi nhuận gộp = Doanh thu thuần − Giá vốn hàng bán. Thể hiện biên lợi nhuận trước chi phí.',
                                     'selling-header': 'Chi phí bán hàng = Phí sàn TMĐT + Chi phí quảng cáo (Ads) + Phí vận chuyển & hoàn hàng.',
                                     'platform': 'Phí sàn = Hoa hồng, phí thanh toán, phí xử lý... mà Shopee/TikTok trừ trên mỗi đơn hàng.',
-                                    'ads': 'Chi phí Marketing = Ngân sách quảng cáo Shopee Ads + TikTok Ads (nhập trong Cấu hình).',
+                                    'ads': 'Chi phí Marketing = % doanh thu từng sàn (Shopee Ads + TikTok Ads) + chi phí ads thực tế nhập hàng ngày.',
                                     'ship': 'Phí ship gửi hàng cho khách + chi phí xử lý đơn hoàn, hàng hỏng.',
                                     'ga-header': 'Chi phí quản lý = Thuê kho, điện, nước, lương, bảo hiểm, phần mềm... (nhập trong Cấu hình).',
                                     'net': 'Lợi nhuận ròng = Lợi nhuận gộp − Chi phí bán hàng − Chi phí quản lý. Đây là số tiền thực lãi.',
@@ -1227,25 +1873,23 @@ export default function BusinessReportPage() {
                             </Row>
                         </Panel>
 
-                        <Panel header="📣 Chi phí Quảng cáo hàng tháng" key="ads">
+                        <Panel header="📣 Chi phí Quảng cáo" key="ads">
                             <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 12 }}>
-                                <InfoCircleOutlined /> Nhập tổng ngân sách ads/tháng — hệ thống tự chia đều theo số ngày trong kỳ báo cáo
+                                <InfoCircleOutlined /> Nhập % doanh thu — hệ thống tự tính: % × doanh thu từng sàn trong kỳ
                             </Text>
                             <Row gutter={12}>
                                 <Col span={12}>
-                                    <Form.Item name="monthlyShopeeAds" label="🛍️ Shopee Ads / tháng">
-                                        <InputNumber style={{ width: '100%' }} min={0} step={100000}
-                                            formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                                            parser={(v: any) => v.replace(/,/g, '')}
-                                            addonAfter="đ" />
+                                    <Form.Item name="shopeeAdsPercent" label="🛍️ Shopee Ads">
+                                        <InputNumber style={{ width: '100%' }} min={0} max={100} step={0.1}
+                                            precision={2}
+                                            addonAfter="%" />
                                     </Form.Item>
                                 </Col>
                                 <Col span={12}>
-                                    <Form.Item name="monthlyTiktokAds" label="🎵 TikTok Ads / tháng">
-                                        <InputNumber style={{ width: '100%' }} min={0} step={100000}
-                                            formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                                            parser={(v: any) => v.replace(/,/g, '')}
-                                            addonAfter="đ" />
+                                    <Form.Item name="tiktokAdsPercent" label="🎵 TikTok Ads">
+                                        <InputNumber style={{ width: '100%' }} min={0} max={100} step={0.1}
+                                            precision={2}
+                                            addonAfter="%" />
                                     </Form.Item>
                                 </Col>
                             </Row>
@@ -1314,6 +1958,40 @@ export default function BusinessReportPage() {
                     pagination={drillDownData.length > 50 ? { pageSize: 50, showSizeChanger: true, showTotal: (t) => `Tổng ${t} dòng` } : false}
                     size="small"
                     scroll={{ y: 450 }}
+                    expandable={(drillDownType === 'orders' || drillDownType === 'ecom') ? {
+                        expandedRowKeys: expandedDrillKeys,
+                        onExpand: (expanded, record) => setExpandedDrillKeys(expanded ? [record.key] : []),
+                        rowExpandable: (record) => (record._orderItems || []).length > 0,
+                        expandedRowRender: (record) => {
+                            const items: any[] = record._orderItems || [];
+                            return (
+                                <div style={{ padding: '8px 16px', background: '#f6ffed', borderRadius: 6, margin: '4px 0' }}>
+                                    <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                                        <thead>
+                                            <tr style={{ borderBottom: '1px solid #b7eb8f', color: '#389e0d', fontWeight: 600 }}>
+                                                <th style={{ padding: '4px 8px', textAlign: 'left' }}>SKU</th>
+                                                <th style={{ padding: '4px 8px', textAlign: 'left' }}>Sản phẩm</th>
+                                                <th style={{ padding: '4px 8px', textAlign: 'center' }}>SL</th>
+                                                <th style={{ padding: '4px 8px', textAlign: 'right' }}>Đơn giá</th>
+                                                <th style={{ padding: '4px 8px', textAlign: 'right' }}>Thành tiền</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {items.map((item: any, idx: number) => (
+                                                <tr key={idx} style={{ borderBottom: '1px solid #d9f7be' }}>
+                                                    <td style={{ padding: '4px 8px', color: '#1890ff', fontFamily: 'monospace' }}>{item.variantSku || item.sku || '—'}</td>
+                                                    <td style={{ padding: '4px 8px' }}>{item.productName || item.name || '—'}</td>
+                                                    <td style={{ padding: '4px 8px', textAlign: 'center', fontWeight: 600 }}>{item.quantity}</td>
+                                                    <td style={{ padding: '4px 8px', textAlign: 'right' }}>{fmt(item.unitPrice || 0)}đ</td>
+                                                    <td style={{ padding: '4px 8px', textAlign: 'right', fontWeight: 600, color: '#00ab56' }}>{fmt(item.total || 0)}đ</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            );
+                        },
+                    } : undefined}
                     summary={() => {
                         if (drillDownData.length === 0) return null;
                         const totalKey = drillDownType === 'items' ? 'totalCost'
@@ -1345,6 +2023,7 @@ export default function BusinessReportPage() {
                 .pnl-row-parent td   { background: #fafafa !important; }
                 .pnl-row-child td    { border-bottom: 1px solid #f9f9f9 !important; }
             `}</style>
+            </>}
         </div>
     );
 }

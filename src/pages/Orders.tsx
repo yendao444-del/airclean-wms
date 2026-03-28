@@ -189,8 +189,8 @@ export default function OrdersPage() {
     // Filtered orders
     const filteredOrders = orders.filter(order => {
         if (sourceFilter !== 'all' && order.source !== sourceFilter) return false;
-        if (!isInRange(order.date)) return false;
         if (searchKeyword.trim()) {
+            // Khi search: bỏ qua date range, tìm toàn bộ đơn
             const kw = searchKeyword.trim().toLowerCase();
             return (
                 order.orderNumber.toLowerCase().includes(kw) ||
@@ -199,6 +199,7 @@ export default function OrdersPage() {
                 order.sourceLabel.toLowerCase().includes(kw)
             );
         }
+        if (!isInRange(order.date)) return false;
         return true;
     });
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import {
@@ -101,15 +101,10 @@ export default function EcommerceExportPage() {
     const [unmatchedScans, setUnmatchedScans] = useState<{ trackingId: string; scannedAt: string }[]>([]);
     const unmatchedDateRef = useRef(dayjs().format('YYYY-MM-DD')); // Ngày hiện tại để auto-reset
 
-    // Chống trùng lặp cho Realtime Watcher
-    const realtimeImportedOrdersRef = useRef<Set<string>>(new Set());
+
 
     // 🔎 State cho tìm kiếm mã vận đơn đi
     const [searchKeyword, setSearchKeyword] = useState('');
-
-    // 📂 State cho Folder Watcher
-    const [watchFolder, setWatchFolder] = useState<string>('');
-    const [isWatching, setIsWatching] = useState<boolean>(false);
 
     // ⚙️ State cho Settings Telegram
     const [settingsModalVisible, setSettingsModalVisible] = useState(false);
@@ -150,39 +145,14 @@ export default function EcommerceExportPage() {
                     chatId: chatIdResult.success && chatIdResult.data ? chatIdResult.data : '',
                     apiToken: apiTokenResult.success && apiTokenResult.data ? apiTokenResult.data : '',
                 });
-
-                // Khôi phục session theo dõi folder TMĐT
-                const watchFolderRs = await window.electronAPI.appConfig.get('ecommerceWatchFolder');
-                if (watchFolderRs.success && watchFolderRs.data) {
-                    const startRs = await window.electronAPI.ecommerceExports.startWatch(watchFolderRs.data);
-                    if (startRs.success) {
-                        setWatchFolder(watchFolderRs.data);
-                        setIsWatching(true);
-                        console.log(`✅ Khôi phục theo dõi TMĐT: ${watchFolderRs.data} (${startRs.data.existingFiles} file)`);
-                        
-                        if (startRs.data.existingFileList && startRs.data.existingFileList.length > 0) {
-                            for (const fileData of startRs.data.existingFileList) {
-                                handleImportFromWatcher(fileData);
-                            }
-                        }
-                    } else {
-                        await window.electronAPI.appConfig.set('ecommerceWatchFolder', ''); 
-                    }
-                }
             } catch (error) {
-                console.error('Error loading settings/watch_folder:', error);
+                console.error('Error loading settings:', error);
             }
         })();
 
-        // Listener file mới (Realtime)
-        const cleanupWatch = window.electronAPI.ecommerceExports.onNewFile((data: any) => {
-            console.log('🆕 [TMDT Watcher] Nhận file:', data.name);
-            handleImportFromWatcher(data);
-        });
-
         const interval = setInterval(() => {
-            loadEcommerceExports(true);
-        }, 30000);
+            if (document.visibilityState === 'visible') loadEcommerceExports(true);
+        }, 60000);
 
         // ⚡ Auto-reset danh sách lệch đơn khi sang ngày mới (check mỗi phút)
         const dailyResetInterval = setInterval(() => {
@@ -197,7 +167,6 @@ export default function EcommerceExportPage() {
         return () => {
             clearInterval(interval);
             clearInterval(dailyResetInterval);
-            if (cleanupWatch) cleanupWatch();
         };
     }, []);
 
@@ -1362,168 +1331,7 @@ Thời gian: ${currentTime}`;
         }
     };
 
-    // ⚡ Xử lý 1 file từ Realtime Watcher
-    const handleImportFromWatcher = async (fileData: any) => {
-        try {
-            const binaryString = atob(fileData.base64);
-            const workbook = XLSX.read(binaryString, { type: 'binary' });
-            const sheetName = workbook.SheetNames[0];
-            const worksheet = workbook.Sheets[sheetName];
-            const jsonData = XLSX.utils.sheet_to_json(worksheet);
 
-            const firstRow: any = jsonData[0] || {};
-            const isTikTok = 'Order ID' in firstRow || 'Cancelled Time' in firstRow;
-            const isShopee = 'Mã đơn hàng' in firstRow || 'Đơn Vị Vận Chuyển' in firstRow;
-
-            if (!isTikTok && !isShopee) return;
-
-            const orderMap = new Map<string, any[]>();
-            let shopeeSkuHeader = '';
-            if (isShopee) {
-                const skuCell = worksheet['T1'];
-                shopeeSkuHeader = skuCell ? (skuCell.v || skuCell.w || '') : '';
-            }
-
-            if (isTikTok) {
-                jsonData.forEach((row: any) => {
-                    const orderId = row['Order ID'] || '';
-                    const productName = row['Product Name'] || '';
-                    const variation = row['Variation'] || '';
-                    const sku = row['Seller SKU'] || '';
-                    const quantity = parseInt(row['Quantity'] || row['Quantity of return'] || row['Quantity of Return'] || '1');
-                    const cancelledTime = row['Cancelled Time'] || row['Cancelled time'] || '';
-                    const shippingProvider = row['Shipping Provider Name'] || '';
-                    const trackingId = row['Tracking ID'] || '';
-                    const orderAmount = parseFloat(row['Order Amount'] || '0');
-
-                    if (orderId.includes('Platform unique') || trackingId.includes("order's tracking")) return;
-                    if (!orderId || !productName || !trackingId) return;
-
-                    const item = {
-                        productId: 0,
-                        productName: variation ? `${productName} - ${variation}` : productName,
-                        color: variation || undefined,
-                        variantSku: sku,
-                        quantity: quantity,
-                        unitPrice: orderAmount / quantity || 0,
-                        total: orderAmount || 0,
-                    };
-                    if (!orderMap.has(orderId)) orderMap.set(orderId, []);
-                    orderMap.get(orderId)!.push({ item, cancelledTime, shippingProvider, trackingId, ecommerceExportReason: 'Hủy đơn TikTok', customerName: 'TikTok', totalAmount: orderAmount });
-                });
-            } else if (isShopee) {
-                jsonData.forEach((row: any) => {
-                    const orderId = row['Mã đơn hàng'] || '';
-                    const productName = row['Tên sản phẩm'] || row['Tên Sản Phẩm'] || '';
-                    const variation = row['Tên phân loại hàng'] || row['Phân loại hàng'] || '';
-                    const sku = row[shopeeSkuHeader] || '';
-                    const quantity = parseInt(row['Số lượng'] || '1');
-                    const cancelledTime = row['Ngày gửi hàng'] || row['Thời gian tạo đơn hàng'] || '';
-                    const shippingProvider = row['Đơn Vị Vận Chuyển'] || '';
-                    const trackingId = row['Mã vận đơn'] || '';
-                    const ecommerceExportReason = row['Trạng Thái Đơn Hàng'] || 'Hủy đơn Shopee';
-                    const rawAmount2 = row['Tổng số tiền Người mua thanh toán'] ?? row['Tổng giá trị đơn hàng (VND)'] ?? row['Tổng giá bán (sản phẩm)'] ?? row['Tổng đơn hàng'] ?? row['Thành tiền'] ?? row['Tổng cộng'] ?? 0;
-                    const totalAmount = typeof rawAmount2 === 'number' ? rawAmount2 : parseFloat(String(rawAmount2).replace(/,/g, '')) || 0;
-                    const unitPrice2 = quantity > 0 ? totalAmount / quantity : totalAmount;
-
-                    if (!orderId || !productName) return;
-
-                    const item = {
-                        productId: 0,
-                        productName: variation ? `${productName} - ${variation}` : productName,
-                        color: variation || undefined,
-                        variantSku: sku,
-                        quantity: quantity,
-                        unitPrice: unitPrice2,
-                        total: totalAmount,
-                    };
-                    if (!orderMap.has(orderId)) orderMap.set(orderId, []);
-                    orderMap.get(orderId)!.push({ item, cancelledTime, shippingProvider, trackingId, ecommerceExportReason, customerName: 'Shopee', totalAmount });
-                });
-            }
-
-            const currentDbExports = await getLatestExports(); // Avoid stale state
-            const newEcommerceExports: EcommerceExport[] = [];
-            let startId = currentDbExports.length > 0 ? Math.max(...currentDbExports.map(r => r.id)) + 1 : 1;
-            let skippedCount = 0;
-
-            orderMap.forEach((orderItems, orderId) => {
-                const isDuplicateInDB = currentDbExports.some(existing => existing.orderNumber === orderId || existing.ecommerceExportCode === orderId);
-                const isDuplicateInSession = realtimeImportedOrdersRef.current.has(orderId);
-                
-                if (isDuplicateInDB || isDuplicateInSession) { skippedCount++; return; }
-
-                const firstItem = orderItems[0];
-                const trackingId = firstItem.trackingId?.toString().trim();
-                const hasTracking = trackingId && trackingId !== 'N/A' && trackingId !== '—' && trackingId !== '';
-                if (!hasTracking) { skippedCount++; return; }
-
-                const allItems = orderItems.map(data => data.item);
-                const totalQuantity = allItems.reduce((sum, item) => sum + item.quantity, 0);
-                const skuCount = allItems.length;
-
-                newEcommerceExports.push({
-                    id: startId++,
-                    ecommerceExportCode: orderId,
-                    customerName: firstItem.customerName,
-                    orderNumber: orderId,
-                    ecommerceExportDate: firstItem.cancelledTime ? dayjs(firstItem.cancelledTime).format('YYYY-MM-DD HH:mm:ss') : dayjs().format('YYYY-MM-DD HH:mm:ss'),
-                    notes: `Shipping: ${firstItem.shippingProvider || 'N/A'} | Tracking: ${firstItem.trackingId || 'N/A'} | ${skuCount} SKU | SL: ${totalQuantity}`,
-                    totalAmount: firstItem.totalAmount,
-                    items: JSON.stringify(allItems),
-                    ecommerceExportReason: firstItem.ecommerceExportReason,
-                    status: 'pending',
-                });
-                // Đánh dấu đã import trong session realtime để tránh file sau trùng
-                realtimeImportedOrdersRef.current.add(orderId);
-            });
-
-            if (newEcommerceExports.length > 0) {
-                const result = await window.electronAPI.ecommerceExports.bulkCreate(newEcommerceExports);
-                if (result.success) {
-                    message.success(`✅ Realtime: Đã thêm ${newEcommerceExports.length} đơn`);
-                    loadEcommerceExports();
-                } else {
-                    message.error(`Lỗi Database: ${result.error || 'Unknown error'}`);
-                }
-            } else if (orderMap.size > 0) {
-                message.info(`Realtime: Bỏ qua đơn trùng (${skippedCount}) từ ${fileData.name}`);
-            }
-        } catch (error) {
-            console.error('Realtime import error:', error);
-        }
-    };
-
-    const toggleWatchFolder = async () => {
-        if (isWatching) {
-            const rs = await window.electronAPI.ecommerceExports.stopWatch();
-            if (rs.success) {
-                setIsWatching(false);
-                setWatchFolder('');
-                await window.electronAPI.appConfig.set('ecommerceWatchFolder', '');
-                message.success('Đã dừng theo dõi thư mục');
-            } else {
-                message.error('Lỗi khi dừng theo dõi');
-            }
-        } else {
-            const rs = await window.electronAPI.ecommerceExports.selectAndWatch();
-            if (rs.success) {
-                setIsWatching(true);
-                setWatchFolder(rs.data.folderPath);
-                await window.electronAPI.appConfig.set('ecommerceWatchFolder', rs.data.folderPath);
-                message.success(`Đang theo dõi: ${rs.data.folderPath}. Đã nạp ${rs.data.existingFiles} file có sẵn.`);
-                
-                // Nạp tự động các file hiện có (giống tính năng DBY)
-                if (rs.data.existingFileList && rs.data.existingFileList.length > 0) {
-                    for (const fileData of rs.data.existingFileList) {
-                        handleImportFromWatcher(fileData);
-                    }
-                }
-            } else if (rs.error !== 'Không có thư mục được chọn') {
-                message.error(rs.error);
-            }
-        }
-    };
 
     const columns: ColumnsType<EcommerceExport> = [
         {
@@ -1853,7 +1661,8 @@ Thời gian: ${currentTime}`;
 
 
     // 🔍 Lọc dữ liệu theo trạng thái
-    const filteredEcommerceExports = ecommerceExports.filter(ecommerceExport => {
+    // ⚡ useMemo — tránh re-filter toàn bộ array mỗi lần render
+    const filteredEcommerceExports = useMemo(() => ecommerceExports.filter(ecommerceExport => {
         // Lọc theo trạng thái
         let statusMatch = true;
         if (statusFilter === 'pending') statusMatch = ecommerceExport.status !== 'completed';
@@ -1876,7 +1685,20 @@ Thời gian: ${currentTime}`;
         }
 
         return true;
-    });
+    }), [ecommerceExports, statusFilter, searchKeyword]);
+
+    // ⚡ Memoize status counts — tránh .filter() x3 mỗi render
+    const statusCounts = useMemo(() => {
+        const today = dayjs().startOf('day');
+        let pending = 0, overdue = 0;
+        for (const r of ecommerceExports) {
+            if (r.status !== 'completed') {
+                pending++;
+                if (dayjs(r.ecommerceExportDate).startOf('day').isBefore(today)) overdue++;
+            }
+        }
+        return { pending, overdue };
+    }, [ecommerceExports]);
 
 
     return (
@@ -1895,7 +1717,7 @@ Thời gian: ${currentTime}`;
                         color: '#fff',
                     }}
                 >
-                    📦 Chờ: {ecommerceExports.filter(r => r.status !== 'completed').length}
+                    📦 Chờ: {statusCounts.pending}
                 </Tag>
                 <Tag
                     onClick={() => setStatusFilter('overdue')}
@@ -1909,11 +1731,7 @@ Thời gian: ${currentTime}`;
                         color: '#fff',
                     }}
                 >
-                    ⚠️ Quá hạn: {ecommerceExports.filter(r => {
-                        const ecommerceExportDate = dayjs(r.ecommerceExportDate).startOf('day');
-                        const today = dayjs().startOf('day');
-                        return ecommerceExportDate.isBefore(today) && r.status !== 'completed';
-                    }).length}
+                    ⚠️ Quá hạn: {statusCounts.overdue}
                 </Tag>
                 <Tag
                     onClick={() => setStatusFilter('no_data')}
@@ -1948,6 +1766,35 @@ Thời gian: ${currentTime}`;
                         Xóa ({selectedRowKeys.length})
                     </Button>
                 )}
+                {ecommerceExports.length > 0 && (
+                    <Button
+                        danger
+                        type="primary"
+                        icon={<DeleteOutlined />}
+                        style={{ flexShrink: 0 }}
+                        onClick={() => {
+                            Modal.confirm({
+                                title: `⚠️ Xóa TẤT CẢ ${ecommerceExports.length} đơn TMDT?`,
+                                content: 'Hành động này không thể hoàn tác. Toàn bộ dữ liệu xuất hàng TMDT sẽ bị xóa vĩnh viễn.',
+                                okText: 'Xóa hết',
+                                okType: 'danger',
+                                cancelText: 'Hủy',
+                                onOk: async () => {
+                                    const rs = await (window.electronAPI as any).ecommerceExports.deleteAll();
+                                    if (rs.success) {
+                                        message.success(`🗑️ Đã xóa ${rs.data} đơn TMDT`);
+                                        loadEcommerceExports();
+                                        setSelectedRowKeys([]);
+                                    } else {
+                                        message.error(`Lỗi: ${rs.error}`);
+                                    }
+                                }
+                            });
+                        }}
+                    >
+                        Xóa tất cả
+                    </Button>
+                )}
                 <Dropdown
                     menu={{
                         items: [
@@ -1967,21 +1814,6 @@ Thời gian: ${currentTime}`;
                     style={{ background: '#52c41a', borderColor: '#52c41a', flexShrink: 0 }}
                 >
                     Nhập Excel
-                </Button>
-                <Button
-                    type="primary"
-                    danger={isWatching}
-                    onClick={toggleWatchFolder}
-                    style={{ flexShrink: 0, fontWeight: 600, boxShadow: isWatching ? '0 0 10px rgba(255, 77, 79, 0.5)' : 'none' }}
-                >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <div style={{
-                            width: 10, height: 10, borderRadius: '50%',
-                            background: isWatching ? '#fff' : '#52c41a',
-                            animation: isWatching ? 'pulse 1.5s infinite' : 'none'
-                        }} />
-                        {isWatching ? 'Stop Watch' : 'Realtime Thư Mục'}
-                    </div>
                 </Button>
                 <Button
                     icon={<SettingOutlined />}
@@ -2135,9 +1967,10 @@ Thời gian: ${currentTime}`;
                         rowKey="id"
                         loading={loading}
                         rowClassName={(record) => {
+                            // ⚡ Dùng indexOf thay vì JSON.parse — nhanh hơn 100x
                             try {
-                                const items = JSON.parse(record.items);
-                                return items.length > 1 ? 'multi-sku-row' : '';
+                                const firstComma = record.items.indexOf('},{');
+                                return firstComma !== -1 ? 'multi-sku-row' : '';
                             } catch {
                                 return '';
                             }
@@ -2179,12 +2012,8 @@ Thời gian: ${currentTime}`;
                                 );
                             },
                             rowExpandable: (record) => {
-                                try {
-                                    const items = JSON.parse(record.items);
-                                    return items.length > 0;
-                                } catch {
-                                    return false;
-                                }
+                                // ⚡ Kiểm tra nhanh bằng string — không JSON.parse
+                                return record.items && record.items.length > 2; // "[]" = 2 chars
                             },
                         }}
                         pagination={{

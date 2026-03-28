@@ -1,12 +1,12 @@
 {
   "name": "quan-ly-ban-hang-desktop",
-  "version": "1.0.176",
+  "version": "1.0.177",
   "description": "Hệ thống quản lý bán hàng - Desktop App",
   "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && set VITE_DEV_SERVER_URL=http://localhost:5173 && electron .\"",
+    "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "npx prisma generate && npm run build && electron-builder"
   },
   "keywords": [
@@ -20,7 +20,6 @@
     "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.3",
-    "better-sqlite3": "^12.6.2",
     "concurrently": "^9.2.1",
     "electron": "^40.1.0",
     "electron-builder": "^26.7.0",
@@ -50,6 +49,17 @@
       "node_modules/google-auth-library/**/*",
       "node_modules/gaxios/**/*",
       "node_modules/gtoken/**/*",
+      "node_modules/bcryptjs/**/*",
+      "!**/*.md",
+      "!**/*.map",
+      "!**/*.ts",
+      "!**/*.d.ts",
+      "!**/CHANGELOG*",
+      "!**/LICENSE*",
+      "!**/readme*",
+      "!**/test/**",
+      "!**/tests/**",
+      "!**/__tests__/**",
       ".env"
     ],
     "extraResources": [
@@ -62,7 +72,12 @@
       "target": "dir",
       "icon": "public/app_icon.ico"
     },
-    "asar": false
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/.prisma/**/*",
+      "node_modules/@prisma/**/*.node",
+      "**/*.node"
+    ]
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",
@@ -74,12 +89,10 @@
     "dotenv": "^17.2.3",
     "glob": "^13.0.1",
     "googleapis": "^171.4.0",
-    "nodemailer": "^8.0.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-hook-form": "^7.71.1",
     "recharts": "^3.7.0",
-    "sqlite3": "^5.1.7",
     "xlsx": "^0.18.5",
     "zod": "^4.3.6",
     "zustand": "^5.0.11"

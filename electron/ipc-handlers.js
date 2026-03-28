@@ -325,6 +325,22 @@ async function backupInvoiceToCloudAndTelegram(order, invoiceNumber, taxCode) {
 let prisma;
 let prismaDirectTx; // Dùng DIRECT_URL cho transactions nặng (bypass PgBouncer)
 
+// ⚡ LAZY INIT — chỉ tạo khi lần đầu cần (tiết kiệm ~500ms startup)
+function getPrismaDirectTx() {
+    if (!prismaDirectTx) {
+        console.time('⚡ lazy-init prismaDirectTx');
+        prismaDirectTx = new PrismaClient({
+            log: ['error', 'warn'],
+            datasources: { db: { url: config.DIRECT_URL } }
+        });
+        prismaDirectTx.$connect()
+            .then(() => console.log('✅ Connected Prisma Direct (for transactions)'))
+            .catch(err => console.error('⚠️ Prisma Direct connect failed:', err.message));
+        console.timeEnd('⚡ lazy-init prismaDirectTx');
+    }
+    return prismaDirectTx;
+}
+
 try {
     console.log('🔄 Initializing Prisma Client...');
     console.log('   🆕 CODE VERSION: 3.0 (Production with embedded config)');
@@ -340,22 +356,7 @@ try {
             }
         }
     });
-
-    // Client riêng dùng DIRECT_URL (không qua PgBouncer) cho các transactions nhiều bước
-    prismaDirectTx = new PrismaClient({
-        log: ['error', 'warn'],
-        datasources: {
-            db: {
-                url: config.DIRECT_URL
-            }
-        }
-    });
     console.log('✅ Prisma Client initialized successfully');
-
-    // Connect direct client (silent - không block startup)
-    prismaDirectTx.$connect()
-        .then(() => console.log('✅ Connected Prisma Direct (for transactions)'))
-        .catch(err => console.error('⚠️ Prisma Direct connect failed:', err.message));
 
     // Test connection - REQUIRED
     prisma.$connect()
@@ -473,8 +474,8 @@ async function cleanupOldLogs() {
 // Chạy cleanup khi app khởi động (delay 10s để DB sẵn sàng)
 setTimeout(cleanupOldLogs, 10000);
 
-// Lặp lại mỗi 6 tiếng
-setInterval(cleanupOldLogs, 6 * 60 * 60 * 1000);
+// Lặp lại mỗi 24 tiếng (thay vì 6h — cleanup không cần chạy thường xuyên)
+setInterval(cleanupOldLogs, 24 * 60 * 60 * 1000);
 
 // ========================================
 // SYSTEM INFO
@@ -589,7 +590,7 @@ ipcMain.handle('products:create', async (event, data) => {
             include: { category: true }
         });
         console.log(`✅ Created product: ${product.name} (ID: ${product.id})`);
-        await logActivity({ module: 'products', action: 'CREATE', description: `Tạo sản phẩm "${product.name}" (SKU: ${product.sku})`, recordId: product.id, recordName: product.name, userName: data.userName || 'Admin' });
+        void logActivity({ module: 'products', action: 'CREATE', description: `Tạo sản phẩm "${product.name}" (SKU: ${product.sku})`, recordId: product.id, recordName: product.name, userName: data.userName || 'Admin' });
         return { success: true, data: product };
     } catch (error) {
         console.error('❌ Create product ERROR:', error.code, error.message);
@@ -632,7 +633,7 @@ ipcMain.handle('products:update', async (event, id, data) => {
             include: { category: true }
         });
         console.log(`✅ Updated product: ${product.name}`);
-        await logActivity({ module: 'products', action: 'UPDATE', description: `Cập nhật sản phẩm "${product.name}"`, recordId: product.id, recordName: product.name, changes: data, userName: data.userName || 'Admin' });
+        void logActivity({ module: 'products', action: 'UPDATE', description: `Cập nhật sản phẩm "${product.name}"`, recordId: product.id, recordName: product.name, changes: data, userName: data.userName || 'Admin' });
         return { success: true, data: product };
     } catch (error) {
         console.error('❌ Update product error:', error.code, error.message);
@@ -658,7 +659,7 @@ ipcMain.handle('products:delete', async (event, id) => {
         const product = await prisma.product.findUnique({ where: { id } });
         await prisma.product.delete({ where: { id } });
         console.log(`✅ Deleted product ID: ${id}`);
-        await logActivity({ module: 'products', action: 'DELETE', description: `Xóa sản phẩm "${product?.name || id}"`, recordId: id, recordName: product?.name });
+        void logActivity({ module: 'products', action: 'DELETE', description: `Xóa sản phẩm "${product?.name || id}"`, recordId: id, recordName: product?.name });
         return { success: true };
     } catch (error) {
         console.error('❌ Delete product error:', error.message);
@@ -699,7 +700,7 @@ ipcMain.handle('categories:create', async (event, data) => {
         });
 
         console.log('✅ Category created:', newCategory);
-        await logActivity({ module: 'products', action: 'CREATE', description: `Tạo danh mục "${newCategory.name}"`, recordName: newCategory.name });
+        void logActivity({ module: 'products', action: 'CREATE', description: `Tạo danh mục "${newCategory.name}"`, recordName: newCategory.name });
         return { success: true, data: newCategory };
     } catch (error) {
         console.error('❌ Error creating category:', error);
@@ -721,7 +722,7 @@ ipcMain.handle('categories:update', async (event, id, data) => {
         });
 
         console.log('✅ Category updated:', updatedCategory);
-        await logActivity({ module: 'products', action: 'UPDATE', description: `Cập nhật danh mục "${updatedCategory.name}"`, recordName: updatedCategory.name });
+        void logActivity({ module: 'products', action: 'UPDATE', description: `Cập nhật danh mục "${updatedCategory.name}"`, recordName: updatedCategory.name });
         return { success: true, data: updatedCategory };
     } catch (error) {
         console.error('❌ Error updating category:', error);
@@ -752,7 +753,7 @@ ipcMain.handle('categories:delete', async (event, id) => {
         });
 
         console.log('✅ Category deleted:', id);
-        await logActivity({ module: 'products', action: 'DELETE', description: `Xóa danh mục #${id}` });
+        void logActivity({ module: 'products', action: 'DELETE', description: `Xóa danh mục #${id}` });
         return { success: true };
     } catch (error) {
         console.error('❌ Error deleting category:', error);
@@ -1788,7 +1789,7 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
             });
         });
 
-        await logActivity({ module: 'sales', action: 'UPDATE', description: `Sửa đơn POS #${oldOrder.orderNumber}`, userName: userName || 'System' });
+        void logActivity({ module: 'sales', action: 'UPDATE', description: `Sửa đơn POS #${oldOrder.orderNumber}`, userName: userName || 'System' });
         return { success: true };
     } catch (error) {
         console.error('❌ [POS] Update order error:', error.message);
@@ -1826,7 +1827,7 @@ ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
             // await tx.payment.deleteMany({ where: { orderId: id } });
         });
 
-        await logActivity({ module: 'sales', action: 'DELETE', description: `Hủy đơn POS #${order.orderNumber}`, userName: userName || 'System' });
+        void logActivity({ module: 'sales', action: 'DELETE', description: `Hủy đơn POS #${order.orderNumber}`, userName: userName || 'System' });
         return { success: true };
     } catch (error) {
         console.error('❌ [POS] Cancel order error:', error.message);
@@ -1957,12 +1958,15 @@ ipcMain.handle('activityLog:getStats', async () => {
 // ========================================
 
 // Get all purchases
-ipcMain.handle('purchases:getAll', async () => {
+ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
 
         const purchases = await prisma.purchaseOrder.findMany({
-            where: { status: { not: 'cancelled' } },
+            where: {
+                status: { not: 'cancelled' },
+                ...(since ? { createdAt: { gte: new Date(since) } } : {})
+            },
             select: {
                 id: true,
                 poNumber: true,
@@ -2064,7 +2068,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
                 throw new Error(`Product ID ${item.productId} not found. Item: ${item.productName}`);
             }
         }
-        const purchase = await prismaDirectTx.$transaction(async (tx) => {
+        const purchase = await getPrismaDirectTx().$transaction(async (tx) => {
             // Generate standard PN-YYMMDD-XXX
             const today = new Date();
             const dateStr = today.toISOString().slice(2, 10).replace(/-/g, '');
@@ -2136,7 +2140,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
         }, { timeout: 60000, maxWait: 10000 });
 
         console.log(`✅ Created purchase order: ${purchase.poNumber}`);
-        await logActivity({ module: 'purchases', action: 'CREATE', description: `Tạo phiếu nhập ${purchase.poNumber} - ${new Intl.NumberFormat('vi-VN').format(data.totalAmount)}đ`, recordName: purchase.poNumber, userName: data.createdBy || 'Admin' });
+        void logActivity({ module: 'purchases', action: 'CREATE', description: `Tạo phiếu nhập ${purchase.poNumber} - ${new Intl.NumberFormat('vi-VN').format(data.totalAmount)}đ`, recordName: purchase.poNumber, userName: data.createdBy || 'Admin' });
 
         return { success: true, data: purchase };
     } catch (error) {
@@ -2166,7 +2170,7 @@ ipcMain.handle('purchases:update', async (event, { id, data }) => {
         });
 
         console.log(`✅ Updated purchase order: ${purchase.poNumber}`);
-        await logActivity({ module: 'purchases', action: 'UPDATE', description: `Cập nhật phiếu nhập ${purchase.poNumber}`, recordName: purchase.poNumber });
+        void logActivity({ module: 'purchases', action: 'UPDATE', description: `Cập nhật phiếu nhập ${purchase.poNumber}`, recordName: purchase.poNumber });
         return { success: true, data: purchase };
     } catch (error) {
         console.error('❌ Update purchase error:', error);
@@ -2188,7 +2192,7 @@ ipcMain.handle('purchases:delete', async (event, id) => {
         if (!order) throw new Error(`Không tìm thấy phiếu nhập #${id}`);
         if (order.status === 'cancelled') return { success: true };
 
-        await prismaDirectTx.$transaction(async (tx) => {
+        await getPrismaDirectTx().$transaction(async (tx) => {
             const productIds = [...new Set(order.items.map(i => i.productId))];
             const products = await tx.product.findMany({
                 where: { id: { in: productIds } }
@@ -2220,7 +2224,7 @@ ipcMain.handle('purchases:delete', async (event, id) => {
         });
 
         console.log(`✅ Successfully cancelled purchase order #${id}`);
-        await logActivity({ module: 'purchases', action: 'DELETE', description: `Hủy phiếu nhập #${id}`, recordName: order.poNumber });
+        void logActivity({ module: 'purchases', action: 'DELETE', description: `Hủy phiếu nhập #${id}`, recordName: order.poNumber });
         return { success: true };
     } catch (error) {
         console.error('❌ Delete purchase error:', error);
@@ -2549,7 +2553,7 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
             }).catch(err => console.error('Email error:', err));
         }
 
-        await logActivity({
+        void logActivity({
             module: 'purchases', action: 'VAT_UPLOAD',
             description: `Upload ${filesList.length} file HĐ VAT #${invoiceNumber} cho phiếu nhập #${purchaseId} (${purchase.supplier?.name})`,
             userName: 'System',
@@ -2633,7 +2637,7 @@ ipcMain.handle('purchases:uploadImportReceipt', async (event, { purchaseId, file
         }
         await prisma.purchaseOrder.update({ where: { id: purchaseId }, data: dbUpdate });
 
-        await logActivity({
+        void logActivity({
             module: 'purchases', action: 'RECEIPT_UPLOAD',
             description: `Upload Phiếu Nhập của phiếu #${purchaseId} (${purchase.supplier?.name})`,
             userName: 'System',
@@ -2666,7 +2670,7 @@ ipcMain.handle('purchases:deleteImportReceipt', async (event, purchaseId) => {
             }
         });
 
-        await logActivity({
+        void logActivity({
             module: 'purchases', action: 'RECEIPT_DELETE',
             description: `Xóa Phiếu Nhập của phiếu #${purchaseId} (${purchase.supplier?.name})`,
             userName: 'System',
@@ -2687,7 +2691,7 @@ ipcMain.handle('purchases:markAsThht', async (event, { purchaseId, revert }) => 
             where: { id: purchaseId },
             data: { vatInvoiceStatus: revert ? 'pending' : 'thht' },
         });
-        await logActivity({
+        void logActivity({
             module: 'purchases', action: revert ? 'THHT_REVERT' : 'THHT_MARK',
             description: `${revert ? 'Hoàn tác' : 'Đánh dấu'} phiếu nhập #${purchaseId} là Đơn THHT`,
             userName: 'System',
@@ -2775,7 +2779,7 @@ ipcMain.handle('suppliers:create', async (event, data) => {
         });
 
         console.log(`✅ Created supplier: ${supplier.name}`);
-        await logActivity({ module: 'purchases', action: 'CREATE', description: `Tạo NCC "${supplier.name}"`, recordName: supplier.name });
+        void logActivity({ module: 'purchases', action: 'CREATE', description: `Tạo NCC "${supplier.name}"`, recordName: supplier.name });
         return { success: true, data: supplier };
     } catch (error) {
         console.error('❌ Create supplier error:', error);
@@ -2802,7 +2806,7 @@ ipcMain.handle('suppliers:update', async (event, id, data) => {
         });
 
         console.log(`✅ Updated supplier: ${supplier.name}`);
-        await logActivity({ module: 'purchases', action: 'UPDATE', description: `Cập nhật NCC "${supplier.name}"`, recordName: supplier.name });
+        void logActivity({ module: 'purchases', action: 'UPDATE', description: `Cập nhật NCC "${supplier.name}"`, recordName: supplier.name });
         return { success: true, data: supplier };
     } catch (error) {
         console.error('❌ Update supplier error:', error);
@@ -2832,7 +2836,7 @@ ipcMain.handle('suppliers:delete', async (event, id) => {
         });
 
         console.log(`✅ Deleted supplier #${id}`);
-        await logActivity({ module: 'purchases', action: 'DELETE', description: `Xóa nhà cung cấp #${id}` });
+        void logActivity({ module: 'purchases', action: 'DELETE', description: `Xóa nhà cung cấp #${id}` });
         return { success: true };
     } catch (error) {
         console.error('❌ Delete supplier error:', error);
@@ -3430,7 +3434,7 @@ ipcMain.handle('users:changePassword', async (event, { userId, oldPassword, newP
         });
 
         console.log(`✅ Changed password for user: ${user.username}`);
-        await logActivity({ module: 'users', action: 'UPDATE', description: `Đổi mật khẩu: ${user.username}`, recordName: user.username, userName: user.username });
+        void logActivity({ module: 'users', action: 'UPDATE', description: `Đổi mật khẩu: ${user.username}`, recordName: user.username, userName: user.username });
         return { success: true };
     } catch (error) {
         console.error('❌ Change password error:', error);
@@ -3848,7 +3852,7 @@ ipcMain.handle('dailyTasks:create', async (event, taskData) => {
             }
         });
 
-        await logActivity({ module: 'system', action: 'CREATE', description: `Tạo công việc "${task.title}"`, recordName: task.title, userName: taskData.assignee || 'Chưa phân công' });
+        void logActivity({ module: 'system', action: 'CREATE', description: `Tạo công việc "${task.title}"`, recordName: task.title, userName: taskData.assignee || 'Chưa phân công' });
         return { success: true, data: task };
     } catch (error) {
         console.error('Error creating task:', error);
@@ -3885,7 +3889,7 @@ ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
             data: updateData
         });
 
-        await logActivity({ module: 'system', action: 'UPDATE', description: `Cập nhật công việc #${id}`, recordId: id });
+        void logActivity({ module: 'system', action: 'UPDATE', description: `Cập nhật công việc #${id}`, recordId: id });
         return { success: true, data: task };
     } catch (error) {
         console.error('Error updating task:', error);
@@ -3924,7 +3928,7 @@ ipcMain.handle('dailyTasks:delete', async (event, id) => {
             where: { id }
         });
 
-        await logActivity({ module: 'system', action: 'DELETE', description: `Xóa công việc #${id}` });
+        void logActivity({ module: 'system', action: 'DELETE', description: `Xóa công việc #${id}` });
         return { success: true };
     } catch (error) {
         console.error('Error deleting task:', error);
@@ -4158,7 +4162,7 @@ ipcMain.handle('combos:create', async (event, data) => {
         const combo = await prisma.comboProduct.create({
             data: { sku: data.sku, name: data.name, items: JSON.stringify(data.items), price: data.price, cost: data.cost, status: 'active' }
         });
-        await logActivity({ module: 'products', action: 'CREATE', description: `Tạo combo "${combo.name}" (SKU: ${combo.sku})`, recordName: combo.name });
+        void logActivity({ module: 'products', action: 'CREATE', description: `Tạo combo "${combo.name}" (SKU: ${combo.sku})`, recordName: combo.name });
         return { success: true, data: combo };
     } catch (error) {
         console.error('Error creating combo:', error);
@@ -4175,7 +4179,7 @@ ipcMain.handle('combos:update', async (event, id, data) => {
             where: { id: parseInt(id) },
             data: updateData,
         });
-        await logActivity({ module: 'products', action: 'UPDATE', description: `Cập nhật combo "${combo.name}"`, recordName: combo.name });
+        void logActivity({ module: 'products', action: 'UPDATE', description: `Cập nhật combo "${combo.name}"`, recordName: combo.name });
         return { success: true, data: combo };
     } catch (error) {
         console.error('Error updating combo:', error);
@@ -4187,7 +4191,7 @@ ipcMain.handle('combos:delete', async (event, id) => {
     try {
         if (!prisma) throw new Error('Database not initialized');
         await prisma.comboProduct.delete({ where: { id: parseInt(id) } });
-        await logActivity({ module: 'products', action: 'DELETE', description: `Xóa combo #${id}` });
+        void logActivity({ module: 'products', action: 'DELETE', description: `Xóa combo #${id}` });
         return { success: true };
     } catch (error) {
         console.error('Error deleting combo:', error);
@@ -4273,33 +4277,16 @@ ipcMain.handle('ecommerceExport:selectAndWatch', async () => {
             }, 2000);
         });
 
-        // Đọc nội dung base64 của các file hiện có
-        const existingFileList = [];
-        for (const filename of existingFiles) {
-            try {
-                const filePath = path.join(folderPath, filename);
-                const stat = fs.statSync(filePath);
-                if (!stat.isFile()) continue;
-                const fileBuffer = fs.readFileSync(filePath);
-                existingFileList.push({
-                    name: filename,
-                    base64: fileBuffer.toString('base64'),
-                    path: filePath,
-                    size: stat.size
-                });
-            } catch (err) {
-                console.error(`❌ [TMDT Watcher] Lỗi đọc file cũ ${filename}:`, err);
-            }
-        }
+        console.log(`👁️ [TMDT Watcher] Đang theo dõi: ${folderPath} (${existingFiles.length} file có sẵn — chỉ watch file MỚI)`);
 
-        console.log(`👁️ [TMDT Watcher] Đang theo dõi: ${folderPath} (${existingFiles.length} file có sẵn)`);
-
+        // ⚡ KHÔNG đọc nội dung file cũ — chúng đã tồn tại trong DB hoặc user sẽ import thủ công
+        // Chỉ track tên file để watcher biết đâu là file MỚI
         return {
             success: true,
             data: {
                 folderPath,
                 existingFiles: existingFiles.length,
-                existingFileList
+                existingFileList: [] // ⚡ Trả rỗng — không load file cũ
             }
         };
     } catch (error) {
@@ -4314,7 +4301,7 @@ ipcMain.handle('ecommerceExport:startWatch', async (event, folderPath) => {
             return { success: false, error: 'Thư mục không tồn tại' };
         }
 
-        // Lấy danh sách file hiện có
+        // Lấy danh sách file hiện có (CHỈ ĐỂ TRACK — không đọc nội dung)
         const existingFiles = fs.readdirSync(folderPath).filter(f => {
             const ext = path.extname(f).toLowerCase();
             return ['.xlsx', '.xls', '.csv'].includes(ext) && !f.startsWith('~$');
@@ -4329,7 +4316,7 @@ ipcMain.handle('ecommerceExport:startWatch', async (event, folderPath) => {
             ecommerceExportWatcher = null;
         }
 
-        // Bắt đầu theo dõi
+        // Bắt đầu theo dõi — CHỈ phát hiện file MỚI
         let debounceTimer = null;
         ecommerceExportWatcher = fs.watch(folderPath, (eventType, filename) => {
             if (!filename) return;
@@ -4365,30 +4352,13 @@ ipcMain.handle('ecommerceExport:startWatch', async (event, folderPath) => {
             }, 2000);
         });
 
-        // Đọc nội dung base64 của các file hiện có
-        const existingFileList = [];
-        for (const filename of existingFiles) {
-            try {
-                const filePath = path.join(folderPath, filename);
-                const stat = fs.statSync(filePath);
-                if (!stat.isFile()) continue;
-                const fileBuffer = fs.readFileSync(filePath);
-                existingFileList.push({
-                    name: filename,
-                    base64: fileBuffer.toString('base64'),
-                    path: filePath,
-                    size: stat.size
-                });
-            } catch (err) {
-                console.error(`❌ [TMDT Watcher] Lỗi đọc file cũ ${filename}:`, err);
-            }
-        }
-
-        console.log(`👁️ [TMDT Watcher] Đã khôi phục session theo dõi: ${folderPath}`);
+        // ⚡ KHÔNG ĐỌC NỘI DUNG FILE CŨ — chúng đã được import trước đó
+        // Chỉ trả về số lượng file đã biết (để UI hiển thị)
+        console.log(`👁️ [TMDT Watcher] Đã khôi phục session theo dõi: ${folderPath} (${existingFiles.length} file đã có)`);
 
         return {
             success: true,
-            data: { folderPath, existingFiles: existingFiles.length, existingFileList }
+            data: { folderPath, existingFiles: existingFiles.length, existingFileList: [] }
         };
     } catch (error) {
         return { success: false, error: error.message };
@@ -4523,7 +4493,8 @@ ipcMain.handle('ecommerceExports:getAll', async (event, { since } = {}) => {
         if (!prisma) throw new Error('Prisma not available');
         const exports = await prisma.ecommerceExport.findMany({
             where: since ? { updatedAt: { gte: new Date(since) } } : undefined,
-            orderBy: { updatedAt: 'desc' }
+            orderBy: { updatedAt: 'desc' },
+            take: 1000 // ⚡ Giới hạn 1000 đơn gần nhất — tránh load toàn bộ DB
         });
         // Format dates for frontend
         const formatted = exports.map(e => ({
@@ -4577,7 +4548,7 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
         }, { timeout: 30000, maxWait: 10000 });
 
         console.log(`✅ Created ecommerce export #${record.id}`);
-        await logActivity({ module: 'export', action: 'CREATE', description: `Tạo bàn giao TMDT #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
+        void logActivity({ module: 'export', action: 'CREATE', description: `Tạo bàn giao TMDT #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
         return { success: true, data: record };
     } catch (error) {
         console.error('❌ Create ecommerce export error:', error);
@@ -4643,7 +4614,7 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
         }, { timeout: 30000, maxWait: 10000 });
 
         console.log(`✅ Updated ecommerce export #${record.id}`);
-        await logActivity({ module: 'export', action: 'UPDATE', description: `Cập nhật bàn giao TMDT #${record.id}`, recordId: record.id });
+        void logActivity({ module: 'export', action: 'UPDATE', description: `Cập nhật bàn giao TMDT #${record.id}`, recordId: record.id });
         return { success: true, data: record };
     } catch (error) {
         console.error('❌ Update ecommerce export error:', error);
@@ -4677,7 +4648,7 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
         }, { timeout: 30000, maxWait: 10000 });
 
         console.log(`✅ Deleted ecommerce export #${id}`);
-        await logActivity({ module: 'export', action: 'DELETE', description: `Xóa bàn giao TMDT #${id}` });
+        void logActivity({ module: 'export', action: 'DELETE', description: `Xóa bàn giao TMDT #${id}` });
         return { success: true };
     } catch (error) {
         console.error('❌ Delete ecommerce export error:', error);
@@ -4716,10 +4687,26 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
         }, { timeout: 30000, maxWait: 10000 });
 
         console.log(`✅ Bulk deleted ${count} ecommerce exports`);
-        await logActivity({ module: 'export', action: 'DELETE', description: `Xóa hàng loạt ${count} bàn giao TMDT` });
+        void logActivity({ module: 'export', action: 'DELETE', description: `Xóa hàng loạt ${count} bàn giao TMDT` });
         return { success: true, data: count };
     } catch (error) {
         console.error('❌ Bulk delete ecommerce exports error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// ⚡ Xóa TẤT CẢ đơn TMDT (dùng khi cần reset/cleanup)
+ipcMain.handle('ecommerceExports:deleteAll', async () => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+
+        const count = await prisma.ecommerceExport.deleteMany({});
+
+        console.log(`🗑️ Deleted ALL ${count.count} ecommerce exports`);
+        void logActivity({ module: 'export', action: 'DELETE', description: `Xóa toàn bộ ${count.count} bàn giao TMDT` });
+        return { success: true, data: count.count };
+    } catch (error) {
+        console.error('❌ Delete all ecommerce exports error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -4769,7 +4756,7 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
         });
 
         console.log(`✅ Bulk created ${created.length} ecommerce exports`);
-        await logActivity({ module: 'export', action: 'CREATE', description: `Tạo hàng loạt ${created.length} bàn giao TMDT` });
+        void logActivity({ module: 'export', action: 'CREATE', description: `Tạo hàng loạt ${created.length} bàn giao TMDT` });
         return { success: true, data: created };
     } catch (error) {
         console.error('❌ Bulk create ecommerce exports error:', error);
@@ -4815,7 +4802,7 @@ ipcMain.handle('exportOrders:create', async (event, data) => {
             }
         });
         console.log(`✅ Created export order #${record.id}`);
-        await logActivity({ module: 'export', action: 'CREATE', description: `Tạo xuất hàng #${record.id} - ${data.customer}`, recordName: data.customer, userName: data.createdBy });
+        void logActivity({ module: 'export', action: 'CREATE', description: `Tạo xuất hàng #${record.id} - ${data.customer}`, recordName: data.customer, userName: data.createdBy });
         return { success: true, data: record };
     } catch (error) {
         console.error('❌ Create export order error:', error);
@@ -4838,7 +4825,7 @@ ipcMain.handle('exportOrders:update', async (event, id, data) => {
             }
         });
         console.log(`✅ Updated export order #${record.id}`);
-        await logActivity({ module: 'export', action: 'UPDATE', description: `Cập nhật xuất hàng #${record.id}` });
+        void logActivity({ module: 'export', action: 'UPDATE', description: `Cập nhật xuất hàng #${record.id}` });
         return { success: true, data: record };
     } catch (error) {
         console.error('❌ Update export order error:', error);
@@ -4851,7 +4838,7 @@ ipcMain.handle('exportOrders:delete', async (event, id) => {
         if (!prisma) throw new Error('Prisma not available');
         await prisma.exportOrder.delete({ where: { id } });
         console.log(`✅ Deleted export order #${id}`);
-        await logActivity({ module: 'export', action: 'DELETE', description: `Xóa xuất hàng #${id}` });
+        void logActivity({ module: 'export', action: 'DELETE', description: `Xóa xuất hàng #${id}` });
         return { success: true };
     } catch (error) {
         console.error('❌ Delete export order error:', error);
@@ -4863,10 +4850,11 @@ ipcMain.handle('exportOrders:delete', async (event, id) => {
 // RETURNS HANDLERS (TRẢ HÀNG)
 // ========================================
 
-ipcMain.handle('returns:getAll', async () => {
+ipcMain.handle('returns:getAll', async (event, { since } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const returns = await prisma.return.findMany({
+            where: since ? { createdAt: { gte: new Date(since) } } : undefined,
             orderBy: { createdAt: 'desc' },
             take: 500 // ⚡ Giới hạn 500 phiếu trả gần nhất
         });
@@ -4906,7 +4894,7 @@ ipcMain.handle('returns:create', async (event, data) => {
             }
         });
         console.log(`✅ Created return #${record.id}`);
-        await logActivity({ module: 'returns', action: 'CREATE', description: `Tạo trả hàng #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
+        void logActivity({ module: 'returns', action: 'CREATE', description: `Tạo trả hàng #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
         return { success: true, data: record };
     } catch (error) {
         console.error('❌ Create return error:', error);
@@ -4935,7 +4923,7 @@ ipcMain.handle('returns:update', async (event, id, data) => {
             data: updateData
         });
         console.log(`✅ Updated return #${record.id}`);
-        await logActivity({ module: 'returns', action: 'UPDATE', description: `Cập nhật trả hàng #${record.id}`, changes: data });
+        void logActivity({ module: 'returns', action: 'UPDATE', description: `Cập nhật trả hàng #${record.id}`, changes: data });
         return { success: true, data: record };
     } catch (error) {
         console.error('❌ Update return error:', error);
@@ -4948,7 +4936,7 @@ ipcMain.handle('returns:delete', async (event, id) => {
         if (!prisma) throw new Error('Prisma not available');
         await prisma.return.delete({ where: { id } });
         console.log(`✅ Deleted return #${id}`);
-        await logActivity({ module: 'returns', action: 'DELETE', description: `Xóa trả hàng #${id}` });
+        void logActivity({ module: 'returns', action: 'DELETE', description: `Xóa trả hàng #${id}` });
         return { success: true };
     } catch (error) {
         console.error('❌ Delete return error:', error);
@@ -4991,7 +4979,7 @@ ipcMain.handle('returns:bulkCreate', async (event, records) => {
             }
         }
         console.log(`✅ Bulk created ${created.length}/${records.length} returns`);
-        await logActivity({ module: 'returns', action: 'CREATE', description: `Tạo hàng loạt ${created.length} trả hàng` });
+        void logActivity({ module: 'returns', action: 'CREATE', description: `Tạo hàng loạt ${created.length} trả hàng` });
         return { success: true, data: created };
     } catch (error) {
         console.error('❌ Bulk create returns error:', error);
@@ -5003,10 +4991,11 @@ ipcMain.handle('returns:bulkCreate', async (event, records) => {
 // REFUNDS HANDLERS (HÀNG HOÀN)
 // ========================================
 
-ipcMain.handle('refunds:getAll', async () => {
+ipcMain.handle('refunds:getAll', async (event, { since } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const refunds = await prisma.refund.findMany({
+            where: since ? { createdAt: { gte: new Date(since) } } : undefined,
             orderBy: { createdAt: 'desc' }
         });
         const formatted = refunds.map(r => ({
@@ -5044,7 +5033,7 @@ ipcMain.handle('refunds:create', async (event, data) => {
             }
         });
         console.log(`✅ Created refund #${record.id}`);
-        await logActivity({ module: 'refunds', action: 'CREATE', description: `Tạo hàng hoàn #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
+        void logActivity({ module: 'refunds', action: 'CREATE', description: `Tạo hàng hoàn #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
         return { success: true, data: record };
     } catch (error) {
         console.error('❌ Create refund error:', error);
@@ -5073,7 +5062,7 @@ ipcMain.handle('refunds:update', async (event, id, data) => {
             data: updateData
         });
         console.log(`✅ Updated refund #${record.id}`);
-        await logActivity({ module: 'refunds', action: 'UPDATE', description: `Cập nhật hàng hoàn #${record.id}`, changes: data });
+        void logActivity({ module: 'refunds', action: 'UPDATE', description: `Cập nhật hàng hoàn #${record.id}`, changes: data });
         return { success: true, data: record };
     } catch (error) {
         console.error('❌ Update refund error:', error);
@@ -5086,7 +5075,7 @@ ipcMain.handle('refunds:delete', async (event, id) => {
         if (!prisma) throw new Error('Prisma not available');
         await prisma.refund.delete({ where: { id } });
         console.log(`✅ Deleted refund #${id}`);
-        await logActivity({ module: 'refunds', action: 'DELETE', description: `Xóa hàng hoàn #${id}` });
+        void logActivity({ module: 'refunds', action: 'DELETE', description: `Xóa hàng hoàn #${id}` });
         return { success: true };
     } catch (error) {
         console.error('❌ Delete refund error:', error);
@@ -5101,7 +5090,7 @@ ipcMain.handle('refunds:bulkDelete', async (event, ids) => {
             where: { id: { in: ids } }
         });
         console.log(`✅ Bulk deleted ${result.count} refunds`);
-        await logActivity({ module: 'refunds', action: 'DELETE', description: `Xóa hàng loạt ${result.count} hàng hoàn` });
+        void logActivity({ module: 'refunds', action: 'DELETE', description: `Xóa hàng loạt ${result.count} hàng hoàn` });
         return { success: true, data: result.count };
     } catch (error) {
         console.error('❌ Bulk delete refunds error:', error);
@@ -5151,7 +5140,7 @@ ipcMain.handle('refunds:bulkCreate', async (event, records) => {
             }
         }
         console.log(`✅ Bulk created ${created.length}/${records.length} refunds`);
-        await logActivity({ module: 'refunds', action: 'CREATE', description: `Tạo hàng loạt ${created.length} hàng hoàn` });
+        void logActivity({ module: 'refunds', action: 'CREATE', description: `Tạo hàng loạt ${created.length} hàng hoàn` });
         return { success: true, data: created };
     } catch (error) {
         console.error('❌ Bulk create refunds error:', error);
@@ -5194,7 +5183,7 @@ ipcMain.handle('stockBalance:create', async (event, data) => {
         });
         console.log(`✅ Created stock balance record #${record.id}`);
         const effectiveUser = currentSession?.username || data.adjustedBy || 'System';
-        await logActivity({ module: 'products', action: 'UPDATE', description: `Cân bằng kho - ${effectiveUser}`, recordName: effectiveUser, userName: effectiveUser });
+        void logActivity({ module: 'products', action: 'UPDATE', description: `Cân bằng kho - ${effectiveUser}`, recordName: effectiveUser, userName: effectiveUser });
         return { success: true, data: record };
     } catch (error) {
         console.error('❌ Create stock balance error:', error);
@@ -5533,7 +5522,7 @@ ipcMain.handle('users:create', async (event, data) => {
             }
         });
         console.log(`✅ Created user: ${user.username}`);
-        await logActivity({ module: 'users', action: 'CREATE', description: `Tạo người dùng "${user.username}" (${data.role || 'staff'})`, recordName: user.username });
+        void logActivity({ module: 'users', action: 'CREATE', description: `Tạo người dùng "${user.username}" (${data.role || 'staff'})`, recordName: user.username });
         return { success: true, data: { ...user, isActive: user.status === 'active' } };
     } catch (error) {
         console.error('❌ Create user error:', error);
@@ -5562,7 +5551,7 @@ ipcMain.handle('users:update', async (event, id, data) => {
             data: updateData
         });
         console.log(`✅ Updated user: ${user.username}`);
-        await logActivity({ module: 'users', action: 'UPDATE', description: `Cập nhật người dùng "${user.username}"`, recordName: user.username });
+        void logActivity({ module: 'users', action: 'UPDATE', description: `Cập nhật người dùng "${user.username}"`, recordName: user.username });
         return { success: true, data: { ...user, isActive: user.status === 'active' } };
     } catch (error) {
         console.error('❌ Update user error:', error);
@@ -5576,7 +5565,7 @@ ipcMain.handle('users:delete', async (event, id) => {
         if (!prisma) throw new Error('Prisma not available');
         await prisma.user.delete({ where: { id } });
         console.log(`✅ Deleted user #${id}`);
-        await logActivity({ module: 'users', action: 'DELETE', description: `Xóa người dùng #${id}` });
+        void logActivity({ module: 'users', action: 'DELETE', description: `Xóa người dùng #${id}` });
         return { success: true };
     } catch (error) {
         console.error('❌ Delete user error:', error);
@@ -5615,7 +5604,7 @@ ipcMain.handle('users:login', async (event, username, password) => {
         // Lưu session phía backend
         currentSession = { id: user.id, username: user.username, role: user.role };
         prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(() => {});
-        await logActivity({ module: 'users', action: 'LOGIN', description: `Đăng nhập: ${user.username}`, recordName: user.username, userName: user.username });
+        void logActivity({ module: 'users', action: 'LOGIN', description: `Đăng nhập: ${user.username}`, recordName: user.username, userName: user.username });
         return { success: true, data: { ...userWithoutPassword, isActive: user.status === 'active' } };
     } catch (error) {
         console.error('❌ Login error:', error);
@@ -6277,7 +6266,7 @@ ipcMain.handle('misa:saveConfig', async (event, config) => {
         // Clear token cache khi đổi config
         invalidateMisaToken();
         console.log(`✅ MISA config saved (password length: ${config.password?.length || 0})`);
-        await logActivity({ module: 'einvoice', action: 'UPDATE', description: 'Cập nhật cấu hình MISA meInvoice', userName: 'Admin' });
+        void logActivity({ module: 'einvoice', action: 'UPDATE', description: 'Cập nhật cấu hình MISA meInvoice', userName: 'Admin' });
         return { success: true };
     } catch (error) {
         return { success: false, error: error.message };
@@ -6479,7 +6468,7 @@ ipcMain.handle('einvoice:bulkImport', async (event, orders) => {
 
         console.log(`✅ EInvoice import: ${imported} new, ${duplicated} duplicates skipped (batch insert)`);
 
-        await logActivity({
+        void logActivity({
             module: 'einvoice',
             action: 'CREATE',
             description: `Import ${imported} đơn HĐĐT${duplicated > 0 ? `, bỏ qua ${duplicated} đơn trùng` : ''} (batch)`,
@@ -6673,7 +6662,7 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
                     timestamp: new Date().toISOString(),
                 });
 
-                await logActivity({
+                void logActivity({
                     module: 'einvoice',
                     action: 'ERROR',
                     description: `Lỗi xuất HĐĐT MISA cho đơn ${order.orderId}: ${orderErr.message}`,
@@ -6706,7 +6695,7 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
             sendTelegramMessage(summaryMsg).catch(err => console.error('Telegram summary error:', err));
         }
 
-        await logActivity({
+        void logActivity({
             module: 'einvoice',
             action: 'UPDATE',
             description: `MISA: Xuất ${issuedOrders.length} HĐĐT thật (batch: ${batchId}, HSM ký số)${skippedCount > 0 ? ` — Bỏ qua ${skippedCount} đơn đã xuất` : ''}${errorLog.length > 0 ? ` — ${errorLog.length} đơn lỗi` : ''}`,
@@ -6855,7 +6844,7 @@ ipcMain.handle('einvoice:exportExcel', async (event, filters) => {
         XLSX.writeFile(wb, result.filePath);
         console.log(`✅ Exported ${records.length} einvoice records to ${result.filePath}`);
 
-        await logActivity({
+        void logActivity({
             module: 'einvoice',
             action: 'EXPORT',
             description: `Xuất báo cáo HĐĐT: ${records.length} dòng → ${path.basename(result.filePath)}`,
@@ -6892,7 +6881,7 @@ ipcMain.handle('einvoice:bulkDelete', async (event, orderIds) => {
             where: { orderId: { in: orderIds } }
         });
         console.log(`✅ Bulk deleted ${result.count} einvoice records`);
-        await logActivity({
+        void logActivity({
             module: 'einvoice', action: 'DELETE',
             description: `Xóa hàng loạt ${result.count} đơn HĐĐT`,
             userName: 'Admin',
@@ -6911,7 +6900,7 @@ ipcMain.handle('einvoice:deleteAll', async () => {
         if (!prisma) throw new Error('Database not initialized');
         const result = await prisma.eInvoice.deleteMany({});
         console.log(`⚠️ DELETED ALL ${result.count} einvoice records`);
-        await logActivity({
+        void logActivity({
             module: 'einvoice', action: 'DELETE',
             description: `⚠️ XÓA TẤT CẢ ${result.count} đơn HĐĐT (TEST MODE)`,
             userName: 'Admin',
@@ -7055,7 +7044,7 @@ ipcMain.handle('einvoice:adjustInvoice', async (event, { orderId, adjustmentType
         ]);
 
         console.log(`✅ Điều chỉnh lần ${chainNum}: ${orig.invoiceNumber} → ${newNum} | -${adjAmount.toLocaleString()}đ | Còn lại: ${(remaining - adjAmount).toLocaleString()}đ`);
-        await logActivity({
+        void logActivity({
             module: 'einvoice', action: adjustmentType === 'replacement' ? 'REPLACE' : 'ADJUST',
             description: `Lần ${chainNum}: ${orig.invoiceNumber} → ${newNum}. -${adjAmount.toLocaleString()}đ. Còn: ${(remaining - adjAmount).toLocaleString()}đ. ${autoReason}`,
             userName: 'System',
