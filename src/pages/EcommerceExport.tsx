@@ -133,6 +133,11 @@ export default function EcommerceExportPage() {
         loadBuf('./sounds/ting.wav').then(b => { successBufRef.current = b; });
         loadBuf('./sounds/alert_louder.wav').then(b => { alertBufRef.current = b; });
 
+        // Resume AudioContext ngay khi có user interaction đầu tiên
+        const resumeCtx = () => { if (ctx.state === 'suspended') ctx.resume(); };
+        window.addEventListener('click', resumeCtx, { once: true });
+        window.addEventListener('keydown', resumeCtx, { once: true });
+
         loadEcommerceExports();
         loadProducts();
 
@@ -211,10 +216,17 @@ export default function EcommerceExportPage() {
         const ctx = audioCtxRef.current;
         if (!ctx || !buf) return;
         try {
-            const src = ctx.createBufferSource();
-            src.buffer = buf;
-            src.connect(ctx.destination);
-            src.start(0);
+            const doPlay = () => {
+                const src = ctx.createBufferSource();
+                src.buffer = buf;
+                src.connect(ctx.destination);
+                src.start(0);
+            };
+            if (ctx.state === 'suspended') {
+                ctx.resume().then(doPlay);
+            } else {
+                doPlay();
+            }
         } catch { /* ignore */ }
     };
     const playSuccess = () => playBuf(successBufRef.current);
