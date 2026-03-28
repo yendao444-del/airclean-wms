@@ -87,6 +87,8 @@ export default function EcommerceExportPage() {
     }>({ type: 'idle', message: 'Sẵn sàng quét mã...' });
     const [scanValue, setScanValue] = useState('');
     const scanInputRef = useRef<any>(null);
+    // 🚀 In-memory mirror giống allOrders của tool gốc — không await DB mỗi lần quét
+    const exportsRef = useRef<EcommerceExport[]>([]);
     const successSoundRef = useRef<HTMLAudioElement | null>(null);
     const alertSoundRef = useRef<HTMLAudioElement | null>(null);
 
@@ -116,9 +118,9 @@ export default function EcommerceExportPage() {
     const [settingsForm] = Form.useForm();
 
     useEffect(() => {
-        // Khởi tạo audio
-        successSoundRef.current = new Audio('./sounds/ting.wav');
-        alertSoundRef.current = new Audio('./sounds/alert_louder.wav');
+        // Khởi tạo audio — dùng element từ DOM (preload="auto") giống tool gốc
+        successSoundRef.current = document.getElementById('sound-success') as HTMLAudioElement;
+        alertSoundRef.current = document.getElementById('sound-alert') as HTMLAudioElement;
 
         loadEcommerceExports();
         loadProducts();
@@ -210,6 +212,7 @@ export default function EcommerceExportPage() {
         try {
             const result = await window.electronAPI.ecommerceExports.getAll();
             if (result.success && result.data) {
+                exportsRef.current = result.data;
                 setEcommerceExports(result.data);
             }
         } catch (error) {
@@ -431,9 +434,8 @@ Thời gian: ${currentTime}`;
         setScanValue('');
         scanInputRef.current?.focus();
 
-        // ⚡ Luôn lấy data mới nhất từ DB để tránh "stale closure" khi quét nhanh
-        const freshExports = await getLatestExports();
-        const foundEcommerceExport = freshExports.find((r: any) => {
+        // 🚀 Đọc từ in-memory ref — instant, không await DB (giống allOrders của tool gốc)
+        const foundEcommerceExport = exportsRef.current.find((r: any) => {
             const trackingMatch = r.notes?.match(/Tracking: ([^|]+)/);
             const tracking = trackingMatch ? trackingMatch[1].trim() : '';
 
@@ -460,6 +462,11 @@ Thời gian: ${currentTime}`;
                     type: 'success',
                     message: `✅ SẼ CẬP NHẬT - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                 });
+
+                // 🚀 Cập nhật ref ngay lập tức để scan tiếp không bị stale
+                exportsRef.current = exportsRef.current.map(r =>
+                    r.id === foundEcommerceExport.id ? { ...r, status: 'completed' } : r
+                );
 
                 // Sau đó mới chạy async operations (không block UI)
                 (async () => {
@@ -1848,6 +1855,10 @@ Thời gian: ${currentTime}`;
 
     return (
         <div>
+            {/* Audio preload — giống tool gốc để không bị delay khi phát */}
+            <audio id="sound-success" src="./sounds/ting.wav" preload="auto" style={{ display: 'none' }} />
+            <audio id="sound-alert" src="./sounds/alert_louder.wav" preload="auto" style={{ display: 'none' }} />
+
             {/* Dòng 1: Stats + Search + Actions */}
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'nowrap' }}>
                 <Tag
