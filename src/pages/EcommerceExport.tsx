@@ -85,7 +85,6 @@ export default function EcommerceExportPage() {
         type: 'idle' | 'success' | 'error' | 'warning';
         message: string;
     }>({ type: 'idle', message: 'Sẵn sàng quét mã...' });
-    const [scanValue, setScanValue] = useState('');
     const scanInputRef = useRef<any>(null);
     // 🚀 In-memory mirror giống allOrders của tool gốc — không await DB mỗi lần quét
     const exportsRef = useRef<EcommerceExport[]>([]);
@@ -455,8 +454,12 @@ Thời gian: ${currentTime}`;
         const trimmed = code.trim();
         if (!trimmed) return;
 
-        // 🧹 Clear input ngay lập tức (giống tool gốc: input.value = ''; input.focus();)
-        setScanValue('');
+        // 🧹 Clear input trực tiếp qua DOM — không trigger React re-render
+        if (scanInputRef.current?.input) scanInputRef.current.input.value = '';
+        else if (scanInputRef.current?.nativeElement) {
+            const el = scanInputRef.current.nativeElement.querySelector('input');
+            if (el) el.value = '';
+        }
         scanInputRef.current?.focus();
 
         // 🚀 Đọc từ in-memory ref — instant, không await DB (giống allOrders của tool gốc)
@@ -555,7 +558,8 @@ Thời gian: ${currentTime}`;
 
     const handleScanKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
-            handleScan(scanValue);
+            const input = scanInputRef.current?.input || scanInputRef.current?.nativeElement?.querySelector('input');
+            handleScan(input?.value || '');
         }
     };
 
@@ -1998,8 +2002,6 @@ Thời gian: ${currentTime}`;
                 <BarcodeOutlined style={{ fontSize: 28, color: '#52c41a', flexShrink: 0 }} />
                 <Input
                     ref={scanInputRef}
-                    value={scanValue}
-                    onChange={(e) => setScanValue(e.target.value)}
                     onKeyDown={handleScanKeyDown}
                     placeholder="Quét hoặc nhập Tracking ID để kiểm tra đơn hàng..."
                     autoFocus
@@ -2014,7 +2016,10 @@ Thời gian: ${currentTime}`;
                     type="primary"
                     size="large"
                     icon={<ScanOutlined />}
-                    onClick={() => handleScan(scanValue)}
+                    onClick={() => {
+                        const input = scanInputRef.current?.input || scanInputRef.current?.nativeElement?.querySelector('input');
+                        handleScan(input?.value || '');
+                    }}
                     style={{
                         background: '#52c41a', borderColor: '#52c41a',
                         flexShrink: 0, height: 44, paddingInline: 24, fontWeight: 600,
