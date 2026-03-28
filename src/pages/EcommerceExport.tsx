@@ -89,8 +89,10 @@ export default function EcommerceExportPage() {
     const scanInputRef = useRef<any>(null);
     // 🚀 In-memory mirror giống allOrders của tool gốc — không await DB mỗi lần quét
     const exportsRef = useRef<EcommerceExport[]>([]);
-    const successSoundRef = useRef<HTMLAudioElement | null>(null);
-    const alertSoundRef = useRef<HTMLAudioElement | null>(null);
+    // 🔊 Web Audio API — decode 1 lần vào memory, play instant không delay
+    const audioCtxRef = useRef<AudioContext | null>(null);
+    const successBufRef = useRef<AudioBuffer | null>(null);
+    const alertBufRef = useRef<AudioBuffer | null>(null);
 
     // 🔍 State cho bộ lọc trạng thái
     const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed' | 'overdue' | 'no_data'>('pending');
@@ -118,9 +120,18 @@ export default function EcommerceExportPage() {
     const [settingsForm] = Form.useForm();
 
     useEffect(() => {
-        // Khởi tạo audio — dùng element từ DOM (preload="auto") giống tool gốc
-        successSoundRef.current = document.getElementById('sound-success') as HTMLAudioElement;
-        alertSoundRef.current = document.getElementById('sound-alert') as HTMLAudioElement;
+        // 🔊 Khởi tạo Web Audio API — fetch + decode buffer 1 lần, play instant
+        const ctx = new AudioContext();
+        audioCtxRef.current = ctx;
+        const loadBuf = async (path: string) => {
+            try {
+                const res = await fetch(path);
+                const arr = await res.arrayBuffer();
+                return await ctx.decodeAudioData(arr);
+            } catch { return null; }
+        };
+        loadBuf('./sounds/ting.wav').then(b => { successBufRef.current = b; });
+        loadBuf('./sounds/alert_louder.wav').then(b => { alertBufRef.current = b; });
 
         loadEcommerceExports();
         loadProducts();
@@ -195,17 +206,19 @@ export default function EcommerceExportPage() {
         return ecommerceExports;
     };
 
-    // 📊 Hàm phát âm thanh - clone mỗi lần để quét nhanh không bị chồng
-    const playSound = (src: HTMLAudioElement | null) => {
-        if (!src) return;
+    // 🔊 Play từ decoded buffer — zero delay, hỗ trợ overlap
+    const playBuf = (buf: AudioBuffer | null) => {
+        const ctx = audioCtxRef.current;
+        if (!ctx || !buf) return;
         try {
-            const clone = src.cloneNode() as HTMLAudioElement;
-            clone.play();
-            clone.onended = () => clone.remove();
+            const src = ctx.createBufferSource();
+            src.buffer = buf;
+            src.connect(ctx.destination);
+            src.start(0);
         } catch { /* ignore */ }
     };
-    const playSuccess = () => playSound(successSoundRef.current);
-    const playAlert = () => playSound(alertSoundRef.current);
+    const playSuccess = () => playBuf(successBufRef.current);
+    const playAlert = () => playBuf(alertBufRef.current);
 
     const loadEcommerceExports = async (silent = false) => {
         if (!silent) setLoading(true);
@@ -1855,10 +1868,6 @@ Thời gian: ${currentTime}`;
 
     return (
         <div>
-            {/* Audio preload — giống tool gốc để không bị delay khi phát */}
-            <audio id="sound-success" src="./sounds/ting.wav" preload="auto" style={{ display: 'none' }} />
-            <audio id="sound-alert" src="./sounds/alert_louder.wav" preload="auto" style={{ display: 'none' }} />
-
             {/* Dòng 1: Stats + Search + Actions */}
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'nowrap' }}>
                 <Tag
