@@ -13,10 +13,6 @@ import {
     DatePicker,
     Input,
     InputNumber,
-    Segmented,
-    Row,
-    Col,
-    Statistic,
     Dropdown,
     Tooltip,
 } from 'antd';
@@ -24,19 +20,21 @@ import {
     PlusOutlined,
     EditOutlined,
     DeleteOutlined,
-    ScanOutlined,
-    BarcodeOutlined,
-    ClearOutlined,
-    SaveOutlined,
     MoreOutlined,
     UserOutlined,
+    SearchOutlined,
+    ReloadOutlined,
+    FileOutlined,
+    BarcodeOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import dayjs from 'dayjs';
+import type { Dayjs } from 'dayjs';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
+const { RangePicker } = DatePicker;
 
 interface Product {
     id: number;
@@ -67,26 +65,24 @@ interface ExportOrder {
     createdBy?: string;
 }
 
-type ViewMode = 'list' | 'pos';
-
 export default function ExportOrdersPage() {
     const currentUser = useCurrentUser();
-    const [viewMode, setViewMode] = useState<ViewMode>('list');
     const [modalVisible, setModalVisible] = useState(false);
     const [exports, setExports] = useState<ExportOrder[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
     const [editingExport, setEditingExport] = useState<ExportOrder | null>(null);
     const [form] = Form.useForm();
 
-    // Product selection states
-    const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-    const [selectedProductVariants, setSelectedProductVariants] = useState<any[]>([]);
-    const [selectedProductSku, setSelectedProductSku] = useState('');
+    // List filter states
+    const [searchKeyword, setSearchKeyword] = useState('');
+    const [listDateRange, setListDateRange] = useState<[Dayjs, Dayjs] | null>(null);
 
-    // POS scan states
-    const [posItems, setPosItems] = useState<ExportItem[]>([]);
-    const [scannedCode, setScannedCode] = useState('');
-    const inputRef = useRef<any>(null);
+    // Multi-item export list (đang build trong modal)
+    const [exportItems, setExportItems] = useState<ExportItem[]>([]);
+    // Temp product selection (trong section "Thêm sản phẩm")
+    const [tempProduct, setTempProduct] = useState<Product | null>(null);
+    const [tempVariants, setTempVariants] = useState<any[]>([]);
+    const autoAddTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
     useEffect(() => {
         loadProducts();
@@ -94,6 +90,17 @@ export default function ExportOrdersPage() {
         const interval = setInterval(loadExports, 30000);
         return () => clearInterval(interval);
     }, []);
+
+    const openCreateModal = async () => {
+        setEditingExport(null);
+        setExportItems([]);
+        setTempProduct(null);
+        setTempVariants([]);
+        form.resetFields();
+        form.setFieldsValue({ customer: 'Khách lẻ', exportDate: dayjs(), status: 'completed' });
+        await loadProducts();
+        setModalVisible(true);
+    };
 
     const loadProducts = async () => {
         try {
@@ -118,534 +125,266 @@ export default function ExportOrdersPage() {
         }
     };
 
-    const saveExports = (_newExports: ExportOrder[]) => {
-        // Data is now saved via individual API calls
-        loadExports();
+    // ========================================
+    // TEMP PRODUCT SELECTION (trong modal)
+    // ========================================
+    const handleTempProductSelect = (productId: number) => {
+        const product = products.find(p => p.id === productId);
+        if (!product) return;
+        setTempProduct(product);
+        let variants: any[] = [];
+        try {
+            variants = product.variants ? JSON.parse(product.variants) : [];
+        } catch { variants = []; }
+        setTempVariants(variants);
+        form.setFieldsValue({ tempColor: undefined, tempUnitPrice: product.price || 0 });
     };
 
-    const handleAdd = async () => {
-        setEditingExport(null);
-        form.resetFields();
-        form.setFieldsValue({
-            customer: 'Khách lẻ',
-            exportDate: dayjs(),
-            status: 'completed',
-            quantity: 1,
-        });
+    const handleAddExportItem = () => {
+        const productId = form.getFieldValue('tempProductId');
+        const color = form.getFieldValue('tempColor');
+        const quantity = form.getFieldValue('tempQuantity');
+        const unitPrice = form.getFieldValue('tempUnitPrice') || 0;
 
-        setSelectedProduct(null);
-        setSelectedProductVariants([]);
-        setSelectedProductSku('');
-
-        // Load products trước khi mở modal
-        await loadProducts();
-
-        setModalVisible(true);
-    };
-
-    const handleProductSelect = (productId: number) => {
+        if (!productId || !quantity) {
+            message.warning('Vui lòng chọn sản phẩm và nhập số lượng!');
+            return;
+        }
         const product = products.find(p => p.id === productId);
         if (!product) return;
 
-        setSelectedProduct(product);
+        let finalSku = product.sku;
+        let finalColor = '';
+        let availableStock = product.stock;
 
-        // Parse variants
-        let variants = [];
-        try {
-            variants = product.variants ? JSON.parse(product.variants) : [];
-        } catch {
-            variants = [];
+        if (tempVariants.length > 0) {
+            if (!color) {
+                message.warning('Vui lòng chọn màu sắc / phân loại!');
+                return;
+            }
+            const variant = tempVariants.find((v: any) => v.color === color);
+            if (variant) {
+                finalSku = variant.sku;
+                finalColor = variant.color;
+                availableStock = variant.stock;
+            }
         }
 
-        setSelectedProductVariants(variants);
-
-        // Set initial SKU
-        if (variants.length > 0) {
-            setSelectedProductSku('');
-            form.setFieldsValue({ color: undefined });
-        } else {
-            setSelectedProductSku(product.sku);
+        if (quantity > availableStock) {
+            message.error(`⚠️ Không đủ tồn kho! "${product.name}${finalColor ? ` - ${finalColor}` : ''}" còn: ${availableStock}`);
+            return;
         }
 
-        // Auto-fill giá = product price
-        form.setFieldsValue({ unitPrice: product.price || 0 });
+        const newItem: ExportItem = {
+            sku: finalSku,
+            productName: product.name + (finalColor ? ` - ${finalColor}` : ''),
+            color: finalColor,
+            quantity,
+            unitPrice,
+        };
+        setExportItems(prev => [...prev, newItem]);
+
+        // Reset temp fields, giữ focus để thêm tiếp
+        form.setFieldsValue({ tempProductId: undefined, tempColor: undefined, tempQuantity: undefined, tempUnitPrice: undefined });
+        setTempProduct(null);
+        setTempVariants([]);
+        if (autoAddTimeoutRef.current) clearTimeout(autoAddTimeoutRef.current);
     };
 
+    // Tự động thêm NGAY KHI chọn màu sắc (giống Purchase)
+    const handleTempColorSelect = (color: string) => {
+        const productId = form.getFieldValue('tempProductId');
+        const product = products.find(p => p.id === productId);
+        if (!product) return;
+
+        const variant = tempVariants.find((v: any) => v.color === color);
+        const finalSku = variant?.sku || product.sku;
+        const availableStock = variant?.stock ?? product.stock;
+
+        if (availableStock <= 0) {
+            message.warning(`⚠️ "${product.name} - ${color}" hết hàng!`);
+            form.setFieldsValue({ tempColor: undefined });
+            return;
+        }
+
+        const newItem: ExportItem = {
+            sku: finalSku,
+            productName: `${product.name} - ${color}`,
+            color,
+            quantity: 1,
+            unitPrice: variant?.price || product.price || 0,
+        };
+        setExportItems(prev => [...prev, newItem]);
+        form.resetFields(['tempColor']);
+        if (autoAddTimeoutRef.current) clearTimeout(autoAddTimeoutRef.current);
+    };
+
+    // Tự động thêm sau 2 giây khi nhập số lượng
+    const handleTempQuantityChange = (value: number | null) => {
+        if (autoAddTimeoutRef.current) clearTimeout(autoAddTimeoutRef.current);
+        const productId = form.getFieldValue('tempProductId');
+        if (productId && value && value > 0) {
+            autoAddTimeoutRef.current = setTimeout(() => handleAddExportItem(), 2000);
+        }
+    };
+
+    // Tự động thêm sau 2 giây khi nhập giá (nếu đã có SL)
+    const handleTempPriceChange = (value: number | null) => {
+        if (autoAddTimeoutRef.current) clearTimeout(autoAddTimeoutRef.current);
+        const productId = form.getFieldValue('tempProductId');
+        const quantity = form.getFieldValue('tempQuantity');
+        if (productId && quantity && quantity > 0 && value !== null && value >= 0) {
+            autoAddTimeoutRef.current = setTimeout(() => handleAddExportItem(), 2000);
+        }
+    };
+
+    const handleRemoveExportItem = (index: number) => {
+        setExportItems(prev => prev.filter((_, i) => i !== index));
+    };
+
+    // ========================================
+    // SUBMIT
+    // ========================================
     const handleSubmit = async () => {
         try {
-            const values = await form.validateFields();
+            const values = await form.validateFields(['customer', 'exportDate', 'status', 'notes']);
 
-            // ⚡ Lưu vào biến local NGAY để tránh mất reference sau re-render
-            const isEditing = !!editingExport;
-            const currentEditingExport = editingExport;
-
-            if (!selectedProduct) {
-                message.warning('Vui lòng chọn sản phẩm');
+            if (exportItems.length === 0) {
+                message.warning('Vui lòng thêm ít nhất 1 sản phẩm!');
                 return;
             }
 
-            let finalSku = selectedProduct.sku;
-            let finalColor = '';
-            let availableStock = selectedProduct.stock;
+            const isEditing = !!editingExport;
+            const currentEditingExport = editingExport;
+            const totalAmount = exportItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
+            const refCode = isEditing
+                ? `PX${currentEditingExport!.id.toString().padStart(4, '0')}`
+                : 'Tạo mới';
 
-            // Nếu có variants
-            if (selectedProductVariants.length > 0) {
-                if (!values.color) {
-                    message.warning('Vui lòng chọn màu sắc');
-                    return;
-                }
-
-                const variant = selectedProductVariants.find((v: any) => v.color === values.color);
-                if (variant) {
-                    finalSku = variant.sku;
-                    finalColor = variant.color;
-                    availableStock = variant.stock;
-                }
-            }
-
-            // ========================================
-            // CHECK STOCK (có tính cả stock cũ khi sửa)
-            // ========================================
+            // EDIT: hoàn lại tất cả stock cũ trước
             if (isEditing && currentEditingExport) {
-                const oldItem = currentEditingExport.items[0];
-                // Khi sửa: stock thực tế = stock hiện tại + số lượng cũ đã xuất (vì sẽ hoàn lại)
-                const realAvailable = (oldItem.sku === finalSku)
-                    ? availableStock + oldItem.quantity
-                    : availableStock;
-                if (values.quantity > realAvailable) {
-                    message.error(`⚠️ Không đủ tồn kho! Còn: ${realAvailable}`);
-                    return;
-                }
-            } else {
-                if (values.quantity > availableStock) {
-                    message.error(`⚠️ Không đủ tồn kho! Còn: ${availableStock}`);
-                    return;
-                }
-            }
-
-            const totalAmount = values.quantity * values.unitPrice;
-
-            const exportItem: ExportItem = {
-                sku: finalSku,
-                productName: selectedProduct.name,
-                color: finalColor,
-                quantity: values.quantity,
-                unitPrice: values.unitPrice,
-            };
-
-            // ========================================
-            // 1. CẬP NHẬT STOCK TRƯỚC (tránh lệch data)
-            // ========================================
-            if (isEditing && currentEditingExport) {
-                // EDIT MODE: Chỉ trừ/cộng phần CHÊNH LỆCH
-                const oldItem = currentEditingExport.items[0];
-
-                if (oldItem.sku === finalSku) {
-                    // Cùng SKU → chỉ xử lý chênh lệch số lượng
-                    const diff = values.quantity - oldItem.quantity;
-                    if (diff !== 0) {
-                        await window.electronAPI.products.updateStock({
-                            sku: finalSku,
-                            quantity: Math.abs(diff),
-                            isAdd: diff < 0, // diff < 0 = giảm SL → cộng stock, diff > 0 = tăng SL → trừ stock
-                            logContext: {
-                                type: 'export',
-                                referenceType: 'XUAT',
-                                reference: `PX${currentEditingExport.id.toString().padStart(4, '0')}`,
-                                note: `Sửa phiếu xuất: ${diff > 0 ? '-' : '+'}${Math.abs(diff)} (${oldItem.quantity} → ${values.quantity})`,
-                                createdBy: currentUser
-                            }
-                        });
-                        console.log(`📦 Stock updated (sửa): ${finalSku} ${diff > 0 ? '-' : '+'}${Math.abs(diff)} (${oldItem.quantity} → ${values.quantity})`);
-                    } else {
-                        console.log(`📦 Stock unchanged: SL không đổi (${values.quantity})`);
-                    }
-                } else {
-                    // Đổi SKU → hoàn lại SKU cũ, trừ SKU mới
+                for (const oldItem of currentEditingExport.items) {
                     await window.electronAPI.products.updateStock({
                         sku: oldItem.sku,
                         quantity: oldItem.quantity,
                         isAdd: true,
-                        logContext: {
-                            type: 'export',
-                            referenceType: 'XUAT',
-                            reference: `PX${currentEditingExport.id.toString().padStart(4, '0')}`,
-                            note: `Đổi SP: Hoàn lại ${oldItem.sku}`,
-                            createdBy: currentUser
-                        }
+                        logContext: { type: 'export', referenceType: 'XUAT', reference: refCode, note: `Sửa phiếu: hoàn lại ${oldItem.sku}`, createdBy: currentUser }
                     });
-                    await window.electronAPI.products.updateStock({
-                        sku: finalSku,
-                        quantity: values.quantity,
-                        isAdd: false,
-                        logContext: {
-                            type: 'export',
-                            referenceType: 'XUAT',
-                            reference: `PX${currentEditingExport.id.toString().padStart(4, '0')}`,
-                            note: `Đổi SP: Trừ SP mới ${finalSku}`,
-                            createdBy: currentUser
-                        }
-                    });
-                    console.log(`📦 Stock updated (đổi SP): Hoàn ${oldItem.sku} +${oldItem.quantity}, Trừ ${finalSku} -${values.quantity}`);
                 }
+            }
 
-                // Log activity
-                await window.electronAPI.activityLog.create({
-                    module: 'products',
-                    action: 'UPDATE',
-                    recordId: selectedProduct.id,
-                    recordName: selectedProduct.name,
-                    changes: {
-                        export: {
-                            oldSku: oldItem.sku,
-                            oldQuantity: oldItem.quantity,
-                            newSku: finalSku,
-                            newQuantity: values.quantity
-                        }
-                    },
-                    description: `Sửa phiếu xuất PX${currentEditingExport.id.toString().padStart(4, '0')}: ${oldItem.quantity} → ${values.quantity}`,
-                    userName: currentUser,
-                    severity: 'INFO'
-                });
-            } else {
-                // CREATE MODE: Trừ stock
+            // Trừ stock theo items mới
+            for (const item of exportItems) {
                 await window.electronAPI.products.updateStock({
-                    sku: finalSku,
-                    quantity: values.quantity,
+                    sku: item.sku,
+                    quantity: item.quantity,
                     isAdd: false,
-                    logContext: {
-                        type: 'export',
-                        referenceType: 'XUAT',
-                        reference: `Tạo mới`,
-                        note: `Xuất kho: ${values.customer}`,
-                        createdBy: currentUser
-                    }
-                });
-
-                console.log(`📦 Stock updated: Trừ ${finalSku} -${values.quantity}`);
-
-                // Log activity
-                await window.electronAPI.activityLog.create({
-                    module: 'products',
-                    action: 'UPDATE',
-                    recordId: selectedProduct.id,
-                    recordName: selectedProduct.name,
-                    changes: {
-                        stock: {
-                            operation: 'export',
-                            sku: finalSku,
-                            quantity: values.quantity
-                        }
-                    },
-                    description: `Xuất hàng: ${selectedProduct.name} (${finalSku}) x ${values.quantity} - Khách: ${values.customer}`,
-                    userName: currentUser,
-                    severity: 'INFO'
+                    logContext: { type: 'export', referenceType: 'XUAT', reference: refCode, note: `Xuất kho: ${item.productName} x${item.quantity} - Khách: ${values.customer}`, createdBy: currentUser }
                 });
             }
 
-            // ========================================
-            // 2. LƯU/CẬP NHẬT PHIẾU XUẤT
-            // ========================================
+            const payload = {
+                customer: values.customer,
+                exportDate: values.exportDate.format('YYYY-MM-DD HH:mm:ss'),
+                status: values.status,
+                notes: values.notes,
+                totalAmount,
+                items: exportItems,
+            };
+
             if (isEditing && currentEditingExport) {
-                // EDIT MODE - Update in database
-                const updatedExport = {
-                    customer: values.customer,
-                    exportDate: values.exportDate.format('YYYY-MM-DD HH:mm:ss'),
-                    status: values.status,
-                    notes: values.notes,
-                    totalAmount,
-                    items: [exportItem],
-                };
-                await window.electronAPI.exportOrders.update(currentEditingExport.id, updatedExport);
+                await window.electronAPI.exportOrders.update(currentEditingExport.id, payload);
             } else {
-                // CREATE MODE - Save to database
-                const newExport = {
-                    customer: values.customer,
-                    exportDate: values.exportDate.format('YYYY-MM-DD HH:mm:ss'),
-                    status: values.status,
-                    notes: values.notes,
-                    totalAmount,
-                    items: [exportItem],
-                    createdBy: currentUser || null,
-                };
-                await window.electronAPI.exportOrders.create(newExport);
+                await window.electronAPI.exportOrders.create({ ...payload, createdBy: currentUser || null });
             }
 
             message.success(isEditing ? '✅ Đã cập nhật phiếu xuất!' : '✅ Đã tạo phiếu xuất thành công!');
             setModalVisible(false);
-            form.resetFields();
-            setSelectedProduct(null);
-            setSelectedProductVariants([]);
-            setSelectedProductSku('');
+            setExportItems([]);
+            setTempProduct(null);
+            setTempVariants([]);
             setEditingExport(null);
-
-            // Reload CUỐI CÙNG để cập nhật UI
+            form.resetFields();
             await loadExports();
             await loadProducts();
         } catch (error) {
-            console.error('Validation error:', error);
+            console.error('Submit error:', error);
         }
     };
 
     const handleEdit = (record: ExportOrder) => {
         setEditingExport(record);
-        const item = record.items[0];
-
-        // Find product
-        const product = products.find(p => p.sku === item.sku ||
-            (p.variants && JSON.parse(p.variants).some((v: any) => v.sku === item.sku)));
-
-        if (product) {
-            setSelectedProduct(product);
-
-            // Parse variants
-            let variants = [];
-            try {
-                variants = product.variants ? JSON.parse(product.variants) : [];
-            } catch {
-                variants = [];
-            }
-            setSelectedProductVariants(variants);
-            setSelectedProductSku(item.sku);
-        }
-
+        setExportItems(record.items);
+        setTempProduct(null);
+        setTempVariants([]);
         form.setFieldsValue({
             customer: record.customer,
             exportDate: dayjs(record.exportDate),
             status: record.status,
             notes: record.notes,
-            productId: product?.id,
-            color: item.color,
-            quantity: item.quantity,
-            unitPrice: item.unitPrice,
         });
-
         setModalVisible(true);
     };
 
     const handleDelete = (record: ExportOrder) => {
         Modal.confirm({
             title: '🗑️ Xóa phiếu xuất?',
-            content: `Bạn có chắc muốn xóa phiếu ${record.id.toString().padStart(4, '0')}?`,
+            content: `Bạn có chắc muốn xóa phiếu PX${record.id.toString().padStart(4, '0')} (${record.items.length} SP)?`,
             okText: 'Xóa',
             okType: 'danger',
             cancelText: 'Hủy',
             onOk: async () => {
-                // Delete from database
                 await window.electronAPI.exportOrders.delete(record.id);
                 await loadExports();
-
-                // Hoàn lại stock
-                const item = record.items[0];
-                await window.electronAPI.products.updateStock({
-                    sku: item.sku,
-                    quantity: item.quantity,
-                    isAdd: true, // CỘNG lại
-                    logContext: {
-                        type: 'export',
-                        referenceType: 'XUAT',
-                        reference: `PX${record.id.toString().padStart(4, '0')}`,
-                        note: `Xóa phiếu xuất: Hủy hoàn kho`,
-                        createdBy: currentUser
-                    }
-                });
-
-                console.log(`📦 Stock restored: Hoàn ${item.sku} +${item.quantity}`);
-
+                // Hoàn lại stock TẤT CẢ items
+                for (const item of record.items) {
+                    await window.electronAPI.products.updateStock({
+                        sku: item.sku,
+                        quantity: item.quantity,
+                        isAdd: true,
+                        logContext: { type: 'export', referenceType: 'XUAT', reference: `PX${record.id.toString().padStart(4, '0')}`, note: `Xóa phiếu: hoàn kho ${item.sku}`, createdBy: currentUser }
+                    });
+                }
                 message.success('✅ Đã xóa phiếu xuất!');
-
-                // Reload products
                 await loadProducts();
             },
         });
     };
 
+
     // ========================================
-    // POS SCAN HANDLERS
+    // FILTER LOGIC
     // ========================================
-
-    const handleScan = (code: string) => {
-        const trimmed = code.trim().toUpperCase();
-        if (!trimmed) return;
-
-        setScannedCode(trimmed);
-
-        // TÌM THEO VARIANT SKU TRƯỚC
-        let foundProduct: Product | undefined;
-        let foundVariant: any = null;
-        let matchedSku = '';
-        let matchedColor = '';
-        let matchedPrice = 0;
-
-        // Loop qua tất cả products để tìm variant
-        for (const product of products) {
-            try {
-                const variants = product.variants ? JSON.parse(product.variants) : [];
-                const variant = variants.find((v: any) =>
-                    v.sku?.toUpperCase() === trimmed
-                );
-
-                if (variant) {
-                    foundProduct = product;
-                    foundVariant = variant;
-                    matchedSku = variant.sku;
-                    matchedColor = variant.color;
-                    matchedPrice = variant.price || product.price || 0;
-                    break;
-                }
-            } catch { }
-        }
-
-        // Nếu không tìm thấy variant, tìm parent SKU hoặc barcode
-        if (!foundProduct) {
-            foundProduct = products.find(
-                (p) => p.sku.toUpperCase() === trimmed || p.barcode?.toUpperCase() === trimmed
+    const filteredExports = exports.filter(e => {
+        if (searchKeyword.trim()) {
+            const kw = searchKeyword.trim().toLowerCase();
+            return (
+                `px${e.id.toString().padStart(4, '0')}`.includes(kw) ||
+                e.customer.toLowerCase().includes(kw) ||
+                e.items.some(i =>
+                    i.productName.toLowerCase().includes(kw) ||
+                    i.sku.toLowerCase().includes(kw) ||
+                    (i.color || '').toLowerCase().includes(kw)
+                )
             );
-
-            if (foundProduct) {
-                matchedSku = foundProduct.sku;
-                matchedPrice = foundProduct.price || 0;
-            }
         }
-
-        if (!foundProduct) {
-            message.error(`❌ Không tìm thấy: ${trimmed}`);
-            return;
+        if (listDateRange) {
+            const d = dayjs(e.exportDate);
+            if (d.isBefore(listDateRange[0].startOf('day')) || d.isAfter(listDateRange[1].endOf('day'))) return false;
         }
-
-        // Check tồn kho
-        const availableStock = foundVariant ? foundVariant.stock : foundProduct.stock;
-        if (availableStock <= 0) {
-            message.error(`⚠️ ${foundProduct.name}${matchedColor ? ` (${matchedColor})` : ''} - Hết hàng!`);
-            return;
-        }
-
-        // Thêm hoặc tăng số lượng
-        const existingIndex = posItems.findIndex((item) => item.sku === matchedSku);
-
-        if (existingIndex >= 0) {
-            const newItems = [...posItems];
-            const currentQty = newItems[existingIndex].quantity;
-
-            if (currentQty >= availableStock) {
-                message.warning(`⚠️ Không đủ tồn kho! Còn: ${availableStock}`);
-                return;
-            }
-
-            newItems[existingIndex].quantity += 1;
-            setPosItems(newItems);
-            message.success(`✅ ${foundProduct.name}${matchedColor ? ` (${matchedColor})` : ''} x${newItems[existingIndex].quantity}`);
-        } else {
-            const newItem: ExportItem = {
-                sku: matchedSku,
-                productName: foundProduct.name,
-                color: matchedColor,
-                quantity: 1,
-                unitPrice: matchedPrice,
-            };
-            setPosItems([newItem, ...posItems]);
-            message.success(`✅ ${foundProduct.name}${matchedColor ? ` (${matchedColor})` : ''} - Đã thêm!`);
-        }
-
-        // Clear input
-        setScannedCode('');
-        if (inputRef.current) {
-            inputRef.current.focus();
-        }
-    };
-
-    const handleManualScan = () => {
-        if (scannedCode.trim()) {
-            handleScan(scannedCode);
-        }
-    };
-
-    const handleRemovePOSItem = (sku: string) => {
-        setPosItems(posItems.filter((item) => item.sku !== sku));
-        message.info('Đã xóa sản phẩm');
-    };
-
-    const handleClearPOS = () => {
-        Modal.confirm({
-            title: 'Xóa tất cả?',
-            content: 'Bạn có chắc muốn xóa tất cả sản phẩm?',
-            okText: 'Xóa',
-            okType: 'danger',
-            cancelText: 'Hủy',
-            onOk: () => {
-                setPosItems([]);
-                message.success('Đã xóa tất cả');
-            },
-        });
-    };
-
-    const handlePOSSave = async () => {
-        if (posItems.length === 0) {
-            message.warning('Chưa có sản phẩm nào để xuất!');
-            return;
-        }
-
-        Modal.confirm({
-            title: '💾 Xác nhận xuất kho POS',
-            content: `Xuất ${posItems.length} sản phẩm, tổng ${posTotalQuantity} cái cho "Khách lẻ"?`,
-            okText: 'Xuất kho',
-            okType: 'primary',
-            cancelText: 'Hủy',
-            onOk: async () => {
-                try {
-                    const totalAmount = posItems.reduce((sum, item) =>
-                        sum + (item.quantity * item.unitPrice), 0
-                    );
-
-                    // Save to database
-                    const newExport = {
-                        customer: 'Khách lẻ',
-                        exportDate: dayjs().format('YYYY-MM-DD HH:mm:ss'),
-                        status: 'completed',
-                        notes: 'POS Scan',
-                        totalAmount,
-                        items: posItems,
-                        createdBy: currentUser || null,
-                    };
-                    await window.electronAPI.exportOrders.create(newExport);
-                    await loadExports();
-
-                    // Update stock cho từng item
-                    for (const item of posItems) {
-                        await window.electronAPI.products.updateStock({
-                            sku: item.sku,
-                            quantity: item.quantity,
-                            isAdd: false,
-                            logContext: {
-                                type: 'export',
-                                referenceType: 'XUAT',
-                                reference: `POS_Xuất`,
-                                note: `Xuất POS/Lấy hàng nhanh`,
-                                createdBy: currentUser
-                            }
-                        });
-                    }
-
-                    message.success('✅ Đã xuất kho thành công!');
-                    setPosItems([]);
-                    await loadProducts();
-                } catch (error) {
-                    console.error('POS save error:', error);
-                    message.error('Lỗi khi lưu phiếu xuất');
-                }
-            },
-        });
-    };
-
-    const posTotalQuantity = posItems.reduce((sum, item) => sum + item.quantity, 0);
-    const posTotalAmount = posItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
+        return true;
+    });
+    const listTotalAmount = filteredExports.reduce((sum, e) => sum + e.totalAmount, 0);
+    const listTotalQty = filteredExports.reduce((sum, e) => sum + e.items.reduce((s, i) => s + i.quantity, 0), 0);
 
     const exportColumns: ColumnsType<ExportOrder> = [
         {
             title: 'Mã phiếu',
             dataIndex: 'id',
-            width: 100,
-            render: (id) => `PX${id.toString().padStart(4, '0')}`,
+            width: 110,
+            render: (id) => (
+                <Text code style={{ fontSize: 13 }}>PX{id.toString().padStart(4, '0')}</Text>
+            ),
         },
         {
             title: 'Ngày xuất',
@@ -664,11 +403,14 @@ export default function ExportOrdersPage() {
                 const item = items[0];
                 return (
                     <div>
-                        <div>{item.productName}</div>
-                        <Space size={4}>
-                            <Tag color="cyan" style={{ fontSize: 11 }}>{item.sku}</Tag>
-                            {item.color && <Tag color="blue" style={{ fontSize: 11 }}>🎨 {item.color}</Tag>}
-                            <Tag color="green" style={{ fontSize: 11 }}>SL: {item.quantity}</Tag>
+                        <div style={{ fontWeight: 500, marginBottom: 4 }}>{item.productName}</div>
+                        <Space size={4} wrap>
+                            <Tag color="cyan" style={{ fontSize: 11, margin: 0 }}>{item.sku}</Tag>
+                            {item.color && <Tag color="purple" style={{ fontSize: 11, margin: 0 }}>{item.color}</Tag>}
+                            <Tag color="green" style={{ fontSize: 11, margin: 0 }}>×{item.quantity}</Tag>
+                            {items.length > 1 && (
+                                <Tag color="orange" style={{ fontSize: 11, margin: 0 }}>+{items.length - 1} SP</Tag>
+                            )}
                         </Space>
                     </div>
                 );
@@ -739,213 +481,73 @@ export default function ExportOrdersPage() {
     ];
 
     return (
-        <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-                <Title level={2} style={{ color: '#262626', margin: 0 }}>
-                    📦 Xuất hàng
-                </Title>
-
-                <Space>
-                    <Segmented
-                        value={viewMode}
-                        onChange={(value) => setViewMode(value as ViewMode)}
-                        options={[
-                            { label: '📋 Danh sách phiếu', value: 'list' },
-                            { label: '📱 POS Quét', value: 'pos' },
-                        ]}
-                    />
-                    <Button
-                        type="primary"
-                        icon={<PlusOutlined />}
-                        onClick={handleAdd}
-                        size="large"
-                        style={{ background: '#00ab56', borderColor: '#00ab56' }}
-                    >
-                        Tạo phiếu xuất
-                    </Button>
-                </Space>
-            </div>
-
-            {viewMode === 'list' ? (
-                <Card>
-                    <Table
-                        columns={exportColumns}
-                        dataSource={exports}
-                        rowKey="id"
-                        pagination={{
-                            pageSize: 10,
-                            showTotal: (total) => `Tổng ${total} phiếu`,
-                        }}
-                    />
-                </Card>
-            ) : (
-                <div>
-                    {/* Scan Input Card */}
-                    <Card style={{ marginBottom: 16 }}>
-                        <Title level={5} style={{ marginBottom: 16 }}>
-                            <ScanOutlined style={{ color: '#00ab56', marginRight: 8 }} />
-                            Quét mã Variant SKU
-                        </Title>
-
-                        <Space.Compact style={{ width: '100%' }} size="large">
+        <>
+            <div>
+                {/* Filter bar */}
+                    <Card style={{ marginBottom: 16 }} bodyStyle={{ padding: '12px 16px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                             <Input
-                                ref={inputRef}
-                                placeholder="Đặt đây và quét Variant SKU (VD: KT001-BLACK)..."
-                                value={scannedCode}
-                                onChange={(e) => setScannedCode(e.target.value)}
-                                onPressEnter={handleManualScan}
-                                size="large"
-                                prefix={<BarcodeOutlined style={{ color: '#00ab56' }} />}
-                                autoFocus
+                                prefix={<SearchOutlined style={{ color: '#bfbfbf' }} />}
+                                placeholder="Tìm mã phiếu, khách hàng, sản phẩm, SKU..."
+                                value={searchKeyword}
+                                onChange={e => setSearchKeyword(e.target.value)}
+                                allowClear
+                                style={{ width: 320 }}
                             />
-                            <Button
-                                type="primary"
-                                size="large"
-                                icon={<ScanOutlined />}
-                                onClick={handleManualScan}
-                                style={{ background: '#00ab56', borderColor: '#00ab56' }}
-                            >
-                                Quét
-                            </Button>
-                        </Space.Compact>
-
-                        <div style={{ marginTop: 12, color: '#8c8c8c', fontSize: 13 }}>
-                            💡 <strong>Tip:</strong> Quét SKU variant (VD: KT001-BLACK). Mỗi lần quét +1.
+                            <RangePicker
+                                value={listDateRange}
+                                onChange={(val) => setListDateRange(val as [Dayjs, Dayjs] | null)}
+                                format="DD/MM/YYYY"
+                                placeholder={['Từ ngày', 'Đến ngày']}
+                                style={{ width: 240 }}
+                            />
+                            <Button icon={<ReloadOutlined />} onClick={loadExports}>Làm mới</Button>
+                            <div style={{ marginLeft: 'auto', display: 'flex', gap: 24, alignItems: 'center' }}>
+                                <span style={{ color: '#8c8c8c', fontSize: 13 }}>
+                                    <FileOutlined style={{ marginRight: 4 }} />
+                                    <Text strong>{filteredExports.length}</Text> phiếu
+                                </span>
+                                <span style={{ color: '#8c8c8c', fontSize: 13 }}>
+                                    Tổng SL: <Text strong>{listTotalQty}</Text>
+                                </span>
+                                <span style={{ color: '#00ab56', fontSize: 14 }}>
+                                    Tổng tiền: <Text strong style={{ color: '#00ab56', fontSize: 15 }}>{listTotalAmount.toLocaleString('vi-VN')} đ</Text>
+                                </span>
+                                <Button
+                                    type="primary"
+                                    icon={<PlusOutlined />}
+                                    onClick={openCreateModal}
+                                    style={{ background: '#00ab56', borderColor: '#00ab56' }}
+                                >
+                                    Tạo phiếu xuất
+                                </Button>
+                            </div>
                         </div>
                     </Card>
 
-                    {/* Statistics */}
-                    <Row gutter={16} style={{ marginBottom: 16 }}>
-                        <Col span={8}>
-                            <Card>
-                                <Statistic
-                                    title="Tổng sản phẩm"
-                                    value={posItems.length}
-                                    valueStyle={{ color: '#00ab56' }}
-                                />
-                            </Card>
-                        </Col>
-                        <Col span={8}>
-                            <Card>
-                                <Statistic
-                                    title="Tổng số lượng"
-                                    value={posTotalQuantity}
-                                    valueStyle={{ color: '#1890ff' }}
-                                />
-                            </Card>
-                        </Col>
-                        <Col span={8}>
-                            <Card>
-                                <Statistic
-                                    title="Tổng tiền"
-                                    value={posTotalAmount}
-                                    valueStyle={{ color: '#ff4d4f' }}
-                                    formatter={(value) => `${value.toLocaleString('vi-VN')} đ`}
-                                />
-                            </Card>
-                        </Col>
-                    </Row>
-
-                    {/* Items Table */}
-                    <Card
-                        title={<span>📋 Danh sách xuất ({posItems.length})</span>}
-                        extra={
-                            <Space>
-                                <Button
-                                    icon={<ClearOutlined />}
-                                    onClick={handleClearPOS}
-                                    disabled={posItems.length === 0}
-                                >
-                                    Xóa tất cả
-                                </Button>
-                                <Button
-                                    type="primary"
-                                    icon={<SaveOutlined />}
-                                    size="large"
-                                    onClick={handlePOSSave}
-                                    disabled={posItems.length === 0}
-                                    style={{ background: '#00ab56', borderColor: '#00ab56' }}
-                                >
-                                    Xuất kho ({posTotalQuantity})
-                                </Button>
-                            </Space>
-                        }
-                    >
-                        {posItems.length === 0 ? (
-                            <div style={{ textAlign: 'center', padding: '60px 20px', color: '#8c8c8c' }}>
-                                <BarcodeOutlined style={{ fontSize: 64, color: '#d9d9d9', marginBottom: 16 }} />
-                                <div style={{ fontSize: 16 }}>Chưa có sản phẩm nào</div>
-                                <div style={{ fontSize: 14, marginTop: 8 }}>Quét mã để bắt đầu</div>
-                            </div>
-                        ) : (
-                            <Table
-                                columns={[
-                                    {
-                                        title: 'SKU',
-                                        dataIndex: 'sku',
-                                        width: 150,
-                                        render: (sku) => <Tag color="cyan"><BarcodeOutlined /> {sku}</Tag>,
-                                    },
-                                    {
-                                        title: 'Sản phẩm',
-                                        dataIndex: 'productName',
-                                    },
-                                    {
-                                        title: 'Màu sắc',
-                                        dataIndex: 'color',
-                                        width: 120,
-                                        render: (color) => color ? <Tag color="blue">🎨 {color}</Tag> : <span style={{ color: '#bfbfbf' }}>—</span>,
-                                    },
-                                    {
-                                        title: 'Số lượng',
-                                        dataIndex: 'quantity',
-                                        width: 120,
-                                        align: 'center',
-                                        render: (qty) => (
-                                            <Tag color="green" style={{ fontSize: 16, fontWeight: 700, padding: '4px 16px' }}>
-                                                {qty}
-                                            </Tag>
-                                        ),
-                                    },
-                                    {
-                                        title: 'Đơn giá',
-                                        dataIndex: 'unitPrice',
-                                        width: 120,
-                                        align: 'right',
-                                        render: (price) => price.toLocaleString('vi-VN'),
-                                    },
-                                    {
-                                        title: 'Thành tiền',
-                                        width: 140,
-                                        align: 'right',
-                                        render: (_, record) => (
-                                            <Text strong>{(record.quantity * record.unitPrice).toLocaleString('vi-VN')} đ</Text>
-                                        ),
-                                    },
-                                    {
-                                        title: '',
-                                        width: 60,
-                                        align: 'center',
-                                        render: (_, record) => (
-                                            <Button
-                                                type="link"
-                                                danger
-                                                size="small"
-                                                icon={<DeleteOutlined />}
-                                                onClick={() => handleRemovePOSItem(record.sku)}
-                                            />
-                                        ),
-                                    },
-                                ]}
-                                dataSource={posItems}
-                                rowKey="sku"
-                                pagination={false}
-                                size="middle"
-                            />
-                        )}
+                    {/* Table */}
+                    <Card>
+                        <Table
+                            columns={exportColumns}
+                            dataSource={filteredExports}
+                            rowKey="id"
+                            pagination={{
+                                pageSize: 15,
+                                showTotal: (total) => `Tổng ${total} phiếu`,
+                                showSizeChanger: true,
+                                pageSizeOptions: ['15', '30', '50'],
+                            }}
+                            locale={{
+                                emptyText: (
+                                    <div style={{ padding: '40px 0', color: '#8c8c8c' }}>
+                                        <FileOutlined style={{ fontSize: 40, color: '#d9d9d9', display: 'block', marginBottom: 12 }} />
+                                        {searchKeyword || listDateRange ? 'Không tìm thấy phiếu nào' : 'Chưa có phiếu xuất nào'}
+                                    </div>
+                                )
+                            }}
+                        />
                     </Card>
-                </div>
-            )}
+            </div>
             <Modal
                 key={`export-modal-${products.length}`}
                 title={editingExport ? '✏️ Sửa phiếu xuất' : '➕ Tạo phiếu xuất mới'}
@@ -989,105 +591,157 @@ export default function ExportOrdersPage() {
                         </Select>
                     </Form.Item>
 
-                    <div style={{
-                        background: '#f0f9ff',
-                        padding: 16,
-                        borderRadius: 8,
-                        marginBottom: 16,
-                        border: '2px dashed #00ab56'
-                    }}>
-                        <Title level={5} style={{ color: '#00ab56', marginTop: 0, marginBottom: 16 }}>
-                            📦 Thông tin sản phẩm
+                    {/* ===== THÊM SẢN PHẨM ===== */}
+                    <div style={{ background: '#f0f9f4', padding: 16, borderRadius: 8, marginBottom: 16, border: '2px dashed #00ab56' }}>
+                        <Title level={5} style={{ color: '#00ab56', marginTop: 0, marginBottom: 12 }}>
+                            ➕ Thêm sản phẩm
                         </Title>
 
-                        <Form.Item
-                            label="Sản phẩm"
-                            name="productId"
-                            rules={[{ required: true, message: 'Vui lòng chọn sản phẩm!' }]}
-                        >
-                            <Select
-                                placeholder="Chọn sản phẩm"
-                                size="large"
-                                onChange={handleProductSelect}
-                                showSearch
-                                optionFilterProp="label"
-                                options={products.map((p) => ({
-                                    value: p.id,
-                                    label: `${p.name} (${p.sku})`
-                                }))}
-                            />
-                        </Form.Item>
-
-                        {selectedProductVariants.length > 0 && (
-                            <Form.Item
-                                label="Màu sắc"
-                                name="color"
-                                rules={[{ required: true, message: 'Vui lòng chọn màu!' }]}
-                            >
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                            <Form.Item label="Sản phẩm" name="tempProductId" style={{ marginBottom: 0 }}>
                                 <Select
-                                    placeholder="Chọn màu"
+                                    placeholder="Chọn sản phẩm"
                                     size="large"
-                                    onChange={(color) => {
-                                        const variant = selectedProductVariants.find(v => v.color === color);
-                                        setSelectedProductSku(variant?.sku || '');
-                                    }}
+                                    onChange={handleTempProductSelect}
+                                    showSearch
+                                    optionFilterProp="label"
+                                    options={products.map(p => ({ value: p.id, label: `${p.name} (${p.sku})` }))}
+                                />
+                            </Form.Item>
+
+                            <Form.Item label="Màu sắc / Phân loại" name="tempColor" style={{ marginBottom: 0 }}>
+                                <Select
+                                    placeholder={tempVariants.length === 0 ? '(Không có phân loại)' : 'Chọn màu → tự động thêm'}
+                                    size="large"
+                                    disabled={tempVariants.length === 0}
+                                    allowClear
+                                    onChange={handleTempColorSelect}
                                 >
-                                    {selectedProductVariants.map((variant, idx) => (
-                                        <Select.Option key={idx} value={variant.color}>
-                                            🎨 {variant.color} <Tag color="cyan" style={{ marginLeft: 8 }}>{variant.sku}</Tag>
-                                        </Select.Option>
-                                    ))}
+                                    {tempVariants
+                                        .filter((v: any) => !exportItems.some(i => i.sku === v.sku))
+                                        .map((v: any, i: number) => (
+                                            <Select.Option key={i} value={v.color}>
+                                                🎨 {v.color} <Tag color="cyan" style={{ marginLeft: 8 }}>{v.sku}</Tag>
+                                            </Select.Option>
+                                        ))}
                                 </Select>
                             </Form.Item>
-                        )}
+                        </div>
 
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                            <Form.Item
-                                label="Số lượng"
-                                name="quantity"
-                                rules={[{ required: true, message: 'Vui lòng nhập số lượng!' }]}
-                            >
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 12, marginTop: 12, alignItems: 'end' }}>
+                            <Form.Item label="Số lượng" name="tempQuantity" style={{ marginBottom: 0 }}>
                                 <InputNumber
                                     placeholder="0"
                                     min={1}
                                     style={{ width: '100%' }}
                                     size="large"
+                                    onChange={handleTempQuantityChange}
                                 />
                             </Form.Item>
 
-                            <Form.Item
-                                label="Giá xuất"
-                                name="unitPrice"
-                                rules={[{ required: true, message: 'Vui lòng nhập giá!' }]}
-                            >
+                            <Form.Item label="Giá xuất" name="tempUnitPrice" style={{ marginBottom: 0 }}>
                                 <InputNumber
                                     placeholder="0"
                                     min={0}
                                     style={{ width: '100%' }}
                                     size="large"
                                     formatter={value => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                                    onChange={handleTempPriceChange}
                                 />
                             </Form.Item>
-                        </div>
 
-                        {selectedProductSku && (
-                            <div style={{ marginTop: 12, padding: 12, background: 'white', borderRadius: 6, border: '1px solid #bae7ff' }}>
-                                <Space>
-                                    <Text strong>SKU xuất:</Text>
-                                    <Tag color="cyan" style={{ fontSize: 14 }}><BarcodeOutlined /> {selectedProductSku}</Tag>
-                                </Space>
-                            </div>
-                        )}
+                            <Form.Item label=" " style={{ marginBottom: 0 }}>
+                                <Button
+                                    icon={<PlusOutlined />}
+                                    onClick={handleAddExportItem}
+                                    size="large"
+                                    style={{ borderColor: '#00ab56', color: '#00ab56', background: 'white' }}
+                                >
+                                    Thêm vào
+                                </Button>
+                            </Form.Item>
+                        </div>
                     </div>
+
+                    {/* ===== DANH SÁCH SẢN PHẨM ===== */}
+                    {exportItems.length > 0 && (
+                        <div style={{ marginBottom: 16 }}>
+                            <Title level={5} style={{ marginBottom: 8 }}>
+                                📋 Danh sách xuất ({exportItems.length} sản phẩm)
+                            </Title>
+                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                <thead>
+                                    <tr style={{ background: '#fafafa', borderBottom: '2px solid #e0e0e0' }}>
+                                        <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 13 }}>Sản phẩm</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 13 }}>SKU</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right', fontSize: 13 }}>SL</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right', fontSize: 13 }}>Đơn giá</th>
+                                        <th style={{ padding: '8px 10px', textAlign: 'right', fontSize: 13 }}>Thành tiền</th>
+                                        <th style={{ padding: '8px 10px', width: 50 }}></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {exportItems.map((item, index) => (
+                                        <tr key={index} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                                            <td style={{ padding: '6px 10px', fontSize: 13 }}>{item.productName}</td>
+                                            <td style={{ padding: '6px 10px' }}>
+                                                <Tag color="cyan" style={{ fontSize: 11 }}>{item.sku}</Tag>
+                                            </td>
+                                            <td style={{ padding: '4px 10px', textAlign: 'right' }}>
+                                                <InputNumber
+                                                    value={item.quantity}
+                                                    min={1}
+                                                    size="small"
+                                                    style={{ width: 70 }}
+                                                    onChange={(val) => {
+                                                        const newItems = [...exportItems];
+                                                        newItems[index] = { ...newItems[index], quantity: val || 1 };
+                                                        setExportItems(newItems);
+                                                    }}
+                                                />
+                                            </td>
+                                            <td style={{ padding: '4px 10px', textAlign: 'right' }}>
+                                                <InputNumber
+                                                    value={item.unitPrice}
+                                                    min={0}
+                                                    size="small"
+                                                    style={{ width: 110 }}
+                                                    formatter={value => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                                                    onChange={(val) => {
+                                                        const newItems = [...exportItems];
+                                                        newItems[index] = { ...newItems[index], unitPrice: val || 0 };
+                                                        setExportItems(newItems);
+                                                    }}
+                                                />
+                                            </td>
+                                            <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 700, fontSize: 13 }}>
+                                                {(item.quantity * item.unitPrice).toLocaleString('vi-VN')} đ
+                                            </td>
+                                            <td style={{ padding: '6px 10px', textAlign: 'center' }}>
+                                                <Button type="link" danger size="small" onClick={() => handleRemoveExportItem(index)}>
+                                                    Xóa
+                                                </Button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                    <tr style={{ background: '#f0f9f4', fontWeight: 700, fontSize: 14 }}>
+                                        <td colSpan={4} style={{ padding: '10px 10px', textAlign: 'right' }}>Tổng cộng:</td>
+                                        <td style={{ padding: '10px 10px', textAlign: 'right', color: '#00ab56' }}>
+                                            {exportItems.reduce((s, i) => s + i.quantity * i.unitPrice, 0).toLocaleString('vi-VN')} đ
+                                        </td>
+                                        <td></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
 
                     <Form.Item label="Ghi chú" name="notes">
                         <TextArea rows={2} placeholder="Ghi chú (tùy chọn)" />
                     </Form.Item>
 
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
-                        <Button onClick={() => setModalVisible(false)} size="large">
-                            Hủy
-                        </Button>
+                        <Button onClick={() => setModalVisible(false)} size="large">Hủy</Button>
                         <Button
                             type="primary"
                             htmlType="submit"
@@ -1099,6 +753,6 @@ export default function ExportOrdersPage() {
                     </div>
                 </Form>
             </Modal>
-        </div>
+        </>
     );
 }

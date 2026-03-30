@@ -4159,8 +4159,11 @@ ipcMain.handle('combos:getAll', async () => {
 ipcMain.handle('combos:create', async (event, data) => {
     try {
         if (!prisma) throw new Error('Database not initialized');
-        const combo = await prisma.comboProduct.create({
-            data: { sku: data.sku, name: data.name, items: JSON.stringify(data.items), price: data.price, cost: data.cost, status: 'active' }
+        const comboData = { name: data.name, items: JSON.stringify(data.items), price: data.price, cost: data.cost, status: 'active' };
+        const combo = await prisma.comboProduct.upsert({
+            where: { sku: data.sku },
+            create: { sku: data.sku, ...comboData },
+            update: comboData,
         });
         void logActivity({ module: 'products', action: 'CREATE', description: `Tạo combo "${combo.name}" (SKU: ${combo.sku})`, recordName: combo.name });
         return { success: true, data: combo };
@@ -4591,7 +4594,8 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
                     items: data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : undefined,
                     totalAmount: data.totalAmount,
                     notes: data.notes || null,
-                    status: data.status
+                    status: data.status,
+                    createdBy: data.createdBy !== undefined ? data.createdBy : undefined
                 }
             });
 
@@ -7074,3 +7078,142 @@ ipcMain.handle('einvoice:getInvoiceChain', async (event, orderId) => {
     } catch (error) { return { success: false, error: error.message }; }
 });
 
+// ========================================
+// ZKTECO / RONALD JACK — MÁY CHẤM CÔNG VÂN TAY
+// ========================================
+// Ronald Jack 1800 WiFi chỉ hỗ trợ ADMS Push (HTTP).
+// Máy tự gửi data lên server, KHÔNG hỗ trợ Pull (UDP/ZK Protocol).
+
+const admsServer = require('./zkteco-adms');
+
+// Auto-start ADMS server khi app khởi động
+(async () => {
+    try {
+        await admsServer.startServer(5005);
+        console.log('✅ [ADMS] Server đã tự động khởi động trên port 5005');
+    } catch (err) {
+        console.error('❌ [ADMS] Không thể khởi động server:', err.message);
+    }
+})();
+
+// Start/Stop ADMS server
+ipcMain.handle('zkteco:connect', async (event, config) => {
+    try {
+        console.log('🔌 [IPC] zkteco:connect (ADMS mode)');
+        const result = await admsServer.startServer(config?.port || 8098);
+        return result;
+    } catch (error) {
+        console.error('❌ zkteco:connect error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('zkteco:disconnect', async () => {
+    try {
+        return admsServer.stopServer();
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Trạng thái ADMS server
+ipcMain.handle('zkteco:getStatus', async () => {
+    try {
+        return { success: true, data: admsServer.getStatus() };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Lấy danh sách NV đã nhận từ ADMS
+ipcMain.handle('zkteco:getUsers', async () => {
+    try {
+        const data = admsServer.getData();
+        return { success: true, data: data.users, count: data.userCount };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Lấy logs chấm công đã nhận từ ADMS
+ipcMain.handle('zkteco:getAttendanceLogs', async () => {
+    try {
+        const data = admsServer.getData();
+        return { success: true, data: data.logs, count: data.logCount };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Full sync: lấy toàn bộ data đã nhận từ ADMS push
+ipcMain.handle('zkteco:fullSync', async (event, config) => {
+    try {
+        console.log('🔄 [IPC] zkteco:fullSync (ADMS mode) — lấy data đã nhận');
+        
+        // Đảm bảo server đang chạy
+        if (!admsServer.getStatus().isRunning) {
+            await admsServer.startServer(config?.port || 5005);
+        }
+        
+        const data = admsServer.getData();
+        
+        if (data.logCount > 0) {
+            void logActivity({
+                module: 'attendance',
+                action: 'SYNC',
+                description: `Lấy dữ liệu ADMS: ${data.logCount} bản ghi, ${data.userCount} nhân viên`,
+                userName: currentSession?.username || 'Admin',
+            });
+        }
+        
+        return data;
+    } catch (error) {
+        console.error('❌ zkteco:fullSync error:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
+// ZKBridge: Goi ZKBridge.exe (C# + Zkemkeeper.dll) de keo data truc tiep tu may
+ipcMain.handle('zkteco:zkbridge', async (event, config) => {
+    const { execFile } = require('child_process');
+    const path = require('path');
+    const fs = require('fs');
+
+    const ip   = config && config.ip   ? config.ip   : '192.168.0.225';
+    const port = config && config.port ? config.port : 4370;
+
+    const exePath    = path.join(__dirname, '..', 'planing', 'zkteco-bridge', 'ZKBridge.exe');
+    const outputPath = path.join(__dirname, '..', 'planing', 'zkteco-bridge', 'attendance_output.json');
+
+    if (!fs.existsSync(exePath)) {
+        return { success: false, error: 'ZKBridge.exe chua duoc build. Chay build.bat trong planing/zkteco-bridge/' };
+    }
+
+    return new Promise(function(resolve) {
+        console.log('[ZKBridge] Goi ' + exePath + ' ' + ip + ':' + port);
+        execFile(exePath, [ip, String(port)], { timeout: 30000 }, function(err, stdout, stderr) {
+            if (stdout) console.log('[ZKBridge stdout]', stdout);
+            if (stderr) console.error('[ZKBridge stderr]', stderr);
+
+            if (fs.existsSync(outputPath)) {
+                try {
+                    const data = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
+                    const logs = (data.logs || []).map(function(l) {
+                        return Object.assign({}, l, {
+                            time: l.timestamp,
+                            empId: parseInt(l.odUserId, 10) || 0,
+                            empNameFallback: 'NV #' + l.odUserId,
+                            status: 'OK',
+                            source: 'ZKBridge',
+                        });
+                    });
+                    resolve({ success: data.success, logs: logs, logCount: logs.length, userCount: 0, syncTime: data.syncTime });
+                } catch (e) {
+                    resolve({ success: false, error: 'Loi parse JSON: ' + e.message });
+                }
+            } else {
+                resolve({ success: false, error: (err && err.message) || 'ZKBridge.exe khong tao duoc output file' });
+            }
+        });
+    });
+});

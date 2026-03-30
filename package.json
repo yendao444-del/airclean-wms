@@ -1,6 +1,6 @@
 {
   "name": "quan-ly-ban-hang-desktop",
-  "version": "1.0.177",
+  "version": "1.0.186",
   "description": "Hệ thống quản lý bán hàng - Desktop App",
   "main": "electron/main.js",
   "scripts": {
@@ -17,17 +17,34 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@ant-design/icons": "^6.1.0",
+    "@prisma/client": "5.22.0",
     "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.3",
+    "adm-zip": "^0.5.16",
+    "antd": "^6.2.3",
+    "archiver": "^7.0.1",
+    "bcryptjs": "^3.0.3",
     "concurrently": "^9.2.1",
+    "dotenv": "^17.2.3",
     "electron": "^40.1.0",
     "electron-builder": "^26.7.0",
     "electron-is-dev": "^3.0.1",
+    "glob": "^13.0.1",
+    "googleapis": "^171.4.0",
+    "node-zklib": "^1.3.0",
     "prisma": "5.22.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-hook-form": "^7.71.1",
+    "recharts": "^3.7.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.1",
-    "wait-on": "^9.0.3"
+    "wait-on": "^9.0.3",
+    "xlsx": "^0.18.5",
+    "zod": "^4.3.6",
+    "zustand": "^5.0.11"
   },
   "build": {
     "appId": "com.dby.pos",
@@ -74,27 +91,12 @@
     },
     "asar": true,
     "asarUnpack": [
-      "node_modules/.prisma/**/*",
-      "node_modules/@prisma/**/*.node",
-      "**/*.node"
-    ]
+      "node_modules/**/*"
+    ],
+    "npmRebuild": false,
+    "buildDependenciesFromSource": false
   },
   "dependencies": {
-    "@ant-design/icons": "^6.1.0",
-    "@prisma/client": "5.22.0",
-    "adm-zip": "^0.5.16",
-    "antd": "^6.2.3",
-    "archiver": "^7.0.1",
-    "bcryptjs": "^3.0.3",
-    "dotenv": "^17.2.3",
-    "glob": "^13.0.1",
-    "googleapis": "^171.4.0",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
-    "react-hook-form": "^7.71.1",
-    "recharts": "^3.7.0",
-    "xlsx": "^0.18.5",
-    "zod": "^4.3.6",
-    "zustand": "^5.0.11"
+    "winax": "^3.6.8"
   }
 }

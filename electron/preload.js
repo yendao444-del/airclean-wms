@@ -241,6 +241,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
         previewInvoice: (invoiceData) => ipcRenderer.invoke('misa:previewInvoice', invoiceData),
         downloadPDF: (transactionId) => ipcRenderer.invoke('misa:downloadPDF', transactionId),
     },
+
+    // ZKTeco / Ronald Jack — Máy chấm công vân tay
+    zkteco: {
+        connect: (config) => ipcRenderer.invoke('zkteco:connect', config),
+        disconnect: () => ipcRenderer.invoke('zkteco:disconnect'),
+        getStatus: () => ipcRenderer.invoke('zkteco:getStatus'),
+        getUsers: () => ipcRenderer.invoke('zkteco:getUsers'),
+        getAttendanceLogs: () => ipcRenderer.invoke('zkteco:getAttendanceLogs'),
+        fullSync: (config) => ipcRenderer.invoke('zkteco:fullSync', config),
+        zkbridge: (config) => ipcRenderer.invoke('zkteco:zkbridge', config),
+    },
 });
 
 // ============================================

@@ -17,6 +17,7 @@ import {
     RollbackOutlined,
     HistoryOutlined,
     UserOutlined,
+    ScheduleOutlined,
     SwapOutlined,
     SendOutlined,
     LogoutOutlined,
@@ -41,6 +42,7 @@ import HeaderTaskTicker from './components/HeaderTaskTicker';
 import Login from './pages/Login';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { PageHeaderProvider, usePageHeader } from './contexts/PageHeaderContext';
+import { AppDataProvider } from './contexts/AppDataContext';
 
 // ⚡ LAZY LOADING - Tất cả pages còn lại (load on demand)
 const FeeCalculatorPage = lazy(() => import('./pages/FeeCalculator'));
@@ -61,6 +63,7 @@ const SalesHistoryPage = lazy(() => import('./pages/SalesHistory'));
 const OrderPickingPage = lazy(() => import('./pages/OrderPicking'));
 const OrdersPage = lazy(() => import('./pages/Orders'));
 const BusinessReportPage = lazy(() => import('./pages/BusinessReport'));
+const AttendancePage = lazy(() => import('./pages/Attendance'));
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -240,6 +243,11 @@ function AppContent() {
         // Daily Tasks
         items.push(createMenuItem('Công việc hàng ngày', 'daily-tasks', <CheckCircleOutlined />));
 
+        // Chấm công (Admin only)
+        if (hasPermission('permissions')) {
+            items.push(createMenuItem('Chấm công', 'attendance', <ScheduleOutlined />));
+        }
+
         // Settings
         if (accessibleKeys.includes('settings')) {
             items.push(createMenuItem('Cài đặt', 'settings', <SettingOutlined />));
@@ -311,6 +319,8 @@ function AppContent() {
                 return <BusinessReportPage />;
             case 'daily-tasks':
                 return <DailyTasksPage />;
+            case 'attendance':
+                return <AttendancePage />;
 
             case 'permissions':
                 return <SettingsPage />;
@@ -489,11 +499,13 @@ export default function App() {
         <ErrorBoundary>
             <ForceUpdateGate>
                 <AuthProvider>
-                    <PageHeaderProvider>
-                        <ErrorBoundary>
-                            <AppContent />
-                        </ErrorBoundary>
-                    </PageHeaderProvider>
+                    <AppDataProvider>
+                        <PageHeaderProvider>
+                            <ErrorBoundary>
+                                <AppContent />
+                            </ErrorBoundary>
+                        </PageHeaderProvider>
+                    </AppDataProvider>
                 </AuthProvider>
             </ForceUpdateGate>
         </ErrorBoundary>

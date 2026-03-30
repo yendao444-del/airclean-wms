@@ -1,0 +1,215 @@
+=========================================
+NHẬT KÝ DEBUG CHẤM CÔNG - CẬP NHẬT 2026-03-30 16:30
+=========================================
+
+[THIẾT BỊ]
+- Ronald Jack 1800 WiFi (ZKTeco rebranded)
+- Serial: ZYSG30089556
+- WiFi: Kết nối mạng "LV" (TP-Link Archer C64)
+- IP hiện tại: 192.168.0.225 (đã đổi từ 192.168.1.225)
+- Gateway: 192.168.0.1
+- Cổng ADMS (máy chủ): 5005
+
+[MÁY TÍNH]
+- IP: 192.168.0.184
+- Gateway: 192.168.0.1 (TP-Link)
+- Kết nối: Dây LAN (Ethernet)
+- OS: Windows
+
+[HẠ TẦNG MẠNG]
+- TP-Link Archer C64: 192.168.0.1 (WiFi "LV", LAN)
+- FPT Modem (Tầng 1): 192.168.1.x 
+- TP-Link WAN IP (từ FPT): 192.168.1.206
+- DDNS (Hacom setup): hacom-050525.dyndns.org → IP ngoài FPT
+
+=========================================
+CÁC CÁCH ĐÃ THỬ VÀ KẾT QUẢ
+=========================================
+
+--- CÁCH 1: node-zklib + IP nội bộ 192.168.1.225:4370 (UDP Pull) ---
+Kết quả: ❌ THẤT BẠI
+Lý do: PC (192.168.0.x) và thiết bị (192.168.1.x) khác subnet ban đầu
+Ghi chú: Đã đổi IP thiết bị về 192.168.0.225 để cùng subnet
+
+--- CÁCH 2: node-zklib + IP 192.168.0.225:4370 (UDP Pull) ---
+Kết quả: ❌ THẤT BẠI
+Lý do: Ronald Jack 1800 WiFi KHÔNG HỖ TRỢ giao thức ZK Protocol (UDP Pull)
+Bằng chứng: Gửi gói UDP ZK Connect packet, không có phản hồi trên bất kỳ port nào
+Đã quét: Port 4370, 4371, 5005, 5200, 80, 8080 — TẤT CẢ KHÔNG PHẢN HỒI UDP
+=> KẾT LUẬN: node-zklib VÔ DỤNG với máy này. KHÔNG BAO GIỜ THỬ LẠI.
+
+--- CÁCH 3: node-zklib + DDNS hacom-050525.dyndns.org:5005 ---
+Kết quả: ❌ THẤT BẠI
+Lý do: NAT Loopback - PC gọi DDNS trỏ về chính mạng nhà mình, bị FPT chặn
+=> KẾT LUẬN: DDNS chỉ dùng từ BÊN NGOÀI mạng nhà, không dùng từ bên trong
+
+--- CÁCH 4: node-zklib + Port 5005 (thay vì 4370) ---
+Kết quả: ❌ THẤT BẠI  
+Lý do: Port 5005 là ADMS Push port, KHÔNG phải ZK UDP port
+Lỗi hiện: "Kết nối thất bại: undefined" (node-zklib gửi UDP, máy không hiểu)
+=> KẾT LUẬN: Sai giao thức hoàn toàn. KHÔNG THỬ LẠI.
+
+--- CÁCH 5: Port Forwarding qua TP-Link (192.168.0.1 → 192.168.0.225:5005) ---
+Kết quả: ❌ THẤT BẠI
+Lý do: Port Forwarding dùng cho WAN→LAN, không có tác dụng khi cả 2 cùng LAN
+Ghi chú: Đã tạo rule "VanTay" trên TP-Link, nhưng vô nghĩa
+
+--- CÁCH 6: ADMS Push Server (App lắng nghe HTTP, máy tự gửi data lên) ---
+Kết quả: ❌ THẤT BẠI (server chạy OK, máy không gửi gì)
+Chi tiết:
+  - Tạo file: electron/zkteco-adms.js (HTTP server lắng nghe /iclock/cdata)
+  - Đã thử port 8098: Server chạy OK, không nhận được request từ thiết bị
+  - Đã thử port 5005: Server chạy OK, không nhận được request từ thiết bị
+  - Đã thử server test riêng (ngoài App): CŨNG KHÔNG nhận được gì
+  - Cấu hình trên thiết bị:
+    * Yêu cầu server: Có (BẬT)
+    * Sử dụng tên miền: Không
+    * IP server: 192.168.0.184
+    * Số cổng: 5005
+    * Tốc độ: 1 (mỗi 1 phút)
+  - Windows Firewall: ĐÃ TẮT HOÀN TOÀN (vẫn không được)
+  - TP-Link AP Isolation: TẮT (kiểm tra qua Admin panel)
+  - Đã chờ >5 phút, không có BẤT KỲ kết nối HTTP nào từ 192.168.0.225
+
+NGHI VẤN: TP-Link Archer C64 chặn TCP giữa WiFi client và LAN client
+ở tầng firmware (không có tùy chọn tắt trên giao diện).
+
+--- KIỂM TRA MẠNG ---
+✅ Ping PC → Thiết bị (192.168.0.225): THÀNH CÔNG (1ms, TTL=255)
+❌ TCP PC → Thiết bị port 5005: THẤT BẠI (TcpTestSucceeded: False)
+❌ TCP PC → Thiết bị port 4370: THẤT BẠI
+❌ TCP PC → Thiết bị port 80/8080/443: TẤT CẢ THẤT BẠI
+❌ UDP PC → Thiết bị (ZK protocol): KHÔNG PHẢN HỒI
+❌ ADMS Push thiết bị → PC: KHÔNG CÓ KẾT NỐI ĐẾN
+
+KẾT LUẬN TỔNG QUÁT:
+- Thiết bị KHÔNG mở bất kỳ port TCP nào → Pull (kéo data) KHÔNG KHẢ THI
+- Thiết bị được cấu hình Push nhưng KHÔNG gửi gì → Router chặn hoặc firmware lỗi
+- Ping thông nhưng TCP/UDP không thông → Vấn đề ở tầng transport, không phải IP
+
+=========================================
+CÁC CÁCH ĐÃ THỬ (TIẾP THEO) - 2026-03-30
+=========================================
+
+--- CÁCH 7: Test điện thoại (WiFi LV) → ADMS server PC port 5005 ---
+Kết quả: ✅ THÀNH CÔNG
+Chi tiết: Mở browser trên iPhone kết nối WiFi LV, truy cập:
+  http://192.168.0.184:5005/iclock/cdata?SN=TEST
+  → Server trả về config đúng (ATTLOGStamp, TransInterval, v.v.)
+=> KẾT LUẬN: TP-Link KHÔNG chặn WiFi↔LAN TCP. Server OK. Vấn đề là máy vân tay chưa kết nối.
+
+--- CÁCH 8: Reboot máy vân tay, kiểm tra ping ---
+Kết quả: ✅ PING OK, ❌ ADMS vẫn không nhận được gì
+Chi tiết:
+  - Rút điện máy vân tay, đợi 10s, cắm lại
+  - Ping 192.168.0.225 -t: timeout lúc rút điện, reply lại sau khi boot
+  - Máy online bình thường sau reboot
+  - Chờ >5 phút: ADMS server KHÔNG nhận được request nào từ SN=ZYSG30089556
+  - Log console app chỉ có: "[IPC] zkteco:fullSync (ADMS mode) — lấy data đã nhận"
+=> KẾT LUẬN: Máy vân tay online nhưng firmware KHÔNG tự gửi ADMS request sau reboot.
+   Có thể: config chưa save, firmware bug, hoặc cần factory reset phần network.
+
+--- KIỂM TRA ĐÃ LÀM ---
+✅ Ping PC → Thiết bị (192.168.0.225): THÀNH CÔNG liên tục
+✅ HTTP Phone (WiFi) → PC:5005: THÀNH CÔNG (server hoạt động đúng)
+✅ AP Isolation TP-Link: ĐÃ TẮT
+✅ Windows Firewall: ĐÃ TẮT
+✅ ADMS server bind 0.0.0.0:5005: ĐÚNG (đã kiểm tra code)
+✅ Cài đặt máy chủ trên thiết bị: IP=192.168.0.184, Port=5005, Yêu cầu=Có
+✅ Ủy quyền máy chủ: Không (tắt — server không có auth)
+❌ Thiết bị → PC:5005: CHƯA BAO GIỜ thấy request nào từ SN=ZYSG30089556
+
+--- CÁCH 9: netstat xác nhận port 5005 LISTENING ---
+Kết quả: ✅ LISTENING xác nhận (server chạy đúng sau khi restart app)
+Chi tiết:
+  - Lần đầu chạy app: log thiếu "[ADMS] Server khởi động" → nghi server chưa start
+  - Sau khi restart app: ✅ [ADMS] Server lắng nghe trên port 5005 (0.0.0.0)
+  - Đã fix bug: fullSync fallback dùng port 8098 thay vì 5005 → đã sửa thành 5005
+  - Kết quả: Server OK, nhưng thiết bị VẪN không gửi request nào
+
+--- KẾT LUẬN CUỐI CÙNG VỀ ADMS REALTIME ---
+- Ronald Jack 1800 KHÔNG tự push ADMS automatic (firmware giới hạn)
+- MitaPro cũng phải bấm tay "Lấy dữ liệu từ máy" → đây là giới hạn phần cứng
+- Realtime hoàn toàn KHÔNG KHẢ THI với thiết bị này qua ADMS tự động
+- Chấp nhận workflow: manual trigger mỗi ngày/ca làm việc
+
+--- CÁCH 10: ZKBridge C# + Zkemkeeper.dll (TCP ZK Protocol) ---
+Kết quả: ❌ THẤT BẠI — Error code -307 mọi trường hợp
+Chi tiết:
+  - Viết ZKBridge.exe bằng C# dùng Interop.zkemkeeper.dll (SDK gốc ZKTeco)
+  - File: planing/zkteco-bridge/ZKBridge.exe + Interop.zkemkeeper.dll + zkemkeeper.dll
+  - ProgID đúng: zkemkeeper.ZKEM (không phải zkemkeeper.CZKEM)
+  - Đã thử port 4370, 5005
+  - Đã thử password: 0, 1234, 12345, 123456
+  - Thiết bị KHÔNG có menu Comm Password → password mặc định = 0
+  - Kết quả: GetLastError() = -307 mọi trường hợp
+  - Ghi chú quan trọng: Khác với node-zklib (timeout/no response),
+    Zkemkeeper NHẬN phản hồi -307 → device CÓ nhận TCP nhưng không hiểu ZK Protocol
+=> KẾT LUẬN: Ronald Jack 1800 WiFi KHÔNG hỗ trợ ZK Protocol TCP lẫn UDP.
+   Zkemkeeper.dll vô dụng với thiết bị này. KHÔNG THỬ LẠI.
+
+--- CÁCH 11: Tắt ADMS mode → thử ZKBridge lại ---
+Kết quả: ❌ THẤT BẠI — vẫn -307
+Chi tiết:
+  - Vào thiết bị: Cài đặt máy chủ → Yêu cầu server = Không (tắt ADMS)
+  - Reboot thiết bị
+  - Chạy ZKBridge.exe 192.168.0.225 4370 → vẫn Error -307
+=> KẾT LUẬN CUỐI CÙNG: Ronald Jack 1800 WiFi HOÀN TOÀN không hỗ trợ ZK Protocol
+   dù ở bất kỳ chế độ nào. -307 là firmware reject vĩnh viễn.
+   CHỈ CÒN: Wireshark+MitaPro HOẶC USB.
+
+=========================================
+HƯỚNG CHƯA THỬ (CÒN LẠI - ƯU TIÊN THEO THỨ TỰ)
+=========================================
+
+[XÁC SUẤT CAO NHẤT]
+
+1. Wireshark + MitaPro → clone giao thức (xác suất ~90%)
+   - Cài MitaPro + Wireshark trên PC
+   - Filter: ip.addr == 192.168.0.225
+   - Bấm "Lấy dữ liệu từ máy" trong MitaPro → capture toàn bộ TCP packets
+   - Phân tích payload hex → implement lại trong Node.js raw TCP socket
+   - ĐÂY LÀ CÁCH DUY NHẤT ĐỂ BIẾT CHÍNH XÁC GIAO THỨC
+   - Yêu cầu: có MitaPro cài trên PC
+
+2. Tìm menu ẩn "Đồng bộ ngay" / "Test kết nối" trên thiết bị
+   - Một số firmware có nút trigger ADMS upload ẩn trong menu sâu
+   - Thử tất cả mục MENU trên máy vân tay
+
+3. Firmware update Ronald Jack 1800
+   - Tải firmware mới từ website ronaldjack.com.vn
+   - Có thể fix bug không tự push ADMS
+
+4. Liên hệ nhà cung cấp Ronald Jack
+   - Hỏi SDK hoặc cách kết nối đúng cho model 1800 WiFi
+   - Serial: ZYSG30089556
+
+[LUÔN HOẠT ĐỘNG - KHÔNG REALTIME]
+
+5. USB export từ thiết bị → import vào app
+   - Cắm USB vào máy vân tay → Menu → Xuất/Tải dữ liệu chấm công → USB
+   - File output: 1_attlog.dat (tab-separated)
+   - Cắm USB vào PC → app đọc file → hiện bảng chấm công
+   - Đảm bảo 100%, không phụ thuộc mạng, không realtime
+   - Tính năng cũ đã xóa (Gemini viết kém), cần implement lại đúng cách
+
+[ĐÃ LOẠI TRỪ HOÀN TOÀN - KHÔNG THỬ LẠI]
+- node-zklib UDP port 4370: Ronald Jack không hỗ trợ ZK UDP
+- node-zklib TCP port 4370/5005: không phản hồi
+- Zkemkeeper.dll TCP: phản hồi -307, không support ZK Protocol
+- ADMS auto-push: server OK, network OK, nhưng firmware không tự push
+- Dây LAN vào thiết bị: Ronald Jack 1800 chỉ có cổng USB, không có LAN
+- Port forwarding TP-Link: vô nghĩa khi cả 2 cùng LAN
+- DDNS NAT loopback: FPT chặn
+- USB WiFi adapter: không cần thiết, mạng đã thông (phone test OK)
+
+=========================================
+LƯU Ý QUAN TRỌNG
+=========================================
+- IP thiết bị PHẢI đuôi .225 (HAI HAI NĂM), KHÔNG PHẢI .255
+  (.255 là Broadcast IP, cấm dùng, máy sẽ mù mạng)
+- Port giao thức ZK (UDP): 4370 — MÁY NÀY KHÔNG HỖ TRỢ
+- Port ADMS Push (HTTP): 5005 — Máy hỗ trợ nhưng chưa gửi được
+- Mita Pro kết nối đúng cách nào vẫn là ẩn số (cần test lại Mita Pro)
+- Password WiFi "LV": 0888488422
+- Firewall Windows: ĐANG TẮT (NHỚ BẬT LẠI SAU KHI XONG)

@@ -57,6 +57,7 @@ interface EcommerceExport {
     totalAmount: number;
     notes?: string;
     status: string;
+    createdBy?: string;
     createdAt?: Date;
 }
 
@@ -467,7 +468,8 @@ Thời gian: ${currentTime}`;
                     try {
                         const updateRes = await window.electronAPI.ecommerceExports.update(foundEcommerceExport.id, {
                             ...foundEcommerceExport,
-                            status: 'completed'
+                            status: 'completed',
+                            createdBy: currentUser || foundEcommerceExport.createdBy || null
                         });
 
                         if (!updateRes.success) {

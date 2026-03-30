@@ -774,29 +774,18 @@ export default function BusinessReportPage() {
             const skuCostMap: Record<string, number> = {};
             if (prodRes.success && prodRes.data) {
                 for (const p of prodRes.data) {
-                    // SKU gốc
-                    skuCostMap[p.sku] = p.cost || 0;
-                    // Variant SKUs (kế thừa cost từ product cha)
+                    if (p.sku) skuCostMap[p.sku] = p.cost ?? 0;
                     try {
                         const variants = p.variants ? JSON.parse(p.variants) : [];
                         for (const v of variants) {
-                            if (v.sku) skuCostMap[v.sku] = v.cost || p.cost || 0;
+                            if (v.sku) skuCostMap[v.sku] = (v.cost != null && v.cost > 0) ? v.cost : (p.cost ?? 0);
                         }
                     } catch { /* skip */ }
                 }
             }
             if (comboRes.success && comboRes.data) {
                 for (const c of comboRes.data) {
-                    // Tính giá vốn combo từ components hiện tại (không dùng c.cost vì có thể lỗi thời)
-                    try {
-                        const comboItems = typeof c.items === 'string' ? JSON.parse(c.items) : (c.items || []);
-                        const calculatedCost = comboItems.reduce((sum: number, ci: any) => {
-                            return sum + (skuCostMap[ci.sku] || 0) * (ci.quantity || 1);
-                        }, 0);
-                        skuCostMap[c.sku] = calculatedCost || c.cost || 0;
-                    } catch {
-                        skuCostMap[c.sku] = c.cost || 0;
-                    }
+                    if (c.sku) skuCostMap[c.sku] = c.cost || 0;
                 }
             }
             setCostMap(skuCostMap);

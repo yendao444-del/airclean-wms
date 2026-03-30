@@ -7,6 +7,7 @@ import {
     Form,
     Input,
     Select,
+    Switch,
     message,
     Space,
     Typography,
@@ -42,6 +43,7 @@ interface Return {
 interface ProcessLog {
     timestamp: string; // DD/MM HH:mm
     note: string;
+    createdBy?: string;
 }
 
 export default function ReturnsPage() {
@@ -72,7 +74,8 @@ export default function ReturnsPage() {
     const [newPackerName, setNewPackerName] = useState('');
 
     // Status list management
-    const [statusList, setStatusList] = useState<Array<{ value: string; label: string; color: string }>>([]);
+    const [statusList, setStatusList] = useState<Array<{ value: string; label: string; color: string; isFinal?: boolean }>>([]);
+    const [newStatusIsFinal, setNewStatusIsFinal] = useState(false);
     const [newStatusLabel, setNewStatusLabel] = useState('');
 
     // ✨ State cho chọn nhiều để xóa
@@ -127,8 +130,8 @@ export default function ReturnsPage() {
             } else {
                 // Default statuses
                 const defaultStatuses = [
-                    { value: 'pending', label: 'Đang xử lý', color: 'gold' },
-                    { value: 'completed', label: 'Hoàn thành', color: 'green' },
+                    { value: 'pending', label: 'Đang xử lý', color: 'gold', isFinal: false },
+                    { value: 'completed', label: 'Hoàn thành', color: 'green', isFinal: true },
                 ];
                 setStatusList(defaultStatuses);
                 await window.electronAPI.appConfig.set('statusList', defaultStatuses);
@@ -139,7 +142,7 @@ export default function ReturnsPage() {
         }
     };
 
-    const saveStatusList = async (list: Array<{ value: string; label: string; color: string }>) => {
+    const saveStatusList = async (list: Array<{ value: string; label: string; color: string; isFinal?: boolean }>) => {
         try {
             await window.electronAPI.appConfig.set('statusList', list);
             setStatusList(list);
@@ -147,6 +150,9 @@ export default function ReturnsPage() {
             console.error('Error saving status list:', error);
         }
     };
+
+    const isFinalStatus = (statusValue: string) =>
+        statusList.find(s => s.value === statusValue)?.isFinal === true;
 
     const loadReturns = async (silent = false) => {
         if (!silent) setLoading(true);
@@ -160,11 +166,6 @@ export default function ReturnsPage() {
         } finally {
             if (!silent) setLoading(false);
         }
-    };
-
-    const saveReturns = (_newReturns: Return[]) => {
-        // Data is now saved via individual API calls
-        loadReturns();
     };
 
     const handleAdd = () => {
@@ -210,6 +211,7 @@ export default function ReturnsPage() {
         const newLog: ProcessLog = {
             timestamp,
             note: tempNote.trim(),
+            createdBy: currentUser || undefined,
         };
 
         setProcessLogs([...processLogs, newLog]);
@@ -600,6 +602,7 @@ export default function ReturnsPage() {
                     const newLog: ProcessLog = {
                         timestamp,
                         note: quickNote.trim(),
+                        createdBy: currentUser || undefined,
                     };
 
                     const updatedLogs = [...logs, newLog];
@@ -648,6 +651,11 @@ export default function ReturnsPage() {
                                 <Tag color="blue" style={{ fontSize: 10, marginRight: 4 }}>
                                     {log.timestamp}
                                 </Tag>
+                                {log.createdBy && (
+                                    <Tag color="geekblue" style={{ fontSize: 10, marginRight: 4 }}>
+                                        @{log.createdBy}
+                                    </Tag>
+                                )}
                                 <Text style={{ fontSize: 12 }}>{log.note}</Text>
                             </div>
                         ))}
@@ -713,7 +721,7 @@ export default function ReturnsPage() {
             width: 200,
             render: (packer, record) => {
                 // Disable packer change in history tab
-                const isInHistory = activeTab === 'history' && record.status === 'completed';
+                const isInHistory = activeTab === 'history' && isFinalStatus(record.status);
 
                 return (
                     <Select
@@ -827,28 +835,46 @@ export default function ReturnsPage() {
                 };
 
                 // Disable status change in history tab
-                const isInHistory = activeTab === 'history' && status === 'completed';
+                const isInHistory = activeTab === 'history' && isFinalStatus(status);
 
                 return (
                     <Select
                         value={status}
                         disabled={isInHistory}
                         onChange={async (newStatus) => {
-                            // Validation: Nếu chuyển sang "completed" mà chưa có packer
+                            // Validation: chưa có packer không cho chuyển Hoàn thành
                             if (newStatus === 'completed' && !record.packer) {
-                                message.warning('⚠️ Vui lòng điền "Nhân viên đóng gói" trước khi chuyển sang Hoàn thành!');
+                                message.warning('⚠️ Vui lòng chọn "Nhân viên đóng gói" trước khi chuyển sang Hoàn thành!');
                                 return;
                             }
 
-                            // 🔧 FIX: Gọi API update status vào DB
-                            try {
-                                await window.electronAPI.returns.update(record.id, { status: newStatus });
-                                console.log(`✅ Đã cập nhật status → ${newStatus} cho phiếu #${record.id}`);
-                                await loadReturns();
-                                message.success('Đã cập nhật trạng thái!');
-                            } catch (err) {
-                                console.error('❌ Lỗi cập nhật trạng thái:', err);
-                                message.error('Lỗi cập nhật trạng thái!');
+                            const doUpdate = async () => {
+                                try {
+                                    await window.electronAPI.returns.update(record.id, { status: newStatus });
+                                    await loadReturns();
+                                    message.success('Đã cập nhật trạng thái!');
+                                } catch (err) {
+                                    message.error('Lỗi cập nhật trạng thái!');
+                                }
+                            };
+
+                            // Xác nhận trước khi chuyển sang Hoàn thành
+                            if (newStatus === 'completed') {
+                                Modal.confirm({
+                                    title: '✅ Xác nhận hoàn thành?',
+                                    content: (
+                                        <div>
+                                            <p>Phiếu <strong>{record.complaintCode}</strong> sẽ được chuyển sang <strong>Hoàn thành</strong> và lưu vào Lịch sử.</p>
+                                            <p style={{ color: '#ff4d4f', marginBottom: 0 }}>Hành động này không thể hoàn tác!</p>
+                                        </div>
+                                    ),
+                                    okText: 'Xác nhận',
+                                    okType: 'primary',
+                                    cancelText: 'Hủy',
+                                    onOk: doUpdate,
+                                });
+                            } else {
+                                await doUpdate();
                             }
                         }}
                         style={{ width: '100%' }}
@@ -1244,7 +1270,7 @@ export default function ReturnsPage() {
                                 </Select>
                             </Form.Item>
 
-                            <Form.Item label="Nhân viên đóng gói" name="packer">
+                            <Form.Item label="Nhân viên đóng gói" name="packer" rules={[{ required: true, message: 'Vui lòng chọn nhân viên đóng gói!' }]}>
                                 <Select size="large" placeholder="Chọn nhân viên..." showSearch allowClear>
                                     {packerList.map(name => (
                                         <Select.Option key={name} value={name}>
@@ -1280,6 +1306,11 @@ export default function ReturnsPage() {
                                             <Tag color="blue" style={{ alignSelf: 'flex-start' }}>
                                                 {log.timestamp}
                                             </Tag>
+                                            {log.createdBy && (
+                                                <Tag color="geekblue" style={{ alignSelf: 'flex-start', fontSize: 12 }}>
+                                                    @{log.createdBy}
+                                                </Tag>
+                                            )}
                                             <div style={{ flex: 1, fontSize: 14 }}>{log.note}</div>
                                             <Button
                                                 type="text"

@@ -1,0 +1,820 @@
+/* ===== ATTENDANCE MODULE - Match demo.html 100% ===== */
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+
+.attendance-module {
+    font-family: 'Plus Jakarta Sans', sans-serif !important;
+    background: #f4f7f6 !important;
+    padding: 32px 40px !important;
+    min-height: 100%;
+}
+
+.attendance-module * {
+    font-family: 'Plus Jakarta Sans', sans-serif !important;
+}
+
+/* ===== PAGE HEADER ===== */
+.att-page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+}
+
+.att-page-header h2 {
+    font-size: 24px !important;
+    font-weight: 900 !important;
+    color: #1f2937 !important;
+    margin: 0 !important;
+    letter-spacing: -0.5px;
+}
+
+.att-page-header .att-subtitle {
+    font-size: 12px;
+    font-weight: 500;
+    color: #9ca3af;
+    font-style: italic;
+    margin-top: 2px;
+}
+
+/* Header Buttons */
+.att-btn-config {
+    background: #fff !important;
+    color: #374151 !important;
+    border: 1px solid #e5e7eb !important;
+    padding: 8px 24px !important;
+    height: 44px !important;
+    border-radius: 16px !important;
+    font-weight: 900 !important;
+    font-size: 12px !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+}
+
+.att-btn-config:hover {
+    background: #f9fafb !important;
+    border-color: #d1d5db !important;
+}
+
+.att-btn-lock {
+    background: #10b981 !important;
+    color: #fff !important;
+    border: none !important;
+    padding: 8px 32px !important;
+    height: 44px !important;
+    border-radius: 16px !important;
+    font-weight: 900 !important;
+    font-size: 12px !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+    box-shadow: 0 8px 24px rgba(16, 185, 129, 0.25) !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+}
+
+.att-btn-lock:hover {
+    background: #059669 !important;
+}
+
+/* ===== TABS ===== */
+
+/* Sticky wrapper for tabs */
+.att-tabs-sticky {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: #f4f7f6;
+    padding-bottom: 0;
+    margin: -32px -40px 24px -40px;
+    padding: 0 40px;
+}
+
+.att-tabs-sticky .ant-tabs {
+    background: #fff;
+    border-radius: 0 0 24px 24px;
+    box-shadow: 0 10px 15px -3px rgba(0,0,0,0.05), 0 4px 6px -2px rgba(0,0,0,0.02);
+    border: 1px solid #f3f4f6;
+    border-top: none;
+}
+
+.att-tabs-sticky .ant-tabs-nav {
+    margin: 0 !important;
+    padding: 0 40px !important;
+    border-bottom: none !important;
+    background: #fff;
+    border-radius: 0 0 24px 24px;
+}
+
+.att-tabs-sticky .ant-tabs-content-holder {
+    padding: 0 !important;
+    display: none !important;
+}
+
+/* Tab content area below header */
+.att-tab-content {
+    background: #fff;
+    border-radius: 24px;
+    padding: 32px 40px;
+    box-shadow: 0 10px 15px -3px rgba(0,0,0,0.05), 0 4px 6px -2px rgba(0,0,0,0.02);
+    border: 1px solid #f3f4f6;
+}
+
+.attendance-module .ant-tabs {
+    background: #fff;
+    border-radius: 24px;
+    overflow: hidden;
+    box-shadow: 0 10px 15px -3px rgba(0,0,0,0.05), 0 4px 6px -2px rgba(0,0,0,0.02);
+    border: 1px solid #f3f4f6;
+}
+
+.attendance-module .ant-tabs-nav {
+    margin: 0 !important;
+    padding: 0 40px !important;
+    border-bottom: 1px solid #f3f4f6 !important;
+}
+
+.attendance-module .ant-tabs-tab {
+    padding: 20px 0 !important;
+    margin: 0 24px 0 0 !important;
+    font-size: 12px !important;
+    text-transform: uppercase !important;
+    letter-spacing: 1.5px !important;
+    font-weight: 800 !important;
+    color: #4b5563 !important;
+    transition: all 0.2s !important;
+}
+
+.attendance-module .ant-tabs-tab:hover {
+    color: #10b981 !important;
+}
+
+.attendance-module .ant-tabs-tab-active .ant-tabs-tab-btn {
+    color: #059669 !important;
+    font-weight: 900 !important;
+}
+
+.attendance-module .ant-tabs-tab:hover {
+    color: #059669 !important;
+}
+
+.attendance-module .ant-tabs-ink-bar {
+    background: #10b981 !important;
+    height: 4px !important;
+    border-radius: 4px 4px 0 0 !important;
+}
+
+.attendance-module .ant-tabs-content-holder {
+    padding: 32px 40px !important;
+}
+
+/* ===== STAT CARDS ===== */
+.att-stat-card {
+    background: #fff;
+    padding: 24px 28px;
+    border-radius: 20px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.04);
+    border: 1px solid #f3f4f6;
+    border-left: 4px solid #d1d5db;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    transition: all 0.2s ease;
+    position: relative;
+}
+
+.att-stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+}
+
+.att-stat-card .att-stat-icon {
+    font-size: 20px;
+    margin-bottom: 4px;
+    opacity: 0.9;
+}
+
+.att-stat-card .att-stat-label {
+    font-size: 10px;
+    font-weight: 900;
+    color: #9ca3af;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+}
+
+.att-stat-card .att-stat-value {
+    font-size: 26px;
+    font-weight: 900;
+    color: #1f2937;
+    letter-spacing: -0.5px;
+}
+
+.att-stat-card.emerald { border-left-color: #10b981; background: linear-gradient(135deg, #fff 70%, #ecfdf5 100%); }
+.att-stat-card.emerald .att-stat-label { color: #34d399; }
+.att-stat-card.emerald .att-stat-value { color: #059669; }
+
+.att-stat-card.blue { border-left-color: #3b82f6; background: linear-gradient(135deg, #fff 70%, #eff6ff 100%); }
+.att-stat-card.blue .att-stat-label { color: #60a5fa; }
+.att-stat-card.blue .att-stat-value { color: #2563eb; }
+
+.att-stat-card.purple { border-left-color: #7c3aed; background: linear-gradient(135deg, #fff 70%, #f5f3ff 100%); }
+
+.att-stat-card.purple .att-stat-label { color: #f87171; }
+.att-stat-card.purple .att-stat-value { color: #7c3aed; }
+.att-stat-card.purple { border-color: #fef2f2; }
+
+/* ===== TABLE ===== */
+.attendance-module .ant-table {
+    border-radius: 24px !important;
+    overflow: hidden !important;
+}
+
+.attendance-module .att-table-card {
+    background: #fff;
+    border-radius: 24px;
+    box-shadow: 0 10px 15px -3px rgba(0,0,0,0.05), 0 4px 6px -2px rgba(0,0,0,0.02);
+    border: 1px solid #f3f4f6;
+    overflow: hidden;
+}
+
+.attendance-module .ant-table-thead > tr > th {
+    background: rgba(249, 250, 251, 0.5) !important;
+    font-size: 11px !important;
+    font-weight: 900 !important;
+    color: #374151 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 1px !important;
+    padding: 20px 32px !important;
+    border-bottom: 1px solid #f3f4f6 !important;
+}
+
+.attendance-module .ant-table-tbody > tr > td {
+    padding: 20px 32px !important;
+    border-bottom: 1px solid #f0f0f0 !important;
+    font-size: 14px !important;
+    font-weight: 600 !important;
+    color: #1f2937 !important;
+}
+
+/* Zebra striping - dòng chẵn tint nhẹ */
+.attendance-module .ant-table-tbody > tr:nth-child(even) > td {
+    background: #fafbfc !important;
+}
+
+.attendance-module .ant-table-tbody > tr:hover > td {
+    background: rgba(16, 185, 129, 0.06) !important;
+    cursor: pointer;
+}
+
+/* Cột cuối (Thực lĩnh) nổi bật */
+.attendance-module .ant-table-tbody > tr > td:last-child {
+    background: rgba(16, 185, 129, 0.03) !important;
+    border-left: 2px solid #ecfdf5;
+}
+
+.att-emp-name {
+    font-weight: 900;
+    color: #111827;
+    font-size: 14px;
+    white-space: nowrap;
+}
+
+.att-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    background: #f3f4f6;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 900;
+    font-size: 14px;
+    color: #6b7280;
+    flex-shrink: 0;
+}
+
+.att-emp-badge {
+    font-size: 9px;
+    font-weight: 700;
+    color: #9ca3af;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-top: 4px;
+}
+
+.att-money-emerald {
+    font-weight: 900;
+    color: #059669;
+}
+
+.att-money-blue {
+    font-weight: 900;
+    color: #2563eb;
+}
+
+.att-money-red {
+    font-weight: 900;
+    color: #dc2626;
+}
+
+.att-money-black {
+    font-weight: 900;
+    color: #1f2937;
+    font-size: 15px;
+}
+
+.att-money-gray {
+    font-weight: 700;
+    color: #374151;
+    font-size: 13px;
+}
+
+.att-money-final {
+    font-weight: 900;
+    color: #059669;
+    font-size: 16px;
+    letter-spacing: -0.3px;
+}
+
+/* ===== HERO BANNER (Đóng gói) ===== */
+.att-hero-banner {
+    background: #10b981;
+    padding: 40px;
+    border-radius: 32px;
+    color: #fff;
+    box-shadow: 0 20px 40px rgba(16, 185, 129, 0.15);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    position: relative;
+    overflow: hidden;
+}
+
+.att-hero-banner::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    right: -20%;
+    width: 400px;
+    height: 400px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 50%;
+}
+
+.att-hero-label {
+    font-size: 11px;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    opacity: 0.8;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.att-hero-value {
+    font-size: 42px;
+    font-weight: 900;
+    letter-spacing: -1px;
+}
+
+.att-hero-box {
+    background: rgba(255,255,255,0.1);
+    backdrop-filter: blur(12px);
+    padding: 24px 32px;
+    border-radius: 24px;
+    border: 1px solid rgba(255,255,255,0.2);
+    text-align: center;
+    min-width: 280px;
+    position: relative;
+    z-index: 1;
+}
+
+.att-hero-box-label {
+    font-size: 11px;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    opacity: 0.8;
+    margin-bottom: 4px;
+}
+
+.att-hero-box-value {
+    font-size: 32px;
+    font-weight: 900;
+    color: #fde047;
+}
+
+/* ===== TAG BADGES ===== */
+.att-tag-green {
+    background: #ecfdf5 !important;
+    color: #059669 !important;
+    border: 1px solid #a7f3d0 !important;
+    border-radius: 999px !important;
+    font-weight: 900 !important;
+    font-size: 11px !important;
+    padding: 2px 16px !important;
+    height: auto !important;
+    line-height: 22px !important;
+    white-space: nowrap !important;
+}
+
+.att-tag-orange {
+    background: #fff7ed !important;
+    color: #ea580c !important;
+    border: 1px solid #fed7aa !important;
+    border-radius: 999px !important;
+    font-weight: 900 !important;
+    font-size: 11px !important;
+    padding: 2px 16px !important;
+    height: auto !important;
+    line-height: 22px !important;
+    white-space: nowrap !important;
+}
+
+.att-tag-blue {
+    background: #eff6ff !important;
+    color: #2563eb !important;
+    border: 1px solid #bfdbfe !important;
+    border-radius: 4px !important;
+    font-weight: 900 !important;
+    font-size: 10px !important;
+    text-transform: uppercase !important;
+    padding: 1px 8px !important;
+    height: auto !important;
+    line-height: 18px !important;
+}
+
+.att-tag-red {
+    background: #fef2f2 !important;
+    color: #dc2626 !important;
+    border: 1px solid #fecaca !important;
+    border-radius: 4px !important;
+    font-weight: 900 !important;
+    font-size: 10px !important;
+    text-transform: uppercase !important;
+    padding: 1px 8px !important;
+    height: auto !important;
+    line-height: 18px !important;
+}
+
+/* ===== ATTENDANCE PILLS ===== */
+.att-pill {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 10px;
+    font-weight: 900;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 4px;
+    min-width: 72px;
+    cursor: default;
+    letter-spacing: 0.3px;
+}
+
+.att-pill-present {
+    background: #ecfdf5;
+    color: #10b981;
+    border: 1px solid #a7f3d0;
+}
+
+.att-pill-late {
+    background: #fffbeb;
+    color: #f59e0b;
+    border: 1px solid #fcd34d;
+}
+
+.att-pill-absent {
+    background: #f9fafb;
+    color: #9ca3af;
+    border: 1px solid #e5e7eb;
+}
+
+.att-sunday-rest {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 900;
+    text-transform: uppercase;
+    color: #9ca3af;
+    letter-spacing: 1.5px;
+    padding: 4px 8px;
+    border-radius: 8px;
+    border: 1.5px dashed #d1d5db;
+    background: #fafafa;
+    min-height: 52px;
+    min-width: 72px;
+    gap: 4px;
+}
+
+/* Sunday column */
+.attendance-module .ant-table td.att-sunday-col,
+.attendance-module .ant-table th.att-sunday-col {
+    background: rgba(249, 250, 251, 0.5) !important;
+    border-left: 2px solid #f0f0f0 !important;
+}
+
+/* ===== SECTION CARDS (Stats, Logs) ===== */
+.att-section-title {
+    font-size: 11px;
+    font-weight: 900;
+    color: #1f2937;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    padding: 0 8px;
+    margin-bottom: 16px;
+}
+
+.att-employee-stat-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: #fff;
+    border-radius: 16px;
+    border: 1px solid #f3f4f6;
+    box-shadow: 0 4px 6px -1px rgba(0,0,0,0.03);
+    transition: background 0.2s;
+}
+
+.att-employee-stat-card:hover {
+    background: #f9fafb;
+}
+
+.att-stat-mini-label {
+    font-size: 10px;
+    font-weight: 900;
+    text-transform: uppercase;
+}
+
+.att-stat-mini-value {
+    font-size: 14px;
+    font-weight: 900;
+}
+
+/* ===== Log rows ===== */
+.att-log-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid #f9fafb;
+    transition: background 0.15s;
+}
+
+.att-log-row:hover {
+    background: rgba(249, 250, 251, 0.5);
+}
+
+.att-log-date {
+    font-size: 11px;
+    font-weight: 900;
+    color: #d1d5db;
+    min-width: 56px;
+}
+
+.att-log-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: #1f2937;
+}
+
+.att-log-status-ok {
+    background: #ecfdf5;
+    color: #10b981;
+    padding: 3px 12px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.att-log-status-late {
+    background: #fef2f2;
+    color: #ef4444;
+    padding: 3px 12px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+/* ===== FUND HERO (Purple) ===== */
+.att-fund-hero {
+    background: #7c3aed;
+    padding: 28px 32px;
+    border-radius: 24px;
+    color: #fff;
+    box-shadow: 0 16px 32px rgba(124, 58, 237, 0.15);
+}
+
+.att-fund-hero .att-stat-label {
+    font-size: 10px;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    opacity: 0.8;
+    margin-bottom: 8px;
+}
+
+.att-fund-hero .att-stat-value {
+    font-size: 32px;
+    font-weight: 900;
+}
+
+/* ===== LEGEND BADGES ===== */
+.att-legend {
+    display: flex;
+    gap: 12px;
+}
+
+.att-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    font-weight: 900;
+    text-transform: uppercase;
+    padding: 4px 12px;
+    border-radius: 8px;
+    border: 1px solid;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+
+.att-legend-item.present {
+    color: #10b981;
+    background: #ecfdf5;
+    border-color: #a7f3d0;
+}
+
+.att-legend-item.late {
+    color: #f59e0b;
+    background: #fffbeb;
+    border-color: #fcd34d;
+}
+
+.att-legend-item.absent {
+    color: #9ca3af;
+    background: #f9fafb;
+    border-color: #e5e7eb;
+}
+
+/* ===== MONTH PICKER ===== */
+.att-month-picker {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    background: #fff;
+    padding: 4px;
+    border-radius: 16px;
+    border: 1px solid #f3f4f6;
+    box-shadow: 0 4px 6px -1px rgba(0,0,0,0.03);
+}
+
+.att-month-btn {
+    padding: 6px 16px !important;
+    font-size: 11px !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    color: #9ca3af !important;
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    height: auto !important;
+    border-radius: 12px !important;
+}
+
+.att-month-btn:hover {
+    color: #10b981 !important;
+}
+
+.att-month-btn-active {
+    background: #10b981 !important;
+    color: #fff !important;
+    font-weight: 900 !important;
+    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2) !important;
+}
+
+.att-month-btn-active:hover {
+    background: #059669 !important;
+    color: #fff !important;
+}
+
+/* ===== PAYSLIP MODAL ===== */
+.att-payslip-modal .ant-modal-content {
+    border-radius: 32px !important;
+    overflow: hidden;
+}
+
+.att-payslip-modal .ant-modal-header {
+    background: rgba(249, 250, 251, 0.5);
+    padding: 32px 40px !important;
+    border-bottom: 1px solid #f3f4f6 !important;
+}
+
+.att-payslip-modal .ant-modal-title {
+    font-weight: 900 !important;
+    font-size: 20px !important;
+    text-transform: uppercase !important;
+    text-align: center;
+    letter-spacing: 1px;
+}
+
+.att-payslip-modal .ant-modal-body {
+    padding: 40px !important;
+}
+
+.att-payslip-modal .ant-modal-footer {
+    padding: 32px 40px !important;
+    background: rgba(249, 250, 251, 0.8);
+    border-top: 1px solid #f3f4f6 !important;
+}
+
+.att-payslip-line {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+}
+
+.att-payslip-line .att-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+}
+
+.att-payslip-total {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 24px;
+    border-top: 4px solid #10b981;
+    margin-top: 24px;
+}
+
+.att-payslip-total-label {
+    font-weight: 900;
+    font-size: 16px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: #1f2937;
+}
+
+.att-payslip-total-value {
+    font-size: 32px;
+    font-weight: 900;
+    color: #059669;
+}
+
+/* ===== CONFIG MODAL ===== */
+.att-config-modal .ant-modal-content {
+    border-radius: 32px !important;
+}
+
+.att-config-group {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.att-config-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: #f9fafb;
+    border-radius: 12px;
+    border: 1px solid #f3f4f6;
+    transition: background 0.15s;
+}
+
+.att-config-row:hover {
+    background: #f3f4f6;
+}
+
+.att-config-row .att-config-label {
+    font-weight: 700;
+    font-size: 13px;
+    color: #1f2937;
+}
+
+.att-config-row .att-config-desc {
+    font-size: 11px;
+    color: #6b7280;
+    margin-top: 2px;
+}
+
+/* ===== SCROLLBAR ===== */
+.attendance-module ::-webkit-scrollbar { width: 6px; height: 6px; }
+.attendance-module ::-webkit-scrollbar-track { background: transparent; }
+.attendance-module ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+.attendance-module ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
