@@ -143,11 +143,11 @@ export default function ExportOrdersPage() {
     const handleAddExportItem = () => {
         const productId = form.getFieldValue('tempProductId');
         const color = form.getFieldValue('tempColor');
-        const quantity = form.getFieldValue('tempQuantity');
-        const unitPrice = form.getFieldValue('tempUnitPrice') || 0;
+        const quantity = 1;
+        const unitPrice = 0;
 
-        if (!productId || !quantity) {
-            message.warning('Vui lòng chọn sản phẩm và nhập số lượng!');
+        if (!productId) {
+            message.warning('Vui lòng chọn sản phẩm!');
             return;
         }
         const product = products.find(p => p.id === productId);
@@ -185,7 +185,7 @@ export default function ExportOrdersPage() {
         setExportItems(prev => [...prev, newItem]);
 
         // Reset temp fields, giữ focus để thêm tiếp
-        form.setFieldsValue({ tempProductId: undefined, tempColor: undefined, tempQuantity: undefined, tempUnitPrice: undefined });
+        form.setFieldsValue({ tempProductId: undefined, tempColor: undefined });
         setTempProduct(null);
         setTempVariants([]);
         if (autoAddTimeoutRef.current) clearTimeout(autoAddTimeoutRef.current);
@@ -628,39 +628,6 @@ export default function ExportOrdersPage() {
                             </Form.Item>
                         </div>
 
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 12, marginTop: 12, alignItems: 'end' }}>
-                            <Form.Item label="Số lượng" name="tempQuantity" style={{ marginBottom: 0 }}>
-                                <InputNumber
-                                    placeholder="0"
-                                    min={1}
-                                    style={{ width: '100%' }}
-                                    size="large"
-                                    onChange={handleTempQuantityChange}
-                                />
-                            </Form.Item>
-
-                            <Form.Item label="Giá xuất" name="tempUnitPrice" style={{ marginBottom: 0 }}>
-                                <InputNumber
-                                    placeholder="0"
-                                    min={0}
-                                    style={{ width: '100%' }}
-                                    size="large"
-                                    formatter={value => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                                    onChange={handleTempPriceChange}
-                                />
-                            </Form.Item>
-
-                            <Form.Item label=" " style={{ marginBottom: 0 }}>
-                                <Button
-                                    icon={<PlusOutlined />}
-                                    onClick={handleAddExportItem}
-                                    size="large"
-                                    style={{ borderColor: '#00ab56', color: '#00ab56', background: 'white' }}
-                                >
-                                    Thêm vào
-                                </Button>
-                            </Form.Item>
-                        </div>
                     </div>
 
                     {/* ===== DANH SÁCH SẢN PHẨM ===== */}
