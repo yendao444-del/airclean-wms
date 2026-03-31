@@ -129,6 +129,13 @@ export default function POSPage() {
     const [paying, setPaying] = useState(false);
     const payInputRef = useRef<HTMLInputElement>(null);
 
+    // Đảm bảo payAmount luôn = subtotal khi modal thanh toán mở
+    useEffect(() => {
+        if (paymentModal && payMethod === 'cash') {
+            setPayAmount(subtotal);
+        }
+    }, [paymentModal]);
+
     // === Load Data ===
     useEffect(() => {
         loadData();
@@ -287,6 +294,26 @@ export default function POSPage() {
     };
 
     const confirmPayment = async () => {
+        if (paying) return;
+
+        // Cảnh báo khi khách trả thiếu (chỉ kiểm tra tiền mặt)
+        if (payMethod === 'cash' && payAmount < subtotal) {
+            const shortage = fmt(subtotal - payAmount);
+            Modal.confirm({
+                title: 'Khách trả chưa đủ',
+                content: `Còn thiếu ${shortage}đ. Vẫn muốn tạo đơn với trạng thái "Chưa thanh toán đủ"?`,
+                okText: 'Vẫn tạo đơn',
+                cancelText: 'Quay lại',
+                okButtonProps: { danger: true },
+                onOk: () => doConfirmPayment(),
+            });
+            return;
+        }
+
+        doConfirmPayment();
+    };
+
+    const doConfirmPayment = async () => {
         if (paying) return;
         setPaying(true);
         try {
@@ -545,96 +572,101 @@ export default function POSPage() {
             {/* === PAYMENT MODAL === */}
             <Modal open={paymentModal}
                 title={null}
-                footer={null} onCancel={() => !paying && setPaymentModal(false)} width={440}
-                styles={{ body: { padding: '20px 24px' } }}
+                footer={null} onCancel={() => !paying && setPaymentModal(false)} width={420}
+                styles={{ body: { padding: 0 } }}
+                centered
             >
                 <div onKeyDown={handlePayKeyDown}>
+                    {/* Header */}
+                    <div style={{ background: '#00ab56', borderRadius: '8px 8px 0 0', padding: '16px 24px', textAlign: 'center' }}>
+                        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.8)', marginBottom: 2 }}>
+                            {payMethod === 'cash' && '💵 Tiền mặt'}
+                            {payMethod === 'bank' && '🏦 Chuyển khoản'}
+                            {payMethod === 'card' && '💳 Thẻ'}
+                            {payMethod === 'momo' && '📱 MoMo'}
+                        </div>
+                        <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.85)', marginBottom: 4 }}>Tổng thanh toán</div>
+                        <div style={{ fontSize: 36, fontWeight: 800, color: '#fff', letterSpacing: -1 }}>{fmt(subtotal)}đ</div>
+                    </div>
+
+                    <div style={{ padding: '20px 24px' }}>
                     {payMethod === 'cash' ? (
                         <>
-                            {/* CASH MODE - Big clean UI */}
-                            <div style={{ textAlign: 'center', marginBottom: 20 }}>
-                                <div style={{ fontSize: 13, color: '#999', marginBottom: 4 }}>💵 Thanh toán tiền mặt</div>
-                                <div style={{ fontSize: 14, color: '#666', marginBottom: 2 }}>Tổng thanh toán</div>
-                                <div style={{ fontSize: 32, fontWeight: 800, color: '#00ab56' }}>{fmt(subtotal)}đ</div>
-                            </div>
-
-                            <div style={{ marginBottom: 16 }}>
-                                <div style={{ fontSize: 13, fontWeight: 600, color: '#333', marginBottom: 6 }}>Khách trả</div>
-                                <InputNumber
-                                    ref={payInputRef as any}
-                                    value={payAmount}
-                                    onChange={v => setPayAmount(v || 0)}
-                                    formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                                    parser={v => Number(v?.replace(/,/g, '') || 0)}
-                                    style={{ width: '100%', fontSize: 22 }}
-                                    size="large"
-                                    onPressEnter={confirmPayment}
-                                    autoFocus
-                                />
+                            {/* Khách trả + Tiền thừa side by side */}
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>
+                                <div>
+                                    <div style={{ fontSize: 12, color: '#888', marginBottom: 6, fontWeight: 500 }}>Khách trả</div>
+                                    <InputNumber
+                                        ref={payInputRef as any}
+                                        value={payAmount}
+                                        onChange={v => { if (v !== null) setPayAmount(v); }}
+                                        formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                                        parser={v => Number(v?.replace(/,/g, '') || 0)}
+                                        style={{ width: '100%', fontSize: 18, fontWeight: 700 }}
+                                        size="large"
+                                        onPressEnter={confirmPayment}
+                                        min={0}
+                                    />
+                                </div>
+                                <div style={{
+                                    background: payAmount === 0 ? '#fafafa' : payAmount >= subtotal ? '#f0fff5' : '#fff1f0',
+                                    border: `1.5px solid ${payAmount === 0 ? '#e8e8e8' : payAmount >= subtotal ? '#b7eb8f' : '#ffccc7'}`,
+                                    borderRadius: 8, padding: '8px 12px', textAlign: 'center', display: 'flex', flexDirection: 'column', justifyContent: 'center',
+                                }}>
+                                    <div style={{ fontSize: 11, color: '#aaa', marginBottom: 4 }}>
+                                        {payAmount === 0 ? 'Tiền thừa' : payAmount >= subtotal ? 'Tiền thừa' : 'Còn thiếu'}
+                                    </div>
+                                    <div style={{
+                                        fontSize: 20, fontWeight: 800,
+                                        color: payAmount === 0 ? '#ccc' : payAmount > subtotal ? '#fa8c16' : payAmount < subtotal ? '#f5222d' : '#00ab56',
+                                    }}>
+                                        {payAmount === 0 ? '—' : `${payAmount < subtotal ? '-' : ''}${fmt(Math.abs(payAmount - subtotal))}đ`}
+                                    </div>
+                                </div>
                             </div>
 
                             {/* Quick cash buttons */}
-                            <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
                                 {[subtotal, ...[10000, 20000, 50000, 100000, 200000, 500000].filter(v => v >= subtotal)].slice(0, 6).map((v, i) => (
                                     <button key={i}
                                         onClick={() => { setPayAmount(v); setTimeout(() => payInputRef.current?.focus(), 50); }}
                                         style={{
-                                            padding: '6px 12px', border: payAmount === v ? '2px solid #00ab56' : '1px solid #e0e0e0',
-                                            borderRadius: 8, background: payAmount === v ? '#f0fff5' : '#fafafa',
+                                            padding: '5px 11px', border: payAmount === v ? '2px solid #00ab56' : '1px solid #e0e0e0',
+                                            borderRadius: 20, background: payAmount === v ? '#f0fff5' : '#fafafa',
                                             cursor: 'pointer', fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
-                                            color: payAmount === v ? '#00ab56' : '#666',
+                                            color: payAmount === v ? '#00ab56' : '#555',
                                         }}
                                     >
                                         {fmt(v)}
                                     </button>
                                 ))}
                             </div>
-
-                            {/* Change display - BIG */}
-                            <div style={{
-                                padding: '16px 20px', background: payAmount >= subtotal ? '#f0fff5' : '#fff8e1',
-                                borderRadius: 12, textAlign: 'center', marginBottom: 16,
-                                border: `2px solid ${payAmount >= subtotal ? '#c8e6c9' : '#ffe0b2'}`,
-                            }}>
-                                <div style={{ fontSize: 13, color: '#888', marginBottom: 4 }}>Tiền thừa trả khách</div>
-                                <div style={{
-                                    fontSize: 36, fontWeight: 800,
-                                    color: payAmount > subtotal ? '#ff6f00' : '#00ab56',
-                                }}>
-                                    {fmt(Math.max(0, payAmount - subtotal))}đ
-                                </div>
-                            </div>
                         </>
                     ) : (
-                        <>
-                            {/* NON-CASH MODE */}
-                            <div style={{ textAlign: 'center', padding: '20px 0' }}>
-                                <div style={{ fontSize: 48, marginBottom: 12 }}>
-                                    {payMethod === 'bank' && '🏦'}
-                                    {payMethod === 'card' && '💳'}
-                                    {payMethod === 'momo' && '📱'}
-                                </div>
-                                <div style={{ fontSize: 14, color: '#666', marginBottom: 8 }}>
-                                    {payMethod === 'bank' && 'Khách thanh toán chuyển khoản'}
-                                    {payMethod === 'card' && 'Khách thanh toán bằng thẻ'}
-                                    {payMethod === 'momo' && 'Khách thanh toán qua MoMo'}
-                                </div>
-                                <div style={{ fontSize: 36, fontWeight: 800, color: '#00ab56' }}>
-                                    {fmt(subtotal)}đ
-                                </div>
+                        <div style={{ textAlign: 'center', padding: '12px 0 4px' }}>
+                            <div style={{ fontSize: 42, marginBottom: 8 }}>
+                                {payMethod === 'bank' && '🏦'}
+                                {payMethod === 'card' && '💳'}
+                                {payMethod === 'momo' && '📱'}
                             </div>
-                        </>
+                            <div style={{ fontSize: 13, color: '#888' }}>
+                                {payMethod === 'bank' && 'Khách thanh toán chuyển khoản'}
+                                {payMethod === 'card' && 'Khách thanh toán bằng thẻ'}
+                                {payMethod === 'momo' && 'Khách thanh toán qua MoMo'}
+                            </div>
+                        </div>
                     )}
+                    </div>
 
-                    <div className="pos-pay-actions">
-                        <button className="pos-btn-cancel" onClick={() => !paying && setPaymentModal(false)} disabled={paying}>Hủy</button>
-                        <button className="pos-btn-confirm" onClick={confirmPayment} disabled={paying}>
+                    {/* Footer actions */}
+                    <div style={{ padding: '0 24px 20px', display: 'flex', gap: 10 }}>
+                        <button className="pos-btn-cancel" onClick={() => !paying && setPaymentModal(false)} disabled={paying} style={{ flex: 1 }}>Hủy</button>
+                        <button className="pos-btn-confirm" onClick={confirmPayment} disabled={paying} style={{ flex: 2 }}>
                             {paying ? '⏳ Đang xử lý...' : '✅ Thanh toán'}
-                            {paying && <span className="pos-pay-spinner" />}
                         </button>
                     </div>
-                    <div style={{ textAlign: 'center', marginTop: 8, fontSize: 11, color: '#bbb' }}>
-                        Nhấn <kbd style={{ padding: '1px 6px', background: '#f0f0f0', borderRadius: 3, border: '1px solid #ddd' }}>Enter</kbd> để thanh toán nhanh
+                    <div style={{ textAlign: 'center', paddingBottom: 12, fontSize: 11, color: '#ccc' }}>
+                        Nhấn <kbd style={{ padding: '1px 6px', background: '#f5f5f5', borderRadius: 3, border: '1px solid #e0e0e0', color: '#888' }}>Enter</kbd> để thanh toán nhanh
                     </div>
                 </div>
             </Modal>

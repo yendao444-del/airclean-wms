@@ -1624,6 +1624,7 @@ export default function PurchasePage() {
                                 style={{ width: '100%' }}
                                 size="large"
                                 format="DD/MM/YYYY HH:mm"
+                                disabled
                             />
                         </Form.Item>
                     </div>

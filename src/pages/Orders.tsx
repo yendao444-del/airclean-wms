@@ -2,12 +2,12 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import '../App.css';
 import {
     Card, Table, Tag, Typography, Spin, Input, Space, Row, Col, Button, message, DatePicker,
-    Modal, Form, InputNumber, Popconfirm, Tooltip,
+    Modal, Form, InputNumber, Popconfirm, Tooltip, Dropdown,
 } from 'antd';
 import {
     OrderedListOutlined, SearchOutlined, DownloadOutlined,
     ArrowUpOutlined, ArrowDownOutlined, FireOutlined,
-    CalendarOutlined, TrophyOutlined, EditOutlined, DeleteOutlined, PlusOutlined, MinusCircleOutlined,
+    CalendarOutlined, TrophyOutlined, EditOutlined, DeleteOutlined, PlusOutlined, MinusCircleOutlined, MoreOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { Dayjs } from 'dayjs';
@@ -105,10 +105,13 @@ export default function OrdersPage() {
             if (posRes.success && posRes.data) {
                 for (const po of posRes.data) {
                     const items = (po.items || []).map((it: any) => ({
+                        productId: it.productId,
                         productName: it.productName || it.name,
                         variantSku: it.sku,
+                        variant: it.variant || null,
                         quantity: it.quantity || it.qty,
                         unitPrice: it.price,
+                        cost: it.cost || 0,
                         total: it.subtotal || (it.price * (it.quantity || it.qty)),
                     }));
                     unified.push({
@@ -401,7 +404,7 @@ export default function OrdersPage() {
 
     const columns: ColumnsType<UnifiedOrder> = [
         {
-            title: 'Ngày', dataIndex: 'date', key: 'date', width: 110,
+            title: 'Ngày', dataIndex: 'date', key: 'date', width: 105,
             sorter: (a, b) => dayjs(a.date).unix() - dayjs(b.date).unix(),
             defaultSortOrder: 'descend',
             render: (d) => {
@@ -410,7 +413,7 @@ export default function OrdersPage() {
             },
         },
         {
-            title: 'Nguồn', dataIndex: 'sourceLabel', key: 'source', width: 95,
+            title: 'Nguồn', dataIndex: 'sourceLabel', key: 'source', width: 80,
             render: (label) => (
                 <Tag style={{ fontWeight: 600, fontSize: 11, borderRadius: 6, background: sourceColors[label] || '#8c8c8c', color: '#fff', border: 'none' }}>
                     {label === 'Shopee' ? '🛒' : label === 'TikTok' ? '🎵' : label === 'POS' ? '🏪' : '📦'} {label}
@@ -418,18 +421,11 @@ export default function OrdersPage() {
             ),
         },
         {
-            title: 'Mã vận đơn', dataIndex: 'tracking', key: 'tracking', width: 155,
-            ellipsis: true,
-            render: (v) => v ? (
-                <Text copyable style={{ fontSize: 12, fontFamily: 'monospace' }}>{v}</Text>
-            ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
-        },
-        {
-            title: 'Mã đơn', dataIndex: 'orderNumber', key: 'orderNumber', width: 170,
+            title: 'Mã đơn', dataIndex: 'orderNumber', key: 'orderNumber', width: 145,
             ellipsis: true, render: (v) => <Text strong style={{ fontSize: 12 }}>{v}</Text>,
         },
         {
-            title: 'Sản phẩm', key: 'items', width: 280,
+            title: 'Sản phẩm', key: 'items', width: 220,
             render: (_, record) => {
                 let items: any[] = [];
                 try { items = JSON.parse(record.items); } catch { }
@@ -443,7 +439,7 @@ export default function OrdersPage() {
             },
         },
         {
-            title: 'SL', key: 'qty', width: 75, align: 'center',
+            title: 'SL', key: 'qty', width: 55, align: 'center',
             render: (_, record) => {
                 let items: any[] = [];
                 try { items = JSON.parse(record.items); } catch { }
@@ -458,39 +454,42 @@ export default function OrdersPage() {
             },
         },
         {
-            title: 'Tổng tiền', dataIndex: 'totalAmount', key: 'totalAmount', width: 120,
+            title: 'Tổng tiền', dataIndex: 'totalAmount', key: 'totalAmount', width: 100,
             align: 'right', sorter: (a, b) => a.totalAmount - b.totalAmount,
             render: (v) => <Text strong style={{ color: '#00ab56' }}>{fmt(v)}đ</Text>,
         },
         {
-            title: 'Vận chuyển', dataIndex: 'shipping', key: 'shipping', width: 120,
+            title: 'Người đóng gói', dataIndex: 'createdBy', key: 'createdBy', width: 100,
             ellipsis: true,
             render: (v) => v ? (
-                <Tag style={{ fontSize: 11, borderRadius: 6, background: '#fff7e6', color: '#d46b08', border: '1px solid #ffd591', fontWeight: 500 }}>
-                    🚚 {v}
-                </Tag>
+                <Text style={{ fontSize: 12, fontWeight: 500 }}>{v}</Text>
             ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
         },
         {
-            title: '', key: 'actions', width: 70, fixed: 'right' as const,
+            title: '', key: 'actions', width: 40, fixed: 'right' as const,
             render: (_: any, record: UnifiedOrder) => {
                 if (record.source !== 'pos') return null;
                 return (
-                    <Space size={4}>
-                        <Tooltip title="Sửa đơn">
-                            <Button size="small" type="text" icon={<EditOutlined />} onClick={() => openEdit(record)} />
-                        </Tooltip>
-                        <Popconfirm
-                            title="Xóa đơn hàng?"
-                            description="Kho sẽ được hoàn lại. Không thể khôi phục!"
-                            onConfirm={() => handleDelete(record)}
-                            okText="Xóa" cancelText="Hủy" okButtonProps={{ danger: true }}
-                        >
-                            <Tooltip title="Xóa đơn">
-                                <Button size="small" type="text" danger icon={<DeleteOutlined />} />
-                            </Tooltip>
-                        </Popconfirm>
-                    </Space>
+                    <Dropdown
+                        trigger={['click']}
+                        menu={{
+                            items: [
+                                { key: 'edit', label: 'Sửa đơn', icon: <EditOutlined />, onClick: () => openEdit(record) },
+                                { type: 'divider' },
+                                {
+                                    key: 'delete', label: 'Xóa đơn', icon: <DeleteOutlined />, danger: true,
+                                    onClick: () => Modal.confirm({
+                                        title: 'Xóa đơn hàng?',
+                                        content: 'Kho sẽ được hoàn lại. Không thể khôi phục!',
+                                        okText: 'Xóa', cancelText: 'Hủy', okButtonProps: { danger: true },
+                                        onOk: () => handleDelete(record),
+                                    }),
+                                },
+                            ],
+                        }}
+                    >
+                        <Button size="small" type="text" icon={<MoreOutlined />} />
+                    </Dropdown>
                 );
             },
         },

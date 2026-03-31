@@ -69,9 +69,8 @@ export default function ReturnsPage() {
     // Settings modal
     const [settingsVisible, setSettingsVisible] = useState(false);
 
-    // Packer list management
-    const [packerList, setPackerList] = useState<string[]>([]);
-    const [newPackerName, setNewPackerName] = useState('');
+    // Employee list management
+    const [employees, setEmployees] = useState<any[]>([]);
 
     // Status list management
     const [statusList, setStatusList] = useState<Array<{ value: string; label: string; color: string; isFinal?: boolean }>>([]);
@@ -87,38 +86,25 @@ export default function ReturnsPage() {
     // ✨ State cho collapse/expand logs
     const [collapsedLogs, setCollapsedLogs] = useState<Record<number, boolean>>({});
 
-
     useEffect(() => {
         loadReturns();
-        loadPackerList();
+        loadEmployees();
         loadStatusList();
         const interval = setInterval(() => loadReturns(true), 30000);
         return () => clearInterval(interval);
     }, []);
 
-    const loadPackerList = async () => {
+    const loadEmployees = async () => {
         try {
-            const result = await window.electronAPI.appConfig.get('packerList');
-            if (result.success && result.data) {
-                setPackerList(result.data);
-            } else {
-                // Default packers
-                const defaultPackers = ['Ngô Minh Toàn', 'Nguyễn Văn A', 'Trần Thị B'];
-                setPackerList(defaultPackers);
-                await window.electronAPI.appConfig.set('packerList', defaultPackers);
+            const api = (window as any).electronAPI;
+            const res = await api.users.getAll();
+            if (res.success && res.data) {
+                // Lấy tất cả trừ admin (nếu cần thiết, hoặc lấy hết)
+                setEmployees(res.data.filter((u: any) => u.username !== 'admin'));
             }
         } catch (error) {
-            console.error('Error loading packer list:', error);
-            setPackerList([]);
-        }
-    };
-
-    const savePackerList = async (list: string[]) => {
-        try {
-            await window.electronAPI.appConfig.set('packerList', list);
-            setPackerList(list);
-        } catch (error) {
-            console.error('Error saving packer list:', error);
+            console.error('Error fetching employees:', error);
+            setEmployees([]);
         }
     };
 
@@ -501,7 +487,7 @@ export default function ReturnsPage() {
                         totalAmount: 0,
                         notes: r.processNotes || null,
                         status: r.status || 'pending',
-                        packer: r.packer || null,
+                        packer: currentUser || null,
                     }));
                     const result = await window.electronAPI.returns.bulkCreate(dbRecords);
                     if (!result.success) throw new Error(result.error || 'Lỗi DB');
@@ -741,79 +727,11 @@ export default function ReturnsPage() {
                         size="small"
                         allowClear
                         showSearch
-                        optionLabelProp="label"
-                        dropdownRender={(menu) => (
-                            <>
-                                {menu}
-                                <div style={{ padding: '8px 12px', borderTop: '1px solid #f0f0f0', marginTop: 4 }}>
-                                    <div style={{ display: 'flex', gap: 6 }}>
-                                        <Input
-                                            placeholder="Thêm nhanh..."
-                                            value={newPackerName}
-                                            onChange={(e) => setNewPackerName(e.target.value)}
-                                            onPressEnter={(e) => {
-                                                e.stopPropagation();
-                                                if (newPackerName.trim() && !packerList.includes(newPackerName.trim())) {
-                                                    const updated = [...packerList, newPackerName.trim()];
-                                                    savePackerList(updated);
-                                                    setNewPackerName('');
-                                                    message.success('Đã thêm nhân viên mới!');
-                                                } else if (packerList.includes(newPackerName.trim())) {
-                                                    message.warning('Nhân viên này đã tồn tại!');
-                                                }
-                                            }}
-                                            size="small"
-                                            style={{ flex: 1 }}
-                                            onClick={(e) => e.stopPropagation()}
-                                        />
-                                        <Button
-                                            type="primary"
-                                            icon={<PlusOutlined />}
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (newPackerName.trim() && !packerList.includes(newPackerName.trim())) {
-                                                    const updated = [...packerList, newPackerName.trim()];
-                                                    savePackerList(updated);
-                                                    setNewPackerName('');
-                                                    message.success('Đã thêm nhân viên mới!');
-                                                } else if (packerList.includes(newPackerName.trim())) {
-                                                    message.warning('Nhân viên này đã tồn tại!');
-                                                }
-                                            }}
-                                            size="small"
-                                        />
-                                    </div>
-                                </div>
-                            </>
-                        )}
+                        optionFilterProp="label"
                     >
-                        {packerList.map(name => (
-                            <Select.Option key={name} value={name} label={`👤 ${name}`}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                    <span>👤 {name}</span>
-                                    <Button
-                                        type="text"
-                                        size="small"
-                                        danger
-                                        icon={<DeleteOutlined />}
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            Modal.confirm({
-                                                title: 'Xóa nhân viên?',
-                                                content: `Bạn có chắc muốn xóa "${name}" khỏi danh sách?`,
-                                                okText: 'Xóa',
-                                                okType: 'danger',
-                                                cancelText: 'Hủy',
-                                                onOk: () => {
-                                                    const updated = packerList.filter(p => p !== name);
-                                                    savePackerList(updated);
-                                                    message.success('Đã xóa nhân viên!');
-                                                },
-                                            });
-                                        }}
-                                        style={{ padding: '0 4px' }}
-                                    />
-                                </div>
+                        {employees.map((emp) => (
+                            <Select.Option key={emp.username} value={emp.username} label={`👤 ${emp.displayName || emp.username}`}>
+                                <span>👤 {emp.displayName || emp.username}</span>
                             </Select.Option>
                         ))}
                     </Select>
@@ -1270,11 +1188,11 @@ export default function ReturnsPage() {
                                 </Select>
                             </Form.Item>
 
-                            <Form.Item label="Nhân viên đóng gói" name="packer" rules={[{ required: true, message: 'Vui lòng chọn nhân viên đóng gói!' }]}>
+                            <Form.Item label="Nhân viên đóng gói" name="packer" initialValue={currentUser} rules={[{ required: true, message: 'Vui lòng chọn nhân viên đóng gói!' }]}>
                                 <Select size="large" placeholder="Chọn nhân viên..." showSearch allowClear>
-                                    {packerList.map(name => (
-                                        <Select.Option key={name} value={name}>
-                                            👤 {name}
+                                    {employees.map(emp => (
+                                        <Select.Option key={emp.username} value={emp.username}>
+                                            👤 {emp.displayName || emp.username}
                                         </Select.Option>
                                     ))}
                                 </Select>
@@ -1516,81 +1434,7 @@ export default function ReturnsPage() {
                             </div>
                         </div>
 
-                        {/* Packer Management */}
-                        <div>
-                            <Title level={5}>👤 Quản lý Nhân viên đóng gói</Title>
-                            <div style={{ padding: '16px', background: '#fafafa', borderRadius: 8 }}>
-                                {/* Add new packer */}
-                                <div style={{ marginBottom: 16 }}>
-                                    <Text strong style={{ fontSize: 13, color: '#595959' }}>➕ Thêm nhân viên mới</Text>
-                                    <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                                        <Input
-                                            placeholder="Tên nhân viên mới..."
-                                            value={newPackerName}
-                                            onChange={(e) => setNewPackerName(e.target.value)}
-                                            onPressEnter={() => {
-                                                if (newPackerName.trim() && !packerList.includes(newPackerName.trim())) {
-                                                    const updated = [...packerList, newPackerName.trim()];
-                                                    savePackerList(updated);
-                                                    setNewPackerName('');
-                                                    message.success('Đã thêm nhân viên mới!');
-                                                } else if (packerList.includes(newPackerName.trim())) {
-                                                    message.warning('Nhân viên này đã tồn tại!');
-                                                }
-                                            }}
-                                        />
-                                        <Button
-                                            type="primary"
-                                            icon={<PlusOutlined />}
-                                            onClick={() => {
-                                                if (newPackerName.trim() && !packerList.includes(newPackerName.trim())) {
-                                                    const updated = [...packerList, newPackerName.trim()];
-                                                    savePackerList(updated);
-                                                    setNewPackerName('');
-                                                    message.success('Đã thêm nhân viên mới!');
-                                                } else if (packerList.includes(newPackerName.trim())) {
-                                                    message.warning('Nhân viên này đã tồn tại!');
-                                                }
-                                            }}
-                                        >
-                                            Thêm
-                                        </Button>
-                                    </div>
-                                </div>
 
-                                {/* List existing packers */}
-                                <div>
-                                    <Text strong style={{ fontSize: 13, color: '#595959' }}>📋 Danh sách hiện tại ({packerList.length})</Text>
-                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
-                                        {packerList.map(name => (
-                                            <Tag
-                                                key={name}
-                                                closable
-                                                onClose={(e) => {
-                                                    e.preventDefault();
-                                                    Modal.confirm({
-                                                        title: 'Xóa nhân viên?',
-                                                        content: `Bạn có chắc muốn xóa "${name}" khỏi danh sách?`,
-                                                        okText: 'Xóa',
-                                                        cancelText: 'Hủy',
-                                                        okButtonProps: { danger: true },
-                                                        onOk: () => {
-                                                            const updated = packerList.filter(n => n !== name);
-                                                            savePackerList(updated);
-                                                            message.success(`Đã xóa "${name}"!`);
-                                                        },
-                                                    });
-                                                }}
-                                                color="blue"
-                                                style={{ fontSize: 13 }}
-                                            >
-                                                👤 {name}
-                                            </Tag>
-                                        ))}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
                     </div>
                 </Modal>
             </div>

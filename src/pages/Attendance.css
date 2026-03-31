@@ -818,3 +818,13 @@
 .attendance-module ::-webkit-scrollbar-track { background: transparent; }
 .attendance-module ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
 .attendance-module ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+/* ===== MATRIX TABLE FIT ======= */
+/* Override default huge padding to fit 7 days without horizontal scroll */
+.attendance-module .att-matrix-table .ant-table-thead > tr > th {
+    padding: 12px 10px !important;
+}
+
+.attendance-module .att-matrix-table .ant-table-tbody > tr > td {
+    padding: 12px 10px !important;
+}

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import {
@@ -21,7 +21,7 @@ import {
     Col,
     Statistic,
 } from 'antd';
-import { EditOutlined, DeleteOutlined, SendOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, SettingOutlined, SearchOutlined } from '@ant-design/icons';
+import { EditOutlined, DeleteOutlined, SendOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, SettingOutlined, SearchOutlined, UserOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import * as XLSX from 'xlsx';
@@ -58,7 +58,14 @@ interface EcommerceExport {
     notes?: string;
     status: string;
     createdBy?: string;
+    pickedBy?: string; // 👤 Người đóng gói/pickup
     createdAt?: Date;
+}
+
+interface PackerEmployee {
+    id: number;
+    name: string;
+    username: string;
 }
 
 export default function EcommerceExportPage() {
@@ -107,6 +114,10 @@ export default function EcommerceExportPage() {
     // 🔎 State cho tìm kiếm mã vận đơn đi
     const [searchKeyword, setSearchKeyword] = useState('');
 
+    // 👤 Quick-Tap Avatar: Người đóng gói đang active
+    const [activePacker, setActivePacker] = useState<string>('');
+    const [packerEmployees, setPackerEmployees] = useState<PackerEmployee[]>([]);
+
     // ⚙️ State cho Settings Telegram
     const [settingsModalVisible, setSettingsModalVisible] = useState(false);
     const [telegramSettings, setTelegramSettings] = useState({
@@ -136,6 +147,7 @@ export default function EcommerceExportPage() {
 
         loadEcommerceExports();
         loadProducts();
+        loadPackerEmployees();
 
         // Load telegram settings from database
         (async () => {
@@ -170,6 +182,38 @@ export default function EcommerceExportPage() {
             clearInterval(dailyResetInterval);
         };
     }, []);
+
+    // 👤 Load danh sách nhân viên đóng gói từ attendance config
+    const loadPackerEmployees = async () => {
+        try {
+            // 1. Fetch system users
+            const usersRes = await window.electronAPI.users.getAll();
+            if (usersRes.success && usersRes.data) {
+                // Lọc bỏ tài khoản admin mặc định (vì không phải là người đóng gói)
+                const validUsers = usersRes.data.filter((u: any) => u.username !== 'admin');
+                setPackerEmployees(validUsers.map((u: any) => ({
+                    id: u.id,
+                    name: u.fullName || u.username,
+                    username: u.username,
+                })));
+            }
+            // Load active packer từ session
+            const packerResult = await window.electronAPI.appConfig.get('activePacker');
+            if (packerResult.success && packerResult.data) {
+                setActivePacker(packerResult.data);
+            }
+        } catch (err) {
+            console.error('Lỗi tải danh sách nhân viên:', err);
+        }
+    };
+
+    // 👤 Chọn/bỏ chọn người đóng gói
+    const handleSelectPacker = useCallback((username: string) => {
+        const newPacker = activePacker === username ? '' : username;
+        setActivePacker(newPacker);
+        // Persist
+        window.electronAPI.appConfig.set('activePacker', newPacker);
+    }, [activePacker]);
 
     // Function to get current db state inside async watcher directly
     // to avoid stale closures.
@@ -469,7 +513,8 @@ Thời gian: ${currentTime}`;
                         const updateRes = await window.electronAPI.ecommerceExports.update(foundEcommerceExport.id, {
                             ...foundEcommerceExport,
                             status: 'completed',
-                            createdBy: currentUser || foundEcommerceExport.createdBy || null
+                            createdBy: currentUser || foundEcommerceExport.createdBy || null,
+                            pickedBy: activePacker || currentUser || null
                         });
 
                         if (!updateRes.success) {
@@ -1580,6 +1625,27 @@ Thời gian: ${currentTime}`;
             },
         },
         {
+            title: 'Người ĐG',
+            dataIndex: 'pickedBy',
+            key: 'pickedBy',
+            width: 100,
+            align: 'center' as const,
+            render: (pickedBy: string) => {
+                if (!pickedBy) return <span style={{ color: '#d9d9d9' }}>—</span>;
+                const emp = packerEmployees.find(e => e.username === pickedBy);
+                const shortName = emp ? emp.name.split(' ').pop() : pickedBy;
+                return (
+                    <Tag
+                        icon={<UserOutlined />}
+                        color="purple"
+                        style={{ fontWeight: 700, fontSize: 11 }}
+                    >
+                        {shortName}
+                    </Tag>
+                );
+            },
+        },
+        {
             title: '',
             key: 'actions',
             width: 100,
@@ -1825,37 +1891,119 @@ Thời gian: ${currentTime}`;
                 />
             </div>
 
+            {/* 👤 Quick-Tap Avatar: Chọn người đóng gói */}
+            {packerEmployees.length > 0 && (
+                <div
+                    style={{
+                        display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8,
+                        padding: '8px 14px', background: '#fafafa', borderRadius: 10,
+                        border: '1px solid #f0f0f0',
+                    }}
+                >
+                    <UserOutlined style={{ fontSize: 16, color: '#8c8c8c', flexShrink: 0 }} />
+                    <Text type="secondary" style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, flexShrink: 0 }}>Người ĐG:</Text>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', flex: 1 }}>
+                        {packerEmployees.map(emp => {
+                            const isActive = activePacker === emp.username;
+                            // Kiểm tra nếu tên là các từ chung chung thì lấy username
+                            const isGenericName = ['quản lý', 'nhân viên', 'quản trị viên'].includes((emp.name || '').toLowerCase());
+                            const displayName = isGenericName ? emp.username : (emp.name || emp.username);
+                            const shortName = isGenericName ? emp.username : displayName.split(' ').pop();
+                            
+                            return (
+                                <div
+                                    key={emp.id}
+                                    onClick={() => handleSelectPacker(emp.username)}
+                                    style={{
+                                        display: 'flex', alignItems: 'center', gap: 10,
+                                        padding: isActive ? '8px 20px' : '6px 14px', 
+                                        borderRadius: 12, cursor: 'pointer',
+                                        transition: 'all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275)',
+                                        background: isActive
+                                            ? 'linear-gradient(135deg, #0DD173 0%, #00B159 100%)'
+                                            : '#fff',
+                                        border: isActive ? '3px solid #00C868' : '1px solid #d9d9d9',
+                                        color: isActive ? '#fff' : '#595959',
+                                        boxShadow: isActive ? '0 8px 16px rgba(0, 200, 104, 0.4)' : '0 2px 4px rgba(0,0,0,0.02)',
+                                        transform: isActive ? 'scale(1.08) translateY(-2px)' : (activePacker ? 'scale(0.95)' : 'scale(1)'),
+                                        opacity: activePacker && !isActive ? 0.5 : 1,
+                                    }}
+                                >
+                                    <div style={{
+                                        width: isActive ? 32 : 28, height: isActive ? 32 : 28, borderRadius: '50%',
+                                        background: isActive ? 'rgba(255,255,255,0.25)' : '#f0f0f0',
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                        fontSize: isActive ? 15 : 13, fontWeight: 800,
+                                        transition: 'all 0.3s ease',
+                                        color: isActive ? '#fff' : '#8c8c8c',
+                                    }}>
+                                        {shortName?.charAt(0).toUpperCase()}
+                                    </div>
+                                    <span style={{ fontWeight: isActive ? 800 : 600, fontSize: isActive ? 15 : 13, letterSpacing: isActive ? 0.5 : 0 }}>
+                                        {shortName}
+                                    </span>
+                                    {isActive && <span style={{ fontSize: 16, textShadow: '0 2px 4px rgba(0,0,0,0.3)' }}>✅</span>}
+                                </div>
+                            );
+                        })}
+                    </div>
+                    {activePacker && (
+                        <div style={{
+                            display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
+                            background: '#ECFFF3', padding: '6px 12px', borderRadius: 8, border: '1px dashed #A2F0C1'
+                        }}>
+                            <span style={{ fontSize: 10, color: '#00C868', fontWeight: 700, textTransform: 'uppercase' }}>Đang gán cho</span>
+                            <span style={{ fontSize: 15, color: '#00A352', fontWeight: 900 }}>{activePacker}</span>
+                        </div>
+                    )}
+                </div>
+            )}
+
             {/* Dòng 2: Quét mã vận đơn */}
             <div
                 className="scan-input-wrap"
-                style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8, padding: '8px 14px' }}
+                style={{ 
+                    display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8, padding: '8px 14px',
+                    border: activePacker ? '3px solid #00C868' : '2px solid transparent',
+                    background: activePacker ? '#ECFFF3' : 'transparent',
+                    borderRadius: 12,
+                    transition: 'all 0.3s ease',
+                    boxShadow: activePacker ? '0 0 15px rgba(0, 200, 104, 0.15)' : 'none'
+                }}
             >
-                <BarcodeOutlined style={{ fontSize: 28, color: '#52c41a', flexShrink: 0 }} />
-                <Input
-                    ref={scanInputRef}
-                    value={scanValue}
-                    onChange={(e) => setScanValue(e.target.value)}
-                    onKeyDown={handleScanKeyDown}
-                    placeholder="Quét hoặc nhập Tracking ID để kiểm tra đơn hàng..."
-                    autoFocus
-                    size="large"
-                    style={{
-                        flex: 1, fontSize: 16, fontWeight: 500,
-                        border: 'none', boxShadow: 'none', background: 'transparent',
-                    }}
-                    prefix={<ScanOutlined style={{ color: '#52c41a', fontSize: 18 }} />}
-                />
+                <BarcodeOutlined style={{ fontSize: 32, color: activePacker ? '#00C868' : '#8c8c8c', flexShrink: 0, transition: 'color 0.3s ease' }} />
+                <div style={{ flex: 1, position: 'relative' }}>
+                    <Input
+                        ref={scanInputRef}
+                        value={scanValue}
+                        onChange={(e) => setScanValue(e.target.value)}
+                        onKeyDown={handleScanKeyDown}
+                        placeholder={activePacker ? `ĐANG GÁN ĐƠN CHO: [${activePacker.toUpperCase()}] - Quét mã ngay...` : "Quét hoặc nhập Tracking ID để kiểm tra đơn hàng..."}
+                        autoFocus
+                        size="large"
+                        style={{
+                            width: '100%', fontSize: 16, fontWeight: activePacker ? 700 : 500,
+                            border: 'none', boxShadow: 'none', background: 'transparent',
+                            color: activePacker ? '#008C44' : 'inherit'
+                        }}
+                        prefix={<ScanOutlined style={{ color: activePacker ? '#00C868' : '#8c8c8c', fontSize: 20 }} />}
+                    />
+                </div>
                 <Button
                     type="primary"
                     size="large"
                     icon={<ScanOutlined />}
                     onClick={() => handleScan(scanValue)}
                     style={{
-                        background: '#52c41a', borderColor: '#52c41a',
+                        background: activePacker ? 'linear-gradient(135deg, #0DD173 0%, #00B159 100%)' : '#bfbfbf', 
+                        borderColor: activePacker ? '#00C868' : '#bfbfbf',
                         flexShrink: 0, height: 44, paddingInline: 24, fontWeight: 600,
+                        boxShadow: activePacker ? '0 4px 10px rgba(0, 200, 104, 0.3)' : 'none',
+                        transition: 'all 0.3s ease',
+                        color: activePacker ? '#fff' : '#fff'
                     }}
                 >
-                    Quét
+                    {activePacker ? 'QUÉT GÁN ĐƠN' : 'Quét'}
                 </Button>
             </div>
 

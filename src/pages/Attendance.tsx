@@ -25,6 +25,7 @@ import {
     message,
     Drawer,
     Spin,
+    DatePicker,
 } from 'antd';
 import {
     CheckCircleOutlined,
@@ -61,9 +62,9 @@ const { Title, Text } = Typography;
 interface Employee {
     id: number;
     name: string;
+    username: string;
     type: 'Official' | 'Seasonal';
     baseSalary: number;
-    packRate: number;
     isHourly?: boolean;
 }
 
@@ -186,10 +187,10 @@ interface PenaltyConfig {
 }
 
 const initialEmployees: Employee[] = [
-    { id: 1, name: 'Nguyễn Đình Toàn', type: 'Official', baseSalary: 10000000, packRate: 0.3 },
-    { id: 2, name: 'Nguyễn Văn Khánh', type: 'Official', baseSalary: 10000000, packRate: 0.3 },
-    { id: 3, name: 'Đỗ Nguyễn Trường', type: 'Seasonal', baseSalary: 25000, packRate: 0.2, isHourly: true },
-    { id: 4, name: 'Trần Mai Phương', type: 'Seasonal', baseSalary: 30000, packRate: 0.2, isHourly: true },
+    { id: 1, name: 'Nguyễn Đình Toàn', username: 'toan', type: 'Official', baseSalary: 10000000 },
+    { id: 2, name: 'Nguyễn Văn Khánh', username: 'khanh', type: 'Official', baseSalary: 10000000 },
+    { id: 3, name: 'Đỗ Nguyễn Trường', username: 'truong', type: 'Seasonal', baseSalary: 25000, isHourly: true },
+    { id: 4, name: 'Trần Mai Phương', username: 'phuong', type: 'Seasonal', baseSalary: 30000, isHourly: true },
 ];
 
 const initialWarehousePacking = { level1Units: 6100, level10Units: 870 };
@@ -264,16 +265,40 @@ function calcPacksFromItems(items: PackingOrderItem[]): number {
     return totalPacks;
 }
 
-// ===== PAYROLL CALCULATION (Đúng theo Plan) =====
-function calculatePayroll(activeFines: FineRecord[], packingData: { level1Units: number; level10Units: number }, employeesList: Employee[], bonusesData: BonusRecord[], liveLogs: any[], monthNum: number, yearNum: number) {
-    const STANDARD_WORK_DAYS = 26; // Số ngày công chuẩn/tháng
-    const HOURS_PER_SHIFT = 4;    // Mỗi ca = 4 giờ (ca sáng 8:00-12:00 / ca chiều 13:00-17:00)
+// ===== PAYROLL CALCULATION — Cơ chế: Ai đóng gói hưởng 100% =====
+function calculatePayroll(
+    activeFines: FineRecord[],
+    packingData: { level1Units: number; level10Units: number },
+    employeesList: Employee[],
+    bonusesData: BonusRecord[],
+    liveLogs: any[],
+    monthNum: number,
+    yearNum: number,
+    orderLogs: PackingOrderLog[]
+) {
+    const STANDARD_WORK_DAYS = 26;
+    const HOURS_PER_SHIFT = 4;
     const lv1Price = 200;
     const lv10Price = 600;
     const totalPackValue_100 = (packingData.level1Units * lv1Price) + (packingData.level10Units * lv10Price);
 
+    // Tính giá trị đóng gói CÁ NHÂN theo từng đơn
+    const packValueByUsername: Record<string, { value: number; orderCount: number }> = {};
+    orderLogs.forEach(order => {
+        const packer = (order.packer || '').trim().toLowerCase();
+        if (!packer) return;
+        const totalPacks = calcPacksFromItems(order.items);
+        const orderValue = totalPacks >= 10 ? (lv10Price * 1) : (lv1Price * 1); // Mỗi đơn = 1 đơn vị
+        // Chính xác hơn: tính theo tổng gói trong đơn
+        const actualValue = totalPacks >= 10 ? (totalPacks * lv10Price / 10) : (totalPacks * lv1Price);
+        // Đơn giản: mỗi đơn < 10 gói = 200đ/gói, >= 10 gói = 600đ/đơn (như cũ)
+        const value = totalPacks >= 10 ? lv10Price : lv1Price;
+        if (!packValueByUsername[packer]) packValueByUsername[packer] = { value: 0, orderCount: 0 };
+        packValueByUsername[packer].value += value;
+        packValueByUsername[packer].orderCount += 1;
+    });
+
     return employeesList.map((emp, idx) => {
-        // Đếm ca làm từ liveAttendanceLogs (ZKTeco) theo tháng được chọn
         const empLogs = liveLogs.filter((l: any) => {
             if (!l.time || l.empId !== emp.id) return false;
             const d = new Date(l.time.replace(' ', 'T'));
@@ -282,33 +307,29 @@ function calculatePayroll(activeFines: FineRecord[], packingData: { level1Units:
         let shifts = 0;
         let absentDays = 0;
         if (empLogs.length > 0) {
-            // Có dữ liệu ZKTeco — đếm thực tế
             const shiftSet = new Set(empLogs.map((l: any) => (l.time || '').substring(0, 10) + '-' + l.shift));
             shifts = shiftSet.size;
-            // Absent: mỗi ngày công chuẩn có 2 ca → absent days = (26*2 - shifts) / 2
             absentDays = Math.max(0, (STANDARD_WORK_DAYS * 2 - shifts)) / 2;
         } else {
-            // Chưa có dữ liệu ZKTeco → mặc định full tháng (26 ngày × 2 ca)
             shifts = STANDARD_WORK_DAYS * 2;
             absentDays = 0;
         }
 
-        // FIX #1: NV Chính thức phải TRỪ ngày nghỉ theo Plan mục 5
-        // NV Chính thức: Nghỉ = Số ngày nghỉ × (Lương CB ÷ 26)
-        // NV Thời vụ: Lương = Số giờ làm × Đơn giá giờ (mỗi ca = 4 giờ)
         const leaveDeduction = emp.isHourly ? 0 : (absentDays * (emp.baseSalary / STANDARD_WORK_DAYS));
         const salaryBase = emp.isHourly
             ? (shifts * HOURS_PER_SHIFT * emp.baseSalary)
             : (emp.baseSalary - leaveDeduction);
 
-        const packIncome = totalPackValue_100 * emp.packRate;
+        // === MỚI: packIncome = giá trị đóng gói CÁ NHÂN (ai đóng hưởng 100%) ===
+        const uname = (emp.username || '').trim().toLowerCase();
+        const empPackData = packValueByUsername[uname] || { value: 0, orderCount: 0 };
+        const packIncome = empPackData.value;
+        const packOrderCount = empPackData.orderCount;
 
-        // FIX #2: Chia thưởng phạt theo Plan mục 13 (từng khoản phạt riêng)
         const myFines = activeFines.filter(f => f.empId === emp.id).reduce((sum, f) => sum + f.amount, 0);
         let fineShare = 0;
         activeFines.forEach(f => {
             if (f.empId !== emp.id) {
-                // Khoản phạt này chia cho (N-1) người (trừ người bị phạt)
                 fineShare += f.amount / (employeesList.length - 1);
             }
         });
@@ -319,6 +340,7 @@ function calculatePayroll(activeFines: FineRecord[], packingData: { level1Units:
         return {
             ...emp, shifts, absentDays, salaryBase, packIncome, totalPackValue_100,
             fineShare, mBonus, myFines, totalBonus, finalSalary, leaveDeduction,
+            packOrderCount,
         };
     });
 }
@@ -326,19 +348,19 @@ function calculatePayroll(activeFines: FineRecord[], packingData: { level1Units:
 // ===== PILL COMPONENT =====
 const ShiftPill = ({ label, status }: { label: string; status: 0 | 1 | 2 }) => {
     const config = {
-        0: { bg: '#f5f5f5', border: '#e8e8e8', color: '#bfbfbf', icon: <MinusCircleOutlined />, tooltip: 'Nghỉ' },
-        1: { bg: '#f6ffed', border: '#b7eb8f', color: '#52c41a', icon: <CheckCircleOutlined />, tooltip: 'Đúng giờ' },
-        2: { bg: '#fff7e6', border: '#ffd591', color: '#fa8c16', icon: <ClockCircleOutlined />, tooltip: 'Đi muộn' },
+        0: { bg: '#f5f5f5', border: '#e8e8e8', color: '#bfbfbf', icon: <MinusCircleOutlined style={{ fontSize: 10 }} />, tooltip: 'Nghỉ' },
+        1: { bg: '#f6ffed', border: '#b7eb8f', color: '#52c41a', icon: <CheckCircleOutlined style={{ fontSize: 10 }} />, tooltip: 'Đúng giờ' },
+        2: { bg: '#fff7e6', border: '#ffd591', color: '#fa8c16', icon: <ClockCircleOutlined style={{ fontSize: 10 }} />, tooltip: 'Đi muộn' },
     };
     const c = config[status];
     return (
         <Tooltip title={`${label}: ${c.tooltip}`}>
             <div style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                fontSize: 11, fontWeight: 700, textTransform: 'uppercase',
-                padding: '3px 8px', borderRadius: 6,
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4,
+                fontSize: 10, fontWeight: 700, textTransform: 'uppercase',
+                padding: '2px 6px', borderRadius: 5,
                 background: c.bg, color: c.color, border: `1px solid ${c.border}`,
-                minWidth: 72, cursor: 'default', letterSpacing: 0.3,
+                cursor: 'default', letterSpacing: 0.2, whiteSpace: 'nowrap',
             }}>
                 <span>{label}</span>
                 {c.icon}
@@ -350,12 +372,12 @@ const ShiftPill = ({ label, status }: { label: string; status: 0 | 1 | 2 }) => {
 const SundayRestCell = () => (
     <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 10, fontWeight: 800, textTransform: 'uppercase',
-        color: '#bfbfbf', letterSpacing: 1, padding: '4px 8px',
-        borderRadius: 8, border: '1.5px dashed #d9d9d9',
-        background: '#fafafa', minHeight: 52, minWidth: 72,
+        fontSize: 9, fontWeight: 800, textTransform: 'uppercase',
+        color: '#bfbfbf', letterSpacing: 0.5, padding: '4px 6px',
+        borderRadius: 6, border: '1.5px dashed #d9d9d9',
+        background: '#fafafa', minHeight: 44,
     }}>
-        <CoffeeOutlined style={{ marginRight: 4 }} /> Nghỉ
+        <CoffeeOutlined style={{ marginRight: 3, fontSize: 10 }} /> Nghỉ
     </div>
 );
 
@@ -406,6 +428,7 @@ export default function Attendance() {
     const [fineAuditLog, setFineAuditLog] = useState<FineAuditLog[]>([]);
 
     const [isDbLoaded, setIsDbLoaded] = useState(false);
+    const [systemUsernames, setSystemUsernames] = useState<string[]>([]);
 
     // 1. Tải dữ liệu từ DB lúc mở component
     useEffect(() => {
@@ -419,7 +442,17 @@ export default function Attendance() {
                         setConfig(d.config);
                         setTempConfig(d.config);
                     }
-                    if (d.employees) setEmployees(d.employees);
+                    if (d.employees) {
+                        // Merge username từ initialEmployees cho records cũ chưa có
+                        const merged = d.employees.map((emp: any) => {
+                            if (!emp.username) {
+                                const initial = initialEmployees.find(ie => ie.id === emp.id);
+                                return { ...emp, username: initial?.username || '' };
+                            }
+                            return emp;
+                        });
+                        setEmployees(merged);
+                    }
                     if (d.bonusAuditLog) setBonusAuditLog(d.bonusAuditLog);
                     if (d.extraBonuses) setExtraBonuses(d.extraBonuses);
                     if (d.extraFundTx) setExtraFundTx(d.extraFundTx);
@@ -427,6 +460,16 @@ export default function Attendance() {
                     if (d.extraFines) setExtraFines(d.extraFines);
                     if (d.fineAuditLog) setFineAuditLog(d.fineAuditLog);
                 }
+                // Fetch danh sách username hệ thống
+                try {
+                    const usersRes = await api.users.getAll();
+                    if (usersRes.success && usersRes.data) {
+                        const names = usersRes.data
+                            .map((u: any) => u.username)
+                            .filter((u: string) => u && u.toLowerCase() !== 'admin');
+                        setSystemUsernames(names);
+                    }
+                } catch (_) {}
             } catch (err) {
                 console.error('Lỗi tải dữ liệu chấm công từ DB:', err);
             } finally {
@@ -436,31 +479,42 @@ export default function Attendance() {
         loadData();
     }, []);
 
+    // Ref lưu snapshot data mới nhất để flush khi reload/đóng app
+    const pendingSaveRef = useRef<object | null>(null);
+
     // 2. Lưu tự động khi có thay đổi state với Debounce
     useEffect(() => {
         if (!isDbLoaded) return; // Không lưu đè lúc chưa tải xong
 
+        const snapshot = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog };
+        pendingSaveRef.current = snapshot;
+
         const saveData = async () => {
             try {
                 const api = (window as any).electronAPI;
-                await api.appConfig.set('attendanceData', {
-                    config,
-                    employees,
-                    bonusAuditLog,
-                    extraBonuses,
-                    extraFundTx,
-                    fundAuditLog,
-                    extraFines,
-                    fineAuditLog
-                });
+                await api.appConfig.set('attendanceData', snapshot);
+                pendingSaveRef.current = null;
             } catch (err) {
                 console.error('Lỗi lưu dữ liệu chấm công vào DB:', err);
             }
         };
-        
+
         const timer = setTimeout(saveData, 500); // Đợi 500ms thao tác cuối rồi mới save
         return () => clearTimeout(timer);
     }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, isDbLoaded]);
+
+    // Flush save ngay lập tức khi reload hoặc đóng app
+    useEffect(() => {
+        const handleBeforeUnload = () => {
+            if (pendingSaveRef.current) {
+                const api = (window as any).electronAPI;
+                // Dùng sendSync để đảm bảo lưu xong trước khi đóng
+                try { api.appConfig.set('attendanceData', pendingSaveRef.current); } catch {}
+            }
+        };
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    }, []);
 
     const [fineModalOpen, setFineModalOpen] = useState(false);
     const [fineForm] = Form.useForm();
@@ -471,6 +525,7 @@ export default function Attendance() {
     const [editingEmp, setEditingEmp] = useState<Employee | null>(null);
 
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);
+    const [packingDateRange, setPackingDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
 
     useEffect(() => {
         loadPackingOrders();
@@ -525,8 +580,8 @@ export default function Attendance() {
                     orderNumber: order.orderNumber || order.ecommerceExportCode || `#${source.toUpperCase()}-${order.id}`,
                     platform: getPlatform(source, customerName),
                     customerName,
-                    // Packer check: Try to pull who packed it (createdBy, userName). Else default to system.
-                    packer: order.createdBy || order.userName || 'Không ghi nhận', 
+                    // Packer check: Prioritize pickedBy (Quick-Tap Avatar), fallback to createdBy/userName
+                    packer: order.pickedBy || order.createdBy || order.userName || 'Không ghi nhận', 
                     items: mappedItems,
                     totalSKU,
                     status: order.status === 'completed' ? 'completed' : 'issue'
@@ -544,10 +599,8 @@ export default function Attendance() {
         }
     };
 
-    // === State cho ZKTeco ===
+    // === State cho điểm danh online ===
     const [liveAttendanceLogs, setLiveAttendanceLogs] = useState<any[]>([]);
-    const [isSyncing, setIsSyncing] = useState(false);
-    const [isBridging, setIsBridging] = useState(false);
 
     // === State cho đóng gói + lịch sử ===
     const warehousePacking = useMemo(() => {
@@ -578,7 +631,7 @@ export default function Attendance() {
     // Gộp finesData gốc + extraFines
     const allFines = useMemo(() => [...finesData, ...extraFines], [extraFines]);
 
-    const payrollData = useMemo(() => calculatePayroll(allFines, warehousePacking, employees, extraBonuses, liveAttendanceLogs, selectedMonth, selectedYear), [allFines, warehousePacking, employees, extraBonuses, liveAttendanceLogs, selectedMonth, selectedYear]);
+    const payrollData = useMemo(() => calculatePayroll(allFines, warehousePacking, employees, extraBonuses, liveAttendanceLogs, selectedMonth, selectedYear, packingOrderLogsData), [allFines, warehousePacking, employees, extraBonuses, liveAttendanceLogs, selectedMonth, selectedYear, packingOrderLogsData]);
 
     // Totals cho Overview
     const totals = useMemo(() => {
@@ -841,60 +894,7 @@ export default function Attendance() {
     }, [fundForm]);
 
 
-    const handleSync = async () => {
-        setIsSyncing(true);
-        message.loading({ content: 'Đang lấy dữ liệu từ ADMS Server...', key: 'zktecosync' });
-        try {
-            const res = await window.electronAPI.zkteco.fullSync({});
-            if (res.success) {
-                if (res.logCount > 0) {
-                    message.success({ content: `Đồng bộ thành công! Lấy được ${res.logCount} bản ghi từ ${res.userCount} nhân sự.`, key: 'zktecosync', duration: 4 });
-                } else {
-                    message.info({ content: 'ADMS Server đang chờ máy vân tay gửi dữ liệu. Hãy đợi 1-2 phút...', key: 'zktecosync', duration: 5 });
-                }
-                // Đổi format từ máy về format của Table
-                const mappedLogs = (res.logs || []).map((l: any) => {
-                    return {
-                        ...l,
-                        time: new Date(l.timestamp).toLocaleString('sv-SE').replace(',', ''), // format YYYY-MM-DD HH:mm:ss
-                        empId: parseInt(l.odUserId, 10), // Giả định id trên máy khớp db
-                        empNameFallback: l.name // phòng khi empId ko khớp
-                    };
-                });
-                setLiveAttendanceLogs(mappedLogs);
-            } else {
-                message.error({ content: `Kết nối thất bại: ${res.error}. ${res.hint || ''}`, key: 'zktecosync', duration: 8 });
-            }
-        } catch (err: any) {
-            message.error({ content: err.message, key: 'zktecosync' });
-        } finally {
-            setIsSyncing(false);
-        }
-    };
 
-    const handleZKBridge = async () => {
-        setIsBridging(true);
-        message.loading({ content: 'ZKBridge đang kết nối máy vân tay...', key: 'zkbridge' });
-        try {
-            const res = await window.electronAPI.zkteco.zkbridge({ ip: '192.168.0.225', port: 4370 });
-            if (res.success) {
-                const mappedLogs = (res.logs || []).map((l: any) => ({
-                    ...l,
-                    time: l.timestamp,
-                    empId: parseInt(l.odUserId, 10),
-                    empNameFallback: l.empNameFallback || `NV #${l.odUserId}`,
-                }));
-                setLiveAttendanceLogs(mappedLogs);
-                message.success({ content: `ZKBridge: Lấy được ${res.logCount} bản ghi!`, key: 'zkbridge', duration: 4 });
-            } else {
-                message.error({ content: `ZKBridge thất bại: ${res.error}`, key: 'zkbridge', duration: 8 });
-            }
-        } catch (err: any) {
-            message.error({ content: err.message, key: 'zkbridge' });
-        } finally {
-            setIsBridging(false);
-        }
-    };
 
     const saveConfig = () => { setConfig({ ...tempConfig }); setConfigModalOpen(false); message.success('Đã lưu cấu hình!'); };
     const lockPayroll = () => {
@@ -978,7 +978,24 @@ export default function Attendance() {
         const totalPackValue = (warehousePacking.level1Units * lv1Price) + (warehousePacking.level10Units * lv10Price);
         const totalUnits = warehousePacking.level1Units + warehousePacking.level10Units;
 
-        const orderLogs = packingOrderLogsData;
+        const orderLogs = packingDateRange
+            ? packingOrderLogsData.filter(o => {
+                const t = dayjs(o.timestamp);
+                return t.isAfter(packingDateRange[0].startOf('day').subtract(1, 'ms'))
+                    && t.isBefore(packingDateRange[1].endOf('day').add(1, 'ms'));
+            })
+            : packingOrderLogsData;
+
+        // Tính lại warehousePacking từ filtered orderLogs
+        let filteredL1 = 0, filteredL2 = 0;
+        orderLogs.forEach(order => {
+            const totalPacks = calcPacksFromItems(order.items);
+            if (totalPacks >= 10) filteredL2 += 1;
+            else filteredL1 += 1;
+        });
+        const filteredPackValue = (filteredL1 * lv1Price) + (filteredL2 * lv10Price);
+        const filteredTotalUnits = filteredL1 + filteredL2;
+
         const totalOrders = orderLogs.length;
         const totalPackedSKU = orderLogs.reduce((s, o) => s + o.totalSKU, 0);
         const issueCount = orderLogs.filter(o => o.status === 'issue').length;
@@ -993,21 +1010,43 @@ export default function Attendance() {
 
         return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+                {/* Bộ lọc ngày */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <Text strong style={{ fontSize: 13 }}>Lọc theo ngày:</Text>
+                    <DatePicker.RangePicker
+                        value={packingDateRange}
+                        onChange={v => setPackingDateRange(v as [dayjs.Dayjs, dayjs.Dayjs] | null)}
+                        format="DD/MM/YYYY"
+                        allowClear
+                        placeholder={['Từ ngày', 'Đến ngày']}
+                        style={{ width: 280 }}
+                    />
+                    {packingDateRange && (
+                        <Button size="small" onClick={() => setPackingDateRange(null)}>Xem cả tháng</Button>
+                    )}
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                        {packingDateRange
+                            ? `${packingDateRange[0].format('DD/MM')} – ${packingDateRange[1].format('DD/MM/YYYY')}`
+                            : `Tháng ${dayjs().format('MM/YYYY')}`}
+                    </Text>
+                    <Button size="small" icon={<SyncOutlined />} onClick={loadPackingOrders} style={{ marginLeft: 'auto' }}>Tải lại</Button>
+                </div>
+
                 {/* Hero Banner */}
                 <div className="att-hero-banner">
                     <div style={{ position: 'relative', zIndex: 1 }}>
-                        <div className="att-hero-label">📦 TỔNG LƯỢT GHI NHẬN LƯƠNG ĐÓNG GÓI THÁNG 03</div>
+                        <div className="att-hero-label">📦 TỔNG LƯỢT GHI NHẬN LƯƠNG ĐÓNG GÓI{packingDateRange ? ` ${packingDateRange[0].format('DD/MM')}–${packingDateRange[1].format('DD/MM')}` : ` THÁNG ${dayjs().format('MM')}`}</div>
                         <div style={{ display: 'flex', alignItems: 'flex-end', gap: 16 }}>
-                            <div className="att-hero-value">{totalUnits.toLocaleString()} Đơn</div>
+                            <div className="att-hero-value">{filteredTotalUnits.toLocaleString()} Đơn</div>
                             <div style={{ display: 'flex', gap: 8, paddingBottom: 6 }}>
-                                {warehousePacking.level10Units > 0 && <Tag color="purple" style={{ border: 'none', background: 'rgba(255,255,255,0.25)', color: 'white', fontWeight: 700 }}>{warehousePacking.level10Units} Kiện To (400đ)</Tag>}
-                                {warehousePacking.level1Units > 0 && <Tag color="blue" style={{ border: 'none', background: 'rgba(255,255,255,0.25)', color: 'white', fontWeight: 700 }}>{warehousePacking.level1Units} Kiện Lẻ (200đ)</Tag>}
+                                {filteredL2 > 0 && <Tag color="purple" style={{ border: 'none', background: 'rgba(255,255,255,0.25)', color: 'white', fontWeight: 700 }}>{filteredL2} Kiện To (400đ)</Tag>}
+                                {filteredL1 > 0 && <Tag color="blue" style={{ border: 'none', background: 'rgba(255,255,255,0.25)', color: 'white', fontWeight: 700 }}>{filteredL1} Kiện Lẻ (200đ)</Tag>}
                             </div>
                         </div>
                     </div>
                     <div className="att-hero-box">
                         <div className="att-hero-box-label">Tổng quỹ thưởng (100%)</div>
-                        <div className="att-hero-box-value">{fmt(totalPackValue)} đ</div>
+                        <div className="att-hero-box-value">{fmt(filteredPackValue)} đ</div>
                     </div>
                 </div>
 
@@ -1016,20 +1055,20 @@ export default function Attendance() {
                     <Card size="small" style={{ borderTop: '3px solid #1890ff' }}>
                         <Statistic
                             title={<Text type="secondary" style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>Kiện Lẻ (Level 1)</Text>}
-                            value={warehousePacking.level1Units}
+                            value={filteredL1}
                             suffix="Kiện"
                             valueStyle={{ color: '#1890ff', fontWeight: 800, fontSize: 24 }}
                         />
-                        <Text type="secondary" style={{ fontSize: 11 }}>× {lv1Price.toLocaleString()} đ = {fmt(warehousePacking.level1Units * lv1Price)}</Text>
+                        <Text type="secondary" style={{ fontSize: 11 }}>× {lv1Price.toLocaleString()} đ = {fmt(filteredL1 * lv1Price)}</Text>
                     </Card>
                     <Card size="small" style={{ borderTop: '3px solid #722ed1' }}>
                         <Statistic
                             title={<Text type="secondary" style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>Kiện To (Level 2)</Text>}
-                            value={warehousePacking.level10Units}
+                            value={filteredL2}
                             suffix="Kiện"
                             valueStyle={{ color: '#722ed1', fontWeight: 800, fontSize: 24 }}
                         />
-                        <Text type="secondary" style={{ fontSize: 11 }}>× {lv10Price.toLocaleString()} đ = {fmt(warehousePacking.level10Units * lv10Price)}</Text>
+                        <Text type="secondary" style={{ fontSize: 11 }}>× {lv10Price.toLocaleString()} đ = {fmt(filteredL2 * lv10Price)}</Text>
                     </Card>
                     <Card size="small" style={{ borderTop: '3px solid #10b981' }}>
                         <Statistic title={<Text type="secondary" style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>Thực tế đã đóng</Text>} value={totalOrders} suffix="đơn" valueStyle={{ color: '#10b981', fontWeight: 800, fontSize: 24 }} />
@@ -1045,18 +1084,56 @@ export default function Attendance() {
                 <Card
                     bodyStyle={{ padding: 0 }}
                     style={{ borderTop: '3px solid #00ab56' }}
-                    title={<Space><TeamOutlined style={{ color: '#00ab56' }} /><Text strong>Bảng chia quỹ đóng gói</Text></Space>}
+                    title={<Space><TeamOutlined style={{ color: '#00ab56' }} /><Text strong>Bảng xếp hạng đóng gói</Text><Tag color="green" style={{ fontSize: 10, fontWeight: 700 }}>AI ĐÓNG NGƯỜI ĐÓ HƯỞNG</Tag></Space>}
                 >
                     <Table
-                        dataSource={payrollData.map(d => ({ ...d, key: d.id }))}
+                        dataSource={[...payrollData]
+                            .sort((a, b) => (b.packOrderCount || 0) - (a.packOrderCount || 0))
+                            .map((d, index) => ({ ...d, key: d.id, _rank: index + 1 }))}
                         pagination={false}
                         size="middle"
+                        rowClassName={(record: any) => record._rank <= 3 && record.packOrderCount > 0 ? `rank-${record._rank}-row` : ''}
                         columns={[
-                            { title: 'Nhân viên', dataIndex: 'name', key: 'name', render: (n: string) => <Text strong>{n}</Text> },
-                            { title: 'Loại HĐ', dataIndex: 'type', key: 'type', render: (t: string) => <Tag color={t === 'Official' ? 'green' : 'orange'}>{t === 'Official' ? 'Chính thức' : 'Thời vụ'}</Tag> },
-                            { title: 'Tỉ lệ hưởng (%)', dataIndex: 'packRate', key: 'rate', align: 'center' as const, render: (v: number) => <Tag color="green" style={{ fontWeight: 800 }}>{v * 100}%</Tag> },
-                            { title: <Text strong style={{ color: '#00ab56', fontStyle: 'italic' }}>Số tiền được chia</Text>, dataIndex: 'packIncome', key: 'income', align: 'right' as const, render: (v: number) => <Text strong style={{ color: '#00ab56', fontStyle: 'italic', fontSize: 16 }}>{fmt(v)}</Text> },
+                            { 
+                                title: 'Hạng', dataIndex: '_rank', key: 'rank', width: 90, align: 'center' as const, 
+                                render: (r: number, record: any) => {
+                                    if (record.packOrderCount === 0) return <div style={{ color: '#bfbfbf', fontWeight: 'bold' }}>-</div>;
+                                    if (r === 1) return <Tag color="gold" style={{ margin: 0, fontWeight: 900, fontSize: 13, border: 'none', background: 'linear-gradient(135deg, #fadb14, #d48806)', color: 'white', padding: '2px 8px', borderRadius: 4, boxShadow: '0 2px 5px rgba(250, 173, 20, 0.4)' }}>TOP 1 🥇</Tag>;
+                                    if (r === 2) return <Tag color="default" style={{ margin: 0, fontWeight: 900, fontSize: 13, border: 'none', background: 'linear-gradient(135deg, #e2e8f0, #94a3b8)', color: '#0f172a', padding: '2px 8px', borderRadius: 4, boxShadow: '0 2px 5px rgba(148, 163, 184, 0.4)' }}>TOP 2 🥈</Tag>;
+                                    if (r === 3) return <Tag color="orange" style={{ margin: 0, fontWeight: 900, fontSize: 13, border: 'none', background: 'linear-gradient(135deg, #ffbb96, #d4380d)', color: 'white', padding: '2px 8px', borderRadius: 4, boxShadow: '0 2px 5px rgba(250, 84, 28, 0.4)' }}>TOP 3 🥉</Tag>;
+                                    return <Tag style={{ margin: 0, fontWeight: 700, fontSize: 12, border: '1px solid #d9d9d9', color: '#8c8c8c', background: '#fafafa', borderRadius: 4 }}>TOP {r}</Tag>;
+                                }
+                            },
+                            { title: 'Nhân viên', dataIndex: 'name', key: 'name', render: (n: string, r: any) => (
+                                <div>
+                                    <Text strong style={{ color: r._rank <= 3 && r.packOrderCount > 0 ? '#000' : '#595959', fontSize: r._rank <= 3 && r.packOrderCount > 0 ? 15 : 14 }}>{n}</Text>
+                                    <div><Tag color={r._rank <= 3 && r.packOrderCount > 0 ? "blue" : "default"} style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 600, border: 'none', background: r._rank <= 3 && r.packOrderCount > 0 ? '#e6f7ff' : '#f5f5f5' }}>@{r.username || '—'}</Tag></div>
+                                </div>
+                            ) },
+                            { title: 'Loại HĐ', dataIndex: 'type', key: 'type', width: 120, render: (t: string) => <Tag color={t === 'Official' ? 'green' : 'orange'} style={{ border: 'none' }}>{t === 'Official' ? 'Chính thức' : 'Thời vụ'}</Tag> },
+                            { 
+                                title: <Text strong style={{ color: '#1890ff' }}>SL đóng gói</Text>, 
+                                dataIndex: 'packOrderCount', key: 'packCount', width: 140, align: 'center' as const, 
+                                render: (count: number, r: any) => (
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                                        <span style={{ fontSize: r._rank <= 3 && count > 0 ? 24 : 18, fontWeight: 900, color: count > 0 ? '#1890ff' : '#d9d9d9' }}>{count || 0}</span>
+                                        <span style={{ fontSize: 10, fontWeight: 700, color: count > 0 ? '#91caff' : '#d9d9d9', textTransform: 'uppercase' }}>đơn</span>
+                                    </div>
+                                ),
+                            },
+                            { title: <Text strong style={{ color: '#00ab56', fontStyle: 'italic' }}>Thu nhập cá nhân</Text>, dataIndex: 'packIncome', key: 'income', align: 'right' as const, render: (v: number, r: any) => <Text strong style={{ color: v > 0 ? '#00ab56' : '#d9d9d9', fontStyle: 'italic', fontSize: r._rank <= 3 && r.packOrderCount > 0 ? 18 : 16 }}>{fmt(v || 0)}</Text> },
                         ]}
+                        summary={() => {
+                            const totalPackCount = payrollData.reduce((s, d) => s + (d.packOrderCount || 0), 0);
+                            const totalIncome = payrollData.reduce((s, d) => s + (d.packIncome || 0), 0);
+                            return (
+                                <Table.Summary.Row style={{ background: '#f0fdf4' }}>
+                                    <Table.Summary.Cell index={0} colSpan={3}><Text strong style={{ color: '#15803d', fontSize: 12, paddingLeft: 16 }}>TỔNG CỘNG</Text></Table.Summary.Cell>
+                                    <Table.Summary.Cell index={3} align="center"><Text strong style={{ color: '#1890ff', fontSize: 18 }}>{totalPackCount} đơn</Text></Table.Summary.Cell>
+                                    <Table.Summary.Cell index={4} align="right"><Text strong style={{ color: '#00ab56', fontSize: 18 }}>{fmt(totalIncome)}</Text></Table.Summary.Cell>
+                                </Table.Summary.Row>
+                            );
+                        }}
                     />
                 </Card>
 
@@ -1232,15 +1309,15 @@ export default function Attendance() {
             return {
                 key: String(emp.id),
                 label: (
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '6px 16px 10px', minWidth: 130 }}>
-                        <span style={{ fontWeight: 700, fontSize: 14, color: '#1f2937', marginBottom: 4 }}>{emp.name}</span>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, width: 'max-content' }}>
+                        <span style={{ fontWeight: 700, fontSize: 13, color: '#1f2937', whiteSpace: 'nowrap' }}>{emp.name}</span>
                         <div style={{ 
                             background: 'linear-gradient(to right, #1890ff, #36cfc9)', 
-                            padding: '2px 10px', 
+                            padding: '2px 12px', 
                             borderRadius: 12, 
                             boxShadow: '0 2px 6px rgba(24,144,255,0.2)' 
                         }}>
-                            <span style={{ fontSize: 13, color: '#fff', fontWeight: 800 }}>+{fmt(totalEmpBonus)}</span>
+                            <span style={{ fontSize: 12, color: '#fff', fontWeight: 800, whiteSpace: 'nowrap' }}>+{fmt(totalEmpBonus)}</span>
                         </div>
                     </div>
                 ),
@@ -1473,28 +1550,28 @@ export default function Attendance() {
     };
 
     // ============================================
-    // TAB 5: CHẤM CÔNG & LỊCH SỬ
+    // TAB 5: ĐIỂM DANH & LỊCH SỬ
     // ============================================
     const matrixColumns = useMemo(() => [
         {
-            title: 'Nhân viên', dataIndex: 'name', key: 'name', fixed: 'left' as const, width: 180,
-            render: (name: string) => <Text strong style={{ fontSize: 13 }}>{name}</Text>,
+            title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 130,
+            render: (name: string) => <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{name}</Text>,
         },
         ...weekDays.map((day, dayIdx) => ({
             title: (
                 <div style={{ textAlign: 'center' as const }}>
-                    <div style={{ fontWeight: 800, fontSize: 12, color: dayIdx === 6 ? '#bfbfbf' : (dayIdx === 4 ? '#00ab56' : '#595959') }}>{day}</div>
-                    {dayIdx === 6 && <div style={{ fontSize: 9, color: '#bfbfbf', fontWeight: 600 }}>(Nghỉ)</div>}
+                    <div style={{ fontWeight: 800, fontSize: 11, color: dayIdx === 6 ? '#bfbfbf' : (dayIdx === 4 ? '#00ab56' : '#595959') }}>{day}</div>
+                    {dayIdx === 6 && <div style={{ fontSize: 8, color: '#bfbfbf', fontWeight: 600 }}>(Nghỉ)</div>}
                 </div>
             ),
-            key: `day-${dayIdx}`, width: 100, align: 'center' as const,
+            key: `day-${dayIdx}`, align: 'center' as const,
             onHeaderCell: () => ({ style: { background: dayIdx === 6 ? '#fafafa' : undefined, borderLeft: dayIdx === 6 ? '2px solid #f0f0f0' : undefined } }),
             onCell: () => ({ style: { background: dayIdx === 6 ? '#fafafa' : undefined, borderLeft: dayIdx === 6 ? '2px solid #f0f0f0' : undefined } }),
             render: (_: any, __: any, rowIdx: number) => {
                 const d = attendanceMatrix[rowIdx][dayIdx];
                 if (dayIdx === 6 && d.am === 0 && d.pm === 0) return <SundayRestCell />;
                 return (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
                         <ShiftPill label="Sáng" status={d.am} />
                         <ShiftPill label="Chiều" status={d.pm} />
                     </div>
@@ -1502,13 +1579,13 @@ export default function Attendance() {
             },
         })),
         {
-            title: <div style={{ textAlign: 'center' }}>Tổng ca</div>, key: 'total', width: 80, align: 'center' as const,
+            title: <div style={{ textAlign: 'center', fontSize: 11 }}>Tổng ca</div>, key: 'total', width: 60, align: 'center' as const,
             render: (_: any, __: any, rowIdx: number) => {
                 const stat = employeeStats[rowIdx];
                 return (
                     <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 20, fontWeight: 800, color: '#262626' }}>{stat.shiftCount}</div>
-                        <Text type="secondary" style={{ fontSize: 10, fontWeight: 700 }}>CA LÀM</Text>
+                        <div style={{ fontSize: 18, fontWeight: 800, color: '#262626' }}>{stat.shiftCount}</div>
+                        <Text type="secondary" style={{ fontSize: 9, fontWeight: 700 }}>CA LÀM</Text>
                     </div>
                 );
             },
@@ -1538,12 +1615,13 @@ export default function Attendance() {
                 style={{ borderTop: '3px solid #00ab56' }}
             >
                 <Table
+                    className="att-matrix-table"
                     dataSource={employees.map((emp, idx) => ({ key: emp.id, name: emp.name, idx }))}
                     columns={matrixColumns}
                     pagination={false}
-                    scroll={{ x: 1000 }}
-                    size="middle"
+                    size="small"
                     bordered
+                    tableLayout="fixed"
                 />
             </Card>
 
@@ -1574,15 +1652,9 @@ export default function Attendance() {
                 </div>
             </Card>
 
-            {/* Lịch sử Log vân tay */}
+            {/* Lịch sử Log Điểm danh */}
             <Card
-                title={<Space><ClockCircleOutlined style={{ color: '#00ab56' }} /><Text strong>Log vân tay (Ronald Jack)</Text></Space>}
-                extra={
-                    <Space>
-                        <Button icon={<SyncOutlined spin={isBridging} />} disabled={isBridging || isSyncing} size="small" onClick={handleZKBridge} style={{ borderColor: '#722ed1', color: '#722ed1' }}>{isBridging ? 'Đang kéo...' : 'Kéo từ máy (ZKBridge)'}</Button>
-                        <Button type="primary" ghost icon={<SyncOutlined spin={isSyncing} />} disabled={isSyncing || isBridging} size="small" onClick={handleSync}>{isSyncing ? 'Đang đồng bộ...' : 'Đồng bộ ADMS'}</Button>
-                    </Space>
-                }
+                title={<Space><ClockCircleOutlined style={{ color: '#00ab56' }} /><Text strong>Nhật ký Điểm danh</Text></Space>}
                 bodyStyle={{ padding: 0 }}
                 style={{ borderTop: '3px solid #00ab56' }}
             >
@@ -1796,14 +1868,14 @@ export default function Attendance() {
                     pagination={false}
                     size="middle"
                     columns={[
-                        { title: 'ID', dataIndex: 'id', width: 60, align: 'center' },
-                        { title: 'Họ và tên', dataIndex: 'name', width: 200, render: (n) => <Text strong>{n}</Text> },
+                        { title: 'ID', dataIndex: 'id', width: 50, align: 'center' },
+                        { title: 'Họ và tên', dataIndex: 'name', width: 180, render: (n) => <Text strong>{n}</Text> },
+                        { title: 'Username', dataIndex: 'username', width: 100, render: (u) => <Tag color="blue" style={{ fontWeight: 700, fontFamily: 'monospace' }}>{u || '—'}</Tag> },
                         { 
-                            title: 'Hợp đồng', dataIndex: 'type', width: 120,
+                            title: 'Hợp đồng', dataIndex: 'type', width: 110,
                             render: (t) => <Tag color={t === 'Official' ? 'blue' : 'green'} style={{ fontWeight: 600 }}>{t === 'Official' ? 'Chính thức' : 'Thời vụ'}</Tag>
                         },
                         { title: 'Đơn giá', dataIndex: 'baseSalary', align: 'right', render: (v, r) => <Text>{fmt(v)}{r.isHourly ? ' / giờ' : ' / tháng'}</Text> },
-                        { title: 'Tỉ lệ chia NS', dataIndex: 'packRate', align: 'right', render: (v) => <Text>{Math.round(v * 100)}%</Text> },
                         { 
                             title: 'Thao tác', align: 'center', width: 100,
                             render: (_, record) => (
@@ -1812,7 +1884,7 @@ export default function Attendance() {
                                         setEditingEmp(record);
                                         empForm.setFieldsValue({
                                             ...record,
-                                            packRate: record.packRate * 100
+                                            username: record.username || ''
                                         });
                                         setEmpModalOpen(true);
                                     }} />
@@ -1834,9 +1906,9 @@ export default function Attendance() {
             const newEmp: Employee = {
                 id: editingEmp ? editingEmp.id : Date.now(),
                 name: values.name,
+                username: (values.username || '').trim().toLowerCase(),
                 type: values.type,
                 baseSalary: values.baseSalary,
-                packRate: values.packRate / 100,
                 isHourly: values.type === 'Seasonal'
             };
             if (editingEmp) {
@@ -1858,7 +1930,7 @@ export default function Attendance() {
         { key: 'packaging', label: <><TeamOutlined /> Đóng gói</> },
         { key: 'bonuses', label: 'Thưởng' },
         { key: 'fines', label: 'Phạt' },
-        { key: 'attendance', label: <><CalendarOutlined /> Vân tay</> },
+        { key: 'attendance', label: <><CalendarOutlined /> Điểm danh</> },
         { 
             key: 'fund', 
             label: (
@@ -2244,9 +2316,31 @@ export default function Attendance() {
                 destroyOnClose
             >
                 <Form form={empForm} layout="vertical">
-                    <Form.Item name="name" label="Họ và tên" rules={[{ required: true, message: 'Nhập tên nhân viên' }]}>
-                        <Input size="large" placeholder="Nhập tên..." />
-                    </Form.Item>
+                    <Row gutter={16}>
+                        <Col span={14}>
+                            <Form.Item name="name" label="Họ và tên" rules={[{ required: true, message: 'Nhập tên nhân viên' }]}>
+                                <Input size="large" placeholder="VD: Nguyễn Văn A" />
+                            </Form.Item>
+                        </Col>
+                        <Col span={10}>
+                            <Form.Item name="username" label="Username (hệ thống)" rules={[{ required: true, message: 'Chọn hoặc nhập username' }]}>
+                                <Select
+                                    size="large"
+                                    showSearch
+                                    placeholder="Chọn username"
+                                    style={{ fontFamily: 'monospace' }}
+                                    optionFilterProp="children"
+                                    notFoundContent="Không tìm thấy"
+                                >
+                                    {systemUsernames.map(u => (
+                                        <Select.Option key={u} value={u}>
+                                            <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{u}</span>
+                                        </Select.Option>
+                                    ))}
+                                </Select>
+                            </Form.Item>
+                        </Col>
+                    </Row>
                     <Row gutter={16}>
                         <Col span={12}>
                             <Form.Item name="type" label="Loại hợp đồng/ca" rules={[{ required: true }]}>
@@ -2269,9 +2363,6 @@ export default function Attendance() {
                             </Form.Item>
                         </Col>
                     </Row>
-                    <Form.Item name="packRate" label="Tỉ lệ chia NS (VD: 30 = 30%)" rules={[{ required: true }]}>
-                        <InputNumber size="large" style={{ width: '100%' }} min={0} max={100} />
-                    </Form.Item>
                 </Form>
             </Modal>
         </div>

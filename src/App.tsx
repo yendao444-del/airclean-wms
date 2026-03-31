@@ -243,9 +243,9 @@ function AppContent() {
         // Daily Tasks
         items.push(createMenuItem('Công việc hàng ngày', 'daily-tasks', <CheckCircleOutlined />));
 
-        // Chấm công (Admin only)
+        // Bảng công (Admin only)
         if (hasPermission('permissions')) {
-            items.push(createMenuItem('Chấm công', 'attendance', <ScheduleOutlined />));
+            items.push(createMenuItem('Bảng công', 'attendance', <ScheduleOutlined />));
         }
 
         // Settings

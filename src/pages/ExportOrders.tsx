@@ -417,7 +417,7 @@ export default function ExportOrdersPage() {
             },
         },
         {
-            title: 'Người xuất',
+            title: 'Người đóng gói',
             dataIndex: 'createdBy',
             width: 130,
             render: (createdBy) => createdBy ? (
@@ -580,6 +580,7 @@ export default function ExportOrdersPage() {
                                 style={{ width: '100%' }}
                                 size="large"
                                 format="DD/MM/YYYY HH:mm"
+                                disabled
                             />
                         </Form.Item>
                     </div>

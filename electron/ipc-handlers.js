@@ -1560,6 +1560,9 @@ ipcMain.handle('posOrder:create', async (event, data) => {
             }
         }
 
+        const paidAmount = data.paidAmount || 0;
+        const paymentStatus = paidAmount >= total ? 'paid' : paidAmount > 0 ? 'partial' : 'unpaid';
+
         const order = await prisma.$transaction(async (tx) => {
             // Create Order
             const newOrder = await tx.order.create({
@@ -1568,7 +1571,7 @@ ipcMain.handle('posOrder:create', async (event, data) => {
                     customerId: data.customerId || null,
                     source: 'pos',
                     status: 'completed',
-                    paymentStatus: 'paid',
+                    paymentStatus,
                     paymentMethod: data.paymentMethod || 'cash',
                     subtotal,
                     discount,
@@ -1697,7 +1700,7 @@ ipcMain.handle('posOrder:getAll', async (event, filters = {}) => {
         // Map userName from user relation for frontend
         const ordersWithUser = orders.map(o => ({
             ...o,
-            userName: o.user?.fullName || o.user?.username || null,
+            userName: o.user?.username || o.user?.fullName || null,
         }));
 
         console.log(`✅ [POS] Loaded ${orders.length} POS orders`);
@@ -1765,9 +1768,14 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
             for (const it of items) {
                 await tx.orderItem.create({
                     data: {
-                        orderId: id, productId: it.productId, sku: it.sku,
-                        productName: it.name, variant: it.variant || null,
-                        quantity: it.qty, price: it.price, cost: it.cost || 0,
+                        orderId: id,
+                        productId: it.productId || null,
+                        sku: it.sku,
+                        productName: it.name,
+                        variant: it.variant || null,
+                        quantity: it.qty,
+                        price: it.price,
+                        cost: it.cost || 0,
                         subtotal: it.price * it.qty,
                     },
                 });
