@@ -199,11 +199,8 @@ export default function EcommerceExportPage() {
                 })));
             }
             // Load active packer từ session
-            const packerResult = await window.electronAPI.appConfig.get('activePacker');
-            if (packerResult.success && packerResult.data) {
-                setActivePacker(packerResult.data);
-                activePackerRef.current = packerResult.data;
-            }
+            // Không load activePacker từ session cũ — mỗi ca phải chọn lại người đóng gói
+            // (tránh tình trạng lệnh được gán nhầm người từ ca trước)
         } catch (err) {
             console.error('Lỗi tải danh sách nhân viên:', err);
         }
@@ -524,7 +521,7 @@ Thời gian: ${currentTime}`;
                             ...foundEcommerceExport,
                             status: 'completed',
                             createdBy: currentUser || foundEcommerceExport.createdBy || null,
-                            pickedBy: activePackerRef.current || currentUser || null
+                            pickedBy: activePackerRef.current || null
                         });
 
                         if (!updateRes.success) {

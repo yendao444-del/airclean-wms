@@ -114,19 +114,7 @@ async function main() {
         await uploadToFolder(dbBackupPath, dbFilename, 'application/json', dayFolderId);
     }
 
-    console.log(`\n[5/5] Upload restore scripts...`);
-    const filesToUpload = [
-        'RESTORE.bat',
-        'RESTORE_DATABASE.bat',
-        '_restore_db.js',
-        '_backup_db.js',
-    ];
-    for (const fname of filesToUpload) {
-        const fpath = path.join(__dirname, fname);
-        if (fs.existsSync(fpath)) {
-            await uploadToFolder(fpath, fname, 'text/plain', dayFolderId);
-        }
-    }
+    // [5/5] Restore scripts đã có trong git bundle — bỏ qua để tiết kiệm thời gian
 
     // Xoa ban cu neu qua 20 ban
     console.log(`\n      Kiem tra so luong backup...`);
