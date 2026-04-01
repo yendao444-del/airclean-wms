@@ -155,7 +155,7 @@ export default function OrdersPage() {
                         tracking: trackingMatch ? trackingMatch[1].trim() : undefined,
                         shipping: shippingMatch ? shippingMatch[1].trim() : undefined,
                         notes: ec.notes || '',
-                        createdBy: ec.createdBy || '',
+                        createdBy: (typeof ec.pickedBy === 'string' && ec.pickedBy) ? ec.pickedBy : (ec.createdBy || ''),
                     });
                 }
             }
