@@ -116,6 +116,7 @@ export default function EcommerceExportPage() {
 
     // 👤 Quick-Tap Avatar: Người đóng gói đang active
     const [activePacker, setActivePacker] = useState<string>('');
+    const activePackerRef = useRef<string>(''); // Ref để tránh stale closure trong handleScan
     const [packerEmployees, setPackerEmployees] = useState<PackerEmployee[]>([]);
 
     // ⚙️ State cho Settings Telegram
@@ -201,16 +202,21 @@ export default function EcommerceExportPage() {
             const packerResult = await window.electronAPI.appConfig.get('activePacker');
             if (packerResult.success && packerResult.data) {
                 setActivePacker(packerResult.data);
+                activePackerRef.current = packerResult.data;
             }
         } catch (err) {
             console.error('Lỗi tải danh sách nhân viên:', err);
         }
     };
 
+    // Sync ref khi activePacker state thay đổi
+    useEffect(() => { activePackerRef.current = activePacker; }, [activePacker]);
+
     // 👤 Chọn/bỏ chọn người đóng gói
     const handleSelectPacker = useCallback((username: string) => {
         const newPacker = activePacker === username ? '' : username;
         setActivePacker(newPacker);
+        activePackerRef.current = newPacker;
         // Persist
         window.electronAPI.appConfig.set('activePacker', newPacker);
     }, [activePacker]);
@@ -518,7 +524,7 @@ Thời gian: ${currentTime}`;
                             ...foundEcommerceExport,
                             status: 'completed',
                             createdBy: currentUser || foundEcommerceExport.createdBy || null,
-                            pickedBy: activePacker || currentUser || null
+                            pickedBy: activePackerRef.current || currentUser || null
                         });
 
                         if (!updateRes.success) {

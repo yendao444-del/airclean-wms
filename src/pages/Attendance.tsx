@@ -584,19 +584,14 @@ export default function Attendance() {
                     new Promise((_, reject) => setTimeout(() => reject(`${label} TIMEOUT (${ms}ms)`), ms))
                 ]).catch(e => { console.warn(`[PACKING] ⚠️ ${label} failed:`, e); return { success: false, data: [] }; });
 
-            const [posRes, exRes, ecRes] = await Promise.all([
-                withTimeout(api.posOrder.getAll({ startDate: sinceVal }), 'POS'),
-                withTimeout(api.exportOrders.getAll({ since: sinceVal }), 'Export'),
-                withTimeout(api.ecommerceExports.getAll({ since: sinceVal }), 'Ecom'),
-            ]);
-            console.log('[PACKING] All API done. POS:', posRes?.data?.length, 'Export:', exRes?.data?.length, 'Ecom:', ecRes?.data?.length);
+            // Chỉ lấy TMDT — POS và Xuất hàng không tính vào nhật ký đóng gói
+            const ecRes = await withTimeout(api.ecommerceExports.getAll({ since: sinceVal }), 'Ecom');
+            console.log('[PACKING] Ecom done:', ecRes?.data?.length);
 
-            const getPlatform = (source: string, customer: string) => {
+            const getPlatform = (_source: string, customer: string) => {
                 const c = (customer || '').toLowerCase();
                 if (c.includes('shopee')) return 'Shopee';
                 if (c.includes('tiktok')) return 'TikTok';
-                if (source === 'pos') return 'POS';
-                if (source === 'export') return 'Khác';
                 return 'Web';
             };
 
@@ -649,18 +644,10 @@ export default function Attendance() {
                 });
             };
 
-            if (posRes.success && posRes.data) posRes.data.forEach((o: any) => processOrder(o, 'pos'));
-            if (exRes.success && exRes.data) exRes.data.forEach((o: any) => processOrder(o, 'export'));
+            // Chỉ tính TMDT completed
             if (ecRes.success && ecRes.data) ecRes.data.filter((o: any) => o.status === 'completed').forEach((o: any) => processOrder(o, 'tmdt'));
 
-            // 🔍 DEBUG: Final summary
-            console.log('[PACKING DEBUG] === SUMMARY ===', {
-                posCount: posRes.success ? (posRes.data?.length || 0) : 'FAIL',
-                exportCount: exRes.success ? (exRes.data?.length || 0) : 'FAIL',
-                ecomCount: ecRes.success ? (ecRes.data?.length || 0) : 'FAIL',
-                unifiedCount: unified.length,
-                sinceVal,
-            });
+            console.log('[PACKING] Done. Ecom:', ecRes.success ? (ecRes.data?.length || 0) : 'FAIL', '| Unified:', unified.length);
 
             setPackingOrderLogsData(unified.sort((a, b) => dayjs(b.timestamp).unix() - dayjs(a.timestamp).unix()));
         } catch (error) {
