@@ -277,6 +277,21 @@ function calcPacksFromItems(items: PackingOrderItem[]): number {
     return totalPacks;
 }
 
+// Match packer robustly (ignores accents and case)
+const matchPacker = (packerStr: any, emp: any) => {
+    if (!packerStr || typeof packerStr !== 'string') return false;
+    const norm = (s: any) => typeof s === 'string' ? s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim() : '';
+    const p = norm(packerStr);
+    const u = norm(emp.username || '');
+    const n = norm(emp.name || '');
+    const f = norm(emp.fullName || '');
+
+    if (u && (p === u || p.includes(u))) return true;
+    if (n && (p === n || p.includes(n))) return true;
+    if (f && (p === f || f.includes(p) || p.includes(f))) return true;
+    return false;
+};
+
 // ===== PAYROLL CALCULATION — Cơ chế: Ai đóng gói hưởng 100% =====
 function calculatePayroll(
     activeFines: FineRecord[],
@@ -292,20 +307,6 @@ function calculatePayroll(
     const HOURS_PER_SHIFT = 4;
     const unitPrice = PACKING_UNIT_PRICE; // 20đ/SP
     const totalPackValue_100 = (packingData.level1Units + packingData.level10Units) * unitPrice;
-
-    // Tính giá trị đóng gói CÁ NHÂN theo từng đơn
-    // Mỗi sản phẩm (SKU cha) = 20đ, combo 10 gói = 10 x 20đ = 200đ
-    const packValueByUsername: Record<string, { value: number; orderCount: number; totalUnits: number }> = {};
-    orderLogs.forEach(order => {
-        const packer = (order.packer || '').trim().toLowerCase();
-        if (!packer) return;
-        const totalPacks = calcPacksFromItems(order.items);
-        const value = totalPacks * unitPrice;
-        if (!packValueByUsername[packer]) packValueByUsername[packer] = { value: 0, orderCount: 0, totalUnits: 0 };
-        packValueByUsername[packer].value += value;
-        packValueByUsername[packer].orderCount += 1;
-        packValueByUsername[packer].totalUnits += totalPacks;
-    });
 
     return employeesList.map((emp, idx) => {
         const empLogs = liveLogs.filter((l: any) => {
@@ -329,14 +330,19 @@ function calculatePayroll(
             ? (shifts * HOURS_PER_SHIFT * emp.baseSalary)
             : (emp.baseSalary - leaveDeduction);
 
-        // === MỚI: packIncome = giá trị đóng gói CÁ NHÂN (ai đóng hưởng 100%) ===
-        // Match packer bằng CẢ username VÀ tên đầy đủ (packer có thể là "toan" hoặc "Nguyễn Đình Toàn")
-        const uname = (emp.username || '').trim().toLowerCase();
-        const empName = (emp.name || '').trim().toLowerCase();
-        const empPackData = packValueByUsername[uname] || packValueByUsername[empName] || { value: 0, orderCount: 0, totalUnits: 0 };
-        const packIncome = empPackData.value;
-        const packOrderCount = empPackData.orderCount;
-        const packTotalUnits = empPackData.totalUnits;
+        // === Tính thu nhập đóng gói CÁ NHÂN bằng match linh hoạt ===
+        let packIncome = 0;
+        let packOrderCount = 0;
+        let packTotalUnits = 0;
+
+        orderLogs.forEach(order => {
+            if (matchPacker(order.packer || '', emp)) {
+                const totalPacks = calcPacksFromItems(order.items);
+                packIncome += totalPacks * unitPrice;
+                packOrderCount += 1;
+                packTotalUnits += totalPacks;
+            }
+        });
 
         const myFines = activeFines.filter(f => f.empId === emp.id).reduce((sum, f) => sum + f.amount, 0);
 
@@ -561,15 +567,29 @@ export default function Attendance() {
         loadPackingOrders();
     }, []);
 
+    const loadPackingRef = useRef(false);
     const loadPackingOrders = async (since?: string) => {
+        if (loadPackingRef.current) { console.log('[PACKING] Skipped (already loading)'); return; }
+        loadPackingRef.current = true;
+        console.log('[PACKING DEBUG] === loadPackingOrders CALLED ===');
         try {
             const api = (window as any).electronAPI;
+            console.log('[PACKING DEBUG] electronAPI exists?', !!api, 'posOrder?', !!api?.posOrder, 'exportOrders?', !!api?.exportOrders, 'ecommerceExports?', !!api?.ecommerceExports);
             const sinceVal = since || overviewDateRange[0].startOf('day').toISOString();
+            
+            // Timeout wrapper: nếu API không trả kết quả trong 10s → bỏ qua
+            const withTimeout = (p: Promise<any>, label: string, ms = 10000) =>
+                Promise.race([
+                    p.then(r => { console.log(`[PACKING] ✅ ${label}:`, r?.data?.length || 0); return r; }),
+                    new Promise((_, reject) => setTimeout(() => reject(`${label} TIMEOUT (${ms}ms)`), ms))
+                ]).catch(e => { console.warn(`[PACKING] ⚠️ ${label} failed:`, e); return { success: false, data: [] }; });
+
             const [posRes, exRes, ecRes] = await Promise.all([
-                api.posOrder.getAll({}),
-                api.exportOrders.getAll({ since: sinceVal }),
-                api.ecommerceExports.getAll({ since: sinceVal }),
+                withTimeout(api.posOrder.getAll({ startDate: sinceVal }), 'POS'),
+                withTimeout(api.exportOrders.getAll({ since: sinceVal }), 'Export'),
+                withTimeout(api.ecommerceExports.getAll({ since: sinceVal }), 'Ecom'),
             ]);
+            console.log('[PACKING] All API done. POS:', posRes?.data?.length, 'Export:', exRes?.data?.length, 'Ecom:', ecRes?.data?.length);
 
             const getPlatform = (source: string, customer: string) => {
                 const c = (customer || '').toLowerCase();
@@ -585,11 +605,19 @@ export default function Attendance() {
             const processOrder = (order: any, source: string) => {
                 let items: any[] = typeof order.items === 'string' ? JSON.parse(order.items || '[]') : (order.items || []);
                 
+                // 🔍 DEBUG: Log raw order data
+                console.log(`[PACKING DEBUG] Source: ${source}, Order #${order.id}, items type: ${typeof order.items}, items count: ${items.length}`, 
+                    items.length > 0 ? { firstItem: items[0], allKeys: items.length > 0 ? Object.keys(items[0]) : [] } : 'NO ITEMS');
+                
                 // Lấy TẤT CẢ sản phẩm (không filter theo SKU cụ thể nữa)
                 const validItems = items.filter(it => {
                     const sku = (it.variantSku || it.sku || it.variant_sku || it.product_sku || it.SKU || it.Sku || '');
                     return sku && sku.trim() !== ''; // Chỉ bỏ qua item không có SKU
                 });
+
+                // 🔍 DEBUG: Log filtered results
+                console.log(`[PACKING DEBUG] Order #${order.id}: ${items.length} items → ${validItems.length} valid`, 
+                    { packer: order.pickedBy || order.createdBy || order.userName });
 
                 if (validItems.length === 0) return;
 
@@ -611,8 +639,10 @@ export default function Attendance() {
                     orderNumber: order.orderNumber || order.ecommerceExportCode || `#${source.toUpperCase()}-${order.id}`,
                     platform: getPlatform(source, customerName),
                     customerName,
-                    // Packer check: Prioritize pickedBy (Quick-Tap Avatar), fallback to createdBy/userName
-                    packer: order.pickedBy || order.createdBy || order.userName || 'Không ghi nhận', 
+                    // Packer: dùng pickedBy (string), fallback userName (string) — KHÔNG dùng createdBy (integer ID)
+                    packer: (typeof order.pickedBy === 'string' && order.pickedBy) ? order.pickedBy
+                          : (typeof order.userName === 'string' && order.userName) ? order.userName
+                          : 'Không ghi nhận',
                     items: mappedItems,
                     totalSKU,
                     status: order.status === 'completed' ? 'completed' : 'issue'
@@ -623,10 +653,21 @@ export default function Attendance() {
             if (exRes.success && exRes.data) exRes.data.forEach((o: any) => processOrder(o, 'export'));
             if (ecRes.success && ecRes.data) ecRes.data.filter((o: any) => o.status === 'completed').forEach((o: any) => processOrder(o, 'tmdt'));
 
+            // 🔍 DEBUG: Final summary
+            console.log('[PACKING DEBUG] === SUMMARY ===', {
+                posCount: posRes.success ? (posRes.data?.length || 0) : 'FAIL',
+                exportCount: exRes.success ? (exRes.data?.length || 0) : 'FAIL',
+                ecomCount: ecRes.success ? (ecRes.data?.length || 0) : 'FAIL',
+                unifiedCount: unified.length,
+                sinceVal,
+            });
+
             setPackingOrderLogsData(unified.sort((a, b) => dayjs(b.timestamp).unix() - dayjs(a.timestamp).unix()));
         } catch (error) {
             console.error('Lỗi tải dữ liệu đơn hàng:', error);
             message.error('Không thể tải dữ liệu đơn đóng gói!');
+        } finally {
+            loadPackingRef.current = false;
         }
     };
 

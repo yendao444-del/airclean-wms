@@ -219,7 +219,9 @@ export default function EcommerceExportPage() {
     // to avoid stale closures.
     const getLatestExports = async () => {
         try {
-            const result = await window.electronAPI.ecommerceExports.getAll();
+            // ⚡ Chỉ lấy 7 ngày gần nhất — đủ cho màn hình đóng gói thực tế
+            const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+            const result = await window.electronAPI.ecommerceExports.getAll({ since: since7d });
             if (result.success && result.data) return result.data;
         } catch { }
         return ecommerceExports;
@@ -249,7 +251,9 @@ export default function EcommerceExportPage() {
     const loadEcommerceExports = async (silent = false) => {
         if (!silent) setLoading(true);
         try {
-            const result = await window.electronAPI.ecommerceExports.getAll();
+            // ⚡ Chỉ lấy 7 ngày gần nhất
+            const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+            const result = await window.electronAPI.ecommerceExports.getAll({ since: since7d });
             if (result.success && result.data) {
                 exportsRef.current = result.data;
                 setEcommerceExports(result.data);

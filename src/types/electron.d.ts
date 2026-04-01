@@ -112,7 +112,7 @@ export interface ElectronAPI {
         getStats: () => Promise<{ success: boolean; data?: ActivityLogStats; error?: string }>;
     };
     purchases: {
-        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
@@ -150,7 +150,7 @@ export interface ElectronAPI {
         resetDaily: () => Promise<{ success: boolean; data?: { reset: boolean; resetCount: number; message: string }; error?: string }>;
     };
     ecommerceExports: {
-        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
@@ -164,7 +164,7 @@ export interface ElectronAPI {
         onNewFile: (callback: (data: { name: string; base64: string; path: string }) => void) => () => void;
     };
     exportOrders: {
-        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
@@ -182,7 +182,7 @@ export interface ElectronAPI {
         bulkCreate: (records: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     };
     refunds: {
-        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;

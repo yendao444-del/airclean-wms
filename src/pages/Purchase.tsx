@@ -222,7 +222,9 @@ export default function PurchasePage() {
     const loadPurchases = async () => {
         setLoading(true);
         try {
-            const result = await window.electronAPI.purchases.getAll();
+            // ⚡ Chỉ lấy 90 ngày gần nhất
+            const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+            const result = await window.electronAPI.purchases.getAll({ since: since90 });
             if (result.success && result.data) {
                 setPurchases(result.data);
             } else {

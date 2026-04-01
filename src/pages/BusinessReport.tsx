@@ -418,11 +418,13 @@ function XNTTab({ dateRange }: { dateRange: [Dayjs, Dayjs] }) {
     const loadData = useCallback(async () => {
         setLoading(true);
         try {
+            // ⚡ Chỉ fetch từ đầu kỳ được chọn — giảm egress Supabase
+            const since = dateRange[0].startOf('day').toISOString();
             const [prodRes, purRes, expRes, ecomRes] = await Promise.all([
                 window.electronAPI.products.getAll(),
-                window.electronAPI.purchases.getAll(),
-                window.electronAPI.exportOrders.getAll(),
-                window.electronAPI.ecommerceExports.getAll(),
+                window.electronAPI.purchases.getAll({ since }),
+                window.electronAPI.exportOrders.getAll({ since }),
+                window.electronAPI.ecommerceExports.getAll({ since }),
             ]);
 
             if (!prodRes.success) return;
@@ -755,11 +757,13 @@ export default function BusinessReportPage() {
     const loadData = useCallback(async () => {
         setLoading(true);
         try {
+            // ⚡ Chỉ fetch từ đầu kỳ được chọn — giảm egress Supabase
+            const since = dateRange[0].startOf('day').toISOString();
             const [expRes, ecomRes, refRes, purRes, prodRes, comboRes] = await Promise.all([
-                window.electronAPI.exportOrders.getAll(),
-                window.electronAPI.ecommerceExports.getAll(),
-                window.electronAPI.refunds.getAll(),
-                window.electronAPI.purchases.getAll(),
+                window.electronAPI.exportOrders.getAll({ since }),
+                window.electronAPI.ecommerceExports.getAll({ since }),
+                window.electronAPI.refunds.getAll({ since }),
+                window.electronAPI.purchases.getAll({ since }),
                 window.electronAPI.products.getAll(),
                 window.electronAPI.combos.getAll(),
             ]);
@@ -820,7 +824,7 @@ export default function BusinessReportPage() {
             console.error('Load data error:', err);
         }
         setLoading(false);
-    }, []);
+    }, [dateRange]);
 
     useEffect(() => { loadData(); }, [loadData]);
 

@@ -27,7 +27,11 @@ export default function SalesHistoryPage() {
     const loadOrders = async (filters?: any) => {
         setLoading(true);
         try {
-            const res = await window.electronAPI.posOrder.getAll(filters || {});
+            // ⚡ Mặc định lấy 30 ngày gần nhất nếu không có filter
+            const defaultFilters = filters || {
+                startDate: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+            };
+            const res = await window.electronAPI.posOrder.getAll(defaultFilters);
             if (res.success && res.data) {
                 setOrders(res.data);
             } else {

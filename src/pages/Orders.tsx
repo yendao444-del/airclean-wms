@@ -95,7 +95,7 @@ export default function OrdersPage() {
             const api = (window as any).electronAPI;
             const since = getSince();
             const [posRes, exRes, ecRes] = await Promise.all([
-                api.posOrder.getAll({}),
+                api.posOrder.getAll({ startDate: since }),
                 api.exportOrders.getAll({ since }),
                 api.ecommerceExports.getAll({ since }),
             ]);

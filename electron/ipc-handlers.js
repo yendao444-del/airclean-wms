@@ -474,7 +474,7 @@ async function cleanupOldLogs() {
 // Chạy cleanup khi app khởi động (delay 10s để DB sẵn sàng)
 setTimeout(cleanupOldLogs, 10000);
 
-// Lặp lại mỗi 24 tiếng (thay vì 6h — cleanup không cần chạy thường xuyên)
+// Lặp lại mỗi 24 tiếng
 setInterval(cleanupOldLogs, 24 * 60 * 60 * 1000);
 
 // ========================================

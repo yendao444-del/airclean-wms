@@ -47,11 +47,13 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
         try {
             if (!silent) setLoading(true);
             const api = (window as any).electronAPI;
+            // ⚡ Chỉ lấy 90 ngày gần nhất để giảm egress Supabase
+            const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
             const [pRes, exRes, ecRes, puRes, cbRes] = await Promise.all([
                 api.products.getAll(),
-                api.exportOrders.getAll(),
-                api.ecommerceExports.getAll(),
-                api.purchases.getAll(),
+                api.exportOrders.getAll({ since: since90 }),
+                api.ecommerceExports.getAll({ since: since90 }),
+                api.purchases.getAll({ since: since90 }),
                 api.combos.getAll(),
             ]);
             if (pRes.success) setProducts(pRes.data || []);
@@ -90,7 +92,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
         loadData();
         const iv = setInterval(() => {
             if (document.visibilityState === 'visible') loadData(true);
-        }, 60000);
+        }, 300000); // ⚡ 5 phút thay vì 60 giây — giảm egress
         return () => clearInterval(iv);
     }, [loadData]);
 
