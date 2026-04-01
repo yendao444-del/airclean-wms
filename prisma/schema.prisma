@@ -372,6 +372,7 @@ model EcommerceExport {
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   createdBy             String?
+  pickedBy              String?  // Người đóng gói/pickup
 
   @@index([status])
   @@index([customerName])

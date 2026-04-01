@@ -78,6 +78,7 @@ interface FineRecord {
     type: string;
     detail: string;
     amount: number;
+    date?: string; // ISO string — ngày tạo phạt
 }
 
 interface BonusRecord {
@@ -86,6 +87,15 @@ interface BonusRecord {
     type: string;
     detail: string;
     amount: number;
+    date?: string; // ISO string — ngày tạo thưởng
+}
+
+interface LockedPeriod {
+    id: string;
+    start: string; // ISO — đầu kỳ
+    end: string;   // ISO — cuối kỳ
+    lockedAt: string;
+    lockedBy: string;
 }
 
 interface BonusAuditLog {
@@ -195,6 +205,9 @@ const initialEmployees: Employee[] = [
 
 const initialWarehousePacking = { level1Units: 6100, level10Units: 870 };
 
+// Giá tiền đóng gói: mỗi sản phẩm (SKU cha) = 20đ
+const PACKING_UNIT_PRICE = 20;
+
 // Seed lịch sử đóng gói ban đầu
 const initialPackingLogs: PackingLog[] = [
     {
@@ -248,19 +261,18 @@ const fundTransactions: FundTransaction[] = []; // Xóa mock — giao dịch th�
 // ===== HELPERS =====
 const fmt = (v: number) => new Intl.NumberFormat('vi-VN').format(Math.round(v)) + ' đ';
 
-// Đọc số lượng gói từ SKU prefix (e.g. "10-5DUNI-TRANG" → 10 gói)
+// Tính tổng số lượng sản phẩm (theo SKU cha) trong đơn hàng
+// SKU format: {prefix}-{code} e.g. "20-5DUNI-TRANG" → prefix 20 = 20 sản phẩm
+// Combo 20 gói x1 = 20 SP × 20đ = 400đ
+// CB- (combo mix) SKU: parse prefix tương tự hoặc tính từ combo components
 function calcPacksFromItems(items: PackingOrderItem[]): number {
     let totalPacks = 0;
     items.forEach(item => {
         const sku = (item.sku || '').toUpperCase();
-        if (sku.startsWith('CB-')) {
-            const matches = sku.match(/\d+/g);
-            if (matches) totalPacks += matches.reduce((s: number, v: string) => s + parseInt(v, 10), 0) * item.quantity;
-        } else {
-            const prefixMatch = sku.match(/^(\d+)-/);
-            const packCount = prefixMatch ? parseInt(prefixMatch[1], 10) : 1;
-            totalPacks += item.quantity * packCount;
-        }
+        // Đọc prefix số từ SKU (e.g. "20-5DUNI-TRANG" → 20)
+        const prefixMatch = sku.match(/^(\d+)-/);
+        const packCount = prefixMatch ? parseInt(prefixMatch[1], 10) : 1;
+        totalPacks += (item.quantity || 1) * packCount;
     });
     return totalPacks;
 }
@@ -278,24 +290,21 @@ function calculatePayroll(
 ) {
     const STANDARD_WORK_DAYS = 26;
     const HOURS_PER_SHIFT = 4;
-    const lv1Price = 200;
-    const lv10Price = 600;
-    const totalPackValue_100 = (packingData.level1Units * lv1Price) + (packingData.level10Units * lv10Price);
+    const unitPrice = PACKING_UNIT_PRICE; // 20đ/SP
+    const totalPackValue_100 = (packingData.level1Units + packingData.level10Units) * unitPrice;
 
     // Tính giá trị đóng gói CÁ NHÂN theo từng đơn
-    const packValueByUsername: Record<string, { value: number; orderCount: number }> = {};
+    // Mỗi sản phẩm (SKU cha) = 20đ, combo 10 gói = 10 x 20đ = 200đ
+    const packValueByUsername: Record<string, { value: number; orderCount: number; totalUnits: number }> = {};
     orderLogs.forEach(order => {
         const packer = (order.packer || '').trim().toLowerCase();
         if (!packer) return;
         const totalPacks = calcPacksFromItems(order.items);
-        const orderValue = totalPacks >= 10 ? (lv10Price * 1) : (lv1Price * 1); // Mỗi đơn = 1 đơn vị
-        // Chính xác hơn: tính theo tổng gói trong đơn
-        const actualValue = totalPacks >= 10 ? (totalPacks * lv10Price / 10) : (totalPacks * lv1Price);
-        // Đơn giản: mỗi đơn < 10 gói = 200đ/gói, >= 10 gói = 600đ/đơn (như cũ)
-        const value = totalPacks >= 10 ? lv10Price : lv1Price;
-        if (!packValueByUsername[packer]) packValueByUsername[packer] = { value: 0, orderCount: 0 };
+        const value = totalPacks * unitPrice;
+        if (!packValueByUsername[packer]) packValueByUsername[packer] = { value: 0, orderCount: 0, totalUnits: 0 };
         packValueByUsername[packer].value += value;
         packValueByUsername[packer].orderCount += 1;
+        packValueByUsername[packer].totalUnits += totalPacks;
     });
 
     return employeesList.map((emp, idx) => {
@@ -321,18 +330,28 @@ function calculatePayroll(
             : (emp.baseSalary - leaveDeduction);
 
         // === MỚI: packIncome = giá trị đóng gói CÁ NHÂN (ai đóng hưởng 100%) ===
+        // Match packer bằng CẢ username VÀ tên đầy đủ (packer có thể là "toan" hoặc "Nguyễn Đình Toàn")
         const uname = (emp.username || '').trim().toLowerCase();
-        const empPackData = packValueByUsername[uname] || { value: 0, orderCount: 0 };
+        const empName = (emp.name || '').trim().toLowerCase();
+        const empPackData = packValueByUsername[uname] || packValueByUsername[empName] || { value: 0, orderCount: 0, totalUnits: 0 };
         const packIncome = empPackData.value;
         const packOrderCount = empPackData.orderCount;
+        const packTotalUnits = empPackData.totalUnits;
 
         const myFines = activeFines.filter(f => f.empId === emp.id).reduce((sum, f) => sum + f.amount, 0);
+
+        // Nhân viên bị phạt KHÔNG được nhận phần chia từ pool phạt
+        const finedEmpIds = new Set(activeFines.map(f => f.empId));
+        const hasOwnFine = finedEmpIds.has(emp.id);
         let fineShare = 0;
-        activeFines.forEach(f => {
-            if (f.empId !== emp.id) {
-                fineShare += f.amount / (employeesList.length - 1);
+        if (!hasOwnFine) {
+            const eligibleCount = employeesList.filter(e => !finedEmpIds.has(e.id)).length;
+            if (eligibleCount > 0) {
+                activeFines.forEach(f => {
+                    fineShare += f.amount / eligibleCount;
+                });
             }
-        });
+        }
 
         const mBonus = bonusesData.filter(b => b.empId === emp.id).reduce((sum, b) => sum + b.amount, 0);
         const totalBonus = fineShare + mBonus;
@@ -340,7 +359,7 @@ function calculatePayroll(
         return {
             ...emp, shifts, absentDays, salaryBase, packIncome, totalPackValue_100,
             fineShare, mBonus, myFines, totalBonus, finalSalary, leaveDeduction,
-            packOrderCount,
+            packOrderCount, packTotalUnits,
         };
     });
 }
@@ -387,6 +406,7 @@ const SundayRestCell = () => (
 export default function Attendance() {
     const currentUser = useCurrentUser();
     const [configModalOpen, setConfigModalOpen] = useState(false);
+    const [activeConfigTab, setActiveConfigTab] = useState('rules');
     const [payslipModal, setPayslipModal] = useState<any>(null);
     const [activeTab, setActiveTab] = useState('overview');
     const [config, setConfig] = useState<PenaltyConfig>({
@@ -427,6 +447,9 @@ export default function Attendance() {
     const [extraFines, setExtraFines] = useState<FineRecord[]>([]);
     const [fineAuditLog, setFineAuditLog] = useState<FineAuditLog[]>([]);
 
+    // === State cho danh sách kỳ đã chốt ===
+    const [lockedPeriods, setLockedPeriods] = useState<LockedPeriod[]>([]);
+
     const [isDbLoaded, setIsDbLoaded] = useState(false);
     const [systemUsernames, setSystemUsernames] = useState<string[]>([]);
 
@@ -459,6 +482,7 @@ export default function Attendance() {
                     if (d.fundAuditLog) setFundAuditLog(d.fundAuditLog);
                     if (d.extraFines) setExtraFines(d.extraFines);
                     if (d.fineAuditLog) setFineAuditLog(d.fineAuditLog);
+                    if (d.lockedPeriods) setLockedPeriods(d.lockedPeriods);
                 }
                 // Fetch danh sách username hệ thống
                 try {
@@ -486,7 +510,7 @@ export default function Attendance() {
     useEffect(() => {
         if (!isDbLoaded) return; // Không lưu đè lúc chưa tải xong
 
-        const snapshot = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog };
+        const snapshot = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods };
         pendingSaveRef.current = snapshot;
 
         const saveData = async () => {
@@ -501,7 +525,7 @@ export default function Attendance() {
 
         const timer = setTimeout(saveData, 500); // Đợi 500ms thao tác cuối rồi mới save
         return () => clearTimeout(timer);
-    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, isDbLoaded]);
+    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods, isDbLoaded]);
 
     // Flush save ngay lập tức khi reload hoặc đóng app
     useEffect(() => {
@@ -524,6 +548,12 @@ export default function Attendance() {
     const [empListModalOpen, setEmpListModalOpen] = useState(false);
     const [editingEmp, setEditingEmp] = useState<Employee | null>(null);
 
+    // State cho lọc kỳ lương Tổng quát — khai báo sớm để loadPackingOrders dùng được
+    const [overviewDateRange, setOverviewDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs]>([
+        dayjs().startOf('month'),
+        dayjs().endOf('month'),
+    ]);
+
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);
     const [packingDateRange, setPackingDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
 
@@ -531,14 +561,14 @@ export default function Attendance() {
         loadPackingOrders();
     }, []);
 
-    const loadPackingOrders = async () => {
+    const loadPackingOrders = async (since?: string) => {
         try {
             const api = (window as any).electronAPI;
-            const since = dayjs().startOf('month').toISOString();
+            const sinceVal = since || overviewDateRange[0].startOf('day').toISOString();
             const [posRes, exRes, ecRes] = await Promise.all([
                 api.posOrder.getAll({}),
-                api.exportOrders.getAll({ since }),
-                api.ecommerceExports.getAll({ since }),
+                api.exportOrders.getAll({ since: sinceVal }),
+                api.ecommerceExports.getAll({ since: sinceVal }),
             ]);
 
             const getPlatform = (source: string, customer: string) => {
@@ -555,9 +585,10 @@ export default function Attendance() {
             const processOrder = (order: any, source: string) => {
                 let items: any[] = typeof order.items === 'string' ? JSON.parse(order.items || '[]') : (order.items || []);
                 
+                // Lấy TẤT CẢ sản phẩm (không filter theo SKU cụ thể nữa)
                 const validItems = items.filter(it => {
-                    const sku = (it.variantSku || it.sku || it.variant_sku || it.product_sku || it.SKU || it.Sku || '').toUpperCase();
-                    return sku.includes('5DUNI') || sku.startsWith('CB-');
+                    const sku = (it.variantSku || it.sku || it.variant_sku || it.product_sku || it.SKU || it.Sku || '');
+                    return sku && sku.trim() !== ''; // Chỉ bỏ qua item không có SKU
                 });
 
                 if (validItems.length === 0) return;
@@ -604,21 +635,18 @@ export default function Attendance() {
 
     // === State cho đóng gói + lịch sử ===
     const warehousePacking = useMemo(() => {
-        let l1 = 0;
-        let l2 = 0;
+        let totalUnits = 0;
         packingOrderLogsData.forEach(order => {
-            const totalPacks = calcPacksFromItems(order.items);
-            if (totalPacks >= 10) l2 += 1;
-            else l1 += 1;
+            totalUnits += calcPacksFromItems(order.items);
         });
-        return { level1Units: l1, level10Units: l2 };
+        return { level1Units: totalUnits, level10Units: 0 };
     }, [packingOrderLogsData]);
 
     const [expandedPackingKeys, setExpandedPackingKeys] = useState<string[]>([]);
 
-    // State cho chọn tháng
-    const [selectedMonth, setSelectedMonth] = useState(3); // Tháng 3
-    const [selectedYear, setSelectedYear] = useState(2026);
+    // State cho chọn tháng (dùng cho tab Vân tay)
+    const [selectedMonth, setSelectedMonth] = useState(dayjs().month() + 1);
+    const [selectedYear, setSelectedYear] = useState(dayjs().year());
     const monthNames = ['', 'Tháng 01', 'Tháng 02', 'Tháng 03', 'Tháng 04', 'Tháng 05', 'Tháng 06', 'Tháng 07', 'Tháng 08', 'Tháng 09', 'Tháng 10', 'Tháng 11', 'Tháng 12'];
     const goMonth = (dir: -1 | 1) => {
         let m = selectedMonth + dir;
@@ -628,10 +656,44 @@ export default function Attendance() {
         setSelectedMonth(m); setSelectedYear(y);
     };
 
+    // Reload packing orders khi đổi kỳ
+    useEffect(() => {
+        loadPackingOrders(overviewDateRange[0].startOf('day').toISOString());
+    }, [overviewDateRange]);
+
     // Gộp finesData gốc + extraFines
     const allFines = useMemo(() => [...finesData, ...extraFines], [extraFines]);
 
-    const payrollData = useMemo(() => calculatePayroll(allFines, warehousePacking, employees, extraBonuses, liveAttendanceLogs, selectedMonth, selectedYear, packingOrderLogsData), [allFines, warehousePacking, employees, extraBonuses, liveAttendanceLogs, selectedMonth, selectedYear, packingOrderLogsData]);
+    // Helper: lọc theo overviewDateRange
+    const inOverviewRange = (dateStr?: string) => {
+        if (!dateStr) return true; // record cũ không có date → luôn hiện
+        const d = dayjs(dateStr);
+        return d.isAfter(overviewDateRange[0].startOf('day').subtract(1, 'ms'))
+            && d.isBefore(overviewDateRange[1].endOf('day').add(1, 'ms'));
+    };
+
+    const overviewFines = useMemo(() => allFines.filter(f => inOverviewRange(f.date)), [allFines, overviewDateRange]);
+    const overviewBonuses = useMemo(() => extraBonuses.filter(b => inOverviewRange(b.date)), [extraBonuses, overviewDateRange]);
+    const overviewPackingLogs = useMemo(() => packingOrderLogsData.filter(o => inOverviewRange(o.timestamp)), [packingOrderLogsData, overviewDateRange]);
+    const overviewWareHousePacking = useMemo(() => {
+        let totalUnits = 0;
+        overviewPackingLogs.forEach(order => {
+            totalUnits += calcPacksFromItems(order.items);
+        });
+        return { level1Units: totalUnits, level10Units: 0 };
+    }, [overviewPackingLogs]);
+
+    // Kỳ hiện tại có bị khóa không?
+    const isCurrentPeriodLocked = useMemo(() =>
+        lockedPeriods.some(lp =>
+            dayjs(lp.start).isSame(overviewDateRange[0], 'day') &&
+            dayjs(lp.end).isSame(overviewDateRange[1], 'day')
+        ), [lockedPeriods, overviewDateRange]);
+
+    const payrollData = useMemo(() => calculatePayroll(
+        overviewFines, overviewWareHousePacking, employees, overviewBonuses,
+        liveAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs
+    ), [overviewFines, overviewWareHousePacking, employees, overviewBonuses, liveAttendanceLogs, overviewDateRange, overviewPackingLogs]);
 
     // Totals cho Overview
     const totals = useMemo(() => {
@@ -675,10 +737,17 @@ export default function Attendance() {
 
     const openConfigModal = () => { setTempConfig({ ...config }); setConfigModalOpen(true); };
 
-
+    const checkLocked = (): boolean => {
+        if (isCurrentPeriodLocked && currentUser !== 'admin') {
+            message.error('Kỳ này đã bị khóa. Chỉ admin mới có thể thực hiện thao tác này!');
+            return true;
+        }
+        return false;
+    };
 
     // === Thêm/Sửa Thưởng Lẻ handler ===
     const handleAddBonus = useCallback(() => {
+        if (checkLocked()) return;
         bonusForm.validateFields().then(values => {
             const now = new Date().toLocaleString('vi-VN');
             if (editingBonus) {
@@ -697,7 +766,7 @@ export default function Attendance() {
                 message.success('Đã cập nhật thưởng!');
             } else {
                 const newId = 'bonus-' + Date.now();
-                const newBonus: BonusRecord = { id: newId, empId: values.empId, type: 'Thưởng lẻ (Admin)', detail: values.detail, amount: values.amount };
+                const newBonus: BonusRecord = { id: newId, empId: values.empId, type: 'Thưởng lẻ (Admin)', detail: values.detail, amount: values.amount, date: new Date().toISOString() };
                 setExtraBonuses(prev => [...prev, newBonus]);
                 setBonusAuditLog(prev => [...prev, {
                     id: 'log-' + Date.now(),
@@ -716,6 +785,7 @@ export default function Attendance() {
     }, [bonusForm, editingBonus, employees]);
 
     const handleDeleteBonus = useCallback((bonus: BonusRecord) => {
+        if (checkLocked()) return;
         const now = new Date().toLocaleString('vi-VN');
         setExtraBonuses(prev => prev.filter(b => b.id !== bonus.id));
         setBonusAuditLog(prev => [...prev, {
@@ -731,6 +801,7 @@ export default function Attendance() {
 
     // === Thêm Phạt Thủ Công handler ===
     const handleAddFine = useCallback(() => {
+        if (checkLocked()) return;
         fineForm.validateFields().then(values => {
             const fineType = Array.isArray(values.type) ? values.type[0] : values.type;
             const newFine: FineRecord = {
@@ -738,6 +809,7 @@ export default function Attendance() {
                 type: fineType,
                 detail: values.detail,
                 amount: values.amount,
+                date: new Date().toISOString(),
             };
             setExtraFines(prev => [...prev, newFine]);
             
@@ -758,6 +830,7 @@ export default function Attendance() {
 
     // === Xóa Phạt Thủ Công handler ===
     const handleDeleteFine = useCallback((fineIndex: number) => {
+        if (checkLocked()) return;
         const fine = extraFines[fineIndex];
         Modal.confirm({
             title: 'Xác nhận xóa khoản phạt',
@@ -793,6 +866,7 @@ export default function Attendance() {
 
     // === Thêm/Sửa Giao dịch Quỹ handler ===
     const handleAddFundTx = useCallback(() => {
+        if (checkLocked()) return;
         const activeType = editingFundTx ? editingFundTx.type : fundModalType;
         if (!activeType && !editingFundTx) return;
         fundForm.validateFields().then(values => {
@@ -854,6 +928,7 @@ export default function Attendance() {
 
     // === Xóa Giao dịch Quỹ (có audit) ===
     const handleDeleteFundTx = useCallback((tx: FundTransaction) => {
+        if (checkLocked()) return;
         Modal.confirm({
             title: 'Xác nhận xóa giao dịch',
             content: (
@@ -888,6 +963,7 @@ export default function Attendance() {
 
     // === Mở modal sửa ===
     const handleEditFundTx = useCallback((tx: FundTransaction) => {
+        if (checkLocked()) return;
         setEditingFundTx(tx);
         fundForm.setFieldsValue({ note: tx.note, amount: tx.amount, person: tx.person });
         setFundModalType(tx.type); // mở modal đúng loại
@@ -897,14 +973,36 @@ export default function Attendance() {
 
 
     const saveConfig = () => { setConfig({ ...tempConfig }); setConfigModalOpen(false); message.success('Đã lưu cấu hình!'); };
+
     const lockPayroll = () => {
+        if (isCurrentPeriodLocked) {
+            message.warning('Kỳ này đã được chốt rồi!');
+            return;
+        }
+        const startStr = overviewDateRange[0].format('DD/MM/YYYY');
+        const endStr = overviewDateRange[1].format('DD/MM/YYYY');
         Modal.confirm({
             title: 'Xác nhận chốt bảng lương',
-            content: 'Xác nhận chốt và khóa bảng lương tháng 03/2026? Sau khi chốt sẽ không thể sửa đổi.',
+            content: (
+                <div>
+                    <p>Xác nhận chốt và khóa bảng lương kỳ <strong>{startStr} — {endStr}</strong>?</p>
+                    <p style={{ color: '#ff4d4f', fontSize: 13 }}>Sau khi chốt, chỉ admin mới có thể sửa đổi dữ liệu kỳ này.</p>
+                </div>
+            ),
             okText: 'Chốt & Khóa',
             cancelText: 'Hủy',
             okType: 'primary',
-            onOk: () => message.success('Đã chốt bảng lương thành công!'),
+            onOk: () => {
+                const newLock: LockedPeriod = {
+                    id: 'lock-' + Date.now(),
+                    start: overviewDateRange[0].startOf('day').toISOString(),
+                    end: overviewDateRange[1].endOf('day').toISOString(),
+                    lockedAt: new Date().toISOString(),
+                    lockedBy: currentUser,
+                };
+                setLockedPeriods(prev => [...prev, newLock]);
+                message.success(`Đã chốt bảng lương kỳ ${startStr} — ${endStr}!`);
+            },
         });
     };
 
@@ -916,14 +1014,15 @@ export default function Attendance() {
             <Table
                 dataSource={payrollData.map(d => ({ ...d, key: d.id }))}
                 pagination={false}
-                size="large"
+                size="middle"
+                scroll={{ x: 900 }}
                 onRow={(record) => ({
                     onClick: () => setPayslipModal(record),
                     style: { cursor: 'pointer' },
                 })}
                 columns={[
                     {
-                        title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 260,
+                        title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 200,
                         render: (name: string) => {
                             const initial = name.split(' ').pop()?.charAt(0) || '';
                             return (
@@ -935,7 +1034,7 @@ export default function Attendance() {
                         },
                     },
                     {
-                        title: 'Loại', dataIndex: 'type', key: 'type', width: 120, align: 'center' as const,
+                        title: 'Loại', dataIndex: 'type', key: 'type', width: 100, align: 'center' as const,
                         render: (t: string) => (
                             <span className={t === 'Official' ? 'att-tag-green' : 'att-tag-orange'}>
                                 {t === 'Official' ? 'CHÍNH THỨC' : 'THỜI VỤ'}
@@ -944,13 +1043,13 @@ export default function Attendance() {
                     },
                     {
                         title: 'Lương CB/CA', dataIndex: 'salaryBase', key: 'base', align: 'right' as const,
-                        render: (v: number, record: any) => (
-                            <span className="att-money-gray">{fmt(v)}{record.isHourly ? '/giờ' : ''}</span>
+                        render: (v: number) => (
+                            <span className="att-money-gray">{fmt(v)}</span>
                         ),
                     },
                     {
-                        title: 'Đóng túi', dataIndex: 'packIncome', key: 'pack', align: 'right' as const,
-                        render: (v: number) => <span className="att-money-emerald">+ {fmt(v)}</span>,
+                        title: 'Đóng gói', dataIndex: 'packIncome', key: 'pack', align: 'right' as const,
+                        render: (v: number, r: any) => <Tooltip title={`${r.packTotalUnits || 0} SP × ${PACKING_UNIT_PRICE}đ`}><span className="att-money-emerald">+ {fmt(v)}</span></Tooltip>,
                     },
                     {
                         title: 'Thưởng', dataIndex: 'totalBonus', key: 'bonus', align: 'right' as const,
@@ -973,28 +1072,17 @@ export default function Attendance() {
     // TAB 2: ĐÓNG GÓI (TEAM)
     // ============================================
     const renderPackaging = () => {
-        const lv1Price = 200;
-        const lv10Price = 400;
-        const totalPackValue = (warehousePacking.level1Units * lv1Price) + (warehousePacking.level10Units * lv10Price);
-        const totalUnits = warehousePacking.level1Units + warehousePacking.level10Units;
+        const unitPrice = PACKING_UNIT_PRICE; // 20đ/SP
 
-        const orderLogs = packingDateRange
-            ? packingOrderLogsData.filter(o => {
-                const t = dayjs(o.timestamp);
-                return t.isAfter(packingDateRange[0].startOf('day').subtract(1, 'ms'))
-                    && t.isBefore(packingDateRange[1].endOf('day').add(1, 'ms'));
-            })
-            : packingOrderLogsData;
+        const orderLogs = overviewPackingLogs;
 
-        // Tính lại warehousePacking từ filtered orderLogs
-        let filteredL1 = 0, filteredL2 = 0;
+        // Tính tổng số lượng SP (theo SKU cha) từ tất cả đơn
+        let filteredTotalSP = 0;
         orderLogs.forEach(order => {
-            const totalPacks = calcPacksFromItems(order.items);
-            if (totalPacks >= 10) filteredL2 += 1;
-            else filteredL1 += 1;
+            filteredTotalSP += calcPacksFromItems(order.items);
         });
-        const filteredPackValue = (filteredL1 * lv1Price) + (filteredL2 * lv10Price);
-        const filteredTotalUnits = filteredL1 + filteredL2;
+        const filteredPackValue = filteredTotalSP * unitPrice;
+        const filteredTotalUnits = orderLogs.length; // Tổng đơn hàng
 
         const totalOrders = orderLogs.length;
         const totalPackedSKU = orderLogs.reduce((s, o) => s + o.totalSKU, 0);
@@ -1010,43 +1098,26 @@ export default function Attendance() {
 
         return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-                {/* Bộ lọc ngày */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <Text strong style={{ fontSize: 13 }}>Lọc theo ngày:</Text>
-                    <DatePicker.RangePicker
-                        value={packingDateRange}
-                        onChange={v => setPackingDateRange(v as [dayjs.Dayjs, dayjs.Dayjs] | null)}
-                        format="DD/MM/YYYY"
-                        allowClear
-                        placeholder={['Từ ngày', 'Đến ngày']}
-                        style={{ width: 280 }}
-                    />
-                    {packingDateRange && (
-                        <Button size="small" onClick={() => setPackingDateRange(null)}>Xem cả tháng</Button>
-                    )}
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                        {packingDateRange
-                            ? `${packingDateRange[0].format('DD/MM')} – ${packingDateRange[1].format('DD/MM/YYYY')}`
-                            : `Tháng ${dayjs().format('MM/YYYY')}`}
-                    </Text>
-                    <Button size="small" icon={<SyncOutlined />} onClick={loadPackingOrders} style={{ marginLeft: 'auto' }}>Tải lại</Button>
+                {/* Toolbar */}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>{overviewDateRange[0].format('DD/MM/YYYY')} — {overviewDateRange[1].format('DD/MM/YYYY')}</Text>
+                    <Button size="small" icon={<SyncOutlined />} onClick={() => loadPackingOrders(overviewDateRange[0].startOf('day').toISOString())}>Tải lại</Button>
                 </div>
 
                 {/* Hero Banner */}
                 <div className="att-hero-banner">
                     <div style={{ position: 'relative', zIndex: 1 }}>
-                        <div className="att-hero-label">📦 TỔNG LƯỢT GHI NHẬN LƯƠNG ĐÓNG GÓI{packingDateRange ? ` ${packingDateRange[0].format('DD/MM')}–${packingDateRange[1].format('DD/MM')}` : ` THÁNG ${dayjs().format('MM')}`}</div>
+                        <div className="att-hero-label">📦 LƯƠNG ĐÓNG GÓI {overviewDateRange[0].format('DD/MM')} — {overviewDateRange[1].format('DD/MM/YYYY')}</div>
                         <div style={{ display: 'flex', alignItems: 'flex-end', gap: 16 }}>
                             <div className="att-hero-value">{filteredTotalUnits.toLocaleString()} Đơn</div>
                             <div style={{ display: 'flex', gap: 8, paddingBottom: 6 }}>
-                                {filteredL2 > 0 && <Tag color="purple" style={{ border: 'none', background: 'rgba(255,255,255,0.25)', color: 'white', fontWeight: 700 }}>{filteredL2} Kiện To (400đ)</Tag>}
-                                {filteredL1 > 0 && <Tag color="blue" style={{ border: 'none', background: 'rgba(255,255,255,0.25)', color: 'white', fontWeight: 700 }}>{filteredL1} Kiện Lẻ (200đ)</Tag>}
+                                <Tag color="blue" style={{ border: 'none', background: 'rgba(255,255,255,0.25)', color: 'white', fontWeight: 700 }}>{filteredTotalSP.toLocaleString()} SP × {unitPrice}đ</Tag>
                             </div>
                         </div>
                     </div>
                     <div className="att-hero-box">
-                        <div className="att-hero-box-label">Tổng quỹ thưởng (100%)</div>
-                        <div className="att-hero-box-value">{fmt(filteredPackValue)} đ</div>
+                        <div className="att-hero-box-label">Tổng quỹ thưởng</div>
+                        <div className="att-hero-box-value">{fmt(filteredPackValue)}</div>
                     </div>
                 </div>
 
@@ -1054,21 +1125,21 @@ export default function Attendance() {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
                     <Card size="small" style={{ borderTop: '3px solid #1890ff' }}>
                         <Statistic
-                            title={<Text type="secondary" style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>Kiện Lẻ (Level 1)</Text>}
-                            value={filteredL1}
-                            suffix="Kiện"
+                            title={<Text type="secondary" style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>Tổng sản phẩm</Text>}
+                            value={filteredTotalSP}
+                            suffix="SP"
                             valueStyle={{ color: '#1890ff', fontWeight: 800, fontSize: 24 }}
                         />
-                        <Text type="secondary" style={{ fontSize: 11 }}>× {lv1Price.toLocaleString()} đ = {fmt(filteredL1 * lv1Price)}</Text>
+                        <Text type="secondary" style={{ fontSize: 11 }}>× {unitPrice.toLocaleString()} đ = {fmt(filteredTotalSP * unitPrice)}</Text>
                     </Card>
                     <Card size="small" style={{ borderTop: '3px solid #722ed1' }}>
                         <Statistic
-                            title={<Text type="secondary" style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>Kiện To (Level 2)</Text>}
-                            value={filteredL2}
-                            suffix="Kiện"
+                            title={<Text type="secondary" style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>Đơn giá</Text>}
+                            value={unitPrice}
+                            suffix="đ/SP"
                             valueStyle={{ color: '#722ed1', fontWeight: 800, fontSize: 24 }}
                         />
-                        <Text type="secondary" style={{ fontSize: 11 }}>× {lv10Price.toLocaleString()} đ = {fmt(filteredL2 * lv10Price)}</Text>
+                        <Text type="secondary" style={{ fontSize: 11 }}>Áp dụng cho toàn bộ sản phẩm</Text>
                     </Card>
                     <Card size="small" style={{ borderTop: '3px solid #10b981' }}>
                         <Statistic title={<Text type="secondary" style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>Thực tế đã đóng</Text>} value={totalOrders} suffix="đơn" valueStyle={{ color: '#10b981', fontWeight: 800, fontSize: 24 }} />
@@ -1258,17 +1329,13 @@ export default function Attendance() {
                                             ),
                                         },
                                         {
-                                            title: 'GHI NHẬN LƯƠNG', key: 'sku', width: 140, align: 'right' as const,
+                                            title: 'GHI NHẬN LƯƠNG', key: 'sku', width: 160, align: 'right' as const,
                                             render: (_: any, r: PackingOrderLog) => {
                                                 const totalPacks = calcPacksFromItems(r.items);
-                                                const isLevel2 = totalPacks >= 10;
-                                                const totalMoney = isLevel2 ? lv10Price : lv1Price;
+                                                const totalMoney = totalPacks * unitPrice;
                                                 return (
                                                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
-                                                        {isLevel2
-                                                            ? <Tag color="purple" style={{ margin: 0, fontWeight: 700, fontSize: 10 }}>1x Level 2 ({lv10Price}đ)</Tag>
-                                                            : <Tag color="blue" style={{ margin: 0, fontWeight: 700, fontSize: 10 }}>1x Level 1 ({lv1Price}đ)</Tag>
-                                                        }
+                                                        <Tag color="blue" style={{ margin: 0, fontWeight: 700, fontSize: 10 }}>{totalPacks} SP × {unitPrice}đ</Tag>
                                                         <Text style={{ fontSize: 11, fontWeight: 800, color: '#00ab56', marginTop: 2 }}>+{totalMoney.toLocaleString('vi-VN')} đ</Text>
                                                     </div>
                                                 );
@@ -1990,14 +2057,78 @@ export default function Attendance() {
 
             {/* Page Header */}
             <div className="att-page-header">
-                <div>
-                    <h2>Bảng Lương {monthNames[selectedMonth]} / {selectedYear}</h2>
-                    <div className="att-subtitle">Mô hình: Chia doanh số đóng gói theo tỉ lệ đội ngũ</div>
-                </div>
-                <Space size={12}>
-                    <Button icon={<TeamOutlined />} style={{ borderRadius: 8, fontWeight: 700, borderColor: '#1890ff', color: '#1890ff' }} onClick={() => setEmpListModalOpen(true)}>Quản lý nhân viên</Button>
+                <Space size={8} wrap style={{ justifyContent: 'flex-end', width: '100%' }}>
+                    <DatePicker.RangePicker
+                        value={overviewDateRange}
+                        onChange={(dates) => {
+                            if (dates && dates[0] && dates[1]) {
+                                setOverviewDateRange([dates[0], dates[1]]);
+                            }
+                        }}
+                        format="DD/MM/YYYY"
+                        allowClear={false}
+                        style={{ borderRadius: 8 }}
+                        placeholder={['Từ ngày', 'Đến ngày']}
+                    />
                     <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal}>Cấu hình</Button>
-                    <Button className="att-btn-lock" icon={<LockOutlined />} onClick={lockPayroll}>Chốt & Khóa</Button>
+                    {isCurrentPeriodLocked ? (
+                        currentUser === 'admin' ? (
+                            <Button
+                                icon={<LockOutlined />}
+                                onClick={() => {
+                                    Modal.confirm({
+                                        title: 'Mở khóa kỳ lương',
+                                        content: `Mở khóa kỳ ${overviewDateRange[0].format('DD/MM/YYYY')} — ${overviewDateRange[1].format('DD/MM/YYYY')}? Nhân viên sẽ có thể chỉnh sửa lại.`,
+                                        okText: 'Mở khóa',
+                                        cancelText: 'Hủy',
+                                        okType: 'primary',
+                                        onOk: () => {
+                                            setLockedPeriods(prev => prev.filter(lp =>
+                                                !(dayjs(lp.start).isSame(overviewDateRange[0], 'day') &&
+                                                  dayjs(lp.end).isSame(overviewDateRange[1], 'day'))
+                                            ));
+                                            message.success('Đã mở khóa kỳ lương!');
+                                        },
+                                    });
+                                }}
+                                style={{
+                                    borderRadius: 8,
+                                    fontWeight: 700,
+                                    background: '#fff7e6',
+                                    borderColor: '#ffa940',
+                                    color: '#d46b08',
+                                }}
+                            >
+                                Mở khóa (Admin)
+                            </Button>
+                        ) : (
+                            <Button
+                                icon={<LockOutlined />}
+                                disabled
+                                style={{
+                                    borderRadius: 8,
+                                    fontWeight: 700,
+                                    background: '#fff7e6',
+                                    borderColor: '#ffa940',
+                                    color: '#d46b08',
+                                    cursor: 'not-allowed',
+                                    opacity: 1,
+                                }}
+                            >
+                                Đã chốt
+                            </Button>
+                        )
+                    ) : (
+                        <Button
+                            className="att-btn-lock"
+                            icon={<LockOutlined />}
+                            onClick={lockPayroll}
+                            type="primary"
+                            danger
+                        >
+                            Chốt & Khóa
+                        </Button>
+                    )}
                 </Space>
             </div>
 
@@ -2005,18 +2136,6 @@ export default function Attendance() {
             <div className="att-tab-content">
                 {renderActiveTabContent()}
             </div>
-
-            {/* ===== MODAL: Danh sách nhân sự ===== */}
-            <Modal
-                title={<div style={{ fontWeight: 700, fontSize: 16 }}><TeamOutlined /> Quản lý nhân sự</div>}
-                open={empListModalOpen}
-                onCancel={() => setEmpListModalOpen(false)}
-                footer={null}
-                width={820}
-                destroyOnClose
-            >
-                {renderEmployees()}
-            </Modal>
 
             {/* ===== MODAL: Phiếu Lương ===== */}
             <Modal
@@ -2029,109 +2148,222 @@ export default function Attendance() {
                 ]}
                 width={480}
             >
-                {payslipModal && (
-                    <div>
-                        <div style={{ textAlign: 'center', paddingBottom: 24, borderBottom: '1px dashed #d9d9d9' }}>
-                            <Title level={3} style={{ margin: 0 }}>{payslipModal.name}</Title>
-                            <Text type="secondary" style={{ fontStyle: 'italic', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1 }}>
-                                {payslipModal.isHourly
-                                    ? `${payslipModal.shifts} ca × 4 giờ = ${payslipModal.shifts * 4} giờ làm việc`
-                                    : 'Nhân viên chính thức'}
-                            </Text>
+                {payslipModal && (() => {
+                    const p = payslipModal;
+                    const empFines = overviewFines.filter(f => f.empId === p.id);
+                    const empBonuses = overviewBonuses.filter(b => b.empId === p.id);
+                    const row = (label: string, value: string, color?: string, sub?: string) => (
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '5px 0' }}>
+                            <div>
+                                <Text style={{ fontSize: 13, color: '#595959' }}>{label}</Text>
+                                {sub && <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 1 }}>{sub}</div>}
+                            </div>
+                            <Text strong style={{ fontSize: 13, color: color || '#1f2937', whiteSpace: 'nowrap', marginLeft: 16 }}>{value}</Text>
                         </div>
-                        <div style={{ padding: '24px 0', display: 'flex', flexDirection: 'column', gap: 16 }}>
-                            {payslipModal.isHourly ? (
-                                <div style={{ background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 8, padding: '10px 14px' }}>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                        <Text type="secondary" style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1 }}>Lương theo giờ</Text>
-                                        <Text strong>{fmt(payslipModal.salaryBase)}</Text>
-                                    </div>
-                                    <div style={{ marginTop: 6, fontSize: 12, color: '#595959' }}>
-                                        {payslipModal.shifts} ca × 4 giờ × {fmt(payslipModal.baseSalary)}/giờ
+                    );
+                    const sectionTitle = (label: string) => (
+                        <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 1, color: '#9ca3af', padding: '10px 0 4px' }}>{label}</div>
+                    );
+                    return (
+                        <div style={{ fontSize: 13 }}>
+                            {/* Header */}
+                            <div style={{ textAlign: 'center', padding: '8px 0 16px', borderBottom: '1px dashed #e5e7eb' }}>
+                                <div style={{ fontSize: 20, fontWeight: 900, color: '#1f2937' }}>{p.name}</div>
+                                <div style={{ marginTop: 4, display: 'flex', justifyContent: 'center', gap: 8 }}>
+                                    <Tag color={p.type === 'Official' ? 'blue' : 'orange'}>{p.type === 'Official' ? 'Chính thức' : 'Thời vụ'}</Tag>
+                                    <Tag color="default">{overviewDateRange[0].format('DD/MM')} — {overviewDateRange[1].format('DD/MM/YYYY')}</Tag>
+                                </div>
+                            </div>
+
+                            {/* 1. Lương cơ bản */}
+                            {sectionTitle('① Lương cơ bản')}
+                            <div style={{ background: '#f9fafb', borderRadius: 8, padding: '8px 12px' }}>
+                                {p.isHourly ? (
+                                    row('Lương theo giờ', `${fmt(p.salaryBase)}`, '#1f2937',
+                                        `${p.shifts} ca × 4 giờ × ${fmt(p.baseSalary)}/giờ`)
+                                ) : (
+                                    row('Lương cơ bản', `${fmt(p.baseSalary)}`, '#1f2937',
+                                        `${p.absentDays > 0 ? `Đủ công ${26 - p.absentDays}/${26} ngày` : 'Đủ công 26/26 ngày'}`)
+                                )}
+                                {!p.isHourly && p.leaveDeduction > 0 &&
+                                    row(`Trừ nghỉ không phép`, `- ${fmt(p.leaveDeduction)}`, '#d97706',
+                                        `${p.absentDays} ngày × ${fmt(p.baseSalary / 26)}/ngày`)
+                                }
+                                <div style={{ borderTop: '1px solid #e5e7eb', marginTop: 6, paddingTop: 6, display: 'flex', justifyContent: 'space-between' }}>
+                                    <Text style={{ fontSize: 12, fontWeight: 700 }}>Thực nhận lương CB</Text>
+                                    <Text strong style={{ color: '#1f2937' }}>{fmt(p.salaryBase)}</Text>
+                                </div>
+                            </div>
+
+                            {/* 2. Đóng gói */}
+                            {sectionTitle('② Thu nhập đóng gói')}
+                            <div style={{ background: '#f0fdf4', borderRadius: 8, padding: '8px 12px', border: '1px solid #bbf7d0' }}>
+                                {row('Đóng gói sản phẩm', `+ ${fmt(p.packIncome)}`, '#059669',
+                                    `${p.packTotalUnits || 0} SP × ${PACKING_UNIT_PRICE}đ (${p.packOrderCount || 0} đơn)`)}
+                            </div>
+
+                            {/* 3. Thưởng */}
+                            {(p.fineShare > 0 || p.mBonus > 0 || empBonuses.length > 0) && (<>
+                                {sectionTitle('③ Thưởng')}
+                                <div style={{ background: '#eff6ff', borderRadius: 8, padding: '8px 12px', border: '1px solid #bfdbfe' }}>
+                                    {p.fineShare > 0 && row('Pool chia phạt', `+ ${fmt(p.fineShare)}`, '#1d4ed8', 'Chia từ quỹ phạt thành viên vi phạm')}
+                                    {empBonuses.map((b, i) => row(b.detail || 'Thưởng lẻ', `+ ${fmt(b.amount)}`, '#1d4ed8', `Admin — ${b.type}`))}
+                                    {p.mBonus > 0 && empBonuses.length === 0 && row('Thưởng lẻ (Admin)', `+ ${fmt(p.mBonus)}`, '#1d4ed8')}
+                                </div>
+                            </>)}
+
+                            {/* 4. Phạt */}
+                            {p.myFines > 0 && (<>
+                                {sectionTitle('④ Khấu trừ')}
+                                <div style={{ background: '#fff1f0', borderRadius: 8, padding: '8px 12px', border: '1px solid #fecaca' }}>
+                                    {empFines.length > 0
+                                        ? empFines.map((f, i) => row(f.type, `- ${fmt(f.amount)}`, '#dc2626', f.detail))
+                                        : row('Phạt & Khấu trừ', `- ${fmt(p.myFines)}`, '#dc2626')
+                                    }
+                                </div>
+                            </>)}
+
+                            {/* Tổng */}
+                            <div style={{ marginTop: 16, padding: '14px 16px', background: 'linear-gradient(135deg, #ecfdf5, #d1fae5)', borderRadius: 10, border: '1px solid #6ee7b7', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div>
+                                    <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: '#065f46' }}>Thực lĩnh</div>
+                                    <div style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>
+                                        {fmt(p.salaryBase)} + {fmt(p.packIncome)} + {fmt(p.totalBonus)} − {fmt(p.myFines)}
                                     </div>
                                 </div>
-                            ) : (
-                                <div style={{ display: 'flex', justifyContent: 'space-between' }}><Text type="secondary" style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1 }}>{`Lương CB (${payslipModal.absentDays > 0 ? `trừ ${payslipModal.absentDays} ngày nghỉ` : 'đủ công'})`}</Text><Text strong>{fmt(payslipModal.salaryBase)}</Text></div>
-                            )}
-                            {!payslipModal.isHourly && payslipModal.leaveDeduction > 0 && (
-                                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 12px', background: '#fff7e6', borderRadius: 6, border: '1px solid #ffe58f' }}><Text style={{ color: '#d48806', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1 }}>📋 Nghỉ {payslipModal.absentDays} ngày × {fmt(payslipModal.baseSalary / 26)}/ngày</Text><Text strong style={{ color: '#d48806' }}>- {fmt(payslipModal.leaveDeduction)}</Text></div>
-                            )}
-                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><Text style={{ color: '#00ab56', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1 }}>Đóng túi kho (Chia {payslipModal.packRate * 100}%)</Text><Text strong style={{ color: '#00ab56' }}>+ {fmt(payslipModal.packIncome)}</Text></div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><Text style={{ color: '#1890ff', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1 }}>Thưởng chia pool</Text><Text strong style={{ color: '#1890ff' }}>+ {fmt(payslipModal.fineShare)}</Text></div>
-                            {payslipModal.mBonus > 0 && (
-                                <div style={{ display: 'flex', justifyContent: 'space-between' }}><Text style={{ color: '#1890ff', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1 }}>Thưởng lẻ (Admin)</Text><Text strong style={{ color: '#1890ff' }}>+ {fmt(payslipModal.mBonus)}</Text></div>
-                            )}
-                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><Text style={{ color: '#ff4d4f', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1 }}>Khấu trừ phạt & Muộn</Text><Text strong style={{ color: '#ff4d4f' }}>- {fmt(payslipModal.myFines)}</Text></div>
+                                <div style={{ fontSize: 26, fontWeight: 900, color: '#059669' }}>{fmt(p.finalSalary)}</div>
+                            </div>
                         </div>
-                        <Divider style={{ margin: 0, borderWidth: 3, borderColor: '#00ab56' }} />
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 24 }}>
-                            <Text strong style={{ fontSize: 16, textTransform: 'uppercase', letterSpacing: 2 }}>Thực lĩnh</Text>
-                            <Text strong style={{ fontSize: 28, color: '#00ab56' }}>{fmt(payslipModal.finalSalary)}</Text>
-                        </div>
-                    </div>
-                )}
+                    );
+                })()}
             </Modal>
 
             {/* ===== MODAL: Cấu hình ===== */}
             <Modal
-                title={<Space><SettingOutlined style={{ color: '#00ab56' }} /><span>Cấu hình quy tắc lương & phạt</span></Space>}
+                title={<Space><SettingOutlined style={{ color: '#00ab56' }} /><span style={{ fontWeight: 700 }}>Cấu hình</span></Space>}
                 open={configModalOpen}
                 onCancel={() => setConfigModalOpen(false)}
-                onOk={saveConfig}
-                okText="Lưu cấu hình"
-                cancelText="Hủy"
-                okButtonProps={{ icon: <SaveOutlined /> }}
-                width={560}
+                footer={activeConfigTab === 'rules' ? [
+                    <Button key="cancel" onClick={() => setConfigModalOpen(false)}>Hủy</Button>,
+                    <Button key="ok" type="primary" icon={<SaveOutlined />} onClick={saveConfig}>Lưu cấu hình</Button>,
+                ] : [
+                    <Button key="close" onClick={() => setConfigModalOpen(false)}>Đóng</Button>,
+                ]}
+                width={640}
             >
-                <Divider style={{ fontSize: 12, fontWeight: 700, color: '#ff4d4f' }}><ClockCircleOutlined /> Phạt đi muộn — NV Chính thức</Divider>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: '#fafafa', borderRadius: 10, border: '1px solid #f0f0f0' }}>
+                <Tabs
+                    activeKey={activeConfigTab}
+                    onChange={setActiveConfigTab}
+                    size="small"
+                    style={{ marginTop: -8 }}
+                    items={[
+                        {
+                            key: 'rules',
+                            label: <span><SettingOutlined /> Quy tắc & Phạt</span>,
+                            children: (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginTop: 8 }}>
+
+                    {/* Biên độ miễn phạt */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: '#f6ffed', borderRadius: 8, border: '1px solid #b7eb8f' }}>
                         <div>
-                            <Text strong style={{ fontSize: 13 }}>Biên độ miễn phạt (Chung)</Text>
-                            <div><Text type="secondary" style={{ fontSize: 11 }}>Số phút tối đa cho phép đi trễ ca.</Text></div>
+                            <Text strong style={{ fontSize: 13 }}>Biên độ miễn phạt</Text>
+                            <Text type="secondary" style={{ fontSize: 11, marginLeft: 6 }}>— số phút tối đa cho phép đi trễ</Text>
                         </div>
                         <InputNumber value={tempConfig.graceMinutes} onChange={v => setTempConfig({ ...tempConfig, graceMinutes: v || 0 })} min={0} max={30} addonAfter="phút" style={{ width: 120 }} />
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: '#fff7e6', borderRadius: 8, border: '1px solid #ffe58f' }}>
-                        <Text strong style={{ fontSize: 12 }}>🟡 Nhẹ (6–15 phút)</Text>
-                        <InputNumber value={tempConfig.officialFineLevel1} onChange={v => setTempConfig({ ...tempConfig, officialFineLevel1: v || 0 })} min={0} step={5000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={v => Number(v!.replace(/,/g, '')) as any} addonAfter="đ" style={{ width: 140 }} />
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: '#fff1f0', borderRadius: 8, border: '1px solid #ffccc7' }}>
-                        <Text strong style={{ fontSize: 12 }}>🟠 TB (16–30 phút)</Text>
-                        <InputNumber value={tempConfig.officialFineLevel2} onChange={v => setTempConfig({ ...tempConfig, officialFineLevel2: v || 0 })} min={0} step={5000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={v => Number(v!.replace(/,/g, '')) as any} addonAfter="đ" style={{ width: 140 }} />
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: '#fff1f0', borderRadius: 8, border: '1px solid #ffa39e' }}>
-                        <Text strong style={{ fontSize: 12 }}>🔴 Nặng ({'>'}30 phút)</Text>
-                        <InputNumber value={tempConfig.officialFineLevel3} onChange={v => setTempConfig({ ...tempConfig, officialFineLevel3: v || 0 })} min={0} step={5000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={v => Number(v!.replace(/,/g, '')) as any} addonAfter="đ" style={{ width: 140 }} />
-                    </div>
-                </div>
 
-                <Divider style={{ fontSize: 12, fontWeight: 700, color: '#fa8c16' }}><ClockCircleOutlined /> Phạt đi muộn — NV Thời vụ</Divider>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: '#fff7e6', borderRadius: 8, border: '1px solid #ffe58f' }}>
-                        <Text strong style={{ fontSize: 12 }}>🟡 Nhẹ (6–15 phút)</Text>
-                        <InputNumber value={tempConfig.seasonalFineLevel1} onChange={v => setTempConfig({ ...tempConfig, seasonalFineLevel1: v || 0 })} min={0} step={5000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={v => Number(v!.replace(/,/g, '')) as any} addonAfter="đ" style={{ width: 140 }} />
+                    {/* Phạt đi muộn: 2 cột song song */}
+                    <div style={{ background: '#fafafa', borderRadius: 10, border: '1px solid #f0f0f0', overflow: 'hidden' }}>
+                        {/* Header */}
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', background: '#f0f0f0', padding: '7px 14px', gap: 8 }}>
+                            <Text style={{ fontSize: 11, fontWeight: 700, color: '#595959', textTransform: 'uppercase', letterSpacing: 0.5 }}>Mức phạt đi muộn</Text>
+                            <Text style={{ fontSize: 11, fontWeight: 700, color: '#1677ff', textAlign: 'center' }}>Chính thức</Text>
+                            <Text style={{ fontSize: 11, fontWeight: 700, color: '#fa8c16', textAlign: 'center' }}>Thời vụ</Text>
+                        </div>
+                        {/* Rows */}
+                        {[
+                            { label: '🟡 Nhẹ (6–15 phút)', off: 'officialFineLevel1' as const, sea: 'seasonalFineLevel1' as const },
+                            { label: '🟠 TB (16–30 phút)',  off: 'officialFineLevel2' as const, sea: 'seasonalFineLevel2' as const },
+                            { label: '🔴 Nặng (>30 phút)',  off: 'officialFineLevel3' as const, sea: 'seasonalFineLevel3' as const },
+                        ].map((row, i) => (
+                            <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', padding: '8px 14px', gap: 8, alignItems: 'center', borderTop: '1px solid #f0f0f0', background: '#fff' }}>
+                                <Text style={{ fontSize: 12, fontWeight: 600 }}>{row.label}</Text>
+                                <InputNumber
+                                    value={tempConfig[row.off]}
+                                    onChange={v => setTempConfig({ ...tempConfig, [row.off]: v || 0 })}
+                                    min={0} step={5000}
+                                    formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                                    parser={v => Number(v!.replace(/,/g, '')) as any}
+                                    addonAfter="đ" style={{ width: '100%' }} size="small"
+                                />
+                                <InputNumber
+                                    value={tempConfig[row.sea]}
+                                    onChange={v => setTempConfig({ ...tempConfig, [row.sea]: v || 0 })}
+                                    min={0} step={5000}
+                                    formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                                    parser={v => Number(v!.replace(/,/g, '')) as any}
+                                    addonAfter="đ" style={{ width: '100%' }} size="small"
+                                />
+                            </div>
+                        ))}
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: '#fff1f0', borderRadius: 8, border: '1px solid #ffccc7' }}>
-                        <Text strong style={{ fontSize: 12 }}>🟠 TB (16–30 phút)</Text>
-                        <InputNumber value={tempConfig.seasonalFineLevel2} onChange={v => setTempConfig({ ...tempConfig, seasonalFineLevel2: v || 0 })} min={0} step={5000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={v => Number(v!.replace(/,/g, '')) as any} addonAfter="đ" style={{ width: 140 }} />
+
+                    {/* Đóng sai đơn */}
+                    <div style={{ background: '#fafafa', borderRadius: 10, border: '1px solid #f0f0f0', overflow: 'hidden' }}>
+                        <div style={{ background: '#f0f0f0', padding: '7px 14px' }}>
+                            <Text style={{ fontSize: 11, fontWeight: 700, color: '#595959', textTransform: 'uppercase', letterSpacing: 0.5 }}><WarningOutlined style={{ marginRight: 4, color: '#fa8c16' }} />Đóng sai đơn</Text>
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', padding: '10px 14px', gap: 12, background: '#fff', alignItems: 'center' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                <Text style={{ fontSize: 11, fontWeight: 700, color: '#1677ff' }}>Chính thức</Text>
+                                <InputNumber value={tempConfig.wrongOrderFineOfficial} onChange={v => setTempConfig({ ...tempConfig, wrongOrderFineOfficial: v || 0 })} min={0} step={5000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={v => Number(v!.replace(/,/g, '')) as any} addonAfter="đ/đơn" style={{ width: '100%' }} size="small" />
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                <Text style={{ fontSize: 11, fontWeight: 700, color: '#fa8c16' }}>Thời vụ</Text>
+                                <InputNumber value={tempConfig.wrongOrderFineSeasonal} onChange={v => setTempConfig({ ...tempConfig, wrongOrderFineSeasonal: v || 0 })} min={0} step={5000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={v => Number(v!.replace(/,/g, '')) as any} addonAfter="đ/đơn" style={{ width: '100%' }} size="small" />
+                            </div>
+                        </div>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: '#fff1f0', borderRadius: 8, border: '1px solid #ffa39e' }}>
-                        <Text strong style={{ fontSize: 12 }}>🔴 Nặng ({'>'}30 phút)</Text>
-                        <InputNumber value={tempConfig.seasonalFineLevel3} onChange={v => setTempConfig({ ...tempConfig, seasonalFineLevel3: v || 0 })} min={0} step={5000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={v => Number(v!.replace(/,/g, '')) as any} addonAfter="đ" style={{ width: 140 }} />
-                    </div>
+
                 </div>
-                <Divider style={{ fontSize: 12, fontWeight: 700, color: '#fa8c16' }}><WarningOutlined /> Quy tắc đóng sai đơn</Divider>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: '#fafafa', borderRadius: 10, border: '1px solid #f0f0f0' }}>
-                        <Text strong style={{ fontSize: 13 }}>Phạt NV Chính Thức</Text>
-                        <InputNumber value={tempConfig.wrongOrderFineOfficial} onChange={v => setTempConfig({ ...tempConfig, wrongOrderFineOfficial: v || 0 })} min={0} step={5000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={v => Number(v!.replace(/,/g, '')) as any} addonAfter="đ/đơn" style={{ width: 160 }} />
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: '#fafafa', borderRadius: 10, border: '1px solid #f0f0f0' }}>
-                        <Text strong style={{ fontSize: 13 }}>Phạt NV Thời Vụ</Text>
-                        <InputNumber value={tempConfig.wrongOrderFineSeasonal} onChange={v => setTempConfig({ ...tempConfig, wrongOrderFineSeasonal: v || 0 })} min={0} step={5000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={v => Number(v!.replace(/,/g, '')) as any} addonAfter="đ/đơn" style={{ width: 160 }} />
-                    </div>
-                </div>
+                            ),
+                        },
+                        {
+                            key: 'employees',
+                            label: <span><TeamOutlined /> Nhân viên</span>,
+                            children: (
+                                <div style={{ marginTop: 4 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+                                        <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => { setEditingEmp(null); empForm.resetFields(); setEmpModalOpen(true); }}>
+                                            Thêm nhân viên
+                                        </Button>
+                                    </div>
+                                    <Table
+                                        dataSource={employees}
+                                        rowKey="id"
+                                        pagination={false}
+                                        size="small"
+                                        columns={[
+                                            { title: 'Tên', dataIndex: 'name', render: (n) => <Text strong style={{ fontSize: 13 }}>{n}</Text> },
+                                            { title: 'Username', dataIndex: 'username', width: 120, render: (u) => <Tag color="blue" style={{ fontWeight: 700, fontFamily: 'monospace', fontSize: 11 }}>{u || '—'}</Tag> },
+                                            { title: 'HĐ', dataIndex: 'type', width: 95, render: (t) => <Tag color={t === 'Official' ? 'blue' : 'green'} style={{ fontSize: 11 }}>{t === 'Official' ? 'Chính thức' : 'Thời vụ'}</Tag> },
+                                            { title: 'Đơn giá', dataIndex: 'baseSalary', align: 'right', width: 120, render: (v, r: Employee) => <Text style={{ fontSize: 12 }}>{fmt(v)}{r.isHourly ? '/h' : '/th'}</Text> },
+                                            {
+                                                title: '', align: 'center', width: 70,
+                                                render: (_: any, record: Employee) => (
+                                                    <Space size={4}>
+                                                        <Button size="small" type="text" icon={<EditOutlined style={{ color: '#1890ff' }} />} onClick={() => { setEditingEmp(record); empForm.setFieldsValue({ ...record, username: record.username || '' }); setEmpModalOpen(true); }} />
+                                                        <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => { setEmployees(prev => prev.filter(e => e.id !== record.id)); message.success('Đã xóa!'); }} />
+                                                    </Space>
+                                                )
+                                            }
+                                        ]}
+                                    />
+                                </div>
+                            ),
+                        },
+                    ]}
+                />
             </Modal>
 
             {/* ===== MODAL: Thêm Thưởng Lẻ ===== */}

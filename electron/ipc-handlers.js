@@ -4537,7 +4537,8 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
                     totalAmount: data.totalAmount || 0,
                     notes: data.notes || null,
                     status: data.status || 'processing',
-                    createdBy: data.createdBy || null
+                    createdBy: data.createdBy || null,
+                    pickedBy: data.pickedBy || null
                 }
             });
 
@@ -4603,7 +4604,8 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
                     totalAmount: data.totalAmount,
                     notes: data.notes || null,
                     status: data.status,
-                    createdBy: data.createdBy !== undefined ? data.createdBy : undefined
+                    createdBy: data.createdBy !== undefined ? data.createdBy : undefined,
+                    pickedBy: data.pickedBy !== undefined ? data.pickedBy : undefined
                 }
             });
 
