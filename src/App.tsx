@@ -243,10 +243,8 @@ function AppContent() {
         // Daily Tasks
         items.push(createMenuItem('Công việc hàng ngày', 'daily-tasks', <CheckCircleOutlined />));
 
-        // Bảng công (Admin only)
-        if (hasPermission('permissions')) {
-            items.push(createMenuItem('Bảng công', 'attendance', <ScheduleOutlined />));
-        }
+        // Bảng công (Public)
+        items.push(createMenuItem('Bảng công', 'attendance', <ScheduleOutlined />));
 
         // Settings
         if (accessibleKeys.includes('settings')) {
