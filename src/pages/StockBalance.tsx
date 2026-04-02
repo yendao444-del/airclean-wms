@@ -1900,7 +1900,7 @@ export default function StockBalancePage() {
                                     <div style={{ padding: "12px 0" }}>
                                         {/* Lọc SKU */}
                                         {drawerLogs.length > 0 && (
-                                            <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                            <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                                                 <span style={{ fontSize: 13, color: '#595959', whiteSpace: 'nowrap' }}>Lọc SKU:</span>
                                                 <Select
                                                     value={ledgerSkuFilter}
@@ -1915,6 +1915,22 @@ export default function StockBalancePage() {
                                                         </Select.Option>
                                                     ))}
                                                 </Select>
+                                                {/* Thống kê xuất hôm nay khi lọc riêng SKU */}
+                                                {ledgerSkuFilter !== 'all' && (() => {
+                                                    const todayStart = dayjs().startOf('day');
+                                                    const todayExport = drawerLogs
+                                                        .filter(l => l.sku === ledgerSkuFilter && l.quantity < 0 && dayjs(l.createdAt).isAfter(todayStart))
+                                                        .reduce((sum, l) => sum + Math.abs(l.quantity), 0);
+                                                    return todayExport > 0 ? (
+                                                        <Tag color="volcano" style={{ fontWeight: 700, fontSize: 13, padding: '2px 10px', borderRadius: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                            📤 Xuất hôm nay: <span style={{ fontSize: 15, fontWeight: 900 }}>{todayExport}</span>
+                                                        </Tag>
+                                                    ) : (
+                                                        <Tag color="default" style={{ fontSize: 12, padding: '2px 8px', borderRadius: 6 }}>
+                                                            📤 Xuất hôm nay: 0
+                                                        </Tag>
+                                                    );
+                                                })()}
                                             </div>
                                         )}
                                         {!drawerLogsLoading && drawerLogs.length === 0 ? (

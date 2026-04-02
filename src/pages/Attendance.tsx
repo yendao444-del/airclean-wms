@@ -269,9 +269,36 @@ function calcPacksFromItems(items: PackingOrderItem[]): number {
     let totalPacks = 0;
     items.forEach(item => {
         const sku = (item.sku || '').toUpperCase();
-        // Đọc prefix số từ SKU (e.g. "20-5DUNI-TRANG" → 20)
-        const prefixMatch = sku.match(/^(\d+)-/);
-        const packCount = prefixMatch ? parseInt(prefixMatch[1], 10) : 1;
+        let packCount = 1;
+
+        if (sku.startsWith('CB-')) {
+            // Combo SKU: CB-10TRANG-10XAM-5DUNI
+            // Parse các cặp {số}{tên màu} từ phần sau CB-
+            // Ví dụ: "10TRANG-10XAM-5DUNI" → match "10TRANG", "10XAM" → 10+10=20
+            // Suffix kiểu "-5DUNI" (loại sản phẩm) sẽ bị bỏ qua vì regex chỉ match {số}{chữ} dạng tên màu
+            const body = sku.substring(3); // Bỏ "CB-"
+            const segments = body.split('-');
+            let comboTotal = 0;
+            // Lấy các segment có dạng {số}{tên} — chỉ tính segment mà phần chữ KHÔNG chứa "UNI|DUNI|5D" (đó là tên SP, không phải màu)
+            const productSuffixes = /^(5D|UNI|DUNI|5DUNI)/i;
+            for (const seg of segments) {
+                const m = seg.match(/^(\d+)(.+)$/);
+                if (m) {
+                    const num = parseInt(m[1], 10);
+                    const label = m[2];
+                    if (!productSuffixes.test(label)) {
+                        // Đây là component màu: 10TRANG, 10XAM, v.v.
+                        comboTotal += num;
+                    }
+                }
+            }
+            packCount = comboTotal > 0 ? comboTotal : 1;
+        } else {
+            // SKU thường: "20-5DUNI-TRANG" → prefix 20 = 20 gói
+            const prefixMatch = sku.match(/^(\d+)-/);
+            packCount = prefixMatch ? parseInt(prefixMatch[1], 10) : 1;
+        }
+
         totalPacks += (item.quantity || 1) * packCount;
     });
     return totalPacks;
@@ -556,8 +583,8 @@ export default function Attendance() {
 
     // State cho lọc kỳ lương Tổng quát — khai báo sớm để loadPackingOrders dùng được
     const [overviewDateRange, setOverviewDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs]>([
-        dayjs().startOf('month'),
-        dayjs().endOf('month'),
+        dayjs().startOf('day'),
+        dayjs().endOf('day'),
     ]);
 
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);
@@ -2086,18 +2113,95 @@ export default function Attendance() {
             {/* Page Header */}
             <div className="att-page-header">
                 <Space size={8} wrap style={{ justifyContent: 'flex-end', width: '100%' }}>
-                    <DatePicker.RangePicker
-                        value={overviewDateRange}
-                        onChange={(dates) => {
-                            if (dates && dates[0] && dates[1]) {
-                                setOverviewDateRange([dates[0], dates[1]]);
-                            }
-                        }}
-                        format="DD/MM/YYYY"
-                        allowClear={false}
-                        style={{ borderRadius: 8 }}
-                        placeholder={['Từ ngày', 'Đến ngày']}
-                    />
+                    {/* Custom Time Range Selector — kiểu Google Analytics */}
+                    {(() => {
+                        const now = dayjs();
+                        const rangeLabel = (() => {
+                            const s = overviewDateRange[0];
+                            const e = overviewDateRange[1];
+                            if (s.isSame(now, 'day') && e.isSame(now, 'day')) return 'Hôm nay';
+                            if (s.isSame(now.subtract(1, 'day'), 'day') && e.isSame(now.subtract(1, 'day'), 'day')) return 'Hôm qua';
+                            if (s.isSame(now.subtract(6, 'day'), 'day') && e.isSame(now, 'day')) return 'Trong 7 ngày qua';
+                            if (s.isSame(now.subtract(29, 'day'), 'day') && e.isSame(now, 'day')) return 'Trong 30 ngày qua';
+                            if (s.isSame(e, 'day')) return s.format('DD/MM/YYYY');
+                            if (s.isSame(s.startOf('month'), 'day') && e.isSame(s.endOf('month'), 'day')) return `Tháng ${s.format('MM/YYYY')}`;
+                            if (s.isSame(s.startOf('week'), 'day') && e.isSame(s.endOf('week'), 'day')) return `Tuần ${s.format('DD/MM')} — ${e.format('DD/MM')}`;
+                            if (s.isSame(s.startOf('year'), 'day') && e.isSame(s.endOf('year'), 'day')) return `Năm ${s.format('YYYY')}`;
+                            return `${s.format('DD/MM/YYYY')} — ${e.format('DD/MM/YYYY')}`;
+                        })();
+                        const setRange = (start: dayjs.Dayjs, end: dayjs.Dayjs) => setOverviewDateRange([start, end]);
+                        return (
+                            <Dropdown
+                                trigger={['click']}
+                                dropdownRender={() => (
+                                    <div style={{ background: '#fff', borderRadius: 8, boxShadow: '0 6px 16px rgba(0,0,0,.12)', padding: '8px 0', minWidth: 220, border: '1px solid #f0f0f0' }}>
+                                        {/* Quick presets */}
+                                        {[
+                                            { label: 'Hôm nay', fn: () => setRange(now.startOf('day'), now.endOf('day')) },
+                                            { label: 'Hôm qua', fn: () => setRange(now.subtract(1, 'day').startOf('day'), now.subtract(1, 'day').endOf('day')) },
+                                            { label: 'Trong 7 ngày qua', fn: () => setRange(now.subtract(6, 'day').startOf('day'), now.endOf('day')) },
+                                            { label: 'Trong 30 ngày qua', fn: () => setRange(now.subtract(29, 'day').startOf('day'), now.endOf('day')) },
+                                        ].map(opt => (
+                                            <div key={opt.label}
+                                                onClick={opt.fn}
+                                                style={{ padding: '8px 16px', cursor: 'pointer', fontSize: 13, fontWeight: 500, color: rangeLabel === opt.label ? '#1677ff' : '#262626', background: rangeLabel === opt.label ? '#e6f4ff' : 'transparent', transition: 'all .15s' }}
+                                                onMouseEnter={e => { if (rangeLabel !== opt.label) e.currentTarget.style.background = '#f5f5f5'; }}
+                                                onMouseLeave={e => { if (rangeLabel !== opt.label) e.currentTarget.style.background = 'transparent'; }}
+                                            >{opt.label}</div>
+                                        ))}
+                                        <div style={{ height: 1, background: '#f0f0f0', margin: '6px 0' }} />
+                                        {/* Theo ngày */}
+                                        <div style={{ padding: '4px 16px' }}>
+                                            <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Theo ngày</div>
+                                            <DatePicker
+                                                size="small"
+                                                format="DD/MM/YYYY"
+                                                placeholder="Chọn ngày..."
+                                                style={{ width: '100%' }}
+                                                onChange={d => { if (d) setRange(d.startOf('day'), d.endOf('day')); }}
+                                            />
+                                        </div>
+                                        {/* Theo tháng */}
+                                        <div style={{ padding: '4px 16px', paddingBottom: 8 }}>
+                                            <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Theo tháng</div>
+                                            <DatePicker
+                                                picker="month"
+                                                size="small"
+                                                format="MM/YYYY"
+                                                style={{ width: '100%' }}
+                                                onChange={d => { if (d) setRange(d.startOf('month'), d.endOf('month')); }}
+                                            />
+                                        </div>
+                                        <div style={{ height: 1, background: '#f0f0f0', margin: '4px 0' }} />
+                                        {/* Custom range */}
+                                        <div style={{ padding: '4px 16px', paddingBottom: 8 }}>
+                                            <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Tùy chỉnh khoảng</div>
+                                            <DatePicker.RangePicker
+                                                size="small"
+                                                format="DD/MM/YYYY"
+                                                allowClear={false}
+                                                style={{ width: '100%' }}
+                                                onChange={dates => { if (dates && dates[0] && dates[1]) setRange(dates[0], dates[1]); }}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+                            >
+                                <Button
+                                    style={{ borderRadius: 8, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, padding: '4px 14px', height: 'auto' }}
+                                >
+                                    <CalendarOutlined style={{ color: '#1677ff' }} />
+                                    <span style={{ color: '#1677ff', fontWeight: 700 }}>{rangeLabel}</span>
+                                    <span style={{ color: '#8c8c8c', fontSize: 12 }}>
+                                        {overviewDateRange[0].isSame(overviewDateRange[1], 'day')
+                                            ? overviewDateRange[0].format('DD/MM/YYYY')
+                                            : `${overviewDateRange[0].format('DD/MM')} → ${overviewDateRange[1].format('DD/MM/YYYY')}`}
+                                    </span>
+                                    <DownOutlined style={{ fontSize: 10, color: '#8c8c8c' }} />
+                                </Button>
+                            </Dropdown>
+                        );
+                    })()}
                     <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal}>Cấu hình</Button>
                     {isCurrentPeriodLocked ? (
                         currentUser === 'admin' ? (

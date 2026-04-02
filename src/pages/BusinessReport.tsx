@@ -713,7 +713,7 @@ export default function BusinessReportPage() {
     const [drillDownOpen, setDrillDownOpen] = useState(false);
     const [drillDownTitle, setDrillDownTitle] = useState('');
     const [drillDownData, setDrillDownData] = useState<any[]>([]);
-    const [drillDownType, setDrillDownType] = useState<'orders' | 'ecom' | 'items' | 'expenses' | 'fee-detail' | 'opex-detail'>('orders');
+    const [drillDownType, setDrillDownType] = useState<'orders' | 'ecom' | 'items' | 'items-agg' | 'expenses' | 'fee-detail' | 'opex-detail'>('orders');
     const [expandedDrillKeys, setExpandedDrillKeys] = useState<string[]>([]);
 
     // ============================================
@@ -1131,7 +1131,7 @@ export default function BusinessReportPage() {
             rows.push({ key: 'rev-other', name: 'TMDT khác',   amount: pnl.otherTMDTRevenue,  pctVal: pct(pnl.otherTMDTRevenue),  isChild: true, indent: 1, drillable: true, section: 'rev' });
 
         // ── B. GIÁ VỐN HÀNG BÁN (COGS) ─────────────────────────────
-        rows.push({ key: 'cogs-header', name: 'B. GIÁ VỐN HÀNG BÁN (COGS)', amount: pnl.totalCOGS, pctVal: pct(pnl.totalCOGS), isGroup: true, section: 'cogs' });
+        rows.push({ key: 'cogs-header', name: 'B. GIÁ VỐN HÀNG BÁN (COGS)', amount: pnl.totalCOGS, pctVal: pct(pnl.totalCOGS), isGroup: true, drillable: true, section: 'cogs' });
         rows.push({ key: 'cogs-pos',  name: 'Giá vốn POS',  amount: pnl.cogsPOS,   pctVal: pct(pnl.cogsPOS),   isChild: true, indent: 1, drillable: true, section: 'cogs' });
         rows.push({ key: 'cogs-tmdt', name: 'Giá vốn TMDT', amount: pnl.cogsTMDT,  pctVal: pct(pnl.cogsTMDT),  isChild: true, indent: 1, drillable: true, section: 'cogs' });
 
@@ -1195,7 +1195,7 @@ export default function BusinessReportPage() {
     // ============================================
     const openDrillDown = useCallback((rowKey: string, rowName: string) => {
         let data: any[] = [];
-        let type: 'orders' | 'ecom' | 'items' | 'expenses' | 'fee-detail' | 'opex-detail' = 'orders';
+        let type: 'orders' | 'ecom' | 'items' | 'items-agg' | 'expenses' | 'fee-detail' | 'opex-detail' = 'orders';
         let title = '';
 
         switch (rowKey) {
@@ -1252,59 +1252,96 @@ export default function BusinessReportPage() {
                     });
                 break;
             }
-            case 'cogs-pos': {
-                title = `Chi tiết Giá vốn POS (${fmt(pnl.cogsPOS)}đ)`;
-                type = 'items';
-                const itemList: any[] = [];
-                filteredExports.forEach(e => {
-                    try {
-                        const items = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []);
-                        items.forEach((item: any) => {
-                            const sku = item.sku || item.variantSku || '';
-                            const cost = costMap[sku] ?? item.cost ?? 0;
-                            const qty = item.quantity || 0;
-                            itemList.push({
-                                key: `${e.exportCode}-${sku}`,
-                                date: dayjs(e.exportDate).format('DD/MM/YYYY'),
-                                orderCode: e.exportCode || 'N/A',
-                                sku,
-                                productName: item.productName || item.name || sku,
-                                quantity: qty,
-                                unitCost: cost,
-                                totalCost: cost * qty,
-                            });
-                        });
-                    } catch { /* skip */ }
-                });
-                data = itemList;
-                break;
-            }
+            case 'cogs-header':
+            case 'cogs-pos':
             case 'cogs-tmdt': {
-                title = `Chi tiết Giá vốn TMDT (${fmt(pnl.cogsTMDT)}đ)`;
+                const isPOS = rowKey === 'cogs-pos' || rowKey === 'cogs-header';
+                const isTMDT = rowKey === 'cogs-tmdt' || rowKey === 'cogs-header';
+                const targetCOGS = rowKey === 'cogs-header' ? pnl.totalCOGS : (rowKey === 'cogs-pos' ? pnl.cogsPOS : pnl.cogsTMDT);
+                const titleStr = rowKey === 'cogs-header' ? 'Toàn bộ' : (rowKey === 'cogs-pos' ? 'POS' : 'TMĐT');
+                title = `Chi tiết Giá vốn ${titleStr} (${fmt(targetCOGS)}đ)`;
                 type = 'items';
-                const itemList2: any[] = [];
-                filteredEcom.forEach(e => {
-                    try {
-                        const items = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []);
-                        items.forEach((item: any) => {
-                            const sku = item.sku || item.variantSku || '';
-                            const cost = costMap[sku] ?? item.cost ?? 0;
-                            const qty = item.quantity || 0;
-                            itemList2.push({
-                                key: `${e.ecommerceExportCode}-${sku}`,
-                                date: dayjs(e.ecommerceExportDate).format('DD/MM/YYYY'),
-                                orderCode: e.ecommerceExportCode || 'N/A',
-                                customer: e.customerName || '',
-                                sku,
-                                productName: item.productName || item.name || sku,
-                                quantity: qty,
-                                unitCost: cost,
-                                totalCost: cost * qty,
+
+                const itemsArr: any[] = [];
+                let keyCounter = 0;
+
+                const extractItems = (ordersList: any[], isPosSrc: boolean) => {
+                    ordersList.forEach((e: any) => {
+                        try {
+                            const items = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []);
+                            const orderTotalRev = e.totalAmount || e.totalRevenue || e.revenue || e.total || e.amount || 0;
+                            
+                            // Diagnose if we need proportional distribution (E-com only, when no unit prices exist)
+                            const totalUpRev = items.reduce((s: number, it: any) => s + (it.unitPrice || it.price || 0) * (it.quantity || 0), 0);
+                            const needsProportional = !isPosSrc && totalUpRev === 0 && orderTotalRev > 0 && items.length > 0;
+                            
+                            let totalOrderCost = 0;
+                            let totalOrderQty = 0;
+                            if (needsProportional) {
+                                items.forEach((it: any) => {
+                                    const c = costMap[it.sku || it.variantSku] ?? it.cost ?? 0;
+                                    totalOrderCost += c * (it.quantity || 0);
+                                    totalOrderQty += (it.quantity || 0);
+                                });
+                            }
+
+                            items.forEach((item: any) => {
+                                const sku = item.sku || item.variantSku || 'Chưa có SKU';
+                                const cost = costMap[sku] ?? item.cost ?? 0;
+                                const qty = item.quantity || 0;
+                                
+                                let rev = 0;
+                                if (isPosSrc) {
+                                    // POS: item.total is reliable (line total after line discount)
+                                    rev = item.total ?? item.subtotal ?? ((item.unitPrice || item.price || 0) * qty);
+                                } else if (needsProportional) {
+                                    // E-com missing unit prices: Distribute order total proportionally
+                                    if (totalOrderCost > 0) {
+                                        rev = orderTotalRev * ((cost * qty) / totalOrderCost);
+                                    } else if (totalOrderQty > 0) {
+                                        rev = orderTotalRev * (qty / totalOrderQty);
+                                    } else {
+                                        rev = 0;
+                                    }
+                                } else {
+                                    // E-com with unit prices natively mapped
+                                    const up = item.unitPrice ?? item.price ?? 0;
+                                    if (up > 0) {
+                                        rev = up * qty;
+                                    } else {
+                                        // Ultimate fallback if something mapped `item.total` correctly
+                                        // However, protect against the "duplicated total" bug
+                                        if (items.length > 1 && (item.total === orderTotalRev || item.subtotal === orderTotalRev)) {
+                                            rev = orderTotalRev * (qty / (items.reduce((s:number, i:any)=>s+(i.quantity||0), 0) || 1));
+                                        } else {
+                                            rev = item.total ?? item.subtotal ?? 0;
+                                        }
+                                    }
+                                }
+
+                                if (qty > 0) {
+                                    itemsArr.push({
+                                        key: keyCounter++,
+                                        date: dayjs(isPosSrc ? e.exportDate : e.ecommerceExportDate).format('DD/MM/YYYY'),
+                                        orderCode: e.exportCode || e.ecommerceExportCode || `DH-${keyCounter}`,
+                                        sku,
+                                        productName: item.productName || item.name || sku,
+                                        quantity: qty,
+                                        unitCost: cost,
+                                        totalCost: cost * qty,
+                                        revenue: rev,
+                                        ratio: rev > 0 ? ((cost * qty) / rev * 100) : (cost > 0 ? 100 : 0),
+                                    });
+                                }
                             });
-                        });
-                    } catch { /* skip */ }
-                });
-                data = itemList2;
+                        } catch { /* skip */ }
+                    });
+                };
+
+                if (isPOS) extractItems(filteredExports, true);
+                if (isTMDT) extractItems(filteredEcom, false);
+
+                data = itemsArr.sort((a, b) => dayjs(b.date, 'DD/MM/YYYY').valueOf() - dayjs(a.date, 'DD/MM/YYYY').valueOf());
                 break;
             }
             // ---- Platform fee sub-items ----
@@ -1486,8 +1523,22 @@ export default function BusinessReportPage() {
                     render: (v: number) => <Text strong style={{ color: '#f5222d' }}>{fmt(v)}đ</Text>,
                     sorter: (a: any, b: any) => a.totalCost - b.totalCost,
                 },
+                { title: 'Doanh thu', dataIndex: 'revenue', key: 'revenue', width: 120, align: 'right' as const,
+                    render: (v: number) => <Text strong style={{ color: '#00ab56' }}>{fmt(v)}đ</Text>,
+                    sorter: (a: any, b: any) => a.revenue - b.revenue,
+                },
+                { title: 'Giá vốn/Doanh thu', dataIndex: 'ratio', key: 'ratio', width: 140, align: 'right' as const,
+                    render: (v: number) => {
+                        let color = '#00ab56';
+                        if (v >= 70) color = '#f5222d';
+                        else if (v >= 50) color = '#fa8c16';
+                        return <Text strong style={{ color }}>{v.toFixed(1)}%</Text>;
+                    },
+                    sorter: (a: any, b: any) => a.ratio - b.ratio,
+                },
             ];
         }
+
         if (drillDownType === 'expenses') {
             return [
                 { title: 'Ngày', dataIndex: 'date', key: 'date', width: 110 },
@@ -1918,7 +1969,7 @@ export default function BusinessReportPage() {
                 open={drillDownOpen}
                 onCancel={() => setDrillDownOpen(false)}
                 footer={null}
-                width={900}
+                width={1100}
                 styles={{ body: { padding: '0 24px 24px' } }}
                 closable={true}
                 destroyOnClose
@@ -1987,15 +2038,43 @@ export default function BusinessReportPage() {
                     } : undefined}
                     summary={() => {
                         if (drillDownData.length === 0) return null;
-                        const totalKey = drillDownType === 'items' ? 'totalCost'
-                            : drillDownType === 'fee-detail' ? 'feeAmount'
+                        
+                        if (drillDownType === 'items') {
+                            const totalRev = drillDownData.reduce((s, r) => s + (r.revenue || 0), 0);
+                            const totalCost = drillDownData.reduce((s, r) => s + (r.totalCost || 0), 0);
+                            const ratio = totalRev > 0 ? (totalCost / totalRev * 100) : 0;
+                            let color = '#262626';
+                            if (ratio >= 70) color = '#f5222d';
+                            else if (ratio >= 50) color = '#fa8c16';
+
+                            return (
+                                <Table.Summary fixed>
+                                    <Table.Summary.Row>
+                                        <Table.Summary.Cell index={0} colSpan={6}>
+                                            <Text strong>TỔNG CỘNG</Text>
+                                        </Table.Summary.Cell>
+                                        <Table.Summary.Cell index={1} align="right">
+                                            <Text strong style={{ color: '#f5222d', fontSize: 13 }}>{fmt(totalCost)}đ</Text>
+                                        </Table.Summary.Cell>
+                                        <Table.Summary.Cell index={2} align="right">
+                                            <Text strong style={{ color: '#00ab56', fontSize: 13 }}>{fmt(totalRev)}đ</Text>
+                                        </Table.Summary.Cell>
+                                        <Table.Summary.Cell index={3} align="right">
+                                            <Text strong style={{ color, fontSize: 13 }}>{ratio.toFixed(1)}%</Text>
+                                        </Table.Summary.Cell>
+                                    </Table.Summary.Row>
+                                </Table.Summary>
+                            );
+                        }
+
+                        const totalKey = drillDownType === 'fee-detail' ? 'feeAmount'
                             : drillDownType === 'opex-detail' ? 'total'
                             : 'amount';
                         const total = drillDownData.reduce((s, r) => s + (r[totalKey] || 0), 0);
                         return (
                             <Table.Summary fixed>
                                 <Table.Summary.Row>
-                                    <Table.Summary.Cell index={0} colSpan={drillDownType === 'items' ? 6 : drillDownType === 'ecom' ? 5 : (drillDownType === 'expenses' || drillDownType === 'opex-detail') ? 3 : 4}>
+                                    <Table.Summary.Cell index={0} colSpan={drillDownType === 'ecom' ? 5 : (drillDownType === 'expenses' || drillDownType === 'opex-detail') ? 3 : 4}>
                                         <Text strong>TỔNG CỘNG</Text>
                                     </Table.Summary.Cell>
                                     <Table.Summary.Cell index={1} align="right">
