@@ -275,6 +275,45 @@ export default function ReturnsPage() {
         });
     };
 
+    const processReturnFine = async (packerName: string, complaintCode: string) => {
+        if (!packerName) return;
+        try {
+            const electronApi = (window as any).electronAPI;
+            const attRes = await electronApi.appConfig.get('attendanceData');
+            if (attRes.success && attRes.data) {
+                const attData = typeof attRes.data === 'string' ? JSON.parse(attRes.data) : attRes.data;
+                const config = attData.config || {};
+                const attEmployees = attData.employees || [];
+                
+                const packerEmp = attEmployees.find((e: any) => e.username === packerName || e.name === packerName);
+                if (!packerEmp) {
+                    console.log(`[Returns] Không tìm thấy NV ${packerName} trong danh sách chấm công.`);
+                    return;
+                }
+
+                const isSeasonal = packerEmp.type === 'Seasonal';
+                const amount = isSeasonal ? (config.wrongOrderFineSeasonal || 0) : (config.wrongOrderFineOfficial || 0);
+
+                if (amount > 0) {
+                    const newFine = {
+                        empId: packerEmp.id,
+                        type: 'Khác',
+                        detail: `Đóng gói sai đơn, phát sinh KH hoàn hàng/khiếu nại (Mã phiếu: ${complaintCode})`,
+                        amount: amount,
+                        date: new Date().toISOString(),
+                        source: 'returns'
+                    };
+                    
+                    attData.extraFines = [...(attData.extraFines || []), newFine];
+                    await electronApi.appConfig.set('attendanceData', JSON.stringify(attData));
+                    message.warning(`⚠️ Đã tự động ghi nhận mức phạt ${amount.toLocaleString('vi-VN')}đ cho NV ${packerEmp.displayName || packerEmp.name} (Lỗi trả hàng)!`);
+                }
+            }
+        } catch (error) {
+            console.error('Lỗi tính phạt tự động:', error);
+        }
+    };
+
     const handleSubmit = async () => {
         try {
             const values = await form.validateFields();
@@ -366,6 +405,14 @@ export default function ReturnsPage() {
                     userName: currentUser,
                     severity: 'INFO'
                 });
+            }
+
+            // Tự động đẩy phạt nếu hoàn thành & có packer
+            if (values.status === 'completed' && values.packer) {
+                const isStatusChanged = !editingReturn || editingReturn.status !== 'completed';
+                if (isStatusChanged) {
+                    await processReturnFine(values.packer, values.complaintCode);
+                }
             }
 
             message.success(editingReturn ? '✅ Đã cập nhật phiếu trả!' : '✅ Đã tạo phiếu trả mới!');
@@ -769,6 +816,11 @@ export default function ReturnsPage() {
                             const doUpdate = async () => {
                                 try {
                                     await window.electronAPI.returns.update(record.id, { status: newStatus });
+                                    
+                                    if (newStatus === 'completed' && record.packer) {
+                                        await processReturnFine(record.packer, record.complaintCode);
+                                    }
+
                                     await loadReturns();
                                     message.success('Đã cập nhật trạng thái!');
                                 } catch (err) {

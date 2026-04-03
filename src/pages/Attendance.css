@@ -866,3 +866,20 @@
 .attendance-module .att-matrix-table .ant-table-tbody > tr > td {
     padding: 12px 10px !important;
 }
+
+/* ===== TỔNG CA COLUMN — nổi bật ===== */
+.attendance-module .att-matrix-table .ant-table-tbody > tr > td.att-total-col-cell {
+    background: linear-gradient(180deg, #ecfdf5 0%, #d1fae5 100%) !important;
+    border-left: 3px solid #00ab56 !important;
+    border-right: none !important;
+}
+
+.attendance-module .att-matrix-table .ant-table-tbody > tr:hover > td.att-total-col-cell {
+    background: linear-gradient(180deg, #d1fae5 0%, #a7f3d0 100%) !important;
+}
+
+.attendance-module .att-matrix-table .ant-table-thead > tr > th.att-total-col-header {
+    background: linear-gradient(135deg, #00ab56 0%, #00c76a 100%) !important;
+    border-left: 3px solid #009148 !important;
+    padding: 0 !important;
+}

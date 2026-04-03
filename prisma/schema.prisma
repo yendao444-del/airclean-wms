@@ -650,3 +650,37 @@ model EInvoice {
   @@index([batchId])
   @@index([refInvoiceId])
 }
+
+// ========================================
+// ATTENDANCE / CHẤM CÔNG KHUÔN MẶT
+// ========================================
+
+model AttendanceLog {
+  id          Int      @id @default(autoincrement())
+  userId      Int?     // FK → User (null nếu nhận diện thất bại)
+  userName    String   // Tên nhân viên (lưu snapshot)
+  faceId      String   // Tên file encoding: "nguyen_van_a"
+
+  checkType   String   // morning_in | morning_out | afternoon_in | evening_out
+  confidence  Float    // Độ tin cậy nhận diện (0.0 - 1.0)
+
+  date        String   // "2026-04-03" — để query theo ngày dễ hơn
+  timestamp   DateTime @default(now())
+
+  note        String?  // Ghi chú thêm nếu cần
+
+  @@index([date])
+  @@index([userId])
+  @@index([faceId, date])
+}
+
+model FaceProfile {
+  id          Int      @id @default(autoincrement())
+  faceId      String   @unique // "nguyen_van_a" — tên file encoding
+  userId      Int?     // FK → User
+  userName    String
+  photoCount  Int      @default(0) // Số ảnh đã đăng ký
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

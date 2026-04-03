@@ -1,7 +1,30 @@
 const { app, BrowserWindow, Menu } = require('electron');
 const path = require('path');
+const { spawn } = require('child_process');
 
 let mainWindow;
+let pythonProcess = null;
+
+function startPythonService() {
+    const pythonScript = path.join(__dirname, '..', 'python', 'attendance_service.py');
+    // Dùng full path Python 3.10 vì Electron spawn có PATH hạn chế
+    const pythonExe = 'C:\\Program Files\\Python310\\python.exe';
+    // Truyền userData path để Python lưu face data vào thư mục ổn định (không bị xóa sau restart)
+    const userDataPath = app.getPath('userData');
+    pythonProcess = spawn(pythonExe, [pythonScript], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        env: { ...process.env, FACE_DATA_DIR: userDataPath },
+    });
+    pythonProcess.stdout.on('data', d => console.log('[Python]', d.toString().trim()));
+    pythonProcess.stderr.on('data', d => console.error('[Python ERR]', d.toString().trim()));
+    pythonProcess.on('exit', (code) => console.log(`[Python] exited: ${code}`));
+    console.log('🐍 Python face service started (PID:', pythonProcess.pid, ')');
+}
+
+function stopPythonService() {
+    if (pythonProcess) { pythonProcess.kill(); pythonProcess = null; }
+}
 
 function createWindow() {
     // Tạo Menu với Edit + View actions để Ctrl+C/V và Ctrl+R hoạt động
@@ -46,6 +69,7 @@ function createWindow() {
             contextIsolation: true,
             sandbox: false,
             preload: path.join(__dirname, 'preload.js'),
+            autoplayPolicy: 'no-user-gesture-required',
         },
         title: 'DBY POS - Quản lý bán hàng',
         icon: app.isPackaged
@@ -102,6 +126,7 @@ function createWindow() {
 app.whenReady().then(() => {
     // Tạo cửa sổ TRƯỚC để luôn hiển thị app
     createWindow();
+    startPythonService();
 
     // Import IPC handlers SAU - bọc try-catch để không crash app
     try {
@@ -122,6 +147,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+    stopPythonService();
     if (process.platform !== 'darwin') {
         app.quit();
     }

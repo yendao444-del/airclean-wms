@@ -1630,6 +1630,7 @@ export default function RefundsPage() {
                         dataSource={filteredRefunds}
                         rowKey="id"
                         loading={loading}
+                        scroll={{ x: 1600 }}
                         rowClassName={(record) => {
                             if (record.status === 'lost' && compensationMap[record.id]) return 'compensated-row';
                             try {

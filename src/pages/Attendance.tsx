@@ -54,7 +54,26 @@ import {
     DeleteOutlined,
     EditOutlined,
     ExclamationCircleOutlined,
+    CameraOutlined,
+    SmileOutlined,
 } from '@ant-design/icons';
+
+// Khởi tạo Audio Context toàn cục cho việc phát âm báo Ting
+export let sharedAudioCtx: AudioContext | null = null;
+export const playTingSound = () => {
+    try {
+        if (!sharedAudioCtx) sharedAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        if (sharedAudioCtx?.state === 'suspended') sharedAudioCtx.resume();
+        const actx = sharedAudioCtx!;
+        const osc = actx.createOscillator();
+        const gain = actx.createGain();
+        osc.connect(gain); gain.connect(actx.destination);
+        osc.type = 'sine'; osc.frequency.value = 1046.50; // C5 note (ting)
+        gain.gain.setValueAtTime(0.3, actx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, actx.currentTime + 0.3);
+        osc.start(actx.currentTime); osc.stop(actx.currentTime + 0.3);
+    } catch(e) { console.error('Audio ting error', e); }
+};
 
 const { Title, Text } = Typography;
 
@@ -79,6 +98,7 @@ interface FineRecord {
     detail: string;
     amount: number;
     date?: string; // ISO string — ngày tạo phạt
+    source?: 'manual' | 'attendance'; // nguồn tạo phạt
 }
 
 interface BonusRecord {
@@ -343,19 +363,42 @@ function calculatePayroll(
         });
         let shifts = 0;
         let absentDays = 0;
+        
+        // Tính số ca làm việc thực tế từ logs
         if (empLogs.length > 0) {
             const shiftSet = new Set(empLogs.map((l: any) => (l.time || '').substring(0, 10) + '-' + l.shift));
             shifts = shiftSet.size;
-            absentDays = Math.max(0, (STANDARD_WORK_DAYS * 2 - shifts)) / 2;
-        } else {
-            shifts = STANDARD_WORK_DAYS * 2;
-            absentDays = 0;
         }
 
-        const leaveDeduction = emp.isHourly ? 0 : (absentDays * (emp.baseSalary / STANDARD_WORK_DAYS));
-        const salaryBase = emp.isHourly
-            ? (shifts * HOURS_PER_SHIFT * emp.baseSalary)
-            : (emp.baseSalary - leaveDeduction);
+        // Chính thức: Tính theo trừ lùi (nếu chưa có log thì mặc định là full công, đi nghỉ mới bị trừ)
+        // Tuy nhiên cách chuẩn nhất là: Số ca nghỉ = Tổng ca tiêu chuẩn (52) - Số ca đi làm.
+        // Tạm thời nếu công ty muốn "Thời vụ" liên kết chặt với công ca:
+        // -> Lương Thời Vụ = Số ca làm thực tế * (Lương CB / Tổng ca tiêu chuẩn)
+        
+        const TOTAL_SHIFTS = STANDARD_WORK_DAYS * 2; // 52 ca
+        const salaryPerShift = emp.baseSalary / TOTAL_SHIFTS;
+        
+        let salaryBase = 0;
+        let leaveDeduction = 0;
+
+        if (emp.type === 'Seasonal') {
+            // Thời vụ: Làm bao nhiêu ca hưởng bấy nhiêu
+            salaryBase = shifts * salaryPerShift;
+            absentDays = Math.max(0, TOTAL_SHIFTS - shifts) / 2;
+            leaveDeduction = 0; // Thời vụ chỉ tính lượng đã làm, ko dùng biến trừ lùi trên UI
+        } else {
+            // Chính thức: Có thể công ty này dùng cơ chế trừ lùi.
+            // Nếu dùng trừ lùi, nếu không có log thì mặc định coi như đi làm đủ (tùy nghiệp vụ).
+            // Nhưng để chính xác, hàm này đang tính theo absentDays thực tế:
+            if (empLogs.length === 0) {
+                shifts = TOTAL_SHIFTS; // Giả lập full để ko bị trừ tiền nếu là đầu tháng chưa điểm danh
+                absentDays = 0;
+            } else {
+                absentDays = Math.max(0, TOTAL_SHIFTS - shifts) / 2;
+            }
+            leaveDeduction = absentDays * (emp.baseSalary / STANDARD_WORK_DAYS);
+            salaryBase = emp.baseSalary - leaveDeduction;
+        }
 
         // === Tính thu nhập đóng gói CÁ NHÂN bằng match linh hoạt ===
         let packIncome = 0;
@@ -398,15 +441,16 @@ function calculatePayroll(
 }
 
 // ===== PILL COMPONENT =====
-const ShiftPill = ({ label, status }: { label: string; status: 0 | 1 | 2 }) => {
+const ShiftPill = ({ label, status, time }: { label: string; status: 0 | 1 | 2; time?: string }) => {
     const config = {
         0: { bg: '#f5f5f5', border: '#e8e8e8', color: '#bfbfbf', icon: <MinusCircleOutlined style={{ fontSize: 10 }} />, tooltip: 'Nghỉ' },
         1: { bg: '#f6ffed', border: '#b7eb8f', color: '#52c41a', icon: <CheckCircleOutlined style={{ fontSize: 10 }} />, tooltip: 'Đúng giờ' },
         2: { bg: '#fff7e6', border: '#ffd591', color: '#fa8c16', icon: <ClockCircleOutlined style={{ fontSize: 10 }} />, tooltip: 'Đi muộn' },
     };
     const c = config[status];
+    const tooltipContent = `${label}: ${c.tooltip}${time ? ` (${time})` : ''}`;
     return (
-        <Tooltip title={`${label}: ${c.tooltip}`}>
+        <Tooltip title={tooltipContent}>
             <div style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4,
                 fontSize: 10, fontWeight: 700, textTransform: 'uppercase',
@@ -432,6 +476,1113 @@ const SundayRestCell = () => (
         <CoffeeOutlined style={{ marginRight: 3, fontSize: 10 }} /> Nghỉ
     </div>
 );
+
+// ===============================================
+// ===== FACE ATTENDANCE TAB COMPONENT =====
+// ===============================================
+const CHECK_TYPE_LABELS: Record<string, { label: string; color: string }> = {
+    morning_in:   { label: 'Sáng vào',   color: '#52c41a' },
+    morning_out:  { label: 'Sáng ra',    color: '#fa8c16' },
+    afternoon_in: { label: 'Chiều vào',  color: '#1677ff' },
+    evening_out:  { label: 'Tối ra',     color: '#722ed1' },
+};
+
+function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine }: {
+    employees: any[],
+    children?: React.ReactNode,
+    onLogAdded?: () => void,
+    config?: PenaltyConfig,
+    onLateFine?: (fine: FineRecord) => void,
+}) {
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const canvasRef = useRef<HTMLCanvasElement>(null);       // capture frame (hidden)
+    const overlayCanvasRef = useRef<HTMLCanvasElement>(null); // vẽ bounding box realtime
+    const regCanvasRef = useRef<HTMLCanvasElement>(null);
+    const regAnimRef = useRef<number>(0);
+    const overlayAnimRef = useRef<number>(0);
+    const recognizeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const mediaStreamRef = useRef<MediaStream | null>(null);
+    const displayVideoRef = useRef<HTMLVideoElement>(null); // video hiển thị trong Camera Panel
+    const lastFaceBoxRef = useRef<any>(null);   // lưu face_box mới nhất để draw
+    const lastResultRef = useRef<any>(null);    // lưu result mới nhất để draw tên
+
+    const [serviceOk, setServiceOk] = useState(false);
+    const [cameraOn, setCameraOn] = useState(false);
+    const cameraOnRef = useRef(false);
+    const [recognizing, setRecognizing] = useState(false);
+    const [cameraExpanded, setCameraExpanded] = useState(false);
+    const [lastResult, setLastResult] = useState<any>(null);
+    const [todayLogs, setTodayLogs] = useState<any[]>([]);
+    const [profiles, setProfiles] = useState<any[]>([]);
+    const [faceBox, setFaceBox] = useState<{ top: number; right: number; bottom: number; left: number } | null>(null);
+    const [regFaceStatus, setRegFaceStatus] = useState<'no_face' | 'too_far' | 'not_centered' | 'ok'>('no_face');
+
+    // Register modal
+    const [registerOpen, setRegisterOpen] = useState(false);
+    const [regFaceId, setRegFaceId] = useState('');
+    const [regUserName, setRegUserName] = useState('');
+    const [regImages, setRegImages] = useState<string[]>([]);
+    const [regCapturing, setRegCapturing] = useState(false);
+    const [regLoading, setRegLoading] = useState(false);
+    const [regDetecting, setRegDetecting] = useState(false);
+
+    const api = (window as any).electronAPI?.attendance;
+
+    // Check service status
+    const checkService = useCallback(async () => {
+        if (!api) return;
+        const res = await api.status();
+        setServiceOk(res.success);
+    }, [api]);
+
+    // Load today logs + profiles
+    const loadData = useCallback(async () => {
+        if (!api) return;
+        const today = new Date().toISOString().slice(0, 10);
+        const [logsRes, profRes] = await Promise.all([
+            api.getLogs({ date: today }),
+            api.getProfiles(),
+        ]);
+        if (logsRes.success) setTodayLogs(logsRes.data);
+        if (profRes.success) setProfiles(profRes.data);
+    }, [api]);
+
+    useEffect(() => {
+        checkService();
+        loadData();
+    }, [checkService, loadData]);
+
+    // Camera start/stop
+    const startCamera = useCallback(async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+            mediaStreamRef.current = stream; // Lưu vào ref để đảm bảo luôn có thể stop()
+            if (videoRef.current) {
+                videoRef.current.srcObject = stream;
+                await videoRef.current.play();
+                cameraOnRef.current = true;
+                setCameraOn(true);
+            }
+        } catch {
+            message.error('Không thể mở camera');
+        }
+    }, []);
+
+    const stopCamera = useCallback(() => {
+        // Stop stream từ mediaStreamRef (cách an toàn nhất)
+        if (mediaStreamRef.current) {
+            mediaStreamRef.current.getTracks().forEach(t => t.stop());
+            mediaStreamRef.current = null;
+        }
+        
+        // Dọn dẹp DOM
+        if (videoRef.current?.srcObject) {
+            videoRef.current.srcObject = null;
+        }
+        
+        isRecognizingRef.current = false;
+        cameraOnRef.current = false;
+        setCameraOn(false);
+        setRecognizing(false);
+        setFaceBox(null);
+        if (recognizeTimerRef.current) {
+            clearTimeout(recognizeTimerRef.current as unknown as ReturnType<typeof setTimeout>);
+            recognizeTimerRef.current = null;
+        }
+    }, []);
+
+    // Sync srcObject sang video hiển thị trong Camera Panel mỗi khi cameraOn đổi
+    useEffect(() => {
+        const displayVideo = displayVideoRef.current;
+        if (!displayVideo) return;
+        if (cameraOn && videoRef.current?.srcObject) {
+            if (displayVideo.srcObject !== videoRef.current.srcObject) {
+                displayVideo.srcObject = videoRef.current.srcObject;
+                displayVideo.play().catch(() => {});
+            }
+        } else {
+            displayVideo.srcObject = null;
+        }
+    }, [cameraOn]);
+
+    // Capture frame as base64
+    const captureFrame = useCallback((fastMode: boolean = false): string | null => {
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+        if (!video || !canvas || !cameraOnRef.current) return null;
+        
+        let targetW = video.videoWidth || 640;
+        let targetH = video.videoHeight || 480;
+
+        // Ép nhỏ ảnh xuống 320x240 để Python nhận diện siêu tốc (nhanh như tool gốc)
+        if (fastMode && targetW > 320) {
+            const scale = 320 / targetW;
+            targetW = 320;
+            targetH = Math.floor(targetH * scale);
+        }
+
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return null;
+        ctx.drawImage(video, 0, 0, targetW, targetH);
+        return canvas.toDataURL('image/jpeg', fastMode ? 0.6 : 0.8);
+    }, []);
+
+    // ─── Canvas Overlay Draw Loop ───────────────────────────────────────────────
+    // Vẽ trực tiếp lên canvas — giống cv2.rectangle + cv2.putText của tool gốc
+    const startOverlayDraw = useCallback(() => {
+        let cachedW = 0, cachedH = 0;
+
+        const draw = () => {
+            const video = videoRef.current;
+            const canvas = overlayCanvasRef.current;
+            if (!canvas || !video) {
+                overlayAnimRef.current = requestAnimationFrame(draw);
+                return;
+            }
+
+            const W = video.videoWidth;
+            const H = video.videoHeight;
+
+            if (W === 0 || H === 0) {
+                overlayAnimRef.current = requestAnimationFrame(draw);
+                return;
+            }
+
+            // Chỉ reset canvas khi kích thước thay đổi (tránh xóa canvas mỗi frame)
+            if (W !== cachedW || H !== cachedH) {
+                canvas.width = W;
+                canvas.height = H;
+                cachedW = W;
+                cachedH = H;
+            }
+
+            const ctx = canvas.getContext('2d');
+            if (!ctx) { overlayAnimRef.current = requestAnimationFrame(draw); return; }
+            ctx.clearRect(0, 0, W, H);
+
+            const box = lastFaceBoxRef.current;
+            const result = lastResultRef.current;
+
+            if (box) {
+                // Tỉ lệ scale ngược lại từ ảnh 320px lên kích thước thực của video
+                const imgW = box.img_width || W;
+                const imgH = box.img_height || H;
+                const scaleX = W / imgW;
+                const scaleY = H / imgH;
+
+                const top = box.top * scaleY;
+                const right = box.right * scaleX;
+                const bottom = box.bottom * scaleY;
+                const left = box.left * scaleX;
+
+                const isMatch = result?.success;
+                const isDuplicate = result?.reason === 'duplicate';
+                const color = isMatch ? '#52c41a' : isDuplicate ? '#faad14' : '#1677ff';
+
+                // Vẽ hình chữ nhật (cv2.rectangle)
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 3;
+                ctx.shadowColor = color;
+                ctx.shadowBlur = 12;
+                ctx.strokeRect(left, top, right - left, bottom - top);
+                ctx.shadowBlur = 0;
+
+                // Vẽ tên (cv2.putText)
+                const name = result?.userName || '';
+                if (name) {
+                    const label = isMatch
+                        ? `${name} (${Math.round((result.confidence || 0) * 100)}%)`
+                        : isDuplicate ? `${name} - Đã chấm công` : name;
+                    ctx.font = 'bold 18px Arial';
+                    const textW = ctx.measureText(label).width + 12;
+                    ctx.fillStyle = color;
+                    ctx.fillRect(left, top - 28, textW, 26);
+                    ctx.fillStyle = '#fff';
+                    ctx.fillText(label, left + 6, top - 8);
+                } else {
+                    // Chưa nhận ra → Scanning...
+                    ctx.font = 'bold 14px Arial';
+                    ctx.fillStyle = '#1677ffcc';
+                    ctx.fillRect(left, top - 24, 110, 22);
+                    ctx.fillStyle = '#fff';
+                    ctx.fillText('Scanning...', left + 6, top - 6);
+                }
+            }
+
+            overlayAnimRef.current = requestAnimationFrame(draw);
+        };
+        overlayAnimRef.current = requestAnimationFrame(draw);
+    }, []);
+
+    const stopOverlayDraw = useCallback(() => {
+        cancelAnimationFrame(overlayAnimRef.current);
+        lastFaceBoxRef.current = null;
+        lastResultRef.current = null;
+        const canvas = overlayCanvasRef.current;
+        if (canvas) {
+            const ctx = canvas.getContext('2d');
+            ctx?.clearRect(0, 0, canvas.width, canvas.height);
+        }
+    }, []);
+
+    // Auto recognize loop
+    const isRecognizingRef = useRef(false);
+    const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const closeAttendanceRef = useRef<(() => void) | null>(null); // callback đóng camera từ ngoài vào
+
+    const resetIdleTimer = useCallback(() => {
+        if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+        idleTimerRef.current = setTimeout(() => {
+            closeAttendanceRef.current?.();
+        }, 15000);
+    }, []);
+
+    const startRecognizing = useCallback(() => {
+        try {
+            if (!sharedAudioCtx) sharedAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+            if (sharedAudioCtx?.state === 'suspended') sharedAudioCtx.resume();
+            
+            // Dummy speak to unlock SpeechSynthesis on browser
+            const initMsg = new SpeechSynthesisUtterance('');
+            initMsg.volume = 0;
+            window.speechSynthesis.speak(initMsg);
+        } catch(e) {}
+
+        if (recognizeTimerRef.current) return;
+        isRecognizingRef.current = true;
+        setRecognizing(true);
+        startOverlayDraw(); // ← canvas draw loop bắt đầu
+
+
+        const doRecognize = async () => {
+            if (!isRecognizingRef.current) return;
+            const frame = captureFrame(true); // true = fast mode (downscale)
+            if (frame && api) {
+                const res = await api.recognize(frame);
+
+                // Service lỗi → dừng hẳn
+                if (res.error) {
+                    console.warn('Face service error:', res.error);
+                    isRecognizingRef.current = false;
+                    setRecognizing(false);
+                    setServiceOk(false);
+                    setLastResult({ error: res.error });
+                    return;
+                }
+
+                // Luôn cập nhật face_box dù match hay không (overlay realtime)
+                const box = res.face_box || res.data?.face_box || null;
+                if (box) {
+                    box.img_width = res.img_width || res.data?.img_width || 640;
+                    box.img_height = res.img_height || res.data?.img_height || 480;
+                }
+                setFaceBox(box);
+                lastFaceBoxRef.current = box; // ← canvas draw loop dùng cái này
+                // DEBUG — xóa sau khi xác nhận hoạt động
+                console.log('[Face] box=', box, 'res=', res);
+
+                if (res.success && res.data) {
+                    // ✅ Match thành công → hiện tên + chấm công
+                    try {
+                        const actx = sharedAudioCtx || new (window.AudioContext || (window as any).webkitAudioContext)();
+                        if (actx.state === 'suspended') actx.resume();
+                        const osc1 = actx.createOscillator(), osc2 = actx.createOscillator();
+                        const gain1 = actx.createGain(), gain2 = actx.createGain();
+                        osc1.connect(gain1); gain1.connect(actx.destination);
+                        osc2.connect(gain2); gain2.connect(actx.destination);
+                        
+                        osc1.type = 'sine'; osc1.frequency.value = 1046.50; // C5
+                        gain1.gain.setValueAtTime(0.5, actx.currentTime);
+                        gain1.gain.exponentialRampToValueAtTime(0.01, actx.currentTime + 0.3);
+                        osc1.start(actx.currentTime); osc1.stop(actx.currentTime + 0.3);
+                        
+                        osc2.type = 'sine'; osc2.frequency.value = 1318.51; // E5
+                        gain2.gain.setValueAtTime(0.5, actx.currentTime + 0.1);
+                        gain2.gain.exponentialRampToValueAtTime(0.01, actx.currentTime + 0.6);
+                        osc2.start(actx.currentTime + 0.1); osc2.stop(actx.currentTime + 0.6);
+
+                        const msg = new SpeechSynthesisUtterance(`Xin chào ${res.data.userName}`);
+                        msg.lang = 'vi-VN';
+                        window.speechSynthesis.speak(msg);
+                    } catch (e) { console.error(e); }
+
+                    const matchResult = {
+                        success: true,
+                        userName: res.data.userName,
+                        checkType: res.data.checkType,
+                        confidence: res.data.confidence,
+                        face_box: box,
+                    };
+                    setLastResult(matchResult);
+                    lastResultRef.current = matchResult;
+                    loadData();
+                    if (onLogAdded) onLogAdded();
+
+                    // Tự động tạo phạt đi muộn nếu có config
+                    if (config && onLateFine && res.data.checkType) {
+                        const ct = res.data.checkType as string;
+                        const isIn = ct === 'morning_in' || ct === 'afternoon_in';
+                        if (isIn) {
+                            const now = new Date();
+                            const [startH, startM] = (ct === 'morning_in' ? config.morningStart : config.afternoonStart).split(':').map(Number);
+                            const shiftStartMin = startH * 60 + startM + (config.graceMinutes || 0);
+                            const actualMin = now.getHours() * 60 + now.getMinutes();
+                            const lateMin = actualMin - shiftStartMin;
+                            if (lateMin > 0) {
+                                const emp = employees.find(e => e.username === res.data.faceId || e.name === res.data.userName);
+                                const isOfficial = !emp || emp.type === 'Official';
+                                let amount = 0;
+                                let level = '';
+                                if (lateMin <= 15) {
+                                    amount = isOfficial ? config.officialFineLevel1 : config.seasonalFineLevel1;
+                                    level = 'Nhẹ';
+                                } else if (lateMin <= 30) {
+                                    amount = isOfficial ? config.officialFineLevel2 : config.seasonalFineLevel2;
+                                    level = 'TB';
+                                } else {
+                                    amount = isOfficial ? config.officialFineLevel3 : config.seasonalFineLevel3;
+                                    level = 'Nặng';
+                                }
+                                const ca = ct === 'morning_in' ? 'sáng' : 'chiều';
+                                onLateFine({
+                                    empId: emp?.id ?? 0,
+                                    type: 'Đi muộn',
+                                    detail: `Đi muộn ca ${ca} ${lateMin} phút (Mức ${level}) — ${now.toLocaleDateString('vi-VN')}`,
+                                    amount,
+                                    date: now.toISOString(),
+                                    source: 'attendance',
+                                });
+                            }
+                        }
+                    }
+                    // Reset idle timer sau mỗi lần chấm thành công
+                    resetIdleTimer();
+                    // Hiện kết quả 2s rồi tiếp tục nhận diện người tiếp theo
+                    setTimeout(() => {
+                        if (isRecognizingRef.current) {
+                            recognizeTimerRef.current = setTimeout(doRecognize, 120) as unknown as ReturnType<typeof setInterval>;
+                        }
+                    }, 2000);
+                    return;
+                } else if (res.reason === 'duplicate') {
+                    // Đã chấm công rồi — hiện tên vàng
+                    const isSameUserDuplicate = lastResultRef.current?.reason === 'duplicate' && lastResultRef.current?.userName === res.userName;
+                    const dupResult = { reason: 'duplicate', userName: res.userName, face_box: box };
+                    setLastResult(dupResult);
+                    lastResultRef.current = dupResult;
+
+                    if (!isSameUserDuplicate) {
+                        try {
+                            const actx = sharedAudioCtx || new (window.AudioContext || (window as any).webkitAudioContext)();
+                            if (actx.state === 'suspended') actx.resume();
+                            const osc = actx.createOscillator();
+                            const gain = actx.createGain();
+                            osc.connect(gain); gain.connect(actx.destination);
+                            osc.type = 'square'; osc.frequency.value = 220; // Âm trầm (cảnh báo nhẹ)
+                            gain.gain.setValueAtTime(0.1, actx.currentTime);
+                            gain.gain.exponentialRampToValueAtTime(0.01, actx.currentTime + 0.3);
+                            osc.start(actx.currentTime); osc.stop(actx.currentTime + 0.3);
+
+                            const msg = new SpeechSynthesisUtterance(`Bạn đã chấm công rồi`);
+                            msg.lang = 'vi-VN';
+                            window.speechSynthesis.speak(msg);
+                        } catch (e) {}
+
+                        // Lần đầu cảnh báo thì dừng hình 2s để user nhìn rõ màn hình
+                        setTimeout(() => {
+                            if (isRecognizingRef.current) {
+                                recognizeTimerRef.current = setTimeout(doRecognize, 120) as unknown as ReturnType<typeof setInterval>;
+                            }
+                        }, 2000);
+                        return;
+                    }
+                    // Nếu vẫn là người đó và vẫn duplicate, thì chỉ tracking khung vàng realtime, KHÔNG thông báo âm thanh nữa
+                } else if (res.reason === 'out_of_hours') {
+                    const oohResult = { reason: 'out_of_hours', face_box: box };
+                    setLastResult(oohResult);
+                    lastResultRef.current = oohResult;
+                } else {
+                    // Phát hiện mặt nhưng không khớp ai
+                    lastFaceBoxRef.current = box;
+                    lastResultRef.current = null;
+                    setLastResult(null);
+                }
+            }
+
+            if (isRecognizingRef.current) {
+                // Tốc độ update box (càng nhỏ càng mượt, 120ms + thời gian xử lý ~ 100ms = ~4-5 FPS)
+                recognizeTimerRef.current = setTimeout(doRecognize, 120) as unknown as ReturnType<typeof setInterval>;
+            }
+        };
+
+        recognizeTimerRef.current = setTimeout(doRecognize, 100) as unknown as ReturnType<typeof setInterval>;
+    }, [api, captureFrame, loadData, startOverlayDraw, resetIdleTimer]);
+
+
+
+    const stopRecognizing = useCallback(() => {
+        isRecognizingRef.current = false;
+        setRecognizing(false);
+        setLastResult(null);
+        setFaceBox(null);
+        lastFaceBoxRef.current = null;
+        lastResultRef.current = null;
+        if (recognizeTimerRef.current) {
+            clearTimeout(recognizeTimerRef.current as unknown as ReturnType<typeof setTimeout>);
+            recognizeTimerRef.current = null;
+        }
+    }, []);
+
+    useEffect(() => () => {
+        stopCamera();
+    }, [stopCamera]);
+
+    // Mirror video feed + oval guide vào canvas trong modal
+    const regFaceStatusRef = useRef<'no_face' | 'too_far' | 'not_centered' | 'ok'>('no_face');
+    useEffect(() => { regFaceStatusRef.current = regFaceStatus; }, [regFaceStatus]);
+
+    useEffect(() => {
+        if (!registerOpen || !cameraOn) {
+            cancelAnimationFrame(regAnimRef.current);
+            return;
+        }
+        const draw = () => {
+            const video = videoRef.current;
+            const canvas = regCanvasRef.current;
+            if (video && canvas && video.readyState >= 2) {
+                const W = video.videoWidth || 640;
+                const H = video.videoHeight || 480;
+                canvas.width = W;
+                canvas.height = H;
+                const ctx = canvas.getContext('2d');
+                if (!ctx) { regAnimRef.current = requestAnimationFrame(draw); return; }
+
+                // Vẽ video
+                ctx.drawImage(video, 0, 0);
+
+                // Tối vùng ngoài oval (nhỏ lại để nhận diện xa hơn)
+                const cx = W / 2, cy = H / 2;
+                const rx = W * 0.22, ry = H * 0.30;
+                ctx.save();
+                ctx.fillStyle = 'rgba(0,0,0,0.55)';
+                ctx.beginPath();
+                ctx.rect(0, 0, W, H);
+                ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+                ctx.fill('evenodd');
+
+                // Viền oval — màu theo trạng thái
+                const status = regFaceStatusRef.current;
+                ctx.beginPath();
+                ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+                ctx.strokeStyle = status === 'ok' ? '#52c41a' : status === 'too_far' ? '#faad14' : status === 'not_centered' ? '#1890ff' : '#ffffff';
+                ctx.lineWidth = status === 'ok' ? 4 : 2.5;
+                if (status !== 'ok') ctx.setLineDash([12, 8]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                
+                // Debug text
+                ctx.fillStyle = 'red';
+                ctx.font = '16px sans-serif';
+                const r = (window as any)._lastRes;
+                const dbgText = r ? (r.error ? `ERR: ${r.error}` : `found:${r.found} reason:${r.reason}`) : ((window as any)._frameIsNull ? 'frame=null' : 'waiting...');
+                ctx.fillText(`STATUS: ${status} | isD: ${!!(api as any).detect} | ${dbgText}`, 10, 30);
+
+                ctx.restore();
+            }
+            regAnimRef.current = requestAnimationFrame(draw);
+        };
+        regAnimRef.current = requestAnimationFrame(draw);
+        return () => cancelAnimationFrame(regAnimRef.current);
+    }, [registerOpen, cameraOn]);
+
+    // Detect face realtime + kiểm tra khoảng cách trong modal
+    const MIN_FACE_RATIO = 0.15; // mặt phải chiếm ít nhất 15% chiều cao frame
+    useEffect(() => {
+        // Chỉ detect khi đã điền đủ thông tin (bắt buộc) + camera đang bật
+        // Không dừng detect khi regCapturing — cần biết mặt có còn trong vùng không
+        if (!registerOpen || !cameraOn || !regFaceId || !regUserName) {
+            setRegFaceStatus('no_face');
+            setRegDetecting(false);
+            return;
+        }
+        let active = true;
+        setRegDetecting(true);
+        const check = async () => {
+            if (!active || !api) return;
+            try {
+                // Tắt fastMode trong modal để HOG bắt mặt to/gần chính xác hơn (640x480)
+                const frame = captureFrame(false); 
+                if (frame) {
+                    // Sử dụng api.detect để không so khớp với profile cũ, tránh lag
+                    const detectFn = (api as any).detect || api.recognize;
+                    
+                    let done = false;
+                    const timeoutTimer = setTimeout(() => {
+                        if (!done) (window as any)._lastRes = { error: 'IPC_HANG_OR_SLOW' };
+                    }, 2000);
+
+                    const res = await detectFn(frame);
+                    done = true;
+                    clearTimeout(timeoutTimer);
+                    
+                    (window as any)._lastRes = res;
+
+                     if (active) {
+                         // api.detect/recognize trả về: { success, found, face_box, img_height }
+                         const hasBox = res.face_box != null;
+                         const notFound = !hasBox || res.reason === 'no_face' || res.reason === 'no_encoding';
+                         if (notFound) {
+                             setRegFaceStatus('no_face');
+                         } else {
+                             const imgW = res.img_width || 640;
+                             const imgH = res.img_height || 480;
+                             const faceH = (res.face_box.bottom - res.face_box.top) / imgH;
+                             
+                             // Kiểm tra tâm khuôn mặt có nằm trong vùng giữa màn hình (gần vòng tròn) không
+                             const faceCX = (res.face_box.left + res.face_box.right) / 2;
+                             const faceCY = (res.face_box.top + res.face_box.bottom) / 2;
+                             const cx = imgW / 2;
+                             const cy = imgH / 2;
+                             
+                             // Cho phép sai số 15% chiều rộng và 20% chiều cao (xấp xỉ kích thước vòng tròn)
+                             const isCentered = Math.abs(faceCX - cx) < imgW * 0.15 && Math.abs(faceCY - cy) < imgH * 0.20;
+
+                             if (faceH < MIN_FACE_RATIO) {
+                                 setRegFaceStatus('too_far');
+                             } else if (!isCentered) {
+                                 setRegFaceStatus('not_centered');
+                             } else {
+                                 setRegFaceStatus('ok');
+                             }
+                         }
+                     }
+                } else {
+                    (window as any)._frameIsNull = true;
+                }
+            } catch {
+                // ignore lỗi từng frame, tiếp tục loop
+            }
+            if (active) setTimeout(check, 700);
+        };
+        check();
+        return () => { active = false; setRegDetecting(false); };
+    }, [registerOpen, cameraOn, api, captureFrame, regFaceId, regUserName]);
+
+    // ===== Auto-capture giống tool gốc (takeImage.py) =====
+    // Khi face vào đúng vị trí + đã điền thông tin → tự chụp liên tiếp 50 ảnh
+    const REG_TARGET = 50;
+    const [regCapturedCount, setRegCapturedCount] = useState(0);
+    const regImagesRef = useRef<string[]>([]);
+    const regCapturingRef = useRef(false);
+
+    const captureForRegister = useCallback(async () => {
+        if (regCapturingRef.current) return;
+        regCapturingRef.current = true;
+        setRegCapturing(true);
+        setRegCapturedCount(0);
+        regImagesRef.current = [];
+
+        // Chụp liên tiếp — kiểm tra face status qua ref để tránh flicker
+        let cancelled = false;
+        let faceGoneFrames = 0;
+        const FACE_GONE_THRESHOLD = 5; // 5 frame liên tiếp (~1s) mới coi là mặt thật sự rời
+        for (let i = 0; i < REG_TARGET; i++) {
+            if (!regCapturingRef.current) { cancelled = true; break; } // hủy thủ công
+            if (regFaceStatusRef.current !== 'ok') {
+                faceGoneFrames++;
+                if (faceGoneFrames >= FACE_GONE_THRESHOLD) { cancelled = true; break; }
+            } else {
+                faceGoneFrames = 0;
+                const frame = captureFrame();
+                if (frame) {
+                    regImagesRef.current.push(frame);
+                    setRegCapturedCount(regImagesRef.current.length);
+                }
+            }
+            await new Promise(r => setTimeout(r, 200));
+        }
+
+        setRegCapturing(false);
+        regCapturingRef.current = false;
+
+        // Bị hủy giữa chừng (mặt rời vùng) → reset im lặng, không báo gì
+        if (cancelled) {
+            regImagesRef.current = [];
+            setRegImages([]);
+            setRegCapturedCount(0);
+            return;
+        }
+
+        // Capture hoàn thành 30 lượt
+        setRegImages(regImagesRef.current);
+        if (regImagesRef.current.length >= 5) {
+            message.success(`Đã chụp ${regImagesRef.current.length} ảnh — bấm Lưu để hoàn tất`);
+        } else {
+            message.warning('Không đủ ảnh, thử lại');
+        }
+    }, [captureFrame]);
+
+    // Hủy chụp giữa chừng
+    const cancelCapture = useCallback(() => {
+        regCapturingRef.current = false;
+        setRegCapturing(false);
+    }, []);
+
+    // AUTO-CAPTURE: khi mặt vào đúng vị trí + đã điền đủ thông tin → đếm ngược 5s rồi tự chụp
+    const autoCaptureFiredRef = useRef(false);
+    const regStartedCameraRef = useRef(false); // camera được bật bởi nút "Đăng ký khuôn mặt mới"
+    const [regCountdown, setRegCountdown] = useState(0);
+    const regTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+    // Tự bật camera khi chọn xong nhân viên trong modal đăng ký
+    useEffect(() => {
+        if (registerOpen && regFaceId && regUserName && !cameraOnRef.current) {
+            regStartedCameraRef.current = true;
+            startCamera();
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [registerOpen, regFaceId, regUserName]); // KHÔNG đưa cameraOn vào đây — tránh loop
+
+    useEffect(() => {
+        if (regFaceStatus === 'ok' && regFaceId && regUserName && !regCapturing && regImages.length === 0 && cameraOn) {
+            if (!autoCaptureFiredRef.current) {
+                autoCaptureFiredRef.current = true;
+                setRegCountdown(5); // Bắt đầu đếm ngược 5 giây
+                playTingSound(); // Phát âm thanh báo hiệu
+
+                let count = 5;
+                if (regTimerRef.current) clearInterval(regTimerRef.current);
+                
+                regTimerRef.current = setInterval(() => {
+                    count -= 1;
+                    setRegCountdown(count);
+                    if (count <= 0) {
+                        clearInterval(regTimerRef.current!);
+                        captureForRegister();
+                    }
+                }, 1000);
+            }
+        } else if (regFaceStatus !== 'ok') {
+            // Hủy đếm ngược + dừng chụp nếu mặt ra khỏi vùng
+            autoCaptureFiredRef.current = false;
+            setRegCountdown(0);
+            if (regTimerRef.current) {
+                clearInterval(regTimerRef.current);
+                regTimerRef.current = null;
+            }
+        }
+    }, [regFaceStatus, regFaceId, regUserName, regCapturing, regImages.length, cameraOn, captureForRegister]);
+
+    const handleRegister = useCallback(async () => {
+        if (!regFaceId || !regUserName || regImages.length === 0) {
+            message.warning('Điền đầy đủ thông tin và chụp ảnh trước');
+            return;
+        }
+        setRegLoading(true);
+        const res = await api.register({ face_id: regFaceId, user_name: regUserName, images: regImages });
+        setRegLoading(false);
+        if (res.success) {
+            message.success(`Đăng ký thành công! Đã lưu ${res.saved} ảnh`);
+            setRegisterOpen(false);
+            setRegFaceId('');
+            setRegUserName('');
+            setRegImages([]);
+            if (regStartedCameraRef.current) {
+                regStartedCameraRef.current = false;
+                stopCamera();
+            }
+            loadData();
+        } else {
+            message.error(res.error || 'Đăng ký thất bại');
+        }
+    }, [api, regFaceId, regUserName, regImages, loadData]);
+
+    const logColumns = [
+        { title: 'Nhân viên', dataIndex: 'userName', key: 'userName', render: (v: string) => <Text strong>{v}</Text> },
+        { title: 'Loại', dataIndex: 'checkType', key: 'checkType', width: 140, render: (v: string) => { const c = CHECK_TYPE_LABELS[v]; return <Tag color={c?.color} style={{ fontWeight: 700 }}>{c?.label || v}</Tag>; } },
+        { title: 'Giờ', dataIndex: 'timestamp', key: 'timestamp', width: 140, render: (v: string) => <Text>{new Date(v).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}</Text> },
+        { title: 'Độ chính xác', dataIndex: 'confidence', key: 'confidence', width: 150, render: (v: number) => <Text type="secondary">{Math.round((v || 0) * 100)}%</Text> },
+    ];
+
+    return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+            {/* Header: Status + 2 nút luôn hiển thị */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Space>
+                    <Badge status={serviceOk ? 'success' : 'error'} text={<Text style={{ fontWeight: 700 }}>{serviceOk ? 'Python service: Sẵn sàng' : 'Python service: Không kết nối được'}</Text>} />
+                    <Button size="small" icon={<SyncOutlined />} onClick={() => { checkService(); loadData(); }}>Làm mới</Button>
+                </Space>
+                <Space>
+                    <Button
+                        icon={<SmileOutlined />}
+                        type={cameraExpanded ? 'default' : 'primary'}
+                        disabled={!serviceOk}
+                        style={cameraExpanded ? {} : { background: '#52c41a', borderColor: '#52c41a', color: '#fff' }}
+                        onClick={async () => {
+                            if (cameraExpanded) {
+                                if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+                                closeAttendanceRef.current = null;
+                                stopRecognizing();
+                                stopCamera();
+                                setCameraExpanded(false);
+                            } else {
+                                setCameraExpanded(true);
+                                closeAttendanceRef.current = () => {
+                                    stopRecognizing();
+                                    stopCamera();
+                                    setCameraExpanded(false);
+                                    closeAttendanceRef.current = null;
+                                };
+                                await startCamera();
+                                startRecognizing();
+                                resetIdleTimer(); // bắt đầu đếm 15s ngay khi mở
+                            }
+                        }}
+                    >
+                        {cameraExpanded ? 'Đóng camera' : 'Chấm công'}
+                    </Button>
+                    <Button icon={<PlusOutlined />} type="primary" disabled={!serviceOk} onClick={() => {
+                        // Reset toàn bộ state đăng ký — bắt buộc chọn lại nhân viên mỗi lần
+                        setRegFaceId('');
+                        setRegUserName('');
+                        setRegImages([]);
+                        setRegCapturedCount(0);
+                        autoCaptureFiredRef.current = false;
+                        setRegisterOpen(true);
+                    }}>
+                        Đăng ký khuôn mặt mới
+                    </Button>
+                </Space>
+            </div>
+
+            {/* Video + canvas LUÔN được mount (kể cả khi cameraExpanded=false)
+                để videoRef.current luôn valid khi register modal gọi startCamera() */}
+            <video
+                ref={videoRef}
+                style={{ display: 'none' }}
+                muted
+                playsInline
+            />
+            <canvas ref={canvasRef} style={{ display: 'none' }} />
+
+            <Row gutter={20}>
+                {/* Camera Panel — ẩn mặc định, hiện khi cameraExpanded */}
+                {cameraExpanded && <Col span={14}>
+                    <Card
+                        title={<Space><CameraOutlined style={{ color: '#1677ff' }} /><Text strong>Camera nhận diện</Text></Space>}
+                        style={{ borderTop: '3px solid #1677ff' }}
+                        extra={
+                            <Space>
+                                {!cameraOn ? (
+                                    <Button type="primary" icon={<CameraOutlined />} onClick={startCamera}>Bật camera</Button>
+                                ) : (
+                                    <>
+                                        {!recognizing ? (
+                                            <Button type="primary" icon={<SmileOutlined />} onClick={startRecognizing} disabled={!serviceOk}>Bắt đầu nhận diện</Button>
+                                        ) : (
+                                            <Button danger onClick={stopRecognizing}>Dừng nhận diện</Button>
+                                        )}
+                                        <Button onClick={stopCamera}>Tắt camera</Button>
+                                    </>
+                                )}
+                            </Space>
+                        }
+                    >
+                        <div style={{ position: 'relative', background: '#000', borderRadius: 8, overflow: 'hidden', minHeight: 360 }}>
+                            {/* Video hiển thị trong panel — srcObject sync qua useEffect([cameraOn]) */}
+                            <video
+                                id="att-display-video"
+                                ref={displayVideoRef}
+                                style={{ width: '100%', display: 'block' }}
+                                muted
+                                playsInline
+                            />
+                            {/* Canvas overlay — vẽ trực tiếp như cv2.rectangle+putText của tool gốc */}
+                            <canvas
+                                ref={overlayCanvasRef}
+                                style={{
+                                    position: 'absolute',
+                                    top: 0, left: 0,
+                                    width: '100%',
+                                    height: '100%',
+                                    pointerEvents: 'none',
+                                }}
+                            />
+                            {!cameraOn && (
+                                <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#666' }}>
+                                    <CameraOutlined style={{ fontSize: 48 }} />
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Recognition Result */}
+                        {lastResult?.success && (
+                            <div style={{
+                                marginTop: 16, padding: '16px 20px',
+                                background: 'linear-gradient(135deg, #f6ffed, #d9f7be)',
+                                borderRadius: 10, border: '1px solid #b7eb8f',
+                                textAlign: 'center',
+                            }}>
+                                <Text style={{ fontSize: 22, fontWeight: 800, color: '#237804' }}>
+                                    Xin chào, {lastResult.userName}!
+                                </Text>
+                                <div style={{ marginTop: 6 }}>
+                                    <Tag color={CHECK_TYPE_LABELS[lastResult.checkType]?.color} style={{ fontWeight: 700, fontSize: 13 }}>
+                                        {CHECK_TYPE_LABELS[lastResult.checkType]?.label || lastResult.checkType}
+                                    </Tag>
+                                    <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+                                        {Math.round((lastResult.confidence || 0) * 100)}% chính xác
+                                    </Text>
+                                </div>
+                            </div>
+                        )}
+                        {lastResult?.reason === 'duplicate' && (
+                            <div style={{ marginTop: 12, padding: '10px 16px', background: '#fff7e6', borderRadius: 8, border: '1px solid #ffd591', textAlign: 'center' }}>
+                                <Text style={{ color: '#d46b08', fontWeight: 700 }}>Đã chấm công rồi (cooldown 30 phút)</Text>
+                            </div>
+                        )}
+                        {lastResult?.reason === 'out_of_hours' && (
+                            <div style={{ marginTop: 12, padding: '10px 16px', background: '#fff1f0', borderRadius: 8, border: '1px solid #ffccc7', textAlign: 'center' }}>
+                                <Text style={{ color: '#cf1322', fontWeight: 700 }}>Ngoài giờ chấm công</Text>
+                            </div>
+                        )}
+                        {lastResult?.error && (
+                            <div style={{ marginTop: 12, padding: '10px 16px', background: '#fff1f0', borderRadius: 8, border: '1px solid #ffccc7', textAlign: 'center' }}>
+                                <Text style={{ color: '#cf1322', fontWeight: 700 }}>Python service mất kết nối — nhận diện đã dừng</Text>
+                                <div><Text type="secondary" style={{ fontSize: 12 }}>Bấm "Làm mới" rồi bắt đầu lại</Text></div>
+                            </div>
+                        )}
+                    </Card>
+                </Col>}
+
+                {/* Profiles Panel */}
+                <Col span={cameraExpanded ? 10 : 24}>
+                    <Card
+                        title={<Space><UserOutlined style={{ color: '#722ed1' }} /><Text strong>Profiles đã đăng ký ({profiles.length})</Text></Space>}
+                        style={{ borderTop: '3px solid #722ed1', marginBottom: 20 }}
+                        bodyStyle={{ padding: '12px 16px' }}
+                    >
+                        {profiles.length === 0 ? (
+                            <Text type="secondary">Chưa có profile nào</Text>
+                        ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                {profiles.map(p => (
+                                    <div key={p.faceId} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: '#fafafa', borderRadius: 8, border: '1px solid #f0f0f0' }}>
+                                        <div>
+                                            <Text strong style={{ fontSize: 13 }}>{p.userName}</Text>
+                                            <div><Text type="secondary" style={{ fontSize: 11 }}>{p.faceId} · {p.photoCount} ảnh</Text></div>
+                                        </div>
+                                        <Tooltip title="Xóa khuôn mặt">
+                                            <Button
+                                                size="small" danger type="text" icon={<DeleteOutlined />}
+                                                onClick={() => {
+                                                    const faceId = p.faceId;
+                                                    const userName = p.userName;
+                                                    Modal.confirm({
+                                                        title: `Xóa khuôn mặt "${userName}"?`,
+                                                        content: 'Nhân viên này sẽ không thể chấm công bằng khuôn mặt nữa.',
+                                                        okText: 'Xóa', okType: 'danger', cancelText: 'Hủy',
+                                                        onOk: () => api.deleteProfile(faceId).then((res: any) => {
+                                                            if (res.success) { message.success('Đã xóa khuôn mặt'); loadData(); }
+                                                            else { message.error(res.error || 'Xóa thất bại'); }
+                                                        }),
+                                                    });
+                                                }}
+                                            />
+                                        </Tooltip>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </Card>
+                </Col>
+            </Row>
+
+            {children}
+
+            {/* Today Logs đẩy xuống tận cùng dưới Dashboard (Ma trận, Thống kê) */}
+            <Card
+                title={<Space><ClockCircleOutlined style={{ color: '#52c41a' }} /><Text strong>Nhật ký nhận diện hôm nay ({new Date().toLocaleDateString('vi-VN')})</Text></Space>}
+                style={{ borderTop: '3px solid #52c41a', marginTop: 24 }}
+                bodyStyle={{ padding: 0 }}
+            >
+                <Table
+                    dataSource={todayLogs.map((l, i) => ({ ...l, key: i }))}
+                    columns={logColumns}
+                    pagination={false}
+                    size="small"
+                    locale={{ emptyText: 'Chưa có lượt chấm công hôm nay' }}
+                    scroll={{ y: 300 }}
+                />
+            </Card>
+
+            {/* Register Modal — Auto-capture giống tool gốc */}
+            <Modal
+                title="Đăng ký khuôn mặt nhân viên"
+                open={registerOpen}
+                onCancel={() => {
+                    setRegisterOpen(false);
+                    setRegImages([]);
+                    setRegCapturedCount(0);
+                    cancelCapture();
+                    autoCaptureFiredRef.current = false;
+                    if (regStartedCameraRef.current) {
+                        regStartedCameraRef.current = false;
+                        stopCamera();
+                    }
+                }}
+                onOk={handleRegister}
+                okText="Lưu đăng ký"
+                width={560}
+                confirmLoading={regLoading}
+                okButtonProps={{ disabled: regImages.length < 5 || !regFaceId || !regUserName }}
+            >
+                <Form layout="vertical">
+                    {/* Bước 1: Chọn nhân viên từ danh sách */}
+                    <Form.Item
+                        label={<Text strong>① Chọn nhân viên cần đăng ký</Text>}
+                        validateStatus={regUserName ? 'success' : ''}
+                        help={!regUserName ? '* Bắt buộc — vui lòng chọn một nhân viên từ danh sách' : ''}
+                    >
+                        <Select
+                            showSearch
+                            placeholder="VD: Nguyễn Đình Toàn"
+                            value={regFaceId || undefined}
+                            onChange={(val) => {
+                                const emp = employees.find(e => e.username === val || e.id.toString() === val);
+                                if (emp) {
+                                    setRegUserName(emp.name);
+                                    // Dùng username làm ID nhận diện khuôn mặt luôn (map 1-1 với DB hệ thống)
+                                    setRegFaceId(emp.username || val);
+                                    // useEffect sẽ tự bật camera khi regFaceId + regUserName có giá trị
+                                }
+                            }}
+                            disabled={regCapturing}
+                            optionFilterProp="children"
+                        >
+                            {employees.map(emp => (
+                                <Select.Option key={emp.id} value={emp.username || emp.id.toString()}>
+                                    {emp.name}
+                                </Select.Option>
+                            ))}
+                        </Select>
+                    </Form.Item>
+                    <Form.Item
+                        label={<Text strong>② Mã nhân viên (Tự động map)</Text>}
+                        validateStatus={regFaceId ? 'success' : ''}
+                    >
+                        <Input
+                            placeholder="Mã nhận diện (VD: toan, khanh...)"
+                            value={regFaceId}
+                            disabled={true}
+                            prefix={<UserOutlined style={{ color: regFaceId ? '#52c41a' : '#bbb' }} />}
+                        />
+                    </Form.Item>
+
+                    {/* Bước 2: Camera — chỉ hiện khi đã điền đủ thông tin */}
+                    <Form.Item label={<Text strong>③ Chụp khuôn mặt</Text>}>
+                        {(!regFaceId || !regUserName) ? (
+                            <div style={{
+                                padding: '28px 20px',
+                                background: 'linear-gradient(135deg, #f8f8f8, #f0f0f0)',
+                                borderRadius: 10,
+                                border: '2px dashed #d9d9d9',
+                                textAlign: 'center',
+                            }}>
+                                <div style={{ fontSize: 32, marginBottom: 8 }}>📝</div>
+                                <Text type="secondary" style={{ fontSize: 13 }}>
+                                    Vui lòng điền đủ <Text strong>Mã NV</Text> và <Text strong>Tên</Text> ở trên trước
+                                </Text>
+                            </div>
+                        ) : !cameraOn ? (
+                            <div style={{ padding: '20px', background: '#fff7e6', borderRadius: 8, textAlign: 'center', border: '1px solid #ffd591' }}>
+                                <Text style={{ color: '#d46b08', fontWeight: 600 }}>⚠️ Cần bật camera ở màn hình chính trước</Text>
+                            </div>
+                        ) : (
+                            <div style={{ position: 'relative', borderRadius: 8, overflow: 'hidden', background: '#000' }}>
+                                <canvas ref={regCanvasRef} style={{ width: '100%', display: 'block' }} />
+                                {/* Face status indicator */}
+                                <div style={{
+                                    position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)',
+                                    background: regFaceStatus === 'ok' ? 'rgba(82,196,26,0.92)' : regFaceStatus === 'too_far' ? 'rgba(250,173,20,0.92)' : regFaceStatus === 'not_centered' ? 'rgba(24,144,255,0.92)' : 'rgba(0,0,0,0.65)',
+                                    color: '#fff', fontSize: 12, fontWeight: 700,
+                                    padding: '4px 14px', borderRadius: 20, whiteSpace: 'nowrap',
+                                }}>
+                                    {regCapturing
+                                        ? `📸 Đang chụp ${regCapturedCount}/${REG_TARGET}... Xoay mặt nhẹ!`
+                                        : regFaceStatus === 'ok'
+                                            ? (regFaceId && regUserName 
+                                                ? (regCountdown > 0 ? `✓ Giữ yên! Tự chụp sau ${regCountdown}s...` : '✓ Đang chuẩn bị chụp...') 
+                                                : '✓ Khuôn mặt OK — điền thông tin bên dưới')
+                                            : regFaceStatus === 'not_centered' ? 'Đưa mặt vào giữa vòng tròn!'
+                                            : regFaceStatus === 'too_far' ? 'Lại gần hơn nữa...'
+                                            : regDetecting ? '⏳ Đang tìm khuôn mặt...' : 'Đưa mặt vào khung hình'}
+                                </div>
+
+                                {/* Progress bar khi đang chụp */}
+                                {regCapturing && (
+                                    <div style={{
+                                        position: 'absolute', bottom: 0, left: 0, right: 0,
+                                        background: 'rgba(0,0,0,0.7)', padding: '10px 16px',
+                                    }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                                            <Text style={{ color: '#52c41a', fontWeight: 700, fontSize: 13 }}>
+                                                Đã chụp {regCapturedCount}/{REG_TARGET} ảnh
+                                            </Text>
+                                            <Button size="small" danger type="text" onClick={cancelCapture}
+                                                style={{ color: '#ff7875', fontSize: 11 }}>Hủy</Button>
+                                        </div>
+                                        <div style={{ background: 'rgba(255,255,255,0.2)', borderRadius: 4, height: 6 }}>
+                                            <div style={{
+                                                background: 'linear-gradient(90deg, #52c41a, #73d13d)',
+                                                height: 6, borderRadius: 4,
+                                                width: `${(regCapturedCount / REG_TARGET) * 100}%`,
+                                                transition: 'width 0.15s',
+                                            }} />
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Hướng dẫn khi chưa chụp */}
+                                {!regCapturing && cameraOn && regImages.length === 0 && (
+                                    <div style={{
+                                        position: 'absolute', bottom: 0, left: 0, right: 0,
+                                        background: 'rgba(0,0,0,0.6)', padding: '8px 12px', textAlign: 'center',
+                                    }}>
+                                        <Text style={{ color: '#d9d9d9', fontSize: 11 }}>
+                                            Điền mã NV + tên → đưa mặt vào khung → tự chụp {REG_TARGET} ảnh
+                                        </Text>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </Form.Item>
+
+                    {/* Kết quả */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        {regImages.length > 0 && !regCapturing && (
+                            <>
+                                <Tag color="success" style={{ fontWeight: 700, fontSize: 13, padding: '4px 12px' }}>
+                                    ✓ {regImages.length} ảnh — sẵn sàng lưu
+                                </Tag>
+                                <Button size="small" onClick={() => { setRegImages([]); setRegCapturedCount(0); autoCaptureFiredRef.current = false; }}>
+                                    Chụp lại
+                                </Button>
+                            </>
+                        )}
+                        {regImages.length === 0 && !regCapturing && cameraOn && regFaceStatus === 'ok' && regFaceId && regUserName && (
+                            <Button type="primary" icon={<CameraOutlined />} onClick={captureForRegister}>
+                                Bắt đầu chụp
+                            </Button>
+                        )}
+                    </div>
+                </Form>
+            </Modal>
+        </div>
+    );
+}
 
 // ===============================================
 // ===== MAIN COMPONENT =====
@@ -762,23 +1913,86 @@ export default function Attendance() {
         return { tSal, tPack, tBonus, fundBalance };
     }, [payrollData]);
 
+    // Tự động fetch logs theo tháng được chọn
+    const fetchMonthLogs = async () => {
+        try {
+            const api = (window as any).electronAPI;
+            if (!api?.attendance) return;
+            const monthStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}`;
+            const res = await api.attendance.getLogs({ month: monthStr });
+            if (res?.success) setLiveAttendanceLogs(res.data);
+        } catch (err) {
+            console.error('Lỗi tải logs tháng:', err);
+        }
+    };
+
+    useEffect(() => {
+        if (isDbLoaded) fetchMonthLogs();
+    }, [selectedYear, selectedMonth, isDbLoaded]);
+
+    const daysInMonth = dayjs(`${selectedYear}-${selectedMonth}-01`).daysInMonth();
+
+    // Thay thế array mock thành data mix thật sự
+    const liveAttendanceMatrix = useMemo(() => {
+        return employees.map(emp => {
+            const monthData = Array.from({ length: daysInMonth }).map(() => ({ am: 0 as 0|1|2, pm: 0 as 0|1|2, amTime: '', pmTime: '' }));
+            // Lọc logs của nhân viên này trong tháng này (faceId = username)
+            const logs = liveAttendanceLogs.filter(l => 
+                (l.faceId === emp.username || l.userId === emp.id) &&
+                dayjs(l.date).month() + 1 === selectedMonth &&
+                dayjs(l.date).year() === selectedYear
+            );
+            
+            logs.forEach(log => {
+                const dayIdx = dayjs(log.date).date() - 1; // 0..30
+                const logTime = dayjs(log.timestamp);
+                
+                // Quy tắc chấm công am/pm
+                if (log.checkType.includes('morning')) {
+                    // Sáng vào muộn nếu sau 08:05
+                    let cType = monthData[dayIdx].am;
+                    monthData[dayIdx].amTime = logTime.format('HH:mm');
+                    if (log.checkType === 'morning_in' && (logTime.hour() > 8 || (logTime.hour() === 8 && logTime.minute() > 5))) {
+                        if (cType !== 1) monthData[dayIdx].am = 2; // Muộn
+                    } else {
+                        monthData[dayIdx].am = 1; // Đúng giờ ghi đè muộn
+                    }
+                }
+                if (log.checkType.includes('afternoon') || log.checkType.includes('evening')) {
+                    // Chiều vào muộn nếu sau 13:35
+                    let cType = monthData[dayIdx].pm;
+                    monthData[dayIdx].pmTime = logTime.format('HH:mm');
+                    if (log.checkType === 'afternoon_in' && (logTime.hour() > 13 || (logTime.hour() === 13 && logTime.minute() > 35))) {
+                        if (cType !== 1) monthData[dayIdx].pm = 2; // Muộn
+                    } else {
+                        monthData[dayIdx].pm = 1; // Đúng giờ ghi đè muộn
+                    }
+                }
+            });
+            return monthData;
+        });
+    }, [employees, liveAttendanceLogs, daysInMonth, selectedMonth, selectedYear]);
+
     // Employee attendance stats
     const employeeStats = useMemo(() => {
         return employees.map((emp, idx) => {
             let lateCount = 0, absentCount = 0, shiftCount = 0;
-            attendanceMatrix[idx].forEach((d, dayIdx) => {
-                if (d.am === 2) lateCount++;
-                if (d.pm === 2) lateCount++;
-                if (dayIdx < 6) {
-                    if (d.am === 0) absentCount += 0.5;
-                    if (d.pm === 0) absentCount += 0.5;
-                }
-                if (d.am > 0) shiftCount++;
-                if (d.pm > 0) shiftCount++;
-            });
+            if (liveAttendanceMatrix[idx]) {
+                liveAttendanceMatrix[idx].forEach((d, dayIdx) => {
+                    const isSunday = dayjs(`${selectedYear}-${selectedMonth}-${dayIdx + 1}`).day() === 0;
+                    if (d.am === 2) lateCount++;
+                    if (d.pm === 2) lateCount++;
+                    if (!isSunday) {
+                        if (d.am === 0) absentCount += 0.5;
+                        if (d.pm === 0) absentCount += 0.5;
+                    }
+                    if (d.am > 0) shiftCount++;
+                    if (d.pm > 0) shiftCount++;
+                });
+            }
             return { ...emp, lateCount, absentCount, shiftCount };
         });
-    }, []);
+    }, [employees, liveAttendanceMatrix, selectedMonth, selectedYear]);
 
     // Fund totals
     const fundTotals = useMemo(() => {
@@ -1561,7 +2775,7 @@ export default function Attendance() {
         // Gộp phạt gốc + phạt thủ công, đánh dấu nguồn
         const combinedFines = [
             ...finesData.map((f, i) => ({ ...f, key: `base-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1 })),
-            ...extraFines.map((f, i) => ({ ...f, key: `manual-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: true, manualIndex: i })),
+            ...extraFines.map((f, i) => ({ ...f, key: `manual-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: true, manualIndex: i, source: f.source })),
         ];
         const totalFineAmount = combinedFines.reduce((sum, f) => sum + f.amount, 0);
 
@@ -1617,11 +2831,13 @@ export default function Attendance() {
                             },
                             {
                                 title: 'Nguồn', key: 'source', width: 100, align: 'center' as const,
-                                render: (_: any, record: any) => (
-                                    record.isManual
-                                        ? <Tag color="orange" style={{ fontWeight: 700, fontSize: 10 }}>THỦ CÔNG</Tag>
-                                        : <Tag style={{ fontWeight: 700, fontSize: 10, color: '#8c8c8c' }}>HỆ THỐNG</Tag>
-                                ),
+                                render: (_: any, record: any) => {
+                                    if (record.source === 'attendance')
+                                        return <Tag color="blue" style={{ fontWeight: 700, fontSize: 10 }}>ĐIỂM DANH</Tag>;
+                                    if (record.isManual)
+                                        return <Tag color="orange" style={{ fontWeight: 700, fontSize: 10 }}>THỦ CÔNG</Tag>;
+                                    return <Tag style={{ fontWeight: 700, fontSize: 10, color: '#8c8c8c' }}>HỆ THỐNG</Tag>;
+                                },
                             },
                             {
                                 title: <Text style={{ color: '#ff4d4f' }}>Số tiền trừ</Text>,
@@ -1674,48 +2890,96 @@ export default function Attendance() {
     // ============================================
     // TAB 5: ĐIỂM DANH & LỊCH SỬ
     // ============================================
-    const matrixColumns = useMemo(() => [
-        {
-            title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 130,
-            render: (name: string) => <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{name}</Text>,
-        },
-        ...weekDays.map((day, dayIdx) => ({
+    const matrixColumns = useMemo(() => {
+        const columns: any[] = [
+            {
+                title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 130, fixed: 'left' as const,
+                render: (name: string) => <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{name}</Text>,
+            }
+        ];
+        
+        for (let i = 0; i < daysInMonth; i++) {
+            const currentDay = dayjs(`${selectedYear}-${selectedMonth}-${i + 1}`, 'YYYY-M-D');
+            const dayOfWeek = currentDay.day(); 
+            const isSunday = dayOfWeek === 0;
+            const isToday = currentDay.isSame(dayjs(), 'day');
+            const titleLabel = dayOfWeek === 0 ? 'CN' : `T${dayOfWeek + 1}`;
+            
+            columns.push({
+                title: (
+                    <div style={{ textAlign: 'center' as const, position: 'relative' }}>
+                        {isToday && <div style={{ position: 'absolute', top: -14, left: '50%', transform: 'translateX(-50%)', background: '#1677ff', color: '#fff', fontSize: 8, padding: '0 4px', borderRadius: 4, fontWeight: 700 }}>H.NAY</div>}
+                        <div style={{ fontWeight: 800, fontSize: 11, color: isToday ? '#1677ff' : (isSunday ? '#bfbfbf' : (dayOfWeek === 6 ? '#00ab56' : '#595959')), marginTop: isToday ? 4 : 0 }}>
+                            {currentDay.format('DD/MM')}
+                        </div>
+                        <div style={{ fontSize: 8, color: isToday ? '#1677ff' : (isSunday ? '#bfbfbf' : '#8c8c8c'), fontWeight: isToday ? 800 : 600 }}>
+                            {titleLabel}
+                        </div>
+                    </div>
+                ),
+                key: `day-${i}`, align: 'center' as const, width: isToday ? 90 : 80,
+                onHeaderCell: () => ({ style: { background: isToday ? '#e6f4ff' : (isSunday ? '#fafafa' : undefined), borderLeft: isSunday || isToday ? '2px solid #f0f0f0' : undefined, borderRight: isToday ? '2px solid #f0f0f0' : undefined } }),
+                onCell: () => ({ style: { background: isToday ? '#f0f5ff' : (isSunday ? '#fafafa' : undefined), borderLeft: isSunday || isToday ? '2px solid #f0f0f0' : undefined, borderRight: isToday ? '2px solid #f0f0f0' : undefined } }),
+                render: (_: any, __: any, rowIdx: number) => {
+                    const d = liveAttendanceMatrix[rowIdx]?.[i] || { am: 0, pm: 0, amTime: '', pmTime: '' };
+                    if (isSunday && d.am === 0 && d.pm === 0) return <SundayRestCell />;
+                    return (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                            <ShiftPill label="Sáng" status={d.am as 0|1|2} time={d.amTime} />
+                            <ShiftPill label="Chiều" status={d.pm as 0|1|2} time={d.pmTime} />
+                        </div>
+                    );
+                },
+            });
+        }
+        
+        columns.push({
             title: (
-                <div style={{ textAlign: 'center' as const }}>
-                    <div style={{ fontWeight: 800, fontSize: 11, color: dayIdx === 6 ? '#bfbfbf' : (dayIdx === 4 ? '#00ab56' : '#595959') }}>{day}</div>
-                    {dayIdx === 6 && <div style={{ fontSize: 8, color: '#bfbfbf', fontWeight: 600 }}>(Nghỉ)</div>}
+                <div style={{
+                    textAlign: 'center',
+                    background: 'linear-gradient(135deg, #00ab56 0%, #00c76a 100%)',
+                    margin: '-12px -10px',
+                    padding: '12px 10px',
+                    color: '#fff',
+                }}>
+                    <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: 1.5, textTransform: 'uppercase', opacity: 0.9 }}>TỔNG</div>
+                    <div style={{ fontSize: 12, fontWeight: 900, letterSpacing: 1 }}>CA</div>
                 </div>
             ),
-            key: `day-${dayIdx}`, align: 'center' as const,
-            onHeaderCell: () => ({ style: { background: dayIdx === 6 ? '#fafafa' : undefined, borderLeft: dayIdx === 6 ? '2px solid #f0f0f0' : undefined } }),
-            onCell: () => ({ style: { background: dayIdx === 6 ? '#fafafa' : undefined, borderLeft: dayIdx === 6 ? '2px solid #f0f0f0' : undefined } }),
+            key: 'total', width: 72, align: 'center' as const, fixed: 'right' as const,
+            onHeaderCell: () => ({ className: 'att-total-col-header', style: { padding: 0 } }),
+            onCell: () => ({ className: 'att-total-col-cell' }),
             render: (_: any, __: any, rowIdx: number) => {
-                const d = attendanceMatrix[rowIdx][dayIdx];
-                if (dayIdx === 6 && d.am === 0 && d.pm === 0) return <SundayRestCell />;
+                const stat = employeeStats[rowIdx] || { shiftCount: 0 };
                 return (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                        <ShiftPill label="Sáng" status={d.am} />
-                        <ShiftPill label="Chiều" status={d.pm} />
+                    <div style={{ textAlign: 'center', padding: '4px 0' }}>
+                        <div style={{ fontSize: 28, fontWeight: 900, color: '#00ab56', lineHeight: 1, letterSpacing: -1 }}>{stat.shiftCount}</div>
+                        <div style={{
+                            display: 'inline-block', marginTop: 4,
+                            fontSize: 8, fontWeight: 900, letterSpacing: 1.5,
+                            color: '#059669', textTransform: 'uppercase' as const,
+                            background: '#d1fae5', borderRadius: 4,
+                            padding: '1px 6px', border: '1px solid #a7f3d0',
+                        }}>CA LÀM</div>
                     </div>
                 );
             },
-        })),
-        {
-            title: <div style={{ textAlign: 'center', fontSize: 11 }}>Tổng ca</div>, key: 'total', width: 60, align: 'center' as const,
-            render: (_: any, __: any, rowIdx: number) => {
-                const stat = employeeStats[rowIdx];
-                return (
-                    <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 18, fontWeight: 800, color: '#262626' }}>{stat.shiftCount}</div>
-                        <Text type="secondary" style={{ fontSize: 9, fontWeight: 700 }}>CA LÀM</Text>
-                    </div>
-                );
-            },
-        },
-    ], [employeeStats]);
+        });
+        return columns;
+    }, [employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear]);
 
     const renderAttendance = () => (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+        <FaceAttendanceTab
+            employees={employees}
+            onLogAdded={() => { if(isDbLoaded) fetchMonthLogs(); }}
+            config={config}
+            onLateFine={(fine) => {
+                setExtraFines(prev => [...prev, fine]);
+                message.warning(`⚠️ Phạt đi muộn: ${fine.detail} — ${fine.amount.toLocaleString('vi-VN')}đ`);
+            }}
+        >
+            <Divider style={{ margin: '8px 0' }} />
+
             {/* Filters */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div className="att-month-picker">
@@ -1743,7 +3007,7 @@ export default function Attendance() {
                     pagination={false}
                     size="small"
                     bordered
-                    tableLayout="fixed"
+                    scroll={{ x: 'max-content' }}
                 />
             </Card>
 
@@ -1773,27 +3037,7 @@ export default function Attendance() {
                     ))}
                 </div>
             </Card>
-
-            {/* Lịch sử Log Điểm danh */}
-            <Card
-                title={<Space><ClockCircleOutlined style={{ color: '#00ab56' }} /><Text strong>Nhật ký Điểm danh</Text></Space>}
-                bodyStyle={{ padding: 0 }}
-                style={{ borderTop: '3px solid #00ab56' }}
-            >
-                <Table
-                    dataSource={(liveAttendanceLogs.length > 0 ? liveAttendanceLogs : attendanceLogs).map((log, idx) => ({ ...log, key: idx }))}
-                    pagination={{ pageSize: 8, size: 'small' }}
-                    size="small"
-                    columns={[
-                        { title: 'Ngày', dataIndex: 'time', key: 'date', width: 90, render: (t: string) => { const p = t?.split(' ')?.[0]?.split('-'); return p ? <Text type="secondary" style={{ fontSize: 12, fontWeight: 600 }}>{p[2]}/{p[1]}</Text> : null; } },
-                        { title: 'Nhân viên', dataIndex: 'empId', key: 'emp', width: 160, render: (id: number, r: any) => <Text strong>{employees.find(e => e.id === id)?.name || r.name || r.empNameFallback || `ID: ${id}`}</Text> },
-                        { title: 'Ca', dataIndex: 'shift', key: 'shift', width: 80, render: (s: string) => <Tag color={s === 'Sáng' ? 'blue' : 'purple'} style={{ fontWeight: 700 }}>{s}</Tag> },
-                        { title: 'Giờ chấm', dataIndex: 'time', key: 'time', width: 80, render: (t: string) => <Text strong>{t?.split(' ')?.[1]?.substring(0, 5)}</Text> },
-                        { title: 'Trạng thái', dataIndex: 'status', key: 'status', width: 120, render: (s: string) => <Tag icon={s?.includes('Muộn') ? <ClockCircleOutlined /> : <CheckCircleOutlined />} color={s?.includes('Muộn') ? 'warning' : 'success'} style={{ fontWeight: 700, fontSize: 11 }}>{s}</Tag> },
-                    ]}
-                />
-            </Card>
-        </div>
+        </FaceAttendanceTab>
     );
 
     // ============================================
@@ -2133,7 +3377,7 @@ export default function Attendance() {
                         return (
                             <Dropdown
                                 trigger={['click']}
-                                dropdownRender={() => (
+                                popupRender={() => (
                                     <div style={{ background: '#fff', borderRadius: 8, boxShadow: '0 6px 16px rgba(0,0,0,.12)', padding: '8px 0', minWidth: 220, border: '1px solid #f0f0f0' }}>
                                         {/* Quick presets */}
                                         {[
@@ -2677,7 +3921,7 @@ export default function Attendance() {
                 onCancel={() => setEmpModalOpen(false)}
                 onOk={handleSaveEmp}
                 okText="Lưu Nhân Sự" cancelText="Hủy"
-                destroyOnClose
+                destroyOnHidden
             >
                 <Form form={empForm} layout="vertical">
                     <Row gutter={16}>

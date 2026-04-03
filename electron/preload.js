@@ -242,6 +242,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
         downloadPDF: (transactionId) => ipcRenderer.invoke('misa:downloadPDF', transactionId),
     },
 
+    // Face Attendance — Chấm công khuôn mặt
+    attendance: {
+        status: () => ipcRenderer.invoke('attendance:status'),
+        recognize: (image) => ipcRenderer.invoke('attendance:recognize', { image }),
+        detect: (image) => ipcRenderer.invoke('attendance:detect', { image }),
+        register: (data) => ipcRenderer.invoke('attendance:register', data),
+        getLogs: (filters) => ipcRenderer.invoke('attendance:getLogs', filters),
+        getProfiles: () => ipcRenderer.invoke('attendance:getProfiles'),
+        deleteProfile: (face_id) => ipcRenderer.invoke('attendance:deleteProfile', { face_id }),
+    },
+
     // ZKTeco / Ronald Jack — Máy chấm công vân tay
     zkteco: {
         connect: (config) => ipcRenderer.invoke('zkteco:connect', config),

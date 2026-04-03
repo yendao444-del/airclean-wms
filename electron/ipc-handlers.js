@@ -7227,3 +7227,379 @@ ipcMain.handle('zkteco:zkbridge', async (event, config) => {
         });
     });
 });
+
+// ========================================
+// ATTENDANCE / CHẤM CÔNG KHUÔN MẶT
+// On-demand: Python chỉ chạy khi vào tab Điểm danh
+// Tự tắt sau 10 phút ko dùng
+// ========================================
+
+const FACE_SERVICE_URL = 'http://127.0.0.1:5001';
+const FACE_SERVICE_IDLE_TIMEOUT = 10 * 60 * 1000; // 10 phút
+
+let faceServiceProcess = null;   // child_process reference
+let faceServiceReady = false;
+let faceServiceIdleTimer = null;
+
+// Reset idle timer mỗi khi có request → tự kill sau 10 phút idle
+function resetFaceServiceIdleTimer() {
+    if (faceServiceIdleTimer) clearTimeout(faceServiceIdleTimer);
+    faceServiceIdleTimer = setTimeout(() => {
+        if (faceServiceProcess) {
+            console.log('[Face] ⏹ Tự tắt Python service sau 10 phút không dùng');
+            faceServiceProcess.kill();
+            faceServiceProcess = null;
+            faceServiceReady = false;
+        }
+    }, FACE_SERVICE_IDLE_TIMEOUT);
+}
+
+// Spawn Python service on-demand
+let _faceSpawning = false;       // Đang trong quá trình spawn
+let _faceLastSpawnFail = 0;      // Timestamp lần spawn thất bại cuối
+
+function ensureFaceService() {
+    return new Promise(async (resolve, reject) => {
+        // 1. Đã chạy và ready → dùng luôn
+        if (faceServiceProcess && faceServiceReady) {
+            resetFaceServiceIdleTimer();
+            return resolve(true);
+        }
+
+        // 2. Kiểm tra port 5001 đã có service sẵn chưa (zombie hoặc process từ lần trước)
+        try {
+            const data = await faceServiceFetch('/status');
+            if (data && data.ok) {
+                console.log('[Face] ✅ Phát hiện service đang chạy sẵn trên port 5001');
+                faceServiceReady = true;
+                resetFaceServiceIdleTimer();
+                return resolve(true);
+            }
+        } catch {
+            // Port chưa có service → sẽ spawn bên dưới
+        }
+
+        // 3. Đang spawn → chờ
+        if (_faceSpawning) {
+            const waitReady = setInterval(() => {
+                if (faceServiceReady) { clearInterval(waitReady); resolve(true); }
+            }, 300);
+            setTimeout(() => { clearInterval(waitReady); reject(new Error('Spawn timeout')); }, 30000);
+            return;
+        }
+
+        // 4. Cooldown: tránh spawn loop (đợi 10s giữa các lần thất bại)
+        const cooldown = Date.now() - _faceLastSpawnFail;
+        if (cooldown < 10000) {
+            return reject(new Error(`Đợi ${Math.ceil((10000 - cooldown) / 1000)}s trước khi thử lại`));
+        }
+
+        // 5. Spawn mới
+        const { spawn, execSync } = require('child_process');
+        const scriptPath = path.join(__dirname, '..', 'python', 'attendance_service.py');
+
+        if (!fs.existsSync(scriptPath)) {
+            return reject(new Error(`Không tìm thấy file: ${scriptPath}`));
+        }
+
+        // Kill bất kỳ process nào đang chiếm port 5001
+        try {
+            execSync('FOR /F "tokens=5" %a IN (\'netstat -ano ^| findstr :5001 ^| findstr LISTENING\') DO taskkill /PID %a /F', {
+                stdio: 'ignore', shell: 'cmd.exe', windowsHide: true
+            });
+            // Đợi port release
+            await new Promise(r => setTimeout(r, 1000));
+        } catch { /* Không có process nào → OK */ }
+
+        _faceSpawning = true;
+        console.log('[Face] 🚀 Đang khởi động Python face service...');
+
+        faceServiceProcess = spawn('python', [scriptPath], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true,
+        });
+
+        faceServiceProcess.stdout.on('data', (data) => {
+            const output = data.toString().trim();
+            if (output) console.log('[Face-py]', output);
+        });
+
+        faceServiceProcess.stderr.on('data', (data) => {
+            const output = data.toString().trim();
+            if (output) console.log('[Face-py:err]', output);
+        });
+
+        faceServiceProcess.on('error', (err) => {
+            console.error('[Face] ❌ Không thể chạy Python:', err.message);
+            faceServiceProcess = null;
+            faceServiceReady = false;
+            _faceSpawning = false;
+            _faceLastSpawnFail = Date.now();
+            reject(new Error('Không thể khởi chạy Python.'));
+        });
+
+        faceServiceProcess.on('exit', (code) => {
+            console.log(`[Face] Python service exited (code ${code})`);
+            faceServiceProcess = null;
+            faceServiceReady = false;
+            _faceSpawning = false;
+            if (code !== 0) _faceLastSpawnFail = Date.now();
+            if (faceServiceIdleTimer) { clearTimeout(faceServiceIdleTimer); faceServiceIdleTimer = null; }
+        });
+
+        // Poll chờ service sẵn sàng (tối đa 15s)
+        let attempts = 0;
+        const maxAttempts = 30; // 30 x 500ms = 15s
+        const pollReady = setInterval(async () => {
+            attempts++;
+            // Nếu process đã exit → ngừng poll
+            if (!faceServiceProcess) {
+                clearInterval(pollReady);
+                _faceSpawning = false;
+                _faceLastSpawnFail = Date.now();
+                return reject(new Error('Python process thoát bất ngờ'));
+            }
+            try {
+                await faceServiceFetch('/status');
+                clearInterval(pollReady);
+                faceServiceReady = true;
+                _faceSpawning = false;
+                resetFaceServiceIdleTimer();
+                console.log('[Face] ✅ Python face service sẵn sàng!');
+                resolve(true);
+            } catch {
+                if (attempts >= maxAttempts) {
+                    clearInterval(pollReady);
+                    _faceSpawning = false;
+                    _faceLastSpawnFail = Date.now();
+                    console.error('[Face] ❌ Python service không phản hồi sau 15s');
+                    if (faceServiceProcess) { faceServiceProcess.kill(); faceServiceProcess = null; }
+                    reject(new Error('Python service khởi động thất bại'));
+                }
+            }
+        }, 500);
+    });
+}
+
+// Tự dọn process khi app thoát
+app.on('before-quit', () => {
+    if (faceServiceProcess) {
+        console.log('[Face] 🧹 Tắt Python service khi app thoát');
+        faceServiceProcess.kill();
+        faceServiceProcess = null;
+    }
+});
+
+function faceServiceFetch(urlPath, options = {}) {
+    return new Promise((resolve, reject) => {
+        const body = options.body || null;
+        const method = options.method || 'GET';
+        const url = new URL(`${FACE_SERVICE_URL}${urlPath}`);
+        const reqOptions = {
+            hostname: url.hostname,
+            port: url.port || 5001,
+            path: url.pathname,
+            method,
+            headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        };
+        const req = http.request(reqOptions, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try { resolve(JSON.parse(data)); }
+                catch { reject(new Error('Invalid JSON response')); }
+            });
+        });
+        // Timeout dài hơn cho xử lý ảnh (đăng ký 50 ảnh tốn nhiều thời gian)
+        const timeout = urlPath.includes('/register') ? 60000 : urlPath.includes('/recognize') ? 15000 : 5000;
+        req.setTimeout(timeout, () => { req.destroy(); reject(new Error('Timeout')); });
+        req.on('error', reject);
+        if (body) req.write(body);
+        req.end();
+    });
+}
+
+// Xác định loại chấm công theo giờ hiện tại
+function getCheckType() {
+    const h = new Date().getHours();
+    const m = new Date().getMinutes();
+    const total = h * 60 + m;
+    
+    // Ca sáng
+    // Check-in: 07:00 đến trước 11:50
+    // Check-out: 11:50 đến 12:30
+    if (total >= 7 * 60 && total <= 12 * 60 + 30) {
+        if (total < 11 * 60 + 50) return 'morning_in';
+        return 'morning_out';
+    }
+    
+    // Giờ nghỉ trưa (Không cho quét thẻ): 12:30 đến trước 13:00
+    if (total > 12 * 60 + 30 && total < 13 * 60) {
+        return null;
+    }
+    
+    // Ca chiều
+    // Check-in: 13:00 đến trước 17:30
+    // Check-out: 17:30 đến 20:30
+    if (total >= 13 * 60 && total <= 20 * 60 + 30) {
+        if (total < 17 * 60 + 30) return 'afternoon_in';
+        return 'evening_out';
+    }
+    
+    return null; // Ngoài thời gian làm việc
+}
+
+// Kiểm tra + tự khởi động Python service khi vào tab Điểm danh
+ipcMain.handle('attendance:status', async () => {
+    try {
+        // Tự động spawn Python nếu chưa chạy
+        await ensureFaceService();
+        const data = await faceServiceFetch('/status');
+        return { success: true, data };
+    } catch (err) {
+        console.warn('[Face] Status check failed:', err.message);
+        return { success: false, error: err.message || 'Python service chưa sẵn sàng' };
+    }
+});
+
+// Phát hiện khuôn mặt (không so khớp) — dùng cho modal đăng ký
+ipcMain.handle('attendance:detect', async (event, { image }) => {
+    try {
+        await ensureFaceService();
+        resetFaceServiceIdleTimer();
+        const result = await faceServiceFetch('/detect', {
+            method: 'POST',
+            body: JSON.stringify({ image }),
+        });
+        return { success: true, face_box: result.face_box, img_height: result.img_height, found: result.found, reason: result.reason };
+    } catch (err) {
+        console.error('❌ attendance:detect error:', err.message);
+        return { success: false, error: err.message };
+    }
+});
+
+// Nhận diện khuôn mặt + ghi chấm công
+ipcMain.handle('attendance:recognize', async (event, { image }) => {
+    try {
+        await ensureFaceService();
+        resetFaceServiceIdleTimer();
+        const result = await faceServiceFetch('/recognize', {
+            method: 'POST',
+            body: JSON.stringify({ image }),
+        });
+
+        // Luôn đính kèm face_box để frontend vẽ overlay real-time
+        const faceInfo = {
+            face_box: result.face_box || null,
+            img_width: result.img_width || 640,
+            img_height: result.img_height || 480,
+        };
+
+        // Không phát hiện mặt
+        if (!result.found) return { success: false, reason: result.reason, ...faceInfo };
+
+        // Phát hiện mặt nhưng không khớp profile nào
+        if (!result.face_id) return { success: false, reason: 'no_match', ...faceInfo };
+
+        const checkType = getCheckType();
+        if (!checkType) return { success: false, reason: 'out_of_hours', face_id: result.face_id, ...faceInfo };
+
+        // Lấy thông tin user từ FaceProfile
+        const profile = await prisma.faceProfile.findUnique({ where: { faceId: result.face_id } });
+        const userName = profile?.userName || result.face_id;
+        const userId = profile?.userId || null;
+
+        // Kiểm tra trùng trong 30 phút
+        const since = new Date(Date.now() - 30 * 60 * 1000);
+        const today = new Date().toISOString().slice(0, 10);
+        const existing = await prisma.attendanceLog.findFirst({
+            where: { faceId: result.face_id, checkType, date: today, timestamp: { gte: since } }
+        });
+        if (existing) return { success: false, reason: 'duplicate', face_id: result.face_id, userName, ...faceInfo };
+
+        // Ghi log
+        const log = await prisma.attendanceLog.create({
+            data: {
+                userId, userName, faceId: result.face_id,
+                checkType, confidence: result.confidence,
+                date: today,
+            }
+        });
+
+        return { success: true, data: { ...log, confidence: result.confidence, userName, ...faceInfo } };
+    } catch (err) {
+        console.error('❌ attendance:recognize error:', err.message);
+        return { success: false, error: err.message };
+    }
+});
+
+// Đăng ký khuôn mặt nhân viên
+ipcMain.handle('attendance:register', async (event, { face_id, user_name, user_id, images }) => {
+    try {
+        await ensureFaceService();
+        resetFaceServiceIdleTimer();
+        const result = await faceServiceFetch('/register', {
+            method: 'POST',
+            body: JSON.stringify({ face_id, user_name, images }),
+        });
+        if (!result.ok) throw new Error('Python register failed');
+
+        // Lưu FaceProfile vào DB
+        await prisma.faceProfile.upsert({
+            where: { faceId: face_id },
+            update: { userName: user_name, userId: user_id || null, photoCount: result.saved, isActive: true },
+            create: { faceId: face_id, userName: user_name, userId: user_id || null, photoCount: result.saved },
+        });
+
+        return { success: true, saved: result.saved };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+// Lấy lịch sử chấm công
+ipcMain.handle('attendance:getLogs', async (event, { date, month, userId } = {}) => {
+    try {
+        const where = {};
+        if (date) where.date = date;
+        else if (month) where.date = { startsWith: month }; // month: 'YYYY-MM'
+        
+        if (userId) where.userId = userId;
+        
+        const logs = await prisma.attendanceLog.findMany({
+            where, orderBy: { timestamp: 'desc' },
+            ...(date ? { take: 200 } : {}) // Limit if single date, fetch all for month
+        });
+        return { success: true, data: logs };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+// Lấy danh sách profiles khuôn mặt
+ipcMain.handle('attendance:getProfiles', async () => {
+    try {
+        const profiles = await prisma.faceProfile.findMany({ where: { isActive: true } });
+        return { success: true, data: profiles };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+// Xóa profile khuôn mặt
+ipcMain.handle('attendance:deleteProfile', async (event, { face_id }) => {
+    // Xóa Python encodings (không bắt buộc — service có thể offline)
+    try {
+        await faceServiceFetch(`/profile/${encodeURIComponent(face_id)}`, { method: 'DELETE' });
+    } catch (err) {
+        console.warn('[attendance] Python delete failed (ignored):', err.message);
+    }
+    // Luôn xóa DB record
+    try {
+        await prisma.faceProfile.updateMany({ where: { faceId: face_id }, data: { isActive: false } });
+        return { success: true };
+    } catch (err) {
+        console.error('[attendance] DB delete failed:', err.message);
+        return { success: false, error: err.message };
+    }
+});
