@@ -5,21 +5,67 @@ const { spawn } = require('child_process');
 let mainWindow;
 let pythonProcess = null;
 
+function findPythonExe() {
+    const fs = require('fs');
+    // Thứ tự ưu tiên tìm Python có face_recognition
+    const candidates = [
+        // Python Launcher (Windows) — thử trước
+        { cmd: 'py', args: ['-3.10'] },
+        { cmd: 'py', args: ['-3'] },
+        // Đường dẫn cố định phổ biến
+        { cmd: 'C:\\Program Files\\Python310\\python.exe', args: [] },
+        { cmd: 'C:\\Program Files\\Python39\\python.exe', args: [] },
+        { cmd: 'C:\\Program Files\\Python311\\python.exe', args: [] },
+        { cmd: 'C:\\Users\\' + (process.env.USERNAME || '') + '\\AppData\\Local\\Programs\\Python\\Python310\\python.exe', args: [] },
+        { cmd: 'C:\\Users\\' + (process.env.USERNAME || '') + '\\AppData\\Local\\Programs\\Python\\Python39\\python.exe', args: [] },
+        // PATH fallback
+        { cmd: 'python', args: [] },
+        { cmd: 'python3', args: [] },
+    ];
+    for (const c of candidates) {
+        try {
+            // Kiểm tra file tồn tại (với exe cụ thể)
+            if (c.cmd.includes('\\') && !fs.existsSync(c.cmd)) continue;
+            return { exe: c.cmd, extraArgs: c.args };
+        } catch {}
+    }
+    return null;
+}
+
 function startPythonService() {
     const pythonScript = path.join(__dirname, '..', 'python', 'attendance_service.py');
-    // Dùng full path Python 3.10 vì Electron spawn có PATH hạn chế
-    const pythonExe = 'C:\\Program Files\\Python310\\python.exe';
-    // Truyền userData path để Python lưu face data vào thư mục ổn định (không bị xóa sau restart)
     const userDataPath = app.getPath('userData');
-    pythonProcess = spawn(pythonExe, [pythonScript], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-        env: { ...process.env, FACE_DATA_DIR: userDataPath },
-    });
-    pythonProcess.stdout.on('data', d => console.log('[Python]', d.toString().trim()));
-    pythonProcess.stderr.on('data', d => console.error('[Python ERR]', d.toString().trim()));
-    pythonProcess.on('exit', (code) => console.log(`[Python] exited: ${code}`));
-    console.log('🐍 Python face service started (PID:', pythonProcess.pid, ')');
+
+    const found = findPythonExe();
+    if (!found) {
+        console.warn('⚠️ Không tìm thấy Python — chức năng chấm công khuôn mặt sẽ không hoạt động');
+        return;
+    }
+
+    const { exe, extraArgs } = found;
+    console.log('🐍 Dùng Python:', exe, extraArgs.join(' '));
+
+    try {
+        pythonProcess = spawn(exe, [...extraArgs, pythonScript], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true,
+            env: { ...process.env, FACE_DATA_DIR: userDataPath },
+        });
+        pythonProcess.stdout.on('data', d => console.log('[Python]', d.toString().trim()));
+        pythonProcess.stderr.on('data', d => console.error('[Python ERR]', d.toString().trim()));
+        pythonProcess.on('error', (err) => {
+            console.warn('⚠️ Python service error (chức năng nhận diện không khả dụng):', err.message);
+            pythonProcess = null;
+        });
+        pythonProcess.on('exit', (code) => {
+            console.log(`[Python] exited: ${code}`);
+            pythonProcess = null;
+        });
+        console.log('🐍 Python face service started (PID:', pythonProcess.pid, ')');
+    } catch (err) {
+        console.warn('⚠️ Không thể khởi động Python service:', err.message);
+        pythonProcess = null;
+    }
 }
 
 function stopPythonService() {
