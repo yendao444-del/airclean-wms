@@ -22,23 +22,34 @@ import uvicorn
 
 # Load Haar cascade
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+# CLAHE một lần ở module level — tránh tạo mới mỗi lần gọi
+_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
-def get_face_locations_fast(img_np):
-    """Tìm mặt bằng HOG, fallback sang Haar Cascade nếu HOG trượt (do mặt quá to/gần)"""
-    # 1. HOG
-    locs = face_recognition.face_locations(img_np, model="hog")
+def get_face_locations_fast(img_np, upsample: int = 1):
+    """Tìm mặt bằng HOG, fallback sang Haar Cascade nếu HOG trượt.
+    Luôn thử upsample=1 trước (nhanh). Nếu không thấy mặt → thử upsample=2 → rồi Haar.
+    """
+    # 1. HOG upsample=1 — nhanh, đủ với mặt to/rõ
+    locs = face_recognition.face_locations(img_np, number_of_times_to_upsample=1, model="hog")
     if locs:
         return locs
-    
-    # 2. Haar Cascade (rất nhạy với mặt to/gần/nhỏ, tốc độ cao)
+
+    # 2. HOG upsample=2 — chậm hơn 4x, dùng khi mặt nhỏ/xa
+    if upsample >= 2:
+        locs = face_recognition.face_locations(img_np, number_of_times_to_upsample=2, model="hog")
+        if locs:
+            return locs
+
+    # 2. Haar Cascade với CLAHE để chuẩn hóa ánh sáng (bắt mặt tối/ngược sáng)
     try:
-        # face_recognition load ảnh RGB, OpenCV dùng BGR/Gray
         img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        # Giảm scaleFactor xuống 1.1 để quét kỹ hơn
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
+        # CLAHE: normalize độ sáng cục bộ — giúp detect mặt trong điều kiện ánh sáng kém
+        gray_eq = _clahe.apply(gray)
+        # minNeighbors=3 (thay vì 4) để nhạy hơn, minSize=20 để bắt mặt nhỏ hơn
+        faces = face_cascade.detectMultiScale(gray_eq, scaleFactor=1.1, minNeighbors=3, minSize=(20, 20))
         if len(faces) > 0:
-            x, y, w, h = faces[0] # Lấy mặt đầu tiên
+            x, y, w, h = faces[0]
             return [(int(y), int(x+w), int(y+h), int(x))]
     except:
         pass
@@ -65,8 +76,17 @@ def load_encodings():
     if ENCODINGS_FILE.exists() and ENCODINGS_FILE.stat().st_size > 10:
         try:
             with open(ENCODINGS_FILE, "rb") as f:
-                known_encodings = pickle.load(f)
-            print(f"[Face] Loaded {len(known_encodings)} profiles from cache")
+                cached = pickle.load(f)
+            # Verify pickle khớp với thư mục thực tế trên disk
+            # Chỉ tính folder có ít nhất 1 ảnh .jpg để tránh mismatch do folder rỗng
+            disk_ids = {d.name for d in FACES_DIR.iterdir() if d.is_dir() and any(d.glob("*.jpg"))}
+            cache_ids = set(cached.keys())
+            if disk_ids == cache_ids:
+                known_encodings = cached
+                print(f"[Face] Loaded {len(known_encodings)} profiles from cache")
+            else:
+                print(f"[Face] Cache mismatch (disk={disk_ids}, cache={cache_ids}), rebuilding...")
+                rebuild_encodings()
         except Exception as e:
             print(f"[Face] Cache corrupted, rebuilding: {e}")
             rebuild_encodings()
@@ -84,8 +104,21 @@ def rebuild_encodings():
         face_id = person_dir.name
         encodings = []
         for img_file in person_dir.glob("*.jpg"):
-            img = face_recognition.load_image_file(str(img_file))
-            encs = face_recognition.face_encodings(img)
+            # Guard: file có thể bị xóa giữa chừng khi đang rebuild (race condition)
+            if not img_file.exists():
+                print(f"[Face] Skip deleted file: {img_file.name}")
+                continue
+            try:
+                img = face_recognition.load_image_file(str(img_file))
+            except Exception as e:
+                print(f"[Face] Skip unreadable file {img_file.name}: {e}")
+                continue
+            # upsample=1 để rebuild nhanh khi startup
+            # Haar fallback xử lý ảnh khó nếu HOG upsample=1 không detect được
+            locs = get_face_locations_fast(np.array(img), upsample=1)
+            if not locs:
+                continue
+            encs = face_recognition.face_encodings(img, locs)
             if encs:
                 encodings.append(encs[0])
         if encodings:
@@ -196,19 +229,23 @@ def recognize(req: RecognizeRequest):
     if not face_encs:
         return {"found": False, "reason": "no_encoding"}
 
-    # So khớp với known_encodings
-    best_match = None
-    best_confidence = 0.0
-    best_dist = 1.0
-    second_best_dist = 1.0  # khoảng cách tốt nhì — dùng để kiểm tra margin
-
-    # THRESHOLD: khoảng cách tối đa để chấp nhận (càng nhỏ = càng chặt)
-    # 0.45 tương đương conf >= 55% — loại bỏ trường hợp nhận nhầm
+    # THRESHOLD: khoảng cách tối đa để chấp nhận. Default face_recognition là 0.6.
+    # Đặt 0.45 để chặt hơn, tránh nhận diện nhầm giữa người có nét tương tự
     THRESHOLD = 0.45
-    # MARGIN: winner phải cách runner-up ít nhất X — tránh nhầm khi 2 người giống nhau
-    MIN_MARGIN = 0.08
+    # MARGIN: khoảng cách giữa người Top 1 và Top 2
+    # Tăng lên 0.10 để tránh nhầm khi 2 người có distance gần nhau
+    MIN_MARGIN = 0.10
 
-    for face_enc in face_encs:
+    img_h, img_w = img.shape[:2]
+
+    # Xử lý từng mặt độc lập — tránh lẫn lộn best_match giữa nhiều mặt trong frame
+    # Lấy mặt đầu tiên match được (thực tế chấm công thường chỉ có 1 người)
+    for idx, face_enc in enumerate(face_encs):
+        best_match = None
+        best_confidence = 0.0
+        best_dist = 1.0
+        second_best_dist = 1.0
+
         for face_id, encs in known_encodings.items():
             distances = face_recognition.face_distance(encs, face_enc)
             min_dist = float(np.min(distances))
@@ -222,33 +259,36 @@ def recognize(req: RecognizeRequest):
             elif min_dist < second_best_dist:
                 second_best_dist = min_dist
 
-    # Điều kiện chấp nhận:
-    # 1. Khoảng cách tốt nhất phải < THRESHOLD
-    # 2. Winner phải cách runner-up đủ xa (MIN_MARGIN) → tránh nhầm khi 2 người giống nhau
-    margin = second_best_dist - best_dist
-    match_accepted = (
-        best_match is not None
-        and best_dist < THRESHOLD
-        and (len(known_encodings) == 1 or margin >= MIN_MARGIN)
-    )
+        # Điều kiện chấp nhận:
+        # 1. Khoảng cách phải < THRESHOLD
+        # 2. Nếu best_dist rất nhỏ (< 0.32) thì chắc chắn đúng, không cần xét margin
+        # 3. Còn lại phải có margin >= MIN_MARGIN để tránh nhầm
+        margin = second_best_dist - best_dist
+        match_accepted = (
+            best_match is not None
+            and best_dist < THRESHOLD
+            and (len(known_encodings) == 1 or best_dist < 0.32 or margin >= MIN_MARGIN)
+        )
 
-    # Luôn trả về face_box của mặt đầu tiên phát hiện được (dù match hay không)
+        # face_box khớp đúng với mặt đang xét (không dùng mặt #0 cố định)
+        top, right, bottom, left = face_locations[idx]
+        face_box = {"top": top, "right": right, "bottom": bottom, "left": left}
+
+        if match_accepted:
+            return {
+                "found": True,
+                "face_id": best_match,
+                "confidence": round(best_confidence, 3),
+                "dist": round(best_dist, 3),
+                "margin": round(margin, 3),
+                "face_box": face_box,
+                "img_width": img_w,
+                "img_height": img_h,
+            }
+
+    # Không có mặt nào match — trả về face_box của mặt đầu tiên để UI vẫn vẽ được khung
     top, right, bottom, left = face_locations[0]
     face_box = {"top": top, "right": right, "bottom": bottom, "left": left}
-    img_h, img_w = img.shape[:2]
-
-    if match_accepted:
-        return {
-            "found": True,
-            "face_id": best_match,
-            "confidence": round(best_confidence, 3),
-            "dist": round(best_dist, 3),
-            "margin": round(margin, 3),
-            "face_box": face_box,
-            "img_width": img_w,
-            "img_height": img_h,
-        }
-
     return {
         "found": False,
         "reason": "no_match",
@@ -281,8 +321,8 @@ def register(req: RegisterRequest):
     for i, img_b64 in enumerate(req.images):
         try:
             img_arr = decode_image(img_b64)
-            # Dùng custom locations để bắt được ảnh to
-            locs = get_face_locations_fast(img_arr)
+            # upsample=1 đủ vì lúc đăng ký mặt đã to/rõ (MIN_FACE_RATIO=15%)
+            locs = get_face_locations_fast(img_arr, upsample=1)
             if not locs:
                 continue
             encs = face_recognition.face_encodings(img_arr, locs)
@@ -319,11 +359,28 @@ def register(req: RegisterRequest):
 @app.delete("/profile/{face_id}")
 def delete_profile(face_id: str):
     """Xóa profile khuôn mặt."""
+    import shutil
+    import threading
+
+    # 1. Xóa khỏi memory ngay lập tức (không cần chờ rebuild)
+    global known_encodings
+    known_encodings.pop(face_id, None)
+
+    # 2. Xóa folder ảnh trên disk
     person_dir = FACES_DIR / face_id
     if person_dir.exists():
-        import shutil
         shutil.rmtree(str(person_dir))
-    rebuild_encodings()
+
+    # 3. Rebuild encodings trong background thread — trả về ngay cho client
+    #    tránh timeout khi có nhiều ảnh (rebuild có thể mất 30-60s)
+    def _bg_rebuild():
+        try:
+            rebuild_encodings()
+        except Exception as e:
+            print(f"[Face] Background rebuild error: {e}")
+
+    threading.Thread(target=_bg_rebuild, daemon=True).start()
+    print(f"[Face] Deleted '{face_id}', rebuild running in background")
     return {"ok": True, "deleted": face_id}
 
 

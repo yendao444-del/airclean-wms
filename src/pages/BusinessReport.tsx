@@ -1117,6 +1117,27 @@ export default function BusinessReportPage() {
     const pct = (val: number) => pnl.netRevenue > 0 ? (val / pnl.netRevenue * 100).toFixed(1) : '0.0';
 
     // ============================================
+    // P&L COLLAPSE STATE
+    // ============================================
+    // Mỗi section header kiểm soát các dòng con — mặc định thu gọn hết
+    const [collapsedPnl, setCollapsedPnl] = useState<Set<string>>(
+        new Set(['rev', 'cogs', 'platform', 'opex'])
+    );
+    const togglePnlSection = (section: string) =>
+        setCollapsedPnl(prev => {
+            const next = new Set(prev);
+            next.has(section) ? next.delete(section) : next.add(section);
+            return next;
+        });
+    // Mapping: section của row → section header kiểm soát nó
+    const PNL_PARENT_SECTION: Record<string, string> = {
+        rev: 'rev', cogs: 'cogs',
+        platform: 'platform', ads: 'platform', ship: 'platform',
+        opex: 'opex', other: 'opex',
+        profit: '__always',
+    };
+
+    // ============================================
     // P&L TABLE DATA (FLAT - no expand)
     // ============================================
     const pnlTableData = useMemo(() => {
@@ -1189,6 +1210,17 @@ export default function BusinessReportPage() {
 
         return rows;
     }, [pnl, config, shopeeFeeConfig, tiktokFeeConfig]);
+
+    // Filter ẩn dòng con khi section đang thu gọn
+    const visiblePnlRows = useMemo(() =>
+        pnlTableData.filter(r => {
+            if (r.isGroup || r.isSubtotal || r.isTotal) return true;
+            const parentSec = PNL_PARENT_SECTION[r.section] ?? '__always';
+            if (parentSec === '__always') return true;
+            return !collapsedPnl.has(parentSec);
+        }),
+        [pnlTableData, collapsedPnl]
+    );
 
     // ============================================
     // DRILL-DOWN LOGIC
@@ -1729,7 +1761,7 @@ export default function BusinessReportPage() {
                 style={{ marginBottom: 16 }}
             >
                 <Table
-                    dataSource={pnlTableData}
+                    dataSource={visiblePnlRows}
                     pagination={false}
                     size="small"
                     loading={loading}
@@ -1761,14 +1793,26 @@ export default function BusinessReportPage() {
                                     'net': 'Lợi nhuận ròng = Lợi nhuận gộp − Chi phí bán hàng − Chi phí quản lý. Đây là số tiền thực lãi.',
                                 };
                                 const tooltip = PNL_TOOLTIPS[r.key];
+                                const secKey = r.section as string;
+                                const isCollapsible = r.isGroup && PNL_PARENT_SECTION[secKey] !== '__always';
+                                const isCollapsed = isCollapsible && collapsedPnl.has(secKey);
                                 const content = (
-                                    <span style={{
-                                        fontWeight: r.isGroup || r.isSubtotal || r.isTotal || r.isParent ? 700 : 400,
-                                        fontSize: r.isTotal ? 15 : r.isGroup || r.isSubtotal ? 14 : r.isChild ? 12 : 13,
-                                        color: r.color || (r.isChild ? '#595959' : '#262626'),
-                                        paddingLeft: r.indent ? r.indent * 20 : 0,
-                                        cursor: tooltip ? 'help' : undefined,
-                                    }}>
+                                    <span
+                                        style={{
+                                            fontWeight: r.isGroup || r.isSubtotal || r.isTotal || r.isParent ? 700 : 400,
+                                            fontSize: r.isTotal ? 15 : r.isGroup || r.isSubtotal ? 14 : r.isChild ? 12 : 13,
+                                            color: r.color || (r.isChild ? '#595959' : '#262626'),
+                                            paddingLeft: r.indent ? r.indent * 20 : 0,
+                                            cursor: isCollapsible ? 'pointer' : tooltip ? 'help' : undefined,
+                                            userSelect: 'none',
+                                        }}
+                                        onClick={isCollapsible ? () => togglePnlSection(secKey) : undefined}
+                                    >
+                                        {isCollapsible && (
+                                            <span style={{ marginRight: 6, fontSize: 11, color: '#8c8c8c', display: 'inline-block', width: 14, textAlign: 'center' }}>
+                                                {isCollapsed ? '▶' : '▼'}
+                                            </span>
+                                        )}
                                         {r.isChild && '↳ '}
                                         {text}
                                     </span>
@@ -1818,12 +1862,19 @@ export default function BusinessReportPage() {
                                 // Hạng mục quan trọng: isGroup (A,B,D,E), isSubtotal (C), isTotal (F), isParent (D1 Shopee/TikTok...)
                                 const isImportant = r.isGroup || r.isSubtotal || r.isTotal || r.isParent;
                                 if (isImportant) {
-                                    // Chọn màu theo section
-                                    const PCT_COLORS: Record<string, string> = {
-                                        rev: 'green', cogs: 'red', profit: r.color === '#f5222d' ? 'red' : 'green',
-                                        platform: 'orange', ads: 'purple', ship: 'blue', opex: 'gold', other: 'default', cost: 'red',
-                                    };
-                                    const tagColor = PCT_COLORS[r.section] || 'blue';
+                                    // Xanh = doanh thu / lợi nhuận, Đỏ = chi phí
+                                    const COST_SECTIONS = new Set(['cogs', 'platform', 'ads', 'ship', 'opex', 'other']);
+                                    const REVENUE_SECTIONS = new Set(['rev']);
+                                    let tagColor: string;
+                                    if (r.isTotal || r.isSubtotal) {
+                                        tagColor = r.color === '#f5222d' ? 'red' : 'green';
+                                    } else if (REVENUE_SECTIONS.has(r.section)) {
+                                        tagColor = 'green';
+                                    } else if (COST_SECTIONS.has(r.section)) {
+                                        tagColor = 'red';
+                                    } else {
+                                        tagColor = 'default';
+                                    }
                                     return (
                                         <Tag color={tagColor} style={{ minWidth: 54, textAlign: 'center', fontWeight: 700, fontSize: 13 }}>
                                             {v}%

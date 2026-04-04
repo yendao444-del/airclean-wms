@@ -251,6 +251,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getLogs: (filters) => ipcRenderer.invoke('attendance:getLogs', filters),
         getProfiles: () => ipcRenderer.invoke('attendance:getProfiles'),
         deleteProfile: (face_id) => ipcRenderer.invoke('attendance:deleteProfile', { face_id }),
+        verifyAll: () => ipcRenderer.invoke('attendance:verifyAll'),
     },
 
     // ZKTeco / Ronald Jack — Máy chấm công vân tay

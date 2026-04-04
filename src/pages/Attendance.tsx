@@ -762,13 +762,14 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
             if (frame && api) {
                 const res = await api.recognize(frame);
 
-                // Service lỗi → dừng hẳn
+                // Service lỗi kết nối → thử lại sau 3 giây để chờ auto-heal
                 if (res.error) {
                     console.warn('Face service error:', res.error);
-                    isRecognizingRef.current = false;
-                    setRecognizing(false);
-                    setServiceOk(false);
                     setLastResult({ error: res.error });
+                    
+                    if (isRecognizingRef.current) {
+                        recognizeTimerRef.current = setTimeout(doRecognize, 3000) as unknown as ReturnType<typeof setInterval>;
+                    }
                     return;
                 }
 
@@ -900,7 +901,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                     }
                     // Nếu vẫn là người đó và vẫn duplicate, thì chỉ tracking khung vàng realtime, KHÔNG thông báo âm thanh nữa
                 } else if (res.reason === 'out_of_hours') {
-                    const oohResult = { reason: 'out_of_hours', face_box: box };
+                    const oohResult = { reason: 'out_of_hours', userName: res.userName, face_box: box };
                     setLastResult(oohResult);
                     lastResultRef.current = oohResult;
                 } else {
@@ -1345,13 +1346,15 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                         )}
                         {lastResult?.reason === 'out_of_hours' && (
                             <div style={{ marginTop: 12, padding: '10px 16px', background: '#fff1f0', borderRadius: 8, border: '1px solid #ffccc7', textAlign: 'center' }}>
-                                <Text style={{ color: '#cf1322', fontWeight: 700 }}>Ngoài giờ chấm công</Text>
+                                <Text style={{ color: '#cf1322', fontWeight: 700 }}>
+                                    {lastResult.userName ? `${lastResult.userName} - Ngoài giờ chấm công` : 'Ngoài giờ chấm công'}
+                                </Text>
                             </div>
                         )}
                         {lastResult?.error && (
                             <div style={{ marginTop: 12, padding: '10px 16px', background: '#fff1f0', borderRadius: 8, border: '1px solid #ffccc7', textAlign: 'center' }}>
-                                <Text style={{ color: '#cf1322', fontWeight: 700 }}>Python service mất kết nối — nhận diện đã dừng</Text>
-                                <div><Text type="secondary" style={{ fontSize: 12 }}>Bấm "Làm mới" rồi bắt đầu lại</Text></div>
+                                <Text style={{ color: '#cf1322', fontWeight: 700 }}>Mất kết nối với AI nhận diện</Text>
+                                <div><Text type="secondary" style={{ fontSize: 12 }}>Hệ thống đang tự động khôi phục...</Text></div>
                             </div>
                         )}
                     </Card>

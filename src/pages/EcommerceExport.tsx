@@ -258,7 +258,13 @@ export default function EcommerceExportPage() {
             const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
             const result = await window.electronAPI.ecommerceExports.getAll({ since: since7d });
             if (result.success && result.data) {
-                exportsRef.current = result.data;
+                // Không downgrade 'completed' trong ref về 'pending' khi DB chưa kịp commit
+                // (tránh race condition khi IPC update đang in-flight)
+                exportsRef.current = result.data.map((item: any) => {
+                    const existing = exportsRef.current.find((r: any) => r.id === item.id);
+                    if (existing?.status === 'completed' && item.status !== 'completed') return existing;
+                    return item;
+                });
                 setEcommerceExports(result.data);
             }
         } catch (error) {
@@ -620,7 +626,7 @@ Thời gian: ${currentTime}`;
                         message.info(`Không tìm thấy cột 'Mã vận đơn', đang dùng cột: [${trackingKey}]`);
                     }
 
-                    const trackings = json.map(row => String(row[trackingKey] || '').trim()).filter(Boolean);
+                    const trackings = [...new Set(json.map(row => String(row[trackingKey] || '').trim()).filter(Boolean))];
                     
                     if (trackings.length === 0) {
                         message.error('Không tìm thấy dữ liệu mã vận đơn trong file!');

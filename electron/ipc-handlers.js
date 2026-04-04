@@ -4576,18 +4576,23 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
             const oldRecord = await tx.ecommerceExport.findUnique({ where: { id } });
             if (!oldRecord) throw new Error('Không tìm thấy phiếu xuất.');
 
-            // Hoàn kho nếu phiếu cũ đã trừ kho
+            // Hoàn kho nếu phiếu cũ đã trừ kho — bỏ qua nếu items không thay đổi (tránh hoàn tồn thừa do double-scan)
             if (oldRecord.status === 'completed') {
-                const oldItems = JSON.parse(oldRecord.items || '[]');
-                for (const old of oldItems) {
-                    if (old.variantSku) {
-                        await deductItemOrCombo(tx, old.variantSku, old.quantity, {
-                            type: 'adjustment',
-                            referenceType: 'TMDT_EDIT',
-                            reference: oldRecord.orderNumber || oldRecord.ecommerceExportCode || 'Sửa thủ công',
-                            note: `Hoàn tồn (sửa đơn TMDT #${oldRecord.id})`,
-                            createdBy: data.createdBy || 'System'
-                        }, { allowMissing: true });
+                const oldItemsStr = oldRecord.items || '[]';
+                const newItemsStr = data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : oldItemsStr;
+                const itemsUnchanged = data.status === 'completed' && oldItemsStr === newItemsStr;
+                if (!itemsUnchanged) {
+                    const oldItems = JSON.parse(oldItemsStr);
+                    for (const old of oldItems) {
+                        if (old.variantSku) {
+                            await deductItemOrCombo(tx, old.variantSku, old.quantity, {
+                                type: 'adjustment',
+                                referenceType: 'TMDT_EDIT',
+                                reference: oldRecord.orderNumber || oldRecord.ecommerceExportCode || 'Sửa thủ công',
+                                note: `Hoàn tồn (sửa đơn TMDT #${oldRecord.id})`,
+                                createdBy: data.createdBy || 'System'
+                            }, { allowMissing: true });
+                        }
                     }
                 }
             }
@@ -4609,9 +4614,12 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
                 }
             });
 
-            // Trừ kho mới nếu phiếu trạng thái hoàn thành
-            if (data.status === 'completed') {
-                const newItems = data.items ? (typeof data.items === 'string' ? JSON.parse(data.items) : data.items) : JSON.parse(oldRecord.items || '[]');
+            // Trừ kho mới nếu phiếu trạng thái hoàn thành — bỏ qua nếu đã completed và items không đổi
+            const oldItemsStrFinal = oldRecord.items || '[]';
+            const newItemsStrFinal = data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : oldItemsStrFinal;
+            const skipDeduct = oldRecord.status === 'completed' && data.status === 'completed' && oldItemsStrFinal === newItemsStrFinal;
+            if (data.status === 'completed' && !skipDeduct) {
+                const newItems = typeof newItemsStrFinal === 'string' ? JSON.parse(newItemsStrFinal) : newItemsStrFinal;
                 for (const item of newItems) {
                     if (item.variantSku) {
                         await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
@@ -7317,6 +7325,7 @@ function ensureFaceService() {
         faceServiceProcess = spawn('python', [scriptPath], {
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
+            env: { ...process.env, FACE_DATA_DIR: app.getPath('userData') },
         });
 
         faceServiceProcess.stdout.on('data', (data) => {
@@ -7410,8 +7419,8 @@ function faceServiceFetch(urlPath, options = {}) {
                 catch { reject(new Error('Invalid JSON response')); }
             });
         });
-        // Timeout dài hơn cho xử lý ảnh (đăng ký 50 ảnh tốn nhiều thời gian)
-        const timeout = urlPath.includes('/register') ? 60000 : urlPath.includes('/recognize') ? 15000 : 5000;
+        // /register: 120s (50 ảnh × HOG + encoding), /recognize: 15s, /profile (delete+rebuild): 60s, còn lại: 5s
+        const timeout = urlPath.includes('/register') ? 120000 : urlPath.includes('/recognize') ? 15000 : urlPath.includes('/profile') ? 60000 : 5000;
         req.setTimeout(timeout, () => { req.destroy(); reject(new Error('Timeout')); });
         req.on('error', reject);
         if (body) req.write(body);
@@ -7501,13 +7510,13 @@ ipcMain.handle('attendance:recognize', async (event, { image }) => {
         // Phát hiện mặt nhưng không khớp profile nào
         if (!result.face_id) return { success: false, reason: 'no_match', ...faceInfo };
 
-        const checkType = getCheckType();
-        if (!checkType) return { success: false, reason: 'out_of_hours', face_id: result.face_id, ...faceInfo };
-
-        // Lấy thông tin user từ FaceProfile
+        // Lấy thông tin user từ FaceProfile (cần trước cả out_of_hours để có userName)
         const profile = await prisma.faceProfile.findUnique({ where: { faceId: result.face_id } });
         const userName = profile?.userName || result.face_id;
         const userId = profile?.userId || null;
+
+        const checkType = getCheckType();
+        if (!checkType) return { success: false, reason: 'out_of_hours', face_id: result.face_id, userName, ...faceInfo };
 
         // Kiểm tra trùng trong 30 phút
         const since = new Date(Date.now() - 30 * 60 * 1000);
@@ -7576,6 +7585,53 @@ ipcMain.handle('attendance:getLogs', async (event, { date, month, userId } = {})
     }
 });
 
+// Kiểm tra toàn bộ profiles — so sánh DB, disk, Python memory
+// Trả về danh sách profiles ở từng nơi và highlight mismatch
+ipcMain.handle('attendance:verifyAll', async () => {
+    const result = { db: [], disk: [], pythonMemory: [], mismatches: [], serviceOnline: false };
+    try {
+        // 1. DB
+        const dbRows = await prisma.faceProfile.findMany({ where: { isActive: true } });
+        result.db = dbRows.map(r => r.faceId);
+    } catch (err) {
+        console.error('[attendance] verifyAll DB error:', err.message);
+    }
+    try {
+        // 2. Disk
+        const facesRoot = path.join(app.getPath('userData'), 'faces');
+        if (fs.existsSync(facesRoot)) {
+            result.disk = fs.readdirSync(facesRoot).filter(name =>
+                fs.statSync(path.join(facesRoot, name)).isDirectory()
+            );
+        }
+    } catch (err) {
+        console.error('[attendance] verifyAll disk error:', err.message);
+    }
+    try {
+        // 3. Python memory
+        const status = await faceServiceFetch('/status');
+        result.pythonMemory = status.face_ids || [];
+        result.serviceOnline = true;
+    } catch (_) {
+        result.serviceOnline = false;
+    }
+
+    // So sánh tìm mismatch
+    const allIds = new Set([...result.db, ...result.disk, ...result.pythonMemory]);
+    for (const id of allIds) {
+        const inDb = result.db.includes(id);
+        const inDisk = result.disk.includes(id);
+        const inPython = result.serviceOnline ? result.pythonMemory.includes(id) : null;
+        const isMismatch = inDb !== inDisk || (inPython !== null && inDb !== inPython);
+        if (isMismatch) {
+            result.mismatches.push({ face_id: id, inDb, inDisk, inPython });
+        }
+    }
+
+    console.log('[attendance] verifyAll:', JSON.stringify(result, null, 2));
+    return { success: true, ...result };
+});
+
 // Lấy danh sách profiles khuôn mặt
 ipcMain.handle('attendance:getProfiles', async () => {
     try {
@@ -7588,18 +7644,49 @@ ipcMain.handle('attendance:getProfiles', async () => {
 
 // Xóa profile khuôn mặt
 ipcMain.handle('attendance:deleteProfile', async (event, { face_id }) => {
-    // Xóa Python encodings (không bắt buộc — service có thể offline)
+    // Xóa Python encodings qua service
     try {
         await faceServiceFetch(`/profile/${encodeURIComponent(face_id)}`, { method: 'DELETE' });
     } catch (err) {
-        console.warn('[attendance] Python delete failed (ignored):', err.message);
+        console.warn('[attendance] Python delete failed, fallback to direct fs delete:', err.message);
+        // Fallback: service offline → xóa folder ảnh trực tiếp bằng fs
+        // Tránh trường hợp DB xóa thành công nhưng ảnh vẫn còn trên disk
+        try {
+            const facesDir = path.join(app.getPath('userData'), 'faces', face_id);
+            if (fs.existsSync(facesDir)) {
+                fs.rmSync(facesDir, { recursive: true, force: true });
+                console.log('[attendance] Deleted face folder directly:', facesDir);
+            }
+        } catch (fsErr) {
+            console.error('[attendance] fs delete also failed:', fsErr.message);
+        }
     }
     // Luôn xóa DB record
     try {
         await prisma.faceProfile.updateMany({ where: { faceId: face_id }, data: { isActive: false } });
-        return { success: true };
     } catch (err) {
         console.error('[attendance] DB delete failed:', err.message);
         return { success: false, error: err.message };
     }
+
+    // Verify sau khi xóa — kiểm tra cả 3 nơi để chắc chắn sạch
+    const verify = { db: false, disk: false, pythonMemory: false };
+    try {
+        const dbRecord = await prisma.faceProfile.findFirst({ where: { faceId: face_id, isActive: true } });
+        verify.db = dbRecord === null; // true = không còn record active
+    } catch (_) {}
+    try {
+        const facesDir = path.join(app.getPath('userData'), 'faces', face_id);
+        verify.disk = !fs.existsSync(facesDir); // true = folder đã bị xóa
+    } catch (_) {}
+    try {
+        const status = await faceServiceFetch('/status');
+        verify.pythonMemory = !status.face_ids?.includes(face_id); // true = không còn trong memory
+    } catch (_) {
+        verify.pythonMemory = null; // null = service offline, không kiểm tra được
+    }
+
+    const allClean = verify.db && verify.disk && (verify.pythonMemory === true || verify.pythonMemory === null);
+    console.log(`[attendance] Delete verify for '${face_id}':`, verify);
+    return { success: true, verify, allClean };
 });
