@@ -188,7 +188,9 @@ function createWindow() {
 app.whenReady().then(() => {
     // Tạo cửa sổ TRƯỚC để luôn hiển thị app
     createWindow();
-    startPythonService();
+    // NOTE: Python service được quản lý bởi ipc-handlers.js (ensureFaceService)
+    // KHÔNG gọi startPythonService() ở đây — sẽ conflict với kill-port logic của ipc-handlers
+    // startPythonService();
 
     // Import IPC handlers SAU - bọc try-catch để không crash app
     try {

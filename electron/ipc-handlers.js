@@ -7327,24 +7327,28 @@ function ensureFaceService() {
             // ★ Mode 2: Fallback Python script — cần Python trên máy
             console.log('[Face] 🐍 Không có EXE → tìm Python...');
             function findPythonForFace() {
+                const { spawnSync } = require('child_process');
                 const candidates = [
                     { exe: 'py', args: ['-3.10'] },
-                    { exe: 'py', args: ['-3.11'] },
-                    { exe: 'py', args: ['-3.9'] },
                     { exe: 'py', args: ['-3'] },
+                    { exe: 'python', args: [] },
+                    { exe: 'python3', args: [] },
                     { exe: 'C:\\Program Files\\Python310\\python.exe', args: [] },
                     { exe: 'C:\\Program Files\\Python311\\python.exe', args: [] },
                     { exe: 'C:\\Program Files\\Python39\\python.exe', args: [] },
                     { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python310\\python.exe`, args: [] },
                     { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python311\\python.exe`, args: [] },
-                    { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python39\\python.exe`, args: [] },
-                    { exe: 'python', args: [] },
-                    { exe: 'python3', args: [] },
+                    { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python39\\python.exe`, args: [] }
                 ];
                 for (const c of candidates) {
                     try {
-                        if (c.exe.includes('\\') && !fs.existsSync(c.exe)) continue;
-                        return c;
+                        if (c.exe.includes('\\')) {
+                            if (fs.existsSync(c.exe)) return c;
+                        } else {
+                            // Verify command exists in PATH
+                            const res = spawnSync(c.exe, ['--version'], { windowsHide: true });
+                            if (!res.error && res.status === 0) return c;
+                        }
                     } catch {}
                 }
                 return null;
