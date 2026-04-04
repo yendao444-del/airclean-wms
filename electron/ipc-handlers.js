@@ -7319,10 +7319,42 @@ function ensureFaceService() {
             await new Promise(r => setTimeout(r, 1000));
         } catch { /* Không có process nào → OK */ }
 
-        _faceSpawning = true;
-        console.log('[Face] 🚀 Đang khởi động Python face service...');
+        // Tìm Python exe theo thứ tự ưu tiên (giống main.js findPythonExe)
+        function findPythonForFace() {
+            const candidates = [
+                { exe: 'py', args: ['-3.10'] },
+                { exe: 'py', args: ['-3.11'] },
+                { exe: 'py', args: ['-3.9'] },
+                { exe: 'py', args: ['-3'] },
+                { exe: 'C:\\Program Files\\Python310\\python.exe', args: [] },
+                { exe: 'C:\\Program Files\\Python311\\python.exe', args: [] },
+                { exe: 'C:\\Program Files\\Python39\\python.exe', args: [] },
+                { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python310\\python.exe`, args: [] },
+                { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python311\\python.exe`, args: [] },
+                { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python39\\python.exe`, args: [] },
+                { exe: 'python', args: [] },
+                { exe: 'python3', args: [] },
+            ];
+            for (const c of candidates) {
+                try {
+                    if (c.exe.includes('\\') && !fs.existsSync(c.exe)) continue;
+                    return c;
+                } catch {}
+            }
+            return null;
+        }
 
-        faceServiceProcess = spawn('python', [scriptPath], {
+        const pyFound = findPythonForFace();
+        if (!pyFound) {
+            _faceSpawning = false;
+            _faceLastSpawnFail = Date.now();
+            return reject(new Error('Không tìm thấy Python (3.9/3.10/3.11) trên máy. Vui lòng cài Python và thêm vào PATH.'));
+        }
+
+        _faceSpawning = true;
+        console.log('[Face] 🚀 Đang khởi động Python face service...', pyFound.exe, pyFound.args.join(' '));
+
+        faceServiceProcess = spawn(pyFound.exe, [...pyFound.args, scriptPath], {
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
             env: { ...process.env, FACE_DATA_DIR: app.getPath('userData') },
