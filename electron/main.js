@@ -167,18 +167,16 @@ function createWindow() {
         const indexPath = path.join(__dirname, '../dist/index.html');
         mainWindow.loadFile(indexPath);
     }
-    // 🔓 DEBUG TEMP: Mở DevTools để debug lỗi Python service trên máy khách
-    // TODO: Tắt lại sau khi debug xong (uncomment khối if/else bên dưới)
-    mainWindow.webContents.openDevTools();
-    /*
+    // 🔒 SECURITY: DevTools control based on packaging
     if (app.isPackaged) {
+        // PRODUCTION (.exe) → khóa DevTools để nhân viên không mở được
         mainWindow.webContents.on('devtools-opened', () => {
             mainWindow.webContents.closeDevTools();
         });
     } else {
+        // DEV (chạy từ source) → mở DevTools để debug
         // mainWindow.webContents.openDevTools();
     }
-    */
 
     mainWindow.on('closed', () => {
         mainWindow = null;
