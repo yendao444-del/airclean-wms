@@ -7304,57 +7304,69 @@ function ensureFaceService() {
 
         // 5. Spawn mới
         const { spawn, execSync } = require('child_process');
-        const scriptPath = path.join(__dirname, '..', 'python', 'attendance_service.py');
 
-        if (!fs.existsSync(scriptPath)) {
-            return reject(new Error(`Không tìm thấy file: ${scriptPath}`));
-        }
-
-        // Kill bất kỳ process nào đang chiếm port 5001
+        // Kill bất kỳ process nào đang chiếm port 5001 (dùng chung cho EXE lẫn Python)
         try {
             execSync('FOR /F "tokens=5" %a IN (\'netstat -ano ^| findstr :5001 ^| findstr LISTENING\') DO taskkill /PID %a /F', {
                 stdio: 'ignore', shell: 'cmd.exe', windowsHide: true
             });
-            // Đợi port release
             await new Promise(r => setTimeout(r, 1000));
         } catch { /* Không có process nào → OK */ }
 
-        // Tìm Python exe theo thứ tự ưu tiên (giống main.js findPythonExe)
-        function findPythonForFace() {
-            const candidates = [
-                { exe: 'py', args: ['-3.10'] },
-                { exe: 'py', args: ['-3.11'] },
-                { exe: 'py', args: ['-3.9'] },
-                { exe: 'py', args: ['-3'] },
-                { exe: 'C:\\Program Files\\Python310\\python.exe', args: [] },
-                { exe: 'C:\\Program Files\\Python311\\python.exe', args: [] },
-                { exe: 'C:\\Program Files\\Python39\\python.exe', args: [] },
-                { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python310\\python.exe`, args: [] },
-                { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python311\\python.exe`, args: [] },
-                { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python39\\python.exe`, args: [] },
-                { exe: 'python', args: [] },
-                { exe: 'python3', args: [] },
-            ];
-            for (const c of candidates) {
-                try {
-                    if (c.exe.includes('\\') && !fs.existsSync(c.exe)) continue;
-                    return c;
-                } catch {}
-            }
-            return null;
-        }
+        // ── Xác định cách chạy: EXE (ưu tiên) hoặc Python (fallback) ──────
+        const exePath    = path.join(__dirname, '..', 'python', 'dist', 'attendance_service.exe');
+        const scriptPath = path.join(__dirname, '..', 'python', 'attendance_service.py');
+        let spawnCmd, spawnArgs;
 
-        const pyFound = findPythonForFace();
-        if (!pyFound) {
+        if (fs.existsSync(exePath)) {
+            // ★ Mode 1: EXE standalone — máy khách không cần cài Python
+            console.log('[Face] 🚀 Dùng attendance_service.exe (standalone)');
+            spawnCmd  = exePath;
+            spawnArgs = [];
+        } else if (fs.existsSync(scriptPath)) {
+            // ★ Mode 2: Fallback Python script — cần Python trên máy
+            console.log('[Face] 🐍 Không có EXE → tìm Python...');
+            function findPythonForFace() {
+                const candidates = [
+                    { exe: 'py', args: ['-3.10'] },
+                    { exe: 'py', args: ['-3.11'] },
+                    { exe: 'py', args: ['-3.9'] },
+                    { exe: 'py', args: ['-3'] },
+                    { exe: 'C:\\Program Files\\Python310\\python.exe', args: [] },
+                    { exe: 'C:\\Program Files\\Python311\\python.exe', args: [] },
+                    { exe: 'C:\\Program Files\\Python39\\python.exe', args: [] },
+                    { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python310\\python.exe`, args: [] },
+                    { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python311\\python.exe`, args: [] },
+                    { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python39\\python.exe`, args: [] },
+                    { exe: 'python', args: [] },
+                    { exe: 'python3', args: [] },
+                ];
+                for (const c of candidates) {
+                    try {
+                        if (c.exe.includes('\\') && !fs.existsSync(c.exe)) continue;
+                        return c;
+                    } catch {}
+                }
+                return null;
+            }
+            const pyFound = findPythonForFace();
+            if (!pyFound) {
+                _faceSpawning = false;
+                _faceLastSpawnFail = Date.now();
+                return reject(new Error('Không có EXE và không tìm thấy Python. Liên hệ kỹ thuật.'));
+            }
+            spawnCmd  = pyFound.exe;
+            spawnArgs = [...pyFound.args, scriptPath];
+        } else {
             _faceSpawning = false;
             _faceLastSpawnFail = Date.now();
-            return reject(new Error('Không tìm thấy Python (3.9/3.10/3.11) trên máy. Vui lòng cài Python và thêm vào PATH.'));
+            return reject(new Error('Không tìm thấy attendance_service.exe hoặc .py'));
         }
 
         _faceSpawning = true;
-        console.log('[Face] 🚀 Đang khởi động Python face service...', pyFound.exe, pyFound.args.join(' '));
+        console.log('[Face] Spawn:', spawnCmd, spawnArgs.join(' '));
 
-        faceServiceProcess = spawn(pyFound.exe, [...pyFound.args, scriptPath], {
+        faceServiceProcess = spawn(spawnCmd, spawnArgs, {
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
             env: { ...process.env, FACE_DATA_DIR: app.getPath('userData') },
