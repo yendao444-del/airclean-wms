@@ -1,12 +1,12 @@
 const { app, BrowserWindow, Menu } = require('electron');
 const path = require('path');
+const fs   = require('fs');
 const { spawn } = require('child_process');
 
 let mainWindow;
 let pythonProcess = null;
 
 function findPythonExe() {
-    const fs = require('fs');
     // Thứ tự ưu tiên tìm Python có face_recognition
     const candidates = [
         // Python Launcher (Windows) — thử trước
