@@ -438,26 +438,37 @@ export default function RefundsPage() {
             let origItems: RefundItem[] = [];
             try { origItems = JSON.parse(refundRecord.items); } catch { origItems = []; }
 
+            const ref = refundRecord.orderNumber || refundRecord.refundCode || `P.Hoàn ${refundRecord.id}`;
+            const updatedSkus: string[] = [];
+            const failedSkus: string[] = [];
+
             // Cộng tồn kho cho từng item gốc
             for (const item of origItems) {
-                if (item.variantSku && item.quantity > 0) {
-                    try {
-                        await window.electronAPI.products.updateStock({
-                            sku: item.variantSku,
-                            quantity: item.quantity,
-                            isAdd: true,
-                            logContext: {
-                                type: 'refund',
-                                referenceType: 'HOAN',
-                                reference: refundRecord.orderNumber || refundRecord.refundCode || `P.Hoàn ${refundRecord.id}`,
-                                note: `Xác nhận nhận hoàn/trả về kho (${refundRecord.customerName})`,
-                                createdBy: null
-                            }
-                        });
+                if (!item.variantSku || item.quantity <= 0) continue;
+                try {
+                    const result = await window.electronAPI.products.updateStock({
+                        sku: item.variantSku,
+                        quantity: item.quantity,
+                        isAdd: true,
+                        allowMissing: true,
+                        logContext: {
+                            type: 'refund',
+                            referenceType: 'HOAN',
+                            reference: ref,
+                            note: `Xác nhận nhận hoàn/trả về kho (${refundRecord.customerName})`,
+                            createdBy: null
+                        }
+                    });
+                    if (result?.success) {
                         console.log(`✅ Cộng kho: ${item.variantSku} +${item.quantity}`);
-                    } catch (err) {
-                        console.error(`❌ Lỗi cộng kho ${item.variantSku}:`, err);
+                        updatedSkus.push(item.variantSku);
+                    } else {
+                        console.error(`❌ Cộng kho thất bại ${item.variantSku}:`, result?.error);
+                        failedSkus.push(item.variantSku);
                     }
+                } catch (err) {
+                    console.error(`❌ Lỗi cộng kho ${item.variantSku}:`, err);
+                    failedSkus.push(item.variantSku);
                 }
             }
 
@@ -465,20 +476,29 @@ export default function RefundsPage() {
             await window.electronAPI.refunds.update(refundRecord.id, { status: 'completed' });
             setRefunds(prev => prev.map(r => r.id === refundRecord.id ? { ...r, status: 'completed' } : r));
 
-            // Ghi stock log
+            // Ghi stock log cho các SKU cộng thành công
             const newLogs: StockLogEntry[] = origItems
-                .filter(i => i.variantSku && i.quantity > 0)
+                .filter(i => i.variantSku && updatedSkus.includes(i.variantSku) && i.quantity > 0)
                 .map(i => ({
                     sku: i.variantSku || '',
                     name: i.productName || '',
                     qty: i.quantity,
-                    orderId: refundRecord.orderNumber || refundRecord.refundCode || `#${refundRecord.id}`,
+                    orderId: ref,
                     time: dayjs().format('HH:mm:ss DD/MM'),
                 }));
-            setStockLog(prev => [...newLogs, ...prev]);
+            if (newLogs.length > 0) setStockLog(prev => [...newLogs, ...prev]);
 
-            const totalQty = origItems.reduce((s, i) => s + i.quantity, 0);
-            message.success(`✅ Đã hoàn! Cộng ${totalQty} SP vào kho`);
+            const addedQty = origItems
+                .filter(i => i.variantSku && updatedSkus.includes(i.variantSku))
+                .reduce((s, i) => s + i.quantity, 0);
+
+            if (failedSkus.length > 0 && updatedSkus.length === 0) {
+                message.warning(`⚠️ Đã xác nhận hoàn nhưng không tìm thấy SKU trong kho: ${failedSkus.join(', ')}. Kiểm tra lại SKU sản phẩm.`);
+            } else if (failedSkus.length > 0) {
+                message.warning(`⚠️ Cộng ${addedQty} SP vào kho. SKU không tìm thấy: ${failedSkus.join(', ')}`);
+            } else {
+                message.success(`✅ Đã hoàn! Cộng ${addedQty} SP vào kho`);
+            }
             playSuccess();
         } catch (error) {
             console.error('Confirm full error:', error);
@@ -497,24 +517,36 @@ export default function RefundsPage() {
         }
 
         try {
+            const ref = refundRecord.orderNumber || refundRecord.refundCode || `P.Hoàn ${refundRecord.id}`;
+            const updatedSkus: string[] = [];
+            const failedSkus: string[] = [];
+
             // Cộng tồn kho theo SKU custom
             for (const item of validItems) {
                 try {
-                    await window.electronAPI.products.updateStock({
+                    const result = await window.electronAPI.products.updateStock({
                         sku: item.sku,
                         quantity: item.qty,
                         isAdd: true,
+                        allowMissing: true,
                         logContext: {
                             type: 'refund',
                             referenceType: 'HOAN',
-                            reference: refundRecord.orderNumber || refundRecord.refundCode || `P.Hoàn ${refundRecord.id}`,
+                            reference: ref,
                             note: `Xác nhận hoàn lệch/custom (${refundRecord.customerName})`,
                             createdBy: null
                         }
                     });
-                    console.log(`✅ Cộng kho (custom): ${item.sku} +${item.qty}`);
+                    if (result?.success) {
+                        console.log(`✅ Cộng kho (custom): ${item.sku} +${item.qty}`);
+                        updatedSkus.push(item.sku);
+                    } else {
+                        console.error(`❌ Cộng kho thất bại ${item.sku}:`, result?.error);
+                        failedSkus.push(item.sku);
+                    }
                 } catch (err) {
                     console.error(`❌ Lỗi cộng kho ${item.sku}:`, err);
+                    failedSkus.push(item.sku);
                 }
             }
 
@@ -534,20 +566,29 @@ export default function RefundsPage() {
             });
             setRefunds(prev => prev.map(r => r.id === refundRecord.id ? { ...r, status: 'completed', notes: updatedNotes } : r));
 
-            // Ghi stock log
-            const newLogs: StockLogEntry[] = validItems.map(i => ({
-                sku: i.sku,
-                name: i.name,
-                qty: i.qty,
-                orderId: refundRecord.orderNumber || refundRecord.refundCode || `#${refundRecord.id}`,
-                time: dayjs().format('HH:mm:ss DD/MM'),
-            }));
-            setStockLog(prev => [...newLogs, ...prev]);
+            // Ghi stock log chỉ cho các SKU cộng thành công
+            const newLogs: StockLogEntry[] = validItems
+                .filter(i => updatedSkus.includes(i.sku))
+                .map(i => ({
+                    sku: i.sku,
+                    name: i.name,
+                    qty: i.qty,
+                    orderId: ref,
+                    time: dayjs().format('HH:mm:ss DD/MM'),
+                }));
+            if (newLogs.length > 0) setStockLog(prev => [...newLogs, ...prev]);
 
             // Đóng mismatch
             setMismatchOpen(prev => { const n = new Set(prev); n.delete(refundRecord.id); return n; });
 
-            message.success(`✅ Đã hoàn! Cộng ${recvTotal} SP vào kho (đã chỉnh SKU)`);
+            const addedQty = validItems.filter(i => updatedSkus.includes(i.sku)).reduce((s, i) => s + i.qty, 0);
+            if (failedSkus.length > 0 && updatedSkus.length === 0) {
+                message.warning(`⚠️ Đã xác nhận hoàn nhưng không tìm thấy SKU trong kho: ${failedSkus.join(', ')}`);
+            } else if (failedSkus.length > 0) {
+                message.warning(`⚠️ Cộng ${addedQty} SP vào kho. SKU không tìm thấy: ${failedSkus.join(', ')}`);
+            } else {
+                message.success(`✅ Đã hoàn! Cộng ${addedQty} SP vào kho (đã chỉnh SKU)`);
+            }
             playSuccess();
         } catch (error) {
             console.error('Confirm custom error:', error);

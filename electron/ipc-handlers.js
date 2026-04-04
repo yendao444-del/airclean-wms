@@ -1336,7 +1336,7 @@ ipcMain.handle('pickup:startWatch', async (event, folderPath) => {
 // ========================================
 
 // Update stock khi export hoặc cân bằng kho
-ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = false, logContext = null }) => {
+ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = false, logContext = null, allowMissing = false }) => {
     try {
         requireRole('admin', 'manager', 'staff');
         console.log(`📦 Update stock: SKU=${sku}, Qty=${quantity}, Add=${isAdd}`);
@@ -1364,7 +1364,7 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
                     const componentQty = item.quantity * quantity; // Qty per combo × combos sold
                     console.log(`  → Deducting ${componentQty} from ${item.sku}`);
 
-                    const deductResult = await updateProductStockInTx(tx, item.sku, -componentQty, logContext);
+                    const deductResult = await updateProductStockInTx(tx, item.sku, -componentQty, logContext, { allowMissing });
                     deductResults.push(deductResult);
                 }
 
@@ -1373,7 +1373,11 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
             }
 
             // Regular product/variant stock update
-            const result = await updateProductStockInTx(tx, sku, delta, logContext);
+            const result = await updateProductStockInTx(tx, sku, delta, logContext, { allowMissing });
+            if (result === false) {
+                // allowMissing=true và không tìm thấy SKU
+                return { success: false, skipped: true, error: `SKU "${sku}" không tìm thấy trong kho` };
+            }
             return { success: true, data: result };
         });
     } catch (error) {
@@ -1381,6 +1385,133 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
         return { success: false, error: error.message };
     }
 });
+
+/**
+ * 🚀 BATCH OPTIMIZATION HELPERS — tối ưu import/delete hàng loạt
+ */
+
+/**
+ * Xây cache SKU → Product/Variant 1 lần duy nhất cho cả batch.
+ * Thay vì full table scan mỗi lần tìm variant, cache O(1) lookup.
+ */
+async function buildSkuCache(tx) {
+    const allProducts = await tx.product.findMany();
+    const allCombos = await tx.comboProduct.findMany();
+
+    const productMap = new Map(); // sku → { product, isVariant, variantIndex }
+    const comboMap = new Map();   // sku → { combo, items[] }
+
+    for (const p of allProducts) {
+        productMap.set(p.sku, { product: p, isVariant: false, variantIndex: -1 });
+        if (p.variants) {
+            try {
+                const variants = JSON.parse(p.variants);
+                for (let i = 0; i < variants.length; i++) {
+                    if (variants[i].sku) {
+                        productMap.set(variants[i].sku, { product: p, isVariant: true, variantIndex: i });
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    for (const c of allCombos) {
+        let items = [];
+        try { items = typeof c.items === 'string' ? JSON.parse(c.items) : (c.items || []); } catch {}
+        comboMap.set(c.sku, { combo: c, items });
+    }
+
+    return { productMap, comboMap };
+}
+
+/**
+ * Batch stock update: gom tất cả SKU thay đổi → nhóm theo SKU → 1 lần update/SKU.
+ * @param {object} tx - Prisma transaction
+ * @param {Array<{sku: string, quantity: number}>} skuChanges - Danh sách {sku, quantity} (quantity < 0 = trừ kho)
+ * @param {object} logContext - Context log cho inventory
+ * @param {object} skuCache - Cache từ buildSkuCache()
+ */
+async function batchStockUpdate(tx, skuChanges, logContext, skuCache) {
+    const { productMap, comboMap } = skuCache;
+
+    // Bước 1: Resolve combo → flat list of actual SKU changes
+    const flatChanges = new Map(); // sku → tổng quantity
+    for (const { sku, quantity } of skuChanges) {
+        const combo = comboMap.get(sku);
+        if (combo) {
+            for (const ci of combo.items) {
+                const componentQty = ci.quantity * Math.abs(quantity);
+                const delta = quantity < 0 ? -componentQty : componentQty;
+                flatChanges.set(ci.sku, (flatChanges.get(ci.sku) || 0) + delta);
+            }
+        } else {
+            flatChanges.set(sku, (flatChanges.get(sku) || 0) + quantity);
+        }
+    }
+
+    // Bước 2: Lookup user ID 1 lần
+    let createdById = null;
+    if (logContext.createdBy) {
+        if (typeof logContext.createdBy === 'string') {
+            const user = await tx.user.findUnique({ where: { username: logContext.createdBy } });
+            createdById = user ? user.id : null;
+        } else if (typeof logContext.createdBy === 'number') {
+            createdById = logContext.createdBy;
+        }
+    }
+
+    // Bước 3: Update stock + create log cho mỗi SKU (đã gom)
+    for (const [sku, totalQty] of flatChanges) {
+        const info = productMap.get(sku);
+        if (!info) {
+            console.warn(`⚠️ [Batch] Bỏ qua SKU ${sku} — không tìm thấy sản phẩm`);
+            continue;
+        }
+
+        const { product, isVariant, variantIndex } = info;
+        let oldStock = 0, newStock = 0, variantColor = null;
+
+        if (isVariant) {
+            // ⚠️ Đọc variants MỚI NHẤT từ cache (có thể đã bị update bởi variant khác cùng product)
+            let variants = JSON.parse(product.variants);
+            oldStock = variants[variantIndex].stock || 0;
+            newStock = Math.max(0, oldStock + totalQty);
+            variants[variantIndex].stock = newStock;
+            variantColor = variants[variantIndex].color || variants[variantIndex].name || null;
+
+            const updatedVariantsStr = JSON.stringify(variants);
+            await tx.product.update({
+                where: { id: product.id },
+                data: { variants: updatedVariantsStr }
+            });
+            // 🔧 SYNC CACHE: cập nhật product.variants trong cache
+            // để variant khác cùng product đọc đúng data mới nhất
+            product.variants = updatedVariantsStr;
+        } else {
+            oldStock = product.stock || 0;
+            const op = totalQty >= 0 ? { increment: totalQty } : { decrement: Math.abs(totalQty) };
+            const updated = await tx.product.update({
+                where: { id: product.id },
+                data: { stock: op }
+            });
+            newStock = updated.stock;
+            // 🔧 SYNC CACHE cho non-variant
+            product.stock = newStock;
+        }
+
+        await tx.inventoryLog.create({
+            data: {
+                productId: product.id, productName: product.name,
+                variantColor, sku, type: logContext.type,
+                referenceType: logContext.referenceType, reference: logContext.reference,
+                quantity: totalQty, oldStock, newStock,
+                note: logContext.note || '', createdBy: createdById
+            }
+        });
+    }
+
+    return flatChanges.size;
+}
 
 /**
  * Deduct/restore stock cho 1 item — tự động expand nếu là ComboProduct.
@@ -4681,35 +4812,49 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
 ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
-        
-        const count = await prisma.$transaction(async (tx) => {
-            let deletedCount = 0;
-            for (const id of ids) {
-                const doc = await tx.ecommerceExport.findUnique({ where: { id } });
-                if (!doc) continue;
+        const startTime = Date.now();
 
-                if (doc.status === 'completed') {
+        const count = await prisma.$transaction(async (tx) => {
+            // 🚀 Bước 1: Lấy TẤT CẢ đơn cần xóa trong 1 query
+            const docs = await tx.ecommerceExport.findMany({
+                where: { id: { in: ids } }
+            });
+            if (docs.length === 0) return 0;
+
+            // 🚀 Bước 2: Gom SKU cần hoàn kho từ đơn completed
+            const completedDocs = docs.filter(d => d.status === 'completed');
+            if (completedDocs.length > 0) {
+                const skuCache = await buildSkuCache(tx);
+                const skuChanges = [];
+                for (const doc of completedDocs) {
                     const items = JSON.parse(doc.items || '[]');
                     for (const item of items) {
                         if (item.variantSku) {
-                            await updateProductStockInTx(tx, item.variantSku, item.quantity, {
-                                type: 'adjustment',
-                                referenceType: 'TMDT_CANCEL',
-                                reference: doc.orderNumber || doc.ecommerceExportCode || 'Xóa hàng loạt',
-                                note: `Hoàn tồn do xóa đơn TMDT #${id}`,
-                                createdBy: 'System'
-                            }, { allowMissing: true });
+                            skuChanges.push({ sku: item.variantSku, quantity: item.quantity }); // + quantity = hoàn kho
                         }
                     }
                 }
-                await tx.ecommerceExport.delete({ where: { id } });
-                deletedCount++;
+                if (skuChanges.length > 0) {
+                    await batchStockUpdate(tx, skuChanges, {
+                        type: 'adjustment',
+                        referenceType: 'TMDT_CANCEL',
+                        reference: `Xóa hàng loạt ${docs.length} đơn`,
+                        note: `Hoàn tồn do xóa ${completedDocs.length} đơn TMDT completed`,
+                        createdBy: 'System'
+                    }, skuCache);
+                }
             }
-            return deletedCount;
-        }, { timeout: 30000, maxWait: 10000 });
 
-        console.log(`✅ Bulk deleted ${count} ecommerce exports`);
-        void logActivity({ module: 'export', action: 'DELETE', description: `Xóa hàng loạt ${count} bàn giao TMDT` });
+            // 🚀 Bước 3: Xóa tất cả trong 1 DELETE statement
+            const deleted = await tx.ecommerceExport.deleteMany({
+                where: { id: { in: ids } }
+            });
+            return deleted.count;
+        }, { timeout: 60000, maxWait: 10000 });
+
+        const elapsed = Date.now() - startTime;
+        console.log(`✅ Bulk deleted ${count} ecommerce exports in ${elapsed}ms`);
+        void logActivity({ module: 'export', action: 'DELETE', description: `Xóa hàng loạt ${count} bàn giao TMDT (${elapsed}ms)` });
         return { success: true, data: count };
     } catch (error) {
         console.error('❌ Bulk delete ecommerce exports error:', error);
@@ -4736,52 +4881,85 @@ ipcMain.handle('ecommerceExports:deleteAll', async () => {
 ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
-        
-        const created = await prisma.$transaction(async (tx) => {
-            const batchCreated = [];
-            for (const data of records) {
-                const record = await tx.ecommerceExport.create({
-                    data: {
-                        customerName: data.customerName,
-                        ecommerceExportCode: data.ecommerceExportCode || null,
-                        orderNumber: data.orderNumber || null,
-                        ecommerceExportReason: data.ecommerceExportReason || null,
-                        ecommerceExportDate: (data.ecommerceExportDate && !isNaN(new Date(data.ecommerceExportDate).getTime())) ? new Date(data.ecommerceExportDate) : new Date(),
-                        items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
-                        totalAmount: data.totalAmount || 0,
-                        notes: data.notes || null,
-                        status: data.status || 'processing',
-                        createdBy: data.createdBy || null
-                    }
-                });
+        const startTime = Date.now();
 
-                if (data.status === 'completed') {
+        const result = await prisma.$transaction(async (tx) => {
+            // 🚀 Bước 1: Batch INSERT tất cả đơn cùng lúc (1 SQL statement)
+            const createData = records.map(data => ({
+                customerName: data.customerName,
+                ecommerceExportCode: data.ecommerceExportCode || null,
+                orderNumber: data.orderNumber || null,
+                ecommerceExportReason: data.ecommerceExportReason || null,
+                ecommerceExportDate: (data.ecommerceExportDate && !isNaN(new Date(data.ecommerceExportDate).getTime())) ? new Date(data.ecommerceExportDate) : new Date(),
+                items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
+                totalAmount: data.totalAmount || 0,
+                notes: data.notes || null,
+                status: data.status || 'processing',
+                createdBy: data.createdBy || null
+            }));
+
+            await tx.ecommerceExport.createMany({ data: createData });
+
+            // 🚀 Bước 2: Gom tất cả SKU cần trừ kho → batch update
+            const completedRecords = records.filter(d => d.status === 'completed');
+            if (completedRecords.length > 0) {
+                const skuCache = await buildSkuCache(tx);
+                const skuChanges = [];
+                for (const data of completedRecords) {
                     const itemsList = typeof data.items === 'string' ? JSON.parse(data.items) : data.items;
                     for (const item of itemsList) {
                         if (item.variantSku) {
-                            await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
-                                type: 'ecom_sale',
-                                referenceType: 'TMDT',
-                                reference: data.orderNumber || data.ecommerceExportCode || 'Nhập hàng loạt',
-                                note: `Tạo/Sửa đơn TMDT: ${data.customerName}`,
-                                createdBy: data.createdBy || 'System'
-                            }, { allowMissing: true });
+                            skuChanges.push({ sku: item.variantSku, quantity: -item.quantity });
                         }
                     }
                 }
-                batchCreated.push(record);
+                if (skuChanges.length > 0) {
+                    await batchStockUpdate(tx, skuChanges, {
+                        type: 'ecom_sale',
+                        referenceType: 'TMDT',
+                        reference: `Nhập hàng loạt ${records.length} đơn`,
+                        note: `Tạo hàng loạt ${completedRecords.length} đơn TMDT completed`,
+                        createdBy: records[0]?.createdBy || 'System'
+                    }, skuCache);
+                }
             }
-            return batchCreated;
+
+            return records.length;
         }, {
             maxWait: 15000,
             timeout: 120000,
         });
 
-        console.log(`✅ Bulk created ${created.length} ecommerce exports`);
-        void logActivity({ module: 'export', action: 'CREATE', description: `Tạo hàng loạt ${created.length} bàn giao TMDT` });
-        return { success: true, data: created };
+        const elapsed = Date.now() - startTime;
+        console.log(`✅ Bulk created ${result} ecommerce exports in ${elapsed}ms`);
+        void logActivity({ module: 'export', action: 'CREATE', description: `Tạo hàng loạt ${result} bàn giao TMDT (${elapsed}ms)` });
+        return { success: true, data: { count: result } };
     } catch (error) {
         console.error('❌ Bulk create ecommerce exports error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// 🚫 Đánh dấu hàng loạt đơn TMDT đã bị hủy trên sàn (đối soát khi import file mới)
+// Chỉ cancel đơn pending — không đụng vào đơn completed (đã giao rồi)
+ipcMain.handle('ecommerceExports:bulkCancel', async (event, ids) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        if (!ids || ids.length === 0) return { success: true, data: 0 };
+
+        const result = await prisma.ecommerceExport.updateMany({
+            where: {
+                id: { in: ids },
+                status: { notIn: ['completed'] } // Chỉ cancel đơn chưa giao
+            },
+            data: { status: 'cancelled' }
+        });
+
+        console.log(`🚫 Bulk cancelled ${result.count} ecommerce exports (đối soát sàn)`);
+        void logActivity({ module: 'export', action: 'UPDATE', description: `Tự động hủy ${result.count} đơn TMDT (đối soát sàn)` });
+        return { success: true, data: result.count };
+    } catch (error) {
+        console.error('❌ Bulk cancel ecommerce exports error:', error);
         return { success: false, error: error.message };
     }
 });

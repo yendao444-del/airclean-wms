@@ -1735,10 +1735,10 @@ export default function Attendance() {
     const [empListModalOpen, setEmpListModalOpen] = useState(false);
     const [editingEmp, setEditingEmp] = useState<Employee | null>(null);
 
-    // State cho lọc kỳ lương Tổng quát — khai báo sớm để loadPackingOrders dùng được
+    // State cho lọc kỳ lương Tổng quát — mặc định theo tháng hiện tại
     const [overviewDateRange, setOverviewDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs]>([
-        dayjs().startOf('day'),
-        dayjs().endOf('day'),
+        dayjs().startOf('month'),
+        dayjs().endOf('month'),
     ]);
 
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);

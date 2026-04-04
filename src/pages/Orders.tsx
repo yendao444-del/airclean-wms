@@ -53,6 +53,7 @@ export default function OrdersPage() {
     const [editForm] = Form.useForm();
     const [editSaving, setEditSaving] = useState(false);
     const [editItems, setEditItems] = useState<any[]>([]);
+    const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
 
     // Product detail modal state
     const [productDetailName, setProductDetailName] = useState<string | null>(null);
@@ -376,6 +377,67 @@ export default function OrdersPage() {
         }
     };
 
+    // 🗑️ Xóa hàng loạt đơn hàng đã chọn
+    const handleBulkDelete = async () => {
+        if (selectedRowKeys.length === 0) return;
+        // Phân loại đơn theo source
+        const toDelete = selectedRowKeys.map(key => orders.find(o => o.id === key)).filter(Boolean) as UnifiedOrder[];
+        const posOrders = toDelete.filter(o => o.source === 'pos');
+        const exportOrders = toDelete.filter(o => o.source === 'export');
+        const tmdtOrders = toDelete.filter(o => o.source === 'tmdt');
+
+        const parts: string[] = [];
+        if (posOrders.length > 0) parts.push(`${posOrders.length} đơn POS`);
+        if (exportOrders.length > 0) parts.push(`${exportOrders.length} đơn Xuất hàng`);
+        if (tmdtOrders.length > 0) parts.push(`${tmdtOrders.length} đơn TMDT`);
+
+        Modal.confirm({
+            title: `⚠️ Xóa ${toDelete.length} đơn hàng đã chọn?`,
+            content: (
+                <div>
+                    <p>Bao gồm: {parts.join(', ')}</p>
+                    <p style={{ color: '#ff4d4f', fontWeight: 600 }}>Đơn POS sẽ được hoàn kho. Không thể khôi phục!</p>
+                </div>
+            ),
+            okText: `Xóa ${toDelete.length} đơn`,
+            okType: 'danger',
+            cancelText: 'Hủy',
+            onOk: async () => {
+                const api = (window as any).electronAPI;
+                let successCount = 0;
+                let errorCount = 0;
+
+                // Xóa POS (từng đơn — vì cần hoàn kho)
+                for (const o of posOrders) {
+                    try {
+                        const res = await api.posOrder.delete({ id: o.originalId, userName: 'Admin' });
+                        if (res.success) successCount++; else errorCount++;
+                    } catch { errorCount++; }
+                }
+                // Xóa Export Orders (từng đơn)
+                for (const o of exportOrders) {
+                    try {
+                        const res = await api.exportOrders.delete(o.originalId);
+                        if (res.success) successCount++; else errorCount++;
+                    } catch { errorCount++; }
+                }
+                // Xóa TMDT (bulk)
+                if (tmdtOrders.length > 0) {
+                    try {
+                        const ids = tmdtOrders.map(o => o.originalId);
+                        const res = await api.ecommerceExports.bulkDelete(ids);
+                        if (res.success) successCount += tmdtOrders.length; else errorCount += tmdtOrders.length;
+                    } catch { errorCount += tmdtOrders.length; }
+                }
+
+                if (successCount > 0) message.success(`✅ Đã xóa ${successCount} đơn hàng!`);
+                if (errorCount > 0) message.error(`❌ ${errorCount} đơn xóa thất bại`);
+                setSelectedRowKeys([]);
+                loadAllOrders();
+            },
+        });
+    };
+
     // Export Excel
     const handleExportExcel = () => {
         if (filteredOrders.length === 0) { message.warning('Không có dữ liệu!'); return; }
@@ -530,6 +592,11 @@ export default function OrdersPage() {
                         value={searchKeyword} onChange={e => setSearchKeyword(e.target.value)}
                         allowClear style={{ width: 200 }}
                     />
+                    {selectedRowKeys.length > 0 && (
+                        <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete}>
+                            Xóa ({selectedRowKeys.length})
+                        </Button>
+                    )}
                     <Button icon={<DownloadOutlined />} onClick={handleExportExcel}>Xuất Excel</Button>
                 </Space>
             </div>
@@ -716,6 +783,10 @@ export default function OrdersPage() {
                     columns={columns}
                     rowKey="id"
                     size="small"
+                    rowSelection={{
+                        selectedRowKeys,
+                        onChange: (keys) => setSelectedRowKeys(keys),
+                    }}
                     pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `${t} đơn hàng` }}
                     scroll={{ x: 1000 }}
                     expandable={{

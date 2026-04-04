@@ -409,129 +409,34 @@ const xntNum = (v: number, color?: string) => (
     </span>
 );
 
+interface AdjustLogRow {
+    id: number;
+    sku: string;
+    productName: string;
+    variantColor: string | null;
+    quantity: number;
+    note: string;
+    reference: string;
+    createdAt: string;
+    userName: string | null;
+}
+
 function XNTTab({ dateRange }: { dateRange: [Dayjs, Dayjs] }) {
+    const [adjustLogs, setAdjustLogs] = useState<AdjustLogRow[]>([]);
     const [loading, setLoading] = useState(false);
-    const [rows, setRows] = useState<XNTProductRow[]>([]);
-    const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
-    const [searchText, setSearchText] = useState('');
 
     const loadData = useCallback(async () => {
         setLoading(true);
         try {
-            // ⚡ Chỉ fetch từ đầu kỳ được chọn — giảm egress Supabase
-            const since = dateRange[0].startOf('day').toISOString();
-            const [prodRes, purRes, expRes, ecomRes] = await Promise.all([
-                window.electronAPI.products.getAll(),
-                window.electronAPI.purchases.getAll({ since }),
-                window.electronAPI.exportOrders.getAll({ since }),
-                window.electronAPI.ecommerceExports.getAll({ since }),
-            ]);
-
-            if (!prodRes.success) return;
-            const products: any[] = prodRes.data || [];
-            const purchases: any[] = purRes.success ? (purRes.data || []) : [];
-            const exportOrders: any[] = expRes.success ? (expRes.data || []) : [];
-            const ecomExports: any[] = ecomRes.success ? (ecomRes.data || []) : [];
-
-            const [startDate, endDate] = dateRange;
-            const isInRange = (dateStr: string) => {
-                if (!dateStr) return false;
-                const d = dayjs(dateStr);
-                return d.isAfter(startDate.startOf('day').subtract(1, 'ms')) && d.isBefore(endDate.endOf('day').add(1, 'ms'));
-            };
-
-            const importedMap: Record<string, number> = {};
-            const exportedMap: Record<string, number> = {};
-
-            purchases.forEach((p: any) => {
-                const pDate = p.purchaseDate || p.receivedAt || p.createdAt;
-                if (!isInRange(pDate)) return;
-                try {
-                    const items = typeof p.items === 'string' ? JSON.parse(p.items) : (p.items || []);
-                    items.forEach((item: any) => {
-                        const sku = item.variantSku || item.sku || '';
-                        if (!sku) return;
-                        importedMap[sku] = (importedMap[sku] || 0) + (item.quantity || 0);
-                    });
-                } catch { /* skip */ }
+            const res = await window.electronAPI.inventoryLogs.getAll({
+                referenceType: 'CAN_BANG',
+                startDate: dateRange[0].startOf('day').toISOString(),
+                endDate: dateRange[1].endOf('day').toISOString(),
+                limit: 500,
             });
-
-            exportOrders.forEach((e: any) => {
-                if (!isInRange(e.exportDate)) return;
-                try {
-                    const items = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []);
-                    items.forEach((item: any) => {
-                        const sku = item.sku || item.variantSku || '';
-                        if (!sku) return;
-                        exportedMap[sku] = (exportedMap[sku] || 0) + (item.quantity || 0);
-                    });
-                } catch { /* skip */ }
-            });
-
-            ecomExports.forEach((e: any) => {
-                if (e.status !== 'completed') return;
-                if (!isInRange(e.ecommerceExportDate)) return;
-                try {
-                    const items = typeof e.items === 'string' ? JSON.parse(e.items) : (e.items || []);
-                    items.forEach((item: any) => {
-                        const sku = item.sku || item.variantSku || '';
-                        if (!sku) return;
-                        exportedMap[sku] = (exportedMap[sku] || 0) + (item.quantity || 0);
-                    });
-                } catch { /* skip */ }
-            });
-
-            const result: XNTProductRow[] = [];
-
-            for (const p of products) {
-                let categoryName = '';
-                try { categoryName = (p.categoryName || p.category?.name || ''); } catch { /**/ }
-
-                const variants: any[] = (() => {
-                    try { return p.variants ? JSON.parse(p.variants) : []; } catch { return []; }
-                })();
-
-                if (variants.length > 0) {
-                    const variantRows: XNTVariantRow[] = [];
-                    for (const v of variants) {
-                        const sku = v.sku || '';
-                        if (!sku) continue;
-                        const closingStock = v.stock || 0;
-                        const imported = importedMap[sku] || 0;
-                        const exported = exportedMap[sku] || 0;
-                        const openingStock = closingStock - imported + exported;
-                        if (closingStock === 0 && imported === 0 && exported === 0) continue;
-                        const label = [v.color, v.size].filter(Boolean).join(' / ') || sku;
-                        variantRows.push({ key: sku, sku, variantLabel: label, openingStock, imported, exported, closingStock });
-                    }
-                    if (variantRows.length === 0) continue;
-                    result.push({
-                        key: `prod-${p.id}`,
-                        productName: p.name,
-                        categoryName,
-                        sku: '',
-                        hasVariants: true,
-                        openingStock: variantRows.reduce((s, r) => s + r.openingStock, 0),
-                        imported: variantRows.reduce((s, r) => s + r.imported, 0),
-                        exported: variantRows.reduce((s, r) => s + r.exported, 0),
-                        closingStock: variantRows.reduce((s, r) => s + r.closingStock, 0),
-                        variants: variantRows,
-                    });
-                } else {
-                    const sku = p.sku || '';
-                    if (!sku) continue;
-                    const closingStock = p.stock || 0;
-                    const imported = importedMap[sku] || 0;
-                    const exported = exportedMap[sku] || 0;
-                    const openingStock = closingStock - imported + exported;
-                    if (closingStock === 0 && imported === 0 && exported === 0) continue;
-                    result.push({ key: `prod-${p.id}`, productName: p.name, categoryName, sku, hasVariants: false, openingStock, imported, exported, closingStock, variants: [] });
-                }
-            }
-
-            setRows(result);
+            if (res.success) setAdjustLogs(res.data || []);
         } catch (err) {
-            console.error('XNT load error', err);
+            console.error('Load adjust logs error', err);
         } finally {
             setLoading(false);
         }
@@ -539,143 +444,93 @@ function XNTTab({ dateRange }: { dateRange: [Dayjs, Dayjs] }) {
 
     useEffect(() => { loadData(); }, [loadData]);
 
-    const filtered = useMemo(() => {
-        if (!searchText.trim()) return rows;
-        const s = searchText.toLowerCase();
-        return rows.filter(r =>
-            r.productName.toLowerCase().includes(s) ||
-            r.categoryName.toLowerCase().includes(s) ||
-            r.sku.toLowerCase().includes(s) ||
-            r.variants.some(v => v.sku.toLowerCase().includes(s) || v.variantLabel.toLowerCase().includes(s))
-        );
-    }, [rows, searchText]);
-
-    const totals = useMemo(() => ({
-        openingStock: filtered.reduce((s, r) => s + r.openingStock, 0),
-        imported: filtered.reduce((s, r) => s + r.imported, 0),
-        exported: filtered.reduce((s, r) => s + r.exported, 0),
-        closingStock: filtered.reduce((s, r) => s + r.closingStock, 0),
-    }), [filtered]);
-
-    const columns: ColumnsType<XNTProductRow> = [
-        {
-            title: 'Tên sản phẩm',
-            dataIndex: 'productName',
-            key: 'productName',
-            render: (name, record) => (
-                <div>
-                    <div style={{ fontWeight: 600, fontSize: 13 }}>{name}</div>
-                    {!record.hasVariants && record.sku && (
-                        <span style={{ fontFamily: 'monospace', fontSize: 11, background: '#e6f4ff', color: '#1677ff', padding: '1px 5px', borderRadius: 3 }}>
-                            {record.sku}
-                        </span>
-                    )}
-                    {record.hasVariants && (
-                        <span style={{ fontSize: 11, color: '#8c8c8c' }}>{record.variants.length} phân loại</span>
-                    )}
-                </div>
-            ),
-        },
-        {
-            title: 'Danh mục', dataIndex: 'categoryName', key: 'categoryName', width: 130, ellipsis: true,
-            render: (v) => v ? <Tag style={{ margin: 0 }}>{v}</Tag> : '',
-        },
-        {
-            title: 'Tồn đầu kỳ', dataIndex: 'openingStock', key: 'openingStock', width: 105, align: 'right',
-            render: (v) => xntNum(v),
-        },
-        {
-            title: 'Nhập kỳ', dataIndex: 'imported', key: 'imported', width: 95, align: 'right',
-            render: (v) => xntNum(v, v > 0 ? '#1a9c3e' : undefined),
-        },
-        {
-            title: 'Xuất kỳ', dataIndex: 'exported', key: 'exported', width: 95, align: 'right',
-            render: (v) => xntNum(v, v > 0 ? '#f5520c' : undefined),
-        },
-        {
-            title: 'Tồn cuối kỳ', dataIndex: 'closingStock', key: 'closingStock', width: 105, align: 'right',
-            render: (v) => <span style={{ fontWeight: 700, color: v < 0 ? '#ff4d4f' : '#1890ff' }}>{v.toLocaleString('vi-VN')}</span>,
-        },
-    ];
-
-    const variantColumns: ColumnsType<XNTVariantRow> = [
-        {
-            title: 'Phân loại', dataIndex: 'variantLabel', key: 'variantLabel',
-            render: (label, record) => (
-                <div>
-                    <span style={{ fontFamily: 'monospace', fontSize: 11, background: '#e6f4ff', color: '#1677ff', padding: '1px 5px', borderRadius: 3, marginRight: 6 }}>
-                        {record.sku}
-                    </span>
-                    <span style={{ color: '#595959', fontSize: 12 }}>{label}</span>
-                </div>
-            ),
-        },
-        { title: 'Tồn đầu kỳ', dataIndex: 'openingStock', key: 'openingStock', width: 105, align: 'right', render: (v) => xntNum(v) },
-        { title: 'Nhập kỳ', dataIndex: 'imported', key: 'imported', width: 95, align: 'right', render: (v) => xntNum(v, v > 0 ? '#1a9c3e' : undefined) },
-        { title: 'Xuất kỳ', dataIndex: 'exported', key: 'exported', width: 95, align: 'right', render: (v) => xntNum(v, v > 0 ? '#f5520c' : undefined) },
-        { title: 'Tồn cuối kỳ', dataIndex: 'closingStock', key: 'closingStock', width: 105, align: 'right', render: (v) => <span style={{ fontWeight: 700, color: v < 0 ? '#ff4d4f' : '#1890ff' }}>{v.toLocaleString('vi-VN')}</span> },
-    ];
-
     return (
         <Card>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <Text style={{ color: '#8c8c8c', fontSize: 13 }}>
-                    Kỳ: <strong>{dateRange[0].format('DD/MM/YYYY')}</strong> → <strong>{dateRange[1].format('DD/MM/YYYY')}</strong>
-                </Text>
-                <Space>
-                    <Input.Search
-                        placeholder="Tìm tên sản phẩm, SKU..."
-                        value={searchText}
-                        onChange={(e) => setSearchText(e.target.value)}
-                        allowClear
-                        style={{ width: 260 }}
-                    />
-                    <Button icon={<ReloadOutlined />} onClick={loadData} loading={loading}>Làm mới</Button>
-                </Space>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                <div>
+                    <Text strong style={{ fontSize: 15 }}>⚖️ Cân bằng kho</Text>
+                    <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+                        Kỳ: <strong>{dateRange[0].format('DD/MM/YYYY')}</strong> → <strong>{dateRange[1].format('DD/MM/YYYY')}</strong>
+                        {' · '}{adjustLogs.length} bản ghi
+                    </Text>
+                </div>
+                <Button icon={<ReloadOutlined />} onClick={loadData} loading={loading}>Làm mới</Button>
             </div>
-            <Table
-                columns={columns}
-                dataSource={filtered}
-                rowKey="key"
-                loading={loading}
-                size="middle"
-                pagination={{ pageSize: 50, showSizeChanger: true, showTotal: (total) => `${total} sản phẩm` }}
-                onRow={(record) => ({
-                    onClick: () => {
-                        if (!record.hasVariants) return;
-                        setExpandedKeys(prev =>
-                            prev.includes(record.key) ? prev.filter(k => k !== record.key) : [...prev, record.key]
-                        );
-                    },
-                    style: { cursor: record.hasVariants ? 'pointer' : 'default' },
-                })}
-                expandable={{
-                    expandedRowKeys: expandedKeys,
-                    showExpandColumn: false,
-                    expandedRowRender: (record) => (
-                        <div style={{ margin: '0 0 0 24px', borderLeft: '3px solid #722ed1', paddingLeft: 12 }}>
-                            <Table
-                                columns={variantColumns}
-                                dataSource={record.variants}
-                                rowKey="key"
-                                size="small"
-                                pagination={false}
-                                showHeader={true}
-                            />
-                        </div>
-                    ),
-                    rowExpandable: (record) => record.hasVariants,
-                }}
-                summary={() => (
-                    <Table.Summary.Row style={{ background: '#f5f6f8', fontWeight: 700 }}>
-                        <Table.Summary.Cell index={0} colSpan={2}><strong>Tổng cộng ({filtered.length} sản phẩm)</strong></Table.Summary.Cell>
-                        <Table.Summary.Cell index={1} align="right"><span style={{ fontWeight: 700 }}>{totals.openingStock.toLocaleString('vi-VN')}</span></Table.Summary.Cell>
-                        <Table.Summary.Cell index={2} align="right"><span style={{ fontWeight: 700, color: '#1a9c3e' }}>{totals.imported.toLocaleString('vi-VN')}</span></Table.Summary.Cell>
-                        <Table.Summary.Cell index={3} align="right"><span style={{ fontWeight: 700, color: '#f5520c' }}>{totals.exported.toLocaleString('vi-VN')}</span></Table.Summary.Cell>
-                        <Table.Summary.Cell index={4} align="right"><span style={{ fontWeight: 700, color: '#1890ff' }}>{totals.closingStock.toLocaleString('vi-VN')}</span></Table.Summary.Cell>
-                    </Table.Summary.Row>
-                )}
-            />
+
+            {adjustLogs.length === 0 && !loading ? (
+                <div style={{ textAlign: 'center', color: '#bfbfbf', padding: '48px 0', fontSize: 13 }}>
+                    Không có điều chỉnh tồn kho trong kỳ này
+                </div>
+            ) : (
+                <Table<AdjustLogRow>
+                    dataSource={adjustLogs}
+                    rowKey="id"
+                    loading={loading}
+                    size="middle"
+                    pagination={{ pageSize: 30, showSizeChanger: false, showTotal: (t) => `${t} bản ghi` }}
+                    columns={[
+                        {
+                            title: 'Thời gian',
+                            dataIndex: 'createdAt',
+                            width: 140,
+                            render: (v: string) => (
+                                <span style={{ fontSize: 12, color: '#595959' }}>
+                                    {dayjs(v).format('DD/MM/YY HH:mm')}
+                                </span>
+                            ),
+                        },
+                        {
+                            title: 'SKU',
+                            dataIndex: 'sku',
+                            width: 180,
+                            render: (sku: string, rec: AdjustLogRow) => (
+                                <div>
+                                    <Tag color="cyan" style={{ fontFamily: 'monospace', fontWeight: 700 }}>{sku}</Tag>
+                                    {rec.variantColor && <Tag color="blue" style={{ fontSize: 11 }}>🎨 {rec.variantColor}</Tag>}
+                                </div>
+                            ),
+                        },
+                        {
+                            title: 'Sản phẩm',
+                            dataIndex: 'productName',
+                            ellipsis: true,
+                            render: (v: string) => <span style={{ fontSize: 13 }}>{v}</span>,
+                        },
+                        {
+                            title: 'Chênh lệch',
+                            dataIndex: 'quantity',
+                            width: 110,
+                            align: 'center',
+                            render: (qty: number) => (
+                                <Tag
+                                    color={qty > 0 ? 'success' : 'error'}
+                                    style={{ fontWeight: 700, fontSize: 13, minWidth: 56, textAlign: 'center' }}
+                                >
+                                    {qty > 0 ? `+${qty}` : qty}
+                                </Tag>
+                            ),
+                        },
+                        {
+                            title: 'Lý do',
+                            dataIndex: 'note',
+                            ellipsis: true,
+                            render: (note: string) => (
+                                <span style={{ fontSize: 12, color: note ? '#262626' : '#bfbfbf', fontStyle: note ? 'normal' : 'italic' }}>
+                                    {note || '(không có lý do)'}
+                                </span>
+                            ),
+                        },
+                        {
+                            title: 'Người thực hiện',
+                            dataIndex: 'userName',
+                            width: 150,
+                            render: (u: string | null) => (
+                                <span style={{ fontSize: 12, color: '#595959' }}>👤 {u || 'Hệ thống'}</span>
+                            ),
+                        },
+                    ]}
+                />
+            )}
         </Card>
     );
 }
@@ -744,7 +599,7 @@ export default function BusinessReportPage() {
                     onClick={() => setActiveTab('xnt')}
                     style={activeTab === 'xnt' ? { background: '#722ed1', borderColor: '#722ed1' } : {}}
                 >
-                    Xuất Nhập Tồn
+                    Báo cáo kho
                 </Button>
             </Space>
         );

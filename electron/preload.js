@@ -92,6 +92,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         bulkDelete: (ids) => ipcRenderer.invoke('ecommerceExports:bulkDelete', ids),
         deleteAll: () => ipcRenderer.invoke('ecommerceExports:deleteAll'),
         bulkCreate: (records) => ipcRenderer.invoke('ecommerceExports:bulkCreate', records),
+        bulkCancel: (ids) => ipcRenderer.invoke('ecommerceExports:bulkCancel', ids),
         selectFolder: () => ipcRenderer.invoke('ecommerceExport:selectFolder'),
         loadExcelFiles: (folderPath) => ipcRenderer.invoke('ecommerceExport:loadExcelFiles', folderPath),
         selectAndWatch: () => ipcRenderer.invoke('ecommerceExport:selectAndWatch'),

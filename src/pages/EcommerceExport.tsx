@@ -97,13 +97,19 @@ export default function EcommerceExportPage() {
     const scanInputRef = useRef<any>(null);
     // 🚀 In-memory mirror giống allOrders của tool gốc — không await DB mỗi lần quét
     const exportsRef = useRef<EcommerceExport[]>([]);
+    // 🗺️ O(1) Tracking lookup Map — tracking → record ID (không dùng index vì index sẽ stale sau reload)
+    const trackingMapRef = useRef<Map<string, number>>(new Map());
+    // ⏱️ Debounced background sync — coalesce nhiều scan liên tiếp thành 1 DB reload
+    const bgSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // ⚡ Persistent JSON parse cache — parse 1 lần duy nhất mỗi record, giữ nguyên qua re-render
+    const itemsCacheRef = useRef<Map<number, { raw: string; parsed: ExportItem[] }>>(new Map());
     // 🔊 Web Audio API — decode 1 lần vào memory, play instant không delay
     const audioCtxRef = useRef<AudioContext | null>(null);
     const successBufRef = useRef<AudioBuffer | null>(null);
     const alertBufRef = useRef<AudioBuffer | null>(null);
 
     // 🔍 State cho bộ lọc trạng thái
-    const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed' | 'overdue' | 'no_data'>('pending');
+    const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed' | 'overdue' | 'cancelled' | 'no_data'>('pending');
 
     // 🚫 Danh sách tracking ID scan nhưng không có trong data
     const [unmatchedScans, setUnmatchedScans] = useState<{ trackingId: string; scannedAt: string }[]>([]);
@@ -181,6 +187,8 @@ export default function EcommerceExportPage() {
         return () => {
             clearInterval(interval);
             clearInterval(dailyResetInterval);
+            // 🧹 Cleanup debounced sync timer
+            if (bgSyncTimerRef.current) clearTimeout(bgSyncTimerRef.current);
         };
     }, []);
 
@@ -251,6 +259,19 @@ export default function EcommerceExportPage() {
     const playSuccess = () => playBuf(successBufRef.current);
     const playAlert = () => playBuf(alertBufRef.current);
 
+    // 🗺️ Rebuild tracking lookup Map mỗi khi data thay đổi
+    // Lưu tracking → record.id (KHÔNG phải index, vì index stale sau reload/import)
+    const rebuildTrackingMap = useCallback((data: EcommerceExport[]) => {
+        const map = new Map<string, number>();
+        for (const record of data) {
+            if (record.notes) {
+                const m = record.notes.match(/Tracking: ([^|]+)/);
+                if (m) map.set(m[1].trim(), record.id);
+            }
+        }
+        trackingMapRef.current = map;
+    }, []);
+
     const loadEcommerceExports = async (silent = false) => {
         if (!silent) setLoading(true);
         try {
@@ -265,6 +286,7 @@ export default function EcommerceExportPage() {
                     if (existing?.status === 'completed' && item.status !== 'completed') return existing;
                     return item;
                 });
+                rebuildTrackingMap(exportsRef.current);
                 setEcommerceExports(result.data);
             }
         } catch (error) {
@@ -477,7 +499,15 @@ Thời gian: ${currentTime}`;
         }
     };
 
-    // 📦 Xử lý quét mã vận đơn
+    // 🔄 Debounced background sync — gom nhiều scan liên tiếp thành 1 lần reload DB
+    const scheduleBgSync = useCallback(() => {
+        if (bgSyncTimerRef.current) clearTimeout(bgSyncTimerRef.current);
+        bgSyncTimerRef.current = setTimeout(() => {
+            loadEcommerceExports(true); // silent reload — không hiện loading spinner
+        }, 3000); // chờ 3s sau scan cuối cùng mới reload
+    }, []);
+
+    // 📦 Xử lý quét mã vận đơn — TỐI ƯU: O(1) lookup + surgical state update
     const handleScan = async (code: string) => {
         const trimmed = code.trim();
         if (!trimmed) return;
@@ -486,20 +516,50 @@ Thời gian: ${currentTime}`;
         setScanValue('');
         scanInputRef.current?.focus();
 
-        // 🚀 Đọc từ in-memory ref — instant, không await DB (giống allOrders của tool gốc)
-        const foundEcommerceExport = exportsRef.current.find((r: any) => {
-            const trackingMatch = r.notes?.match(/Tracking: ([^|]+)/);
-            const tracking = trackingMatch ? trackingMatch[1].trim() : '';
-
-            // Chỉ so sánh với Tracking ID
-            return tracking === trimmed;
-        });
+        // 🚀 O(1) lookup từ Map → fallback .find() nếu map bị lệch (dữ liệu cũ/trùng)
+        let foundEcommerceExport: EcommerceExport | undefined;
+        const recordId = trackingMapRef.current.get(trimmed);
+        if (recordId !== undefined) {
+            foundEcommerceExport = exportsRef.current.find(r => r.id === recordId);
+        }
+        // 🔄 Fallback 1: Map miss → scan toàn bộ exportsRef (dữ liệu trùng lặp cũ?)
+        if (!foundEcommerceExport) {
+            foundEcommerceExport = exportsRef.current.find((r: any) => {
+                const trackingMatch = r.notes?.match(/Tracking: ([^|]+)/);
+                const tracking = trackingMatch ? trackingMatch[1].trim() : '';
+                return tracking === trimmed;
+            });
+            if (foundEcommerceExport) {
+                console.warn(`⚠️ trackingMap miss nhưng .find() tìm thấy — rebuild map. Tracking: ${trimmed}`);
+                rebuildTrackingMap(exportsRef.current);
+            }
+        }
+        // 🔄 Fallback 2: exportsRef miss → scan state (ref out-of-sync?)
+        if (!foundEcommerceExport) {
+            foundEcommerceExport = ecommerceExports.find((r: any) => {
+                const trackingMatch = r.notes?.match(/Tracking: ([^|]+)/);
+                const tracking = trackingMatch ? trackingMatch[1].trim() : '';
+                return tracking === trimmed;
+            });
+            if (foundEcommerceExport) {
+                console.warn(`⚠️ exportsRef miss nhưng state tìm thấy — resync ref. Tracking: ${trimmed}`);
+                exportsRef.current = [...ecommerceExports];
+                rebuildTrackingMap(exportsRef.current);
+            }
+        }
 
         if (foundEcommerceExport) {
-            // ✅ Kiểm tra xem đơn đã pickup chưa
-            if (foundEcommerceExport.status === 'completed') {
+            // 🚨 CHẶN CỨNG: Đơn đã bị hủy trên sàn → KHÔNG CHO GIAO
+            if (foundEcommerceExport.status === 'cancelled') {
+                playAlert();
+                setScanStatus({
+                    type: 'error',
+                    message: `🚨 ĐƠN ĐÃ HỦY - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                });
+                message.error(`⛔ ĐƠN ĐÃ BỊ HỦY TRÊN SÀN! Không được giao: ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`);
+            } else if (foundEcommerceExport.status === 'completed') {
                 // ⚠️ Đơn hàng đã được bàn giao DVVC rồi
-                playAlert(); // Âm thanh cảnh báo
+                playAlert();
                 setScanStatus({
                     type: 'warning',
                     message: `⚠️ ĐÃ PICKUP - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
@@ -507,6 +567,8 @@ Thời gian: ${currentTime}`;
                 message.warning(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} đã gửi rồi!`);
             } else {
                 // ✅ Đơn hàng chưa pickup → Cập nhật thành "Đã bàn giao DVVC" + TRỪ TỒN KHO
+                const targetId = foundEcommerceExport.id;
+                const pickerName = activePackerRef.current || null;
 
                 // 🔊 PHÁT ÂM THANH NGAY để không bị delay
                 playSuccess();
@@ -517,8 +579,14 @@ Thời gian: ${currentTime}`;
 
                 // 🚀 Cập nhật ref ngay lập tức để scan tiếp không bị stale
                 exportsRef.current = exportsRef.current.map(r =>
-                    r.id === foundEcommerceExport.id ? { ...r, status: 'completed' } : r
+                    r.id === targetId ? { ...r, status: 'completed', pickedBy: pickerName || r.pickedBy } : r
                 );
+
+                // ⚡ SURGICAL STATE UPDATE — chỉ thay đổi 1 row, không reload toàn bộ
+                // React sẽ chỉ re-render đúng row thay đổi (shallow compare từng item)
+                setEcommerceExports(prev => prev.map(r =>
+                    r.id === targetId ? { ...r, status: 'completed', pickedBy: pickerName || r.pickedBy } : r
+                ));
 
                 // Sau đó mới chạy async operations (không block UI)
                 (async () => {
@@ -527,7 +595,7 @@ Thời gian: ${currentTime}`;
                             ...foundEcommerceExport,
                             status: 'completed',
                             createdBy: currentUser || foundEcommerceExport.createdBy || null,
-                            pickedBy: activePackerRef.current || null
+                            pickedBy: pickerName
                         });
 
                         if (!updateRes.success) {
@@ -537,6 +605,13 @@ Thời gian: ${currentTime}`;
                                 message: `❌ LỖI DATABASE: ${updateRes.error}`,
                             });
                             message.error(`Lỗi cập nhật: ${updateRes.error}`);
+                            // Rollback ref + state nếu DB lỗi
+                            exportsRef.current = exportsRef.current.map(r =>
+                                r.id === targetId ? { ...r, status: 'pending', pickedBy: foundEcommerceExport.pickedBy } : r
+                            );
+                            setEcommerceExports(prev => prev.map(r =>
+                                r.id === targetId ? { ...r, status: 'pending', pickedBy: foundEcommerceExport.pickedBy } : r
+                            ));
                             return; // Stop here!
                         }
 
@@ -553,8 +628,9 @@ Thời gian: ${currentTime}`;
                         // 📱 Gửi thông báo Telegram
                         await sendTelegramNotification(foundEcommerceExport);
 
-                        // 🔄 Reload từ DB sau khi tất cả operations hoàn tất
-                        loadEcommerceExports();
+                        // 🔄 Debounced background sync — KHÔNG reload ngay (tránh re-render 100 rows)
+                        // Chỉ sync lại từ DB sau 3s im lặng (không scan thêm)
+                        scheduleBgSync();
                     } catch (error) {
                         console.error('Error updating stock/status:', error);
                         message.error('Lỗi khi cập nhật!');
@@ -1116,7 +1192,6 @@ Thời gian: ${currentTime}`;
                     const result = await window.electronAPI.ecommerceExports.bulkCreate(newEcommerceExports);
                     if (!result.success) throw new Error(result.error || 'Lỗi DB');
                     console.log(`✅ Đã lưu ${newEcommerceExports.length} đơn vào database`);
-                    loadEcommerceExports();
                 } catch (dbError) {
                     console.error('❌ Lỗi lưu vào database:', dbError);
                     message.error('Lỗi khi lưu dữ liệu vào database!');
@@ -1124,10 +1199,42 @@ Thời gian: ${currentTime}`;
                 }
 
                 const source = isTikTok ? 'TikTok' : 'Shopee';
-                if (skippedCount > 0) {
-                    message.success(`✅ Đã import ${newEcommerceExports.length} phiếu xuất mới từ ${source}! (Bỏ qua ${skippedCount} đơn trùng lặp)`);
-                } else {
-                    message.success(`✅ Đã import ${newEcommerceExports.length} phiếu xuất từ ${source}!`);
+
+                // 🚫 ĐỐI SOÁT: Tìm đơn pending cùng nguồn mà KHÔNG CÓ trong file mới → tự cancel
+                // Lý do: Đơn bị hủy trên sàn sẽ không xuất hiện trong file export mới nhất
+                const fileOrderIds = new Set(orderMap.keys()); // TẤT CẢ Order ID từ file (kể cả trùng)
+                const stalePending = ecommerceExports.filter(existing =>
+                    existing.customerName === source &&
+                    existing.status !== 'completed' && existing.status !== 'cancelled' &&
+                    existing.orderNumber &&
+                    !fileOrderIds.has(existing.orderNumber)
+                );
+
+                let cancelledCount = 0;
+                if (stalePending.length > 0) {
+                    try {
+                        const cancelRes = await (window as any).electronAPI.ecommerceExports.bulkCancel(
+                            stalePending.map(o => o.id)
+                        );
+                        if (cancelRes.success) {
+                            cancelledCount = cancelRes.data;
+                            console.log(`🚫 Đã hủy ${cancelledCount} đơn ${source} không còn trên sàn`);
+                        }
+                    } catch (cancelErr) {
+                        console.error('❌ Lỗi đối soát:', cancelErr);
+                    }
+                }
+
+                // Reload sau khi cả import + cancel hoàn tất
+                loadEcommerceExports();
+
+                // Thông báo kết quả
+                const parts = [`✅ Import ${newEcommerceExports.length} đơn mới từ ${source}`];
+                if (skippedCount > 0) parts.push(`bỏ qua ${skippedCount} trùng`);
+                if (cancelledCount > 0) parts.push(`🚫 ${cancelledCount} đơn đã hủy trên sàn`);
+                message.success(parts.join(' | '));
+                if (cancelledCount > 0) {
+                    message.warning(`⚠️ ${cancelledCount} đơn ${source} đã bị hủy trên sàn → không được giao!`, 8);
                 }
             } catch (error) {
                 console.error('Import error:', error);
@@ -1525,70 +1632,57 @@ Thời gian: ${currentTime}`;
         },
         {
             title: 'Product Name',
-            dataIndex: 'items',
             key: 'productName',
             width: 200,
             ellipsis: true,
-            render: (items) => {
-                try {
-                    const parsed = JSON.parse(items);
-                    if (parsed.length === 0) return <span style={{ color: '#bfbfbf' }}>—</span>;
-                    const firstItem = parsed[0];
+            render: (_, record) => {
+                // ⚡ Đọc từ persistent cache — KHÔNG JSON.parse lại
+                const parsed = getParsedItems(record);
+                if (parsed.length === 0) return <span style={{ color: '#bfbfbf' }}>—</span>;
+                const firstItem = parsed[0];
 
-                    return (
-                        <span
-                            title={firstItem.productName}
-                            style={{
-                                display: 'block',
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
-                                maxWidth: '180px'
-                            }}
-                        >
-                            {firstItem.productName || '—'}
-                        </span>
-                    );
-                } catch (e) {
-                    console.error('❌ Error parsing items:', e);
-                    return <span style={{ color: '#bfbfbf' }}>—</span>;
-                }
+                return (
+                    <span
+                        title={firstItem.productName}
+                        style={{
+                            display: 'block',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            maxWidth: '180px'
+                        }}
+                    >
+                        {firstItem.productName || '—'}
+                    </span>
+                );
             },
         },
         {
             title: 'SKU',
-            dataIndex: 'items',
             key: 'skuCount',
             width: 80,
             align: 'center' as const,
-            render: (items) => {
-                try {
-                    const parsed = JSON.parse(items);
-                    const count = parsed.length;
-                    if (count === 0) return <Tag color="default">0</Tag>;
-                    if (count > 1) {
-                        return <Tag color="red" style={{ fontWeight: 700, fontSize: 12 }}>{count} SKU</Tag>;
-                    }
-                    return <Tag color="green" style={{ fontWeight: 700, fontSize: 12 }}>1 SKU</Tag>;
-                } catch {
-                    return <Tag color="default">0</Tag>;
+            render: (_, record) => {
+                // ⚡ Đọc từ persistent cache
+                const parsed = getParsedItems(record);
+                const count = parsed.length;
+                if (count === 0) return <Tag color="default">0</Tag>;
+                if (count > 1) {
+                    return <Tag color="red" style={{ fontWeight: 700, fontSize: 12 }}>{count} SKU</Tag>;
                 }
+                return <Tag color="green" style={{ fontWeight: 700, fontSize: 12 }}>1 SKU</Tag>;
             },
         },
         {
             title: 'Variation',
-            dataIndex: 'items',
             key: 'variation',
             width: 100,
-            render: (items) => {
-                try {
-                    const parsed = JSON.parse(items);
-                    if (parsed.length === 0) return <span style={{ color: '#bfbfbf' }}>—</span>;
-                    const firstItem = parsed[0];
-                    return firstItem.color ? <Tag color="purple">{firstItem.color}</Tag> : <span style={{ color: '#bfbfbf' }}>—</span>;
-                } catch {
-                    return <span style={{ color: '#bfbfbf' }}>—</span>;
-                }
+            render: (_, record) => {
+                // ⚡ Đọc từ persistent cache
+                const parsed = getParsedItems(record);
+                if (parsed.length === 0) return <span style={{ color: '#bfbfbf' }}>—</span>;
+                const firstItem = parsed[0];
+                return firstItem.color ? <Tag color="purple">{firstItem.color}</Tag> : <span style={{ color: '#bfbfbf' }}>—</span>;
             },
         },
         {
@@ -1617,6 +1711,15 @@ Thời gian: ${currentTime}`;
             key: 'status',
             width: 150,
             render: (status, record) => {
+                // 🚨 Đơn đã hủy trên sàn
+                if (status === 'cancelled') {
+                    return (
+                        <Tag color="error" style={{ fontWeight: 700, fontSize: 12 }}>
+                            🚫 ĐÃ HỦY
+                        </Tag>
+                    );
+                }
+
                 // Kiểm tra quá hạn: Đơn tạo từ hôm qua trở về trước và chưa giao DVVC
                 const ecommerceExportDate = dayjs(record.ecommerceExportDate).startOf('day');
                 const today = dayjs().startOf('day');
@@ -1741,44 +1844,67 @@ Thời gian: ${currentTime}`;
     ];
 
 
-    // 🔍 Lọc dữ liệu theo trạng thái
-    // ⚡ useMemo — tránh re-filter toàn bộ array mỗi lần render
-    const filteredEcommerceExports = useMemo(() => ecommerceExports.filter(ecommerceExport => {
-        // Lọc theo trạng thái
-        let statusMatch = true;
-        if (statusFilter === 'pending') statusMatch = ecommerceExport.status !== 'completed';
-        else if (statusFilter === 'completed') statusMatch = ecommerceExport.status === 'completed';
-        else if (statusFilter === 'overdue') {
-            const ecommerceExportDate = dayjs(ecommerceExport.ecommerceExportDate).startOf('day');
-            const today = dayjs().startOf('day');
-            const isNotToday = ecommerceExportDate.isBefore(today);
-            statusMatch = isNotToday && ecommerceExport.status !== 'completed';
-        }
-        if (!statusMatch) return false;
+    // 🔍 Lọc dữ liệu theo trạng thái + Pre-parse items JSON 1 lần
+    // ⚡ useMemo — tránh re-filter + re-parse mỗi lần render
+    const filteredEcommerceExports = useMemo(() => {
+        const today = dayjs().startOf('day');
+        return ecommerceExports.filter(ecommerceExport => {
+            // Lọc theo trạng thái
+            let statusMatch = true;
+            if (statusFilter === 'pending') statusMatch = ecommerceExport.status !== 'completed' && ecommerceExport.status !== 'cancelled';
+            else if (statusFilter === 'completed') statusMatch = ecommerceExport.status === 'completed';
+            else if (statusFilter === 'cancelled') statusMatch = ecommerceExport.status === 'cancelled';
+            else if (statusFilter === 'overdue') {
+                const ecommerceExportDate = dayjs(ecommerceExport.ecommerceExportDate).startOf('day');
+                const isNotToday = ecommerceExportDate.isBefore(today);
+                statusMatch = isNotToday && ecommerceExport.status !== 'completed' && ecommerceExport.status !== 'cancelled';
+            }
+            if (!statusMatch) return false;
 
-        // 🔎 Lọc theo từ khóa tìm kiếm mã vận đơn đi
-        if (searchKeyword.trim()) {
-            const keyword = searchKeyword.trim().toLowerCase();
-            const trackingMatch = ecommerceExport.notes?.match(/Tracking: ([^|]+)/);
-            const tracking = trackingMatch ? trackingMatch[1].trim().toLowerCase() : '';
-            const orderId = (ecommerceExport.orderNumber || ecommerceExport.ecommerceExportCode || '').toLowerCase();
-            return tracking.includes(keyword) || orderId.includes(keyword);
-        }
+            // 🔎 Lọc theo từ khóa tìm kiếm mã vận đơn đi
+            if (searchKeyword.trim()) {
+                const keyword = searchKeyword.trim().toLowerCase();
+                const trackingMatch = ecommerceExport.notes?.match(/Tracking: ([^|]+)/);
+                const tracking = trackingMatch ? trackingMatch[1].trim().toLowerCase() : '';
+                const orderId = (ecommerceExport.orderNumber || ecommerceExport.ecommerceExportCode || '').toLowerCase();
+                return tracking.includes(keyword) || orderId.includes(keyword);
+            }
 
-        return true;
-    }), [ecommerceExports, statusFilter, searchKeyword]);
+            return true;
+        });
+    }, [ecommerceExports, statusFilter, searchKeyword]);
+
+    // ⚡ Lazy JSON parse — chỉ parse khi column render GỌI, cache vĩnh viễn trong ref
+    // Khác useMemo: KHÔNG parse lại tất cả khi 1 dòng thay đổi status
+    const getParsedItems = useCallback((record: EcommerceExport): ExportItem[] => {
+        const cache = itemsCacheRef.current;
+        const existing = cache.get(record.id);
+        // Cache hit: raw items string chưa đổi → trả kết quả cũ
+        if (existing && existing.raw === record.items) return existing.parsed;
+        // Cache miss hoặc data mới → parse 1 lần
+        try {
+            const parsed = JSON.parse(record.items || '[]');
+            cache.set(record.id, { raw: record.items, parsed });
+            return parsed;
+        } catch {
+            cache.set(record.id, { raw: record.items, parsed: [] });
+            return [];
+        }
+    }, []);
 
     // ⚡ Memoize status counts — tránh .filter() x3 mỗi render
     const statusCounts = useMemo(() => {
         const today = dayjs().startOf('day');
-        let pending = 0, overdue = 0;
+        let pending = 0, overdue = 0, cancelled = 0;
         for (const r of ecommerceExports) {
-            if (r.status !== 'completed') {
+            if (r.status === 'cancelled') {
+                cancelled++;
+            } else if (r.status !== 'completed') {
                 pending++;
                 if (dayjs(r.ecommerceExportDate).startOf('day').isBefore(today)) overdue++;
             }
         }
-        return { pending, overdue };
+        return { pending, overdue, cancelled };
     }, [ecommerceExports]);
 
 
@@ -1828,6 +1954,22 @@ Thời gian: ${currentTime}`;
                 >
                     ⚡ Lệch: {unmatchedScans.length}
                 </Tag>
+                {statusCounts.cancelled > 0 && (
+                    <Tag
+                        onClick={() => setStatusFilter('cancelled')}
+                        style={{
+                            cursor: 'pointer', flexShrink: 0,
+                            padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                            borderRadius: 8, border: 'none',
+                            background: statusFilter === 'cancelled'
+                                ? 'linear-gradient(135deg, #434343 0%, #000000 100%)'
+                                : 'linear-gradient(135deg, #8c8c8c 0%, #595959 100%)',
+                            color: '#fff',
+                        }}
+                    >
+                        🚫 Hủy: {statusCounts.cancelled}
+                    </Tag>
+                )}
 
                 <div style={{ width: 1, height: 24, background: '#d9d9d9', flexShrink: 0 }} />
 
@@ -1845,35 +1987,6 @@ Thời gian: ${currentTime}`;
                 {selectedRowKeys.length > 0 && (
                     <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete} style={{ flexShrink: 0 }}>
                         Xóa ({selectedRowKeys.length})
-                    </Button>
-                )}
-                {ecommerceExports.length > 0 && (
-                    <Button
-                        danger
-                        type="primary"
-                        icon={<DeleteOutlined />}
-                        style={{ flexShrink: 0 }}
-                        onClick={() => {
-                            Modal.confirm({
-                                title: `⚠️ Xóa TẤT CẢ ${ecommerceExports.length} đơn TMDT?`,
-                                content: 'Hành động này không thể hoàn tác. Toàn bộ dữ liệu xuất hàng TMDT sẽ bị xóa vĩnh viễn.',
-                                okText: 'Xóa hết',
-                                okType: 'danger',
-                                cancelText: 'Hủy',
-                                onOk: async () => {
-                                    const rs = await (window.electronAPI as any).ecommerceExports.deleteAll();
-                                    if (rs.success) {
-                                        message.success(`🗑️ Đã xóa ${rs.data} đơn TMDT`);
-                                        loadEcommerceExports();
-                                        setSelectedRowKeys([]);
-                                    } else {
-                                        message.error(`Lỗi: ${rs.error}`);
-                                    }
-                                }
-                            });
-                        }}
-                    >
-                        Xóa tất cả
                     </Button>
                 )}
                 <Dropdown

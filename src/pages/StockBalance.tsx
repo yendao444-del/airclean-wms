@@ -1094,8 +1094,9 @@ export default function StockBalancePage() {
         }
 
         const note = balanceNotes[item.sku]?.trim();
-        if (!note) {
-            message.warning('⚠️ Vui lòng nhập lý do cân bằng trước!');
+        const requireNote = Math.abs(item.difference) >= 5;
+        if (requireNote && !note) {
+            message.warning(`⚠️ Chênh lệch ${item.difference > 0 ? '+' : ''}${item.difference} — bắt buộc nhập lý do!`);
             return;
         }
 
@@ -1816,7 +1817,7 @@ export default function StockBalancePage() {
                                                             <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, minWidth: 70 }}>📦 Lẻ ({record.unit})</th>
                                                             {units.length > 0 && <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#096dd9', minWidth: 90 }}>Tổng TT</th>}
                                                             <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: 12, fontWeight: 700 }}>Chênh lệch</th>
-                                                            <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, minWidth: 150 }}>📝 Ghi chú <span style={{ color: '#ff4d4f' }}>*</span></th>
+                                                            <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, minWidth: 150 }}>📝 Ghi chú <span style={{ color: '#ff4d4f', fontSize: 10, fontWeight: 500 }}>(bắt buộc khi ±≥5)</span></th>
                                                             <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, minWidth: 100 }}></th>
                                                         </tr>
                                                     </thead>
@@ -1870,18 +1871,35 @@ export default function StockBalancePage() {
                                                                         )}
                                                                     </td>
                                                                     <td style={{ padding: '6px 4px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
-                                                                        {variant.difference !== 0 ? (
-                                                                            <Input.TextArea value={balanceNotes[variant.sku] || ''} onChange={(e) => setBalanceNotes(prev => ({ ...prev, [variant.sku]: e.target.value }))}
-                                                                                placeholder="Nhập lý do..." rows={1} autoSize={{ minRows: 1, maxRows: 3 }}
-                                                                                style={{ width: '100%', minWidth: 120, fontSize: 12, borderColor: balanceNotes[variant.sku]?.trim() ? '#52c41a' : '#ff4d4f' }}
-                                                                                status={!balanceNotes[variant.sku]?.trim() ? 'error' : undefined} />
-                                                                        ) : <span style={{ color: '#bfbfbf', fontSize: 12 }}>—</span>}
+                                                                        {variant.difference !== 0 ? (() => {
+                                                                            const needNote = Math.abs(variant.difference) >= 5;
+                                                                            const hasNote = !!balanceNotes[variant.sku]?.trim();
+                                                                            return (
+                                                                                <Input.TextArea
+                                                                                    value={balanceNotes[variant.sku] || ''}
+                                                                                    onChange={(e) => setBalanceNotes(prev => ({ ...prev, [variant.sku]: e.target.value }))}
+                                                                                    placeholder={needNote ? 'Bắt buộc nhập lý do (±≥5)...' : 'Ghi chú (tuỳ chọn)...'}
+                                                                                    rows={1} autoSize={{ minRows: 1, maxRows: 3 }}
+                                                                                    style={{ width: '100%', minWidth: 120, fontSize: 12, borderColor: needNote && !hasNote ? '#ff4d4f' : hasNote ? '#52c41a' : undefined }}
+                                                                                    status={needNote && !hasNote ? 'error' : undefined}
+                                                                                />
+                                                                            );
+                                                                        })() : <span style={{ color: '#bfbfbf', fontSize: 12 }}>—</span>}
                                                                     </td>
                                                                     <td style={{ padding: '10px 8px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
-                                                                        {variant.difference !== 0 ? (
-                                                                            <Button type="primary" size="small" icon={<SyncOutlined />} onClick={() => handleSingleBalance(variant)}
-                                                                                style={{ background: '#faad14', borderColor: '#faad14', fontWeight: 600 }}>Cân bằng</Button>
-                                                                        ) : <Tag color="success">✅</Tag>}
+                                                                        {variant.difference !== 0 ? (() => {
+                                                                            const needNote = Math.abs(variant.difference) >= 5;
+                                                                            const blocked = needNote && !balanceNotes[variant.sku]?.trim();
+                                                                            return (
+                                                                                <Button type="primary" size="small" icon={<SyncOutlined />}
+                                                                                    onClick={() => handleSingleBalance(variant)}
+                                                                                    disabled={blocked}
+                                                                                    title={blocked ? 'Nhập lý do trước khi cân bằng' : undefined}
+                                                                                    style={{ background: blocked ? undefined : '#faad14', borderColor: blocked ? undefined : '#faad14', fontWeight: 600 }}>
+                                                                                    Cân bằng
+                                                                                </Button>
+                                                                            );
+                                                                        })() : <Tag color="success">✅</Tag>}
                                                                     </td>
                                                                 </tr>
                                                             );
