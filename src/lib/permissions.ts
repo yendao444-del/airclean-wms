@@ -35,7 +35,8 @@ export type Permission =
     | 'reports'
     | 'history'
     | 'permissions'
-    | 'settings';
+    | 'settings'
+    | 'attendance';
 
 // Permission mapping for each role
 export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
@@ -72,6 +73,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'reports',
         'history',
         'settings',
+        'attendance',
         // ❌ Manager KHÔNG có quyền: permissions
     ],
 
@@ -94,6 +96,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
 
         'fee-calculator',
         'settings',
+        'attendance',
     ],
 
     viewer: [
@@ -105,6 +108,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'stock-balance.view',
         'history',
         'settings',
+        'attendance',
     ],
 };
 
