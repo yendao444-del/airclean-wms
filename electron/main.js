@@ -33,20 +33,34 @@ function findPythonExe() {
 }
 
 function startPythonService() {
-    const pythonScript = path.join(__dirname, '..', 'python', 'attendance_service.py');
     const userDataPath = app.getPath('userData');
 
-    const found = findPythonExe();
-    if (!found) {
-        console.warn('⚠️ Không tìm thấy Python — chức năng chấm công khuôn mặt sẽ không hoạt động');
+    // ── Ưu tiên EXE standalone (PyInstaller) — không cần Python trên máy ──────
+    const exePath    = path.join(__dirname, '..', 'python', 'dist', 'attendance_service.exe');
+    const scriptPath = path.join(__dirname, '..', 'python', 'attendance_service.py');
+
+    let spawnCmd, spawnArgs;
+
+    if (fs.existsSync(exePath)) {
+        console.log('🚀 Dùng attendance_service.exe (standalone)');
+        spawnCmd  = exePath;
+        spawnArgs = [];
+    } else if (fs.existsSync(scriptPath)) {
+        const found = findPythonExe();
+        if (!found) {
+            console.warn('⚠️ Không tìm thấy Python — chức năng chấm công khuôn mặt sẽ không hoạt động');
+            return;
+        }
+        console.log('🐍 Fallback Python:', found.exe, found.extraArgs.join(' '));
+        spawnCmd  = found.exe;
+        spawnArgs = [...found.extraArgs, scriptPath];
+    } else {
+        console.warn('⚠️ Không tìm thấy attendance_service.exe hoặc .py — chức năng chấm công không khả dụng');
         return;
     }
 
-    const { exe, extraArgs } = found;
-    console.log('🐍 Dùng Python:', exe, extraArgs.join(' '));
-
     try {
-        pythonProcess = spawn(exe, [...extraArgs, pythonScript], {
+        pythonProcess = spawn(spawnCmd, spawnArgs, {
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
             env: { ...process.env, FACE_DATA_DIR: userDataPath },
