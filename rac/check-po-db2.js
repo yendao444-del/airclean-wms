@@ -1,1 +1,0 @@
-const { PrismaClient } = require('@prisma/client'); const prisma = new PrismaClient(); async function main() { console.log('PO:', await prisma.purchaseOrder.findFirst({where: {poNumber: 'PO1774601573413'}})); console.log('Log:', await prisma.inventoryLog.findFirst({where: {reference: 'PO1774601573413'}})); } main().finally(() => prisma.$disconnect());

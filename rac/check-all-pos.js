@@ -1,1 +1,0 @@
-const { PrismaClient } = require('@prisma/client'); const prisma = new PrismaClient(); async function main() { console.log(await prisma.purchaseOrder.findMany({select: {poNumber: true}})); } main().finally(() => prisma.$disconnect());

@@ -21,6 +21,21 @@ function AntAppPatcher({ children }: { children: ReactNode }) {
     Modal.error = modal.error;
     Modal.warning = modal.warning;
 
+    // Patch message static methods to use hook-based versions
+    staticMessage.success = message.success;
+    staticMessage.error = message.error;
+    staticMessage.warning = message.warning;
+    staticMessage.info = message.info;
+    staticMessage.loading = message.loading;
+    staticMessage.open = message.open;
+
+    // Patch notification static methods
+    staticNotification.success = notification.success;
+    staticNotification.error = notification.error;
+    staticNotification.warning = notification.warning;
+    staticNotification.info = notification.info;
+    staticNotification.open = notification.open;
+
     return <>{children}</>;
 }
 

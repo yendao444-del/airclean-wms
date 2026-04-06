@@ -1795,6 +1795,13 @@ ipcMain.handle('posOrder:getAll', async (event, filters = {}) => {
 
         const where = { source: 'pos' };
 
+        // Mặc định ẩn đơn đã hủy — trừ khi explicitly yêu cầu status cụ thể
+        if (filters.status) {
+            where.status = filters.status;
+        } else {
+            where.status = { not: 'cancelled' };
+        }
+
         // Filter by date
         if (filters.startDate || filters.endDate) {
             where.createdAt = {};
@@ -1809,11 +1816,6 @@ ipcMain.handle('posOrder:getAll', async (event, filters = {}) => {
         // Filter by payment method
         if (filters.paymentMethod) {
             where.paymentMethod = filters.paymentMethod;
-        }
-
-        // Filter by status
-        if (filters.status) {
-            where.status = filters.status;
         }
 
         const orders = await prisma.order.findMany({
@@ -1938,6 +1940,7 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
 
 // Xóa đơn hàng POS (hoàn kho) - KHÔNG XÓA CỨNG (Soft Cancel)
 ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
+    console.log(`🗑️ [DELETE] posOrder:delete called, id=${id}, type=${typeof id}`);
     try {
         if (!prisma) throw new Error('Database chưa được khởi tạo.');
 
@@ -1945,19 +1948,22 @@ ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
             where: { id },
             include: { items: true },
         });
+        console.log(`🗑️ [DELETE] order found:`, order ? `#${order.orderNumber} status=${order.status} items=${order.items.length}` : 'NOT FOUND');
         if (!order) throw new Error('Không tìm thấy đơn hàng.');
         if (order.status === 'cancelled') return { success: true };
 
         await prisma.$transaction(async (tx) => {
-            // Hoàn kho có ghi log rõ ràng
+            // Hoàn kho — dùng deductItemOrCombo để xử lý cả combo SKU
+            const logCtx = {
+                type: 'adjustment',
+                referenceType: 'POS_CANCEL',
+                reference: order.orderNumber,
+                note: `Hoàn tồn do hủy đơn POS ${order.orderNumber}`,
+                createdBy: userName || 'System'
+            };
             for (const item of order.items) {
-                await updateProductStockInTx(tx, item.sku, item.quantity, {
-                    type: 'adjustment',
-                    referenceType: 'POS_CANCEL',
-                    reference: order.orderNumber,
-                    note: `Hoàn tồn do hủy đơn POS ${order.orderNumber}`,
-                    createdBy: userName || 'System'
-                });
+                // +quantity = cộng lại kho (vì đang hủy đơn bán)
+                await deductItemOrCombo(tx, item.sku, item.quantity, logCtx, { allowMissing: true });
             }
             // Cập nhật trạng thái phiếu thay vì xóa cứng
             await tx.order.update({ where: { id }, data: { status: 'cancelled' } });

@@ -1,1 +1,0 @@
-const { PrismaClient } = require('@prisma/client'); const prisma = new PrismaClient(); async function main() { console.log(await prisma.inventoryLog.findMany({where: {reference: 'PO1774601570652'}})); } main().finally(() => prisma.$disconnect());

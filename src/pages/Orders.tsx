@@ -1,8 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import '../App.css';
 import {
-    Card, Table, Tag, Typography, Spin, Input, Space, Row, Col, Button, message, DatePicker,
-    Modal, Form, InputNumber, Popconfirm, Tooltip, Dropdown,
+    Card, Table, Tag, Typography, Spin, Input, Space, Row, Col, Button, DatePicker,
+    Modal, Form, InputNumber, Popconfirm, Tooltip, Dropdown, App,
 } from 'antd';
 import {
     OrderedListOutlined, SearchOutlined, DownloadOutlined,
@@ -41,6 +41,7 @@ interface UnifiedOrder {
 type DatePreset = 'today' | '7days' | '30days' | 'month' | 'custom';
 
 export default function OrdersPage() {
+    const { message, modal } = App.useApp();
     const [orders, setOrders] = useState<UnifiedOrder[]>([]);
     const [loading, setLoading] = useState(false);
     const [searchKeyword, setSearchKeyword] = useState('');
@@ -365,15 +366,19 @@ export default function OrdersPage() {
     const handleDelete = async (record: UnifiedOrder) => {
         try {
             const api = (window as any).electronAPI;
+            console.log('[DELETE] Calling posOrder.delete, id=', record.originalId, 'type=', typeof record.originalId);
             const result = await api.posOrder.delete({ id: record.originalId, userName: 'Admin' });
+            console.log('[DELETE] Result:', result);
             if (result.success) {
                 message.success('✅ Đã xóa đơn hàng và hoàn kho!');
                 loadAllOrders();
             } else {
-                message.error(result.error || 'Lỗi xóa');
+                message.error(`Lỗi: ${result.error || 'Không rõ'}`);
+                console.error('[DELETE] Failed:', result.error);
             }
         } catch (e: any) {
-            message.error(e.message);
+            console.error('[DELETE] Exception:', e);
+            message.error(`Lỗi: ${e.message}`);
         }
     };
 
@@ -391,7 +396,7 @@ export default function OrdersPage() {
         if (exportOrders.length > 0) parts.push(`${exportOrders.length} đơn Xuất hàng`);
         if (tmdtOrders.length > 0) parts.push(`${tmdtOrders.length} đơn TMDT`);
 
-        Modal.confirm({
+        modal.confirm({
             title: `⚠️ Xóa ${toDelete.length} đơn hàng đã chọn?`,
             content: (
                 <div>
@@ -540,7 +545,7 @@ export default function OrdersPage() {
                                 { type: 'divider' },
                                 {
                                     key: 'delete', label: 'Xóa đơn', icon: <DeleteOutlined />, danger: true,
-                                    onClick: () => Modal.confirm({
+                                    onClick: () => modal.confirm({
                                         title: 'Xóa đơn hàng?',
                                         content: 'Kho sẽ được hoàn lại. Không thể khôi phục!',
                                         okText: 'Xóa', cancelText: 'Hủy', okButtonProps: { danger: true },

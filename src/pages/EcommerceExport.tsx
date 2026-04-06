@@ -1178,30 +1178,24 @@ Thời gian: ${currentTime}`;
                     newEcommerceExports.push(newEcommerceExport);
                 });
 
-                if (newEcommerceExports.length === 0) {
-                    if (skippedCount > 0) {
-                        message.warning(`⚠️ Tất cả ${skippedCount} đơn hàng đều đã tồn tại trong hệ thống!`);
-                    } else {
-                        message.warning('Không tìm thấy dữ liệu hợp lệ trong file Excel!');
+                // 🔧 FIX: Lưu vào DATABASE nếu có đơn mới
+                if (newEcommerceExports.length > 0) {
+                    try {
+                        const result = await window.electronAPI.ecommerceExports.bulkCreate(newEcommerceExports);
+                        if (!result.success) throw new Error(result.error || 'Lỗi DB');
+                        console.log(`✅ Đã lưu ${newEcommerceExports.length} đơn vào database`);
+                    } catch (dbError) {
+                        console.error('❌ Lỗi lưu vào database:', dbError);
+                        message.error('Lỗi khi lưu dữ liệu vào database!');
+                        return;
                     }
-                    return;
-                }
-
-                // 🔧 FIX: Lưu vào DATABASE thay vì chỉ reload (saveEcommerceExports chỉ reload)
-                try {
-                    const result = await window.electronAPI.ecommerceExports.bulkCreate(newEcommerceExports);
-                    if (!result.success) throw new Error(result.error || 'Lỗi DB');
-                    console.log(`✅ Đã lưu ${newEcommerceExports.length} đơn vào database`);
-                } catch (dbError) {
-                    console.error('❌ Lỗi lưu vào database:', dbError);
-                    message.error('Lỗi khi lưu dữ liệu vào database!');
-                    return;
                 }
 
                 const source = isTikTok ? 'TikTok' : 'Shopee';
 
-                // 🚫 ĐỐI SOÁT: Tìm đơn pending cùng nguồn mà KHÔNG CÓ trong file mới → tự cancel
+                // 🚫 ĐỐI SOÁT: LUÔN CHẠY — Tìm đơn pending cùng nguồn mà KHÔNG CÓ trong file mới → tự cancel
                 // Lý do: Đơn bị hủy trên sàn sẽ không xuất hiện trong file export mới nhất
+                // FIX: Không return sớm nữa — đối soát phải chạy kể cả khi tất cả đơn đều trùng
                 const fileOrderIds = new Set(orderMap.keys()); // TẤT CẢ Order ID từ file (kể cả trùng)
                 const stalePending = ecommerceExports.filter(existing =>
                     existing.customerName === source &&
@@ -1229,12 +1223,22 @@ Thời gian: ${currentTime}`;
                 loadEcommerceExports();
 
                 // Thông báo kết quả
-                const parts = [`✅ Import ${newEcommerceExports.length} đơn mới từ ${source}`];
-                if (skippedCount > 0) parts.push(`bỏ qua ${skippedCount} trùng`);
-                if (cancelledCount > 0) parts.push(`🚫 ${cancelledCount} đơn đã hủy trên sàn`);
-                message.success(parts.join(' | '));
-                if (cancelledCount > 0) {
-                    message.warning(`⚠️ ${cancelledCount} đơn ${source} đã bị hủy trên sàn → không được giao!`, 8);
+                if (newEcommerceExports.length === 0 && cancelledCount === 0) {
+                    // Không có gì mới, không có gì hủy
+                    if (skippedCount > 0) {
+                        message.warning(`⚠️ Tất cả ${skippedCount} đơn hàng đều đã tồn tại trong hệ thống!`);
+                    } else {
+                        message.warning('Không tìm thấy dữ liệu hợp lệ trong file Excel!');
+                    }
+                } else {
+                    const parts: string[] = [];
+                    if (newEcommerceExports.length > 0) parts.push(`✅ Import ${newEcommerceExports.length} đơn mới từ ${source}`);
+                    if (skippedCount > 0) parts.push(`bỏ qua ${skippedCount} trùng`);
+                    if (cancelledCount > 0) parts.push(`🚫 ${cancelledCount} đơn đã hủy trên sàn`);
+                    message.success(parts.join(' | '));
+                    if (cancelledCount > 0) {
+                        message.warning(`⚠️ ${cancelledCount} đơn ${source} đã bị hủy trên sàn → không được giao!`, 8);
+                    }
                 }
             } catch (error) {
                 console.error('Import error:', error);
@@ -1276,6 +1280,8 @@ Thời gian: ${currentTime}`;
             let processedFiles = 0;
             // 🔧 FIX: Track tất cả orderNumber đã import trong session này để tránh trùng giữa các file
             const importedOrderNumbers = new Set<string>();
+            // 🚫 Thu thập TẤT CẢ Order IDs theo nguồn — dùng cho đối soát sau khi import xong
+            const allOrderIdsBySource = new Map<string, Set<string>>();
 
             // Xử lý từng file
             for (const fileData of files) {
@@ -1302,6 +1308,15 @@ Thời gian: ${currentTime}`;
                         console.warn(`⚠️ Skip file ${fileData.name}: không đúng định dạng`);
                         continue;
                     }
+
+                    // 🚫 Thu thập Order IDs cho đối soát (gom từ vòng lặp chính, không cần re-parse)
+                    const fileSource = isTikTok ? 'TikTok' : 'Shopee';
+                    if (!allOrderIdsBySource.has(fileSource)) allOrderIdsBySource.set(fileSource, new Set());
+                    const sourceOrderIds = allOrderIdsBySource.get(fileSource)!;
+                    jsonData.forEach((row: any) => {
+                        const oid = isTikTok ? (row['Order ID'] || '') : (row['Mã đơn hàng'] || '');
+                        if (oid) sourceOrderIds.add(oid);
+                    });
 
                     // Process same as handleImportExcel
                     const orderMap = new Map<string, any[]>();
@@ -1481,16 +1496,52 @@ Thời gian: ${currentTime}`;
                 }
             }
 
-            // 🔄 Reload toàn bộ data từ DB sau khi import xong
-            if (totalImported > 0) {
+            // 🚫 ĐỐI SOÁT: Tìm đơn pending mà KHÔNG CÓ trong tất cả các file vừa import → tự cancel
+            // allOrderIdsBySource đã được thu thập trong vòng lặp xử lý chính ở trên
+
+            let totalCancelled = 0;
+            for (const [source, fileOrderIds] of allOrderIdsBySource.entries()) {
+                const stalePending = ecommerceExports.filter(existing =>
+                    existing.customerName === source &&
+                    existing.status !== 'completed' && existing.status !== 'cancelled' &&
+                    existing.orderNumber &&
+                    !fileOrderIds.has(existing.orderNumber)
+                );
+
+                if (stalePending.length > 0) {
+                    try {
+                        const cancelRes = await (window as any).electronAPI.ecommerceExports.bulkCancel(
+                            stalePending.map(o => o.id)
+                        );
+                        if (cancelRes.success) {
+                            totalCancelled += cancelRes.data;
+                            console.log(`🚫 Đã hủy ${cancelRes.data} đơn ${source} không còn trên sàn`);
+                        }
+                    } catch (cancelErr) {
+                        console.error(`❌ Lỗi đối soát ${source}:`, cancelErr);
+                    }
+                }
+            }
+
+            // 🔄 Reload toàn bộ data từ DB sau khi import + đối soát xong
+            if (totalImported > 0 || totalCancelled > 0) {
                 await loadEcommerceExports();
             }
 
-            message.success({
-                content: `✅ Đã import ${totalImported} phiếu xuất từ ${processedFiles} file! ${totalSkipped > 0 ? `(Bỏ qua ${totalSkipped} đơn trùng)` : ''}`,
-                key: 'import-folder',
-                duration: 5
-            });
+            // Thông báo kết quả
+            const resultParts: string[] = [];
+            if (totalImported > 0) resultParts.push(`✅ Import ${totalImported} đơn từ ${processedFiles} file`);
+            if (totalSkipped > 0) resultParts.push(`bỏ qua ${totalSkipped} trùng`);
+            if (totalCancelled > 0) resultParts.push(`🚫 ${totalCancelled} đơn hủy trên sàn`);
+            
+            if (resultParts.length === 0) {
+                message.warning({ content: '⚠️ Không có thay đổi nào — tất cả đơn đều đã tồn tại!', key: 'import-folder', duration: 5 });
+            } else {
+                message.success({ content: resultParts.join(' | '), key: 'import-folder', duration: 5 });
+            }
+            if (totalCancelled > 0) {
+                message.warning(`⚠️ ${totalCancelled} đơn đã bị hủy trên sàn → không được giao!`, 8);
+            }
 
         } catch (error) {
             console.error('Folder import error:', error);
@@ -1705,62 +1756,13 @@ Thời gian: ${currentTime}`;
                 return <Tag color="green">{shipping}</Tag>;
             },
         },
-        {
-            title: 'Trạng thái',
-            dataIndex: 'status',
-            key: 'status',
-            width: 150,
-            render: (status, record) => {
-                // 🚨 Đơn đã hủy trên sàn
-                if (status === 'cancelled') {
-                    return (
-                        <Tag color="error" style={{ fontWeight: 700, fontSize: 12 }}>
-                            🚫 ĐÃ HỦY
-                        </Tag>
-                    );
-                }
-
-                // Kiểm tra quá hạn: Đơn tạo từ hôm qua trở về trước và chưa giao DVVC
-                const ecommerceExportDate = dayjs(record.ecommerceExportDate).startOf('day');
-                const today = dayjs().startOf('day');
-                const isNotToday = ecommerceExportDate.isBefore(today);
-                const isOverdue = isNotToday && status !== 'completed';
-
-                return (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <Tag color={status === 'completed' ? 'success' : 'processing'}>
-                            {status === 'completed' ? 'Hoàn thành' : 'Đang xử lý'}
-                        </Tag>
-                        {isOverdue && (
-                            <Tag color="red" style={{ fontWeight: 600 }}>
-                                ⚠️ Quá hạn
-                            </Tag>
-                        )}
-                    </div>
-                );
-            },
-        },
-        {
-            title: 'Người ĐG',
-            dataIndex: 'pickedBy',
-            key: 'pickedBy',
-            width: 100,
-            align: 'center' as const,
-            render: (pickedBy: string) => {
-                if (!pickedBy) return <span style={{ color: '#d9d9d9' }}>—</span>;
-                const emp = packerEmployees.find(e => e.username === pickedBy);
-                const shortName = emp ? emp.name.split(' ').pop() : pickedBy;
-                return (
-                    <Tag
-                        icon={<UserOutlined />}
-                        color="purple"
-                        style={{ fontWeight: 700, fontSize: 11 }}
-                    >
-                        {shortName}
-                    </Tag>
-                );
-            },
-        },
+        // 🔽 Ẩn cột Trạng thái & Người ĐG — đã có filter tabs hiển thị trạng thái
+        // {
+        //     title: 'Trạng thái', ...
+        // },
+        // {
+        //     title: 'Người ĐG', ...
+        // },
         {
             title: '',
             key: 'actions',
@@ -2293,7 +2295,7 @@ Thời gian: ${currentTime}`;
                             },
                         }}
                         pagination={{
-                            defaultPageSize: 50,
+                            defaultPageSize: 10,
                             showSizeChanger: true,
                             pageSizeOptions: ['10', '20', '50', '100'],
                             showTotal: (total) => `Tổng ${total} phiếu`,

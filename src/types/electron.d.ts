@@ -96,7 +96,7 @@ export interface ElectronAPI {
         create: (data: Partial<Product>) => Promise<{ success: boolean; data?: Product; error?: string }>;
         update: (id: number, data: Partial<Product>) => Promise<{ success: boolean; data?: Product; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
-        updateStock: (data: { sku: string; quantity: number; isAdd?: boolean; logContext?: any }) => Promise<{ success: boolean; data?: Product; error?: string }>;
+        updateStock: (data: { sku: string; quantity: number; isAdd?: boolean; logContext?: any; allowMissing?: boolean }) => Promise<{ success: boolean; skipped?: boolean; data?: Product; error?: string }>;
     };
     categories: {
         getAll: () => Promise<{ success: boolean; data?: Category[]; error?: string }>;

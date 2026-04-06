@@ -12,4 +12,19 @@ release*
 /prisma/dev.db
 nul
 
+# Backups — không commit file lớn vào git
 AIRCLEAN_WMS_Backup_*.rar
+AIRCLEAN_WMS_Backup_*.bundle
+DB-BACKUP-*.json
+
+# Thư mục không cần thiết
+LOGO/
+rac/
+HANG/
+
+# Debug/temp files
+check_db.js
+check_app_data.js
+*.spec
+*.code-workspace
+dev.db
