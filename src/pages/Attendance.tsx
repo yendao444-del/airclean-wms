@@ -416,18 +416,19 @@ function calculatePayroll(
 
         const myFines = activeFines.filter(f => f.empId === emp.id).reduce((sum, f) => sum + f.amount, 0);
 
-        // Nhân viên bị phạt KHÔNG được nhận phần chia từ pool phạt
-        const finedEmpIds = new Set(activeFines.map(f => f.empId));
-        const hasOwnFine = finedEmpIds.has(emp.id);
+        // Mỗi khoản phạt → chia đều cho những NV KHÔNG phải người bị phạt khoản đó
+        // VD: Trường bị phạt 10k → chia 3 người còn lại = 3,333đ mỗi người
+        // Khánh bị phạt 30k → chia 3 người còn lại = 10,000đ mỗi người
         let fineShare = 0;
-        if (!hasOwnFine) {
-            const eligibleCount = employeesList.filter(e => !finedEmpIds.has(e.id)).length;
-            if (eligibleCount > 0) {
-                activeFines.forEach(f => {
-                    fineShare += f.amount / eligibleCount;
-                });
+        activeFines.forEach(f => {
+            if (f.empId !== emp.id) {
+                // Đếm số NV được nhận từ khoản phạt này = tổng NV - 1 (người bị phạt)
+                const recipientCount = employeesList.length - 1;
+                if (recipientCount > 0) {
+                    fineShare += f.amount / recipientCount;
+                }
             }
-        }
+        });
 
         const mBonus = bonusesData.filter(b => b.empId === emp.id).reduce((sum, b) => sum + b.amount, 0);
         const totalBonus = fineShare + mBonus;
@@ -441,14 +442,16 @@ function calculatePayroll(
 }
 
 // ===== PILL COMPONENT =====
-const ShiftPill = ({ label, status, time }: { label: string; status: 0 | 1 | 2; time?: string }) => {
+const ShiftPill = ({ label, status, time, outTime }: { label: string; status: 0 | 1 | 2; time?: string; outTime?: string }) => {
     const config = {
         0: { bg: '#f5f5f5', border: '#e8e8e8', color: '#bfbfbf', icon: <MinusCircleOutlined style={{ fontSize: 10 }} />, tooltip: 'Nghỉ' },
         1: { bg: '#f6ffed', border: '#b7eb8f', color: '#52c41a', icon: <CheckCircleOutlined style={{ fontSize: 10 }} />, tooltip: 'Đúng giờ' },
         2: { bg: '#fff7e6', border: '#ffd591', color: '#fa8c16', icon: <ClockCircleOutlined style={{ fontSize: 10 }} />, tooltip: 'Đi muộn' },
     };
     const c = config[status];
-    const tooltipContent = `${label}: ${c.tooltip}${time ? ` (${time})` : ''}`;
+    const timeInfo = time ? ` vào ${time}` : '';
+    const outInfo = outTime ? ` → ra ${outTime}` : (status > 0 ? ' → chưa checkout' : '');
+    const tooltipContent = `${label}: ${c.tooltip}${timeInfo}${outInfo}`;
     return (
         <Tooltip title={tooltipContent}>
             <div style={{
@@ -457,9 +460,18 @@ const ShiftPill = ({ label, status, time }: { label: string; status: 0 | 1 | 2; 
                 padding: '2px 6px', borderRadius: 5,
                 background: c.bg, color: c.color, border: `1px solid ${c.border}`,
                 cursor: 'default', letterSpacing: 0.2, whiteSpace: 'nowrap',
+                position: 'relative',
             }}>
                 <span>{label}</span>
-                {c.icon}
+                <span style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    {c.icon}
+                    {outTime && (
+                        <span style={{
+                            fontSize: 8, fontWeight: 600, opacity: 0.7,
+                            borderLeft: '1px solid', paddingLeft: 3, marginLeft: 1,
+                        }}>→{outTime}</span>
+                    )}
+                </span>
             </div>
         </Tooltip>
     );
@@ -1938,7 +1950,7 @@ export default function Attendance() {
     // Thay thế array mock thành data mix thật sự
     const liveAttendanceMatrix = useMemo(() => {
         return employees.map(emp => {
-            const monthData = Array.from({ length: daysInMonth }).map(() => ({ am: 0 as 0|1|2, pm: 0 as 0|1|2, amTime: '', pmTime: '' }));
+            const monthData = Array.from({ length: daysInMonth }).map(() => ({ am: 0 as 0|1|2, pm: 0 as 0|1|2, amTime: '', pmTime: '', amOutTime: '', pmOutTime: '' }));
             // Lọc logs của nhân viên này trong tháng này (faceId = username)
             const logs = liveAttendanceLogs.filter(l => 
                 (l.faceId === emp.username || l.userId === emp.id) &&
@@ -1951,25 +1963,36 @@ export default function Attendance() {
                 const logTime = dayjs(log.timestamp);
                 
                 // Quy tắc chấm công am/pm
-                if (log.checkType.includes('morning')) {
+                if (log.checkType === 'morning_in') {
                     // Sáng vào muộn nếu sau 08:05
                     let cType = monthData[dayIdx].am;
                     monthData[dayIdx].amTime = logTime.format('HH:mm');
-                    if (log.checkType === 'morning_in' && (logTime.hour() > 8 || (logTime.hour() === 8 && logTime.minute() > 5))) {
+                    if (logTime.hour() > 8 || (logTime.hour() === 8 && logTime.minute() > 5)) {
                         if (cType !== 1) monthData[dayIdx].am = 2; // Muộn
                     } else {
                         monthData[dayIdx].am = 1; // Đúng giờ ghi đè muộn
                     }
+                } else if (log.checkType === 'morning_out') {
+                    // Sáng ra — ghi nhận giờ checkout
+                    monthData[dayIdx].amOutTime = logTime.format('HH:mm');
+                    // Nếu chưa có check-in nhưng có check-out → vẫn tính là đã đi làm (đúng giờ)
+                    if (monthData[dayIdx].am === 0) monthData[dayIdx].am = 1;
                 }
-                if (log.checkType.includes('afternoon') || log.checkType.includes('evening')) {
+                
+                if (log.checkType === 'afternoon_in') {
                     // Chiều vào muộn nếu sau 13:35
                     let cType = monthData[dayIdx].pm;
                     monthData[dayIdx].pmTime = logTime.format('HH:mm');
-                    if (log.checkType === 'afternoon_in' && (logTime.hour() > 13 || (logTime.hour() === 13 && logTime.minute() > 35))) {
+                    if (logTime.hour() > 13 || (logTime.hour() === 13 && logTime.minute() > 35)) {
                         if (cType !== 1) monthData[dayIdx].pm = 2; // Muộn
                     } else {
                         monthData[dayIdx].pm = 1; // Đúng giờ ghi đè muộn
                     }
+                } else if (log.checkType === 'evening_out') {
+                    // Tối ra — ghi nhận giờ checkout
+                    monthData[dayIdx].pmOutTime = logTime.format('HH:mm');
+                    // Nếu chưa có check-in nhưng có check-out → vẫn tính là đã đi làm
+                    if (monthData[dayIdx].pm === 0) monthData[dayIdx].pm = 1;
                 }
             });
             return monthData;
@@ -2920,16 +2943,16 @@ export default function Attendance() {
                         </div>
                     </div>
                 ),
-                key: `day-${i}`, align: 'center' as const, width: isToday ? 90 : 80,
+                key: `day-${i}`, align: 'center' as const, width: isToday ? 110 : 100,
                 onHeaderCell: () => ({ style: { background: isToday ? '#e6f4ff' : (isSunday ? '#fafafa' : undefined), borderLeft: isSunday || isToday ? '2px solid #f0f0f0' : undefined, borderRight: isToday ? '2px solid #f0f0f0' : undefined } }),
                 onCell: () => ({ style: { background: isToday ? '#f0f5ff' : (isSunday ? '#fafafa' : undefined), borderLeft: isSunday || isToday ? '2px solid #f0f0f0' : undefined, borderRight: isToday ? '2px solid #f0f0f0' : undefined } }),
                 render: (_: any, __: any, rowIdx: number) => {
-                    const d = liveAttendanceMatrix[rowIdx]?.[i] || { am: 0, pm: 0, amTime: '', pmTime: '' };
+                    const d = liveAttendanceMatrix[rowIdx]?.[i] || { am: 0, pm: 0, amTime: '', pmTime: '', amOutTime: '', pmOutTime: '' };
                     if (isSunday && d.am === 0 && d.pm === 0) return <SundayRestCell />;
                     return (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                            <ShiftPill label="Sáng" status={d.am as 0|1|2} time={d.amTime} />
-                            <ShiftPill label="Chiều" status={d.pm as 0|1|2} time={d.pmTime} />
+                            <ShiftPill label="Sáng" status={d.am as 0|1|2} time={d.amTime} outTime={d.amOutTime} />
+                            <ShiftPill label="Chiều" status={d.pm as 0|1|2} time={d.pmTime} outTime={d.pmOutTime} />
                         </div>
                     );
                 },

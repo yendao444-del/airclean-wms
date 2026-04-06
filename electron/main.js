@@ -3,6 +3,27 @@ const path = require('path');
 const fs   = require('fs');
 const { spawn } = require('child_process');
 
+// ✅ FIX: Electron v40 resolve module từ node_modules/electron/dist/resources/app/
+// → tất cả require() (prisma, xlsx, bcryptjs...) đều fail vì tìm sai thư mục
+// Monkey-patch Module._resolveFilename để fallback về project root thật
+const Module = require('module');
+const originalResolve = Module._resolveFilename;
+const realNodeModules = path.join(process.cwd(), 'node_modules');
+Module._resolveFilename = function(request, parent, isMain, options) {
+    try {
+        return originalResolve.call(this, request, parent, isMain, options);
+    } catch (err) {
+        // Nếu resolve fail → thử từ project root
+        if (!request.startsWith('.') && !request.startsWith('/') && !request.startsWith('node:')) {
+            const absPath = path.join(realNodeModules, request);
+            try {
+                return originalResolve.call(this, absPath, parent, isMain, options);
+            } catch {}
+        }
+        throw err;
+    }
+};
+
 let mainWindow;
 let pythonProcess = null;
 
