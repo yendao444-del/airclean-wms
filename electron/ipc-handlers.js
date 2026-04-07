@@ -13,6 +13,43 @@ const fs = require('fs');
 const https = require('https');
 const http = require('http');
 
+// ========================================
+// 🔒 STOCK MUTEX — Serialize stock operations
+// Ngăn race condition khi nhiều scan/import chạy đồng thời
+// Đảm bảo Tồn đầu/Tồn cuối trong Thẻ Kho luôn đúng
+// ========================================
+const _stockQueue = [];
+let _stockLocked = false;
+
+function acquireStockLock() {
+    return new Promise(resolve => {
+        if (!_stockLocked) {
+            _stockLocked = true;
+            resolve();
+        } else {
+            _stockQueue.push(resolve);
+        }
+    });
+}
+
+function releaseStockLock() {
+    if (_stockQueue.length > 0) {
+        const next = _stockQueue.shift();
+        next();
+    } else {
+        _stockLocked = false;
+    }
+}
+
+async function withStockLock(fn) {
+    await acquireStockLock();
+    try {
+        return await fn();
+    } finally {
+        releaseStockLock();
+    }
+}
+
 // ⚡ LAZY LOADING — Module nặng chỉ load khi cần, không block startup
 // googleapis (~3-5s), xlsx (~1-2s), bcryptjs (~0.5s) → tiết kiệm ~5-7s
 function lazyRequire(moduleName) {
@@ -1348,7 +1385,8 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
         const delta = isAdd ? quantity : -quantity;
 
         // Bọc toàn bộ vào 1 Transaction duy nhất
-        return await prisma.$transaction(async (tx) => {
+        // 🔒 StockMutex: serialize stock operations — tránh race condition
+        return await withStockLock(() => prisma.$transaction(async (tx) => {
             // 🎁 CHECK IF SKU IS A COMBO
             const combo = await tx.comboProduct.findUnique({
                 where: { sku }
@@ -1379,7 +1417,7 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
                 return { success: false, skipped: true, error: `SKU "${sku}" không tìm thấy trong kho` };
             }
             return { success: true, data: result };
-        });
+        }));
     } catch (error) {
         console.error('❌ Update stock error:', error);
         return { success: false, error: error.message };
@@ -1694,7 +1732,8 @@ ipcMain.handle('posOrder:create', async (event, data) => {
         const paidAmount = data.paidAmount || 0;
         const paymentStatus = paidAmount >= total ? 'paid' : paidAmount > 0 ? 'partial' : 'unpaid';
 
-        const order = await prisma.$transaction(async (tx) => {
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
+        const order = await withStockLock(() => prisma.$transaction(async (tx) => {
             // Create Order
             const newOrder = await tx.order.create({
                 data: {
@@ -1756,7 +1795,7 @@ ipcMain.handle('posOrder:create', async (event, data) => {
             }
 
             return newOrder;
-        });
+        }));
 
         // 5. Activity Log
         try {
@@ -1878,7 +1917,8 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
         const totalCost = items.reduce((s, it) => s + (it.cost || 0) * it.qty, 0);
         const profit = total - totalCost;
 
-        await prisma.$transaction(async (tx) => {
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
+        await withStockLock(() => prisma.$transaction(async (tx) => {
             // 1. Hoàn lại kho theo items cũ
             for (const oldItem of oldOrder.items) {
                 await updateProductStockInTx(tx, oldItem.sku, oldItem.quantity, {
@@ -1928,7 +1968,7 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
                 where: { orderId: id },
                 data: { method: paymentMethod || oldOrder.paymentMethod, amount: total },
             });
-        });
+        }));
 
         void logActivity({ module: 'sales', action: 'UPDATE', description: `Sửa đơn POS #${oldOrder.orderNumber}`, userName: userName || 'System' });
         return { success: true };
@@ -1952,7 +1992,8 @@ ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
         if (!order) throw new Error('Không tìm thấy đơn hàng.');
         if (order.status === 'cancelled') return { success: true };
 
-        await prisma.$transaction(async (tx) => {
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
+        await withStockLock(() => prisma.$transaction(async (tx) => {
             // Hoàn kho — dùng deductItemOrCombo để xử lý cả combo SKU
             const logCtx = {
                 type: 'adjustment',
@@ -1970,7 +2011,7 @@ ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
             
             // Xóa payment liên quan nếu cần thiết hoặc đánh dấu hủy (tạm comment delete payment)
             // await tx.payment.deleteMany({ where: { orderId: id } });
-        });
+        }));
 
         void logActivity({ module: 'sales', action: 'DELETE', description: `Hủy đơn POS #${order.orderNumber}`, userName: userName || 'System' });
         return { success: true };
@@ -2213,7 +2254,8 @@ ipcMain.handle('purchases:create', async (event, data) => {
                 throw new Error(`Product ID ${item.productId} not found. Item: ${item.productName}`);
             }
         }
-        const purchase = await getPrismaDirectTx().$transaction(async (tx) => {
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
+        const purchase = await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
             // Generate standard PN-YYMMDD-XXX
             const today = new Date();
             const dateStr = today.toISOString().slice(2, 10).replace(/-/g, '');
@@ -2282,7 +2324,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
             }
 
             return newOrder;
-        }, { timeout: 60000, maxWait: 10000 });
+        }, { timeout: 60000, maxWait: 10000 }));
 
         console.log(`✅ Created purchase order: ${purchase.poNumber}`);
         void logActivity({ module: 'purchases', action: 'CREATE', description: `Tạo phiếu nhập ${purchase.poNumber} - ${new Intl.NumberFormat('vi-VN').format(data.totalAmount)}đ`, recordName: purchase.poNumber, userName: data.createdBy || 'Admin' });
@@ -2337,7 +2379,8 @@ ipcMain.handle('purchases:delete', async (event, id) => {
         if (!order) throw new Error(`Không tìm thấy phiếu nhập #${id}`);
         if (order.status === 'cancelled') return { success: true };
 
-        await getPrismaDirectTx().$transaction(async (tx) => {
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
+        await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
             const productIds = [...new Set(order.items.map(i => i.productId))];
             const products = await tx.product.findMany({
                 where: { id: { in: productIds } }
@@ -2366,7 +2409,7 @@ ipcMain.handle('purchases:delete', async (event, id) => {
                 where: { id },
                 data: { status: 'cancelled' }
             });
-        });
+        }));
 
         console.log(`✅ Successfully cancelled purchase order #${id}`);
         void logActivity({ module: 'purchases', action: 'DELETE', description: `Hủy phiếu nhập #${id}`, recordName: order.poNumber });
@@ -4662,7 +4705,8 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
         if (!prisma) throw new Error('Prisma not available');
         const isCompleted = data.status === 'completed';
 
-        const record = await prisma.$transaction(async (tx) => {
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
+        const record = await withStockLock(() => prisma.$transaction(async (tx) => {
             const newRecord = await tx.ecommerceExport.create({
                 data: {
                     customerName: data.customerName,
@@ -4694,7 +4738,7 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
                 }
             }
             return newRecord;
-        }, { timeout: 30000, maxWait: 10000 });
+        }, { timeout: 30000, maxWait: 10000 }));
 
         console.log(`✅ Created ecommerce export #${record.id}`);
         void logActivity({ module: 'export', action: 'CREATE', description: `Tạo bàn giao TMDT #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
@@ -4709,7 +4753,8 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
 
-        const record = await prisma.$transaction(async (tx) => {
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
+        const record = await withStockLock(() => prisma.$transaction(async (tx) => {
             const oldRecord = await tx.ecommerceExport.findUnique({ where: { id } });
             if (!oldRecord) throw new Error('Không tìm thấy phiếu xuất.');
 
@@ -4770,7 +4815,7 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
                 }
             }
             return newRecord;
-        }, { timeout: 30000, maxWait: 10000 });
+        }, { timeout: 30000, maxWait: 10000 }));
 
         console.log(`✅ Updated ecommerce export #${record.id}`);
         void logActivity({ module: 'export', action: 'UPDATE', description: `Cập nhật bàn giao TMDT #${record.id}`, recordId: record.id });
@@ -4785,7 +4830,8 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         
-        await prisma.$transaction(async (tx) => {
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
+        await withStockLock(() => prisma.$transaction(async (tx) => {
             const doc = await tx.ecommerceExport.findUnique({ where: { id } });
             if (!doc) return;
 
@@ -4804,7 +4850,7 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
                 }
             }
             await tx.ecommerceExport.delete({ where: { id } });
-        }, { timeout: 30000, maxWait: 10000 });
+        }, { timeout: 30000, maxWait: 10000 }));
 
         console.log(`✅ Deleted ecommerce export #${id}`);
         void logActivity({ module: 'export', action: 'DELETE', description: `Xóa bàn giao TMDT #${id}` });
@@ -4820,7 +4866,8 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
         if (!prisma) throw new Error('Prisma not available');
         const startTime = Date.now();
 
-        const count = await prisma.$transaction(async (tx) => {
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
+        const count = await withStockLock(() => prisma.$transaction(async (tx) => {
             // 🚀 Bước 1: Lấy TẤT CẢ đơn cần xóa trong 1 query
             const docs = await tx.ecommerceExport.findMany({
                 where: { id: { in: ids } }
@@ -4856,7 +4903,7 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
                 where: { id: { in: ids } }
             });
             return deleted.count;
-        }, { timeout: 60000, maxWait: 10000 });
+        }, { timeout: 60000, maxWait: 10000 }));
 
         const elapsed = Date.now() - startTime;
         console.log(`✅ Bulk deleted ${count} ecommerce exports in ${elapsed}ms`);
@@ -4889,7 +4936,8 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
         if (!prisma) throw new Error('Prisma not available');
         const startTime = Date.now();
 
-        const result = await prisma.$transaction(async (tx) => {
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
+        const result = await withStockLock(() => prisma.$transaction(async (tx) => {
             // 🚀 Bước 1: Batch INSERT tất cả đơn cùng lúc (1 SQL statement)
             const createData = records.map(data => ({
                 customerName: data.customerName,
@@ -4934,7 +4982,7 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
         }, {
             maxWait: 15000,
             timeout: 120000,
-        });
+        }));
 
         const elapsed = Date.now() - startTime;
         console.log(`✅ Bulk created ${result} ecommerce exports in ${elapsed}ms`);
