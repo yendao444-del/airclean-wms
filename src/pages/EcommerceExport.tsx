@@ -1956,23 +1956,6 @@ Thời gian: ${currentTime}`;
                 >
                     ⚡ Lệch: {unmatchedScans.length}
                 </Tag>
-                {statusCounts.cancelled > 0 && (
-                    <Tag
-                        onClick={() => setStatusFilter('cancelled')}
-                        style={{
-                            cursor: 'pointer', flexShrink: 0,
-                            padding: '4px 10px', fontSize: 12, fontWeight: 600,
-                            borderRadius: 8, border: 'none',
-                            background: statusFilter === 'cancelled'
-                                ? 'linear-gradient(135deg, #434343 0%, #000000 100%)'
-                                : 'linear-gradient(135deg, #8c8c8c 0%, #595959 100%)',
-                            color: '#fff',
-                        }}
-                    >
-                        🚫 Hủy: {statusCounts.cancelled}
-                    </Tag>
-                )}
-
                 <div style={{ width: 1, height: 24, background: '#d9d9d9', flexShrink: 0 }} />
 
                 <Input

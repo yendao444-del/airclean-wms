@@ -171,6 +171,17 @@ async function main() {
         await uploadToFolder(drive, dbBackupPath, dbFilename, 'application/json', dayFolderId);
     }
 
+    const restoreBatPath = path.join(__dirname, 'RESTORE.bat');
+    if (fs.existsSync(restoreBatPath)) {
+        console.log(`\n      Upload script hien thi: RESTORE.bat...`);
+        await uploadToFolder(drive, restoreBatPath, 'RESTORE.bat', 'text/plain', dayFolderId);
+    }
+
+    const restoreDbBatPath = path.join(__dirname, 'RESTORE_DATABASE.bat');
+    if (fs.existsSync(restoreDbBatPath)) {
+        await uploadToFolder(drive, restoreDbBatPath, 'RESTORE_DATABASE.bat', 'text/plain', dayFolderId);
+    }
+
     console.log('\n      Kiem tra so luong backup...');
     const allFolders = await drive.files.list({
         q: `'${folderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,

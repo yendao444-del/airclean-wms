@@ -104,6 +104,7 @@ export default function RefundsPage() {
 
     // 🔍 State cho bộ lọc trạng thái
     const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'received' | 'completed' | 'overdue' | 'lost'>('pending');
+    const [searchText, setSearchText] = useState('');
 
     // 🚫 State cho Mất hàng
     const [lostModalVisible, setLostModalVisible] = useState(false);
@@ -1325,8 +1326,28 @@ export default function RefundsPage() {
         setCompAmount(0);
     };
 
-    // 🔍 Lọc dữ liệu theo trạng thái
+    // 🔍 Lọc dữ liệu theo trạng thái và tìm kiếm
     const filteredRefunds = refunds.filter(refund => {
+        // Filter by text first
+        if (searchText) {
+            const lowerSearch = searchText.toLowerCase().trim();
+            const orderMatch = refund.orderNumber?.toLowerCase().includes(lowerSearch);
+            const refundCodeMatch = refund.refundCode?.toLowerCase().includes(lowerSearch);
+
+            // Extract tracking purely
+            let tracking = '';
+            const trackingMatch = refund.notes?.match(/Tracking: ([^|]+)/);
+            if (trackingMatch) {
+                tracking = trackingMatch[1].trim();
+            }
+            const trackMatch = tracking.toLowerCase().includes(lowerSearch);
+
+            // Or just check inside notes generally
+            const notesMatch = refund.notes?.toLowerCase().includes(lowerSearch);
+
+            if (!orderMatch && !refundCodeMatch && !trackMatch && !notesMatch) return false;
+        }
+
         if (statusFilter === 'all') return true;
         if (statusFilter === 'pending') return refund.status === 'pending';
         if (statusFilter === 'received') return refund.status === 'received';
@@ -1582,8 +1603,8 @@ export default function RefundsPage() {
                     )}
                 </Card>
 
-                {/* 🔍 Bộ lọc trạng thái */}
-                <div style={{ marginBottom: 16 }}>
+                {/* 🔍 Bộ lọc trạng thái & Tìm kiếm */}
+                <div style={{ marginBottom: 16, display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
                     <Radio.Group
                         value={statusFilter}
                         onChange={(e) => setStatusFilter(e.target.value)}
@@ -1612,6 +1633,15 @@ export default function RefundsPage() {
                             📋 Tất cả ({refunds.length})
                         </Radio.Button>
                     </Radio.Group>
+
+                    <Input.Search
+                        placeholder="Tìm Order ID, Tracking ID..."
+                        allowClear
+                        value={searchText}
+                        onChange={(e) => setSearchText(e.target.value)}
+                        style={{ width: 300 }}
+                        size="large"
+                    />
                 </div>
 
                 {/* Nút xuất Excel */}
