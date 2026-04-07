@@ -125,22 +125,26 @@ async function main() {
     console.log(`      OK! Kich thuoc bundle: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
 
     console.log('\n[2/5] Kiem tra thu muc sao luu tren Google Drive...');
-    let folderId = null;
+    let folderId = process.env.GDRIVE_FOLDER_ID || null;
     try {
-        const folderRes = await drive.files.list({
-            q: "name='AIRCLEAN_WMS_SOURCE_BACKUP' and mimeType='application/vnd.google-apps.folder' and trashed=false",
-            spaces: 'drive',
-            fields: 'files(id, name)',
-        });
-        if (folderRes.data.files.length > 0) {
-            folderId = folderRes.data.files[0].id;
-        } else {
-            console.log('      Tao moi thu muc: AIRCLEAN_WMS_SOURCE_BACKUP');
-            const newFolder = await drive.files.create({
-                resource: { name: 'AIRCLEAN_WMS_SOURCE_BACKUP', mimeType: 'application/vnd.google-apps.folder' },
-                fields: 'id',
+        if (!folderId) {
+            const folderRes = await drive.files.list({
+                q: "name='AIRCLEAN_WMS_SOURCE_BACKUP' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+                spaces: 'drive',
+                fields: 'files(id, name)',
             });
-            folderId = newFolder.data.id;
+            if (folderRes.data.files.length > 0) {
+                folderId = folderRes.data.files[0].id;
+            } else {
+                console.log('      Tao moi thu muc: AIRCLEAN_WMS_SOURCE_BACKUP');
+                const newFolder = await drive.files.create({
+                    resource: { name: 'AIRCLEAN_WMS_SOURCE_BACKUP', mimeType: 'application/vnd.google-apps.folder' },
+                    fields: 'id',
+                });
+                folderId = newFolder.data.id;
+            }
+        } else {
+            console.log('      Su dung thu muc chia se theo ID: ' + folderId);
         }
     } catch (err) {
         console.error('LOI API:', err.message);
