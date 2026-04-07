@@ -28,25 +28,45 @@ let mainWindow;
 let pythonProcess = null;
 
 function findPythonExe() {
-    // Thứ tự ưu tiên tìm Python có face_recognition
-    const candidates = [
-        // Python Launcher (Windows) — thử trước
+    const { spawnSync } = require('child_process');
+    // Quét nhiều user phổ biến + user hiện tại
+    const usernames = [...new Set(['Admin', 'NCPC', process.env.USERNAME || ''].filter(Boolean))];
+    const candidates = [];
+    // 1. Đường dẫn per-user (ưu tiên cao nhất)
+    for (const uname of usernames) {
+        for (const ver of ['Python311', 'Python310', 'Python39', 'Python312']) {
+            candidates.push({ cmd: `C:\\Users\\${uname}\\AppData\\Local\\Programs\\Python\\${ver}\\python.exe`, args: [] });
+        }
+    }
+    // 2. Program Files
+    for (const ver of ['Python311', 'Python310', 'Python39', 'Python312']) {
+        candidates.push({ cmd: `C:\\Program Files\\${ver}\\python.exe`, args: [] });
+    }
+    // 3. PATH-based (cuối cùng)
+    candidates.push(
+        { cmd: 'py', args: ['-3.11'] },
         { cmd: 'py', args: ['-3.10'] },
         { cmd: 'py', args: ['-3'] },
-        // Đường dẫn cố định phổ biến
-        { cmd: 'C:\\Program Files\\Python310\\python.exe', args: [] },
-        { cmd: 'C:\\Program Files\\Python39\\python.exe', args: [] },
-        { cmd: 'C:\\Program Files\\Python311\\python.exe', args: [] },
-        { cmd: 'C:\\Users\\' + (process.env.USERNAME || '') + '\\AppData\\Local\\Programs\\Python\\Python310\\python.exe', args: [] },
-        { cmd: 'C:\\Users\\' + (process.env.USERNAME || '') + '\\AppData\\Local\\Programs\\Python\\Python39\\python.exe', args: [] },
-        // PATH fallback
         { cmd: 'python', args: [] },
         { cmd: 'python3', args: [] },
-    ];
+    );
+
     for (const c of candidates) {
         try {
-            // Kiểm tra file tồn tại (với exe cụ thể)
             if (c.cmd.includes('\\') && !fs.existsSync(c.cmd)) continue;
+            if (!c.cmd.includes('\\')) {
+                const res = spawnSync(c.cmd, [...c.args, '--version'], { windowsHide: true, timeout: 5000, stdio: 'pipe' });
+                if (res.error || res.status !== 0) continue;
+            }
+            // Verify face_recognition module
+            const verify = spawnSync(c.cmd, [...c.args, '-c', 'import face_recognition; print("OK")'], {
+                windowsHide: true, timeout: 15000, stdio: 'pipe'
+            });
+            if (verify.error || verify.status !== 0) {
+                console.log(`[Python] ❌ ${c.cmd} → thiếu face_recognition`);
+                continue;
+            }
+            console.log(`[Python] ✅ CHỌN: ${c.cmd} ${c.args.join(' ')}`);
             return { exe: c.cmd, extraArgs: c.args };
         } catch {}
     }

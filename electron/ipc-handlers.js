@@ -7436,11 +7436,20 @@ let faceServiceIdleTimer = null;
 // Reset idle timer mỗi khi có request → tự kill sau 10 phút idle
 function resetFaceServiceIdleTimer() {
     if (faceServiceIdleTimer) clearTimeout(faceServiceIdleTimer);
-    faceServiceIdleTimer = setTimeout(() => {
+    faceServiceIdleTimer = setTimeout(async () => {
         if (faceServiceProcess) {
             console.log('[Face] ⏹ Tự tắt Python service sau 10 phút không dùng');
-            faceServiceProcess.kill();
-            faceServiceProcess = null;
+            // Graceful shutdown: gọi /shutdown trước để Python kịp flush data
+            try {
+                await faceServiceFetch('/shutdown', { method: 'POST' });
+            } catch { /* Python đã tắt hoặc không phản hồi */ }
+            // Chờ 2s cho Python tự thoát
+            await new Promise(r => setTimeout(r, 2000));
+            // Nếu vẫn còn sống thì force kill
+            if (faceServiceProcess) {
+                faceServiceProcess.kill();
+                faceServiceProcess = null;
+            }
             faceServiceReady = false;
         }
     }, FACE_SERVICE_IDLE_TIMEOUT);
@@ -7512,28 +7521,60 @@ function ensureFaceService() {
             console.log('[Face] 🐍 Không có EXE → tìm Python...');
             function findPythonForFace() {
                 const { spawnSync } = require('child_process');
-                const candidates = [
+                // ── Ưu tiên đường dẫn cụ thể (tin cậy hơn) trước, PATH-based sau ──
+                // Quét nhiều user phổ biến: Admin, NCPC, và user hiện tại
+                const usernames = [...new Set(['Admin', 'NCPC', process.env.USERNAME || ''].filter(Boolean))];
+                const candidates = [];
+                // 1. Đường dẫn cố định per-user (AppData\Local\Programs)
+                for (const uname of usernames) {
+                    for (const ver of ['Python311', 'Python310', 'Python39', 'Python312']) {
+                        candidates.push({ exe: `C:\\Users\\${uname}\\AppData\\Local\\Programs\\Python\\${ver}\\python.exe`, args: [] });
+                    }
+                }
+                // 2. Đường dẫn Program Files (all-users install)
+                for (const ver of ['Python311', 'Python310', 'Python39', 'Python312']) {
+                    candidates.push({ exe: `C:\\Program Files\\${ver}\\python.exe`, args: [] });
+                }
+                // 3. PATH-based (rủi ro chọn sai runtime nên để cuối)
+                candidates.push(
+                    { exe: 'py', args: ['-3.11'] },
                     { exe: 'py', args: ['-3.10'] },
                     { exe: 'py', args: ['-3'] },
                     { exe: 'python', args: [] },
                     { exe: 'python3', args: [] },
-                    { exe: 'C:\\Program Files\\Python310\\python.exe', args: [] },
-                    { exe: 'C:\\Program Files\\Python311\\python.exe', args: [] },
-                    { exe: 'C:\\Program Files\\Python39\\python.exe', args: [] },
-                    { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python310\\python.exe`, args: [] },
-                    { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python311\\python.exe`, args: [] },
-                    { exe: `C:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python39\\python.exe`, args: [] }
-                ];
+                );
+
+                console.log(`[Face] 🔍 Tìm Python có face_recognition (${candidates.length} candidates, users: ${usernames.join(',')})`);
+
                 for (const c of candidates) {
                     try {
+                        // Bước 1: Kiểm tra file tồn tại hoặc command khả dụng
                         if (c.exe.includes('\\')) {
-                            if (fs.existsSync(c.exe)) return c;
+                            if (!fs.existsSync(c.exe)) continue;
                         } else {
-                            // Verify command exists in PATH
-                            const res = spawnSync(c.exe, ['--version'], { windowsHide: true });
-                            if (!res.error && res.status === 0) return c;
+                            const res = spawnSync(c.exe, [...c.args, '--version'], {
+                                windowsHide: true, timeout: 5000, stdio: 'pipe'
+                            });
+                            if (res.error || res.status !== 0) continue;
                         }
-                    } catch {}
+
+                        // Bước 2: ★ KIỂM TRA MODULE face_recognition ★
+                        // Đây là bước quan trọng nhất — tránh chọn Python không có thư viện
+                        const verifyArgs = [...c.args, '-c', 'import face_recognition; print("OK")'];
+                        const verify = spawnSync(c.exe, verifyArgs, {
+                            windowsHide: true, timeout: 15000, stdio: 'pipe'
+                        });
+                        if (verify.error || verify.status !== 0) {
+                            const errMsg = verify.stderr ? verify.stderr.toString().trim().slice(0, 120) : 'unknown';
+                            console.log(`[Face]   ❌ ${c.exe} ${c.args.join(' ')} → thiếu face_recognition: ${errMsg}`);
+                            continue;
+                        }
+
+                        console.log(`[Face]   ✅ CHỌN: ${c.exe} ${c.args.join(' ')} → có face_recognition`);
+                        return c;
+                    } catch (err) {
+                        console.log(`[Face]   ⚠️ ${c.exe} → lỗi: ${err.message}`);
+                    }
                 }
                 return null;
             }
@@ -7674,11 +7715,6 @@ function getCheckType() {
         return 'morning_out';
     }
     
-    // Giờ nghỉ trưa (Không cho quét thẻ): 12:30 đến trước 13:00
-    if (total > 12 * 60 + 30 && total < 13 * 60) {
-        return null;
-    }
-    
     // Ca chiều
     // Check-in: 13:00 đến trước 17:30
     // Check-out: 17:30 đến 20:30
@@ -7687,7 +7723,11 @@ function getCheckType() {
         return 'evening_out';
     }
     
-    return null; // Ngoài thời gian làm việc
+    // DEBUG: Tạm bỏ giới hạn giờ — luôn cho phép chấm công
+    // Ngoài khung giờ → tự chọn ca gần nhất thay vì block
+    if (total < 7 * 60) return 'morning_in';           // Trước 7h → coi như sáng vào sớm
+    if (total <= 13 * 60) return 'morning_out';         // 12:30-13:00 (nghỉ trưa) → sáng ra
+    return 'evening_out';                               // Sau 20:30 → tối ra
 }
 
 // Kiểm tra + tự khởi động Python service khi vào tab Điểm danh
@@ -7728,6 +7768,16 @@ ipcMain.handle('attendance:recognize', async (event, { image }) => {
             method: 'POST',
             body: JSON.stringify({ image }),
         });
+
+        // ── DEBUG LOG ──────────────────────────────────────────────────
+        console.log('[Face DEBUG] Python result:', JSON.stringify({
+            found: result.found,
+            face_id: result.face_id,
+            reason: result.reason,
+            confidence: result.confidence,
+            dist: result.dist,
+            _debug: result._debug,
+        }));
 
         // Luôn đính kèm face_box để frontend vẽ overlay real-time
         const faceInfo = {

@@ -65,9 +65,42 @@ ENCODINGS_FILE = BASE_DIR / "encodings.pkl"  # Cache encodings
 
 FACES_DIR.mkdir(parents=True, exist_ok=True)
 
+# ── Startup: In rõ đường dẫn để debug ──────────────────────────────
+print(f"[Face] FACE_DATA_DIR env = {os.environ.get('FACE_DATA_DIR', 'NOT SET')}")
+print(f"[Face] BASE_DIR         = {BASE_DIR}")
+print(f"[Face] FACES_DIR        = {FACES_DIR} (exists={FACES_DIR.exists()})")
+print(f"[Face] ENCODINGS_FILE   = {ENCODINGS_FILE} (exists={ENCODINGS_FILE.exists()})")
+if FACES_DIR.exists():
+    subdirs = [d.name for d in FACES_DIR.iterdir() if d.is_dir()]
+    print(f"[Face] Face folders     = {subdirs}")
+else:
+    print(f"[Face] Face folders     = (dir not found)")
+
 # ─── In-memory encodings ──────────────────────────────────────────────────────
 # { "nguyen_van_a": [ encoding1, encoding2, ... ] }
 known_encodings: dict[str, list] = {}
+
+
+def _save_encodings_atomic():
+    """Ghi encodings.pkl an toàn — ghi vào file tạm rồi rename.
+    Tránh corruption nếu bị kill giữa chừng (10-min idle timer).
+    """
+    tmp_file = ENCODINGS_FILE.with_suffix(".pkl.tmp")
+    try:
+        with open(tmp_file, "wb") as f:
+            pickle.dump(known_encodings, f)
+            f.flush()
+            os.fsync(f.fileno())
+        # Atomic rename (trên Windows sẽ overwrite nếu dst tồn tại từ Python 3.3+)
+        tmp_file.replace(ENCODINGS_FILE)
+    except Exception as e:
+        print(f"[Face] ❌ Atomic save failed: {e}")
+        # Fallback: ghi trực tiếp
+        try:
+            with open(ENCODINGS_FILE, "wb") as f:
+                pickle.dump(known_encodings, f)
+        except Exception as e2:
+            print(f"[Face] ❌ Fallback save also failed: {e2}")
 
 
 def load_encodings():
@@ -83,28 +116,38 @@ def load_encodings():
             cache_ids = set(cached.keys())
             if disk_ids == cache_ids:
                 known_encodings = cached
-                print(f"[Face] Loaded {len(known_encodings)} profiles from cache")
+                print(f"[Face] ✅ Loaded {len(known_encodings)} profiles from cache")
             else:
-                print(f"[Face] Cache mismatch (disk={disk_ids}, cache={cache_ids}), rebuilding...")
-                rebuild_encodings()
+                print(f"[Face] ⚠️ Cache mismatch (disk={disk_ids}, cache={cache_ids}), rebuilding...")
+                rebuild_encodings(cached_fallback=cached)
         except Exception as e:
-            print(f"[Face] Cache corrupted, rebuilding: {e}")
+            print(f"[Face] ❌ Cache corrupted, rebuilding: {e}")
             rebuild_encodings()
     else:
         rebuild_encodings()
 
 
-def rebuild_encodings():
-    """Tính lại encodings từ toàn bộ ảnh trong FACES_DIR."""
+def rebuild_encodings(cached_fallback: dict = None):
+    """Tính lại encodings từ toàn bộ ảnh trong FACES_DIR.
+    
+    cached_fallback: Nếu có, giữ lại encoding cũ cho profile mà ảnh JPEG
+    không detect được mặt (tránh mất data âm thầm do nén ảnh).
+    """
     global known_encodings
-    known_encodings = {}
+    new_encodings = {}
+    skipped_profiles = []
+    
     for person_dir in FACES_DIR.iterdir():
         if not person_dir.is_dir():
             continue
         face_id = person_dir.name
+        jpg_files = list(person_dir.glob("*.jpg"))
+        if not jpg_files:
+            continue
+            
         encodings = []
-        for img_file in person_dir.glob("*.jpg"):
-            # Guard: file có thể bị xóa giữa chừng khi đang rebuild (race condition)
+        skip_count = 0
+        for img_file in jpg_files:
             if not img_file.exists():
                 print(f"[Face] Skip deleted file: {img_file.name}")
                 continue
@@ -112,21 +155,35 @@ def rebuild_encodings():
                 img = face_recognition.load_image_file(str(img_file))
             except Exception as e:
                 print(f"[Face] Skip unreadable file {img_file.name}: {e}")
+                skip_count += 1
                 continue
-            # upsample=1 để rebuild nhanh khi startup
-            # Haar fallback xử lý ảnh khó nếu HOG upsample=1 không detect được
-            locs = get_face_locations_fast(np.array(img), upsample=1)
+            # upsample=2 khi rebuild — chậm hơn nhưng tin cậy hơn với ảnh JPEG nén
+            locs = get_face_locations_fast(np.array(img), upsample=2)
             if not locs:
+                print(f"[Face] ⚠️ No face in saved photo: {face_id}/{img_file.name}")
+                skip_count += 1
                 continue
             encs = face_recognition.face_encodings(img, locs)
             if encs:
                 encodings.append(encs[0])
+                
         if encodings:
-            known_encodings[face_id] = encodings
-            print(f"[Face] Registered '{face_id}': {len(encodings)} photos")
-
-    with open(ENCODINGS_FILE, "wb") as f:
-        pickle.dump(known_encodings, f)
+            new_encodings[face_id] = encodings
+            print(f"[Face] ✅ Rebuilt '{face_id}': {len(encodings)}/{len(jpg_files)} photos")
+        else:
+            # ★ KHÔNG âm thầm xóa profile — dùng cached encoding nếu có
+            if cached_fallback and face_id in cached_fallback:
+                new_encodings[face_id] = cached_fallback[face_id]
+                print(f"[Face] ⚠️ '{face_id}': ảnh JPEG không detect được mặt, GIỮ encoding cũ từ cache ({len(cached_fallback[face_id])} encs)")
+            else:
+                skipped_profiles.append(face_id)
+                print(f"[Face] ❌ '{face_id}': {len(jpg_files)} ảnh nhưng KHÔNG detect được mặt nào, BỎ QUA!")
+    
+    known_encodings = new_encodings
+    _save_encodings_atomic()
+    
+    if skipped_profiles:
+        print(f"[Face] ⚠️ CẢNH BÁO: {len(skipped_profiles)} profile bị bỏ: {skipped_profiles}")
     print(f"[Face] Rebuilt encodings: {len(known_encodings)} profiles")
 
 
@@ -208,6 +265,7 @@ def recognize(req: RecognizeRequest):
             if face_locations:
                 top, right, bottom, left = face_locations[0]
                 img_h, img_w = img.shape[:2]
+                print(f"[DEBUG] No profiles loaded! face detected but 0 encodings")
                 return {"found": False, "reason": "no_profiles",
                         "face_box": {"top": top, "right": right, "bottom": bottom, "left": left},
                         "img_height": img_h, "img_width": img_w}
@@ -238,6 +296,9 @@ def recognize(req: RecognizeRequest):
 
     img_h, img_w = img.shape[:2]
 
+    # ── DEBUG: Log chi tiết distance cho từng profile ──────────────────────
+    debug_distances = {}
+
     # Xử lý từng mặt độc lập — tránh lẫn lộn best_match giữa nhiều mặt trong frame
     # Lấy mặt đầu tiên match được (thực tế chấm công thường chỉ có 1 người)
     for idx, face_enc in enumerate(face_encs):
@@ -249,7 +310,9 @@ def recognize(req: RecognizeRequest):
         for face_id, encs in known_encodings.items():
             distances = face_recognition.face_distance(encs, face_enc)
             min_dist = float(np.min(distances))
+            avg_dist = float(np.mean(distances))
             confidence = float(1.0 - min_dist)
+            debug_distances[face_id] = {"min": round(min_dist, 4), "avg": round(avg_dist, 4), "n_encs": len(encs)}
 
             if min_dist < best_dist:
                 second_best_dist = best_dist
@@ -270,6 +333,13 @@ def recognize(req: RecognizeRequest):
             and (len(known_encodings) == 1 or best_dist < 0.32 or margin >= MIN_MARGIN)
         )
 
+        # ── DEBUG LOG ──────────────────────────────────────────────────────
+        print(f"[DEBUG recognize] img={img_w}x{img_h} | faces_detected={len(face_encs)}")
+        print(f"[DEBUG recognize] Distances: {debug_distances}")
+        print(f"[DEBUG recognize] Best: {best_match} dist={best_dist:.4f} | 2nd_dist={second_best_dist:.4f} | margin={margin:.4f}")
+        print(f"[DEBUG recognize] THRESHOLD={THRESHOLD} | dist<TH? {best_dist < THRESHOLD} | dist<0.32? {best_dist < 0.32} | margin>=MIN? {margin >= MIN_MARGIN}")
+        print(f"[DEBUG recognize] → match_accepted={match_accepted}")
+
         # face_box khớp đúng với mặt đang xét (không dùng mặt #0 cố định)
         top, right, bottom, left = face_locations[idx]
         face_box = {"top": top, "right": right, "bottom": bottom, "left": left}
@@ -284,6 +354,7 @@ def recognize(req: RecognizeRequest):
                 "face_box": face_box,
                 "img_width": img_w,
                 "img_height": img_h,
+                "_debug": debug_distances,
             }
 
     # Không có mặt nào match — trả về face_box của mặt đầu tiên để UI vẫn vẽ được khung
@@ -297,6 +368,7 @@ def recognize(req: RecognizeRequest):
         "face_box": face_box,
         "img_width": img_w,
         "img_height": img_h,
+        "_debug": debug_distances,
     }
 
 
@@ -347,11 +419,7 @@ def register(req: RegisterRequest):
     # Nếu dùng extend, những ảnh lỗi từ lần đăng ký test trước đây sẽ bị lưu mãi mãi (ví dụ Phương đăng ký nhầm vào tên Trường thì Trường sẽ cứ bị nhận thành Phương)
     known_encodings[req.face_id] = new_encs
         
-    try:
-        with open(ENCODINGS_FILE, "wb") as f:
-            pickle.dump(known_encodings, f)
-    except Exception as e:
-        print(f"[Face] Failed to save encodings: {e}")
+    _save_encodings_atomic()
 
     return {"ok": True, "face_id": req.face_id, "saved": saved}
 
@@ -360,27 +428,20 @@ def register(req: RegisterRequest):
 def delete_profile(face_id: str):
     """Xóa profile khuôn mặt."""
     import shutil
-    import threading
 
-    # 1. Xóa khỏi memory ngay lập tức (không cần chờ rebuild)
+    # 1. Xóa khỏi memory ngay lập tức
     global known_encodings
-    known_encodings.pop(face_id, None)
+    removed = known_encodings.pop(face_id, None)
 
     # 2. Xóa folder ảnh trên disk
     person_dir = FACES_DIR / face_id
     if person_dir.exists():
         shutil.rmtree(str(person_dir))
 
-    # 3. Rebuild encodings trong background thread — trả về ngay cho client
-    #    tránh timeout khi có nhiều ảnh (rebuild có thể mất 30-60s)
-    def _bg_rebuild():
-        try:
-            rebuild_encodings()
-        except Exception as e:
-            print(f"[Face] Background rebuild error: {e}")
-
-    threading.Thread(target=_bg_rebuild, daemon=True).start()
-    print(f"[Face] Deleted '{face_id}', rebuild running in background")
+    # 3. Lưu encodings mới (KHÔNG rebuild toàn bộ — tránh race condition xóa sạch memory)
+    _save_encodings_atomic()
+    
+    print(f"[Face] Deleted '{face_id}' (had {len(removed) if removed else 0} encs), {len(known_encodings)} profiles remain")
     return {"ok": True, "deleted": face_id}
 
 
@@ -391,6 +452,25 @@ def list_profiles():
     for face_id, encs in known_encodings.items():
         profiles.append({"face_id": face_id, "photo_count": len(encs)})
     return {"profiles": profiles}
+
+
+@app.get("/debug")
+def debug_info():
+    """DEBUG: Kiểm tra trạng thái chi tiết."""
+    import sys
+    return {
+        "python_version": sys.version,
+        "face_data_dir": str(BASE_DIR),
+        "faces_dir": str(FACES_DIR),
+        "faces_dir_exists": FACES_DIR.exists(),
+        "encodings_file": str(ENCODINGS_FILE),
+        "encodings_file_exists": ENCODINGS_FILE.exists(),
+        "encodings_file_size": ENCODINGS_FILE.stat().st_size if ENCODINGS_FILE.exists() else 0,
+        "profiles_in_memory": len(known_encodings),
+        "profile_details": {fid: len(encs) for fid, encs in known_encodings.items()},
+        "disk_folders": [d.name for d in FACES_DIR.iterdir() if d.is_dir()] if FACES_DIR.exists() else [],
+        "disk_photos": {d.name: len(list(d.glob('*.jpg'))) for d in FACES_DIR.iterdir() if d.is_dir()} if FACES_DIR.exists() else {},
+    }
 
 
 @app.post("/shutdown")

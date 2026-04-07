@@ -616,7 +616,7 @@ Thời gian: ${currentTime}`;
                         }
 
                         console.log(`✅ Đã cập nhật status → completed cho đơn #${foundEcommerceExport.id}`);
-                        
+
                         setScanStatus({
                             type: 'success',
                             message: `✅ THÀNH CÔNG - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
@@ -703,24 +703,24 @@ Thời gian: ${currentTime}`;
                     }
 
                     const trackings = [...new Set(json.map(row => String(row[trackingKey] || '').trim()).filter(Boolean))];
-                    
+
                     if (trackings.length === 0) {
                         message.error('Không tìm thấy dữ liệu mã vận đơn trong file!');
                         return;
                     }
 
                     message.loading({ content: `Đang xử lý ${trackings.length} mã vận đơn...`, key: 'bulkScan' });
-                    
+
                     let successCount = 0;
                     let errorCount = 0;
 
                     for (const tracking of trackings) {
                         // Chúng ta chạy tuần tự để Backend không bị Rate Limit / Race Condition trên SQLite/Supabase
                         await new Promise(r => setTimeout(r, 100)); // Delay nhỏ để tránh spam API
-                        
+
                         // Fake input ref value to avoid rewriting handleScan
                         if (scanInputRef.current?.input) scanInputRef.current.input.value = tracking;
-                        
+
                         // Gọi hàm xử lý quét (Nó sẽ tự auto skip nếu đã quét)
                         await handleScan(tracking);
                     }
@@ -1533,7 +1533,7 @@ Thời gian: ${currentTime}`;
             if (totalImported > 0) resultParts.push(`✅ Import ${totalImported} đơn từ ${processedFiles} file`);
             if (totalSkipped > 0) resultParts.push(`bỏ qua ${totalSkipped} trùng`);
             if (totalCancelled > 0) resultParts.push(`🚫 ${totalCancelled} đơn hủy trên sàn`);
-            
+
             if (resultParts.length === 0) {
                 message.warning({ content: '⚠️ Không có thay đổi nào — tất cả đơn đều đã tồn tại!', key: 'import-folder', duration: 5 });
             } else {
@@ -2037,14 +2037,14 @@ Thời gian: ${currentTime}`;
                             const isGenericName = ['quản lý', 'nhân viên', 'quản trị viên'].includes((emp.name || '').toLowerCase());
                             const displayName = isGenericName ? emp.username : (emp.name || emp.username);
                             const shortName = isGenericName ? emp.username : displayName.split(' ').pop();
-                            
+
                             return (
                                 <div
                                     key={emp.id}
                                     onClick={() => handleSelectPacker(emp.username)}
                                     style={{
                                         display: 'flex', alignItems: 'center', gap: 10,
-                                        padding: isActive ? '8px 20px' : '6px 14px', 
+                                        padding: isActive ? '8px 20px' : '6px 14px',
                                         borderRadius: 12, cursor: 'pointer',
                                         transition: 'all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275)',
                                         background: isActive
@@ -2090,7 +2090,7 @@ Thời gian: ${currentTime}`;
             {/* Dòng 2: Quét mã vận đơn */}
             <div
                 className="scan-input-wrap"
-                style={{ 
+                style={{
                     display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8, padding: '8px 14px',
                     border: activePacker ? '3px solid #00C868' : '2px solid transparent',
                     background: activePacker ? '#ECFFF3' : 'transparent',
@@ -2123,7 +2123,7 @@ Thời gian: ${currentTime}`;
                     icon={<ScanOutlined />}
                     onClick={() => handleScan(scanValue)}
                     style={{
-                        background: activePacker ? 'linear-gradient(135deg, #0DD173 0%, #00B159 100%)' : '#bfbfbf', 
+                        background: activePacker ? 'linear-gradient(135deg, #0DD173 0%, #00B159 100%)' : '#bfbfbf',
                         borderColor: activePacker ? '#00C868' : '#bfbfbf',
                         flexShrink: 0, height: 44, paddingInline: 24, fontWeight: 600,
                         boxShadow: activePacker ? '0 4px 10px rgba(0, 200, 104, 0.3)' : 'none',
