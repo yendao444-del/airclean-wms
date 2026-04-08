@@ -181,4 +181,4 @@ echo ============================================
 echo Version : v!NEW_VERSION!
 echo Patch   : !PATCH_ZIP! (~!FILE_SIZE_MB! MB)
 echo.
-exit /b 0
+pause
