@@ -70,16 +70,8 @@ xcopy "dist\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 xcopy "electron\*" "!PATCH_TEMP!\resources\app\electron\" /E /I /Y /Q >nul 2>&1
 copy /Y "python\attendance_service.py" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
 copy /Y "python\requirements.txt" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
-
-if exist "python\dist\attendance_service.exe" (
-    mkdir "!PATCH_TEMP!\resources\app\python\dist" >nul 2>&1
-    copy /Y "python\dist\attendance_service.exe" "!PATCH_TEMP!\resources\app\python\dist\" >nul 2>&1
-    echo    [OK] Included attendance_service.exe ^(existing build^)
-) else (
-    echo    [WARN] attendance_service.exe not found - patch se khong co EXE
-)
-
 copy /Y "package.json" "!PATCH_TEMP!\resources\app\package.json" >nul 2>&1
+echo    [OK] Khong kem EXE ^(dung RELEASE-ver2.bat neu can cap nhat Python service^)
 
 powershell -NoProfile -Command "Compress-Archive -Path '!PATCH_TEMP!\*' -DestinationPath '!PATCH_ZIP_PATH!' -Force"
 set ZIP_EXIT=!errorlevel!
