@@ -7,6 +7,8 @@ release2
 release3
 release4
 /release*
+!/RELEASE*.bat
+!/RELEASE*.ps1
 *.zip
 /src/generated/prisma
 /prisma/dev.db
