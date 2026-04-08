@@ -215,16 +215,14 @@ function createWindow() {
         const indexPath = path.join(__dirname, '../dist/index.html');
         mainWindow.loadFile(indexPath);
     }
-    // 🔒 SECURITY: DevTools control based on packaging
-    if (app.isPackaged) {
-        // PRODUCTION (.exe) → khóa DevTools để nhân viên không mở được
-        mainWindow.webContents.on('devtools-opened', () => {
-            mainWindow.webContents.closeDevTools();
-        });
-    } else {
-        // DEV (chạy từ source) → mở DevTools để debug
-        // mainWindow.webContents.openDevTools();
-    }
+    // 🔓 DEBUG BUILD: DevTools mở được trên máy packaged để debug
+    // TODO: Khóa lại sau khi debug xong (xoá dòng openDevTools, bỏ comment đoạn lock bên dưới)
+    mainWindow.webContents.openDevTools();
+    // if (app.isPackaged) {
+    //     mainWindow.webContents.on('devtools-opened', () => {
+    //         mainWindow.webContents.closeDevTools();
+    //     });
+    // }
 
     mainWindow.on('closed', () => {
         mainWindow = null;
