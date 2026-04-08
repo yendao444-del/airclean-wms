@@ -7512,7 +7512,19 @@ function resetFaceServiceIdleTimer() {
 let _faceLastSpawnFail = 0;      // Timestamp lần spawn thất bại cuối
 let _ensurePromise = null;       // Promise quản lý việc spawn chống race condition
 
+function isLiveFaceService(data) {
+    // Service đã sống (có thể đang initializing hoặc ready)
+    return Boolean(
+        data &&
+        data.ok === true &&
+        data.service === FACE_SERVICE_NAME &&
+        (data.status === 'ready' || data.status === 'initializing') &&
+        data.version !== undefined
+    );
+}
+
 function isValidFaceServiceStatus(data) {
+    // Service đã sống VÀ sẵn sàng xử lý request
     return Boolean(
         data &&
         data.ok === true &&
@@ -7705,10 +7717,11 @@ function ensureFaceService() {
                 if (faceServiceIdleTimer) { clearTimeout(faceServiceIdleTimer); faceServiceIdleTimer = null; }
             });
 
-            // Poll chờ service sẵn sàng (Đã sửa từ 15s lên 30s)
+            // Poll chờ service sống (initializing hoặc ready đều OK)
+            // KHÔNG đợi ready vì rebuild encodings có thể > 30s trên máy chậm
             return await new Promise((res, rej) => {
                 let attempts = 0;
-                const maxAttempts = 60; // 60 x 500ms = 30s (Tránh delay do Windows Defender)
+                const maxAttempts = 60; // 60 x 500ms = 30s (chỉ đợi port mở + service phản hồi)
                 const pollReady = setInterval(async () => {
                     attempts++;
                     if (!faceServiceProcess) {
@@ -7717,15 +7730,21 @@ function ensureFaceService() {
                         return rej(new Error('Python process thoát bất ngờ'));
                     }
                     try {
-                        const status = await faceServiceFetch('/status');
-                        if (!isValidFaceServiceStatus(status)) {
+                        const statusData = await faceServiceFetch('/status');
+                        if (isLiveFaceService(statusData)) {
+                            clearInterval(pollReady);
+                            // Nếu đã ready thì set luôn, nếu initializing thì chưa set ready
+                            if (statusData.status === 'ready') {
+                                faceServiceReady = true;
+                                console.log(`[Face] ✅ Python face service sẵn sàng sau ${attempts * 0.5}s!`);
+                            } else {
+                                console.log(`[Face] ✅ Python service đã mở port sau ${attempts * 0.5}s (đang load encodings...)`);
+                            }
+                            resetFaceServiceIdleTimer();
+                            res(true);
+                        } else {
                             throw new Error('Invalid attendance service status payload');
                         }
-                        clearInterval(pollReady);
-                        faceServiceReady = true;
-                        resetFaceServiceIdleTimer();
-                        console.log(`[Face] ✅ Python face service sẵn sàng sau ${attempts * 0.5}s!`);
-                        res(true);
                     } catch {
                         if (attempts >= maxAttempts) {
                             clearInterval(pollReady);
@@ -7827,8 +7846,12 @@ ipcMain.handle('attendance:status', async () => {
         // Tự động spawn Python nếu chưa chạy
         await ensureFaceService();
         const data = await faceServiceFetch('/status');
-        if (!isValidFaceServiceStatus(data)) {
+        if (!isLiveFaceService(data)) {
             throw new Error('Attendance service trả về /status không hợp lệ');
+        }
+        // Nếu đang initializing → vẫn báo success nhưng ghi nhận chưa ready
+        if (data.status === 'ready' && !faceServiceReady) {
+            faceServiceReady = true;
         }
         return { success: true, data };
     } catch (err) {

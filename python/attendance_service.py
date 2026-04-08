@@ -73,8 +73,8 @@ BASE_DIR = Path(_data_root)
 FACES_DIR = BASE_DIR / "faces"          # Ảnh đăng ký
 ENCODINGS_FILE = BASE_DIR / "encodings.pkl"  # Cache encodings
 SERVICE_NAME = "attendance"
-SERVICE_STATUS = "ready"
-SERVICE_VERSION = "1.1.0"
+SERVICE_STATUS = "initializing"  # Bắt đầu là initializing, chuyển ready khi load xong encodings
+SERVICE_VERSION = "1.2.0"
 
 FACES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -213,16 +213,30 @@ def decode_image(base64_str: str) -> np.ndarray:
 # ─── Lifespan ─────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app):
-    # Startup
-    load_encodings()
-    print("[Face] Service ready on port 5001")
+    import threading
+    global SERVICE_STATUS
+
+    def _background_load():
+        global SERVICE_STATUS
+        try:
+            load_encodings()
+            SERVICE_STATUS = "ready"
+            print("[Face] Encodings loaded - status=ready")
+        except Exception as e:
+            SERVICE_STATUS = "error"
+            print(f"[Face] Background load failed: {e}")
+
+    # Mo port ngay, load encodings chay nen
+    t = threading.Thread(target=_background_load, daemon=True)
+    t.start()
+    print("[Face] Service started on port 5001 (encodings loading in background...)")
     yield
     # Shutdown
     print("[Face] Service shutting down")
 
 
 # ─── App ──────────────────────────────────────────────────────────────────────
-app = FastAPI(title="DBY Face Attendance", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="DBY Face Attendance", version="1.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 

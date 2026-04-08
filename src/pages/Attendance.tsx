@@ -558,6 +558,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
     const lastResultRef = useRef<any>(null);    // lưu result mới nhất để draw tên
 
     const [serviceOk, setServiceOk] = useState(false);
+    const [serviceStatus, setServiceStatus] = useState<'ready' | 'initializing' | 'error'>('error');
     const [cameraOn, setCameraOn] = useState(false);
     const cameraOnRef = useRef(false);
     const [recognizing, setRecognizing] = useState(false);
@@ -594,6 +595,11 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
         if (!api) return;
         const res = await api.status();
         setServiceOk(res.success);
+        if (res.success && res.data?.status) {
+            setServiceStatus(res.data.status);
+        } else {
+            setServiceStatus('error');
+        }
     }, [api]);
 
     // Load today logs + profiles
@@ -1294,14 +1300,21 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
             {/* Header: Status + 2 nút luôn hiển thị */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <Space>
-                    <Badge status={serviceOk ? 'success' : 'error'} text={<Text style={{ fontWeight: 700 }}>{serviceOk ? 'Python service: Sẵn sàng' : 'Python service: Không kết nối được'}</Text>} />
+                    <Badge
+                        status={serviceStatus === 'ready' ? 'success' : serviceStatus === 'initializing' ? 'processing' : 'error'}
+                        text={<Text style={{ fontWeight: 700 }}>{
+                            serviceStatus === 'ready' ? 'Python service: Sẵn sàng'
+                            : serviceStatus === 'initializing' ? 'Python service: Đang khởi tạo...'
+                            : 'Python service: Không kết nối được'
+                        }</Text>}
+                    />
                     <Button size="small" icon={<SyncOutlined />} onClick={() => { checkService(); loadData(); }}>Làm mới</Button>
                 </Space>
                 <Space>
                     <Button
                         icon={<SmileOutlined />}
                         type={cameraExpanded ? 'default' : 'primary'}
-                        disabled={!serviceOk}
+                        disabled={serviceStatus !== 'ready'}
                         style={cameraExpanded ? {} : { background: '#52c41a', borderColor: '#52c41a', color: '#fff' }}
                         onClick={async () => {
                             if (cameraExpanded) {
@@ -1326,7 +1339,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                     >
                         {cameraExpanded ? 'Đóng camera' : 'Chấm công'}
                     </Button>
-                    <Button icon={<PlusOutlined />} type="primary" disabled={!serviceOk} onClick={() => {
+                    <Button icon={<PlusOutlined />} type="primary" disabled={serviceStatus !== 'ready'} onClick={() => {
                         // Reset toàn bộ state đăng ký — bắt buộc chọn lại nhân viên mỗi lần
                         setRegFaceId('');
                         setRegUserName('');
@@ -1363,7 +1376,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                                 ) : (
                                     <>
                                         {!recognizing ? (
-                                            <Button type="primary" icon={<SmileOutlined />} onClick={startRecognizing} disabled={!serviceOk}>Bắt đầu nhận diện</Button>
+                                            <Button type="primary" icon={<SmileOutlined />} onClick={startRecognizing} disabled={serviceStatus !== 'ready'}>Bắt đầu nhận diện</Button>
                                         ) : (
                                             <Button danger onClick={stopRecognizing}>Dừng nhận diện</Button>
                                         )}

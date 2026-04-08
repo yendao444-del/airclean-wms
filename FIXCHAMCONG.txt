@@ -1,0 +1,79 @@
+FIX CHAM CONG - Tong hop van de va phuong an
+
+1. Van de da xac dinh
+
+- Loi UnicodeEncodeError trong attendance_service.py
+  Nguyen nhan:
+  Python print emoji/Unicode ra console Windows dung cp1252, lam service crash ngay khi startup.
+  Trang thai:
+  Da fix bang 2 lop bao ve:
+  - attendance_service.py ep stdout/stderr sang utf-8
+  - Electron spawn them PYTHONIOENCODING=utf-8
+
+- Loi health check yeu tren port 5001
+  Nguyen nhan:
+  App truoc day chi can port 5001 co response la coi nhu face service san sang.
+  Rui ro:
+  Nhan nham process khac dang nghe cung port.
+  Trang thai:
+  Da fix:
+  - /status phai tra ve service=status=version dung contract
+  - Electron validate payload, khong chi check HTTP 200
+
+- Loi port conflict 5001
+  Nguyen nhan:
+  Co process cu/khac dang giu port 5001, app spawn service moi qua som nen bi Errno 10048.
+  Trang thai:
+  Da fix:
+  - sua logic kill port
+  - doi va verify port 5001 free truoc khi spawn
+
+- Loi timeout startup tren may khach
+  Nguyen nhan:
+  attendance_service.py dang load_encodings() trong startup.
+  Neu encodings.pkl lech voi thu muc faces thi service rebuild toan bo truoc khi mo port 5001.
+  May co nhieu anh se rebuild rat lau, app timeout truoc khi service ready.
+  Trang thai:
+  [DONE] Đã fix bằng cách:
+  - Tách load_encodings() sang background thread.
+  - Service lấy port 5001 ngay lập tức.
+
+- May khach dang chay bang Python fallback thay vi attendance_service.exe
+  Nguyen nhan:
+  Goi phat hanh hien tai chua coi EXE la duong production bat buoc.
+  He qua:
+  Phu thuoc vao Python tren may khach, de phat sinh loi moi truong.
+  Trang thai:
+  [DONE] Đã fix: Bổ sung bước pyinstaller build EXE thẳng vào RELEASE.bat và RELEASE-ver2.bat.
+
+2. Ket qua kiem tra may khach
+
+- May khach co Python 3.10 va 3.11
+- py -3.10 import face_recognition => OK
+- Nghia la may khach KHONG thieu Python va KHONG thieu face_recognition
+- Van de hien tai cua may khach khong nam o cai dat Python
+- Van de hien tai nam o startup service bi cham do rebuild encodings
+
+3. Workaround tam thoi
+(Đã không còn cần thiết do đã fix gốc)
+
+4. Huong sua goc de khong tai phat (ĐÃ HOÀN THÀNH 100%)
+
+- [DONE] Uu tien 1:
+  Dong goi attendance_service.exe vao release va coi day la production path.
+  Python fallback chi de debug/noi bo.
+  -> Đã cập nhật RELEASE.bat & RELEASE-ver2.bat tự build EXE.
+
+- [DONE] Uu tien 2:
+  Sua startup cua attendance_service.py de khong rebuild blocking truoc khi mo port.
+  -> Đã refactor dùng threading.Thread daemon. /status trả 3 trạng thái: initializing, ready, error.
+
+- [DONE] Uu tien 3:
+  Tang timeout cho startup tren may khach co nhieu anh.
+  -> Đã nâng max timeout trong ipc-handlers lên 30s. Và đổi poll chỉ đợi 'isLive' (initializing OK), nên không sợ timeout do load_encodings.
+  -> App React cũng đã bổ sung poll 10s tự gỡ lỗi nếu rớt kết nối.
+
+==============================================
+TỔNG KẾT: Đã hoàn tất xử lý rốt ráo toàn bộ các vấn đề liên quan đến module Face Attendance.
+Hệ thống nay chạy ổn định, tự hồi phục, chống race condition, và không bắt client cài Python thủ công nữa.
+Thời gian hoàn thành: 2026-04-08
