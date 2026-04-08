@@ -89,41 +89,40 @@ echo.
 
 echo [5/6] Create patch zip...
 echo ----------------------------------------
+set PROJECT_DIR=%CD%
 set PATCH_ZIP=DBYPOS-PATCH-v!NEW_VERSION!.zip
+set PATCH_ZIP_PATH=!PROJECT_DIR!\!PATCH_ZIP!
+set PATCH_TEMP=!PROJECT_DIR!\_patch_temp
 
-if exist "!PATCH_ZIP!" (
-    del "!PATCH_ZIP!"
-)
+if exist "!PATCH_ZIP_PATH!" del "!PATCH_ZIP_PATH!"
+if exist "!PATCH_TEMP!" rmdir /S /Q "!PATCH_TEMP!"
 
-if exist "_patch_temp" rmdir /S /Q "_patch_temp"
-mkdir "_patch_temp\resources\app\dist"
-mkdir "_patch_temp\resources\app\electron"
-mkdir "_patch_temp\resources\app\python"
+mkdir "!PATCH_TEMP!\resources\app\dist"
+mkdir "!PATCH_TEMP!\resources\app\electron"
+mkdir "!PATCH_TEMP!\resources\app\python"
 
-xcopy "dist\*" "_patch_temp\resources\app\dist\" /E /I /Y /Q >nul 2>&1
-xcopy "electron\*" "_patch_temp\resources\app\electron\" /E /I /Y /Q >nul 2>&1
-copy /Y "python\attendance_service.py" "_patch_temp\resources\app\python\" >nul 2>&1
-copy /Y "python\requirements.txt" "_patch_temp\resources\app\python\" >nul 2>&1
+xcopy "dist\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
+xcopy "electron\*" "!PATCH_TEMP!\resources\app\electron\" /E /I /Y /Q >nul 2>&1
+copy /Y "python\attendance_service.py" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
+copy /Y "python\requirements.txt" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
 
 if exist "python\dist\attendance_service.exe" (
-    mkdir "_patch_temp\resources\app\python\dist" >nul 2>&1
-    copy /Y "python\dist\attendance_service.exe" "_patch_temp\resources\app\python\dist\" >nul 2>&1
+    mkdir "!PATCH_TEMP!\resources\app\python\dist" >nul 2>&1
+    copy /Y "python\dist\attendance_service.exe" "!PATCH_TEMP!\resources\app\python\dist\" >nul 2>&1
     echo    [OK] Included attendance_service.exe
 ) else (
     echo    [ERROR] attendance_service.exe missing after successful build.
-    rmdir /S /Q "_patch_temp" 2>nul
+    rmdir /S /Q "!PATCH_TEMP!" 2>nul
     pause
     exit /b 1
 )
 
-copy /Y "package.json" "_patch_temp\resources\app\package.json" >nul 2>&1
+copy /Y "package.json" "!PATCH_TEMP!\resources\app\package.json" >nul 2>&1
 
-pushd "_patch_temp"
-powershell -Command "Compress-Archive -Path '*' -DestinationPath '..\!PATCH_ZIP!' -Force"
+powershell -NoProfile -Command "Compress-Archive -Path '!PATCH_TEMP!\*' -DestinationPath '!PATCH_ZIP_PATH!' -Force"
 set ZIP_EXIT=!errorlevel!
-popd
 
-rmdir /S /Q "_patch_temp" 2>nul
+rmdir /S /Q "!PATCH_TEMP!" 2>nul
 
 if !ZIP_EXIT! neq 0 (
     echo [ERROR] Patch zip creation failed.
@@ -131,13 +130,13 @@ if !ZIP_EXIT! neq 0 (
     exit /b 1
 )
 
-if not exist "!PATCH_ZIP!" (
+if not exist "!PATCH_ZIP_PATH!" (
     echo [ERROR] Patch zip not found after compression.
     pause
     exit /b 1
 )
 
-for %%F in ("!PATCH_ZIP!") do (
+for %%F in ("!PATCH_ZIP_PATH!") do (
     set FILE_SIZE=%%~zF
     set /a FILE_SIZE_MB=!FILE_SIZE! / 1048576
 )
@@ -165,8 +164,7 @@ if !PUSH_EXIT! neq 0 (
 )
 echo [OK] Git push completed.
 
-set CURRENT_DIR=%CD%
-gh release create v!NEW_VERSION! "%CURRENT_DIR%\!PATCH_ZIP!" --title "DBY POS v!NEW_VERSION! (PATCH)" --notes "!NOTES!" > _gh_out.txt 2>&1
+gh release create v!NEW_VERSION! "!PATCH_ZIP_PATH!" --title "DBY POS v!NEW_VERSION! (PATCH)" --notes "!NOTES!" > _gh_out.txt 2>&1
 set GH_EXIT=!errorlevel!
 type _gh_out.txt
 del _gh_out.txt >nul 2>&1
