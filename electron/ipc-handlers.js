@@ -7732,7 +7732,7 @@ function ensureFaceService() {
             // KHÔNG đợi ready vì rebuild encodings có thể > 30s trên máy chậm
             return await new Promise((res, rej) => {
                 let attempts = 0;
-                const maxAttempts = 60; // 60 x 500ms = 30s (chỉ đợi port mở + service phản hồi)
+                const maxAttempts = 180; // 180 x 500ms = 90s (máy khách chậm cần thêm thời gian load)
                 const pollReady = setInterval(async () => {
                     attempts++;
                     if (!faceServiceProcess) {
@@ -7760,9 +7760,9 @@ function ensureFaceService() {
                         if (attempts >= maxAttempts) {
                             clearInterval(pollReady);
                             _faceLastSpawnFail = Date.now();
-                            console.error('[Face] ❌ Python service không phản hồi sau 30s');
+                            console.error('[Face] ❌ Python service không phản hồi sau 90s');
                             if (faceServiceProcess) { faceServiceProcess.kill(); faceServiceProcess = null; }
-                            rej(new Error('Python service khởi động thất bại (Timeout 30s)'));
+                            rej(new Error('Python service khởi động thất bại (Timeout 90s)'));
                         }
                     }
                 }, 500);
