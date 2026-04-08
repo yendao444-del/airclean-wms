@@ -155,6 +155,16 @@ export default function PurchasePage() {
     const [importReceiptFiles, setImportReceiptFiles] = useState<any[]>([]);
     const [importReceiptUploading, setImportReceiptUploading] = useState(false);
 
+    // 👁️ State cho xem Phiếu Nhập Kho (preview)
+    const [importReceiptPreviewVisible, setImportReceiptPreviewVisible] = useState(false);
+    const [importReceiptPreviewData, setImportReceiptPreviewData] = useState<{
+        driveUrls?: string[];
+        localFiles?: { dataUrl: string; fileName: string; mimeType: string; ext: string }[];
+        purchaseId: number;
+        supplierName: string;
+    } | null>(null);
+    const [importReceiptPreviewIndex, setImportReceiptPreviewIndex] = useState(0);
+
     // 👁️ State cho xem HĐ VAT (Google Drive preview)
     const [vatPreviewVisible, setVatPreviewVisible] = useState(false);
     const [vatPreviewData, setVatPreviewData] = useState<{
@@ -185,6 +195,40 @@ export default function PurchasePage() {
             supplierName: record.supplierName || '',
         });
         setVatPreviewVisible(true);
+    };
+
+    // Mở modal xem Phiếu Nhập Kho
+    const openImportReceiptPreview = async (record: any) => {
+        const driveUrl = record.importReceiptDriveUrl;
+        if (driveUrl) {
+            const urls = driveUrl.split('\n').map((u: string) => u.trim()).filter(Boolean);
+            setImportReceiptPreviewIndex(0);
+            setImportReceiptPreviewData({
+                driveUrls: urls,
+                purchaseId: record.id,
+                supplierName: record.supplierName || '',
+            });
+            setImportReceiptPreviewVisible(true);
+        } else {
+            // Thử đọc file local
+            try {
+                const result = await (window.electronAPI as any).purchases.getImportReceiptFileData(record.id);
+                if (result.success && result.data?.length > 0) {
+                    setImportReceiptPreviewIndex(0);
+                    setImportReceiptPreviewData({
+                        localFiles: result.data,
+                        purchaseId: record.id,
+                        supplierName: record.supplierName || '',
+                    });
+                    setImportReceiptPreviewVisible(true);
+                } else {
+                    message.warning('Không tìm thấy file Phiếu Nhập Kho trên máy. Vui lòng upload lại.');
+                    openImportReceiptModal(record.id);
+                }
+            } catch {
+                message.error('Lỗi đọc file Phiếu Nhập Kho.');
+            }
+        }
     };
 
     // Ref cho trường màu sắc để tự động focus
@@ -420,6 +464,13 @@ export default function PurchasePage() {
     const handleSubmit = async (values: any) => {
         if (purchaseItems.length === 0) {
             message.warning('Vui lòng thêm ít nhất 1 sản phẩm!');
+            return;
+        }
+
+        // Bắt buộc đính kèm Phiếu Nhập Kho
+        const alreadyHasReceipt = editingPurchase && (editingPurchase as any).importReceiptStatus === 'uploaded';
+        if (!alreadyHasReceipt && pendingImportFiles.length === 0) {
+            message.error('Vui lòng đính kèm Phiếu Nhập Kho trước khi lưu!');
             return;
         }
 
@@ -1092,12 +1143,8 @@ export default function PurchasePage() {
                                     <CheckCircleOutlined style={{ fontSize: 16 }} /> Đã tải Phiếu Nhập Kho
                                 </div>
                                 <div style={{ marginTop: 6, paddingLeft: 24, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-                                    {((record as any).importReceiptDriveUrl) && ((record as any).importReceiptDriveUrl).split('\n').filter(Boolean).map((url: string, index: number, arr: string[]) => (
-                                        <a key={index} href={url} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#1890ff', whiteSpace: 'nowrap' }}>
-                                            <LinkOutlined /> Xem file {arr.length > 1 ? index + 1 : ''}
-                                        </a>
-                                    ))}
-                                    {((record as any).importReceiptDriveUrl) && <div style={{ width: '1px', height: 12, background: '#d9d9d9', margin: '0 4px' }}></div>}
+                                    <Button type="link" size="small" onClick={() => openImportReceiptPreview(record as any)} style={{ padding: 0, fontWeight: 600 }}>👁️ Xem phiếu</Button>
+                                    <div style={{ width: '1px', height: 12, background: '#d9d9d9', margin: '0 2px' }}></div>
                                     <Button type="link" size="small" onClick={() => openImportReceiptModal(record.id)} style={{ padding: 0 }}>Sửa</Button>
                                     <Button type="link" danger size="small" onClick={() => handleDeleteImportReceipt(record.id)} style={{ padding: 0 }}>Xóa</Button>
                                 </div>
@@ -2296,6 +2343,120 @@ export default function PurchasePage() {
                         })()}
                     </Form.Item>
                 </Form>
+            </Modal>
+
+            {/* === 👁️ MODAL XEM PHIẾU NHẬP KHO — Hỗ trợ Drive URL + file local === */}
+            <Modal
+                title={
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <span style={{ fontSize: 18 }}>📦</span>
+                        <div>
+                            <div style={{ fontWeight: 700, fontSize: 16, color: '#262626' }}>
+                                Phiếu Nhập Kho
+                                {((importReceiptPreviewData?.driveUrls?.length || importReceiptPreviewData?.localFiles?.length) || 0) > 1 && (
+                                    <Tag color="blue" style={{ marginLeft: 8 }}>
+                                        {importReceiptPreviewIndex + 1} / {importReceiptPreviewData?.driveUrls?.length || importReceiptPreviewData?.localFiles?.length} file
+                                    </Tag>
+                                )}
+                            </div>
+                            <div style={{ fontSize: 12, color: '#8c8c8c', fontWeight: 400 }}>
+                                🏢 {importReceiptPreviewData?.supplierName} · Phiếu #{importReceiptPreviewData?.purchaseId}
+                            </div>
+                        </div>
+                    </div>
+                }
+                open={importReceiptPreviewVisible}
+                onCancel={() => { setImportReceiptPreviewVisible(false); setImportReceiptPreviewData(null); setImportReceiptPreviewIndex(0); }}
+                width={900}
+                style={{ top: 20 }}
+                footer={
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Button
+                            icon={<EditOutlined />}
+                            onClick={() => {
+                                setImportReceiptPreviewVisible(false);
+                                if (importReceiptPreviewData) openImportReceiptModal(importReceiptPreviewData.purchaseId);
+                            }}
+                        >
+                            ✏️ Sửa Phiếu Nhập Kho
+                        </Button>
+                        <Space>
+                            {((importReceiptPreviewData?.driveUrls?.length || importReceiptPreviewData?.localFiles?.length) || 0) > 1 && (
+                                <>
+                                    <Button
+                                        disabled={importReceiptPreviewIndex === 0}
+                                        onClick={() => setImportReceiptPreviewIndex(i => i - 1)}
+                                    >
+                                        ◀ Trước
+                                    </Button>
+                                    <Button
+                                        disabled={importReceiptPreviewIndex >= ((importReceiptPreviewData?.driveUrls?.length || importReceiptPreviewData?.localFiles?.length) || 1) - 1}
+                                        onClick={() => setImportReceiptPreviewIndex(i => i + 1)}
+                                    >
+                                        Sau ▶
+                                    </Button>
+                                </>
+                            )}
+                            {importReceiptPreviewData?.driveUrls?.[importReceiptPreviewIndex] && (
+                                <Button
+                                    type="primary"
+                                    icon={<LinkOutlined />}
+                                    onClick={() => window.open(importReceiptPreviewData!.driveUrls![importReceiptPreviewIndex], '_blank')}
+                                    style={{ background: '#1890ff' }}
+                                >
+                                    Mở trên Google Drive
+                                </Button>
+                            )}
+                            <Button onClick={() => { setImportReceiptPreviewVisible(false); setImportReceiptPreviewData(null); setImportReceiptPreviewIndex(0); }}>
+                                Đóng
+                            </Button>
+                        </Space>
+                    </div>
+                }
+            >
+                {/* Thumbnail strip khi có nhiều file */}
+                {((importReceiptPreviewData?.driveUrls?.length || importReceiptPreviewData?.localFiles?.length) || 0) > 1 && (
+                    <div style={{ display: 'flex', gap: 8, marginBottom: 12, padding: '8px 0', overflowX: 'auto', borderBottom: '1px solid #f0f0f0' }}>
+                        {(importReceiptPreviewData?.driveUrls || importReceiptPreviewData?.localFiles || []).map((_f, idx) => (
+                            <Button
+                                key={idx}
+                                size="small"
+                                type={idx === importReceiptPreviewIndex ? 'primary' : 'default'}
+                                onClick={() => setImportReceiptPreviewIndex(idx)}
+                                style={{ minWidth: 48, fontWeight: idx === importReceiptPreviewIndex ? 700 : 400 }}
+                            >
+                                📄 {idx + 1}
+                            </Button>
+                        ))}
+                    </div>
+                )}
+                <div style={{ width: '100%', height: '70vh', borderRadius: 8, overflow: 'hidden', border: '2px solid #f0f0f0', background: '#fafafa' }}>
+                    {/* Drive URL preview */}
+                    {importReceiptPreviewData?.driveUrls?.[importReceiptPreviewIndex] && (
+                        <iframe
+                            src={importReceiptPreviewData.driveUrls[importReceiptPreviewIndex].replace('/view', '/preview')}
+                            style={{ width: '100%', height: '100%', border: 'none' }}
+                            title={`Phiếu Nhập Kho - File ${importReceiptPreviewIndex + 1}`}
+                            allow="autoplay"
+                        />
+                    )}
+                    {/* Local file preview */}
+                    {!importReceiptPreviewData?.driveUrls && importReceiptPreviewData?.localFiles?.[importReceiptPreviewIndex] && (
+                        importReceiptPreviewData.localFiles[importReceiptPreviewIndex].ext === 'pdf' ? (
+                            <iframe
+                                src={importReceiptPreviewData.localFiles[importReceiptPreviewIndex].dataUrl}
+                                style={{ width: '100%', height: '100%', border: 'none' }}
+                                title={`Phiếu Nhập Kho - File ${importReceiptPreviewIndex + 1}`}
+                            />
+                        ) : (
+                            <img
+                                src={importReceiptPreviewData.localFiles[importReceiptPreviewIndex].dataUrl}
+                                alt={`Phiếu Nhập Kho - File ${importReceiptPreviewIndex + 1}`}
+                                style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                            />
+                        )
+                    )}
+                </div>
             </Modal>
 
             {/* === 👁️ MODAL XEM HĐ VAT (Google Drive Preview) — Hỗ trợ nhiều file === */}
