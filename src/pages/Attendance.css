@@ -867,6 +867,61 @@
     padding: 12px 10px !important;
 }
 
+.attendance-module .att-matrix-table .ant-table-cell-fix-left,
+.attendance-module .att-matrix-table .ant-table-cell-fix-right {
+    background: #fff !important;
+    z-index: 2;
+    overflow: hidden !important;
+    position: sticky;
+}
+
+.attendance-module .att-matrix-table .ant-table-tbody > tr:nth-child(even) > td.ant-table-cell-fix-left,
+.attendance-module .att-matrix-table .ant-table-tbody > tr:nth-child(even) > td.ant-table-cell-fix-right {
+    background: #fafbfc !important;
+}
+
+.attendance-module .att-matrix-table .ant-table-tbody > tr:hover > td.ant-table-cell-fix-left,
+.attendance-module .att-matrix-table .ant-table-tbody > tr:hover > td.ant-table-cell-fix-right {
+    background: rgba(16, 185, 129, 0.06) !important;
+}
+
+.attendance-module .att-matrix-table .ant-table-thead > tr > th.ant-table-cell-fix-left,
+.attendance-module .att-matrix-table .ant-table-thead > tr > th.ant-table-cell-fix-right {
+    background: rgba(249, 250, 251, 0.98) !important;
+    z-index: 3;
+    overflow: hidden !important;
+}
+
+.attendance-module .att-matrix-table .ant-table-ping-left .ant-table-cell-fix-left-last::after,
+.attendance-module .att-matrix-table .ant-table-ping-right .ant-table-cell-fix-right-first::after {
+    box-shadow: none !important;
+}
+
+.attendance-module .att-matrix-table .ant-table-cell-fix-left::before,
+.attendance-module .att-matrix-table .ant-table-cell-fix-right::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: inherit;
+    z-index: 0;
+}
+
+.attendance-module .att-matrix-table .ant-table-cell-fix-left > *,
+.attendance-module .att-matrix-table .ant-table-cell-fix-right > * {
+    position: relative;
+    z-index: 1;
+}
+
+.attendance-module .att-matrix-name-cell {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    width: 100%;
+    background: inherit;
+}
+
 /* ===== TỔNG CA COLUMN — nổi bật ===== */
 .attendance-module .att-matrix-table .ant-table-tbody > tr > td.att-total-col-cell {
     background: linear-gradient(180deg, #ecfdf5 0%, #d1fae5 100%) !important;

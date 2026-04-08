@@ -216,6 +216,45 @@ interface PenaltyConfig {
     standardWorkDays: number; // 26
 }
 
+const normalizeAttendanceText = (value?: string | null) =>
+    (value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/đ/g, 'd')
+        .replace(/Đ/g, 'D')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
+
+const findEmployeeForAttendanceLog = (
+    log: { userId?: number | null; faceId?: string | null; userName?: string | null },
+    employees: Employee[],
+) => {
+    if (!log) return null;
+
+    if (log.userId != null) {
+        const byId = employees.find(emp => emp.id === Number(log.userId));
+        if (byId) return byId;
+    }
+
+    const normalizedFaceId = normalizeAttendanceText(log.faceId);
+    if (normalizedFaceId) {
+        const byFaceId = employees.find(emp => normalizeAttendanceText(emp.username) === normalizedFaceId);
+        if (byFaceId) return byFaceId;
+    }
+
+    const normalizedUserName = normalizeAttendanceText(log.userName);
+    if (!normalizedUserName) return null;
+
+    const byExactName = employees.find(emp => normalizeAttendanceText(emp.name) === normalizedUserName);
+    if (byExactName) return byExactName;
+
+    const byUsername = employees.find(emp => normalizeAttendanceText(emp.username) === normalizedUserName);
+    if (byUsername) return byUsername;
+
+    return null;
+};
+
 const initialEmployees: Employee[] = [
     { id: 1, name: 'Nguyễn Đình Toàn', username: 'toan', type: 'Official', baseSalary: 10000000 },
     { id: 2, name: 'Nguyễn Văn Khánh', username: 'khanh', type: 'Official', baseSalary: 10000000 },
@@ -539,6 +578,16 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
     const [regDetecting, setRegDetecting] = useState(false);
 
     const api = (window as any).electronAPI?.attendance;
+    const todayLogRows = useMemo(() => (
+        todayLogs.map((log, i) => {
+            const employee = findEmployeeForAttendanceLog(log, employees);
+            return {
+                ...log,
+                key: i,
+                displayUserName: employee?.name || log.userName || log.faceId || 'Không xác định',
+            };
+        })
+    ), [todayLogs, employees]);
 
     // Check service status
     const checkService = useCallback(async () => {
@@ -1194,7 +1243,16 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
             return;
         }
         setRegLoading(true);
-        const res = await api.register({ face_id: regFaceId, user_name: regUserName, images: regImages });
+        const matchedEmployee = employees.find(emp =>
+            emp.username === regFaceId ||
+            normalizeAttendanceText(emp.name) === normalizeAttendanceText(regUserName)
+        );
+        const res = await api.register({
+            face_id: regFaceId,
+            user_name: regUserName,
+            user_id: matchedEmployee?.id,
+            images: regImages,
+        });
         setRegLoading(false);
         if (res.success) {
             message.success(`Đăng ký thành công! Đã lưu ${res.saved} ảnh`);
@@ -1210,10 +1268,10 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
         } else {
             message.error(res.error || 'Đăng ký thất bại');
         }
-    }, [api, regFaceId, regUserName, regImages, loadData]);
+    }, [api, regFaceId, regUserName, regImages, loadData, employees]);
 
     const logColumns = [
-        { title: 'Nhân viên', dataIndex: 'userName', key: 'userName', render: (v: string) => <Text strong>{v}</Text> },
+        { title: 'Nhân viên', dataIndex: 'displayUserName', key: 'userName', render: (v: string) => <Text strong>{v}</Text> },
         { title: 'Loại', dataIndex: 'checkType', key: 'checkType', width: 140, render: (v: string) => { const c = CHECK_TYPE_LABELS[v]; return <Tag color={c?.color} style={{ fontWeight: 700 }}>{c?.label || v}</Tag>; } },
         { title: 'Giờ', dataIndex: 'timestamp', key: 'timestamp', width: 140, render: (v: string) => <Text>{new Date(v).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}</Text> },
         { title: 'Độ chính xác', dataIndex: 'confidence', key: 'confidence', width: 150, render: (v: number) => <Text type="secondary">{Math.round((v || 0) * 100)}%</Text> },
@@ -1424,7 +1482,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                 bodyStyle={{ padding: 0 }}
             >
                 <Table
-                    dataSource={todayLogs.map((l, i) => ({ ...l, key: i }))}
+                    dataSource={todayLogRows}
                     columns={logColumns}
                     pagination={false}
                     size="small"
@@ -1853,6 +1911,7 @@ export default function Attendance() {
 
     // === State cho điểm danh online ===
     const [liveAttendanceLogs, setLiveAttendanceLogs] = useState<any[]>([]);
+    const attendanceMatrixWrapRef = useRef<HTMLDivElement | null>(null);
 
     // === State cho đóng gói + lịch sử ===
     const warehousePacking = useMemo(() => {
@@ -1951,12 +2010,13 @@ export default function Attendance() {
     const liveAttendanceMatrix = useMemo(() => {
         return employees.map(emp => {
             const monthData = Array.from({ length: daysInMonth }).map(() => ({ am: 0 as 0|1|2, pm: 0 as 0|1|2, amTime: '', pmTime: '', amOutTime: '', pmOutTime: '' }));
-            // Lọc logs của nhân viên này trong tháng này (faceId = username)
-            const logs = liveAttendanceLogs.filter(l => 
-                (l.faceId === emp.username || l.userId === emp.id) &&
-                dayjs(l.date).month() + 1 === selectedMonth &&
-                dayjs(l.date).year() === selectedYear
-            );
+            // Resolve log -> nhân viên bằng nhiều khóa để tránh rớt dữ liệu UI khi faceId/userId cũ không khớp tuyệt đối
+            const logs = liveAttendanceLogs.filter(l => {
+                const matchedEmployee = findEmployeeForAttendanceLog(l, employees);
+                return matchedEmployee?.id === emp.id &&
+                    dayjs(l.date).month() + 1 === selectedMonth &&
+                    dayjs(l.date).year() === selectedYear;
+            });
             
             logs.forEach(log => {
                 const dayIdx = dayjs(log.date).date() - 1; // 0..30
@@ -2919,8 +2979,12 @@ export default function Attendance() {
     const matrixColumns = useMemo(() => {
         const columns: any[] = [
             {
-                title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 130, fixed: 'left' as const,
-                render: (name: string) => <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{name}</Text>,
+                title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 130,
+                render: (name: string) => (
+                    <div className="att-matrix-name-cell">
+                        <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{name}</Text>
+                    </div>
+                ),
             }
         ];
         
@@ -2944,7 +3008,10 @@ export default function Attendance() {
                     </div>
                 ),
                 key: `day-${i}`, align: 'center' as const, width: isToday ? 110 : 100,
-                onHeaderCell: () => ({ style: { background: isToday ? '#e6f4ff' : (isSunday ? '#fafafa' : undefined), borderLeft: isSunday || isToday ? '2px solid #f0f0f0' : undefined, borderRight: isToday ? '2px solid #f0f0f0' : undefined } }),
+                onHeaderCell: () => ({
+                    className: isToday ? 'att-today-col-header' : undefined,
+                    style: { background: isToday ? '#e6f4ff' : (isSunday ? '#fafafa' : undefined), borderLeft: isSunday || isToday ? '2px solid #f0f0f0' : undefined, borderRight: isToday ? '2px solid #f0f0f0' : undefined }
+                }),
                 onCell: () => ({ style: { background: isToday ? '#f0f5ff' : (isSunday ? '#fafafa' : undefined), borderLeft: isSunday || isToday ? '2px solid #f0f0f0' : undefined, borderRight: isToday ? '2px solid #f0f0f0' : undefined } }),
                 render: (_: any, __: any, rowIdx: number) => {
                     const d = liveAttendanceMatrix[rowIdx]?.[i] || { am: 0, pm: 0, amTime: '', pmTime: '', amOutTime: '', pmOutTime: '' };
@@ -2994,6 +3061,43 @@ export default function Attendance() {
         return columns;
     }, [employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear]);
 
+    useEffect(() => {
+        const isCurrentMonth = selectedMonth === dayjs().month() + 1 && selectedYear === dayjs().year();
+        if (!isCurrentMonth || activeTab !== 'attendance') return;
+
+        let cancelled = false;
+        let retryCount = 0;
+
+        const scrollToTodayColumn = () => {
+            if (cancelled) return;
+
+            const wrap = attendanceMatrixWrapRef.current;
+            const todayHeader = wrap?.querySelector('.att-today-col-header') as HTMLElement | null;
+            if (!wrap || !todayHeader) {
+                if (retryCount < 8) {
+                    retryCount += 1;
+                    window.setTimeout(scrollToTodayColumn, 80);
+                }
+                return;
+            }
+
+            todayHeader.scrollIntoView({
+                behavior: 'auto',
+                block: 'nearest',
+                inline: 'center',
+            });
+        };
+
+        const frame1 = window.requestAnimationFrame(() => {
+            window.requestAnimationFrame(scrollToTodayColumn);
+        });
+
+        return () => {
+            cancelled = true;
+            window.cancelAnimationFrame(frame1);
+        };
+    }, [selectedMonth, selectedYear, activeTab, daysInMonth]);
+
     const renderAttendance = () => (
         <FaceAttendanceTab
             employees={employees}
@@ -3026,15 +3130,17 @@ export default function Attendance() {
                 bodyStyle={{ padding: 0 }}
                 style={{ borderTop: '3px solid #00ab56' }}
             >
-                <Table
-                    className="att-matrix-table"
-                    dataSource={employees.map((emp, idx) => ({ key: emp.id, name: emp.name, idx }))}
-                    columns={matrixColumns}
-                    pagination={false}
-                    size="small"
-                    bordered
-                    scroll={{ x: 'max-content' }}
-                />
+                <div ref={attendanceMatrixWrapRef}>
+                    <Table
+                        className="att-matrix-table"
+                        dataSource={employees.map((emp, idx) => ({ key: emp.id, name: emp.name, idx }))}
+                        columns={matrixColumns}
+                        pagination={false}
+                        size="small"
+                        bordered
+                        scroll={{ x: 'max-content' }}
+                    />
+                </div>
             </Card>
 
             {/* Stats */}
