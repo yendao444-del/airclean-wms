@@ -104,7 +104,11 @@ function startPythonService() {
         pythonProcess = spawn(spawnCmd, spawnArgs, {
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
-            env: { ...process.env, FACE_DATA_DIR: userDataPath },
+            env: {
+                ...process.env,
+                FACE_DATA_DIR: userDataPath,
+                PYTHONIOENCODING: 'utf-8',
+            },
         });
         pythonProcess.stdout.on('data', d => console.log('[Python]', d.toString().trim()));
         pythonProcess.stderr.on('data', d => console.error('[Python ERR]', d.toString().trim()));

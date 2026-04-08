@@ -7,6 +7,7 @@ import os
 import io
 import base64
 import pickle
+import sys
 import numpy as np
 from pathlib import Path
 from typing import Optional
@@ -19,6 +20,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+
+# Windows may default piped stdout/stderr to cp1252, which crashes on emoji logs.
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 # Load Haar cascade
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
@@ -62,6 +72,9 @@ _data_root = os.environ.get("FACE_DATA_DIR") or str(Path(__file__).parent)
 BASE_DIR = Path(_data_root)
 FACES_DIR = BASE_DIR / "faces"          # Ảnh đăng ký
 ENCODINGS_FILE = BASE_DIR / "encodings.pkl"  # Cache encodings
+SERVICE_NAME = "attendance"
+SERVICE_STATUS = "ready"
+SERVICE_VERSION = "1.1.0"
 
 FACES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -231,6 +244,9 @@ class DeleteRequest(BaseModel):
 def status():
     return {
         "ok": True,
+        "service": SERVICE_NAME,
+        "status": SERVICE_STATUS,
+        "version": SERVICE_VERSION,
         "profiles": len(known_encodings),
         "face_ids": list(known_encodings.keys())
     }

@@ -7476,20 +7476,23 @@ ipcMain.handle('zkteco:zkbridge', async (event, config) => {
 // Tự tắt sau 10 phút ko dùng
 // ========================================
 
+const net = require('net');
+
 const FACE_SERVICE_URL = 'http://127.0.0.1:5001';
-const FACE_SERVICE_IDLE_TIMEOUT = 10 * 60 * 1000; // 10 phút
+const FACE_SERVICE_PORT = 5001;
+const FACE_SERVICE_IDLE_TIMEOUT = 30 * 60 * 1000; // Tăng lên 30 phút thay vì 10 phút
+const FACE_SERVICE_NAME = 'attendance';
 
 let faceServiceProcess = null;   // child_process reference
 let faceServiceReady = false;
 let faceServiceIdleTimer = null;
 
-// Reset idle timer mỗi khi có request → tự kill sau 10 phút idle
+// Reset idle timer mỗi khi có request → tự kill sau 30 phút idle
 function resetFaceServiceIdleTimer() {
     if (faceServiceIdleTimer) clearTimeout(faceServiceIdleTimer);
     faceServiceIdleTimer = setTimeout(async () => {
         if (faceServiceProcess) {
-            console.log('[Face] ⏹ Tự tắt Python service sau 10 phút không dùng');
-            // Graceful shutdown: gọi /shutdown trước để Python kịp flush data
+            console.log('[Face] ⏹ Tự tắt Python service sau 30 phút không dùng');
             try {
                 await faceServiceFetch('/shutdown', { method: 'POST' });
             } catch { /* Python đã tắt hoặc không phản hồi */ }
@@ -7506,211 +7509,245 @@ function resetFaceServiceIdleTimer() {
 }
 
 // Spawn Python service on-demand
-let _faceSpawning = false;       // Đang trong quá trình spawn
 let _faceLastSpawnFail = 0;      // Timestamp lần spawn thất bại cuối
+let _ensurePromise = null;       // Promise quản lý việc spawn chống race condition
+
+function isValidFaceServiceStatus(data) {
+    return Boolean(
+        data &&
+        data.ok === true &&
+        data.service === FACE_SERVICE_NAME &&
+        data.status === 'ready' &&
+        data.version !== undefined
+    );
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isFaceServicePortFree() {
+    return new Promise((resolve) => {
+        const tester = net.createServer();
+
+        tester.once('error', () => resolve(false));
+        tester.once('listening', () => {
+            tester.close(() => resolve(true));
+        });
+
+        tester.listen(FACE_SERVICE_PORT, '127.0.0.1');
+    });
+}
+
+function killProcessOnFacePort(execSync) {
+    const killCommand = [
+        "$targets = @(Get-NetTCPConnection -LocalPort 5001 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)",
+        "if ($targets.Count -gt 0) {",
+        "  $targets | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }",
+        "}"
+    ].join('; ');
+
+    execSync(`powershell.exe -NoProfile -NonInteractive -Command "${killCommand}"`, {
+        stdio: 'ignore',
+        windowsHide: true,
+        timeout: 10000,
+    });
+}
+
+async function waitForFacePortFree(maxAttempts = 10, delayMs = 1000) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (await isFaceServicePortFree()) {
+            return true;
+        }
+        console.log(`[Face] Chờ port ${FACE_SERVICE_PORT} free... lần ${attempt}/${maxAttempts}`);
+        await sleep(delayMs);
+    }
+    return false;
+}
 
 function ensureFaceService() {
-    return new Promise(async (resolve, reject) => {
-        // 1. Đã chạy và ready → dùng luôn
-        if (faceServiceProcess && faceServiceReady) {
-            resetFaceServiceIdleTimer();
-            return resolve(true);
-        }
+    // Nếu đang có 1 tiến trình spawn dang dở, trả về luôn tiến trình đó (Chống Race Condition)
+    if (_ensurePromise) return _ensurePromise;
 
-        // 2. Kiểm tra port 5001 đã có service sẵn chưa (zombie hoặc process từ lần trước)
+    _ensurePromise = (async () => {
         try {
-            const data = await faceServiceFetch('/status');
-            if (data && data.ok) {
-                console.log('[Face] ✅ Phát hiện service đang chạy sẵn trên port 5001');
-                faceServiceReady = true;
+            // 1. Đã chạy và ready → dùng luôn
+            if (faceServiceProcess && faceServiceReady) {
                 resetFaceServiceIdleTimer();
-                return resolve(true);
+                return true;
             }
-        } catch {
-            // Port chưa có service → sẽ spawn bên dưới
-        }
 
-        // 3. Đang spawn → chờ
-        if (_faceSpawning) {
-            const waitReady = setInterval(() => {
-                if (faceServiceReady) { clearInterval(waitReady); resolve(true); }
-            }, 300);
-            setTimeout(() => { clearInterval(waitReady); reject(new Error('Spawn timeout')); }, 30000);
-            return;
-        }
-
-        // 4. Cooldown: tránh spawn loop (đợi 10s giữa các lần thất bại)
-        const cooldown = Date.now() - _faceLastSpawnFail;
-        if (cooldown < 10000) {
-            return reject(new Error(`Đợi ${Math.ceil((10000 - cooldown) / 1000)}s trước khi thử lại`));
-        }
-
-        // 5. Spawn mới
-        const { spawn, execSync } = require('child_process');
-
-        // Kill bất kỳ process nào đang chiếm port 5001 (dùng chung cho EXE lẫn Python)
-        try {
-            execSync('FOR /F "tokens=5" %a IN (\'netstat -ano ^| findstr :5001 ^| findstr LISTENING\') DO taskkill /PID %a /F', {
-                stdio: 'ignore', shell: 'cmd.exe', windowsHide: true
-            });
-            await new Promise(r => setTimeout(r, 1000));
-        } catch { /* Không có process nào → OK */ }
-
-        // ── Xác định cách chạy: EXE (ưu tiên) hoặc Python (fallback) ──────
-        const exePath = path.join(__dirname, '..', 'python', 'dist', 'attendance_service.exe');
-        const scriptPath = path.join(__dirname, '..', 'python', 'attendance_service.py');
-        let spawnCmd, spawnArgs;
-
-        if (fs.existsSync(exePath)) {
-            // ★ Mode 1: EXE standalone — máy khách không cần cài Python
-            console.log('[Face] 🚀 Dùng attendance_service.exe (standalone)');
-            spawnCmd = exePath;
-            spawnArgs = [];
-        } else if (fs.existsSync(scriptPath)) {
-            // ★ Mode 2: Fallback Python script — cần Python trên máy
-            console.log('[Face] 🐍 Không có EXE → tìm Python...');
-            function findPythonForFace() {
-                const { spawnSync } = require('child_process');
-                // ── Ưu tiên đường dẫn cụ thể (tin cậy hơn) trước, PATH-based sau ──
-                // Quét nhiều user phổ biến: Admin, NCPC, và user hiện tại
-                const usernames = [...new Set(['Admin', 'NCPC', process.env.USERNAME || ''].filter(Boolean))];
-                const candidates = [];
-                // 1. Đường dẫn cố định per-user (AppData\Local\Programs)
-                for (const uname of usernames) {
-                    for (const ver of ['Python311', 'Python310', 'Python39', 'Python312']) {
-                        candidates.push({ exe: `C:\\Users\\${uname}\\AppData\\Local\\Programs\\Python\\${ver}\\python.exe`, args: [] });
-                    }
-                }
-                // 2. Đường dẫn Program Files (all-users install)
-                for (const ver of ['Python311', 'Python310', 'Python39', 'Python312']) {
-                    candidates.push({ exe: `C:\\Program Files\\${ver}\\python.exe`, args: [] });
-                }
-                // 3. PATH-based (rủi ro chọn sai runtime nên để cuối)
-                candidates.push(
-                    { exe: 'py', args: ['-3.11'] },
-                    { exe: 'py', args: ['-3.10'] },
-                    { exe: 'py', args: ['-3'] },
-                    { exe: 'python', args: [] },
-                    { exe: 'python3', args: [] },
-                );
-
-                console.log(`[Face] 🔍 Tìm Python có face_recognition (${candidates.length} candidates, users: ${usernames.join(',')})`);
-
-                for (const c of candidates) {
-                    try {
-                        // Bước 1: Kiểm tra file tồn tại hoặc command khả dụng
-                        if (c.exe.includes('\\')) {
-                            if (!fs.existsSync(c.exe)) continue;
-                        } else {
-                            const res = spawnSync(c.exe, [...c.args, '--version'], {
-                                windowsHide: true, timeout: 5000, stdio: 'pipe'
-                            });
-                            if (res.error || res.status !== 0) continue;
-                        }
-
-                        // Bước 2: ★ KIỂM TRA MODULE face_recognition ★
-                        // Đây là bước quan trọng nhất — tránh chọn Python không có thư viện
-                        const verifyArgs = [...c.args, '-c', 'import face_recognition; print("OK")'];
-                        const verify = spawnSync(c.exe, verifyArgs, {
-                            windowsHide: true, timeout: 15000, stdio: 'pipe'
-                        });
-                        if (verify.error || verify.status !== 0) {
-                            const errMsg = verify.stderr ? verify.stderr.toString().trim().slice(0, 120) : 'unknown';
-                            console.log(`[Face]   ❌ ${c.exe} ${c.args.join(' ')} → thiếu face_recognition: ${errMsg}`);
-                            continue;
-                        }
-
-                        console.log(`[Face]   ✅ CHỌN: ${c.exe} ${c.args.join(' ')} → có face_recognition`);
-                        return c;
-                    } catch (err) {
-                        console.log(`[Face]   ⚠️ ${c.exe} → lỗi: ${err.message}`);
-                    }
-                }
-                return null;
-            }
-            const pyFound = findPythonForFace();
-            if (!pyFound) {
-                _faceSpawning = false;
-                _faceLastSpawnFail = Date.now();
-                return reject(new Error('Không có EXE và không tìm thấy Python. Liên hệ kỹ thuật.'));
-            }
-            spawnCmd = pyFound.exe;
-            spawnArgs = [...pyFound.args, scriptPath];
-        } else {
-            _faceSpawning = false;
-            _faceLastSpawnFail = Date.now();
-            return reject(new Error('Không tìm thấy attendance_service.exe hoặc .py'));
-        }
-
-        _faceSpawning = true;
-        console.log('[Face] Spawn:', spawnCmd, spawnArgs.join(' '));
-
-        faceServiceProcess = spawn(spawnCmd, spawnArgs, {
-            stdio: ['ignore', 'pipe', 'pipe'],
-            windowsHide: true,
-            env: { ...process.env, FACE_DATA_DIR: app.getPath('userData') },
-        });
-
-        faceServiceProcess.stdout.on('data', (data) => {
-            const output = data.toString().trim();
-            if (output) console.log('[Face-py]', output);
-        });
-
-        faceServiceProcess.stderr.on('data', (data) => {
-            const output = data.toString().trim();
-            if (output) console.log('[Face-py:err]', output);
-        });
-
-        faceServiceProcess.on('error', (err) => {
-            console.error('[Face] ❌ Không thể chạy Python:', err.message);
-            faceServiceProcess = null;
-            faceServiceReady = false;
-            _faceSpawning = false;
-            _faceLastSpawnFail = Date.now();
-            reject(new Error('Không thể khởi chạy Python.'));
-        });
-
-        faceServiceProcess.on('exit', (code) => {
-            console.log(`[Face] Python service exited (code ${code})`);
-            faceServiceProcess = null;
-            faceServiceReady = false;
-            _faceSpawning = false;
-            if (code !== 0) _faceLastSpawnFail = Date.now();
-            if (faceServiceIdleTimer) { clearTimeout(faceServiceIdleTimer); faceServiceIdleTimer = null; }
-        });
-
-        // Poll chờ service sẵn sàng (tối đa 15s)
-        let attempts = 0;
-        const maxAttempts = 30; // 30 x 500ms = 15s
-        const pollReady = setInterval(async () => {
-            attempts++;
-            // Nếu process đã exit → ngừng poll
-            if (!faceServiceProcess) {
-                clearInterval(pollReady);
-                _faceSpawning = false;
-                _faceLastSpawnFail = Date.now();
-                return reject(new Error('Python process thoát bất ngờ'));
-            }
+            // 2. Kiểm tra port 5001 đã có service sẵn chưa (zombie hoặc process từ lần trước)
             try {
-                await faceServiceFetch('/status');
-                clearInterval(pollReady);
-                faceServiceReady = true;
-                _faceSpawning = false;
-                resetFaceServiceIdleTimer();
-                console.log('[Face] ✅ Python face service sẵn sàng!');
-                resolve(true);
-            } catch {
-                if (attempts >= maxAttempts) {
-                    clearInterval(pollReady);
-                    _faceSpawning = false;
-                    _faceLastSpawnFail = Date.now();
-                    console.error('[Face] ❌ Python service không phản hồi sau 15s');
-                    if (faceServiceProcess) { faceServiceProcess.kill(); faceServiceProcess = null; }
-                    reject(new Error('Python service khởi động thất bại'));
+                const data = await faceServiceFetch('/status');
+                if (isValidFaceServiceStatus(data)) {
+                    console.log('[Face] ✅ Phát hiện service đang chạy sẵn trên port 5001');
+                    faceServiceReady = true;
+                    resetFaceServiceIdleTimer();
+                    return true;
                 }
+                console.warn('[Face] ⚠️ Port 5001 có phản hồi nhưng không đúng attendance service, sẽ thay thế bằng service nội bộ');
+            } catch {
+                // Port chưa có service → sẽ spawn bên dưới
             }
-        }, 500);
-    });
+
+            // 3. Cooldown: tránh spawn loop (đợi 10s giữa các lần thất bại)
+            const cooldown = Date.now() - _faceLastSpawnFail;
+            if (cooldown < 10000) {
+                throw new Error(`Đợi ${Math.ceil((10000 - cooldown) / 1000)}s trước khi thử lại`);
+            }
+
+            // 4. Spawn mới
+            const { spawn, execSync } = require('child_process');
+
+            // Kill process đang giữ port 5001 rồi chờ Windows nhả port thật sự.
+            try {
+                killProcessOnFacePort(execSync);
+            } catch {
+                /* Bỏ qua nếu lệnh kill lỗi hoặc không có ai dùng port */
+            }
+            if (!(await waitForFacePortFree())) {
+                throw new Error(`Port ${FACE_SERVICE_PORT} không giải phóng được sau 10s`);
+            }
+
+            // ── Xác định cách chạy: EXE (ưu tiên) hoặc Python (fallback) ──────
+            const exePath = path.join(__dirname, '..', 'python', 'dist', 'attendance_service.exe');
+            const scriptPath = path.join(__dirname, '..', 'python', 'attendance_service.py');
+            let spawnCmd, spawnArgs;
+
+            if (fs.existsSync(exePath)) {
+                console.log('[Face] 🚀 Dùng attendance_service.exe (standalone)');
+                spawnCmd = exePath;
+                spawnArgs = [];
+            } else if (fs.existsSync(scriptPath)) {
+                console.log('[Face] 🐍 Không có EXE → tìm Python...');
+                function findPythonForFace() {
+                    const { spawnSync } = require('child_process');
+                    const usernames = [...new Set(['Admin', 'NCPC', process.env.USERNAME || ''].filter(Boolean))];
+                    const candidates = [];
+                    for (const uname of usernames) {
+                        for (const ver of ['Python311', 'Python310', 'Python39', 'Python312']) {
+                            candidates.push({ exe: `C:\\Users\\${uname}\\AppData\\Local\\Programs\\Python\\${ver}\\python.exe`, args: [] });
+                        }
+                    }
+                    for (const ver of ['Python311', 'Python310', 'Python39', 'Python312']) {
+                        candidates.push({ exe: `C:\\Program Files\\${ver}\\python.exe`, args: [] });
+                    }
+                    candidates.push(
+                        { exe: 'py', args: ['-3.11'] }, { exe: 'py', args: ['-3.10'] }, { exe: 'py', args: ['-3'] },
+                        { exe: 'python', args: [] }, { exe: 'python3', args: [] }
+                    );
+
+                    console.log(`[Face] 🔍 Tìm Python có face_recognition (${candidates.length} candidates, users: ${usernames.join(',')})`);
+
+                    for (const c of candidates) {
+                        try {
+                            if (c.exe.includes('\\')) {
+                                if (!fs.existsSync(c.exe)) continue;
+                            } else {
+                                const res = spawnSync(c.exe, [...c.args, '--version'], { windowsHide: true, timeout: 5000, stdio: 'pipe' });
+                                if (res.error || res.status !== 0) continue;
+                            }
+
+                            const verifyArgs = [...c.args, '-c', 'import face_recognition; print("OK")'];
+                            const verify = spawnSync(c.exe, verifyArgs, { windowsHide: true, timeout: 15000, stdio: 'pipe' });
+                            if (verify.error || verify.status !== 0) continue;
+
+                            console.log(`[Face]   ✅ CHỌN: ${c.exe} ${c.args.join(' ')} → có face_recognition`);
+                            return c;
+                        } catch (err) { }
+                    }
+                    return null;
+                }
+                const pyFound = findPythonForFace();
+                if (!pyFound) {
+                    throw new Error('Không có EXE và không tìm thấy Python. Liên hệ kỹ thuật.');
+                }
+                spawnCmd = pyFound.exe;
+                spawnArgs = [...pyFound.args, scriptPath];
+            } else {
+                throw new Error('Không tìm thấy attendance_service.exe hoặc .py');
+            }
+            console.log('[Face] Spawn:', spawnCmd, spawnArgs.join(' '));
+
+            faceServiceProcess = require('child_process').spawn(spawnCmd, spawnArgs, {
+                stdio: ['ignore', 'pipe', 'pipe'],
+                windowsHide: true,
+                env: {
+                    ...process.env,
+                    FACE_DATA_DIR: app.getPath('userData'),
+                    PYTHONIOENCODING: 'utf-8',
+                },
+            });
+
+            faceServiceProcess.stdout.on('data', (data) => {
+                const output = data.toString().trim();
+                if (output) console.log('[Face-py]', output);
+            });
+
+            faceServiceProcess.stderr.on('data', (data) => {
+                const output = data.toString().trim();
+                if (output) console.log('[Face-py:err]', output);
+            });
+
+            faceServiceProcess.on('error', (err) => {
+                console.error('[Face] ❌ Không thể chạy Python:', err.message);
+                faceServiceProcess = null;
+                faceServiceReady = false;
+                _faceLastSpawnFail = Date.now();
+            });
+
+            faceServiceProcess.on('exit', (code) => {
+                console.log(`[Face] Python service exited (code ${code})`);
+                faceServiceProcess = null;
+                faceServiceReady = false;
+                if (code !== 0) _faceLastSpawnFail = Date.now();
+                if (faceServiceIdleTimer) { clearTimeout(faceServiceIdleTimer); faceServiceIdleTimer = null; }
+            });
+
+            // Poll chờ service sẵn sàng (Đã sửa từ 15s lên 30s)
+            return await new Promise((res, rej) => {
+                let attempts = 0;
+                const maxAttempts = 60; // 60 x 500ms = 30s (Tránh delay do Windows Defender)
+                const pollReady = setInterval(async () => {
+                    attempts++;
+                    if (!faceServiceProcess) {
+                        clearInterval(pollReady);
+                        _faceLastSpawnFail = Date.now();
+                        return rej(new Error('Python process thoát bất ngờ'));
+                    }
+                    try {
+                        const status = await faceServiceFetch('/status');
+                        if (!isValidFaceServiceStatus(status)) {
+                            throw new Error('Invalid attendance service status payload');
+                        }
+                        clearInterval(pollReady);
+                        faceServiceReady = true;
+                        resetFaceServiceIdleTimer();
+                        console.log(`[Face] ✅ Python face service sẵn sàng sau ${attempts * 0.5}s!`);
+                        res(true);
+                    } catch {
+                        if (attempts >= maxAttempts) {
+                            clearInterval(pollReady);
+                            _faceLastSpawnFail = Date.now();
+                            console.error('[Face] ❌ Python service không phản hồi sau 30s');
+                            if (faceServiceProcess) { faceServiceProcess.kill(); faceServiceProcess = null; }
+                            rej(new Error('Python service khởi động thất bại (Timeout 30s)'));
+                        }
+                    }
+                }, 500);
+            });
+
+        } catch (err) {
+            _faceLastSpawnFail = Date.now();
+            throw err;
+        } finally {
+            // Khi spawn thành công hoặc thất bại, giải phóng Promise để lệnh sau có thể thử lại
+            _ensurePromise = null;
+        }
+    })();
+
+    return _ensurePromise;
 }
 
 // Tự dọn process khi app thoát
@@ -7738,6 +7775,10 @@ function faceServiceFetch(urlPath, options = {}) {
             let data = '';
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                    reject(new Error(`HTTP ${res.statusCode}`));
+                    return;
+                }
                 try { resolve(JSON.parse(data)); }
                 catch { reject(new Error('Invalid JSON response')); }
             });
@@ -7786,6 +7827,9 @@ ipcMain.handle('attendance:status', async () => {
         // Tự động spawn Python nếu chưa chạy
         await ensureFaceService();
         const data = await faceServiceFetch('/status');
+        if (!isValidFaceServiceStatus(data)) {
+            throw new Error('Attendance service trả về /status không hợp lệ');
+        }
         return { success: true, data };
     } catch (err) {
         console.warn('[Face] Status check failed:', err.message);
@@ -7942,6 +7986,9 @@ ipcMain.handle('attendance:verifyAll', async () => {
     try {
         // 3. Python memory
         const status = await faceServiceFetch('/status');
+        if (!isValidFaceServiceStatus(status)) {
+            throw new Error('Invalid attendance service status payload');
+        }
         result.pythonMemory = status.face_ids || [];
         result.serviceOnline = true;
     } catch (_) {
@@ -8013,6 +8060,9 @@ ipcMain.handle('attendance:deleteProfile', async (event, { face_id }) => {
     } catch (_) { }
     try {
         const status = await faceServiceFetch('/status');
+        if (!isValidFaceServiceStatus(status)) {
+            throw new Error('Invalid attendance service status payload');
+        }
         verify.pythonMemory = !status.face_ids?.includes(face_id); // true = không còn trong memory
     } catch (_) {
         verify.pythonMemory = null; // null = service offline, không kiểm tra được
