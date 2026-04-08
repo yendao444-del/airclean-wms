@@ -4,6 +4,11 @@ setlocal enabledelayedexpansion
 
 for /f "tokens=*" %%t in ('gh auth token 2^>nul') do set GH_TOKEN=%%t
 
+:: Dọn file rác từ lần chạy trước
+del /Q "DBYPOS-PATCH-*.zip" 2>nul
+del /Q "v" 2>nul
+for /f "delims=" %%f in ('dir /b "v[0-9]*" 2^>nul') do del /Q "%%f" 2>nul
+
 echo ============================================
 echo   DBY POS - QUICK PATCH Release
 echo   Chi update code (KHONG build lai EXE)
@@ -127,6 +132,9 @@ if !GH_EXIT! neq 0 (
     exit /b 1
 )
 echo [OK] GitHub release created.
+
+:: Xóa zip sau khi upload thành công
+if exist "!PATCH_ZIP_PATH!" del /Q "!PATCH_ZIP_PATH!" && echo [OK] Da xoa zip sau khi upload.
 echo.
 
 echo ============================================

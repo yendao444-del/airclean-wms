@@ -41,3 +41,12 @@ python/build/
 # Python installer và file rác từ bat script
 python-*.exe
 python-*.amd64.exe
+
+# File rác sinh ra do bat script bug (redirect -> tao file)
+/v
+/v[0-9]*
+/v[0-9]*.[0-9]*
+/v[0-9]*.[0-9]*.[0-9]*
+
+# Patch zip sau khi release (xoa sau khi upload)
+DBYPOS-PATCH-*.zip
