@@ -7853,21 +7853,34 @@ function getCheckType() {
 
 // Kiểm tra + tự khởi động Python service khi vào tab Điểm danh
 ipcMain.handle('attendance:status', async () => {
+    const exePath = path.join(__dirname, '..', 'python', 'dist', 'attendance_service.exe');
+    const scriptPath = path.join(__dirname, '..', 'python', 'attendance_service.py');
+    const debug = {
+        isPackaged: app.isPackaged,
+        exeExists: fs.existsSync(exePath),
+        scriptExists: fs.existsSync(scriptPath),
+        exePath,
+        faceExeDisabled,
+        faceServiceReady,
+        hasProcess: !!faceServiceProcess,
+    };
+    console.log('[Face:status] debug:', JSON.stringify(debug));
     try {
         // Tự động spawn Python nếu chưa chạy
         await ensureFaceService();
         const data = await faceServiceFetch('/status');
         if (!isLiveFaceService(data)) {
-            throw new Error('Attendance service trả về /status không hợp lệ');
+            throw new Error('Attendance service trả về /status không hợp lệ: ' + JSON.stringify(data));
         }
         // Nếu đang initializing → vẫn báo success nhưng ghi nhận chưa ready
         if (data.status === 'ready' && !faceServiceReady) {
             faceServiceReady = true;
         }
-        return { success: true, data };
+        console.log('[Face:status] OK →', data.status);
+        return { success: true, data, debug };
     } catch (err) {
-        console.warn('[Face] Status check failed:', err.message);
-        return { success: false, error: err.message || 'Python service chưa sẵn sàng' };
+        console.warn('[Face:status] FAILED:', err.message);
+        return { success: false, error: err.message || 'Python service chưa sẵn sàng', debug };
     }
 });
 

@@ -594,6 +594,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
     const checkService = useCallback(async () => {
         if (!api) return;
         const res = await api.status();
+        console.log('[Face:checkService]', JSON.stringify(res));
         setServiceOk(res.success);
         if (res.success && res.data?.status) {
             setServiceStatus(res.data.status);
