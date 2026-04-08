@@ -176,6 +176,21 @@ echo [OK] GitHub release created.
 echo.
 
 echo ============================================
+echo   [BONUS] Dong bo Google Drive...
+echo ============================================
+if exist "_auto_backup_drive.js" (
+    call node _auto_backup_drive.js
+    if errorlevel 1 (
+        echo [WARN] Google Drive Backup that bai - kiem tra credentials.
+    ) else (
+        echo [OK] Google Drive Backup thanh cong.
+    )
+) else (
+    echo [WARN] Khong tim thay _auto_backup_drive.js - bo qua backup.
+)
+echo.
+
+echo ============================================
 echo   PATCH RELEASE COMPLETED
 echo ============================================
 echo Version : v!NEW_VERSION!
