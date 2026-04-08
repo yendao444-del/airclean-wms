@@ -592,9 +592,10 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
 
     // Check service status
     const checkService = useCallback(async () => {
+        console.log('[Face:checkService] api=', !!api, '| electronAPI=', !!(window as any).electronAPI, '| attendance=', !!(window as any).electronAPI?.attendance);
         if (!api) return;
         const res = await api.status();
-        console.log('[Face:checkService]', JSON.stringify(res));
+        console.log('[Face:checkService] res=', JSON.stringify(res));
         setServiceOk(res.success);
         if (res.success && res.data?.status) {
             setServiceStatus(res.data.status);
@@ -616,6 +617,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
     }, [api]);
 
     useEffect(() => {
+        console.log('[Face:mount] Attendance component mounted. api=', !!api);
         // Gọi lần đầu ngay khi mở tab
         checkService();
         loadData();
