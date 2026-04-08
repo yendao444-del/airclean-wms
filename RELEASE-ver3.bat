@@ -126,10 +126,9 @@ if !PUSH_EXIT! neq 0 (
 )
 echo [OK] Git push completed.
 
-gh release create v!NEW_VERSION! "!PATCH_ZIP_PATH!" --title "DBY POS v!NEW_VERSION! (PATCH)" --notes "!NOTES!" > _gh_out.txt 2>&1
+echo Dang upload !PATCH_ZIP! len GitHub... (file ~!FILE_SIZE_MB! MB, co the mat 2-5 phut)
+gh release create v!NEW_VERSION! "!PATCH_ZIP_PATH!" --title "DBY POS v!NEW_VERSION! (PATCH)" --notes "!NOTES!"
 set GH_EXIT=!errorlevel!
-type _gh_out.txt
-del _gh_out.txt >nul 2>&1
 if !GH_EXIT! neq 0 (
     echo [ERROR] GitHub release creation failed.
     pause
