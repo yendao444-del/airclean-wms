@@ -215,14 +215,7 @@ function createWindow() {
         const indexPath = path.join(__dirname, '../dist/index.html');
         mainWindow.loadFile(indexPath);
     }
-    // 🔓 DEBUG BUILD: DevTools mở được trên máy packaged để debug
-    // TODO: Khóa lại sau khi debug xong (xoá dòng openDevTools, bỏ comment đoạn lock bên dưới)
-    mainWindow.webContents.openDevTools();
-    // if (app.isPackaged) {
-    //     mainWindow.webContents.on('devtools-opened', () => {
-    //         mainWindow.webContents.closeDevTools();
-    //     });
-    // }
+    // DevTools có thể mở bằng Ctrl+Shift+I (không tự động mở, không bị khóa)
 
     mainWindow.on('closed', () => {
         mainWindow = null;
