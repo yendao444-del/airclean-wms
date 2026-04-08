@@ -82,11 +82,14 @@ function startPythonService() {
 
     let spawnCmd, spawnArgs;
 
-    if (fs.existsSync(exePath)) {
+    if (app.isPackaged && fs.existsSync(exePath)) {
         console.log('🚀 Dùng attendance_service.exe (standalone)');
         spawnCmd  = exePath;
         spawnArgs = [];
     } else if (fs.existsSync(scriptPath)) {
+        if (!app.isPackaged && fs.existsSync(exePath)) {
+            console.log('🛠 Dev mode → bỏ qua attendance_service.exe, dùng Python script');
+        }
         const found = findPythonExe();
         if (!found) {
             console.warn('⚠️ Không tìm thấy Python — chức năng chấm công khuôn mặt sẽ không hoạt động');

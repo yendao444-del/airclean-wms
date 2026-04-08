@@ -7486,6 +7486,7 @@ const FACE_SERVICE_NAME = 'attendance';
 let faceServiceProcess = null;   // child_process reference
 let faceServiceReady = false;
 let faceServiceIdleTimer = null;
+let faceExeDisabled = false;
 
 // Reset idle timer mỗi khi có request → tự kill sau 30 phút idle
 function resetFaceServiceIdleTimer() {
@@ -7627,11 +7628,17 @@ function ensureFaceService() {
             const scriptPath = path.join(__dirname, '..', 'python', 'attendance_service.py');
             let spawnCmd, spawnArgs;
 
-            if (fs.existsSync(exePath)) {
+            const preferFaceExe = app.isPackaged && !faceExeDisabled;
+            if (preferFaceExe && fs.existsSync(exePath)) {
                 console.log('[Face] 🚀 Dùng attendance_service.exe (standalone)');
                 spawnCmd = exePath;
                 spawnArgs = [];
             } else if (fs.existsSync(scriptPath)) {
+                if (!app.isPackaged && fs.existsSync(exePath)) {
+                    console.log('[Face] 🛠 Dev mode → bỏ qua attendance_service.exe, dùng Python script để debug ổn định hơn');
+                } else if (faceExeDisabled) {
+                    console.log('[Face] ⚠️ attendance_service.exe đã bị vô hiệu hóa cho phiên này → fallback sang Python script');
+                }
                 console.log('[Face] 🐍 Không có EXE → tìm Python...');
                 function findPythonForFace() {
                     const { spawnSync } = require('child_process');
@@ -7711,6 +7718,10 @@ function ensureFaceService() {
 
             faceServiceProcess.on('exit', (code) => {
                 console.log(`[Face] Python service exited (code ${code})`);
+                if (spawnCmd === exePath && code !== 0) {
+                    faceExeDisabled = true;
+                    console.warn('[Face] ⚠️ attendance_service.exe lỗi, sẽ fallback sang Python script ở lần thử tiếp theo');
+                }
                 faceServiceProcess = null;
                 faceServiceReady = false;
                 if (code !== 0) _faceLastSpawnFail = Date.now();

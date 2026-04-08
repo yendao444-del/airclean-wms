@@ -6,7 +6,7 @@ release
 release2
 release3
 release4
-release*
+/release*
 *.zip
 /src/generated/prisma
 /prisma/dev.db
@@ -31,3 +31,11 @@ dev.db
 
 electron/gdrive-credentials.json
 electron/gdrive-token.json
+python/.build-venv/
+python/.face-build-python.txt
+python/build/
+.face-build-python.txt
+
+# Python installer và file rác từ bat script
+python-*.exe
+python-*.amd64.exe
