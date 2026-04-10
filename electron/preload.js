@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         deleteImportReceipt: (id) => ipcRenderer.invoke('purchases:deleteImportReceipt', id),
         markAsThht: (purchaseId, revert) => ipcRenderer.invoke('purchases:markAsThht', { purchaseId, revert }),
         getVATFileData: (purchaseId) => ipcRenderer.invoke('purchases:getVATFileData', { purchaseId }),
+        getImportReceiptFileData: (purchaseId) => ipcRenderer.invoke('purchases:getImportReceiptFileData', { purchaseId }),
     },
     suppliers: {
         getAll: () => ipcRenderer.invoke('suppliers:getAll'),

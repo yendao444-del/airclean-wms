@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
+import { useAuth } from '../contexts/AuthContext';
 import '../App.css';
 import {
     Card, Table, Tag, Typography, Spin, Input, Space, Row, Col, Button, DatePicker,
@@ -42,6 +43,8 @@ type DatePreset = 'today' | '7days' | '30days' | 'month' | 'custom';
 
 export default function OrdersPage() {
     const { message, modal } = App.useApp();
+    const { user } = useAuth();
+    const isAdmin = user?.role === 'admin';
     const [orders, setOrders] = useState<UnifiedOrder[]>([]);
     const [loading, setLoading] = useState(false);
     const [searchKeyword, setSearchKeyword] = useState('');
@@ -153,7 +156,8 @@ export default function OrdersPage() {
                         orderNumber: ec.orderNumber || ec.ecommerceExportCode || `#TMDT-${ec.id}`,
                         customer: ec.customerName || 'Sàn TMDT', items: ecItemsStr,
                         totalAmount: ec.totalAmount || 0, status: ec.status,
-                        date: ec.updatedAt || ec.createdAt || ec.ecommerceExportDate || '',
+                        // Filter by the business/export date, not the last sync timestamp.
+                        date: ec.ecommerceExportDate || ec.createdAt || ec.updatedAt || '',
                         tracking: trackingMatch ? trackingMatch[1].trim() : undefined,
                         shipping: shippingMatch ? shippingMatch[1].trim() : undefined,
                         notes: ec.notes || '',
@@ -536,25 +540,23 @@ export default function OrdersPage() {
             title: '', key: 'actions', width: 40, fixed: 'right' as const,
             render: (_: any, record: UnifiedOrder) => {
                 if (record.source !== 'pos') return null;
+                const menuItems: any[] = [
+                    { key: 'edit', label: 'Sửa đơn', icon: <EditOutlined />, onClick: () => openEdit(record) },
+                ];
+                if (isAdmin) {
+                    menuItems.push({ type: 'divider' });
+                    menuItems.push({
+                        key: 'delete', label: 'Xóa đơn', icon: <DeleteOutlined />, danger: true,
+                        onClick: () => modal.confirm({
+                            title: 'Xóa đơn hàng?',
+                            content: 'Kho sẽ được hoàn lại. Không thể khôi phục!',
+                            okText: 'Xóa', cancelText: 'Hủy', okButtonProps: { danger: true },
+                            onOk: () => handleDelete(record),
+                        }),
+                    });
+                }
                 return (
-                    <Dropdown
-                        trigger={['click']}
-                        menu={{
-                            items: [
-                                { key: 'edit', label: 'Sửa đơn', icon: <EditOutlined />, onClick: () => openEdit(record) },
-                                { type: 'divider' },
-                                {
-                                    key: 'delete', label: 'Xóa đơn', icon: <DeleteOutlined />, danger: true,
-                                    onClick: () => modal.confirm({
-                                        title: 'Xóa đơn hàng?',
-                                        content: 'Kho sẽ được hoàn lại. Không thể khôi phục!',
-                                        okText: 'Xóa', cancelText: 'Hủy', okButtonProps: { danger: true },
-                                        onOk: () => handleDelete(record),
-                                    }),
-                                },
-                            ],
-                        }}
-                    >
+                    <Dropdown trigger={['click']} menu={{ items: menuItems }}>
                         <Button size="small" type="text" icon={<MoreOutlined />} />
                     </Dropdown>
                 );
@@ -597,7 +599,7 @@ export default function OrdersPage() {
                         value={searchKeyword} onChange={e => setSearchKeyword(e.target.value)}
                         allowClear style={{ width: 200 }}
                     />
-                    {selectedRowKeys.length > 0 && (
+                    {selectedRowKeys.length > 0 && isAdmin && (
                         <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete}>
                             Xóa ({selectedRowKeys.length})
                         </Button>

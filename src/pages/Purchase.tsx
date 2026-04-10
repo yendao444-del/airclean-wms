@@ -225,8 +225,9 @@ export default function PurchasePage() {
                     message.warning('Không tìm thấy file Phiếu Nhập Kho trên máy. Vui lòng upload lại.');
                     openImportReceiptModal(record.id);
                 }
-            } catch {
-                message.error('Lỗi đọc file Phiếu Nhập Kho.');
+            } catch (err: any) {
+                console.error('openImportReceiptPreview error:', err);
+                message.error('Lỗi đọc file: ' + (err?.message || String(err)));
             }
         }
     };

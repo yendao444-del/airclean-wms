@@ -120,6 +120,7 @@ export interface ElectronAPI {
         uploadImportReceipt: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         deleteImportReceipt: (id: number) => Promise<{ success: boolean; error?: string }>;
         markAsThht: (purchaseId: number, revert?: boolean) => Promise<{ success: boolean; error?: string }>;
+        getImportReceiptFileData: (purchaseId: number) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     };
     suppliers: {
         getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;

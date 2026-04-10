@@ -186,6 +186,9 @@ function createWindow() {
         backgroundColor: '#1f1f1f',
     });
 
+    // Mặc định phóng to hết cỡ khi mở app
+    mainWindow.maximize();
+
     // Load React app - auto-detect dev server
     const VITE_DEV_SERVER = 'http://localhost:5173';
     const isDev = !app.isPackaged;

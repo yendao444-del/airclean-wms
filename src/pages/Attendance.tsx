@@ -98,7 +98,7 @@ interface FineRecord {
     detail: string;
     amount: number;
     date?: string; // ISO string — ngày tạo phạt
-    source?: 'manual' | 'attendance'; // nguồn tạo phạt
+    source?: 'manual' | 'attendance' | 'returns'; // nguồn tạo phạt
 }
 
 interface BonusRecord {
@@ -216,6 +216,16 @@ interface PenaltyConfig {
     standardWorkDays: number; // 26
 }
 
+// === Điều chỉnh lương thủ công (Admin) ===
+// Key = `${empId}_${YYYY-MM}` ví dụ: "3_2026-04"
+interface PayrollOverride {
+    extraShifts?: number;   // Thêm ca thủ công (cộng vào số ca điểm danh)
+    extraAdjust?: number;   // Điều chỉnh tiền thêm (+/-)
+    adjustNote?: string;    // Ghi chú điều chỉnh
+    updatedAt?: string;     // Thời gian sửa
+    updatedBy?: string;     // Admin nào sửa
+}
+
 const normalizeAttendanceText = (value?: string | null) =>
     (value || '')
         .normalize('NFD')
@@ -239,7 +249,12 @@ const findEmployeeForAttendanceLog = (
 
     const normalizedFaceId = normalizeAttendanceText(log.faceId);
     if (normalizedFaceId) {
-        const byFaceId = employees.find(emp => normalizeAttendanceText(emp.username) === normalizedFaceId);
+        // Match trực tiếp, hoặc fallback: face cũ đăng ký với username ngắn (vd: 'toan')
+        // nhưng username đã migrate sang đầy đủ ('nguyendinhtoan') → kiểm tra endsWith
+        const byFaceId = employees.find(emp => {
+            const u = normalizeAttendanceText(emp.username);
+            return u === normalizedFaceId || u.endsWith(normalizedFaceId);
+        });
         if (byFaceId) return byFaceId;
     }
 
@@ -387,57 +402,91 @@ function calculatePayroll(
     liveLogs: any[],
     monthNum: number,
     yearNum: number,
-    orderLogs: PackingOrderLog[]
+    orderLogs: PackingOrderLog[],
+    overrides?: Record<string, PayrollOverride>
 ) {
     const STANDARD_WORK_DAYS = 26;
     const HOURS_PER_SHIFT = 4;
     const unitPrice = PACKING_UNIT_PRICE; // 20đ/SP
     const totalPackValue_100 = (packingData.level1Units + packingData.level10Units) * unitPrice;
+    const periodKey = `${yearNum}-${String(monthNum).padStart(2, '0')}`;
 
     return employeesList.map((emp, idx) => {
-        const empLogs = liveLogs.filter((l: any) => {
-            if (!l.time || l.empId !== emp.id) return false;
-            const d = new Date(l.time.replace(' ', 'T'));
-            return d.getMonth() + 1 === monthNum && d.getFullYear() === yearNum;
-        });
         let shifts = 0;
         let absentDays = 0;
-
-        // Tính số ca làm việc thực tế từ logs
-        if (empLogs.length > 0) {
-            const shiftSet = new Set(empLogs.map((l: any) => (l.time || '').substring(0, 10) + '-' + l.shift));
-            shifts = shiftSet.size;
-        }
-
-        // Chính thức: Tính theo trừ lùi (nếu chưa có log thì mặc định là full công, đi nghỉ mới bị trừ)
-        // Tuy nhiên cách chuẩn nhất là: Số ca nghỉ = Tổng ca tiêu chuẩn (52) - Số ca đi làm.
-        // Tạm thời nếu công ty muốn "Thời vụ" liên kết chặt với công ca:
-        // -> Lương Thời Vụ = Số ca làm thực tế * (Lương CB / Tổng ca tiêu chuẩn)
+        let extraShifts = 0;
+        let extraAdjust = 0;
+        let adjustNote = '';
+        let hasOverride = false;
 
         const TOTAL_SHIFTS = STANDARD_WORK_DAYS * 2; // 52 ca
-        const salaryPerShift = emp.baseSalary / TOTAL_SHIFTS;
+        const salaryPerShift = emp.isHourly
+            ? emp.baseSalary * HOURS_PER_SHIFT  // VD: 25,000 × 4h = 100,000đ/ca
+            : emp.baseSalary / TOTAL_SHIFTS;
+
+        // === Override (áp dụng cho cả 2 loại: extraAdjust, adjustNote) ===
+        const overrideKey = `${emp.id}_${periodKey}`;
+        const ov = overrides?.[overrideKey];
+        if (ov) {
+            if (ov.extraAdjust != null && ov.extraAdjust !== 0) {
+                extraAdjust = ov.extraAdjust;
+                hasOverride = true;
+            }
+            if (ov.adjustNote) adjustNote = ov.adjustNote;
+        }
 
         let salaryBase = 0;
         let leaveDeduction = 0;
 
         if (emp.type === 'Seasonal') {
-            // Thời vụ: Làm bao nhiêu ca hưởng bấy nhiêu
+            // ========== NV THỜI VỤ: Lương theo ca từ điểm danh ==========
+            // Match logs cho nhân viên này
+            const empLogs = liveLogs.filter((l: any) => {
+                const matched = findEmployeeForAttendanceLog(l, employeesList);
+                if (matched?.id === emp.id) {
+                    const logDate = l.date || (l.timestamp ? l.timestamp.substring(0, 10) : '');
+                    if (!logDate) return false;
+                    const d = new Date(logDate);
+                    return d.getMonth() + 1 === monthNum && d.getFullYear() === yearNum;
+                }
+                return false;
+            });
+
+            // Đếm ca: Có ít nhất 1 check-in HOẶC check-out = tính 1 ca
+            if (empLogs.length > 0) {
+                const dayMap = new Map<string, Set<string>>();
+                empLogs.forEach((l: any) => {
+                    const logDate = l.date || (l.timestamp ? l.timestamp.substring(0, 10) : '');
+                    if (!logDate) return;
+                    if (!dayMap.has(logDate)) dayMap.set(logDate, new Set());
+                    if (l.checkType) dayMap.get(logDate)!.add(l.checkType);
+                });
+                dayMap.forEach((checkTypes) => {
+                    if (checkTypes.has('morning_in') || checkTypes.has('morning_out')) shifts++;
+                    if (checkTypes.has('afternoon_in') || checkTypes.has('evening_out')) shifts++;
+                });
+            }
+
+            // Thêm ca thủ công (Admin)
+            if (ov?.extraShifts != null && ov.extraShifts !== 0) {
+                extraShifts = ov.extraShifts;
+                shifts += extraShifts;
+                hasOverride = true;
+            }
+
             salaryBase = shifts * salaryPerShift;
             absentDays = Math.max(0, TOTAL_SHIFTS - shifts) / 2;
-            leaveDeduction = 0; // Thời vụ chỉ tính lượng đã làm, ko dùng biến trừ lùi trên UI
+            leaveDeduction = 0;
         } else {
-            // Chính thức: Có thể công ty này dùng cơ chế trừ lùi.
-            // Nếu dùng trừ lùi, nếu không có log thì mặc định coi như đi làm đủ (tùy nghiệp vụ).
-            // Nhưng để chính xác, hàm này đang tính theo absentDays thực tế:
-            if (empLogs.length === 0) {
-                shifts = TOTAL_SHIFTS; // Giả lập full để ko bị trừ tiền nếu là đầu tháng chưa điểm danh
-                absentDays = 0;
-            } else {
-                absentDays = Math.max(0, TOTAL_SHIFTS - shifts) / 2;
-            }
-            leaveDeduction = absentDays * (emp.baseSalary / STANDARD_WORK_DAYS);
-            salaryBase = emp.baseSalary - leaveDeduction;
+            // ========== NV CHÍNH THỨC: Lương cố định ==========
+            shifts = TOTAL_SHIFTS;
+            absentDays = 0;
+            leaveDeduction = 0;
+            salaryBase = emp.baseSalary;
         }
+
+        const autoShifts = shifts - extraShifts; // Số ca gốc từ điểm danh
+        const autoSalaryBase = salaryBase;
 
         // === Tính thu nhập đóng gói CÁ NHÂN bằng match linh hoạt ===
         let packIncome = 0;
@@ -453,15 +502,14 @@ function calculatePayroll(
             }
         });
 
+        const autoPackIncome = packIncome;
+
         const myFines = activeFines.filter(f => f.empId === emp.id).reduce((sum, f) => sum + f.amount, 0);
 
-        // Mỗi khoản phạt → chia đều cho những NV KHÔNG phải người bị phạt khoản đó
-        // VD: Trường bị phạt 10k → chia 3 người còn lại = 3,333đ mỗi người
-        // Khánh bị phạt 30k → chia 3 người còn lại = 10,000đ mỗi người
         let fineShare = 0;
         activeFines.forEach(f => {
+            if (f.source === 'returns') return;
             if (f.empId !== emp.id) {
-                // Đếm số NV được nhận từ khoản phạt này = tổng NV - 1 (người bị phạt)
                 const recipientCount = employeesList.length - 1;
                 if (recipientCount > 0) {
                     fineShare += f.amount / recipientCount;
@@ -471,11 +519,14 @@ function calculatePayroll(
 
         const mBonus = bonusesData.filter(b => b.empId === emp.id).reduce((sum, b) => sum + b.amount, 0);
         const totalBonus = fineShare + mBonus;
-        const finalSalary = salaryBase + packIncome + totalBonus - myFines;
+        const finalSalary = salaryBase + packIncome + totalBonus - myFines + extraAdjust;
         return {
             ...emp, shifts, absentDays, salaryBase, packIncome, totalPackValue_100,
             fineShare, mBonus, myFines, totalBonus, finalSalary, leaveDeduction,
             packOrderCount, packTotalUnits,
+            // Giá trị gốc (auto) để so sánh trên UI
+            autoShifts, autoSalaryBase, autoPackIncome,
+            extraShifts, extraAdjust, adjustNote, hasOverride, salaryPerShift,
         };
     });
 }
@@ -914,7 +965,11 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                             const actualMin = now.getHours() * 60 + now.getMinutes();
                             const lateMin = actualMin - shiftStartMin;
                             if (lateMin > 0) {
-                                const emp = employees.find(e => e.username === res.data.faceId || e.name === res.data.userName);
+                                const fId = normalizeAttendanceText(res.data.faceId);
+                                const emp = employees.find(e => {
+                                    const u = normalizeAttendanceText(e.username);
+                                    return u === fId || u.endsWith(fId) || e.name === res.data.userName;
+                                });
                                 const isOfficial = !emp || emp.type === 'Official';
                                 let amount = 0;
                                 let level = '';
@@ -1714,7 +1769,7 @@ export default function Attendance() {
     });
     const [tempConfig, setTempConfig] = useState<PenaltyConfig>(config);
 
-    const [employees, setEmployees] = useState<Employee[]>(initialEmployees);
+    const [employees, setEmployees] = useState<Employee[]>([]);
 
     // === State cho quỹ + audit ===
     const [bonusModalOpen, setBonusModalOpen] = useState(false);
@@ -1735,6 +1790,9 @@ export default function Attendance() {
     // === State cho danh sách kỳ đã chốt ===
     const [lockedPeriods, setLockedPeriods] = useState<LockedPeriod[]>([]);
 
+    // === Ghi đè lương thủ công (Admin) ===
+    const [payrollOverrides, setPayrollOverrides] = useState<Record<string, PayrollOverride>>({});
+
     const [isDbLoaded, setIsDbLoaded] = useState(false);
     const [systemUsernames, setSystemUsernames] = useState<string[]>([]);
 
@@ -1743,6 +1801,27 @@ export default function Attendance() {
         const loadData = async () => {
             try {
                 const api = (window as any).electronAPI;
+
+                // Fetch danh sách username hệ thống TRƯỚC để dùng migrate
+                let sysUsernames: string[] = [];
+                try {
+                    const usersRes = await api.users.getAll();
+                    if (usersRes.success && usersRes.data) {
+                        sysUsernames = usersRes.data
+                            .map((u: any) => u.username)
+                            .filter((u: string) => u && u.toLowerCase() !== 'admin');
+                        setSystemUsernames(sysUsernames);
+                    }
+                } catch (_) { }
+
+                // Hàm migrate username cũ (toan → nguyendinhtoan) sang username Quản trị
+                const migrateUsername = (uname: string): string => {
+                    if (!uname) return uname;
+                    if (sysUsernames.includes(uname)) return uname; // đã đúng
+                    const matched = sysUsernames.find(su => su.endsWith(uname));
+                    return matched || uname;
+                };
+
                 const rs = await api.appConfig.get('attendanceData');
                 if (rs && rs.success && rs.data) {
                     const d = rs.data;
@@ -1750,17 +1829,18 @@ export default function Attendance() {
                         setConfig(d.config);
                         setTempConfig(d.config);
                     }
-                    if (d.employees) {
-                        // Merge username từ initialEmployees cho records cũ chưa có
+                    if (d.employees && Array.isArray(d.employees) && d.employees.length > 0) {
                         const merged = d.employees.map((emp: any) => {
-                            if (!emp.username) {
-                                const initial = initialEmployees.find(ie => ie.id === emp.id);
-                                return { ...emp, username: initial?.username || '' };
-                            }
-                            return emp;
+                            const username = emp.username
+                                ? migrateUsername(emp.username)
+                                : (initialEmployees.find(ie => ie.id === emp.id)?.username || '');
+                            return { ...emp, username };
                         });
                         setEmployees(merged);
+                    } else if (!d.employees) {
+                        setEmployees(initialEmployees);
                     }
+                    // Nếu d.employees là mảng rỗng [] → giữ nguyên (user đã xóa hết NV)
                     if (d.bonusAuditLog) setBonusAuditLog(d.bonusAuditLog);
                     if (d.extraBonuses) setExtraBonuses(d.extraBonuses);
                     if (d.extraFundTx) setExtraFundTx(d.extraFundTx);
@@ -1768,17 +1848,10 @@ export default function Attendance() {
                     if (d.extraFines) setExtraFines(d.extraFines);
                     if (d.fineAuditLog) setFineAuditLog(d.fineAuditLog);
                     if (d.lockedPeriods) setLockedPeriods(d.lockedPeriods);
+                    if (d.payrollOverrides) setPayrollOverrides(d.payrollOverrides);
+                } else {
+                    setEmployees(initialEmployees);
                 }
-                // Fetch danh sách username hệ thống
-                try {
-                    const usersRes = await api.users.getAll();
-                    if (usersRes.success && usersRes.data) {
-                        const names = usersRes.data
-                            .map((u: any) => u.username)
-                            .filter((u: string) => u && u.toLowerCase() !== 'admin');
-                        setSystemUsernames(names);
-                    }
-                } catch (_) { }
             } catch (err) {
                 console.error('Lỗi tải dữ liệu chấm công từ DB:', err);
             } finally {
@@ -1786,6 +1859,26 @@ export default function Attendance() {
             }
         };
         loadData();
+
+        // Lắng nghe fine mới từ trang Trả hàng
+        const handleFineAdded = (e: Event) => {
+            const newFine = (e as CustomEvent).detail;
+            if (newFine) setExtraFines(prev => [...prev, newFine]);
+        };
+        const handleFineRemoved = (e: Event) => {
+            const { complaintCode } = (e as CustomEvent).detail || {};
+            if (complaintCode) {
+                setExtraFines(prev => prev.filter((f: any) =>
+                    !(f.source === 'returns' && f.detail && f.detail.includes(complaintCode))
+                ));
+            }
+        };
+        window.addEventListener('attendance:fineAdded', handleFineAdded);
+        window.addEventListener('attendance:fineRemoved', handleFineRemoved);
+        return () => {
+            window.removeEventListener('attendance:fineAdded', handleFineAdded);
+            window.removeEventListener('attendance:fineRemoved', handleFineRemoved);
+        };
     }, []);
 
     // Ref lưu snapshot data mới nhất để flush khi reload/đóng app
@@ -1794,8 +1887,9 @@ export default function Attendance() {
     // 2. Lưu tự động khi có thay đổi state với Debounce
     useEffect(() => {
         if (!isDbLoaded) return; // Không lưu đè lúc chưa tải xong
+        if (employees.length === 0) return; // Chưa có data employees → không ghi đè DB
 
-        const snapshot = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods };
+        const snapshot = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods, payrollOverrides };
         pendingSaveRef.current = snapshot;
 
         const saveData = async () => {
@@ -1810,7 +1904,7 @@ export default function Attendance() {
 
         const timer = setTimeout(saveData, 500); // Đợi 500ms thao tác cuối rồi mới save
         return () => clearTimeout(timer);
-    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods, isDbLoaded]);
+    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods, payrollOverrides, isDbLoaded]);
 
     // Flush save ngay lập tức khi reload hoặc đóng app
     useEffect(() => {
@@ -1850,10 +1944,8 @@ export default function Attendance() {
     const loadPackingOrders = async (since?: string) => {
         if (loadPackingRef.current) { console.log('[PACKING] Skipped (already loading)'); return; }
         loadPackingRef.current = true;
-        console.log('[PACKING DEBUG] === loadPackingOrders CALLED ===');
         try {
             const api = (window as any).electronAPI;
-            console.log('[PACKING DEBUG] electronAPI exists?', !!api, 'posOrder?', !!api?.posOrder, 'exportOrders?', !!api?.exportOrders, 'ecommerceExports?', !!api?.ecommerceExports);
             const sinceVal = since || overviewDateRange[0].startOf('day').toISOString();
 
             // Timeout wrapper: nếu API không trả kết quả trong 10s → bỏ qua
@@ -1864,7 +1956,7 @@ export default function Attendance() {
                 ]).catch(e => { console.warn(`[PACKING] ⚠️ ${label} failed:`, e); return { success: false, data: [] }; });
 
             // Chỉ lấy TMDT — POS và Xuất hàng không tính vào nhật ký đóng gói
-            const ecRes = await withTimeout(api.ecommerceExports.getAll({ since: sinceVal }), 'Ecom');
+            const ecRes = await withTimeout(api.ecommerceExports.getAll({ since: sinceVal, sinceField: 'updatedAt' }), 'Ecom');
             console.log('[PACKING] Ecom done:', ecRes?.data?.length);
 
             const getPlatform = (_source: string, customer: string) => {
@@ -1879,19 +1971,11 @@ export default function Attendance() {
             const processOrder = (order: any, source: string) => {
                 let items: any[] = typeof order.items === 'string' ? JSON.parse(order.items || '[]') : (order.items || []);
 
-                // 🔍 DEBUG: Log raw order data
-                console.log(`[PACKING DEBUG] Source: ${source}, Order #${order.id}, items type: ${typeof order.items}, items count: ${items.length}`,
-                    items.length > 0 ? { firstItem: items[0], allKeys: items.length > 0 ? Object.keys(items[0]) : [] } : 'NO ITEMS');
-
                 // Lấy TẤT CẢ sản phẩm (không filter theo SKU cụ thể nữa)
                 const validItems = items.filter(it => {
                     const sku = (it.variantSku || it.sku || it.variant_sku || it.product_sku || it.SKU || it.Sku || '');
                     return sku && sku.trim() !== ''; // Chỉ bỏ qua item không có SKU
                 });
-
-                // 🔍 DEBUG: Log filtered results
-                console.log(`[PACKING DEBUG] Order #${order.id}: ${items.length} items → ${validItems.length} valid`,
-                    { packer: order.pickedBy || order.createdBy || order.userName });
 
                 if (validItems.length === 0) return;
 
@@ -1913,9 +1997,9 @@ export default function Attendance() {
                     orderNumber: order.orderNumber || order.ecommerceExportCode || `#${source.toUpperCase()}-${order.id}`,
                     platform: getPlatform(source, customerName),
                     customerName,
-                    // Packer: dùng pickedBy (string), fallback userName (string) — KHÔNG dùng createdBy (integer ID)
+                    // Packer: dùng pickedBy (string), fallback createdBy (string username)
                     packer: (typeof order.pickedBy === 'string' && order.pickedBy) ? order.pickedBy
-                        : (typeof order.userName === 'string' && order.userName) ? order.userName
+                        : (typeof order.createdBy === 'string' && order.createdBy) ? order.createdBy
                             : 'Không ghi nhận',
                     items: mappedItems,
                     totalSKU,
@@ -2000,8 +2084,8 @@ export default function Attendance() {
 
     const payrollData = useMemo(() => calculatePayroll(
         overviewFines, overviewWareHousePacking, employees, overviewBonuses,
-        liveAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs
-    ), [overviewFines, overviewWareHousePacking, employees, overviewBonuses, liveAttendanceLogs, overviewDateRange, overviewPackingLogs]);
+        liveAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, payrollOverrides
+    ), [overviewFines, overviewWareHousePacking, employees, overviewBonuses, liveAttendanceLogs, overviewDateRange, overviewPackingLogs, payrollOverrides]);
 
     // Totals cho Overview
     const totals = useMemo(() => {
@@ -2051,14 +2135,17 @@ export default function Attendance() {
                 const logTime = dayjs(log.timestamp);
 
                 // Quy tắc chấm công am/pm
+                // LƯU Ý: Logs từ backend trả về theo thứ tự DESC (mới nhất trước).
+                // Nên morning_out có thể được xử lý TRƯỚC morning_in.
+                // → check-in (morning_in/afternoon_in) LUÔN là nguồn quyết định cuối cùng
+                //   cho trạng thái đúng giờ/muộn, ghi đè bất kỳ giá trị nào trước đó.
                 if (log.checkType === 'morning_in') {
                     // Sáng vào muộn nếu sau 08:05
-                    let cType = monthData[dayIdx].am;
                     monthData[dayIdx].amTime = logTime.format('HH:mm');
                     if (logTime.hour() > 8 || (logTime.hour() === 8 && logTime.minute() > 5)) {
-                        if (cType !== 1) monthData[dayIdx].am = 2; // Muộn
+                        monthData[dayIdx].am = 2; // Muộn — luôn ghi đè
                     } else {
-                        monthData[dayIdx].am = 1; // Đúng giờ ghi đè muộn
+                        monthData[dayIdx].am = 1; // Đúng giờ — luôn ghi đè
                     }
                 } else if (log.checkType === 'morning_out') {
                     // Sáng ra — ghi nhận giờ checkout
@@ -2069,12 +2156,11 @@ export default function Attendance() {
 
                 if (log.checkType === 'afternoon_in') {
                     // Chiều vào muộn nếu sau 13:35
-                    let cType = monthData[dayIdx].pm;
                     monthData[dayIdx].pmTime = logTime.format('HH:mm');
                     if (logTime.hour() > 13 || (logTime.hour() === 13 && logTime.minute() > 35)) {
-                        if (cType !== 1) monthData[dayIdx].pm = 2; // Muộn
+                        monthData[dayIdx].pm = 2; // Muộn — luôn ghi đè
                     } else {
-                        monthData[dayIdx].pm = 1; // Đúng giờ ghi đè muộn
+                        monthData[dayIdx].pm = 1; // Đúng giờ — luôn ghi đè
                     }
                 } else if (log.checkType === 'evening_out') {
                     // Tối ra — ghi nhận giờ checkout
@@ -2405,7 +2491,7 @@ export default function Attendance() {
                 })}
                 columns={[
                     {
-                        title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 200,
+                        title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 200, fixed: 'left' as const,
                         render: (name: string) => {
                             const initial = name.split(' ').pop()?.charAt(0) || '';
                             return (
@@ -2425,25 +2511,25 @@ export default function Attendance() {
                         ),
                     },
                     {
-                        title: 'Lương CB/CA', dataIndex: 'salaryBase', key: 'base', align: 'right' as const,
+                        title: 'Lương CB/CA', dataIndex: 'salaryBase', key: 'base', align: 'right' as const, width: 140,
                         render: (v: number) => (
                             <span className="att-money-gray">{fmt(v)}</span>
                         ),
                     },
                     {
-                        title: 'Đóng gói', dataIndex: 'packIncome', key: 'pack', align: 'right' as const,
+                        title: 'Đóng gói', dataIndex: 'packIncome', key: 'pack', align: 'right' as const, width: 130,
                         render: (v: number, r: any) => <Tooltip title={`${r.packTotalUnits || 0} SP × ${PACKING_UNIT_PRICE}đ`}><span className="att-money-emerald">+ {fmt(v)}</span></Tooltip>,
                     },
                     {
-                        title: 'Thưởng', dataIndex: 'totalBonus', key: 'bonus', align: 'right' as const,
+                        title: 'Thưởng', dataIndex: 'totalBonus', key: 'bonus', align: 'right' as const, width: 120,
                         render: (v: number) => <span className="att-money-emerald">+ {fmt(v)}</span>,
                     },
                     {
-                        title: 'Phạt & Nghỉ', dataIndex: 'myFines', key: 'fine', align: 'right' as const,
+                        title: 'Phạt & Nghỉ', dataIndex: 'myFines', key: 'fine', align: 'right' as const, width: 120,
                         render: (v: number) => <span className="att-money-red">{v > 0 ? `- ${fmt(v)}` : `${fmt(0)}`}</span>,
                     },
                     {
-                        title: 'Thực Lãnh', dataIndex: 'finalSalary', key: 'final', align: 'right' as const,
+                        title: 'Thực Lãnh', dataIndex: 'finalSalary', key: 'final', align: 'right' as const, width: 150,
                         render: (v: number) => <span className="att-money-final">{fmt(v)}</span>,
                     },
                 ]}
@@ -3009,7 +3095,7 @@ export default function Attendance() {
     const matrixColumns = useMemo(() => {
         const columns: any[] = [
             {
-                title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 130,
+                title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 130, fixed: 'left' as const,
                 render: (name: string) => (
                     <div className="att-matrix-name-cell">
                         <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{name}</Text>
@@ -3680,72 +3766,286 @@ export default function Attendance() {
                 title={<div style={{ textAlign: 'center', fontWeight: 900, fontSize: 18, textTransform: 'uppercase' }}>Phiếu Lương Chi Tiết</div>}
                 open={!!payslipModal}
                 onCancel={() => setPayslipModal(null)}
-                footer={[
-                    <Button key="print" onClick={() => window.print()} icon={<FileTextOutlined />}>In Phiếu</Button>,
-                    <Button key="close" type="primary" onClick={() => setPayslipModal(null)}>Đóng</Button>,
-                ]}
-                width={480}
+                footer={null}
+                width={520}
+                className="att-payslip-modal"
             >
                 {payslipModal && (() => {
                     const p = payslipModal;
+                    const isAdmin = currentUser === 'admin';
+                    const periodKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
+                    const overrideKey = `${p.id}_${periodKey}`;
+                    const currentOverride = payrollOverrides[overrideKey] || {};
+
                     const empFines = overviewFines.filter(f => f.empId === p.id);
                     const empBonuses = overviewBonuses.filter(b => b.empId === p.id);
+
+                    // Helper: Lưu override cho NV này
+                    const saveOverride = (patch: Partial<PayrollOverride>) => {
+                        setPayrollOverrides(prev => ({
+                            ...prev,
+                            [overrideKey]: {
+                                ...prev[overrideKey],
+                                ...patch,
+                                updatedAt: new Date().toISOString(),
+                                updatedBy: currentUser,
+                            }
+                        }));
+                        message.success('Đã cập nhật ghi đè lương!');
+                    };
+
+                    // Helper: Xóa toàn bộ override
+                    const clearOverride = () => {
+                        Modal.confirm({
+                            title: 'Xóa tất cả điều chỉnh?',
+                            content: 'Lương sẽ được tính tự động theo hệ thống chấm công. Thêm ca và điều chỉnh tiền sẽ bị xóa.',
+                            okText: 'Xóa điều chỉnh',
+                            okType: 'danger',
+                            cancelText: 'Hủy',
+                            onOk: () => {
+                                setPayrollOverrides(prev => {
+                                    const next = { ...prev };
+                                    delete next[overrideKey];
+                                    return next;
+                                });
+                                // Refresh payslip data
+                                setTimeout(() => {
+                                    const updated = payrollData.find((pd: any) => pd.id === p.id);
+                                    if (updated) setPayslipModal(updated);
+                                }, 100);
+                                message.success('Đã xóa điều chỉnh — dùng lại dữ liệu tự động!');
+                            }
+                        });
+                    };
+
+                    // Helper: row hiển thị
                     const row = (label: string, value: string, color?: string, sub?: string) => (
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '5px 0' }}>
-                            <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '6px 0' }}>
+                            <div style={{ flex: 1 }}>
                                 <Text style={{ fontSize: 13, color: '#595959' }}>{label}</Text>
                                 {sub && <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 1 }}>{sub}</div>}
                             </div>
                             <Text strong style={{ fontSize: 13, color: color || '#1f2937', whiteSpace: 'nowrap', marginLeft: 16 }}>{value}</Text>
                         </div>
                     );
+
+                    // Helper: editable row - hiển thị giá trị + nút sửa (admin only)
+                    // Khi bấm sửa → popup xác nhận tuyệt đối trước khi ghi đè
+                    const editableRow = (
+                        label: string,
+                        autoVal: number,
+                        overrideVal: number | undefined,
+                        onSave: (val: number) => void,
+                        opts?: { suffix?: string; sub?: string; color?: string; step?: number; min?: number; fieldName?: string }
+                    ) => {
+                        const hasOv = overrideVal != null;
+                        const displayVal = hasOv ? overrideVal : autoVal;
+                        const handleEditClick = () => {
+                            let newVal = displayVal;
+                            Modal.confirm({
+                                title: `⚠️ Sửa thủ công: ${opts?.fieldName || label}`,
+                                icon: <ExclamationCircleOutlined style={{ color: '#fa8c16' }} />,
+                                width: 420,
+                                content: (
+                                    <div style={{ padding: '12px 0' }}>
+                                        <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, padding: '12px 16px', marginBottom: 12 }}>
+                                            <div style={{ fontSize: 12, fontWeight: 700, color: '#ad6800', marginBottom: 4 }}>⚠️ LƯU Ý QUAN TRỌNG</div>
+                                            <div style={{ fontSize: 12, color: '#8c6d1f' }}>
+                                                Giá trị hiện tại <b>{autoVal}{opts?.suffix || ''}</b> được tính tự động từ hệ thống chấm công.
+                                                Sau khi sửa, giá trị thủ công sẽ <b>ghi đè</b> và không bị thay đổi bởi điểm danh.
+                                            </div>
+                                        </div>
+                                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Nhập giá trị mới:</div>
+                                        <InputNumber
+                                            autoFocus
+                                            size="large"
+                                            defaultValue={displayVal}
+                                            min={opts?.min ?? 0}
+                                            step={opts?.step ?? 1}
+                                            style={{ width: '100%', fontWeight: 700 }}
+                                            onChange={(v) => { newVal = v ?? displayVal; }}
+                                            formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                                            parser={(v: any) => v.replace(/,/g, '')}
+                                            addonAfter={opts?.suffix}
+                                        />
+                                        <div style={{ marginTop: 8, fontSize: 11, color: '#9ca3af' }}>
+                                            Gốc (tự động): <b>{autoVal}{opts?.suffix || ''}</b>
+                                        </div>
+                                    </div>
+                                ),
+                                okText: '✅ Xác nhận ghi đè',
+                                okType: 'primary',
+                                cancelText: 'Hủy',
+                                onOk: () => { if (newVal != null) onSave(newVal); },
+                            });
+                        };
+                        return (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', gap: 8 }}>
+                                <div style={{ flex: 1 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                        <Text style={{ fontSize: 13, color: '#595959' }}>{label}</Text>
+                                        {hasOv && (
+                                            <Tooltip title={`Gốc (tự động): ${autoVal}${opts?.suffix || ''}`}>
+                                                <Tag color="orange" style={{ fontSize: 9, padding: '0 4px', lineHeight: '16px', border: 'none', cursor: 'help' }}>
+                                                    ✏️ Đã sửa
+                                                </Tag>
+                                            </Tooltip>
+                                        )}
+                                    </div>
+                                    {opts?.sub && <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 1 }}>{opts.sub}</div>}
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                    <Text strong style={{ fontSize: 14, color: hasOv ? '#d46b08' : (opts?.color || '#1f2937') }}>
+                                        {displayVal}{opts?.suffix || ''}
+                                    </Text>
+                                    {isAdmin && (
+                                        <Button type="text" size="small" icon={<EditOutlined />}
+                                            style={{ color: '#8c8c8c', padding: '0 4px' }}
+                                            onClick={handleEditClick}
+                                        />
+                                    )}
+                                </div>
+                            </div>
+                        );
+                    };
+
                     const sectionTitle = (label: string) => (
-                        <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 1, color: '#9ca3af', padding: '10px 0 4px' }}>{label}</div>
+                        <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 1, color: '#9ca3af', padding: '12px 0 4px' }}>{label}</div>
                     );
+
                     return (
                         <div style={{ fontSize: 13 }}>
                             {/* Header */}
-                            <div style={{ textAlign: 'center', padding: '8px 0 16px', borderBottom: '1px dashed #e5e7eb' }}>
+                            <div style={{ textAlign: 'center', padding: '4px 0 16px', borderBottom: '1px dashed #e5e7eb' }}>
                                 <div style={{ fontSize: 20, fontWeight: 900, color: '#1f2937' }}>{p.name}</div>
-                                <div style={{ marginTop: 4, display: 'flex', justifyContent: 'center', gap: 8 }}>
+                                <div style={{ marginTop: 6, display: 'flex', justifyContent: 'center', gap: 8, flexWrap: 'wrap' }}>
                                     <Tag color={p.type === 'Official' ? 'blue' : 'orange'}>{p.type === 'Official' ? 'Chính thức' : 'Thời vụ'}</Tag>
                                     <Tag color="default">{overviewDateRange[0].format('DD/MM')} — {overviewDateRange[1].format('DD/MM/YYYY')}</Tag>
+                                    {p.hasOverride && <Tag color="volcano" style={{ fontWeight: 700 }}>🔧 Có điều chỉnh</Tag>}
                                 </div>
+                                {/* Admin badge */}
+                                {isAdmin && (
+                                    <div style={{ marginTop: 8, display: 'flex', justifyContent: 'center', gap: 8 }}>
+                                        <Tag icon={<LockOutlined />} color="green" style={{ fontSize: 10, fontWeight: 700 }}>
+                                            Quyền Admin — Có thể chỉnh sửa
+                                        </Tag>
+                                    </div>
+                                )}
                             </div>
 
                             {/* 1. Lương cơ bản */}
                             {sectionTitle('① Lương cơ bản')}
-                            <div style={{ background: '#f9fafb', borderRadius: 8, padding: '8px 12px' }}>
-                                {p.isHourly ? (
-                                    row('Lương theo giờ', `${fmt(p.salaryBase)}`, '#1f2937',
-                                        `${p.shifts} ca × 4 giờ × ${fmt(p.baseSalary)}/giờ`)
-                                ) : (
-                                    row('Lương cơ bản', `${fmt(p.baseSalary)}`, '#1f2937',
-                                        `${p.absentDays > 0 ? `Đủ công ${26 - p.absentDays}/${26} ngày` : 'Đủ công 26/26 ngày'}`)
+                            <div style={{ background: '#f9fafb', borderRadius: 10, padding: '10px 14px', border: '1px solid #f3f4f6' }}>
+                                {/* Số ca điểm danh (read-only — tự động từ hệ thống) */}
+                                {row('Từ điểm danh', `${p.autoShifts} ca`, '#1f2937',
+                                    p.isHourly ? `Mỗi ca 4 giờ × ${fmt(p.baseSalary)}/giờ = ${fmt(p.salaryPerShift)}/ca` : 'Tự động từ hệ thống chấm công')}
+
+                                {/* Thêm ca thủ công (Admin only) */}
+                                {(isAdmin || (p.extraShifts && p.extraShifts !== 0)) && (
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', gap: 8 }}>
+                                        <div style={{ flex: 1 }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                <Text style={{ fontSize: 13, color: '#d46b08' }}>Thêm ca thủ công</Text>
+                                                {p.extraShifts > 0 && <Tag color="orange" style={{ fontSize: 9, padding: '0 4px', lineHeight: '16px', border: 'none' }}>✏️ Admin</Tag>}
+                                            </div>
+                                            <div style={{ fontSize: 11, color: '#b45309', marginTop: 1 }}>Bù ca điểm danh thiếu / sai</div>
+                                        </div>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                            <Text strong style={{ fontSize: 14, color: p.extraShifts > 0 ? '#d46b08' : '#8c8c8c' }}>
+                                                +{currentOverride.extraShifts || 0} ca
+                                            </Text>
+                                            {isAdmin && (
+                                                <Button type="text" size="small" icon={<EditOutlined />}
+                                                    style={{ color: '#8c8c8c', padding: '0 4px' }}
+                                                    onClick={() => {
+                                                        let newVal = currentOverride.extraShifts ?? 0;
+                                                        Modal.confirm({
+                                                            title: '⚠️ Thêm ca thủ công',
+                                                            icon: <ExclamationCircleOutlined style={{ color: '#fa8c16' }} />,
+                                                            width: 420,
+                                                            content: (
+                                                                <div style={{ padding: '12px 0' }}>
+                                                                    <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, padding: '12px 16px', marginBottom: 12 }}>
+                                                                        <div style={{ fontSize: 12, fontWeight: 700, color: '#ad6800', marginBottom: 4 }}>⚠️ LƯU Ý QUAN TRỌNG</div>
+                                                                        <div style={{ fontSize: 12, color: '#8c6d1f' }}>
+                                                                            Hệ thống ghi nhận <b>{p.autoShifts} ca</b> từ điểm danh.<br/>
+                                                                            Nhập số ca cần <b>cộng thêm</b> (VD: quên check-out, điểm danh bị lỗi).<br/>
+                                                                            Tổng ca = Điểm danh + Thêm ca.
+                                                                        </div>
+                                                                    </div>
+                                                                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Số ca cần thêm:</div>
+                                                                    <InputNumber
+                                                                        autoFocus
+                                                                        size="large"
+                                                                        defaultValue={currentOverride.extraShifts ?? 0}
+                                                                        min={0}
+                                                                        step={1}
+                                                                        style={{ width: '100%', fontWeight: 700 }}
+                                                                        onChange={(v) => { newVal = v ?? 0; }}
+                                                                        addonAfter="ca"
+                                                                    />
+                                                                    <div style={{ marginTop: 8, fontSize: 11, color: '#9ca3af' }}>
+                                                                        Đặt 0 để không thêm ca nào.
+                                                                    </div>
+                                                                </div>
+                                                            ),
+                                                            okText: '✅ Xác nhận',
+                                                            okType: 'primary',
+                                                            cancelText: 'Hủy',
+                                                            onOk: () => { saveOverride({ extraShifts: newVal }); },
+                                                        });
+                                                    }}
+                                                />
+                                            )}
+                                        </div>
+                                    </div>
                                 )}
-                                {!p.isHourly && p.leaveDeduction > 0 &&
-                                    row(`Trừ nghỉ không phép`, `- ${fmt(p.leaveDeduction)}`, '#d97706',
-                                        `${p.absentDays} ngày × ${fmt(p.baseSalary / 26)}/ngày`)
-                                }
-                                <div style={{ borderTop: '1px solid #e5e7eb', marginTop: 6, paddingTop: 6, display: 'flex', justifyContent: 'space-between' }}>
+
+                                {/* Tổng ca */}
+                                {p.extraShifts > 0 && (
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderTop: '1px dashed #e5e7eb' }}>
+                                        <Text style={{ fontSize: 12, fontWeight: 600, color: '#374151' }}>Tổng số ca</Text>
+                                        <Text strong style={{ fontSize: 13, color: '#059669' }}>{p.shifts} ca</Text>
+                                    </div>
+                                )}
+
+                                {p.isHourly ? (
+                                    row('Lương theo ca', `${fmt(p.salaryBase)}`, '#1f2937',
+                                        `${p.shifts} ca × ${fmt(p.salaryPerShift)}/ca`)
+                                ) : (
+                                    <>
+                                        {row('Lương cơ bản', `${fmt(p.baseSalary)}`, '#1f2937',
+                                            `${p.absentDays > 0 ? `Đi làm ${26 - p.absentDays}/${26} ngày` : 'Đủ công 26/26 ngày'}`)}
+                                        {p.leaveDeduction > 0 &&
+                                            row('Trừ nghỉ không phép', `- ${fmt(p.leaveDeduction)}`, '#d97706',
+                                                `${p.absentDays} ngày × ${fmt(p.baseSalary / 26)}/ngày`)}
+                                    </>
+                                )}
+
+                                <div style={{ borderTop: '1px solid #e5e7eb', marginTop: 8, paddingTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                     <Text style={{ fontSize: 12, fontWeight: 700 }}>Thực nhận lương CB</Text>
-                                    <Text strong style={{ color: '#1f2937' }}>{fmt(p.salaryBase)}</Text>
+                                    <Text strong style={{ color: '#1f2937', fontSize: 14 }}>{fmt(p.salaryBase)}</Text>
                                 </div>
                             </div>
 
                             {/* 2. Đóng gói */}
                             {sectionTitle('② Thu nhập đóng gói')}
-                            <div style={{ background: '#f0fdf4', borderRadius: 8, padding: '8px 12px', border: '1px solid #bbf7d0' }}>
+                            <div style={{ background: '#f0fdf4', borderRadius: 10, padding: '10px 14px', border: '1px solid #bbf7d0' }}>
                                 {row('Đóng gói sản phẩm', `+ ${fmt(p.packIncome)}`, '#059669',
                                     `${p.packTotalUnits || 0} SP × ${PACKING_UNIT_PRICE}đ (${p.packOrderCount || 0} đơn)`)}
+                                {(p.autoPackIncome != null && p.packIncome !== p.autoPackIncome) && (
+                                    <div style={{ fontSize: 10, color: '#fa8c16', fontWeight: 600 }}>
+                                        ✏️ Gốc: {fmt(p.autoPackIncome)}
+                                    </div>
+                                )}
                             </div>
 
                             {/* 3. Thưởng */}
                             {(p.fineShare > 0 || p.mBonus > 0 || empBonuses.length > 0) && (<>
                                 {sectionTitle('③ Thưởng')}
-                                <div style={{ background: '#eff6ff', borderRadius: 8, padding: '8px 12px', border: '1px solid #bfdbfe' }}>
+                                <div style={{ background: '#eff6ff', borderRadius: 10, padding: '10px 14px', border: '1px solid #bfdbfe' }}>
                                     {p.fineShare > 0 && row('Pool chia phạt', `+ ${fmt(p.fineShare)}`, '#1d4ed8', 'Chia từ quỹ phạt thành viên vi phạm')}
-                                    {empBonuses.map((b, i) => row(b.detail || 'Thưởng lẻ', `+ ${fmt(b.amount)}`, '#1d4ed8', `Admin — ${b.type}`))}
+                                    {empBonuses.map((b: any, i: number) => row(b.detail || 'Thưởng lẻ', `+ ${fmt(b.amount)}`, '#1d4ed8', `Admin — ${b.type}`))}
                                     {p.mBonus > 0 && empBonuses.length === 0 && row('Thưởng lẻ (Admin)', `+ ${fmt(p.mBonus)}`, '#1d4ed8')}
                                 </div>
                             </>)}
@@ -3753,24 +4053,128 @@ export default function Attendance() {
                             {/* 4. Phạt */}
                             {p.myFines > 0 && (<>
                                 {sectionTitle('④ Khấu trừ')}
-                                <div style={{ background: '#fff1f0', borderRadius: 8, padding: '8px 12px', border: '1px solid #fecaca' }}>
+                                <div style={{ background: '#fef2f2', borderRadius: 10, padding: '10px 14px', border: '1px solid #fecaca' }}>
                                     {empFines.length > 0
-                                        ? empFines.map((f, i) => row(f.type, `- ${fmt(f.amount)}`, '#dc2626', f.detail))
+                                        ? empFines.map((f: any, i: number) => row(f.type, `- ${fmt(f.amount)}`, '#dc2626', f.detail))
                                         : row('Phạt & Khấu trừ', `- ${fmt(p.myFines)}`, '#dc2626')
                                     }
                                 </div>
                             </>)}
 
+                            {/* 5. Điều chỉnh thủ công (Admin only) */}
+                            {isAdmin && (
+                                <>
+                                    {sectionTitle('⑤ Điều chỉnh thủ công (Admin)')}
+                                    <div style={{ background: '#fefce8', borderRadius: 10, padding: '10px 14px', border: '1px solid #fde68a' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', gap: 8 }}>
+                                            <div style={{ flex: 1 }}>
+                                                <Text style={{ fontSize: 13, color: '#92400e' }}>Cộng / Trừ điều chỉnh</Text>
+                                                <div style={{ fontSize: 11, color: '#b45309', marginTop: 1 }}>
+                                                    {currentOverride.adjustNote || 'Chưa có điều chỉnh'}
+                                                </div>
+                                            </div>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                <Text strong style={{ fontSize: 14, color: (currentOverride.extraAdjust || 0) > 0 ? '#059669' : (currentOverride.extraAdjust || 0) < 0 ? '#dc2626' : '#8c8c8c' }}>
+                                                    {(currentOverride.extraAdjust || 0) > 0 ? '+' : ''}{fmt(currentOverride.extraAdjust || 0)}
+                                                </Text>
+                                                <Button type="text" size="small" icon={<EditOutlined />}
+                                                    style={{ color: '#8c8c8c', padding: '0 4px' }}
+                                                    onClick={() => {
+                                                        let newAdjust = currentOverride.extraAdjust ?? 0;
+                                                        let newNote = currentOverride.adjustNote || '';
+                                                        Modal.confirm({
+                                                            title: '⚠️ Điều chỉnh lương thủ công',
+                                                            icon: <ExclamationCircleOutlined style={{ color: '#fa8c16' }} />,
+                                                            width: 420,
+                                                            content: (
+                                                                <div style={{ padding: '12px 0' }}>
+                                                                    <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, padding: '12px 16px', marginBottom: 12 }}>
+                                                                        <div style={{ fontSize: 12, fontWeight: 700, color: '#ad6800', marginBottom: 4 }}>⚠️ LƯU Ý QUAN TRỌNG</div>
+                                                                        <div style={{ fontSize: 12, color: '#8c6d1f' }}>
+                                                                            Số dương = <b>cộng thêm tiền</b>, số âm = <b>trừ bớt tiền</b>.
+                                                                            Thao tác này sẽ <b>ảnh hưởng trực tiếp</b> đến lương thực lĩnh.
+                                                                        </div>
+                                                                    </div>
+                                                                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Số tiền điều chỉnh:</div>
+                                                                    <InputNumber
+                                                                        autoFocus
+                                                                        size="large"
+                                                                        defaultValue={currentOverride.extraAdjust ?? 0}
+                                                                        step={10000}
+                                                                        style={{ width: '100%', fontWeight: 700 }}
+                                                                        onChange={(v) => { newAdjust = v ?? 0; }}
+                                                                        formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                                                                        parser={(v: any) => v.replace(/,/g, '')}
+                                                                        addonAfter="đ"
+                                                                    />
+                                                                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, marginTop: 12 }}>Ghi chú lý do:</div>
+                                                                    <Input
+                                                                        placeholder="VD: Bù ca thiếu, thưởng thêm..."
+                                                                        defaultValue={currentOverride.adjustNote || ''}
+                                                                        onChange={e => { newNote = e.target.value; }}
+                                                                    />
+                                                                </div>
+                                                            ),
+                                                            okText: '✅ Xác nhận điều chỉnh',
+                                                            okType: 'primary',
+                                                            cancelText: 'Hủy',
+                                                            onOk: () => { saveOverride({ extraAdjust: newAdjust, adjustNote: newNote }); },
+                                                        });
+                                                    }}
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+
+                            {/* Tóm tắt điều chỉnh (read-only) nếu có */}
+                            {!isAdmin && p.extraAdjust !== 0 && p.extraAdjust != null && (
+                                <>
+                                    {sectionTitle('⑤ Điều chỉnh từ Admin')}
+                                    <div style={{ background: '#fefce8', borderRadius: 10, padding: '10px 14px', border: '1px solid #fde68a' }}>
+                                        {row(
+                                            p.adjustNote || 'Điều chỉnh thủ công',
+                                            `${p.extraAdjust > 0 ? '+' : ''} ${fmt(p.extraAdjust)}`,
+                                            p.extraAdjust > 0 ? '#059669' : '#dc2626'
+                                        )}
+                                    </div>
+                                </>
+                            )}
+
                             {/* Tổng */}
-                            <div style={{ marginTop: 16, padding: '14px 16px', background: 'linear-gradient(135deg, #ecfdf5, #d1fae5)', borderRadius: 10, border: '1px solid #6ee7b7', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div style={{ marginTop: 16, padding: '16px 18px', background: 'linear-gradient(135deg, #ecfdf5, #d1fae5)', borderRadius: 12, border: '1px solid #6ee7b7', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <div>
                                     <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: '#065f46' }}>Thực lĩnh</div>
                                     <div style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>
                                         {fmt(p.salaryBase)} + {fmt(p.packIncome)} + {fmt(p.totalBonus)} − {fmt(p.myFines)}
+                                        {p.extraAdjust ? ` ${p.extraAdjust > 0 ? '+' : '−'} ${fmt(Math.abs(p.extraAdjust))}` : ''}
                                     </div>
                                 </div>
-                                <div style={{ fontSize: 26, fontWeight: 900, color: '#059669' }}>{fmt(p.finalSalary)}</div>
+                                <div style={{ fontSize: 28, fontWeight: 900, color: '#059669' }}>{fmt(p.finalSalary)}</div>
                             </div>
+
+                            {/* Footer actions */}
+                            <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                                <div>
+                                    {isAdmin && p.hasOverride && (
+                                        <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={clearOverride}>
+                                            Xóa điều chỉnh
+                                        </Button>
+                                    )}
+                                </div>
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                    <Button onClick={() => window.print()} icon={<FileTextOutlined />}>In Phiếu</Button>
+                                    <Button type="primary" onClick={() => setPayslipModal(null)}>Đóng</Button>
+                                </div>
+                            </div>
+
+                            {/* Updated info */}
+                            {currentOverride.updatedAt && (
+                                <div style={{ marginTop: 8, fontSize: 10, color: '#9ca3af', textAlign: 'right' }}>
+                                    Cập nhật bởi <b>{currentOverride.updatedBy}</b> lúc {dayjs(currentOverride.updatedAt).format('DD/MM/YYYY HH:mm')}
+                                </div>
+                            )}
                         </div>
                     );
                 })()}

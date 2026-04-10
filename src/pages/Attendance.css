@@ -285,16 +285,18 @@
     color: #374151 !important;
     text-transform: uppercase !important;
     letter-spacing: 1px !important;
-    padding: 20px 32px !important;
+    padding: 16px 16px !important;
     border-bottom: 1px solid #f3f4f6 !important;
+    white-space: nowrap !important;
 }
 
 .attendance-module .ant-table-tbody > tr > td {
-    padding: 20px 32px !important;
+    padding: 16px 16px !important;
     border-bottom: 1px solid #f0f0f0 !important;
     font-size: 14px !important;
     font-weight: 600 !important;
     color: #1f2937 !important;
+    white-space: nowrap !important;
 }
 
 /* Zebra striping - dòng chẵn tint nhẹ */
@@ -346,28 +348,33 @@
 .att-money-emerald {
     font-weight: 900;
     color: #059669;
+    white-space: nowrap;
 }
 
 .att-money-blue {
     font-weight: 900;
     color: #2563eb;
+    white-space: nowrap;
 }
 
 .att-money-red {
     font-weight: 900;
     color: #dc2626;
+    white-space: nowrap;
 }
 
 .att-money-black {
     font-weight: 900;
     color: #1f2937;
     font-size: 15px;
+    white-space: nowrap;
 }
 
 .att-money-gray {
     font-weight: 700;
     color: #374151;
     font-size: 13px;
+    white-space: nowrap;
 }
 
 .att-money-final {
@@ -375,6 +382,7 @@
     color: #059669;
     font-size: 16px;
     letter-spacing: -0.3px;
+    white-space: nowrap;
 }
 
 /* ===== HERO BANNER (Đóng gói) ===== */

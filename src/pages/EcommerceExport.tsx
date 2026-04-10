@@ -568,7 +568,7 @@ Thời gian: ${currentTime}`;
             } else {
                 // ✅ Đơn hàng chưa pickup → Cập nhật thành "Đã bàn giao DVVC" + TRỪ TỒN KHO
                 const targetId = foundEcommerceExport.id;
-                const pickerName = activePackerRef.current || null;
+                const pickerName = activePackerRef.current || currentUser || null;
 
                 // 🔊 PHÁT ÂM THANH NGAY để không bị delay
                 playSuccess();

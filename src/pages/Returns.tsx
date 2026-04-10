@@ -99,7 +99,6 @@ export default function ReturnsPage() {
             const api = (window as any).electronAPI;
             const res = await api.users.getAll();
             if (res.success && res.data) {
-                // Lấy tất cả trừ admin (nếu cần thiết, hoặc lấy hết)
                 setEmployees(res.data.filter((u: any) => u.username !== 'admin'));
             }
         } catch (error) {
@@ -275,6 +274,27 @@ export default function ReturnsPage() {
         });
     };
 
+    const processReturnFineRemoval = async (complaintCode: string) => {
+        try {
+            const electronApi = (window as any).electronAPI;
+            const attRes = await electronApi.appConfig.get('attendanceData');
+            if (attRes.success && attRes.data) {
+                const attData = typeof attRes.data === 'string' ? JSON.parse(attRes.data) : attRes.data;
+                const before = (attData.extraFines || []).length;
+                attData.extraFines = (attData.extraFines || []).filter((f: any) =>
+                    !(f.source === 'returns' && f.detail && f.detail.includes(complaintCode))
+                );
+                if (attData.extraFines.length < before) {
+                    await electronApi.appConfig.set('attendanceData', attData);
+                    window.dispatchEvent(new CustomEvent('attendance:fineRemoved', { detail: { complaintCode } }));
+                    message.info(`Đã xóa khoản phạt liên quan đến phiếu ${complaintCode}.`);
+                }
+            }
+        } catch (error) {
+            console.error('Lỗi xóa phạt tự động:', error);
+        }
+    };
+
     const processReturnFine = async (packerName: string, complaintCode: string) => {
         if (!packerName) return;
         try {
@@ -284,10 +304,17 @@ export default function ReturnsPage() {
                 const attData = typeof attRes.data === 'string' ? JSON.parse(attRes.data) : attRes.data;
                 const config = attData.config || {};
                 const attEmployees = attData.employees || [];
-                
-                const packerEmp = attEmployees.find((e: any) => e.username === packerName || e.name === packerName);
+
+                const norm = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+                const packerNorm = norm(packerName);
+                const packerEmp = attEmployees.find((e: any) =>
+                    e.username === packerName ||
+                    e.name === packerName ||
+                    (e.username && norm(e.username) === packerNorm) ||
+                    (e.username && packerNorm.includes(norm(e.username)))
+                );
                 if (!packerEmp) {
-                    console.log(`[Returns] Không tìm thấy NV ${packerName} trong danh sách chấm công.`);
+                    console.warn(`[Returns] Không tìm thấy NV "${packerName}" trong danh sách chấm công.`);
                     return;
                 }
 
@@ -305,7 +332,8 @@ export default function ReturnsPage() {
                     };
                     
                     attData.extraFines = [...(attData.extraFines || []), newFine];
-                    await electronApi.appConfig.set('attendanceData', JSON.stringify(attData));
+                    await electronApi.appConfig.set('attendanceData', attData);
+                    window.dispatchEvent(new CustomEvent('attendance:fineAdded', { detail: newFine }));
                     message.warning(`⚠️ Đã tự động ghi nhận mức phạt ${amount.toLocaleString('vi-VN')}đ cho NV ${packerEmp.displayName || packerEmp.name} (Lỗi trả hàng)!`);
                 }
             }
@@ -816,9 +844,11 @@ export default function ReturnsPage() {
                             const doUpdate = async () => {
                                 try {
                                     await window.electronAPI.returns.update(record.id, { status: newStatus });
-                                    
+
                                     if (newStatus === 'completed' && record.packer) {
                                         await processReturnFine(record.packer, record.complaintCode);
+                                    } else if (record.status === 'completed' && newStatus !== 'completed' && record.complaintCode) {
+                                        await processReturnFineRemoval(record.complaintCode);
                                     }
 
                                     await loadReturns();
