@@ -172,6 +172,7 @@ function createWindow() {
         height: 900,
         minWidth: 1200,
         minHeight: 700,
+        show: false,
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
@@ -186,8 +187,11 @@ function createWindow() {
         backgroundColor: '#1f1f1f',
     });
 
-    // Mặc định phóng to hết cỡ khi mở app
-    mainWindow.maximize();
+    // Show full màn hình ngay khi render xong, không flash cửa sổ nhỏ
+    mainWindow.once('ready-to-show', () => {
+        mainWindow.maximize();
+        mainWindow.show();
+    });
 
     // Load React app - auto-detect dev server
     const VITE_DEV_SERVER = 'http://localhost:5173';
