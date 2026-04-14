@@ -102,7 +102,7 @@ export default function OrdersPage() {
             const [posRes, exRes, ecRes] = await Promise.all([
                 api.posOrder.getAll({ startDate: since }),
                 api.exportOrders.getAll({ since }),
-                api.ecommerceExports.getAll({ since }),
+                api.ecommerceExports.getAll({ since, sinceField: 'updatedAt' }),
             ]);
 
             const unified: UnifiedOrder[] = [];
@@ -149,6 +149,7 @@ export default function OrdersPage() {
                     const trackingMatch = ec.notes?.match(/Tracking: ([^|]+)/);
                     const shippingMatch = ec.notes?.match(/Shipping: ([^|]+)/);
                     const ecItemsStr = typeof ec.items === 'string' ? ec.items : JSON.stringify(ec.items || []);
+                    const effectiveDate = ec.updatedAt || ec.ecommerceExportDate || ec.createdAt || '';
                     unified.push({
                         id: `TMDT-${ec.id}`, originalId: ec.id, source: 'tmdt',
                         sourceLabel: ec.customerName?.toLowerCase().includes('tiktok') ? 'TikTok' :
@@ -156,8 +157,8 @@ export default function OrdersPage() {
                         orderNumber: ec.orderNumber || ec.ecommerceExportCode || `#TMDT-${ec.id}`,
                         customer: ec.customerName || 'Sàn TMDT', items: ecItemsStr,
                         totalAmount: ec.totalAmount || 0, status: ec.status,
-                        // Filter by the business/export date, not the last sync timestamp.
-                        date: ec.ecommerceExportDate || ec.createdAt || ec.updatedAt || '',
+                        // TMDT should be counted by pickup/completion time, not import date.
+                        date: effectiveDate,
                         tracking: trackingMatch ? trackingMatch[1].trim() : undefined,
                         shipping: shippingMatch ? shippingMatch[1].trim() : undefined,
                         notes: ec.notes || '',
