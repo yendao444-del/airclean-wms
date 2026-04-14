@@ -4750,6 +4750,22 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const isCompleted = data.status === 'completed';
+        const orderKey = (data.orderNumber || data.ecommerceExportCode || '').trim();
+
+        if (orderKey) {
+            const existing = await prisma.ecommerceExport.findFirst({
+                where: {
+                    OR: [
+                        { orderNumber: orderKey },
+                        { ecommerceExportCode: orderKey }
+                    ]
+                },
+                select: { id: true, status: true }
+            });
+            if (existing) {
+                return { success: true, skipped: true, reason: 'duplicate', data: existing };
+            }
+        }
 
         // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
         const record = await withStockLock(() => prisma.$transaction(async (tx) => {
@@ -5003,11 +5019,51 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const startTime = Date.now();
+        const orderKeys = [...new Set(
+            (records || [])
+                .map(r => (r?.orderNumber || r?.ecommerceExportCode || '').trim())
+                .filter(Boolean)
+        )];
+
+        const existingRecords = orderKeys.length > 0
+            ? await prisma.ecommerceExport.findMany({
+                where: {
+                    OR: [
+                        { orderNumber: { in: orderKeys } },
+                        { ecommerceExportCode: { in: orderKeys } }
+                    ]
+                },
+                select: { orderNumber: true, ecommerceExportCode: true }
+            })
+            : [];
+
+        const existingOrderKeys = new Set();
+        for (const record of existingRecords) {
+            if (record.orderNumber) existingOrderKeys.add(record.orderNumber.trim());
+            if (record.ecommerceExportCode) existingOrderKeys.add(record.ecommerceExportCode.trim());
+        }
+
+        const seenIncomingOrderKeys = new Set();
+        const dedupedRecords = [];
+        for (const record of (records || [])) {
+            const orderKey = (record?.orderNumber || record?.ecommerceExportCode || '').trim();
+            if (orderKey) {
+                if (existingOrderKeys.has(orderKey) || seenIncomingOrderKeys.has(orderKey)) {
+                    continue;
+                }
+                seenIncomingOrderKeys.add(orderKey);
+            }
+            dedupedRecords.push(record);
+        }
+
+        if (dedupedRecords.length === 0) {
+            return { success: true, data: { count: 0, skipped: records.length } };
+        }
 
         // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
         const result = await withStockLock(() => prisma.$transaction(async (tx) => {
             // ðŸš€ BÆ°á»›c 1: Batch INSERT táº¥t cáº£ Ä‘Æ¡n cÃ¹ng lÃºc (1 SQL statement)
-            const createData = records.map(data => ({
+            const createData = dedupedRecords.map(data => ({
                 customerName: data.customerName,
                 ecommerceExportCode: data.ecommerceExportCode || null,
                 orderNumber: data.orderNumber || null,
@@ -5023,7 +5079,7 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
             await tx.ecommerceExport.createMany({ data: createData });
 
             // ðŸš€ BÆ°á»›c 2: Gom táº¥t cáº£ SKU cáº§n trá»« kho â†’ batch update
-            const completedRecords = records.filter(d => d.status === 'completed');
+            const completedRecords = dedupedRecords.filter(d => d.status === 'completed');
             if (completedRecords.length > 0) {
                 const skuCache = await buildSkuCache(tx);
                 const skuChanges = [];
@@ -5041,12 +5097,12 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
                         referenceType: 'TMDT',
                         reference: `Nháº­p hÃ ng loáº¡t ${records.length} Ä‘Æ¡n`,
                         note: `Táº¡o hÃ ng loáº¡t ${completedRecords.length} Ä‘Æ¡n TMDT completed`,
-                        createdBy: records[0]?.createdBy || 'System'
+                        createdBy: dedupedRecords[0]?.createdBy || 'System'
                     }, skuCache);
                 }
             }
 
-            return records.length;
+            return dedupedRecords.length;
         }, {
             maxWait: 15000,
             timeout: 120000,
@@ -5055,7 +5111,8 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
         const elapsed = Date.now() - startTime;
         console.log(`âœ… Bulk created ${result} ecommerce exports in ${elapsed}ms`);
         void logActivity({ module: 'export', action: 'CREATE', description: `Táº¡o hÃ ng loáº¡t ${result} bÃ n giao TMDT (${elapsed}ms)` });
-        return { success: true, data: { count: result } };
+        return { success: true, data: { count: result, skipped: records.length - result } };
+
     } catch (error) {
         console.error('âŒ Bulk create ecommerce exports error:', error);
         return { success: false, error: error.message };

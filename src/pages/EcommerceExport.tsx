@@ -627,6 +627,7 @@ Thời gian: ${currentTime}`;
                             createdBy: currentUser || foundEcommerceExport.createdBy || null,
                             pickedBy: pickerName
                         });
+                        const updateResAny = updateRes as any;
 
                         if (!updateRes.success) {
                             playAlert();
@@ -646,8 +647,8 @@ Thời gian: ${currentTime}`;
                         }
 
                         // Đã lưu vào queue offline (mất mạng) — UI giữ nguyên, hiện badge
-                        if (updateRes.queued) {
-                            setOfflinePending(updateRes.pendingCount || 0);
+                        if (updateResAny.queued) {
+                            setOfflinePending(updateResAny.pendingCount || 0);
                             setScanStatus({
                                 type: 'success',
                                 message: `📦 ĐÃ LƯU TẠM - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
@@ -1224,7 +1225,14 @@ Thời gian: ${currentTime}`;
                     try {
                         const result = await window.electronAPI.ecommerceExports.bulkCreate(newEcommerceExports);
                         if (!result.success) throw new Error(result.error || 'Lỗi DB');
-                        console.log(`✅ Đã lưu ${newEcommerceExports.length} đơn vào database`);
+                        const bulkResult = result as any;
+                        const insertedCount = bulkResult.data?.count ?? newEcommerceExports.length;
+                        const skippedInDb = bulkResult.data?.skipped ?? 0;
+                        if (skippedInDb > 0) {
+                            skippedCount += skippedInDb;
+                        }
+                        console.log(`✅ Đã lưu ${insertedCount} đơn vào database`);
+                        newEcommerceExports.splice(insertedCount);
                     } catch (dbError) {
                         console.error('❌ Lỗi lưu vào database:', dbError);
                         message.error('Lỗi khi lưu dữ liệu vào database!');
@@ -1524,7 +1532,12 @@ Thời gian: ${currentTime}`;
                         try {
                             const result = await window.electronAPI.ecommerceExports.bulkCreate(newEcommerceExports);
                             if (!result.success) throw new Error(result.error || 'Lỗi DB');
-                            console.log(`✅ Đã lưu ${newEcommerceExports.length} đơn vào database`);
+                            const bulkResult = result as any;
+                            const insertedCount = bulkResult.data?.count ?? newEcommerceExports.length;
+                            const skippedInDb = bulkResult.data?.skipped ?? 0;
+                            totalImported += insertedCount - newEcommerceExports.length;
+                            totalSkipped += skippedInDb;
+                            console.log(`✅ Đã lưu ${insertedCount} đơn vào database`);
                         } catch (dbError) {
                             console.error('❌ Lỗi lưu vào database:', dbError);
                             message.error(`Lỗi lưu ${newEcommerceExports.length} đơn: ${dbError instanceof Error ? dbError.message : 'Unknown'}`);
