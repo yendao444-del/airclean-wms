@@ -4797,37 +4797,38 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
 
 // ─── Helper: phân biệt lỗi mạng với lỗi logic ────────────────────────────────
 function isNetworkError(err) {
-    const msg = (err.message || ‘’).toLowerCase();
-    const code = err.code || ‘’;
+    const msg = (err.message || '').toLowerCase();
+    const code = err.code || '';
     return (
-        msg.includes(‘enotfound’) || msg.includes(‘econnrefused’) ||
-        msg.includes(‘etimedout’) || msg.includes(‘econnreset’) ||
-        msg.includes(‘socket hang up’) || msg.includes(‘network’) ||
-        msg.includes(‘connect’) || msg.includes(‘fetch failed’) ||
-        code === ‘P5010’ || code === ‘P5011’ // Prisma connection errors
+        msg.includes('enotfound') || msg.includes('econnrefused') ||
+        msg.includes('etimedout') || msg.includes('econnreset') ||
+        msg.includes('socket hang up') || msg.includes('network') ||
+        msg.includes('connect') || msg.includes('fetch failed') ||
+        code === 'P5010' || code === 'P5011' // Prisma connection errors
     );
 }
 
-// ─── Core logic tách riêng để dùng lại khi sync queue ────────────────────────
+// --- Core logic tach rieng de dung lai khi sync queue ---
 async function execEcommerceExportUpdate(id, data) {
-    if (!prisma) throw new Error(‘Prisma not available’);
+    if (!prisma) throw new Error('Prisma not available');
     const record = await withStockLock(() => prisma.$transaction(async (tx) => {
         const oldRecord = await tx.ecommerceExport.findUnique({ where: { id } });
-        if (!oldRecord) throw new Error(‘Không tìm thấy phiếu xuất.’);
+        if (!oldRecord) throw new Error('Khong tim thay phieu xuat.');
 
-        if (oldRecord.status === ‘completed’) {
-            const oldItemsStr = oldRecord.items || ‘[]’;
-            const newItemsStr = data.items ? (typeof data.items === ‘string’ ? data.items : JSON.stringify(data.items)) : oldItemsStr;
-            const itemsUnchanged = data.status === ‘completed’ && oldItemsStr === newItemsStr;
+        if (oldRecord.status === 'completed') {
+            const oldItemsStr = oldRecord.items || '[]';
+            const newItemsStr = data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : oldItemsStr;
+            const itemsUnchanged = data.status === 'completed' && oldItemsStr === newItemsStr;
             if (!itemsUnchanged) {
                 const oldItems = JSON.parse(oldItemsStr);
                 for (const old of oldItems) {
                     if (old.variantSku) {
                         await deductItemOrCombo(tx, old.variantSku, old.quantity, {
-                            type: ‘adjustment’, referenceType: ‘TMDT_EDIT’,
-                            reference: oldRecord.orderNumber || oldRecord.ecommerceExportCode || ‘Sửa thủ công’,
-                            note: `Hoàn tồn (sửa đơn TMDT #${oldRecord.id})`,
-                            createdBy: data.createdBy || ‘System’
+                            type: 'adjustment',
+                            referenceType: 'TMDT_EDIT',
+                            reference: oldRecord.orderNumber || oldRecord.ecommerceExportCode || 'Sua thu cong',
+                            note: 'Hoan ton (sua don TMDT #' + oldRecord.id + ')',
+                            createdBy: data.createdBy || 'System'
                         }, { allowMissing: true });
                     }
                 }
@@ -4842,7 +4843,7 @@ async function execEcommerceExportUpdate(id, data) {
                 orderNumber: data.orderNumber || null,
                 ecommerceExportReason: data.ecommerceExportReason || null,
                 ecommerceExportDate: data.ecommerceExportDate ? new Date(data.ecommerceExportDate) : undefined,
-                items: data.items ? (typeof data.items === ‘string’ ? data.items : JSON.stringify(data.items)) : undefined,
+                items: data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : undefined,
                 totalAmount: data.totalAmount,
                 notes: data.notes || null,
                 status: data.status,
@@ -4851,18 +4852,19 @@ async function execEcommerceExportUpdate(id, data) {
             }
         });
 
-        const oldItemsStrFinal = oldRecord.items || ‘[]’;
-        const newItemsStrFinal = data.items ? (typeof data.items === ‘string’ ? data.items : JSON.stringify(data.items)) : oldItemsStrFinal;
-        const skipDeduct = oldRecord.status === ‘completed’ && data.status === ‘completed’ && oldItemsStrFinal === newItemsStrFinal;
-        if (data.status === ‘completed’ && !skipDeduct) {
-            const newItems = typeof newItemsStrFinal === ‘string’ ? JSON.parse(newItemsStrFinal) : newItemsStrFinal;
+        const oldItemsStrFinal = oldRecord.items || '[]';
+        const newItemsStrFinal = data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : oldItemsStrFinal;
+        const skipDeduct = oldRecord.status === 'completed' && data.status === 'completed' && oldItemsStrFinal === newItemsStrFinal;
+        if (data.status === 'completed' && !skipDeduct) {
+            const newItems = typeof newItemsStrFinal === 'string' ? JSON.parse(newItemsStrFinal) : newItemsStrFinal;
             for (const item of newItems) {
                 if (item.variantSku) {
                     await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
-                        type: ‘ecom_sale’, referenceType: ‘TMDT_EDIT’,
-                        reference: data.orderNumber || data.ecommerceExportCode || ‘Sửa thủ công’,
-                        note: `Tạo/Sửa đơn TMDT: ${data.customerName || oldRecord.customerName || ‘TMDT’}`,
-                        createdBy: data.createdBy || ‘System’
+                        type: 'ecom_sale',
+                        referenceType: 'TMDT_EDIT',
+                        reference: data.orderNumber || data.ecommerceExportCode || 'Sua thu cong',
+                        note: 'Tao/Sua don TMDT: ' + (data.customerName || oldRecord.customerName || 'TMDT'),
+                        createdBy: data.createdBy || 'System'
                     }, { allowMissing: true });
                 }
             }
@@ -4879,7 +4881,6 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
         void logActivity({ module: 'export', action: 'UPDATE', description: 'Cap nhat ban giao TMDT #' + record.id, recordId: record.id });
         return { success: true, data: record };
     } catch (error) {
-        // Neu la loi mang -> luu vao queue, tra ve success de UI khong rollback
         if (isNetworkError(error)) {
             console.warn('[OfflineQueue] Network error, queuing update id=' + id + ':', error.message);
             try {
