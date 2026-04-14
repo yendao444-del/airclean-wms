@@ -5901,14 +5901,15 @@ ipcMain.handle('users:delete', async (event, id) => {
 ipcMain.handle('users:login', async (event, username, password) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
+        const normalizedUsername = typeof username === 'string' ? username.trim() : '';
         const user = await prisma.user.findUnique({
-            where: { username }
+            where: { username: normalizedUsername }
         });
         if (!user || user.status !== 'active') {
             return { success: false, error: 'TÃ i khoáº£n khÃ´ng tá»“n táº¡i hoáº·c Ä‘Ã£ bá»‹ vÃ´ hiá»‡u hÃ³a' };
         }
         // ðŸ”’ SECURITY: So sÃ¡nh báº±ng bcrypt
-        const isHashed = user.password.startsWith('$2a$') || user.password.startsWith('$2b$');
+        const isHashed = typeof user.password === 'string' && user.password.startsWith('$2');
         let passwordValid = false;
         if (isHashed) {
             passwordValid = await bcrypt.compare(password, user.password);
