@@ -4,6 +4,10 @@ const path = require('path');
 // âœ… PRODUCTION CONFIG - KhÃ´ng cáº§n .env ná»¯a
 const config = require('./config');
 
+// 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
+const offlineQueue = require('./offline-queue');
+try { offlineQueue.init(app.getPath('userData')); } catch (e) { console.error('[OfflineQueue] Init failed:', e.message); }
+
 // Set environment variables tá»« config
 process.env.DATABASE_URL = config.DATABASE_URL;
 process.env.DIRECT_URL = config.DIRECT_URL;
@@ -4791,83 +4795,104 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
     }
 });
 
-ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
-    try {
-        if (!prisma) throw new Error('Prisma not available');
+// ─── Helper: phân biệt lỗi mạng với lỗi logic ────────────────────────────────
+function isNetworkError(err) {
+    const msg = (err.message || ‘’).toLowerCase();
+    const code = err.code || ‘’;
+    return (
+        msg.includes(‘enotfound’) || msg.includes(‘econnrefused’) ||
+        msg.includes(‘etimedout’) || msg.includes(‘econnreset’) ||
+        msg.includes(‘socket hang up’) || msg.includes(‘network’) ||
+        msg.includes(‘connect’) || msg.includes(‘fetch failed’) ||
+        code === ‘P5010’ || code === ‘P5011’ // Prisma connection errors
+    );
+}
 
-        // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
-        const record = await withStockLock(() => prisma.$transaction(async (tx) => {
-            const oldRecord = await tx.ecommerceExport.findUnique({ where: { id } });
-            if (!oldRecord) throw new Error('KhÃ´ng tÃ¬m tháº¥y phiáº¿u xuáº¥t.');
+// ─── Core logic tách riêng để dùng lại khi sync queue ────────────────────────
+async function execEcommerceExportUpdate(id, data) {
+    if (!prisma) throw new Error(‘Prisma not available’);
+    const record = await withStockLock(() => prisma.$transaction(async (tx) => {
+        const oldRecord = await tx.ecommerceExport.findUnique({ where: { id } });
+        if (!oldRecord) throw new Error(‘Không tìm thấy phiếu xuất.’);
 
-            // HoÃ n kho náº¿u phiáº¿u cÅ© Ä‘Ã£ trá»« kho â€” bá» qua náº¿u items khÃ´ng thay Ä‘á»•i (trÃ¡nh hoÃ n tá»“n thá»«a do double-scan)
-            if (oldRecord.status === 'completed') {
-                const oldItemsStr = oldRecord.items || '[]';
-                const newItemsStr = data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : oldItemsStr;
-                const itemsUnchanged = data.status === 'completed' && oldItemsStr === newItemsStr;
-                if (!itemsUnchanged) {
-                    const oldItems = JSON.parse(oldItemsStr);
-                    for (const old of oldItems) {
-                        if (old.variantSku) {
-                            await deductItemOrCombo(tx, old.variantSku, old.quantity, {
-                                type: 'adjustment',
-                                referenceType: 'TMDT_EDIT',
-                                reference: oldRecord.orderNumber || oldRecord.ecommerceExportCode || 'Sá»­a thá»§ cÃ´ng',
-                                note: `HoÃ n tá»“n (sá»­a Ä‘Æ¡n TMDT #${oldRecord.id})`,
-                                createdBy: data.createdBy || 'System'
-                            }, { allowMissing: true });
-                        }
-                    }
-                }
-            }
-
-            const newRecord = await tx.ecommerceExport.update({
-                where: { id },
-                data: {
-                    customerName: data.customerName,
-                    ecommerceExportCode: data.ecommerceExportCode || null,
-                    orderNumber: data.orderNumber || null,
-                    ecommerceExportReason: data.ecommerceExportReason || null,
-                    ecommerceExportDate: data.ecommerceExportDate ? new Date(data.ecommerceExportDate) : undefined,
-                    items: data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : undefined,
-                    totalAmount: data.totalAmount,
-                    notes: data.notes || null,
-                    status: data.status,
-                    createdBy: data.createdBy !== undefined ? data.createdBy : undefined,
-                    pickedBy: data.pickedBy !== undefined ? data.pickedBy : undefined
-                }
-            });
-
-            // Trá»« kho má»›i náº¿u phiáº¿u tráº¡ng thÃ¡i hoÃ n thÃ nh â€” bá» qua náº¿u Ä‘Ã£ completed vÃ  items khÃ´ng Ä‘á»•i
-            const oldItemsStrFinal = oldRecord.items || '[]';
-            const newItemsStrFinal = data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : oldItemsStrFinal;
-            const skipDeduct = oldRecord.status === 'completed' && data.status === 'completed' && oldItemsStrFinal === newItemsStrFinal;
-            if (data.status === 'completed' && !skipDeduct) {
-                const newItems = typeof newItemsStrFinal === 'string' ? JSON.parse(newItemsStrFinal) : newItemsStrFinal;
-                for (const item of newItems) {
-                    if (item.variantSku) {
-                        await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
-                            type: 'ecom_sale',
-                            referenceType: 'TMDT_EDIT',
-                            reference: data.orderNumber || data.ecommerceExportCode || 'Sá»­a thá»§ cÃ´ng',
-                            note: `Táº¡o/Sá»­a Ä‘Æ¡n TMDT: ${data.customerName || oldRecord.customerName || 'TMDT'}`,
-                            createdBy: data.createdBy || 'System'
+        if (oldRecord.status === ‘completed’) {
+            const oldItemsStr = oldRecord.items || ‘[]’;
+            const newItemsStr = data.items ? (typeof data.items === ‘string’ ? data.items : JSON.stringify(data.items)) : oldItemsStr;
+            const itemsUnchanged = data.status === ‘completed’ && oldItemsStr === newItemsStr;
+            if (!itemsUnchanged) {
+                const oldItems = JSON.parse(oldItemsStr);
+                for (const old of oldItems) {
+                    if (old.variantSku) {
+                        await deductItemOrCombo(tx, old.variantSku, old.quantity, {
+                            type: ‘adjustment’, referenceType: ‘TMDT_EDIT’,
+                            reference: oldRecord.orderNumber || oldRecord.ecommerceExportCode || ‘Sửa thủ công’,
+                            note: `Hoàn tồn (sửa đơn TMDT #${oldRecord.id})`,
+                            createdBy: data.createdBy || ‘System’
                         }, { allowMissing: true });
                     }
                 }
             }
-            return newRecord;
-        }, { timeout: 30000, maxWait: 10000 }));
+        }
 
-        console.log(`âœ… Updated ecommerce export #${record.id}`);
-        void logActivity({ module: 'export', action: 'UPDATE', description: `Cáº­p nháº­t bÃ n giao TMDT #${record.id}`, recordId: record.id });
+        const newRecord = await tx.ecommerceExport.update({
+            where: { id },
+            data: {
+                customerName: data.customerName,
+                ecommerceExportCode: data.ecommerceExportCode || null,
+                orderNumber: data.orderNumber || null,
+                ecommerceExportReason: data.ecommerceExportReason || null,
+                ecommerceExportDate: data.ecommerceExportDate ? new Date(data.ecommerceExportDate) : undefined,
+                items: data.items ? (typeof data.items === ‘string’ ? data.items : JSON.stringify(data.items)) : undefined,
+                totalAmount: data.totalAmount,
+                notes: data.notes || null,
+                status: data.status,
+                createdBy: data.createdBy !== undefined ? data.createdBy : undefined,
+                pickedBy: data.pickedBy !== undefined ? data.pickedBy : undefined
+            }
+        });
+
+        const oldItemsStrFinal = oldRecord.items || ‘[]’;
+        const newItemsStrFinal = data.items ? (typeof data.items === ‘string’ ? data.items : JSON.stringify(data.items)) : oldItemsStrFinal;
+        const skipDeduct = oldRecord.status === ‘completed’ && data.status === ‘completed’ && oldItemsStrFinal === newItemsStrFinal;
+        if (data.status === ‘completed’ && !skipDeduct) {
+            const newItems = typeof newItemsStrFinal === ‘string’ ? JSON.parse(newItemsStrFinal) : newItemsStrFinal;
+            for (const item of newItems) {
+                if (item.variantSku) {
+                    await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
+                        type: ‘ecom_sale’, referenceType: ‘TMDT_EDIT’,
+                        reference: data.orderNumber || data.ecommerceExportCode || ‘Sửa thủ công’,
+                        note: `Tạo/Sửa đơn TMDT: ${data.customerName || oldRecord.customerName || ‘TMDT’}`,
+                        createdBy: data.createdBy || ‘System’
+                    }, { allowMissing: true });
+                }
+            }
+        }
+        return newRecord;
+    }, { timeout: 30000, maxWait: 10000 }));
+    return record;
+}
+
+ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
+    try {
+        const record = await execEcommerceExportUpdate(id, data);
+        console.log('Updated ecommerce export #' + record.id);
+        void logActivity({ module: 'export', action: 'UPDATE', description: 'Cap nhat ban giao TMDT #' + record.id, recordId: record.id });
         return { success: true, data: record };
     } catch (error) {
-        console.error('âŒ Update ecommerce export error:', error);
+        // Neu la loi mang -> luu vao queue, tra ve success de UI khong rollback
+        if (isNetworkError(error)) {
+            console.warn('[OfflineQueue] Network error, queuing update id=' + id + ':', error.message);
+            try {
+                offlineQueue.enqueue('ecommerceExports:update', { id, data });
+                return { success: true, queued: true, pendingCount: offlineQueue.count() };
+            } catch (qErr) {
+                console.error('[OfflineQueue] Failed to enqueue:', qErr.message);
+            }
+        }
+        console.error('Update ecommerce export error:', error);
         return { success: false, error: error.message };
     }
 });
-
 ipcMain.handle('ecommerceExports:delete', async (event, id) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
@@ -5616,14 +5641,18 @@ ipcMain.handle('inventoryLogs:getAll', async (event, filters = {}) => {
             }
         }
 
-        const logs = await prisma.inventoryLog.findMany({
+        const queryOptions = {
             where,
             orderBy: { createdAt: 'desc' },
-            take: filters.limit || 500,
             include: {
                 user: { select: { username: true, fullName: true } },
             }
-        });
+        };
+        // Chỉ giới hạn khi caller truyền limit rõ ràng (vd: getBySku dùng limit: 100)
+        // Không giới hạn khi load thẻ kho để tổng xuất/nhập luôn chính xác
+        if (filters.limit) queryOptions.take = filters.limit;
+
+        const logs = await prisma.inventoryLog.findMany(queryOptions);
 
         const formatted = logs.map(l => ({
             ...l,
@@ -8160,3 +8189,44 @@ ipcMain.handle('attendance:deleteProfile', async (event, { face_id }) => {
     return { success: true, verify, allClean };
 });
 
+
+
+//                                                                              
+// OFFLINE QUEUE  Sync & Status handlers
+//                                                                              
+
+// Tr� v� s� �n ang ch� sync
+ipcMain.handle('offlineQueue:status', () => {
+    return { success: true, pendingCount: offlineQueue.count() };
+});
+
+// Flush to�n b� queue l�n Supabase
+ipcMain.handle('offlineQueue:sync', async () => {
+    const items = offlineQueue.dequeueAll();
+    if (items.length === 0) return { success: true, synced: 0, failed: 0 };
+
+    let synced = 0, failed = 0;
+    const errors = [];
+
+    for (const item of items) {
+        try {
+            if (item.type === 'ecommerceExports:update') {
+                await execEcommerceExportUpdate(item.payload.id, item.payload.data);
+                offlineQueue.remove(item._filename);
+                synced++;
+                console.log('[OfflineQueue] Synced:', item._filename);
+            } else {
+                // Unknown type  b� qua, x�a � kh�ng b� loop
+                offlineQueue.remove(item._filename);
+            }
+        } catch (err) {
+            failed++;
+            errors.push({ file: item._filename, error: err.message });
+            console.error('[OfflineQueue] Sync failed for', item._filename, ':', err.message);
+            // Kh�ng x�a file  gi� l�i � retry l�n sau
+        }
+    }
+
+    console.log('[OfflineQueue] Sync complete  synced:', synced, '| failed:', failed, '| remaining:', offlineQueue.count());
+    return { success: true, synced, failed, remaining: offlineQueue.count(), errors };
+});

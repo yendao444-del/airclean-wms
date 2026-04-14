@@ -266,6 +266,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         fullSync: (config) => ipcRenderer.invoke('zkteco:fullSync', config),
         zkbridge: (config) => ipcRenderer.invoke('zkteco:zkbridge', config),
     },
+    offlineQueue: {
+        status: () => ipcRenderer.invoke('offlineQueue:status'),
+        sync: () => ipcRenderer.invoke('offlineQueue:sync'),
+    },
 });
 
 // ============================================

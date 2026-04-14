@@ -76,6 +76,7 @@ export default function EcommerceExportPage() {
     const [ecommerceExports, setEcommerceExports] = useState<EcommerceExport[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(false);
+    const [offlinePending, setOfflinePending] = useState(0); // Số đơn chờ sync
     const [modalVisible, setModalVisible] = useState(false);
     const [methodModalVisible, setMethodModalVisible] = useState(false);
     const [editingEcommerceExport, setEditingEcommerceExport] = useState<EcommerceExport | null>(null);
@@ -184,9 +185,38 @@ export default function EcommerceExportPage() {
             }
         }, 60000);
 
+        // ─── Offline Queue: kiểm tra pending khi mở trang ───────────────────
+        const checkOfflinePending = async () => {
+            try {
+                const res = await (window as any).electronAPI.offlineQueue.status();
+                if (res.success) setOfflinePending(res.pendingCount || 0);
+            } catch {}
+        };
+        checkOfflinePending();
+
+        // Auto-sync khi mạng khôi phục
+        const handleOnline = async () => {
+            const res = await (window as any).electronAPI.offlineQueue.status();
+            if (!res.success || res.pendingCount === 0) return;
+            message.loading({ content: `Đang đồng bộ ${res.pendingCount} đơn chờ...`, key: 'offlineSync', duration: 0 });
+            const syncRes = await (window as any).electronAPI.offlineQueue.sync();
+            if (syncRes.success) {
+                setOfflinePending(syncRes.remaining || 0);
+                if (syncRes.synced > 0) {
+                    message.success({ content: `Đã đồng bộ ${syncRes.synced} đơn thành công!`, key: 'offlineSync', duration: 3 });
+                    loadEcommerceExports(true);
+                }
+                if (syncRes.failed > 0) {
+                    message.warning({ content: `${syncRes.failed} đơn đồng bộ thất bại, sẽ thử lại sau.`, key: 'offlineSync', duration: 4 });
+                }
+            }
+        };
+        window.addEventListener('online', handleOnline);
+
         return () => {
             clearInterval(interval);
             clearInterval(dailyResetInterval);
+            window.removeEventListener('online', handleOnline);
             // 🧹 Cleanup debounced sync timer
             if (bgSyncTimerRef.current) clearTimeout(bgSyncTimerRef.current);
         };
@@ -613,6 +643,17 @@ Thời gian: ${currentTime}`;
                                 r.id === targetId ? { ...r, status: 'pending', pickedBy: foundEcommerceExport.pickedBy } : r
                             ));
                             return; // Stop here!
+                        }
+
+                        // Đã lưu vào queue offline (mất mạng) — UI giữ nguyên, hiện badge
+                        if (updateRes.queued) {
+                            setOfflinePending(updateRes.pendingCount || 0);
+                            setScanStatus({
+                                type: 'success',
+                                message: `📦 ĐÃ LƯU TẠM - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                            });
+                            message.warning(`Mất mạng — đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} đã lưu tạm, sẽ tự sync khi có mạng.`);
+                            return;
                         }
 
                         console.log(`✅ Đã cập nhật status → completed cho đơn #${foundEcommerceExport.id}`);
@@ -2067,6 +2108,34 @@ Thời gian: ${currentTime}`;
                             <span style={{ fontSize: 15, color: '#00A352', fontWeight: 900 }}>{activePacker}</span>
                         </div>
                     )}
+                </div>
+            )}
+
+            {/* Badge offline pending */}
+            {offlinePending > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px', background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, marginBottom: 6 }}>
+                    <span style={{ fontSize: 16 }}>📦</span>
+                    <span style={{ color: '#d48806', fontWeight: 600, fontSize: 13 }}>
+                        {offlinePending} đơn đang chờ đồng bộ (lưu offline khi mất mạng)
+                    </span>
+                    <Button
+                        size="small"
+                        type="primary"
+                        style={{ marginLeft: 'auto', background: '#d48806', borderColor: '#d48806' }}
+                        onClick={async () => {
+                            message.loading({ content: 'Đang đồng bộ...', key: 'manualSync', duration: 0 });
+                            const res = await (window as any).electronAPI.offlineQueue.sync();
+                            setOfflinePending(res.remaining || 0);
+                            if (res.synced > 0) {
+                                message.success({ content: `Đã đồng bộ ${res.synced} đơn!`, key: 'manualSync', duration: 3 });
+                                loadEcommerceExports(true);
+                            } else {
+                                message.warning({ content: 'Không thể đồng bộ, kiểm tra kết nối mạng.', key: 'manualSync', duration: 3 });
+                            }
+                        }}
+                    >
+                        Đồng bộ ngay
+                    </Button>
                 </div>
             )}
 

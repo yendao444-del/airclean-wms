@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer, Legend } from 'recharts';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import './Attendance.css';
 import dayjs from 'dayjs';
@@ -589,12 +590,13 @@ const CHECK_TYPE_LABELS: Record<string, { label: string; color: string }> = {
     evening_out: { label: 'Tối ra', color: '#722ed1' },
 };
 
-function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine }: {
+function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine, isAdmin }: {
     employees: any[],
     children?: React.ReactNode,
     onLogAdded?: () => void,
     config?: PenaltyConfig,
     onLateFine?: (fine: FineRecord) => void,
+    isAdmin?: boolean,
 }) {
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);       // capture frame (hidden)
@@ -1397,17 +1399,18 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                     >
                         {cameraExpanded ? 'Đóng camera' : 'Chấm công'}
                     </Button>
-                    <Button icon={<PlusOutlined />} type="primary" disabled={serviceStatus !== 'ready'} onClick={() => {
-                        // Reset toàn bộ state đăng ký — bắt buộc chọn lại nhân viên mỗi lần
-                        setRegFaceId('');
-                        setRegUserName('');
-                        setRegImages([]);
-                        setRegCapturedCount(0);
-                        autoCaptureFiredRef.current = false;
-                        setRegisterOpen(true);
-                    }}>
-                        Đăng ký khuôn mặt mới
-                    </Button>
+                    {isAdmin && (
+                        <Button icon={<PlusOutlined />} type="primary" disabled={serviceStatus !== 'ready'} onClick={() => {
+                            setRegFaceId('');
+                            setRegUserName('');
+                            setRegImages([]);
+                            setRegCapturedCount(0);
+                            autoCaptureFiredRef.current = false;
+                            setRegisterOpen(true);
+                        }}>
+                            Đăng ký khuôn mặt mới
+                        </Button>
+                    )}
                 </Space>
             </div>
 
@@ -1530,7 +1533,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                                             <Text strong style={{ fontSize: 13 }}>{p.userName}</Text>
                                             <div><Text type="secondary" style={{ fontSize: 11 }}>{p.faceId} · {p.photoCount} ảnh</Text></div>
                                         </div>
-                                        <Tooltip title="Xóa khuôn mặt">
+                                        {isAdmin && <Tooltip title="Xóa khuôn mặt">
                                             <Button
                                                 size="small" danger type="text" icon={<DeleteOutlined />}
                                                 onClick={() => {
@@ -1547,7 +1550,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                                                     });
                                                 }}
                                             />
-                                        </Tooltip>
+                                        </Tooltip>}
                                     </div>
                                 ))}
                             </div>
@@ -1745,6 +1748,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
 // ===============================================
 export default function Attendance() {
     const currentUser = useCurrentUser();
+    const isAdmin = currentUser === 'admin';
     const [configModalOpen, setConfigModalOpen] = useState(false);
     const [activeConfigTab, setActiveConfigTab] = useState('rules');
     const [payslipModal, setPayslipModal] = useState<any>(null);
@@ -1881,22 +1885,26 @@ export default function Attendance() {
         };
     }, []);
 
-    // Ref lưu snapshot data mới nhất để flush khi reload/đóng app
-    const pendingSaveRef = useRef<object | null>(null);
+    // Ref lưu snapshot mới nhất để flush khi unmount hoặc đóng app
+    const latestSnapshotRef = useRef<object | null>(null);
 
-    // 2. Lưu tự động khi có thay đổi state với Debounce
+    // 2a. Luôn cập nhật ref khi state thay đổi (không debounce, không ghi DB)
+    useEffect(() => {
+        if (!isDbLoaded || employees.length === 0) return;
+        latestSnapshotRef.current = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods, payrollOverrides };
+    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods, payrollOverrides, isDbLoaded]);
+
+    // 2b. Lưu tự động khi có thay đổi state với Debounce
     useEffect(() => {
         if (!isDbLoaded) return; // Không lưu đè lúc chưa tải xong
         if (employees.length === 0) return; // Chưa có data employees → không ghi đè DB
 
         const snapshot = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods, payrollOverrides };
-        pendingSaveRef.current = snapshot;
 
         const saveData = async () => {
             try {
                 const api = (window as any).electronAPI;
                 await api.appConfig.set('attendanceData', snapshot);
-                pendingSaveRef.current = null;
             } catch (err) {
                 console.error('Lỗi lưu dữ liệu chấm công vào DB:', err);
             }
@@ -1906,13 +1914,23 @@ export default function Attendance() {
         return () => clearTimeout(timer);
     }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods, payrollOverrides, isDbLoaded]);
 
+    // 2c. Flush save khi component unmount (navigate sang tab khác) để tránh mất data
+    useEffect(() => {
+        return () => {
+            if (latestSnapshotRef.current) {
+                (window as any).electronAPI?.appConfig
+                    .set('attendanceData', latestSnapshotRef.current)
+                    .catch(console.error);
+            }
+        };
+    }, []);
+
     // Flush save ngay lập tức khi reload hoặc đóng app
     useEffect(() => {
         const handleBeforeUnload = () => {
-            if (pendingSaveRef.current) {
+            if (latestSnapshotRef.current) {
                 const api = (window as any).electronAPI;
-                // Dùng sendSync để đảm bảo lưu xong trước khi đóng
-                try { api.appConfig.set('attendanceData', pendingSaveRef.current); } catch { }
+                try { api.appConfig.set('attendanceData', latestSnapshotRef.current); } catch { }
             }
         };
         window.addEventListener('beforeunload', handleBeforeUnload);
@@ -2573,58 +2591,107 @@ export default function Attendance() {
                     <Button size="small" icon={<SyncOutlined />} onClick={() => loadPackingOrders(overviewDateRange[0].startOf('day').toISOString())}>Tải lại</Button>
                 </div>
 
-                {/* Hero Banner */}
-                <div className="att-hero-banner">
-                    <div style={{ position: 'relative', zIndex: 1 }}>
-                        <div className="att-hero-label">📦 LƯƠNG ĐÓNG GÓI {overviewDateRange[0].format('DD/MM')} — {overviewDateRange[1].format('DD/MM/YYYY')}</div>
-                        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 16 }}>
-                            <div className="att-hero-value">{filteredTotalUnits.toLocaleString()} Đơn</div>
-                            <div style={{ display: 'flex', gap: 8, paddingBottom: 6 }}>
-                                <Tag color="blue" style={{ border: 'none', background: 'rgba(255,255,255,0.25)', color: 'white', fontWeight: 700 }}>{filteredTotalSP.toLocaleString()} SP × {unitPrice}đ</Tag>
+                {/* Stats + Chart Header */}
+                {(() => {
+                    const CHART_COLORS = ['#00ab56', '#1890ff', '#fa8c16', '#722ed1', '#10b981', '#f5222d', '#13c2c2'];
+                    const chartData = [...payrollData]
+                        .filter((d: any) => (d.packOrderCount || 0) > 0)
+                        .sort((a: any, b: any) => (b.packOrderCount || 0) - (a.packOrderCount || 0))
+                        .map((d: any) => ({ name: d.name, value: d.packOrderCount || 0, income: d.packIncome || 0 }));
+                    return (
+                        <div style={{ background: '#fff', border: '1px solid #e8e8e8', borderRadius: 12, overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+                            {/* Title bar */}
+                            <div style={{ padding: '10px 20px', background: '#f6ffed', borderBottom: '1px solid #d9f7be', display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: 13, fontWeight: 700, color: '#389e0d', textTransform: 'uppercase', letterSpacing: 0.5 }}>📦 Lương đóng gói</span>
+                                <span style={{ fontSize: 12, color: '#8c8c8c' }}>{overviewDateRange[0].format('DD/MM')} — {overviewDateRange[1].format('DD/MM/YYYY')}</span>
+                            </div>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1px 420px' }}>
+                                {/* Left: Stats */}
+                                <div style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+                                    {/* Quỹ thưởng - số to */}
+                                    <div>
+                                        <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 2 }}>Tổng quỹ thưởng</div>
+                                        <div style={{ fontSize: 36, fontWeight: 900, color: '#00ab56', lineHeight: 1 }}>{fmt(filteredPackValue)}</div>
+                                        <div style={{ fontSize: 12, color: '#52c41a', marginTop: 3 }}>{filteredTotalSP.toLocaleString()} SP × {unitPrice.toLocaleString()}đ/SP</div>
+                                    </div>
+                                    <Divider style={{ margin: '0' }} />
+                                    {/* 4 stats nhỏ */}
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 24px' }}>
+                                        <div>
+                                            <div style={{ fontSize: 10, fontWeight: 700, color: '#8c8c8c', textTransform: 'uppercase', letterSpacing: 0.4 }}>Tổng đơn</div>
+                                            <div style={{ fontSize: 22, fontWeight: 900, color: '#10b981' }}>{totalOrders.toLocaleString()}<span style={{ fontSize: 12, fontWeight: 500, color: '#aaa', marginLeft: 4 }}>đơn</span></div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: 10, fontWeight: 700, color: '#8c8c8c', textTransform: 'uppercase', letterSpacing: 0.4 }}>Tổng sản phẩm</div>
+                                            <div style={{ fontSize: 22, fontWeight: 900, color: '#1890ff' }}>{filteredTotalSP.toLocaleString()}<span style={{ fontSize: 12, fontWeight: 500, color: '#aaa', marginLeft: 4 }}>SP</span></div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: 10, fontWeight: 700, color: '#8c8c8c', textTransform: 'uppercase', letterSpacing: 0.4 }}>Đơn giá</div>
+                                            <div style={{ fontSize: 22, fontWeight: 900, color: '#722ed1' }}>{unitPrice.toLocaleString()}<span style={{ fontSize: 12, fontWeight: 500, color: '#aaa', marginLeft: 4 }}>đ/SP</span></div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: 10, fontWeight: 700, color: '#8c8c8c', textTransform: 'uppercase', letterSpacing: 0.4 }}>Nhân sự</div>
+                                            <div style={{ fontSize: 22, fontWeight: 900, color: '#fa8c16' }}>{uniquePackers}<span style={{ fontSize: 12, fontWeight: 500, color: '#aaa', marginLeft: 4 }}>người</span></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                {/* Divider */}
+                                <div style={{ background: '#f0f0f0' }} />
+                                {/* Right: Donut Chart */}
+                                <div style={{ padding: '16px 16px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', textTransform: 'uppercase', letterSpacing: 0.5 }}>Phân bổ đóng gói</div>
+                                    {chartData.length > 0 ? (<>
+                                        <ResponsiveContainer width="100%" height={200}>
+                                            <PieChart>
+                                                <Pie
+                                                    data={chartData}
+                                                    cx="50%"
+                                                    cy="50%"
+                                                    innerRadius={58}
+                                                    outerRadius={90}
+                                                    paddingAngle={3}
+                                                    dataKey="value"
+                                                >
+                                                    {chartData.map((_: any, i: number) => (
+                                                        <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                                                    ))}
+                                                </Pie>
+                                                <ReTooltip
+                                                    formatter={(value: any, name: any, props: any) => [
+                                                        <span><b>{value} đơn</b> — {fmt(props.payload.income)}</span>, name
+                                                    ]}
+                                                    contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                                                />
+                                            </PieChart>
+                                        </ResponsiveContainer>
+                                        {/* Custom legend bên dưới */}
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 5, paddingLeft: 4 }}>
+                                            {chartData.map((entry: any, i: number) => {
+                                                const pct = totalOrders > 0 ? Math.round(entry.value / totalOrders * 100) : 0;
+                                                return (
+                                                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                        <div style={{ width: 10, height: 10, borderRadius: '50%', background: CHART_COLORS[i % CHART_COLORS.length], flexShrink: 0 }} />
+                                                        <span style={{ fontSize: 12, color: '#595959', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.name}</span>
+                                                        <span style={{ fontSize: 12, fontWeight: 700, color: CHART_COLORS[i % CHART_COLORS.length] }}>{entry.value} đơn</span>
+                                                        <span style={{ fontSize: 11, color: '#aaa', minWidth: 36, textAlign: 'right' }}>{pct}%</span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </>) : (
+                                        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#d9d9d9', fontSize: 13 }}>Chưa có dữ liệu</div>
+                                    )}
+                                </div>
                             </div>
                         </div>
-                    </div>
-                    <div className="att-hero-box">
-                        <div className="att-hero-box-label">Tổng quỹ thưởng</div>
-                        <div className="att-hero-box-value">{fmt(filteredPackValue)}</div>
-                    </div>
-                </div>
-
-                {/* KPI Cards (Gộp) */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-                    <Card size="small" style={{ borderTop: '3px solid #1890ff' }}>
-                        <Statistic
-                            title={<Text type="secondary" style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>Tổng sản phẩm</Text>}
-                            value={filteredTotalSP}
-                            suffix="SP"
-                            valueStyle={{ color: '#1890ff', fontWeight: 800, fontSize: 24 }}
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>× {unitPrice.toLocaleString()} đ = {fmt(filteredTotalSP * unitPrice)}</Text>
-                    </Card>
-                    <Card size="small" style={{ borderTop: '3px solid #722ed1' }}>
-                        <Statistic
-                            title={<Text type="secondary" style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>Đơn giá</Text>}
-                            value={unitPrice}
-                            suffix="đ/SP"
-                            valueStyle={{ color: '#722ed1', fontWeight: 800, fontSize: 24 }}
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>Áp dụng cho toàn bộ sản phẩm</Text>
-                    </Card>
-                    <Card size="small" style={{ borderTop: '3px solid #10b981' }}>
-                        <Statistic title={<Text type="secondary" style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>Thực tế đã đóng</Text>} value={totalOrders} suffix="đơn" valueStyle={{ color: '#10b981', fontWeight: 800, fontSize: 24 }} />
-                        <Text type="secondary" style={{ fontSize: 11, visibility: 'hidden' }}>&nbsp;</Text>
-                    </Card>
-                    <Card size="small" style={{ borderTop: '3px solid #fa8c16' }}>
-                        <Statistic title={<Text type="secondary" style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>Nhân sự đóng gói</Text>} value={uniquePackers} suffix="người" valueStyle={{ color: '#fa8c16', fontWeight: 800, fontSize: 24 }} />
-                        <Text type="secondary" style={{ fontSize: 11, visibility: 'hidden' }}>&nbsp;</Text>
-                    </Card>
-                </div>
+                    );
+                })()}
 
                 {/* Distribution Table */}
                 <Card
                     bodyStyle={{ padding: 0 }}
                     style={{ borderTop: '3px solid #00ab56' }}
-                    title={<Space><TeamOutlined style={{ color: '#00ab56' }} /><Text strong>Bảng xếp hạng đóng gói</Text><Tag color="green" style={{ fontSize: 10, fontWeight: 700 }}>AI ĐÓNG NGƯỜI ĐÓ HƯỞNG</Tag></Space>}
+                    title={<Space><TeamOutlined style={{ color: '#00ab56' }} /><Text strong>Bảng xếp hạng đóng gói</Text></Space>}
                 >
                     <Table
                         dataSource={[...payrollData]
@@ -2877,7 +2944,7 @@ export default function Attendance() {
                                     { title: <Text style={{ color: '#1890ff', fontWeight: 700 }}>SỐ TIỀN NHẬN</Text>, dataIndex: 'amount', key: 'amount', width: 160, align: 'right' as const, render: (v: number) => <Text strong style={{ color: '#1890ff', fontSize: 15 }}>+ {fmt(v)}</Text> },
                                     {
                                         title: '', key: 'actions', width: 100, align: 'center' as const,
-                                        render: (_: any, r: any) => r.isManual ? (
+                                        render: (_: any, r: any) => (r.isManual && isAdmin) ? (
                                             <Space size={8}>
                                                 <Tooltip title="Sửa">
                                                     <Button size="small" type="primary" ghost icon={<EditOutlined />} onClick={() => {
@@ -2914,7 +2981,7 @@ export default function Attendance() {
                         <div style={{ background: 'linear-gradient(135deg, #1890ff 0%, #36cfc9 100%)', width: 8, height: 24, borderRadius: 4 }} />
                         <Title level={4} style={{ margin: 0, color: '#1f2937' }}>Phân bổ Thưởng & Chia phạt</Title>
                     </div>
-                    <Button type="primary" icon={<PlusOutlined />} style={{ fontWeight: 700, borderRadius: 8, height: 38, background: 'linear-gradient(to right, #1890ff, #36cfc9)', border: 'none', boxShadow: '0 4px 10px rgba(24,144,255,0.3)' }} onClick={() => { setEditingBonus(null); bonusForm.resetFields(); setBonusModalOpen(true); }}>Thêm thưởng thủ công</Button>
+                    {isAdmin && <Button type="primary" icon={<PlusOutlined />} style={{ fontWeight: 700, borderRadius: 8, height: 38, background: 'linear-gradient(to right, #1890ff, #36cfc9)', border: 'none', boxShadow: '0 4px 10px rgba(24,144,255,0.3)' }} onClick={() => { setEditingBonus(null); bonusForm.resetFields(); setBonusModalOpen(true); }}>Thêm thưởng thủ công</Button>}
                 </div>
                 <Card
                     bodyStyle={{ padding: 0 }}
@@ -2988,15 +3055,17 @@ export default function Attendance() {
                         <Title level={4} style={{ margin: 0, color: '#ff4d4f' }}>Khấu trừ & Phạt</Title>
                         <Tag color="error" style={{ fontWeight: 800, fontSize: 13, padding: '2px 12px' }}>{combinedFines.length} khoản</Tag>
                     </div>
-                    <Button
-                        type="primary"
-                        danger
-                        icon={<PlusOutlined />}
-                        onClick={() => setFineModalOpen(true)}
-                        style={{ fontWeight: 700 }}
-                    >
-                        Thêm phạt thủ công
-                    </Button>
+                    {isAdmin && (
+                        <Button
+                            type="primary"
+                            danger
+                            icon={<PlusOutlined />}
+                            onClick={() => setFineModalOpen(true)}
+                            style={{ fontWeight: 700 }}
+                        >
+                            Thêm phạt thủ công
+                        </Button>
+                    )}
                 </div>
 
                 {/* Tổng phạt summary */}
@@ -3049,7 +3118,7 @@ export default function Attendance() {
                             {
                                 title: '', key: 'actions', width: 60, align: 'center' as const,
                                 render: (_: any, record: any) => {
-                                    if (!record.isManual) return null;
+                                    if (!record.isManual || !isAdmin) return null;
                                     return (
                                         <Tooltip title="Xóa phạt">
                                             <Button
@@ -3219,6 +3288,7 @@ export default function Attendance() {
             employees={employees}
             onLogAdded={() => { if (isDbLoaded) fetchMonthLogs(); }}
             config={config}
+            isAdmin={isAdmin}
             onLateFine={(fine) => {
                 setExtraFines(prev => [...prev, fine]);
                 message.warning(`⚠️ Phạt đi muộn: ${fine.detail} — ${fine.amount.toLocaleString('vi-VN')}đ`);
@@ -3327,16 +3397,18 @@ export default function Attendance() {
                                     Lịch sử{fundAuditLog.length > 0 ? ` (${fundAuditLog.length})` : ''}
                                 </Button>
                             </Tooltip>
-                            <Dropdown menu={{
-                                items: [
-                                    { key: 'in', label: <span style={{ color: '#00ab56', fontWeight: 700 }}>💰 Thu vào quỹ</span>, onClick: () => { fundForm.resetFields(); fundForm.setFieldsValue({ person: currentUser || '' }); setEditingFundTx(null); setFundModalType('in'); } },
-                                    { key: 'out', label: <span style={{ color: '#ff4d4f', fontWeight: 700 }}>💸 Chi ra từ quỹ</span>, onClick: () => { fundForm.resetFields(); fundForm.setFieldsValue({ person: currentUser || '' }); setEditingFundTx(null); setFundModalType('out'); } },
-                                ],
-                            }}>
-                                <Button type="primary" style={{ background: '#722ed1', borderColor: '#722ed1', fontWeight: 700 }} icon={<PlusOutlined />}>
-                                    Thêm giao dịch <DownOutlined />
-                                </Button>
-                            </Dropdown>
+                            {isAdmin && (
+                                <Dropdown menu={{
+                                    items: [
+                                        { key: 'in', label: <span style={{ color: '#00ab56', fontWeight: 700 }}>💰 Thu vào quỹ</span>, onClick: () => { fundForm.resetFields(); fundForm.setFieldsValue({ person: currentUser || '' }); setEditingFundTx(null); setFundModalType('in'); } },
+                                        { key: 'out', label: <span style={{ color: '#ff4d4f', fontWeight: 700 }}>💸 Chi ra từ quỹ</span>, onClick: () => { fundForm.resetFields(); fundForm.setFieldsValue({ person: currentUser || '' }); setEditingFundTx(null); setFundModalType('out'); } },
+                                    ],
+                                }}>
+                                    <Button type="primary" style={{ background: '#722ed1', borderColor: '#722ed1', fontWeight: 700 }} icon={<PlusOutlined />}>
+                                        Thêm giao dịch <DownOutlined />
+                                    </Button>
+                                </Dropdown>
+                            )}
                         </Space>
                     }
                     bodyStyle={{ padding: 0 }}
@@ -3355,7 +3427,7 @@ export default function Attendance() {
                                 title: '', key: 'actions', width: '10%', align: 'center' as const,
                                 render: (_: any, record: FundTransaction) => {
                                     const isEditable = extraFundTx.some(t => t.id === record.id);
-                                    if (!isEditable) return null;
+                                    if (!isEditable || !isAdmin) return null;
                                     return (
                                         <Space size={4} style={{ whiteSpace: 'nowrap' }}>
                                             <Tooltip title="Sửa">
@@ -3472,9 +3544,11 @@ export default function Attendance() {
             <Card bordered={false} style={{ borderRadius: 12 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
                     <div style={{ fontSize: 16, fontWeight: 700 }}>Danh sách nhân sự</div>
-                    <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditingEmp(null); empForm.resetFields(); setEmpModalOpen(true); }}>
-                        Thêm Nhân Sự
-                    </Button>
+                    {isAdmin && (
+                        <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditingEmp(null); empForm.resetFields(); setEmpModalOpen(true); }}>
+                            Thêm Nhân Sự
+                        </Button>
+                    )}
                 </div>
                 <Table
                     dataSource={employees}
@@ -3492,7 +3566,7 @@ export default function Attendance() {
                         { title: 'Đơn giá', dataIndex: 'baseSalary', align: 'right', render: (v, r) => <Text>{fmt(v)}{r.isHourly ? ' / giờ' : ' / tháng'}</Text> },
                         {
                             title: 'Thao tác', align: 'center', width: 100,
-                            render: (_, record) => (
+                            render: (_, record) => isAdmin ? (
                                 <Space>
                                     <Button size="small" type="text" icon={<EditOutlined style={{ color: '#1890ff' }} />} onClick={() => {
                                         setEditingEmp(record);
@@ -3507,7 +3581,7 @@ export default function Attendance() {
                                         message.success('Đã xóa nhân viên!');
                                     }} />
                                 </Space>
-                            )
+                            ) : null
                         }
                     ]}
                 />
@@ -3694,7 +3768,7 @@ export default function Attendance() {
                             </Dropdown>
                         );
                     })()}
-                    <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal}>Cấu hình</Button>
+                    {isAdmin && <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal}>Cấu hình</Button>}
                     {isCurrentPeriodLocked ? (
                         currentUser === 'admin' ? (
                             <Button
@@ -3772,7 +3846,6 @@ export default function Attendance() {
             >
                 {payslipModal && (() => {
                     const p = payslipModal;
-                    const isAdmin = currentUser === 'admin';
                     const periodKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
                     const overrideKey = `${p.id}_${periodKey}`;
                     const currentOverride = payrollOverrides[overrideKey] || {};
