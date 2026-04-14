@@ -1519,7 +1519,7 @@ async function batchStockUpdate(tx, skuChanges, logContext, skuCache) {
             // âš ï¸ Äá»c variants Má»šI NHáº¤T tá»« cache (cÃ³ thá»ƒ Ä‘Ã£ bá»‹ update bá»Ÿi variant khÃ¡c cÃ¹ng product)
             let variants = JSON.parse(product.variants);
             oldStock = variants[variantIndex].stock || 0;
-            newStock = Math.max(0, oldStock + totalQty);
+            newStock = oldStock + totalQty;
             variants[variantIndex].stock = newStock;
             variantColor = variants[variantIndex].color || variants[variantIndex].name || null;
 
@@ -1624,7 +1624,7 @@ async function updateProductStockInTx(tx, sku, quantity, logContext, options = {
         if (variantIndex < 0) throw new Error(`Variant ${sku} khÃ´ng tÃ¬m tháº¥y`);
 
         oldStock = variants[variantIndex].stock || 0;
-        newStock = Math.max(0, oldStock + quantity);
+        newStock = oldStock + quantity;
         variants[variantIndex].stock = newStock;
         variantColor = variants[variantIndex].color || variants[variantIndex].name || null;
 
@@ -8254,12 +8254,12 @@ ipcMain.handle('attendance:deleteProfile', async (event, { face_id }) => {
 // OFFLINE QUEUE  Sync & Status handlers
 //                                                                              
 
-// Tr� v� s� �n ang ch� sync
+// Tr� v� s� �n ang ch� sync
 ipcMain.handle('offlineQueue:status', () => {
     return { success: true, pendingCount: offlineQueue.count() };
 });
 
-// Flush to�n b� queue l�n Supabase
+// Flush to�n b� queue l�n Supabase
 ipcMain.handle('offlineQueue:sync', async () => {
     const items = offlineQueue.dequeueAll();
     if (items.length === 0) return { success: true, synced: 0, failed: 0 };
@@ -8275,14 +8275,14 @@ ipcMain.handle('offlineQueue:sync', async () => {
                 synced++;
                 console.log('[OfflineQueue] Synced:', item._filename);
             } else {
-                // Unknown type  b� qua, x�a � kh�ng b� loop
+                // Unknown type  b� qua, x�a � kh�ng b� loop
                 offlineQueue.remove(item._filename);
             }
         } catch (err) {
             failed++;
             errors.push({ file: item._filename, error: err.message });
             console.error('[OfflineQueue] Sync failed for', item._filename, ':', err.message);
-            // Kh�ng x�a file  gi� l�i � retry l�n sau
+            // Kh�ng x�a file  gi� l�i � retry l�n sau
         }
     }
 

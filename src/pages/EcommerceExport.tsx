@@ -68,6 +68,33 @@ interface PackerEmployee {
     username: string;
 }
 
+// Tên cột SKU phổ biến trong file Shopee export
+const SHOPEE_SKU_COLUMN_NAMES = [
+    'SKU sản phẩm', 'SKU Sản Phẩm', 'Seller SKU', 'Mã SKU',
+    'SKU', 'Mã hàng', 'Mã Hàng', 'Model',
+];
+
+/**
+ * Tìm tên cột chứa SKU trong file Shopee.
+ * Ưu tiên: cell T1 → fallback qua các tên cột phổ biến trong jsonData.
+ */
+function getShopeeSkuHeader(worksheet: any, jsonData: any[]): string {
+    // Thử ô T1 trước (cách cũ)
+    const skuCell = worksheet['T1'];
+    const cellHeader = skuCell ? (skuCell.v || skuCell.w || '') : '';
+    if (cellHeader && jsonData.length > 0 && cellHeader in (jsonData[0] as any)) {
+        return cellHeader;
+    }
+    // Fallback: tìm tên cột khớp trong row đầu tiên
+    if (jsonData.length > 0) {
+        const firstRow = jsonData[0] as any;
+        for (const candidate of SHOPEE_SKU_COLUMN_NAMES) {
+            if (candidate in firstRow) return candidate;
+        }
+    }
+    return cellHeader; // trả về gì có (dù sai) để giữ behavior cũ
+}
+
 export default function EcommerceExportPage() {
     const { user } = useAuth();
     const currentUser = useCurrentUser();
@@ -1040,12 +1067,9 @@ Thời gian: ${currentTime}`;
                 // Group by Order ID to combine items from same order
                 const orderMap = new Map<string, any[]>();
 
-                // 📊 Shopee: lấy header cột T trực tiếp từ cell
-                let shopeeSkuHeader = '';
-                if (isShopee) {
-                    const skuCell = worksheet['T1'];
-                    shopeeSkuHeader = skuCell ? (skuCell.v || skuCell.w || '') : '';
-                }
+                // 📊 Shopee: tìm tên cột SKU (ô T1 → fallback tên cột phổ biến)
+                const shopeeSkuHeader = isShopee ? getShopeeSkuHeader(worksheet, jsonData) : '';
+                if (isShopee) console.log('🔑 Shopee SKU header detected:', shopeeSkuHeader || '(KHÔNG TÌM THẤY)');
 
                 if (isTikTok) {
                     // ===== XỬ LÝ TIKTOK =====
@@ -1370,12 +1394,9 @@ Thời gian: ${currentTime}`;
                     // Process same as handleImportExcel
                     const orderMap = new Map<string, any[]>();
 
-                    // 📊 Shopee: lấy header cột T
-                    let shopeeSkuHeader = '';
-                    if (isShopee) {
-                        const skuCell = worksheet['T1'];
-                        shopeeSkuHeader = skuCell ? (skuCell.v || skuCell.w || '') : '';
-                    }
+                    // 📊 Shopee: tìm tên cột SKU (ô T1 → fallback tên cột phổ biến)
+                    const shopeeSkuHeader = isShopee ? getShopeeSkuHeader(worksheet, jsonData) : '';
+                    if (isShopee) console.log('🔑 [Folder] Shopee SKU header detected:', shopeeSkuHeader || '(KHÔNG TÌM THẤY)');
 
                     if (isTikTok) {
                         jsonData.forEach((row: any) => {

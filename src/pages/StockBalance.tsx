@@ -1548,8 +1548,9 @@ export default function StockBalancePage() {
         try {
             const allLogs: InventoryLogItem[] = [];
             const skus = row.variants.map(v => v.sku);
+            const todayStart = dayjs().startOf('day').toISOString();
             await Promise.all(skus.map(async (sku) => {
-                const r = await window.electronAPI.inventoryLogs.getBySku({ sku, limit: 100 });
+                const r = await (window as any).electronAPI.inventoryLogs.getAll({ sku, startDate: todayStart });
                 if (r.success && r.data) allLogs.push(...r.data);
             }));
             allLogs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
