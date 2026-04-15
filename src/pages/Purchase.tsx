@@ -2505,14 +2505,12 @@ export default function PurchasePage() {
                 })()}
                 open={vatModalVisible}
                 onCancel={() => {
-                    if (vatGroupPendingIds.length > 0) {
-                        message.warning('Vui lòng upload HĐ VAT để hoàn tất gộp nhóm.');
-                        return;
-                    }
+                    setVatGroupPendingIds([]);
+                    setVatGroupUploadId(null);
                     setVatModalVisible(false);
                 }}
-                closable={vatGroupPendingIds.length === 0}
-                maskClosable={vatGroupPendingIds.length === 0}
+                closable
+                maskClosable={false}
                 footer={null}
                 width={480}
             >
