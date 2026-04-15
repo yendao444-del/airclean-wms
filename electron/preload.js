@@ -38,6 +38,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         uploadVatGroupInvoice: (data) => ipcRenderer.invoke('purchases:uploadVatGroupInvoice', data),
         uploadImportReceipt: (data) => ipcRenderer.invoke('purchases:uploadImportReceipt', data),
         deleteImportReceipt: (id) => ipcRenderer.invoke('purchases:deleteImportReceipt', id),
+        deleteVatInvoice: (id) => ipcRenderer.invoke('purchases:deleteVatInvoice', id),
         createVatGroup: (data) => ipcRenderer.invoke('purchases:createVatGroup', data),
         removeVatGroup: (data) => ipcRenderer.invoke('purchases:removeVatGroup', data),
         markAsThht: (purchaseId, revert) => ipcRenderer.invoke('purchases:markAsThht', { purchaseId, revert }),

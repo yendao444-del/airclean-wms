@@ -80,6 +80,7 @@ interface Purchase {
     vatId?: string | null;
     vatFileName?: string | null;
     vatFileSize?: number | null;
+    sharedVatPurchaseIds?: number[];
 }
 
 // Nén ảnh trước khi upload — giảm từ 5-10MB xuống ~300KB, tăng tốc upload 10-20x
@@ -934,6 +935,7 @@ export default function PurchasePage() {
 
     // 🧾 Upload HĐ VAT nhà cung cấp
     const openVatModal = (purchaseId: number, record?: any) => {
+        setViewModalVisible(false);
         setVatPurchaseId(purchaseId);
         setVatGroupUploadId(record?.vatGroupId || null);
         setVatFiles([]);
@@ -1075,6 +1077,25 @@ export default function PurchasePage() {
         }
     };
 
+    const handleDeleteVatInvoice = (id: number) => {
+        Modal.confirm({
+            title: '🗑️ Xóa HĐ VAT',
+            content: 'Bạn có chắc chắn muốn xóa HĐ VAT của đơn này? Trạng thái sẽ về Chưa có HĐ.',
+            okText: 'Xóa',
+            cancelText: 'Hủy',
+            okType: 'danger',
+            onOk: async () => {
+                const result = await (window.electronAPI as any).purchases.deleteVatInvoice(id);
+                if (result.success) {
+                    message.success('Đã xóa HĐ VAT thành công!');
+                    loadPurchases();
+                } else {
+                    message.error(result.error || 'Lỗi xóa HĐ VAT');
+                }
+            }
+        });
+    };
+
     const handleDeleteImportReceipt = (id: number) => {
         Modal.confirm({
             title: '🗑️ Xóa Phiếu Nhập Kho',
@@ -1143,10 +1164,13 @@ export default function PurchasePage() {
             render: (_: any, record: Purchase) => {
                 const vatId = (record as any).vatId || (record as any).vatGroupId;
                 if (!vatId) return <span style={{ color: '#bfbfbf' }}>—</span>;
+                const isGrouped = !!(record as any).vatGroupId;
+                const isShared = !isGrouped && ((record as any).sharedVatPurchaseIds?.length > 0);
                 return (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <Tag color={(record as any).vatGroupId ? 'cyan' : 'gold'} style={{ margin: 0, fontWeight: 700 }}>{vatId}</Tag>
-                        {!!(record as any).vatGroupId && <span style={{ fontSize: 11, color: '#8c8c8c' }}>HĐ gộp</span>}
+                        <Tag color={isGrouped ? 'cyan' : 'gold'} style={{ margin: 0, fontWeight: 700 }}>{vatId}</Tag>
+                        {isGrouped && <span style={{ fontSize: 11, color: '#0958d9' }}>🔗 HĐ gộp</span>}
+                        {isShared && <span style={{ fontSize: 11, color: '#fa8c16' }}>📎 Chung HĐ</span>}
                     </div>
                 );
             },
@@ -1365,12 +1389,25 @@ export default function PurchasePage() {
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#d46b08', fontWeight: 600, fontSize: 13 }}>
                                         <CheckCircleOutlined style={{ fontSize: 16 }} /> Đã tải HĐ VAT
                                     </div>
-                                    <div style={{ fontSize: 12, color: '#595959', marginTop: 4, paddingLeft: 24 }}>
-                                        Tra cứu mã: <b>{(record as any).vatInvoiceNumber}</b>
-                                        <Button type="link" size="small" onClick={() => openGroupedAwareVatPreview(record as any)}>
+                                    <div style={{ fontSize: 12, color: '#595959', marginTop: 4, paddingLeft: 24, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                        <span>Tra cứu mã: <b>{(record as any).vatInvoiceNumber}</b></span>
+                                        <Button type="link" size="small" onClick={() => openGroupedAwareVatPreview(record as any)} style={{ padding: 0 }}>
                                             👁️ Xem
                                         </Button>
+                                        <Button type="link" danger size="small" onClick={() => handleDeleteVatInvoice(record.id)} style={{ padding: 0 }}>
+                                            Xóa
+                                        </Button>
                                     </div>
+                                    {((record as any).sharedVatPurchaseIds?.length > 0) && (
+                                        <div style={{ marginTop: 6, paddingLeft: 24, fontSize: 12, color: '#fa8c16', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                            <span>📎 Chung HĐ với:</span>
+                                            {((record as any).sharedVatPurchaseIds as number[]).map(pid => {
+                                                const p = purchases.find(x => x.id === pid);
+                                                return <Tag key={pid} color="orange" style={{ fontSize: 11, margin: 0 }}>{p?.poNumber || `#${pid}`}</Tag>;
+                                            })}
+                                            <span style={{ color: '#8c8c8c', marginLeft: 4 }}>— Cân nhắc dùng "Gộp HĐ VAT"</span>
+                                        </div>
+                                    )}
                                 </div>
                             ) : (
                                 <div>
@@ -2511,6 +2548,7 @@ export default function PurchasePage() {
                 }}
                 closable
                 maskClosable={false}
+                zIndex={1200}
                 footer={null}
                 width={480}
             >
@@ -2739,9 +2777,10 @@ export default function PurchasePage() {
                             icon={<EditOutlined />}
                             onClick={() => {
                                 setVatPreviewVisible(false);
+                                setVatPreviewData(null);
                                 if (vatPreviewData) {
                                     const record = purchases.find(p => p.id === vatPreviewData.purchaseId);
-                                    openVatModal(vatPreviewData.purchaseId, record);
+                                    setTimeout(() => openVatModal(vatPreviewData.purchaseId, record), 150);
                                 }
                             }}
                         >

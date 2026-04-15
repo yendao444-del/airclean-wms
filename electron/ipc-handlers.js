@@ -2282,6 +2282,21 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
         const purchaseMap = new Map(purchases.map(p => [p.id, p]));
         const purchaseGroupMeta = new Map();
 
+        // Detect purchases cùng vatId (chỉ để hiển thị, không ảnh hưởng logic VAT)
+        const sameVatIdMap = new Map(); // purchaseId → [other purchase IDs]
+        const vatIdGroups = new Map();
+        purchases.forEach(p => {
+            const fileMeta = vatFileMeta[String(p.id)];
+            if (!fileMeta?.vatId) return;
+            const key = `${p.supplierId || 'x'}::${fileMeta.vatId}`;
+            if (!vatIdGroups.has(key)) vatIdGroups.set(key, []);
+            vatIdGroups.get(key).push(p.id);
+        });
+        vatIdGroups.forEach(ids => {
+            if (ids.length < 2) return;
+            ids.forEach(id => sameVatIdMap.set(id, ids.filter(pid => pid !== id)));
+        });
+
         Object.entries(vatGroups || {}).forEach(([groupId, group]) => {
             const purchaseIds = Array.isArray(group?.purchaseIds)
                 ? group.purchaseIds.map(id => Number(id)).filter(id => purchaseMap.has(id))
@@ -2348,6 +2363,7 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
                 vatGroupVatId: vatGroups[vatGroupMeta.vatGroupId]?.vatId || null,
                 vatGroupVatFileName: vatGroups[vatGroupMeta.vatGroupId]?.vatFileName || null,
                 vatGroupVatFileSize: vatGroups[vatGroupMeta.vatGroupId]?.vatFileSize || null,
+                sharedVatPurchaseIds: sameVatIdMap.get(p.id) || [],
                 // Phiáº¿u nháº­p kho
                 importReceiptStatus: p.importReceiptStatus,
                 importReceiptFile: p.importReceiptFile,
@@ -3259,6 +3275,40 @@ ipcMain.handle('purchases:deleteImportReceipt', async (event, purchaseId) => {
     }
 });
 // ÄÃ¡nh dáº¥u phiáº¿u nháº­p lÃ  "ÄÆ¡n THHT" (khÃ´ng cáº§n HÄ VAT)
+// Xóa HĐ VAT của phiếu nhập (đơn lẻ, không thuộc nhóm gộp)
+ipcMain.handle('purchases:deleteVatInvoice', async (event, purchaseId) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const purchase = await prisma.purchaseOrder.findUnique({
+            where: { id: purchaseId },
+            include: { supplier: true },
+        });
+        if (!purchase) throw new Error(`Không tìm thấy phiếu nhập #${purchaseId}`);
+
+        await prisma.purchaseOrder.update({
+            where: { id: purchaseId },
+            data: {
+                vatInvoiceStatus: 'pending',
+                vatInvoiceNumber: null,
+                vatInvoiceDate: null,
+                vatInvoiceFile: null,
+                vatInvoiceDriveUrl: null,
+            }
+        });
+
+        void logActivity({
+            module: 'purchases', action: 'VAT_DELETE',
+            description: `Xóa HĐ VAT của phiếu #${purchaseId} (${purchase.supplier?.name})`,
+            userName: 'System',
+        });
+
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Delete VAT Invoice error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 ipcMain.handle('purchases:markAsThht', async (event, { purchaseId, revert }) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
