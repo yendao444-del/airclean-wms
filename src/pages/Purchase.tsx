@@ -21,6 +21,7 @@ import {
 import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, EyeOutlined, HistoryOutlined, ClockCircleOutlined, UploadOutlined, FileTextOutlined, CheckCircleOutlined, LinkOutlined, InboxOutlined, AuditOutlined, GiftOutlined, TagOutlined, PaperClipOutlined, SearchOutlined, FilterOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
+import { useAuth } from '../contexts/AuthContext';
 import dayjs from 'dayjs';
 
 const { Title } = Typography;
@@ -118,6 +119,8 @@ async function compressImageToBase64(file: File, maxWidth = 1600, quality = 0.75
 
 export default function PurchasePage() {
     const currentUser = useCurrentUser();
+    const { user } = useAuth();
+    const isAdmin = user?.role === 'admin';
     const [purchases, setPurchases] = useState<Purchase[]>([]);
     const [suppliers, setSuppliers] = useState<Supplier[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
@@ -1302,19 +1305,23 @@ export default function PurchasePage() {
                     >
                         Xem chi tiết
                     </Button>
-                    <Button
-                        icon={<EditOutlined />}
-                        onClick={() => handleEdit(record)}
-                    >
-                        Sửa
-                    </Button>
-                    <Button
-                        danger
-                        icon={<DeleteOutlined />}
-                        onClick={() => handleDelete(record)}
-                    >
-                        Xóa
-                    </Button>
+                    {isAdmin && (
+                        <Button
+                            icon={<EditOutlined />}
+                            onClick={() => handleEdit(record)}
+                        >
+                            Sửa
+                        </Button>
+                    )}
+                    {isAdmin && (
+                        <Button
+                            danger
+                            icon={<DeleteOutlined />}
+                            onClick={() => handleDelete(record)}
+                        >
+                            Xóa
+                        </Button>
+                    )}
                 </div>
 
                 {/* KHU VỰC THAO TÁC / XEM CHỨNG TỪ THEO DEMO */}
@@ -1614,7 +1621,7 @@ export default function PurchasePage() {
                             Gộp HĐ VAT ({selectedRowKeys.length})
                         </Button>
                     )}
-                    {selectedRowKeys.length > 0 && (
+                    {isAdmin && selectedRowKeys.length > 0 && (
                         <Button
                             danger
                             icon={<DeleteOutlined />}

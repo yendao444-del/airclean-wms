@@ -1934,12 +1934,15 @@ export default function StockBalancePage() {
                                                         </Select.Option>
                                                     ))}
                                                 </Select>
-                                                {/* Thống kê xuất hôm nay khi lọc riêng SKU */}
-                                                {ledgerSkuFilter !== 'all' && (() => {
-                                                    const todayStart = dayjs().startOf('day');
-                                                    const todayExport = drawerLogs
-                                                        .filter(l => l.sku === ledgerSkuFilter && l.quantity < 0 && dayjs(l.createdAt).isAfter(todayStart))
-                                                        .reduce((sum, l) => sum + Math.abs(l.quantity), 0);
+                                                {/* Thống kê xuất hôm nay: tồn đầu ngày - tồn cuối */}
+                                                {(() => {
+                                                    const filtered = drawerLogs
+                                                        .filter(l => ledgerSkuFilter === 'all' || l.sku === ledgerSkuFilter)
+                                                        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+                                                    if (filtered.length === 0) return null;
+                                                    const tonDau = filtered[0].oldStock;
+                                                    const tonCuoi = filtered[filtered.length - 1].newStock;
+                                                    const todayExport = Math.max(0, tonDau - tonCuoi);
                                                     return todayExport > 0 ? (
                                                         <Tag color="volcano" style={{ fontWeight: 700, fontSize: 13, padding: '2px 10px', borderRadius: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
                                                             📤 Xuất hôm nay: <span style={{ fontSize: 15, fontWeight: 900 }}>{todayExport}</span>
