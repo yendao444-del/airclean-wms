@@ -102,6 +102,15 @@ interface FineRecord {
     source?: 'manual' | 'attendance' | 'returns'; // nguồn tạo phạt
 }
 
+interface PurchaseVatTracking {
+    id: number;
+    poNumber?: string;
+    supplierName?: string;
+    createdAt?: string;
+    purchaseDate?: string;
+    vatInvoiceStatus?: string;
+}
+
 interface BonusRecord {
     id: string;
     empId: number;
@@ -340,6 +349,9 @@ const fmt = (v: number) => new Intl.NumberFormat('vi-VN').format(Math.round(v)) 
 // SKU format: {prefix}-{code} e.g. "20-5DUNI-TRANG" → prefix 20 = 20 sản phẩm
 // Combo 20 gói x1 = 20 SP × 20đ = 400đ
 // CB- (combo mix) SKU: parse prefix tương tự hoặc tính từ combo components
+const VAT_OVERDUE_FINE_TOTAL = 50000;
+const VAT_OVERDUE_POLICY_START = dayjs().startOf('day');
+
 function calcPacksFromItems(items: PackingOrderItem[]): number {
     let totalPacks = 0;
     items.forEach(item => {
@@ -509,7 +521,7 @@ function calculatePayroll(
 
         let fineShare = 0;
         activeFines.forEach(f => {
-            if (f.source === 'returns') return;
+            if (f.source === 'returns' || f.source === ('purchase_vat_overdue' as any)) return;
             if (f.empId !== emp.id) {
                 const recipientCount = employeesList.length - 1;
                 if (recipientCount > 0) {
@@ -1796,6 +1808,7 @@ export default function Attendance() {
 
     // === Ghi đè lương thủ công (Admin) ===
     const [payrollOverrides, setPayrollOverrides] = useState<Record<string, PayrollOverride>>({});
+    const [purchaseVatTracking, setPurchaseVatTracking] = useState<PurchaseVatTracking[]>([]);
 
     const [isDbLoaded, setIsDbLoaded] = useState(false);
     const [systemUsernames, setSystemUsernames] = useState<string[]>([]);
@@ -1953,6 +1966,7 @@ export default function Attendance() {
 
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);
     const [packingDateRange, setPackingDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
+    const loadPurchasesRef = useRef(false);
 
     useEffect(() => {
         loadPackingOrders();
@@ -2040,6 +2054,22 @@ export default function Attendance() {
     };
 
     // === State cho điểm danh online ===
+    const loadPurchaseVatTracking = async (since?: string) => {
+        if (loadPurchasesRef.current) return;
+        loadPurchasesRef.current = true;
+        try {
+            const api = (window as any).electronAPI;
+            const result = await api.purchases.getAll({ since });
+            if (result?.success && Array.isArray(result.data)) {
+                setPurchaseVatTracking(result.data);
+            }
+        } catch (error) {
+            console.error('Lá»—i táº£i dá»¯ liá»‡u VAT nháº­p hÃ ng:', error);
+        } finally {
+            loadPurchasesRef.current = false;
+        }
+    };
+
     const [liveAttendanceLogs, setLiveAttendanceLogs] = useState<any[]>([]);
     const attendanceMatrixWrapRef = useRef<HTMLDivElement | null>(null);
 
@@ -2069,18 +2099,55 @@ export default function Attendance() {
     // Reload packing orders khi đổi kỳ
     useEffect(() => {
         loadPackingOrders(overviewDateRange[0].startOf('day').toISOString());
+        loadPurchaseVatTracking(overviewDateRange[0].subtract(7, 'day').startOf('day').toISOString());
     }, [overviewDateRange]);
 
     // Gộp finesData gốc + extraFines
-    const allFines = useMemo(() => [...finesData, ...extraFines], [extraFines]);
+    const autoVatOverdueFines = useMemo(() => {
+        const officialEmployees = [...employees]
+            .filter(emp => emp.type === 'Official')
+            .sort((a, b) => a.id - b.id);
+
+        if (officialEmployees.length === 0) return [] as FineRecord[];
+
+        const baseShare = Math.floor(VAT_OVERDUE_FINE_TOTAL / officialEmployees.length);
+        const remainder = VAT_OVERDUE_FINE_TOTAL % officialEmployees.length;
+
+        return purchaseVatTracking.flatMap((purchase) => {
+            const vatStatus = String(purchase.vatInvoiceStatus || 'pending').toLowerCase();
+            if (['uploaded', 'verified', 'thht', 'no_vat'].includes(vatStatus)) return [];
+
+            const purchaseAtRaw = purchase.purchaseDate || purchase.createdAt;
+            if (!purchaseAtRaw) return [];
+
+            const purchaseAt = dayjs(purchaseAtRaw);
+            if (!purchaseAt.isValid()) return [];
+            if (purchaseAt.isBefore(VAT_OVERDUE_POLICY_START)) return [];
+
+            const penaltyDate = purchaseAt.add(3, 'day');
+            if (!penaltyDate.isBefore(dayjs())) return [];
+            if (!inOverviewRange(penaltyDate.toISOString())) return [];
+
+            return officialEmployees.map((emp, idx) => ({
+                empId: emp.id,
+                type: 'VAT quá hạn nhập hàng',
+                detail: `Phiếu ${purchase.poNumber || `#${purchase.id}`}${purchase.supplierName ? ` - ${purchase.supplierName}` : ''} quá 3 ngày chưa cập nhật HĐ VAT`,
+                amount: baseShare + (idx < remainder ? 1 : 0),
+                date: penaltyDate.toISOString(),
+                source: 'purchase_vat_overdue' as any,
+            }));
+        });
+    }, [employees, purchaseVatTracking, overviewDateRange]);
+
+    const allFines = useMemo(() => [...finesData, ...extraFines, ...autoVatOverdueFines], [extraFines, autoVatOverdueFines]);
 
     // Helper: lọc theo overviewDateRange
-    const inOverviewRange = (dateStr?: string) => {
+    function inOverviewRange(dateStr?: string) {
         if (!dateStr) return true; // record cũ không có date → luôn hiện
         const d = dayjs(dateStr);
         return d.isAfter(overviewDateRange[0].startOf('day').subtract(1, 'ms'))
             && d.isBefore(overviewDateRange[1].endOf('day').add(1, 'ms'));
-    };
+    }
 
     const overviewFines = useMemo(() => allFines.filter(f => inOverviewRange(f.date)), [allFines, overviewDateRange]);
     const overviewBonuses = useMemo(() => extraBonuses.filter(b => inOverviewRange(b.date)), [extraBonuses, overviewDateRange]);
@@ -3045,6 +3112,7 @@ export default function Attendance() {
         const combinedFines = [
             ...finesData.map((f, i) => ({ ...f, key: `base-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1 })),
             ...extraFines.map((f, i) => ({ ...f, key: `manual-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: true, manualIndex: i, source: f.source })),
+            ...autoVatOverdueFines.map((f, i) => ({ ...f, key: `vat-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
         ];
         const totalFineAmount = combinedFines.reduce((sum, f) => sum + f.amount, 0);
 

@@ -87,35 +87,56 @@ const OAUTH_CLIENT_SECRET = config.OAUTH_CLIENT_SECRET;
 
 // Google Drive auth (OAuth2 â€” dÃ¹ng storage cá»§a user, khÃ´ng bá»‹ quota limit)
 let driveClient = null;
+let driveClientTokenMtime = 0;
+
 function getDriveClient() {
-    if (driveClient) return driveClient;
     try {
         const tokenPath = path.join(__dirname, 'gdrive-token.json');
         if (!fs.existsSync(tokenPath)) {
-            console.warn('âš ï¸ Google Drive token not found:', tokenPath);
+            console.warn('[Drive] Token not found:', tokenPath);
+            driveClient = null;
             return null;
         }
-        // âš¡ Lazy load googleapis (~3-5s) â€” chá»‰ khi tháº­t sá»± cáº§n Drive backup
+        // Force reinit neáu token file thay doi (sau reauth)
+        const tokenMtime = fs.statSync(tokenPath).mtimeMs;
+        if (driveClient && tokenMtime === driveClientTokenMtime) {
+            return driveClient;
+        }
+        if (tokenMtime !== driveClientTokenMtime) {
+            console.log('[Drive] Token file changed, reinit client...');
+            driveClient = null;
+        }
         const { google } = require('googleapis');
         const tokens = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
         const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET);
         oauth2Client.setCredentials(tokens);
-
-        // Auto-refresh token khi háº¿t háº¡n
         oauth2Client.on('tokens', (newTokens) => {
-            const saved = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
-            const updated = { ...saved, ...newTokens };
-            fs.writeFileSync(tokenPath, JSON.stringify(updated, null, 2));
-            console.log('ðŸ”„ Google Drive token refreshed');
+            try {
+                const saved = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
+                const updated = { ...saved, ...newTokens };
+                fs.writeFileSync(tokenPath, JSON.stringify(updated, null, 2));
+                driveClientTokenMtime = fs.statSync(tokenPath).mtimeMs;
+                console.log('[Drive] Token refreshed & saved');
+            } catch (saveErr) {
+                console.error('[Drive] Failed to save refreshed token:', saveErr.message);
+            }
         });
-
         driveClient = google.drive({ version: 'v3', auth: oauth2Client });
-        console.log('âœ… Google Drive client initialized (OAuth2)');
+        driveClientTokenMtime = tokenMtime;
+        console.log('[Drive] Client initialized (OAuth2)');
         return driveClient;
     } catch (err) {
-        console.error('âŒ Google Drive init error:', err.message);
+        console.error('[Drive] Init error:', err.message);
+        driveClient = null;
+        driveClientTokenMtime = 0;
         return null;
     }
+}
+
+function resetDriveClient() {
+    driveClient = null;
+    driveClientTokenMtime = 0;
+    console.log('[Drive] Client reset - se tai khoi tao voi token moi nhat');
 }
 
 // TÃ¬m hoáº·c táº¡o subfolder theo thÃ¡ng: HDDT-AIRCLEAN/2026-03/
@@ -2715,21 +2736,21 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
 
         // 4. Gá»­i Telegram
         const telegramMsg = [
-            `ðŸ§¾ <b>HÄ VAT má»›i â€” Nháº­p hÃ ng</b>`,
+            `🧾 <b>HĐ VAT mới — Nhập hàng</b>`,
             ``,
-            `ðŸ“‹ Phiáº¿u nháº­p: <b>#${purchaseId}</b>`,
-            `ðŸ¢ NCC: <b>${purchase.supplier?.name || 'N/A'}</b>`,
-            `ðŸ”¢ Sá»‘ HÄ: <b>${invoiceNumber}</b>`,
-            `ðŸ“… NgÃ y HÄ: <b>${new Date(invoiceDate).toLocaleDateString('vi-VN')}</b>`,
-            `ðŸ’° Tá»•ng tiá»n: <b>${purchase.total.toLocaleString('vi-VN')}Ä‘</b>`,
-            filesList.length > 1 ? `ðŸ“Ž <b>${filesList.length} files Ä‘Ã­nh kÃ¨m</b>` : '',
-            driveUrls[0] ? `\nðŸ“Ž <a href="${driveUrls[0]}">Xem trÃªn Drive</a>` : '',
+            `📋 Phiếu nhập: <b>#${purchaseId}</b>`,
+            `🏢 NCC: <b>${purchase.supplier?.name || 'N/A'}</b>`,
+            `🔢 Số HĐ: <b>${invoiceNumber}</b>`,
+            `📅 Ngày HĐ: <b>${new Date(invoiceDate).toLocaleDateString('vi-VN')}</b>`,
+            `💰 Tổng tiền: <b>${purchase.total.toLocaleString('vi-VN')}đ</b>`,
+            filesList.length > 1 ? `📎 <b>${filesList.length} files đính kèm</b>` : '',
+            driveUrls[0] ? `\n📎 <a href="${driveUrls[0]}">Xem trên Drive</a>` : '',
         ].filter(Boolean).join('\n');
 
         sendVatTelegramMessage(telegramMsg).catch(err => console.error('Telegram error:', err));
         for (let i = 0; i < savedBuffers.length; i++) {
             sendVatTelegramDocument(savedBuffers[i], savedFileNames[i],
-                `HÄ VAT #${invoiceNumber}${savedBuffers.length > 1 ? ` [${i + 1}/${savedBuffers.length}]` : ''} â€” ${purchase.supplier?.name || 'NCC'}`
+                `HĐ VAT #${invoiceNumber}${savedBuffers.length > 1 ? ` [${i + 1}/${savedBuffers.length}]` : ''} — ${purchase.supplier?.name || 'NCC'}`
             ).catch(err => console.error('Telegram doc error:', err));
         }
 
