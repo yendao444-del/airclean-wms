@@ -65,6 +65,21 @@ interface Purchase {
     status: string;
     createdBy?: string; // 👤 Người tạo phiếu
     createdAt: Date;
+    vatGroupId?: string | null;
+    vatGroupNote?: string;
+    vatGroupPurchaseIds?: number[];
+    vatGroupHasVat?: boolean;
+    vatGroupSourcePurchaseId?: number | null;
+    vatGroupInvoiceNumber?: string | null;
+    vatGroupInvoiceDate?: string | null;
+    vatGroupDriveUrl?: string | null;
+    vatGroupStatus?: string | null;
+    vatGroupVatId?: string | null;
+    vatGroupVatFileName?: string | null;
+    vatGroupVatFileSize?: number | null;
+    vatId?: string | null;
+    vatFileName?: string | null;
+    vatFileSize?: number | null;
 }
 
 // Nén ảnh trước khi upload — giảm từ 5-10MB xuống ~300KB, tăng tốc upload 10-20x
@@ -116,6 +131,10 @@ export default function PurchasePage() {
 
     // ✨ State cho xóa hàng loạt
     const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+    const [vatGroupModalVisible, setVatGroupModalVisible] = useState(false);
+    const [vatGroupNote, setVatGroupNote] = useState('');
+    const [vatGrouping, setVatGrouping] = useState(false);
+    const [vatGroupPendingIds, setVatGroupPendingIds] = useState<number[]>([]);
 
     // ✨ State cho quản lý nhà cung cấp inline
     const [supplierModalVisible, setSupplierModalVisible] = useState(false);
@@ -137,6 +156,7 @@ export default function PurchasePage() {
     // 🧾 State cho upload HĐ VAT
     const [vatModalVisible, setVatModalVisible] = useState(false);
     const [vatPurchaseId, setVatPurchaseId] = useState<number | null>(null);
+    const [vatGroupUploadId, setVatGroupUploadId] = useState<string | null>(null);
     const [vatForm] = Form.useForm();
     const [vatFiles, setVatFiles] = useState<File[]>([]);
     const [vatUploading, setVatUploading] = useState(false);
@@ -175,10 +195,30 @@ export default function PurchasePage() {
         supplierName: string;
     } | null>(null);
     const [vatPreviewIndex, setVatPreviewIndex] = useState(0);
+    const openGroupedAwareVatPreview = (record: any) => {
+        const isGrouped = !!record.vatGroupId;
+        const driveUrl = isGrouped ? record.vatGroupDriveUrl : record.vatInvoiceDriveUrl;
+        if (!driveUrl) {
+            message.warning(isGrouped ? 'Nhóm này chưa có link Google Drive. Vui lòng upload lại HĐ VAT cho nhóm.' : 'Phiếu này chưa có link Google Drive. Vui lòng upload lại HĐ VAT.');
+            openVatModal(record.id, record);
+            return;
+        }
+        const urls = driveUrl.split('\n').map((u: string) => u.trim()).filter(Boolean);
+        const previewDate = isGrouped ? record.vatGroupInvoiceDate : record.vatInvoiceDate;
+        setVatPreviewIndex(0);
+        setVatPreviewData({
+            driveUrls: urls,
+            invoiceNumber: isGrouped ? (record.vatGroupInvoiceNumber || '') : (record.vatInvoiceNumber || ''),
+            invoiceDate: previewDate ? dayjs(previewDate).format('DD/MM/YYYY') : '',
+            purchaseId: record.id,
+            supplierName: record.supplierName || '',
+        });
+        setVatPreviewVisible(true);
+    };
 
     // Mở modal xem HĐ VAT qua Google Drive
     const openVatPreview = (record: any) => {
-        const driveUrl = record.vatInvoiceDriveUrl;
+        const driveUrl = record.vatInvoiceDriveUrl || record.vatGroupDriveUrl;
         if (!driveUrl) {
             message.warning('Phiếu này chưa có link Google Drive. Vui lòng upload lại HĐ VAT.');
             openVatModal(record.id, record);
@@ -189,8 +229,8 @@ export default function PurchasePage() {
         setVatPreviewIndex(0);
         setVatPreviewData({
             driveUrls: urls,
-            invoiceNumber: record.vatInvoiceNumber || '',
-            invoiceDate: record.vatInvoiceDate ? dayjs(record.vatInvoiceDate).format('DD/MM/YYYY') : '',
+            invoiceNumber: record.vatInvoiceNumber || record.vatGroupInvoiceNumber || '',
+            invoiceDate: (record.vatInvoiceDate || record.vatGroupInvoiceDate) ? dayjs(record.vatInvoiceDate || record.vatGroupInvoiceDate).format('DD/MM/YYYY') : '',
             purchaseId: record.id,
             supplierName: record.supplierName || '',
         });
@@ -246,6 +286,8 @@ export default function PurchasePage() {
     const [pendingVatDate, setPendingVatDate] = useState<any>(null);
     const [vatInlineVisible, setVatInlineVisible] = useState(false);
     const [chungTuPickerVisible, setChungTuPickerVisible] = useState(false);
+    const [detailModalVisible, setDetailModalVisible] = useState(false);
+    const [detailModalRecord, setDetailModalRecord] = useState<Purchase | null>(null);
     const isThhtWatch = Form.useWatch('isThht', form);
     const isNoVatWatch = Form.useWatch('isNoVat', form);
     const importFileInputRef = useRef<HTMLInputElement>(null);
@@ -457,6 +499,64 @@ export default function PurchasePage() {
                     message.error('Lỗi khi xóa hàng loạt!');
                 } finally {
                     setLoading(false);
+                }
+            },
+        });
+    };
+
+    const handleCreateVatGroup = async () => {
+        const purchaseIds = selectedRowKeys.map(id => Number(id)).filter(Boolean);
+        if (purchaseIds.length < 2) {
+            message.warning('Vui lòng chọn ít nhất 2 phiếu để gộp hóa đơn VAT!');
+            return;
+        }
+
+        setVatGrouping(true);
+        try {
+            const result = await (window.electronAPI as any).purchases.createVatGroup({
+                purchaseIds,
+                note: vatGroupNote.trim(),
+            });
+            if (result.success) {
+                message.success(`🔗 Đã tạo nhóm HĐ gộp ${result.data?.vatGroupId}!`);
+                setVatGroupModalVisible(false);
+                setVatGroupNote('');
+                setSelectedRowKeys([]);
+                setVatGroupUploadId(result.data?.vatGroupId || null);
+                setVatPurchaseId(purchaseIds[0] || null);
+                setVatFiles([]);
+                vatForm.resetFields();
+                vatForm.setFieldsValue({
+                    invoiceNumber: result.data?.vatGroupId || `VATG-${dayjs().format('YYYYMMDD-HHmm')}`,
+                    invoiceDate: dayjs(),
+                });
+                setVatModalVisible(true);
+                loadPurchases();
+            } else {
+                message.error(result.error || 'Không thể tạo nhóm HĐ gộp');
+            }
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể tạo nhóm HĐ gộp');
+        } finally {
+            setVatGrouping(false);
+        }
+    };
+
+    const handleRemoveVatGroup = (purchase: Purchase) => {
+        const groupId = (purchase as any).vatGroupId;
+        if (!groupId) return;
+        Modal.confirm({
+            title: 'Tách khỏi nhóm HĐ gộp',
+            content: `Tách phiếu ${purchase.poNumber || '#' + purchase.id} khỏi nhóm ${groupId}?`,
+            okText: 'Tách nhóm',
+            cancelText: 'Hủy',
+            onOk: async () => {
+                const result = await (window.electronAPI as any).purchases.removeVatGroup({ purchaseId: purchase.id });
+                if (result.success) {
+                    message.success('Đã tách phiếu khỏi nhóm HĐ gộp');
+                    loadPurchases();
+                } else {
+                    message.error(result.error || 'Không thể tách nhóm');
                 }
             },
         });
@@ -835,10 +935,16 @@ export default function PurchasePage() {
     // 🧾 Upload HĐ VAT nhà cung cấp
     const openVatModal = (purchaseId: number, record?: any) => {
         setVatPurchaseId(purchaseId);
+        setVatGroupUploadId(record?.vatGroupId || null);
         setVatFiles([]);
         vatForm.resetFields();
 
-        if (record?.vatInvoiceNumber) {
+        if (record?.vatGroupId) {
+            vatForm.setFieldsValue({
+                invoiceNumber: record.vatGroupInvoiceNumber || record.vatGroupId,
+                invoiceDate: record.vatGroupInvoiceDate ? dayjs(record.vatGroupInvoiceDate) : dayjs(),
+            });
+        } else if (record?.vatInvoiceNumber) {
             // Sửa HĐ đã có → fill data cũ
             vatForm.setFieldsValue({
                 invoiceNumber: record.vatInvoiceNumber,
@@ -854,12 +960,11 @@ export default function PurchasePage() {
     };
 
     const handleVatUpload = async (values: any) => {
-        if (!vatPurchaseId) return;
+        const isNewGroup = vatGroupPendingIds.length > 0;
+        const isExistingGroup = !!vatGroupUploadId;
+        if (!vatPurchaseId && !isExistingGroup && !isNewGroup) return;
 
-        const existingPurchase = purchases.find(p => p.id === vatPurchaseId) as any;
-        const isEdit = !!existingPurchase?.vatInvoiceNumber;
-
-        if (vatFiles.length === 0 && !isEdit) {
+        if (vatFiles.length === 0) {
             message.warning('Vui lòng chọn ít nhất 1 file HĐ VAT!');
             return;
         }
@@ -868,24 +973,56 @@ export default function PurchasePage() {
         try {
             const filesData = await Promise.all(vatFiles.map(file => compressImageToBase64(file)));
 
-            const payload: any = {
-                purchaseId: vatPurchaseId,
-                invoiceNumber: values.invoiceNumber || `VAT-PO${vatPurchaseId}-${dayjs().format('YYMMDDHHmm')}`,
-                invoiceDate: values.invoiceDate.format('YYYY-MM-DD'),
-                files: filesData,
-            };
+            // Nếu là nhóm mới → tạo nhóm trước, rồi mới upload
+            let effectiveGroupId = vatGroupUploadId;
+            if (isNewGroup) {
+                const groupResult = await (window.electronAPI as any).purchases.createVatGroup({
+                    purchaseIds: vatGroupPendingIds,
+                    note: '',
+                });
+                if (!groupResult.success) {
+                    message.error(groupResult.error || 'Không thể tạo nhóm HĐ gộp');
+                    return;
+                }
+                effectiveGroupId = groupResult.data?.vatGroupId;
+            }
 
-            const result = await (window.electronAPI as any).purchases.uploadVATInvoice(payload);
+            const isGroupUpload = !!effectiveGroupId;
+            const existingPurchase = purchases.find(p => p.id === vatPurchaseId) as any;
+            const isEdit = !isGroupUpload && !!existingPurchase?.vatInvoiceNumber;
+
+            const payload: any = isGroupUpload
+                ? {
+                    vatGroupId: effectiveGroupId,
+                    invoiceNumber: values.invoiceNumber || effectiveGroupId,
+                    invoiceDate: values.invoiceDate.format('YYYY-MM-DD'),
+                    files: filesData,
+                }
+                : {
+                    purchaseId: vatPurchaseId,
+                    invoiceNumber: values.invoiceNumber || `VAT-PO${vatPurchaseId}-${dayjs().format('YYMMDDHHmm')}`,
+                    invoiceDate: values.invoiceDate.format('YYYY-MM-DD'),
+                    files: filesData,
+                };
+
+            const result = await (window.electronAPI as any).purchases[isGroupUpload ? 'uploadVatGroupInvoice' : 'uploadVATInvoice'](payload);
 
             if (result.success) {
                 const fileCount = filesData.length;
-                message.success(`✅ ${isEdit ? 'Đã cập nhật' : 'Đã upload'} HĐ VAT #${values.invoiceNumber}${fileCount > 1 ? ` (${fileCount} files)` : ''}!`);
+                if (isGroupUpload) {
+                    message.success(`✅ Đã gộp & upload HĐ VAT nhóm ${effectiveGroupId}${fileCount > 1 ? ` (${fileCount} files)` : ''}!`);
+                } else {
+                    message.success(`✅ ${isEdit ? 'Đã cập nhật' : 'Đã upload'} HĐ VAT #${values.invoiceNumber}${fileCount > 1 ? ` (${fileCount} files)` : ''}!`);
+                }
                 if (result.data?.driveUrls?.length > 0) {
                     message.info('☁️ Đã backup lên Google Drive');
                 }
                 if (result.driveWarning) {
                     message.warning(result.driveWarning, 8);
                 }
+                setVatGroupPendingIds([]);
+                setVatGroupUploadId(null);
+                setSelectedRowKeys([]);
                 setVatModalVisible(false);
                 loadPurchases();
             } else {
@@ -999,16 +1136,20 @@ export default function PurchasePage() {
         },
         {
             title: '🕒 Thời gian tạo',
-            dataIndex: 'createdAt',
-            key: 'createdAt',
+            ...{ title: 'VAT ID' },
+            dataIndex: 'vatId',
+            key: 'vatId',
             width: 180,
-            render: (createdAt) => (
-                createdAt ? (
-                    <span style={{ fontSize: 12, color: '#8c8c8c' }}>
-                        {dayjs(createdAt).format('DD/MM/YYYY HH:mm')}
-                    </span>
-                ) : '-'
-            ),
+            render: (_: any, record: Purchase) => {
+                const vatId = (record as any).vatId || (record as any).vatGroupId;
+                if (!vatId) return <span style={{ color: '#bfbfbf' }}>—</span>;
+                return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        <Tag color={(record as any).vatGroupId ? 'cyan' : 'gold'} style={{ margin: 0, fontWeight: 700 }}>{vatId}</Tag>
+                        {!!(record as any).vatGroupId && <span style={{ fontSize: 11, color: '#8c8c8c' }}>HĐ gộp</span>}
+                    </div>
+                );
+            },
         },
         {
             title: '📦 Trạng thái',
@@ -1032,13 +1173,25 @@ export default function PurchasePage() {
                     );
                 }
                 
-                const hasVat = r.vatInvoiceStatus === 'uploaded';
+                const isGroupedVat = !!r.vatGroupId;
+                const hasVat = isGroupedVat ? !!r.vatGroupHasVat : r.vatInvoiceStatus === 'uploaded';
                 const hasRc = r.importReceiptStatus === 'uploaded';
 
                 // Phiếu nhập trước 19/03/2026 không bắt buộc chứng từ
                 const CUTOFF = new Date('2026-03-19T00:00:00');
                 const purchaseDate = new Date(r.invoiceDate || r.createdAt);
                 const isOldRecord = purchaseDate < CUTOFF;
+
+                if (isGroupedVat) {
+                    return (
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                            <Tag color={hasVat ? 'cyan' : 'gold'} style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px' }}>
+                                {hasVat ? '🔗 HĐ gộp' : '🔗 Nhóm HĐ gộp'}
+                            </Tag>
+                            <div style={{ fontSize: 11, color: '#595959', fontWeight: 600 }}>{r.vatGroupId}</div>
+                        </div>
+                    );
+                }
 
                 if (hasVat && hasRc) {
                     return (
@@ -1088,8 +1241,11 @@ export default function PurchasePage() {
 
     const totalAmount = purchaseItems.reduce((sum, item) => sum + item.total, 0);
 
-    // ✨ Expandable row render - hiển thị actions + bảng sản phẩm chuyên nghiệp
-    const expandedRowRender = (record: Purchase) => {
+    // ✨ Detail popup modal - hiển thị actions + bảng sản phẩm chuyên nghiệp
+    const renderDetailModal = () => {
+        const record = detailModalRecord;
+        if (!record) return null;
+
         let items: PurchaseItem[] = [];
         try {
             items = JSON.parse(record.items);
@@ -1100,12 +1256,17 @@ export default function PurchasePage() {
         const itemTotal = items.reduce((sum, i) => sum + i.total, 0);
 
         return (
+            <Modal
+                open={detailModalVisible}
+                onCancel={() => setDetailModalVisible(false)}
+                footer={null}
+                width={900}
+                title={`📦 Chi tiết phiếu nhập — ${record.poNumber || `#${record.id}`}`}
+                styles={{ body: { padding: '16px 0 0 0', maxHeight: '75vh', overflowY: 'auto' } }}
+                destroyOnClose
+            >
             <div style={{
                 padding: '12px',
-                background: '#e6f7ff',
-                border: '3px solid #1890ff',
-                borderRadius: '8px',
-                margin: '8px 0',
             }}>
                 {/* Actions */}
                 <div style={{ marginBottom: 16, display: 'flex', gap: 8 }}>
@@ -1167,7 +1328,33 @@ export default function PurchasePage() {
                     {/* CỘT 2: VAT */}
                     <div style={{ flex: 1 }}>
                         <h4 style={{ fontWeight: 700, color: '#595959', marginBottom: 8, fontSize: 13 }}>2. Hóa đơn Tài chính (Kế toán)</h4>
-                        {['thht', 'no_vat'].includes((record as any).vatInvoiceStatus) ? (
+                        {(record as any).vatGroupId ? (
+                            <div style={{ padding: 12, background: '#f0f5ff', border: '1px solid #91caff', borderRadius: 6 }}>
+                                <div style={{ color: '#0958d9', fontWeight: 700, fontSize: 13 }}>🔗 HĐ gộp: {(record as any).vatGroupId}</div>
+                                {!!(record as any).vatGroupNote && (
+                                    <div style={{ fontSize: 12, color: '#595959', marginTop: 4 }}>📝 {(record as any).vatGroupNote}</div>
+                                )}
+                                <div style={{ fontSize: 12, color: '#595959', marginTop: 4 }}>
+                                    Gồm {((record as any).vatGroupPurchaseIds || []).length} phiếu: {(((record as any).vatGroupPurchaseIds || []) as number[])
+                                        .map(id => purchases.find(p => p.id === id)?.poNumber || `#${id}`)
+                                        .join(', ')}
+                                </div>
+                                <div style={{ marginTop: 8, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                                    {(record as any).vatGroupHasVat ? (
+                                        <Button type="link" size="small" onClick={() => openGroupedAwareVatPreview(record as any)} style={{ padding: 0, fontWeight: 600 }}>
+                                            👁️ Xem HĐ VAT nhóm
+                                        </Button>
+                                    ) : (
+                                        <Button type="link" size="small" onClick={() => openVatModal(record.id, record)} style={{ padding: 0, fontWeight: 600 }}>
+                                            🧾 Upload HĐ cho nhóm
+                                        </Button>
+                                    )}
+                                    <Button type="link" size="small" danger onClick={() => handleRemoveVatGroup(record)} style={{ padding: 0 }}>
+                                        Tách khỏi nhóm
+                                    </Button>
+                                </div>
+                            </div>
+                        ) : ['thht', 'no_vat'].includes((record as any).vatInvoiceStatus) ? (
                             <div style={{ padding: 12, background: '#f9f0ff', border: '1px solid #d3adf7', borderRadius: 6 }}>
                                 <div style={{ color: '#722ed1', fontWeight: 600, fontSize: 13 }}>📦 Đơn THHT / Không VAT</div>
                                 <Button type="link" size="small" onClick={() => handleMarkThht(record, true)} style={{ padding: 0, marginTop: 4, color: '#1890ff' }}>↩️ Hoàn tác</Button>
@@ -1180,7 +1367,7 @@ export default function PurchasePage() {
                                     </div>
                                     <div style={{ fontSize: 12, color: '#595959', marginTop: 4, paddingLeft: 24 }}>
                                         Tra cứu mã: <b>{(record as any).vatInvoiceNumber}</b>
-                                        <Button type="link" size="small" onClick={() => openVatPreview(record as any)}>
+                                        <Button type="link" size="small" onClick={() => openGroupedAwareVatPreview(record as any)}>
                                             👁️ Xem
                                         </Button>
                                     </div>
@@ -1318,6 +1505,7 @@ export default function PurchasePage() {
                     </table>
                 </div>
             </div>
+            </Modal>
         );
     };
 
@@ -1327,6 +1515,7 @@ export default function PurchasePage() {
                 @keyframes flash { from { opacity: 1; } to { opacity: 0.6; } }
                 .blink { animation: flash 1s infinite alternate; }
             `}</style>
+            {renderDetailModal()}
             {/* ===== HEADER + TOOLBAR (tích hợp tìm kiếm) ===== */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
                 <Title level={2} style={{ color: '#262626', margin: 0, whiteSpace: 'nowrap' }}>
@@ -1370,6 +1559,26 @@ export default function PurchasePage() {
                 <Space>
                     {selectedRowKeys.length > 0 && (
                         <Button
+                            icon={<LinkOutlined />}
+                            onClick={() => {
+                                const ids = selectedRowKeys.map(id => Number(id)).filter(Boolean);
+                                if (ids.length < 2) { message.warning('Vui lòng chọn ít nhất 2 phiếu!'); return; }
+                                setVatGroupPendingIds(ids);
+                                setVatGroupUploadId(null);
+                                setVatPurchaseId(ids[0]);
+                                setVatFiles([]);
+                                vatForm.resetFields();
+                                vatForm.setFieldsValue({ invoiceNumber: `VATG-${dayjs().format('YYYYMMDD-HHmm')}`, invoiceDate: dayjs() });
+                                setVatModalVisible(true);
+                            }}
+                            type={selectedRowKeys.length >= 2 ? 'primary' : 'default'}
+                            disabled={selectedRowKeys.length < 2}
+                        >
+                            Gộp HĐ VAT ({selectedRowKeys.length})
+                        </Button>
+                    )}
+                    {selectedRowKeys.length > 0 && (
+                        <Button
                             danger
                             icon={<DeleteOutlined />}
                             onClick={handleBulkDelete}
@@ -1406,10 +1615,11 @@ export default function PurchasePage() {
                         (p.createdBy || '').toLowerCase().includes(kw) ||
                         (p.notes || '').toLowerCase().includes(kw);
                     const vatStatus = (p as any).vatInvoiceStatus;
+                    const hasVat = (p as any).vatGroupId ? !!(p as any).vatGroupHasVat : vatStatus === 'uploaded';
                     const matchVat = filterVat === 'all' ||
-                        (filterVat === 'uploaded' && vatStatus === 'uploaded') ||
+                        (filterVat === 'uploaded' && hasVat) ||
                         (filterVat === 'thht' && ['thht', 'no_vat'].includes(vatStatus)) ||
-                        (filterVat === 'pending' && !vatStatus);
+                        (filterVat === 'pending' && !hasVat && !['thht', 'no_vat'].includes(vatStatus || ''));
                     return matchText && matchVat;
                 });
                 return (
@@ -1419,12 +1629,13 @@ export default function PurchasePage() {
                             dataSource={filteredPurchases}
                             rowKey="id"
                             loading={loading}
-                            expandable={{
-                                expandedRowRender,
-                                rowExpandable: () => true,
-                                expandRowByClick: true,
-                                showExpandColumn: false,
-                            }}
+                            onRow={(record) => ({
+                                onClick: () => {
+                                    setDetailModalRecord(record);
+                                    setDetailModalVisible(true);
+                                },
+                                style: { cursor: 'pointer' },
+                            })}
                             rowSelection={{
                                 selectedRowKeys,
                                 onChange: (keys) => setSelectedRowKeys(keys),
@@ -2070,6 +2281,35 @@ export default function PurchasePage() {
                 </Space>
             </Modal>
 
+            <Modal
+                title="🔗 Gộp hóa đơn VAT"
+                open={vatGroupModalVisible}
+                onCancel={() => { setVatGroupModalVisible(false); setVatGroupNote(''); }}
+                onOk={handleCreateVatGroup}
+                okText="Tạo nhóm"
+                cancelText="Hủy"
+                confirmLoading={vatGrouping}
+            >
+                <div style={{ marginBottom: 12, color: '#595959' }}>
+                    Chọn nhiều phiếu và gom vào một hóa đơn VAT gộp. Hệ thống sẽ tự sinh `VAT Group ID`.
+                </div>
+                <div style={{ marginBottom: 12, padding: 12, background: '#fafafa', borderRadius: 8, border: '1px solid #f0f0f0' }}>
+                    {purchases
+                        .filter(p => selectedRowKeys.includes(p.id))
+                        .map(p => (
+                            <div key={p.id} style={{ fontSize: 13, marginBottom: 6 }}>
+                                <b>{p.poNumber || `#${p.id}`}</b> - {p.supplierName}
+                            </div>
+                        ))}
+                </div>
+                <Input.TextArea
+                    rows={3}
+                    placeholder="Ghi chú nhóm HĐ gộp"
+                    value={vatGroupNote}
+                    onChange={(e) => setVatGroupNote(e.target.value)}
+                />
+            </Modal>
+
             {/* 👁️ Modal xem chi tiết phiếu nhập */}
             <Modal
                 title={
@@ -2258,11 +2498,21 @@ export default function PurchasePage() {
             {/* === 🧾 MODAL UPLOAD HĐ VAT === */}
             <Modal
                 title={(() => {
+                    if (vatGroupPendingIds.length > 0) return `🔗 Gộp & Upload HĐ VAT (${vatGroupPendingIds.length} phiếu)`;
                     const existing = purchases.find(p => p.id === vatPurchaseId) as any;
+                    if (vatGroupUploadId) return `🧾 Upload HĐ VAT cho nhóm ${vatGroupUploadId}`;
                     return existing?.vatInvoiceNumber ? '✏️ Sửa Hóa đơn VAT' : '🧾 Upload Hóa đơn VAT nhà cung cấp';
                 })()}
                 open={vatModalVisible}
-                onCancel={() => setVatModalVisible(false)}
+                onCancel={() => {
+                    if (vatGroupPendingIds.length > 0) {
+                        message.warning('Vui lòng upload HĐ VAT để hoàn tất gộp nhóm.');
+                        return;
+                    }
+                    setVatModalVisible(false);
+                }}
+                closable={vatGroupPendingIds.length === 0}
+                maskClosable={vatGroupPendingIds.length === 0}
                 footer={null}
                 width={480}
             >
@@ -2279,7 +2529,7 @@ export default function PurchasePage() {
                     {/* File upload */}
                     {(() => {
                         const existing = purchases.find(p => p.id === vatPurchaseId) as any;
-                        const isEdit = !!existing?.vatInvoiceNumber;
+                        const isEdit = vatGroupUploadId ? false : !!existing?.vatInvoiceNumber;
                         return (
                             <Form.Item label={
                                 <span style={{ fontWeight: 700, fontSize: 14, color: '#262626' }}>
@@ -2321,8 +2571,8 @@ export default function PurchasePage() {
                     <Form.Item>
                         {(() => {
                             const existing = purchases.find(p => p.id === vatPurchaseId) as any;
-                            const isEdit = !!existing?.vatInvoiceNumber;
-                            const canSubmit = isEdit || vatFiles.length > 0;
+                            const isEdit = vatGroupUploadId ? false : !!existing?.vatInvoiceNumber;
+                            const canSubmit = vatFiles.length > 0 || (!vatGroupUploadId && isEdit);
                             return (
                                 <Button type="primary" htmlType="submit" loading={vatUploading} block
                                     disabled={!canSubmit}
@@ -2483,6 +2733,7 @@ export default function PurchasePage() {
                 open={vatPreviewVisible}
                 onCancel={() => { setVatPreviewVisible(false); setVatPreviewData(null); setVatPreviewIndex(0); }}
                 width={900}
+                zIndex={1100}
                 style={{ top: 20 }}
                 footer={
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>

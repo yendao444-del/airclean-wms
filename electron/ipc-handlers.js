@@ -16,6 +16,7 @@ const { PrismaClient } = require('@prisma/client');
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
+const crypto = require('crypto');
 
 // ========================================
 // ðŸ”’ STOCK MUTEX â€” Serialize stock operations
@@ -2170,10 +2171,72 @@ ipcMain.handle('activityLog:getStats', async () => {
 // PURCHASES HANDLERS
 // ========================================
 
+const PURCHASE_VAT_GROUPS_KEY = 'purchaseVatGroups_v1';
+const PURCHASE_VAT_FILE_META_KEY = 'purchaseVatFileMeta_v1';
+
+async function getPurchaseVatGroups() {
+    if (!prisma) return {};
+    const config = await prisma.appConfig.findUnique({ where: { key: PURCHASE_VAT_GROUPS_KEY } });
+    if (!config?.value) return {};
+    try {
+        return JSON.parse(config.value) || {};
+    } catch {
+        return {};
+    }
+}
+
+async function savePurchaseVatGroups(groups) {
+    if (!prisma) throw new Error('Prisma not available');
+    await prisma.appConfig.upsert({
+        where: { key: PURCHASE_VAT_GROUPS_KEY },
+        update: { value: JSON.stringify(groups) },
+        create: { key: PURCHASE_VAT_GROUPS_KEY, value: JSON.stringify(groups) }
+    });
+}
+
+async function getPurchaseVatFileMeta() {
+    if (!prisma) return {};
+    const config = await prisma.appConfig.findUnique({ where: { key: PURCHASE_VAT_FILE_META_KEY } });
+    if (!config?.value) return {};
+    try {
+        return JSON.parse(config.value) || {};
+    } catch {
+        return {};
+    }
+}
+
+async function savePurchaseVatFileMeta(meta) {
+    if (!prisma) throw new Error('Prisma not available');
+    await prisma.appConfig.upsert({
+        where: { key: PURCHASE_VAT_FILE_META_KEY },
+        update: { value: JSON.stringify(meta) },
+        create: { key: PURCHASE_VAT_FILE_META_KEY, value: JSON.stringify(meta) }
+    });
+}
+
+function generatePurchaseVatGroupId(existingGroups = {}) {
+    const now = new Date();
+    const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
+    const sameDayCount = Object.keys(existingGroups).filter(id => String(id).startsWith(`VATG-${datePart}-`)).length;
+    return `VATG-${datePart}-${String(sameDayCount + 1).padStart(3, '0')}`;
+}
+
+function generateVatIdFromFile(fileName = '', fileSize = 0) {
+    const normalizedName = String(fileName || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
+    const raw = `${normalizedName}|${Number(fileSize) || 0}`;
+    const digest = crypto.createHash('sha1').update(raw).digest('hex').slice(0, 8).toUpperCase();
+    return `VAT-${digest}`;
+}
+
 // Get all purchases
 ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
+        const vatGroups = await getPurchaseVatGroups();
+        const vatFileMeta = await getPurchaseVatFileMeta();
 
         const purchases = await prisma.purchaseOrder.findMany({
             where: {
@@ -2216,6 +2279,29 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
             take: 100 // âš¡ Giáº£m tá»« 300 â†’ 100 phiáº¿u gáº§n nháº¥t
         });
 
+        const purchaseMap = new Map(purchases.map(p => [p.id, p]));
+        const purchaseGroupMeta = new Map();
+
+        Object.entries(vatGroups || {}).forEach(([groupId, group]) => {
+            const purchaseIds = Array.isArray(group?.purchaseIds)
+                ? group.purchaseIds.map(id => Number(id)).filter(id => purchaseMap.has(id))
+                : [];
+            if (purchaseIds.length === 0) return;
+
+            purchaseIds.forEach(id => {
+                purchaseGroupMeta.set(id, {
+                    vatGroupId: groupId,
+                    vatGroupNote: group?.note || '',
+                    vatGroupPurchaseIds: purchaseIds,
+                    vatGroupHasVat: !!group?.vatInvoiceFile,
+                    vatGroupSourcePurchaseId: null,
+                    vatGroupInvoiceNumber: group?.vatInvoiceNumber || null,
+                    vatGroupInvoiceDate: group?.vatInvoiceDate || null,
+                    vatGroupDriveUrl: group?.vatInvoiceDriveUrl || null,
+                });
+            });
+        });
+
         // Format data for frontend
         const formatted = purchases.map(p => {
             // Convert PurchaseItem[] to frontend format
@@ -2231,6 +2317,9 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
                 unit: item.product.unit || 'CÃ¡i' // ThÃªm unit
             }));
 
+            const vatGroupMeta = purchaseGroupMeta.get(p.id) || {};
+            const fileMeta = vatFileMeta[String(p.id)] || {};
+
             return {
                 ...p,
                 supplierName: p.supplier?.name,
@@ -2244,6 +2333,21 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
                 vatInvoiceFile: p.vatInvoiceFile,
                 vatInvoiceDriveUrl: p.vatInvoiceDriveUrl,
                 vatInvoiceStatus: p.vatInvoiceStatus,
+                vatId: fileMeta.vatId || null,
+                vatFileName: fileMeta.fileName || null,
+                vatFileSize: fileMeta.fileSize || null,
+                vatGroupId: vatGroupMeta.vatGroupId || null,
+                vatGroupNote: vatGroupMeta.vatGroupNote || '',
+                vatGroupPurchaseIds: vatGroupMeta.vatGroupPurchaseIds || [],
+                vatGroupHasVat: !!vatGroupMeta.vatGroupHasVat,
+                vatGroupSourcePurchaseId: vatGroupMeta.vatGroupSourcePurchaseId || null,
+                vatGroupStatus: vatGroupMeta.vatGroupHasVat ? 'uploaded' : 'pending',
+                vatGroupInvoiceNumber: vatGroupMeta.vatGroupInvoiceNumber || null,
+                vatGroupInvoiceDate: vatGroupMeta.vatGroupInvoiceDate || null,
+                vatGroupDriveUrl: vatGroupMeta.vatGroupDriveUrl || null,
+                vatGroupVatId: vatGroups[vatGroupMeta.vatGroupId]?.vatId || null,
+                vatGroupVatFileName: vatGroups[vatGroupMeta.vatGroupId]?.vatFileName || null,
+                vatGroupVatFileSize: vatGroups[vatGroupMeta.vatGroupId]?.vatFileSize || null,
                 // Phiáº¿u nháº­p kho
                 importReceiptStatus: p.importReceiptStatus,
                 importReceiptFile: p.importReceiptFile,
@@ -2254,6 +2358,248 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
         return { success: true, data: formatted };
     } catch (error) {
         console.error('âŒ Get purchases error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('purchases:createVatGroup', async (event, { purchaseIds = [], note = '' } = {}) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        requireRole('admin', 'manager', 'staff');
+
+        const normalizedIds = [...new Set((purchaseIds || []).map(id => Number(id)).filter(Boolean))];
+        if (normalizedIds.length < 2) throw new Error('Cần chọn ít nhất 2 phiếu để gộp hóa đơn');
+
+        const purchases = await prisma.purchaseOrder.findMany({
+            where: { id: { in: normalizedIds }, status: { not: 'cancelled' } },
+            select: { id: true, poNumber: true }
+        });
+        if (purchases.length !== normalizedIds.length) {
+            throw new Error('Có phiếu nhập không hợp lệ hoặc đã bị hủy');
+        }
+
+        const vatGroups = await getPurchaseVatGroups();
+        Object.keys(vatGroups).forEach(groupId => {
+            const currentIds = Array.isArray(vatGroups[groupId]?.purchaseIds) ? vatGroups[groupId].purchaseIds.map(Number) : [];
+            const remainingIds = currentIds.filter(id => !normalizedIds.includes(id));
+            if (remainingIds.length >= 2) {
+                vatGroups[groupId].purchaseIds = remainingIds;
+            } else {
+                delete vatGroups[groupId];
+            }
+        });
+
+        const newGroupId = generatePurchaseVatGroupId(vatGroups);
+        vatGroups[newGroupId] = {
+            purchaseIds: normalizedIds,
+            note: note || '',
+            createdAt: new Date().toISOString(),
+            vatInvoiceStatus: 'pending',
+            vatInvoiceNumber: null,
+            vatInvoiceDate: null,
+            vatInvoiceFile: null,
+            vatInvoiceDriveUrl: null,
+            vatId: null,
+            vatFileName: null,
+            vatFileSize: null,
+        };
+        await savePurchaseVatGroups(vatGroups);
+
+        void logActivity({
+            module: 'purchases',
+            action: 'VAT_GROUP_CREATE',
+            description: `Tạo nhóm HĐ gộp ${newGroupId} cho ${purchases.map(p => p.poNumber || `#${p.id}`).join(', ')}`,
+            userName: 'System',
+        });
+
+        return { success: true, data: { vatGroupId: newGroupId, purchaseIds: normalizedIds, note: note || '' } };
+    } catch (error) {
+        console.error('âŒ Create VAT group error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('purchases:uploadVatGroupInvoice', async (event, { vatGroupId, invoiceNumber, invoiceDate, files = [], fileBase64, fileName }) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        requireRole('admin', 'manager', 'staff');
+
+        const vatGroups = await getPurchaseVatGroups();
+        const group = vatGroups[String(vatGroupId)];
+        if (!group) throw new Error(`Không tìm thấy nhóm HĐ VAT ${vatGroupId}`);
+
+        const purchaseIds = Array.isArray(group.purchaseIds) ? group.purchaseIds.map(Number).filter(Boolean) : [];
+        if (purchaseIds.length < 2) throw new Error('Nhóm HĐ VAT không hợp lệ');
+
+        const purchases = await prisma.purchaseOrder.findMany({
+            where: { id: { in: purchaseIds }, status: { not: 'cancelled' } },
+            include: { supplier: true },
+        });
+        if (purchases.length === 0) throw new Error('Không tìm thấy phiếu nhập trong nhóm VAT');
+
+        const filesList = files.length > 0 ? files : (fileBase64 ? [{ fileBase64, fileName }] : []);
+        if (filesList.length === 0) throw new Error('Vui lòng chọn ít nhất 1 file HĐ VAT cho nhóm');
+
+        const userDataPath = app.getPath('userData');
+        const vatDir = path.join(userDataPath, 'vat-invoices');
+        if (!fs.existsSync(vatDir)) fs.mkdirSync(vatDir, { recursive: true });
+
+        const localPaths = [];
+        const driveUrls = [];
+        const savedBuffers = [];
+        const savedFileNames = [];
+        let primaryVatMeta = null;
+
+        for (let i = 0; i < filesList.length; i++) {
+            const { fileBase64: b64, fileName: fn } = filesList[i];
+            const ext = (fn || 'jpg').split('.').pop() || 'jpg';
+            const suffix = filesList.length > 1 ? `_${i + 1}` : '';
+            const localFileName = `VAT_GROUP_${vatGroupId}_${Date.now()}${suffix}.${ext}`;
+            const localPath = path.join(vatDir, localFileName);
+
+            const fileBuffer = Buffer.from(b64, 'base64');
+            fs.writeFileSync(localPath, fileBuffer);
+            localPaths.push(localPath);
+            savedBuffers.push(fileBuffer);
+            savedFileNames.push(localFileName);
+
+            if (i === 0) {
+                primaryVatMeta = {
+                    fileName: fn || localFileName,
+                    fileSize: fileBuffer.length,
+                    vatId: generateVatIdFromFile(fn || localFileName, fileBuffer.length),
+                };
+            }
+
+            try {
+                const drive = getDriveClient();
+                if (drive) {
+                    const folderId = await getOrCreateVatDriveFolder();
+                    if (folderId) {
+                        const supplierName = purchases[0]?.supplier?.name || 'NCC';
+                        const driveFileName = `HĐ_VAT_${supplierName}_${vatGroupId}_${invoiceNumber}${suffix}.${ext}`;
+                        const result = await uploadToDrive(drive, folderId, driveFileName, fileBuffer, ext === 'pdf' ? 'application/pdf' : 'image/jpeg');
+                        if (result) {
+                            driveUrls.push(result.webViewLink);
+                        }
+                    }
+                }
+            } catch (driveErr) {
+                console.error(`âš ï¸ Drive upload group VAT failed for file ${i + 1}:`, driveErr.message);
+            }
+        }
+
+        vatGroups[String(vatGroupId)] = {
+            ...group,
+            vatInvoiceStatus: 'uploaded',
+            vatInvoiceNumber: invoiceNumber,
+            vatInvoiceDate: new Date(invoiceDate).toISOString(),
+            vatInvoiceFile: localPaths.length === 1 ? localPaths[0] : JSON.stringify(localPaths),
+            vatInvoiceDriveUrl: driveUrls.length === 0 ? null : (driveUrls.length === 1 ? driveUrls[0] : driveUrls.join('\n')),
+            vatId: primaryVatMeta?.vatId || null,
+            vatFileName: primaryVatMeta?.fileName || null,
+            vatFileSize: primaryVatMeta?.fileSize || null,
+            updatedAt: new Date().toISOString(),
+        };
+        await savePurchaseVatGroups(vatGroups);
+
+        const purchaseNames = purchases.map(p => p.poNumber || `#${p.id}`).join(', ');
+        const supplierName = purchases[0]?.supplier?.name || 'NCC';
+        const telegramMsg = [
+            `🧾 <b>HĐ VAT gộp mới</b>`,
+            ``,
+            `🔗 Nhóm VAT: <b>${vatGroupId}</b>`,
+            `🏢 NCC: <b>${supplierName}</b>`,
+            `📋 Phiếu nhập: <b>${purchaseNames}</b>`,
+            `🔢 Số HĐ: <b>${invoiceNumber}</b>`,
+            `📅 Ngày HĐ: <b>${new Date(invoiceDate).toLocaleDateString('vi-VN')}</b>`,
+            filesList.length > 1 ? `📎 <b>${filesList.length} files đính kèm</b>` : '',
+            driveUrls[0] ? `\n📎 <a href="${driveUrls[0]}">Xem trên Drive</a>` : '',
+        ].filter(Boolean).join('\n');
+
+        sendVatTelegramMessage(telegramMsg).catch(err => console.error('Telegram group VAT error:', err));
+        for (let i = 0; i < savedBuffers.length; i++) {
+            sendVatTelegramDocument(savedBuffers[i], savedFileNames[i],
+                `HĐ VAT nhóm ${vatGroupId} #${invoiceNumber}${savedBuffers.length > 1 ? ` [${i + 1}/${savedBuffers.length}]` : ''}`
+            ).catch(err => console.error('Telegram group VAT doc error:', err));
+        }
+
+        if (savedBuffers.length > 0) {
+            sendVatEmail({
+                purchaseId: purchaseIds[0],
+                supplierName,
+                invoiceNumber,
+                invoiceDate: new Date(invoiceDate).toLocaleDateString('vi-VN'),
+                totalAmount: purchases.reduce((sum, p) => sum + Number(p.total || 0), 0).toLocaleString('vi-VN') + 'đ',
+                driveUrl: driveUrls[0] || null,
+                fileBuffer: savedBuffers[0],
+                fileName: savedFileNames[0],
+            }).catch(err => console.error('Group VAT email error:', err));
+        }
+
+        void logActivity({
+            module: 'purchases',
+            action: 'VAT_GROUP_UPLOAD',
+            description: `Upload ${filesList.length} file HĐ VAT cho nhóm ${vatGroupId} (${purchaseNames})`,
+            userName: 'System',
+        });
+
+        const driveWarning = driveUrls.length === 0
+            ? 'âš ï¸ File nhóm đã lưu local + Telegram, nhưng Google Drive upload thất bại. Kiểm tra lại Google Drive.'
+            : null;
+
+        return {
+            success: true,
+            data: {
+                vatGroupId,
+                localPaths,
+                driveUrls,
+                invoiceNumber,
+                vatId: primaryVatMeta?.vatId || null,
+            },
+            driveWarning,
+        };
+    } catch (error) {
+        console.error('âŒ Upload group VAT invoice error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('purchases:removeVatGroup', async (event, { purchaseId } = {}) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        requireRole('admin', 'manager', 'staff');
+        const targetId = Number(purchaseId);
+        if (!targetId) throw new Error('Thiếu purchaseId');
+
+        const vatGroups = await getPurchaseVatGroups();
+        let removedGroupId = null;
+
+        Object.keys(vatGroups).forEach(groupId => {
+            const currentIds = Array.isArray(vatGroups[groupId]?.purchaseIds) ? vatGroups[groupId].purchaseIds.map(Number) : [];
+            if (!currentIds.includes(targetId)) return;
+            removedGroupId = groupId;
+            const remainingIds = currentIds.filter(id => id !== targetId);
+            if (remainingIds.length >= 2) {
+                vatGroups[groupId].purchaseIds = remainingIds;
+            } else {
+                delete vatGroups[groupId];
+            }
+        });
+
+        if (!removedGroupId) throw new Error('Phiếu này chưa nằm trong nhóm HĐ gộp');
+        await savePurchaseVatGroups(vatGroups);
+
+        void logActivity({
+            module: 'purchases',
+            action: 'VAT_GROUP_REMOVE',
+            description: `Tách phiếu nhập #${targetId} khỏi nhóm HĐ gộp ${removedGroupId}`,
+            userName: 'System',
+        });
+
+        return { success: true, data: { purchaseId: targetId, removedGroupId } };
+    } catch (error) {
+        console.error('âŒ Remove VAT group error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -2660,6 +3006,7 @@ async function sendVatEmail(invoiceData) {
 ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoiceNumber, invoiceDate, files = [], fileBase64, fileName }) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
+        const vatFileMeta = await getPurchaseVatFileMeta();
 
         // 1. Láº¥y thÃ´ng tin phiáº¿u nháº­p
         const purchase = await prisma.purchaseOrder.findUnique({
@@ -2679,6 +3026,7 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
         const driveUrls = [];
         const savedBuffers = [];
         const savedFileNames = [];
+        let primaryVatMeta = null;
 
         // 2. LÆ°u tá»«ng file local + upload Drive
         for (let i = 0; i < filesList.length; i++) {
@@ -2694,6 +3042,14 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
             localPaths.push(localPath);
             savedBuffers.push(fileBuffer);
             savedFileNames.push(localFileName);
+            if (i === 0) {
+                primaryVatMeta = {
+                    fileName: fn || localFileName,
+                    fileSize: fileBuffer.length,
+                    vatId: generateVatIdFromFile(fn || localFileName, fileBuffer.length),
+                    updatedAt: new Date().toISOString(),
+                };
+            }
 
             // Upload lÃªn Google Drive
             try {
@@ -2718,6 +3074,11 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
             } catch (driveErr) {
                 console.error(`âš ï¸ Drive upload failed for file ${i + 1}:`, driveErr.message);
             }
+        }
+
+        if (primaryVatMeta) {
+            vatFileMeta[String(purchaseId)] = primaryVatMeta;
+            await savePurchaseVatFileMeta(vatFileMeta);
         }
 
         // 3. Cáº­p nháº­t DB
@@ -2779,7 +3140,7 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
             : null;
         if (driveWarning) console.warn(driveWarning);
         console.log(`âœ… VAT invoice uploaded for PO#${purchaseId}: ${invoiceNumber} (${filesList.length} files, Drive: ${driveUrls.length > 0 ? 'OK' : 'FAILED'})`);
-        return { success: true, data: { localPaths, driveUrls, invoiceNumber }, driveWarning };
+        return { success: true, data: { localPaths, driveUrls, invoiceNumber, vatId: primaryVatMeta?.vatId || null }, driveWarning };
     } catch (error) {
         console.error('âŒ Upload VAT invoice error:', error);
         return { success: false, error: error.message };

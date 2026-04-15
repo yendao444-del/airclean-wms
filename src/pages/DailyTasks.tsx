@@ -122,13 +122,18 @@ const DailyTasks = () => {
         (async () => {
             try {
                 // Load assignee list
-                const result = await window.electronAPI.appConfig.get('dailyTasksAssigneeList');
-                if (result.success && result.data) {
-                    setAssigneeList(result.data);
+                const usersResult = await window.electronAPI.users.getAll();
+                if (usersResult.success && usersResult.data) {
+                    const usernames = usersResult.data
+                        .filter((u: any) => u?.username && u.username !== 'admin' && u.isActive !== false)
+                        .map((u: any) => String(u.username).trim())
+                        .filter(Boolean)
+                        .sort((a: string, b: string) => a.localeCompare(b, 'vi'));
+                    setAssigneeList(usernames);
                 } else {
                     const defaults = ['Khánh', 'Toàn', 'Phượng'];
-                    setAssigneeList(defaults);
-                    await window.electronAPI.appConfig.set('dailyTasksAssigneeList', defaults);
+                    setAssigneeList([]);
+                    
                 }
 
                 // Load categories from DB
@@ -145,9 +150,16 @@ const DailyTasks = () => {
         })();
     }, []);
 
-    const saveAssigneeList = async (list: string[]) => {
-        setAssigneeList(list);
-        await window.electronAPI.appConfig.set('dailyTasksAssigneeList', list);
+    const saveAssigneeList = async (_list: string[]) => {
+        const usersResult = await window.electronAPI.users.getAll();
+        if (usersResult.success && usersResult.data) {
+            const usernames = usersResult.data
+                .filter((u: any) => u?.username && u.username !== 'admin' && u.isActive !== false)
+                .map((u: any) => String(u.username).trim())
+                .filter(Boolean)
+                .sort((a: string, b: string) => a.localeCompare(b, 'vi'));
+            setAssigneeList(usernames);
+        }
     };
 
     const saveCategories = async (cats: typeof CATEGORIES) => {

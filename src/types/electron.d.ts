@@ -117,8 +117,11 @@ export interface ElectronAPI {
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         uploadVATInvoice: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        uploadVatGroupInvoice: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         uploadImportReceipt: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         deleteImportReceipt: (id: number) => Promise<{ success: boolean; error?: string }>;
+        createVatGroup: (data: { purchaseIds: number[]; note?: string }) => Promise<{ success: boolean; data?: any; error?: string }>;
+        removeVatGroup: (data: { purchaseId: number }) => Promise<{ success: boolean; data?: any; error?: string }>;
         markAsThht: (purchaseId: number, revert?: boolean) => Promise<{ success: boolean; error?: string }>;
         getImportReceiptFileData: (purchaseId: number) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     };
