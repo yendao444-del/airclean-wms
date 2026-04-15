@@ -1117,6 +1117,13 @@ export default function PurchasePage() {
 
     const columns: ColumnsType<Purchase> = [
         {
+            title: 'Ngày nhập',
+            dataIndex: 'purchaseDate',
+            key: 'purchaseDate',
+            width: 180,
+            render: (date) => dayjs(date).format('DD/MM/YYYY HH:mm'),
+        },
+        {
             title: 'Mã phiếu',
             dataIndex: 'poNumber',
             key: 'poNumber',
@@ -1127,13 +1134,6 @@ export default function PurchasePage() {
             title: 'Nhà cung cấp',
             dataIndex: 'supplierName',
             key: 'supplierName',
-        },
-        {
-            title: 'Ngày nhập',
-            dataIndex: 'purchaseDate',
-            key: 'purchaseDate',
-            width: 180,
-            render: (date) => dayjs(date).format('DD/MM/YYYY HH:mm'),
         },
         {
             title: 'Tổng tiền',

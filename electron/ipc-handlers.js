@@ -2286,6 +2286,7 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
         const sameVatIdMap = new Map(); // purchaseId → [other purchase IDs]
         const vatIdGroups = new Map();
         purchases.forEach(p => {
+            if (p.vatInvoiceStatus !== 'uploaded') return; // chỉ xét phiếu đang có VAT thực sự
             const fileMeta = vatFileMeta[String(p.id)];
             if (!fileMeta?.vatId) return;
             const key = `${p.supplierId || 'x'}::${fileMeta.vatId}`;
@@ -2348,9 +2349,9 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
                 vatInvoiceFile: p.vatInvoiceFile,
                 vatInvoiceDriveUrl: p.vatInvoiceDriveUrl,
                 vatInvoiceStatus: p.vatInvoiceStatus,
-                vatId: fileMeta.vatId || null,
-                vatFileName: fileMeta.fileName || null,
-                vatFileSize: fileMeta.fileSize || null,
+                vatId: p.vatInvoiceStatus === 'uploaded' ? (fileMeta.vatId || null) : null,
+                vatFileName: p.vatInvoiceStatus === 'uploaded' ? (fileMeta.fileName || null) : null,
+                vatFileSize: p.vatInvoiceStatus === 'uploaded' ? (fileMeta.fileSize || null) : null,
                 vatGroupId: vatGroupMeta.vatGroupId || null,
                 vatGroupNote: vatGroupMeta.vatGroupNote || '',
                 vatGroupPurchaseIds: vatGroupMeta.vatGroupPurchaseIds || [],
@@ -3295,6 +3296,13 @@ ipcMain.handle('purchases:deleteVatInvoice', async (event, purchaseId) => {
                 vatInvoiceDriveUrl: null,
             }
         });
+
+        // Xóa vatFileMeta để VAT ID không còn hiển thị
+        const vatFileMeta = await getPurchaseVatFileMeta();
+        if (vatFileMeta[String(purchaseId)]) {
+            delete vatFileMeta[String(purchaseId)];
+            await savePurchaseVatFileMeta(vatFileMeta);
+        }
 
         void logActivity({
             module: 'purchases', action: 'VAT_DELETE',
