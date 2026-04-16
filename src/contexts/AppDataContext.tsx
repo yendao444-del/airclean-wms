@@ -49,10 +49,11 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
             const api = (window as any).electronAPI;
             // ⚡ Chỉ lấy 90 ngày gần nhất để giảm egress Supabase
             const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+            const untilNow = new Date().toISOString();
             const [pRes, exRes, ecRes, puRes, cbRes] = await Promise.all([
                 api.products.getAll(),
                 api.exportOrders.getAll({ since: since90 }),
-                api.ecommerceExports.getAll({ since: since90 }),
+                api.ecommerceExports.getAll({ since: since90, until: untilNow, limit: 10000 }),
                 api.purchases.getAll({ since: since90 }),
                 api.combos.getAll(),
             ]);

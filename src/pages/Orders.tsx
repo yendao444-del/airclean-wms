@@ -49,7 +49,7 @@ export default function OrdersPage() {
     const [loading, setLoading] = useState(false);
     const [searchKeyword, setSearchKeyword] = useState('');
     const [sourceFilter, setSourceFilter] = useState<'all' | 'pos' | 'export' | 'tmdt'>('all');
-    const [datePreset, setDatePreset] = useState<DatePreset>('30days');
+    const [datePreset, setDatePreset] = useState<DatePreset>('today');
     const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
 
     // Edit/Delete state
@@ -94,19 +94,40 @@ export default function OrdersPage() {
         }
     };
 
+    const getUntil = () => {
+        switch (datePreset) {
+            case 'today': return dayjs().endOf('day').toISOString();
+            case '7days': return dayjs().endOf('day').toISOString();
+            case '30days': return dayjs().endOf('day').toISOString();
+            case 'month': return dayjs().endOf('month').toISOString();
+            case 'custom': return customRange ? customRange[1].endOf('day').toISOString() : dayjs().endOf('day').toISOString();
+            default: return dayjs().endOf('day').toISOString();
+        }
+    };
+
+    const getEcommerceFetchLimit = () => {
+        const since = dayjs(getSince());
+        const until = dayjs(getUntil());
+        const days = Math.max(until.diff(since, 'day') + 1, 1);
+        return Math.min(Math.max(days * 800, 2000), 10000);
+    };
+
     const loadAllOrders = async (silent = false) => {
         if (!silent) setLoading(true);
         try {
             const api = (window as any).electronAPI;
             const since = getSince();
+            const until = getUntil();
+            const ecommerceLimit = getEcommerceFetchLimit();
             const marketplacePromise = (async () => ({
                 mode: 'marketplace',
                 res: await api.marketplaceOrders.getAll({ since }),
             }))();
-            const [posRes, exRes, marketplaceLoad] = await Promise.all([
+            const [posRes, exRes, marketplaceLoad, ecommerceExportsRes] = await Promise.all([
                 api.posOrder.getAll({ startDate: since }),
                 api.exportOrders.getAll({ since }),
                 marketplacePromise,
+                api.ecommerceExports.getAll({ since, until, limit: ecommerceLimit }),
             ]);
 
             const unified: UnifiedOrder[] = [];
@@ -189,6 +210,31 @@ export default function OrdersPage() {
                             createdBy: (typeof ec.pickedBy === 'string' && ec.pickedBy) ? ec.pickedBy : (ec.createdBy || ''),
                         });
                     }
+                }
+            }
+
+            if (ecommerceExportsRes.success && ecommerceExportsRes.data) {
+                for (const ec of ecommerceExportsRes.data) {
+                    if (ec.status !== 'completed') continue;
+                    const trackingMatch = ec.notes?.match(/Tracking: ([^|]+)/);
+                    const shippingMatch = ec.notes?.match(/Shipping: ([^|]+)/);
+                    const ecItemsStr = typeof ec.items === 'string' ? ec.items : JSON.stringify(ec.items || []);
+                    const effectiveDate = ec.updatedAt || ec.ecommerceExportDate || ec.createdAt || '';
+                    unified.push({
+                        id: `TMDT-EX-${ec.id}`, originalId: ec.id, source: 'tmdt',
+                        sourceLabel: ec.customerName?.toLowerCase().includes('tiktok') ? 'TikTok' :
+                            ec.customerName?.toLowerCase().includes('shopee') ? 'Shopee' : 'TMDT',
+                        orderNumber: ec.orderNumber || ec.ecommerceExportCode || `#TMDT-${ec.id}`,
+                        customer: ec.customerName || 'Sàn TMDT',
+                        items: ecItemsStr,
+                        totalAmount: ec.totalAmount || 0,
+                        status: ec.status,
+                        date: effectiveDate,
+                        tracking: trackingMatch ? trackingMatch[1].trim() : undefined,
+                        shipping: shippingMatch ? shippingMatch[1].trim() : undefined,
+                        notes: ec.notes || '',
+                        createdBy: (typeof ec.pickedBy === 'string' && ec.pickedBy) ? ec.pickedBy : (ec.createdBy || ''),
+                    });
                 }
             }
 
@@ -518,6 +564,13 @@ export default function OrdersPage() {
             ellipsis: true, render: (v) => <Text strong style={{ fontSize: 12 }}>{v}</Text>,
         },
         {
+            title: 'Mã vận đơn', dataIndex: 'tracking', key: 'tracking', width: 130,
+            ellipsis: true,
+            render: (v) => v ? (
+                <Text copyable style={{ fontSize: 12 }}>{v}</Text>
+            ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
+        },
+        {
             title: 'Sản phẩm', key: 'items', width: 220,
             render: (_, record) => {
                 let items: any[] = [];
@@ -817,7 +870,7 @@ export default function OrdersPage() {
                         onChange: (keys) => setSelectedRowKeys(keys),
                     }}
                     pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `${t} đơn hàng` }}
-                    scroll={{ x: 1000 }}
+                    scroll={{ x: 1150 }}
                     expandable={{
                         rowExpandable: (record) => {
                             try {

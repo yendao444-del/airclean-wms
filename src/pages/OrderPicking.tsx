@@ -577,7 +577,8 @@ export default function OrderPickingPage() {
         reader.onload = (e) => {
             try {
                 const data = e.target?.result;
-                const workbook = XLSX.read(data, { type: 'binary' });
+                const isCSV = file.name.toLowerCase().endsWith('.csv');
+                const workbook = XLSX.read(data, { type: isCSV ? 'string' : 'binary' });
                 const sheet = workbook.Sheets[workbook.SheetNames[0]];
                 const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];
 
@@ -644,7 +645,11 @@ export default function OrderPickingPage() {
                 message.error(`Lỗi đọc file "${file.name}"!`);
             }
         };
-        reader.readAsBinaryString(file);
+        if (file.name.toLowerCase().endsWith('.csv')) {
+            reader.readAsText(file, "utf-8");
+        } else {
+            reader.readAsBinaryString(file);
+        }
         return false;
     };
 

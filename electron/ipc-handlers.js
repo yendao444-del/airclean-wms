@@ -5164,14 +5164,19 @@ require('./update-handlers')(prisma);
 // ECOMMERCE EXPORTS HANDLERS (XUáº¤T HÃ€NG TMDT)
 // ========================================
 
-ipcMain.handle('ecommerceExports:getAll', async (event, { since, sinceField } = {}) => {
+ipcMain.handle('ecommerceExports:getAll', async (event, { since, sinceField, until, limit } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         // sinceField: 'ecommerceExportDate' (BusinessReport) hoáº·c 'updatedAt' (Attendance packing)
         const field = sinceField || 'ecommerceExportDate';
+        const dateFilter = {};
+        if (since) dateFilter.gte = new Date(since);
+        if (until) dateFilter.lte = new Date(until);
+
         const exports = await prisma.ecommerceExport.findMany({
-            where: since ? { [field]: { gte: new Date(since) } } : undefined,
+            where: Object.keys(dateFilter).length > 0 ? { [field]: dateFilter } : undefined,
             orderBy: { ecommerceExportDate: 'desc' },
+            take: limit || 2000,  // gioi han payload, tranh IPC block
         });
         // Format dates for frontend
         const formatted = exports.map(e => ({

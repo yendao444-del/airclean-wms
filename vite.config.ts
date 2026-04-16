@@ -17,7 +17,7 @@ export default defineConfig({
     // ⚡ BUILD OPTIMIZATION
     build: {
         // Target modern browsers for smaller output
-        target: 'es2015',
+        target: 'esnext',
 
         // Output directory
         outDir: 'dist',

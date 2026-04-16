@@ -164,15 +164,23 @@ const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ p
     const fetchLogsForParent = async (parent: ProductRow) => {
         setLoadingLogs(true);
         try {
-            const result = await (window as any).electronAPI.inventoryLogs.getAll({});
-            if (result.success) {
-                const parentSkus = parent.variants.map(v => v.sku);
-                const relevantLogs = (result.data as InventoryLogItem[]).filter(
-                    log => parentSkus.includes(log.sku) || log.sku === parent.sku || log.type === 'combo'
-                );
-                // Sort newest first
-                setLogs(relevantLogs.sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
-            }
+            const parentSkus = parent.variants.map(v => v.sku);
+            const mainSku = parent.sku;
+
+            // Tải log từng SKU song song thay vì load toàn bộ DB về client
+            const skusToFetch = [mainSku, ...parentSkus].filter(Boolean);
+            const results = await Promise.all(
+                skusToFetch.map(sku => (window as any).electronAPI.inventoryLogs.getBySku({ sku, limit: 500 }))
+            );
+
+            const allLogs: InventoryLogItem[] = results
+                .filter(r => r.success)
+                .flatMap(r => r.data as InventoryLogItem[]);
+
+            // Dedup theo id, sort newest first
+            const seen = new Set<number>();
+            const dedupLogs = allLogs.filter(l => { if (seen.has(l.id)) return false; seen.add(l.id); return true; });
+            setLogs(dedupLogs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
         } catch (error) {
             message.error('Lỗi khi tải nhật ký');
         } finally {
@@ -914,7 +922,11 @@ export default function StockBalancePage() {
             }
 
             // 2. Ecommerce exports (completed, 90 ngày)
-            const ecRes = await api.ecommerceExports.getAll({ since: since90 });
+            const ecRes = await api.ecommerceExports.getAll({
+                since: since90,
+                until: dayjs().endOf('day').toISOString(),
+                limit: 10000,
+            });
             if (ecRes.success && ecRes.data) {
                 for (const ec of ecRes.data) {
                     if (ec.status !== 'completed') continue;
@@ -2235,4 +2247,3 @@ export default function StockBalancePage() {
         </div>
     );
 }
-

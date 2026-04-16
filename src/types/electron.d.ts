@@ -155,7 +155,7 @@ export interface ElectronAPI {
         resetDaily: () => Promise<{ success: boolean; data?: { reset: boolean; resetCount: number; message: string }; error?: string }>;
     };
     ecommerceExports: {
-        getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { since?: string; until?: string; sinceField?: string; limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
     Card,
     Button,
@@ -205,7 +205,7 @@ export default function ProductsPage() {
                                                 items: undefined,
                                                 price: comboPrice,
                                                 cost: expectedCost,
-                                            }).catch(() => {});
+                                            }).catch(() => { });
                                         }
 
                                         // Add combo info to variant
@@ -947,16 +947,16 @@ export default function ProductsPage() {
         },
     ];
 
-    // Filter products based on search
-    const filteredProducts = products.filter(product => {
-        if (!searchText.trim()) return true;
+    // Filter products based on search (memoized — chỉ tính lại khi products/searchText thay đổi)
+    const filteredProducts = useMemo(() => {
+        if (!searchText.trim()) return products;
         const search = searchText.toLowerCase();
-        return (
+        return products.filter(product =>
             product.sku.toLowerCase().includes(search) ||
             product.barcode?.toLowerCase().includes(search) ||
             product.name.toLowerCase().includes(search)
         );
-    });
+    }, [products, searchText]);
 
 
     return (

@@ -330,7 +330,7 @@ export default function ReturnsPage() {
                         date: new Date().toISOString(),
                         source: 'returns'
                     };
-                    
+
                     attData.extraFines = [...(attData.extraFines || []), newFine];
                     await electronApi.appConfig.set('attendanceData', attData);
                     window.dispatchEvent(new CustomEvent('attendance:fineAdded', { detail: newFine }));
@@ -465,7 +465,8 @@ export default function ReturnsPage() {
         reader.onload = async (e) => {
             try {
                 const data = e.target?.result;
-                const workbook = XLSX.read(data, { type: 'binary' });
+                const isCSV = file.name.toLowerCase().endsWith('.csv');
+                const workbook = XLSX.read(data, { type: isCSV ? 'string' : 'binary' });
                 const sheetName = workbook.SheetNames[0];
                 const worksheet = workbook.Sheets[sheetName];
                 const jsonData = XLSX.utils.sheet_to_json(worksheet);
@@ -589,7 +590,11 @@ export default function ReturnsPage() {
             }
         };
 
-        reader.readAsBinaryString(file);
+        if (file.name.toLowerCase().endsWith('.csv')) {
+            reader.readAsText(file, "utf-8");
+        } else {
+            reader.readAsBinaryString(file);
+        }
         return false;
     };
 

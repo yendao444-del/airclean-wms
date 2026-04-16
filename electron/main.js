@@ -1,6 +1,6 @@
 const { app, BrowserWindow, Menu } = require('electron');
 const path = require('path');
-const fs   = require('fs');
+const fs = require('fs');
 const { spawn } = require('child_process');
 
 // ✅ FIX: Electron v40 resolve module từ node_modules/electron/dist/resources/app/
@@ -9,7 +9,7 @@ const { spawn } = require('child_process');
 const Module = require('module');
 const originalResolve = Module._resolveFilename;
 const realNodeModules = path.join(process.cwd(), 'node_modules');
-Module._resolveFilename = function(request, parent, isMain, options) {
+Module._resolveFilename = function (request, parent, isMain, options) {
     try {
         return originalResolve.call(this, request, parent, isMain, options);
     } catch (err) {
@@ -18,7 +18,7 @@ Module._resolveFilename = function(request, parent, isMain, options) {
             const absPath = path.join(realNodeModules, request);
             try {
                 return originalResolve.call(this, absPath, parent, isMain, options);
-            } catch {}
+            } catch { }
         }
         throw err;
     }
@@ -68,7 +68,7 @@ function findPythonExe() {
             }
             console.log(`[Python] ✅ CHỌN: ${c.cmd} ${c.args.join(' ')}`);
             return { exe: c.cmd, extraArgs: c.args };
-        } catch {}
+        } catch { }
     }
     return null;
 }
@@ -77,14 +77,14 @@ function startPythonService() {
     const userDataPath = app.getPath('userData');
 
     // ── Ưu tiên EXE standalone (PyInstaller) — không cần Python trên máy ──────
-    const exePath    = path.join(__dirname, '..', 'python', 'dist', 'attendance_service.exe');
+    const exePath = path.join(__dirname, '..', 'python', 'dist', 'attendance_service.exe');
     const scriptPath = path.join(__dirname, '..', 'python', 'attendance_service.py');
 
     let spawnCmd, spawnArgs;
 
     if (app.isPackaged && fs.existsSync(exePath)) {
         console.log('🚀 Dùng attendance_service.exe (standalone)');
-        spawnCmd  = exePath;
+        spawnCmd = exePath;
         spawnArgs = [];
     } else if (fs.existsSync(scriptPath)) {
         if (!app.isPackaged && fs.existsSync(exePath)) {
@@ -96,7 +96,7 @@ function startPythonService() {
             return;
         }
         console.log('🐍 Fallback Python:', found.exe, found.extraArgs.join(' '));
-        spawnCmd  = found.exe;
+        spawnCmd = found.exe;
         spawnArgs = [...found.extraArgs, scriptPath];
     } else {
         console.warn('⚠️ Không tìm thấy attendance_service.exe hoặc .py — chức năng chấm công không khả dụng');
@@ -179,6 +179,7 @@ function createWindow() {
             sandbox: false,
             preload: path.join(__dirname, 'preload.js'),
             autoplayPolicy: 'no-user-gesture-required',
+            backgroundThrottling: false,  // Giữ timers chạy đúng tốc độ khi mất focus
         },
         title: 'DBY POS - Quản lý bán hàng',
         icon: app.isPackaged

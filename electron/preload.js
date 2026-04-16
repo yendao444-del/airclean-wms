@@ -161,6 +161,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     inventoryLogs: {
         getAll: (filters) => ipcRenderer.invoke('inventoryLogs:getAll', filters),
         getBySku: (params) => ipcRenderer.invoke('inventoryLogs:getBySku', params),
+        getStats: (filters) => ipcRenderer.invoke('inventoryLogs:getStats', filters),
         create: (data) => ipcRenderer.invoke('inventoryLogs:create', data),
         getRefDetail: (params) => ipcRenderer.invoke('inventoryLogs:getRefDetail', params),
     },

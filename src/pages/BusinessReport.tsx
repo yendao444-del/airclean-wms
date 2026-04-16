@@ -614,9 +614,12 @@ export default function BusinessReportPage() {
         try {
             // ⚡ Chỉ fetch từ đầu kỳ được chọn — giảm egress Supabase
             const since = dateRange[0].startOf('day').toISOString();
+            const until = dateRange[1].endOf('day').toISOString();
+            const rangeDays = Math.max(dateRange[1].endOf('day').diff(dateRange[0].startOf('day'), 'day') + 1, 1);
+            const ecommerceLimit = Math.min(Math.max(rangeDays * 800, 2000), 10000);
             const [expRes, ecomRes, refRes, purRes, prodRes, comboRes] = await Promise.all([
                 window.electronAPI.exportOrders.getAll({ since }),
-                window.electronAPI.ecommerceExports.getAll({ since }),
+                window.electronAPI.ecommerceExports.getAll({ since, until, limit: ecommerceLimit }),
                 window.electronAPI.refunds.getAll({ since }),
                 window.electronAPI.purchases.getAll({ since }),
                 window.electronAPI.products.getAll(),

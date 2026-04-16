@@ -183,13 +183,7 @@ export default function EcommerceExportPage() {
         window.addEventListener('click', resumeCtx, { once: true });
         window.addEventListener('keydown', resumeCtx, { once: true });
 
-        (async () => {
-            const deletedCancelled = await purgeCancelledExports();
-            await loadEcommerceExports();
-            if (deletedCancelled > 0) {
-                console.log(`ðŸ§¹ ÄÃ£ dá»n ${deletedCancelled} Ä‘Æ¡n TMDT bá»‹ há»§y khá»i há»‡ thá»‘ng`);
-            }
-        })();
+        loadEcommerceExports();
         loadProducts();
         loadPackerEmployees();
 
@@ -226,7 +220,7 @@ export default function EcommerceExportPage() {
             try {
                 const res = await (window as any).electronAPI.offlineQueue.status();
                 if (res.success) setOfflinePending(res.pendingCount || 0);
-            } catch {}
+            } catch { }
         };
         checkOfflinePending();
 
@@ -296,7 +290,10 @@ export default function EcommerceExportPage() {
     // to avoid stale closures.
     const getLatestExports = async () => {
         try {
-            const result = await window.electronAPI.ecommerceExports.getAll({});
+            const result = await window.electronAPI.ecommerceExports.getAll({
+                until: dayjs().endOf('day').toISOString(),
+                limit: 10000,
+            });
             if (result.success && result.data) return result.data;
         } catch { }
         return ecommerceExports;
@@ -358,9 +355,12 @@ export default function EcommerceExportPage() {
     }, [rebuildTrackingMap]);
 
     const loadCompletedOrderKeys = useCallback(async () => {
+        // Chỉ load 365 ngày gần nhất — đủ để check trùng, tránh load toàn bộ DB
+        const since365 = dayjs().subtract(365, 'day').toISOString();
+        const untilNow = dayjs().endOf('day').toISOString();
         const [exportsResult, ordersResult] = await Promise.all([
-            window.electronAPI.ecommerceExports.getAll({}),
-            window.electronAPI.marketplaceOrders.getAll({}),
+            window.electronAPI.ecommerceExports.getAll({ since: since365, until: untilNow, limit: 10000 }),
+            window.electronAPI.marketplaceOrders.getAll({ since: since365 }),
         ]);
 
         if (!exportsResult?.success || !Array.isArray(exportsResult.data)) {
@@ -443,10 +443,23 @@ export default function EcommerceExportPage() {
     const loadEcommerceExports = async (silent = false) => {
         if (!silent) setLoading(true);
         try {
-            const result = await window.electronAPI.ecommerceExports.getAll({});
+            const result = await window.electronAPI.ecommerceExports.getAll({
+                until: dayjs().endOf('day').toISOString(),
+                limit: 10000,
+            });
             if (result.success && result.data) {
-                // KhÃ´ng downgrade 'completed' trong ref vá» 'pending' khi DB chÆ°a ká»‹p commit
-                // (trÃ¡nh race condition khi IPC update Ä‘ang in-flight)
+                // Purge cancelled ngay tu data DB tuoi - tranh dung state rong luc khoi dong
+                const cancelledIds = result.data
+                    .filter((r: any) => r.status === 'cancelled')
+                    .map((r: any) => r.id);
+                if (cancelledIds.length > 0) {
+                    window.electronAPI.ecommerceExports.bulkDelete(cancelledIds)
+                        .then((res) => console.log('Purged ' + cancelledIds.length + ' don TMDT da huy'))
+                        .catch(() => {});
+                    result.data = result.data.filter((r: any) => r.status !== 'cancelled');
+                }
+
+                // Khong downgrade 'completed' trong ref ve 'pending' khi DB chua kip commit
                 const normalizedDb = normalizeDbExports(result.data.map((item: any) => {
                     const existing = exportsRef.current.find((r: any) => r.id === item.id);
                     if (existing?.status === 'completed' && item.status !== 'completed') return existing;
@@ -910,10 +923,6 @@ Thời gian: ${currentTime}`;
                         message.success(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} gửi hàng thành công ✓`);
                         await sendTelegramNotification(normalizedSaved);
                         scheduleBgSync();
-
-                        // ðŸ”„ Debounced background sync â€” KHÃ”NG reload ngay (trÃ¡nh re-render 100 rows)
-                        // Chá»‰ sync láº¡i tá»« DB sau 3s im láº·ng (khÃ´ng scan thÃªm)
-                        scheduleBgSync();
                     } catch (error) {
                         console.error('Error updating stock/status:', error);
                         message.error('Lỗi khi cập nhật!');
@@ -965,7 +974,8 @@ Thời gian: ${currentTime}`;
             reader.onload = async (event) => {
                 try {
                     const data = event.target?.result;
-                    const workbook = XLSX.read(data, { type: 'binary' });
+                    const isCSV = file.name.toLowerCase().endsWith('.csv');
+                    const workbook = XLSX.read(data, { type: isCSV ? 'string' : 'binary' });
                     const sheet = workbook.Sheets[workbook.SheetNames[0]];
                     const json = XLSX.utils.sheet_to_json(sheet) as any[];
 
@@ -1019,7 +1029,11 @@ Thời gian: ${currentTime}`;
                     message.error({ content: 'Loi doc file Excel!', key: 'bulkScan' });
                 }
             };
-            reader.readAsBinaryString(file);
+            if (file.name.toLowerCase().endsWith('.csv')) {
+                reader.readAsText(file, "utf-8");
+            } else {
+                reader.readAsBinaryString(file);
+            }
         };
         input.click();
     };
@@ -1193,8 +1207,22 @@ Thời gian: ${currentTime}`;
             // ðŸš« Gá»  Bá»Ž TÃNH NÄ‚NG TRá»ª KHá»ŽI FRONTEND (Theo Má»‡nh Lá»‡nh Tá»‘i Cao)
             // Backend (ipc-handlers.js) sáº½ tá»± Ä‘á»™c láº­p xá»­ lÃ½ vÃ  Transactional Atomicity
 
-            // Save to database
-            saveEcommerceExports(updatedEcommerceExports);
+            // Save to database via API
+            if (editingEcommerceExport) {
+                const saveResult = await (window as any).electronAPI.ecommerceExports.update(editingEcommerceExport.id, updatedEcommerceExports.find((r: any) => r.id === editingEcommerceExport.id));
+                if (!saveResult?.success) {
+                    message.error(saveResult?.error || 'Loi cap nhat don!');
+                    return;
+                }
+            } else {
+                const newRecord = updatedEcommerceExports[0];
+                const saveResult = await (window as any).electronAPI.ecommerceExports.create(newRecord);
+                if (!saveResult?.success) {
+                    message.error(saveResult?.error || 'Loi tao don moi!');
+                    return;
+                }
+            }
+            loadEcommerceExports();
 
             const successMsg = editingEcommerceExport
                 ? '�S& Đã cập nhật phiếu xuất!' + (shouldUpdateStock ? ' + Trừ t�n kho!' : '')
@@ -1269,7 +1297,8 @@ Thời gian: ${currentTime}`;
             try {
                 const persistedCompletedKeys = await loadCompletedOrderKeys();
                 const data = e.target?.result;
-                const workbook = XLSX.read(data, { type: 'binary' });
+                const isCSV = file.name.toLowerCase().endsWith('.csv');
+                const workbook = XLSX.read(data, { type: isCSV ? 'string' : 'binary' });
                 const sheetName = workbook.SheetNames[0];
                 const worksheet = workbook.Sheets[sheetName];
                 const jsonData = XLSX.utils.sheet_to_json(worksheet);
@@ -1494,7 +1523,11 @@ Thời gian: ${currentTime}`;
             }
         };
 
-        reader.readAsBinaryString(file);
+        if (file.name.toLowerCase().endsWith('.csv')) {
+            reader.readAsText(file, "utf-8");
+        } else {
+            reader.readAsBinaryString(file);
+        }
         return false;
     };
 
@@ -1552,7 +1585,16 @@ Thời gian: ${currentTime}`;
 
                     // Convert base64 back to binary
                     const binaryString = atob(fileData.data);
-                    const workbook = XLSX.read(binaryString, { type: 'binary' });
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+                    const isCSV = fileData.name.toLowerCase().endsWith('.csv');
+                    let workbook;
+                    if (isCSV) {
+                        const decoder = new TextDecoder('utf-8');
+                        workbook = XLSX.read(decoder.decode(bytes), { type: 'string' });
+                    } else {
+                        workbook = XLSX.read(bytes, { type: 'array' });
+                    }
                     const sheetName = workbook.SheetNames[0];
                     const worksheet = workbook.Sheets[sheetName];
                     const jsonData = XLSX.utils.sheet_to_json(worksheet);

@@ -1994,6 +1994,9 @@ export default function Attendance() {
         try {
             const api = (window as any).electronAPI;
             const sinceVal = since || overviewDateRange[0].startOf('day').toISOString();
+            const untilVal = overviewDateRange[1].endOf('day').toISOString();
+            const rangeDays = Math.max(overviewDateRange[1].endOf('day').diff(overviewDateRange[0].startOf('day'), 'day') + 1, 1);
+            const packingFetchLimit = Math.min(Math.max(rangeDays * 800, 2000), 10000);
 
             // Timeout wrapper: nếu API không trả kết quả trong 10s → bỏ qua
             const withTimeout = (p: Promise<any>, label: string, ms = 10000) =>
@@ -2003,7 +2006,15 @@ export default function Attendance() {
                 ]).catch(e => { console.warn(`[PACKING] ⚠️ ${label} failed:`, e); return { success: false, data: [] }; });
 
             // Chỉ lấy TMDT — POS và Xuất hàng không tính vào nhật ký đóng gói
-            const ecRes = await withTimeout(api.ecommerceExports.getAll({ since: sinceVal, sinceField: 'updatedAt' }), 'Ecom');
+            const ecRes = await withTimeout(
+                api.ecommerceExports.getAll({
+                    since: sinceVal,
+                    until: untilVal,
+                    sinceField: 'updatedAt',
+                    limit: packingFetchLimit,
+                }),
+                'Ecom'
+            );
             console.log('[PACKING] Ecom done:', ecRes?.data?.length);
 
             const getPlatform = (_source: string, customer: string) => {
