@@ -989,10 +989,10 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                         if (isIn) {
                             const now = new Date();
                             const [startH, startM] = (ct === 'morning_in' ? config.morningStart : config.afternoonStart).split(':').map(Number);
-                            const shiftStartMin = startH * 60 + startM + (config.graceMinutes || 0);
+                            const shiftStartMin = startH * 60 + startM;
                             const actualMin = now.getHours() * 60 + now.getMinutes();
                             const lateMin = actualMin - shiftStartMin;
-                            if (lateMin > 0) {
+                            if (lateMin > (config.graceMinutes || 0)) {
                                 const fId = normalizeAttendanceText(res.data.faceId);
                                 const emp = employees.find(e => {
                                     const u = normalizeAttendanceText(e.username);
@@ -2263,6 +2263,13 @@ export default function Attendance() {
 
     // Thay thế array mock thành data mix thật sự
     const liveAttendanceMatrix = useMemo(() => {
+        // Tính ngưỡng muộn từ config: giờ bắt đầu + biên độ miễn phạt
+        const grace = config.graceMinutes || 0;
+        const [amH, amM] = config.morningStart.split(':').map(Number);
+        const amThreshold = amH * 60 + amM + grace; // phút tính từ 00:00
+        const [pmH, pmM] = config.afternoonStart.split(':').map(Number);
+        const pmThreshold = pmH * 60 + pmM + grace;
+
         return employees.map(emp => {
             const monthData = Array.from({ length: daysInMonth }).map(() => ({ am: 0 as 0 | 1 | 2, pm: 0 as 0 | 1 | 2, amTime: '', pmTime: '', amOutTime: '', pmOutTime: '' }));
             // Resolve log -> nhân viên bằng nhiều khóa để tránh rớt dữ liệu UI khi faceId/userId cũ không khớp tuyệt đối
@@ -2276,6 +2283,7 @@ export default function Attendance() {
             logs.forEach(log => {
                 const dayIdx = dayjs(log.date).date() - 1; // 0..30
                 const logTime = dayjs(log.timestamp);
+                const logMin = logTime.hour() * 60 + logTime.minute();
 
                 // Quy tắc chấm công am/pm
                 // LƯU Ý: Logs từ backend trả về theo thứ tự DESC (mới nhất trước).
@@ -2283,13 +2291,8 @@ export default function Attendance() {
                 // → check-in (morning_in/afternoon_in) LUÔN là nguồn quyết định cuối cùng
                 //   cho trạng thái đúng giờ/muộn, ghi đè bất kỳ giá trị nào trước đó.
                 if (log.checkType === 'morning_in') {
-                    // Sáng vào muộn nếu sau 08:05
                     monthData[dayIdx].amTime = logTime.format('HH:mm');
-                    if (logTime.hour() > 8 || (logTime.hour() === 8 && logTime.minute() > 5)) {
-                        monthData[dayIdx].am = 2; // Muộn — luôn ghi đè
-                    } else {
-                        monthData[dayIdx].am = 1; // Đúng giờ — luôn ghi đè
-                    }
+                    monthData[dayIdx].am = logMin > amThreshold ? 2 : 1; // Muộn hoặc đúng giờ
                 } else if (log.checkType === 'morning_out') {
                     // Sáng ra — ghi nhận giờ checkout
                     monthData[dayIdx].amOutTime = logTime.format('HH:mm');
@@ -2298,13 +2301,8 @@ export default function Attendance() {
                 }
 
                 if (log.checkType === 'afternoon_in') {
-                    // Chiều vào muộn nếu sau 13:35
                     monthData[dayIdx].pmTime = logTime.format('HH:mm');
-                    if (logTime.hour() > 13 || (logTime.hour() === 13 && logTime.minute() > 35)) {
-                        monthData[dayIdx].pm = 2; // Muộn — luôn ghi đè
-                    } else {
-                        monthData[dayIdx].pm = 1; // Đúng giờ — luôn ghi đè
-                    }
+                    monthData[dayIdx].pm = logMin > pmThreshold ? 2 : 1; // Muộn hoặc đúng giờ
                 } else if (log.checkType === 'evening_out') {
                     // Tối ra — ghi nhận giờ checkout
                     monthData[dayIdx].pmOutTime = logTime.format('HH:mm');
@@ -2314,7 +2312,7 @@ export default function Attendance() {
             });
             return monthData;
         });
-    }, [employees, liveAttendanceLogs, daysInMonth, selectedMonth, selectedYear]);
+    }, [employees, liveAttendanceLogs, daysInMonth, selectedMonth, selectedYear, config]);
 
     // Employee attendance stats
     const employeeStats = useMemo(() => {

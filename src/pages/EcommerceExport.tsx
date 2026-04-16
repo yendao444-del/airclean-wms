@@ -180,7 +180,13 @@ export default function EcommerceExportPage() {
         window.addEventListener('click', resumeCtx, { once: true });
         window.addEventListener('keydown', resumeCtx, { once: true });
 
-        loadEcommerceExports();
+        (async () => {
+            const deletedCancelled = await purgeCancelledExports();
+            await loadEcommerceExports();
+            if (deletedCancelled > 0) {
+                console.log(`🧹 Đã dọn ${deletedCancelled} đơn TMDT bị hủy khỏi hệ thống`);
+            }
+        })();
         loadProducts();
         loadPackerEmployees();
 
@@ -287,9 +293,7 @@ export default function EcommerceExportPage() {
     // to avoid stale closures.
     const getLatestExports = async () => {
         try {
-            // ⚡ Chỉ lấy 7 ngày gần nhất — đủ cho màn hình đóng gói thực tế
-            const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-            const result = await window.electronAPI.ecommerceExports.getAll({ since: since7d });
+            const result = await window.electronAPI.ecommerceExports.getAll({});
             if (result.success && result.data) return result.data;
         } catch { }
         return ecommerceExports;
@@ -332,9 +336,7 @@ export default function EcommerceExportPage() {
     const loadEcommerceExports = async (silent = false) => {
         if (!silent) setLoading(true);
         try {
-            // ⚡ Chỉ lấy 7 ngày gần nhất
-            const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-            const result = await window.electronAPI.ecommerceExports.getAll({ since: since7d });
+            const result = await window.electronAPI.ecommerceExports.getAll({});
             if (result.success && result.data) {
                 // Không downgrade 'completed' trong ref về 'pending' khi DB chưa kịp commit
                 // (tránh race condition khi IPC update đang in-flight)
@@ -344,12 +346,39 @@ export default function EcommerceExportPage() {
                     return item;
                 });
                 rebuildTrackingMap(exportsRef.current);
-                setEcommerceExports(result.data);
+                setEcommerceExports([...exportsRef.current]);
             }
         } catch (error) {
             if (!silent) message.error('Lỗi khi tải dữ liệu');
         } finally {
             if (!silent) setLoading(false);
+        }
+    };
+
+    const purgeCancelledExports = async (silent = true) => {
+        try {
+            const cancelledIds = ecommerceExports
+                .filter(r => r.status === 'cancelled')
+                .map(r => r.id);
+
+            if (cancelledIds.length === 0) {
+                if (!silent) message.info('Không có đơn TMDT đã hủy để xóa.');
+                return 0;
+            }
+
+            const result = await window.electronAPI.ecommerceExports.bulkDelete(cancelledIds);
+            if (!result?.success) {
+                if (!silent) message.error(result?.error || 'Không thể xóa đơn TMDT đã hủy');
+                return 0;
+            }
+            const deletedCount = result.data || cancelledIds.length;
+            if (!silent && deletedCount > 0) {
+                message.success(`Đã xóa ${deletedCount} đơn TMDT đã hủy`);
+            }
+            return deletedCount;
+        } catch (error) {
+            if (!silent) message.error('Không thể xóa đơn TMDT đã hủy');
+            return 0;
         }
     };
 
@@ -490,6 +519,33 @@ export default function EcommerceExportPage() {
         });
     };
 
+    const handleDeleteCancelled = () => {
+        if (!isAdmin) {
+            message.error('Chỉ quản trị viên mới có quyền xóa đơn hàng!');
+            return;
+        }
+
+        if (statusCounts.cancelled === 0) {
+            message.info('Không có đơn TMDT đã hủy để xóa.');
+            return;
+        }
+
+        Modal.confirm({
+            title: `Xóa ${statusCounts.cancelled} đơn TMDT đã hủy?`,
+            content: 'Thao tác này sẽ xóa toàn bộ đơn có trạng thái cancelled trong Xuất hàng TMDT. Không ảnh hưởng đơn đã hoàn thành ở mục Đơn hàng.',
+            okText: 'Xóa đơn hủy',
+            okType: 'danger',
+            cancelText: 'Hủy',
+            onOk: async () => {
+                const deletedCount = await purgeCancelledExports(false);
+                if (deletedCount > 0) {
+                    await loadEcommerceExports();
+                    if (statusFilter === 'cancelled') setStatusFilter('all');
+                }
+            },
+        });
+    };
+
     // 📱 Gửi thông báo lên Telegram
     const sendTelegramNotification = async (ecommerceExport: EcommerceExport) => {
         const { chatId, apiToken } = telegramSettings;
@@ -579,27 +635,29 @@ Thời gian: ${currentTime}`;
         if (recordId !== undefined) {
             foundEcommerceExport = exportsRef.current.find(r => r.id === recordId);
         }
-        // 🔄 Fallback 1: Map miss → scan toàn bộ exportsRef (dữ liệu trùng lặp cũ?)
+        // 🔄 Fallback 1: Map miss → scan toàn bộ exportsRef theo Tracking hoặc Order ID
         if (!foundEcommerceExport) {
             foundEcommerceExport = exportsRef.current.find((r: any) => {
                 const trackingMatch = r.notes?.match(/Tracking: ([^|]+)/);
                 const tracking = trackingMatch ? trackingMatch[1].trim() : '';
-                return tracking === trimmed;
+                const orderId = (r.orderNumber || r.ecommerceExportCode || '').trim();
+                return tracking === trimmed || orderId === trimmed;
             });
             if (foundEcommerceExport) {
-                console.warn(`⚠️ trackingMap miss nhưng .find() tìm thấy — rebuild map. Tracking: ${trimmed}`);
+                console.warn(`⚠️ trackingMap miss nhưng .find() tìm thấy — rebuild map. Input: ${trimmed}`);
                 rebuildTrackingMap(exportsRef.current);
             }
         }
-        // 🔄 Fallback 2: exportsRef miss → scan state (ref out-of-sync?)
+        // 🔄 Fallback 2: exportsRef miss → scan state theo Tracking hoặc Order ID
         if (!foundEcommerceExport) {
             foundEcommerceExport = ecommerceExports.find((r: any) => {
                 const trackingMatch = r.notes?.match(/Tracking: ([^|]+)/);
                 const tracking = trackingMatch ? trackingMatch[1].trim() : '';
-                return tracking === trimmed;
+                const orderId = (r.orderNumber || r.ecommerceExportCode || '').trim();
+                return tracking === trimmed || orderId === trimmed;
             });
             if (foundEcommerceExport) {
-                console.warn(`⚠️ exportsRef miss nhưng state tìm thấy — resync ref. Tracking: ${trimmed}`);
+                console.warn(`⚠️ exportsRef miss nhưng state tìm thấy — resync ref. Input: ${trimmed}`);
                 exportsRef.current = [...ecommerceExports];
                 rebuildTrackingMap(exportsRef.current);
             }
@@ -711,9 +769,9 @@ Thời gian: ${currentTime}`;
             playAlert();
             setScanStatus({
                 type: 'error',
-                message: `❌ KHÔNG TÌM THẤY - Tracking ID: ${trimmed}`,
+                message: `❌ KHÔNG TÌM THẤY - Mã quét: ${trimmed}`,
             });
-            message.warning(`Không tìm thấy đơn hàng với Tracking ID: ${trimmed}`);
+            message.warning(`Không tìm thấy đơn hàng với mã: ${trimmed}`);
 
             // ⚡ Lưu vào danh sách "Lệch đơn" (tránh trùng)
             setUnmatchedScans(prev => {
@@ -1199,9 +1257,11 @@ Thời gian: ${currentTime}`;
 
                 // Create EcommerceExport for each order
                 orderMap.forEach((orderItems, orderId) => {
-                    // 🚫 KIỂM TRA TRÙNG LẶP - Bỏ qua nếu Order ID đã tồn tại
+                    // 🚫 KIỂM TRA TRÙNG LẶP - Chỉ bỏ qua nếu đơn đã hoàn thành.
+                    // Đơn chưa giao sẽ được backend thay thế theo file import mới.
                     const isDuplicate = ecommerceExports.some(existing =>
-                        existing.orderNumber === orderId || existing.ecommerceExportCode === orderId
+                        (existing.orderNumber === orderId || existing.ecommerceExportCode === orderId) &&
+                        existing.status === 'completed'
                     );
 
                     if (isDuplicate) {
@@ -1266,37 +1326,12 @@ Thời gian: ${currentTime}`;
 
                 const source = isTikTok ? 'TikTok' : 'Shopee';
 
-                // 🚫 ĐỐI SOÁT: LUÔN CHẠY — Tìm đơn pending cùng nguồn mà KHÔNG CÓ trong file mới → tự cancel
-                // Lý do: Đơn bị hủy trên sàn sẽ không xuất hiện trong file export mới nhất
-                // FIX: Không return sớm nữa — đối soát phải chạy kể cả khi tất cả đơn đều trùng
-                const fileOrderIds = new Set(orderMap.keys()); // TẤT CẢ Order ID từ file (kể cả trùng)
-                const stalePending = ecommerceExports.filter(existing =>
-                    existing.customerName === source &&
-                    existing.status !== 'completed' && existing.status !== 'cancelled' &&
-                    existing.orderNumber &&
-                    !fileOrderIds.has(existing.orderNumber)
-                );
-
-                let cancelledCount = 0;
-                if (stalePending.length > 0) {
-                    try {
-                        const cancelRes = await (window as any).electronAPI.ecommerceExports.bulkCancel(
-                            stalePending.map(o => o.id)
-                        );
-                        if (cancelRes.success) {
-                            cancelledCount = cancelRes.data;
-                            console.log(`🚫 Đã hủy ${cancelledCount} đơn ${source} không còn trên sàn`);
-                        }
-                    } catch (cancelErr) {
-                        console.error('❌ Lỗi đối soát:', cancelErr);
-                    }
-                }
-
-                // Reload sau khi cả import + cancel hoàn tất
+                // Không tự đối soát-hủy theo file import nữa.
+                await purgeCancelledExports();
                 loadEcommerceExports();
 
                 // Thông báo kết quả
-                if (newEcommerceExports.length === 0 && cancelledCount === 0) {
+                if (newEcommerceExports.length === 0) {
                     // Không có gì mới, không có gì hủy
                     if (skippedCount > 0) {
                         message.warning(`⚠️ Tất cả ${skippedCount} đơn hàng đều đã tồn tại trong hệ thống!`);
@@ -1307,11 +1342,7 @@ Thời gian: ${currentTime}`;
                     const parts: string[] = [];
                     if (newEcommerceExports.length > 0) parts.push(`✅ Import ${newEcommerceExports.length} đơn mới từ ${source}`);
                     if (skippedCount > 0) parts.push(`bỏ qua ${skippedCount} trùng`);
-                    if (cancelledCount > 0) parts.push(`🚫 ${cancelledCount} đơn đã hủy trên sàn`);
                     message.success(parts.join(' | '));
-                    if (cancelledCount > 0) {
-                        message.warning(`⚠️ ${cancelledCount} đơn ${source} đã bị hủy trên sàn → không được giao!`, 8);
-                    }
                 }
             } catch (error) {
                 console.error('Import error:', error);
@@ -1353,8 +1384,8 @@ Thời gian: ${currentTime}`;
             let processedFiles = 0;
             // 🔧 FIX: Track tất cả orderNumber đã import trong session này để tránh trùng giữa các file
             const importedOrderNumbers = new Set<string>();
-            // 🚫 Thu thập TẤT CẢ Order IDs theo nguồn — dùng cho đối soát sau khi import xong
             const allOrderIdsBySource = new Map<string, Set<string>>();
+            // 🚫 Thu thập TẤT CẢ Order IDs theo nguồn — dùng cho đối soát sau khi import xong
 
             // Xử lý từng file
             for (const fileData of files) {
@@ -1498,9 +1529,11 @@ Thời gian: ${currentTime}`;
                     let skippedCount = 0;
 
                     orderMap.forEach((orderItems, orderId) => {
-                        // Check trùng với DB hiện có
+                        // Check trùng với DB hiện có: chỉ giữ completed.
+                        // Đơn chưa giao sẽ được backend thay thế theo file mới.
                         const isDuplicateInDB = ecommerceExports.some(existing =>
-                            existing.orderNumber === orderId || existing.ecommerceExportCode === orderId
+                            (existing.orderNumber === orderId || existing.ecommerceExportCode === orderId) &&
+                            existing.status === 'completed'
                         );
                         // 🔧 FIX: Check trùng với các file đã import trong cùng session
                         const isDuplicateInSession = importedOrderNumbers.has(orderId);
@@ -1571,35 +1604,10 @@ Thời gian: ${currentTime}`;
                 }
             }
 
-            // 🚫 ĐỐI SOÁT: Tìm đơn pending mà KHÔNG CÓ trong tất cả các file vừa import → tự cancel
-            // allOrderIdsBySource đã được thu thập trong vòng lặp xử lý chính ở trên
+            const deletedCancelled = await purgeCancelledExports();
 
-            let totalCancelled = 0;
-            for (const [source, fileOrderIds] of allOrderIdsBySource.entries()) {
-                const stalePending = ecommerceExports.filter(existing =>
-                    existing.customerName === source &&
-                    existing.status !== 'completed' && existing.status !== 'cancelled' &&
-                    existing.orderNumber &&
-                    !fileOrderIds.has(existing.orderNumber)
-                );
-
-                if (stalePending.length > 0) {
-                    try {
-                        const cancelRes = await (window as any).electronAPI.ecommerceExports.bulkCancel(
-                            stalePending.map(o => o.id)
-                        );
-                        if (cancelRes.success) {
-                            totalCancelled += cancelRes.data;
-                            console.log(`🚫 Đã hủy ${cancelRes.data} đơn ${source} không còn trên sàn`);
-                        }
-                    } catch (cancelErr) {
-                        console.error(`❌ Lỗi đối soát ${source}:`, cancelErr);
-                    }
-                }
-            }
-
-            // 🔄 Reload toàn bộ data từ DB sau khi import + đối soát xong
-            if (totalImported > 0 || totalCancelled > 0) {
+            // 🔄 Reload toàn bộ data từ DB sau khi import xong
+            if (totalImported > 0 || deletedCancelled > 0) {
                 await loadEcommerceExports();
             }
 
@@ -1607,15 +1615,11 @@ Thời gian: ${currentTime}`;
             const resultParts: string[] = [];
             if (totalImported > 0) resultParts.push(`✅ Import ${totalImported} đơn từ ${processedFiles} file`);
             if (totalSkipped > 0) resultParts.push(`bỏ qua ${totalSkipped} trùng`);
-            if (totalCancelled > 0) resultParts.push(`🚫 ${totalCancelled} đơn hủy trên sàn`);
 
             if (resultParts.length === 0) {
                 message.warning({ content: '⚠️ Không có thay đổi nào — tất cả đơn đều đã tồn tại!', key: 'import-folder', duration: 5 });
             } else {
                 message.success({ content: resultParts.join(' | '), key: 'import-folder', duration: 5 });
-            }
-            if (totalCancelled > 0) {
-                message.warning(`⚠️ ${totalCancelled} đơn đã bị hủy trên sàn → không được giao!`, 8);
             }
 
         } catch (error) {
@@ -1972,16 +1976,18 @@ Thời gian: ${currentTime}`;
     // ⚡ Memoize status counts — tránh .filter() x3 mỗi render
     const statusCounts = useMemo(() => {
         const today = dayjs().startOf('day');
-        let pending = 0, overdue = 0, cancelled = 0;
+        let pending = 0, overdue = 0, cancelled = 0, completed = 0;
         for (const r of ecommerceExports) {
             if (r.status === 'cancelled') {
                 cancelled++;
-            } else if (r.status !== 'completed') {
+            } else if (r.status === 'completed') {
+                completed++;
+            } else {
                 pending++;
                 if (dayjs(r.ecommerceExportDate).startOf('day').isBefore(today)) overdue++;
             }
         }
-        return { pending, overdue, cancelled };
+        return { all: ecommerceExports.length, pending, overdue, completed, cancelled };
     }, [ecommerceExports]);
 
 
@@ -1989,6 +1995,20 @@ Thời gian: ${currentTime}`;
         <div>
             {/* Dòng 1: Stats + Search + Actions */}
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'nowrap' }}>
+                <Tag
+                    onClick={() => setStatusFilter('all')}
+                    style={{
+                        cursor: 'pointer', flexShrink: 0,
+                        padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                        borderRadius: 8, border: 'none',
+                        background: statusFilter === 'all'
+                            ? 'linear-gradient(135deg, #1677ff 0%, #4096ff 100%)'
+                            : 'linear-gradient(135deg, #bae0ff 0%, #d6e4ff 100%)',
+                        color: '#fff',
+                    }}
+                >
+                    📋 All: {statusCounts.all}
+                </Tag>
                 <Tag
                     onClick={() => setStatusFilter('pending')}
                     style={{
@@ -2001,7 +2021,21 @@ Thời gian: ${currentTime}`;
                         color: '#fff',
                     }}
                 >
-                    📦 Chờ: {statusCounts.pending}
+                    📦 Pending: {statusCounts.pending}
+                </Tag>
+                <Tag
+                    onClick={() => setStatusFilter('completed')}
+                    style={{
+                        cursor: 'pointer', flexShrink: 0,
+                        padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                        borderRadius: 8, border: 'none',
+                        background: statusFilter === 'completed'
+                            ? 'linear-gradient(135deg, #52c41a 0%, #73d13d 100%)'
+                            : 'linear-gradient(135deg, #d9f7be 0%, #f6ffed 100%)',
+                        color: statusFilter === 'completed' ? '#fff' : '#389e0d',
+                    }}
+                >
+                    ✅ Complete: {statusCounts.completed}
                 </Tag>
                 <Tag
                     onClick={() => setStatusFilter('overdue')}
@@ -2015,7 +2049,21 @@ Thời gian: ${currentTime}`;
                         color: '#fff',
                     }}
                 >
-                    ⚠️ Quá hạn: {statusCounts.overdue}
+                    ⚠️ Overdue: {statusCounts.overdue}
+                </Tag>
+                <Tag
+                    onClick={() => setStatusFilter('cancelled')}
+                    style={{
+                        cursor: 'pointer', flexShrink: 0,
+                        padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                        borderRadius: 8, border: 'none',
+                        background: statusFilter === 'cancelled'
+                            ? 'linear-gradient(135deg, #595959 0%, #262626 100%)'
+                            : 'linear-gradient(135deg, #d9d9d9 0%, #f5f5f5 100%)',
+                        color: statusFilter === 'cancelled' ? '#fff' : '#434343',
+                    }}
+                >
+                    🚫 Cancelled: {statusCounts.cancelled}
                 </Tag>
                 <Tag
                     onClick={() => setStatusFilter('no_data')}
@@ -2029,7 +2077,7 @@ Thời gian: ${currentTime}`;
                         color: '#fff',
                     }}
                 >
-                    ⚡ Lệch: {unmatchedScans.length}
+                    ⚡ Mismatch: {unmatchedScans.length}
                 </Tag>
                 <div style={{ width: 1, height: 24, background: '#d9d9d9', flexShrink: 0 }} />
 
@@ -2047,6 +2095,16 @@ Thời gian: ${currentTime}`;
                 {selectedRowKeys.length > 0 && (
                     <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete} style={{ flexShrink: 0 }}>
                         Xóa ({selectedRowKeys.length})
+                    </Button>
+                )}
+                {isAdmin && statusCounts.cancelled > 0 && (
+                    <Button
+                        danger
+                        icon={<DeleteOutlined />}
+                        onClick={handleDeleteCancelled}
+                        style={{ flexShrink: 0 }}
+                    >
+                        Xóa đơn hủy ({statusCounts.cancelled})
                     </Button>
                 )}
                 <Dropdown
@@ -2244,6 +2302,14 @@ Thời gian: ${currentTime}`;
                     }}
                 >
                     {scanStatus.message}
+                </div>
+            )}
+
+            {statusFilter !== 'no_data' && filteredEcommerceExports.length === 0 && ecommerceExports.length > 0 && (
+                <div style={{ marginBottom: 8, padding: '8px 12px', borderRadius: 8, background: '#fff7e6', border: '1px solid #ffd591', color: '#ad6800', fontSize: 13, fontWeight: 500 }}>
+                    Bộ lọc hiện tại không có dữ liệu. Hệ thống vẫn đang có {statusCounts.all} đơn:
+                    {` ${statusCounts.pending} chờ, ${statusCounts.completed} hoàn thành, ${statusCounts.cancelled} hủy.`}
+                    {statusFilter !== 'all' ? ' Chuyển sang "Tất cả" để kiểm tra lại.' : ''}
                 </div>
             )}
 

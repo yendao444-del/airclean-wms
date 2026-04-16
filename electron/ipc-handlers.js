@@ -1814,7 +1814,7 @@ ipcMain.handle('posOrder:create', async (event, data) => {
                         type: 'pos_sale',
                         referenceType: 'POS',
                         reference: orderNumber,
-                        note: `BÃ¡n POS: ${item.name} x${item.qty}`,
+                        note: `Bán POS: ${item.name} x${item.qty}`,
                         createdBy: createdByUserId
                     });
                 } catch (stockErr) {
@@ -1953,7 +1953,7 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
                     type: 'adjustment',
                     referenceType: 'POS_EDIT',
                     reference: oldOrder.orderNumber,
-                    note: `HoÃ n tá»“n (sá»­a Ä‘Æ¡n POS #${oldOrder.orderNumber})`,
+                    note: `Hoàn tồn (sửa đơn POS #${oldOrder.orderNumber})`,
                     createdBy: userName || 'System'
                 });
             }
@@ -1986,7 +1986,7 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
                     type: 'pos_sale',
                     referenceType: 'POS_EDIT',
                     reference: oldOrder.orderNumber,
-                    note: `Trá»« tá»“n má»›i (sá»­a Ä‘Æ¡n POS #${oldOrder.orderNumber})`,
+                    note: `Trừ tồn mới (sửa đơn POS #${oldOrder.orderNumber})`,
                     createdBy: userName || 'System'
                 });
             }
@@ -2027,7 +2027,7 @@ ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
                 type: 'adjustment',
                 referenceType: 'POS_CANCEL',
                 reference: order.orderNumber,
-                note: `HoÃ n tá»“n do há»§y Ä‘Æ¡n POS ${order.orderNumber}`,
+                note: `Hoàn tồn do hủy đơn POS ${order.orderNumber}`,
                 createdBy: userName || 'System'
             };
             for (const item of order.items) {
@@ -2708,7 +2708,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
                     type: 'purchase',
                     referenceType: 'NHAP',
                     reference: newOrder.poNumber,
-                    note: `Nháº­p hÃ ng: ${item.productName || product.name} x${item.quantity}`,
+                    note: `Nhập hàng: ${item.productName || product.name} x${item.quantity}`,
                     createdBy: data.createdBy || 'Admin'
                 });
             }
@@ -2789,7 +2789,7 @@ ipcMain.handle('purchases:delete', async (event, id) => {
                     type: 'adjustment',
                     referenceType: 'NHAP_CANCEL',
                     reference: order.poNumber,
-                    note: `HoÃ n tá»“n do há»§y phiáº¿u nháº­p ${order.poNumber}`,
+                    note: `Hoàn tồn do hủy phiếu nhập ${order.poNumber}`,
                     createdBy: 'System'
                 });
             }
@@ -5233,7 +5233,7 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
                             type: 'ecom_sale',
                             referenceType: 'TMDT',
                             reference: data.orderNumber || data.ecommerceExportCode || 'LÆ°u thá»§ cÃ´ng',
-                            note: `Xuáº¥t hÃ ng TMDT: ${data.customerName}`,
+                            note: `Xuất hàng TMDT: ${data.customerName}`,
                             createdBy: data.createdBy || 'System'
                         }, { allowMissing: true });
                     }
@@ -5367,7 +5367,7 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
                             type: 'adjustment',
                             referenceType: 'TMDT_CANCEL',
                             reference: doc.orderNumber || doc.ecommerceExportCode || 'XÃ³a thá»§ cÃ´ng',
-                            note: `HoÃ n tá»“n do xÃ³a Ä‘Æ¡n TMDT #${id}`,
+                            note: `Hoàn tồn do xóa đơn TMDT #${id}`,
                             createdBy: 'System'
                         }, { allowMissing: true });
                     }
@@ -5416,7 +5416,7 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
                         type: 'adjustment',
                         referenceType: 'TMDT_CANCEL',
                         reference: `XÃ³a hÃ ng loáº¡t ${docs.length} Ä‘Æ¡n`,
-                        note: `HoÃ n tá»“n do xÃ³a ${completedDocs.length} Ä‘Æ¡n TMDT completed`,
+                        note: `Hoàn tồn do xóa ${completedDocs.length} đơn TMDT completed`,
                         createdBy: 'System'
                     }, skuCache);
                 }
@@ -5455,6 +5455,23 @@ ipcMain.handle('ecommerceExports:deleteAll', async () => {
     }
 });
 
+ipcMain.handle('ecommerceExports:deleteCancelled', async () => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+
+        const result = await prisma.ecommerceExport.deleteMany({
+            where: { status: 'cancelled' }
+        });
+
+        console.log(`ðŸ—‘ï¸ Deleted ${result.count} cancelled ecommerce exports`);
+        void logActivity({ module: 'export', action: 'DELETE', description: `XÃ³a ${result.count} Ä‘Æ¡n TMDT Ä‘Ã£ há»§y` });
+        return { success: true, data: result.count };
+    } catch (error) {
+        console.error('âŒ Delete cancelled ecommerce exports error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
@@ -5465,9 +5482,24 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
                 .filter(Boolean)
         )];
 
+        // Re-import file TMDT nên thay thế các đơn chưa giao/cancelled cùng Order ID,
+        // chỉ giữ lại đơn completed để tránh ghi đè lịch sử đã pickup.
+        if (orderKeys.length > 0) {
+            await prisma.ecommerceExport.deleteMany({
+                where: {
+                    status: { not: 'completed' },
+                    OR: [
+                        { orderNumber: { in: orderKeys } },
+                        { ecommerceExportCode: { in: orderKeys } }
+                    ]
+                }
+            });
+        }
+
         const existingRecords = orderKeys.length > 0
             ? await prisma.ecommerceExport.findMany({
                 where: {
+                    status: 'completed',
                     OR: [
                         { orderNumber: { in: orderKeys } },
                         { ecommerceExportCode: { in: orderKeys } }
@@ -5536,7 +5568,7 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
                         type: 'ecom_sale',
                         referenceType: 'TMDT',
                         reference: `Nháº­p hÃ ng loáº¡t ${records.length} Ä‘Æ¡n`,
-                        note: `Táº¡o hÃ ng loáº¡t ${completedRecords.length} Ä‘Æ¡n TMDT completed`,
+                        note: `Tạo hàng loạt ${completedRecords.length} đơn TMDT completed`,
                         createdBy: dedupedRecords[0]?.createdBy || 'System'
                     }, skuCache);
                 }
