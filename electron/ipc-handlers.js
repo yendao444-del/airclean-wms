@@ -5054,16 +5054,16 @@ ipcMain.handle('ecommerceExport:stopWatch', async () => {
     return { success: false, error: 'KhÃ´ng cÃ³ watcher nÃ o Ä‘ang cháº¡y' };
 });
 
-// Chá»n thÆ° má»¥c chá»©a file Excel xuáº¥t hÃ ng TMDT
+// Chon thu muc chua file Excel xuat hang TMDT
 ipcMain.handle('ecommerceExport:selectFolder', async () => {
     try {
         const result = await dialog.showOpenDialog({
             properties: ['openDirectory'],
-            title: 'Chá»n thÆ° má»¥c chá»©a file Excel xuáº¥t hÃ ng TMDT',
+            title: 'Chon thu muc chua file Excel xuat hang TMDT',
         });
 
         if (result.canceled || result.filePaths.length === 0) {
-            return { success: false, error: 'KhÃ´ng cÃ³ thÆ° má»¥c Ä‘Æ°á»£c chá»n' };
+            return { success: false, error: 'Khong co thu muc duoc chon' };
         }
 
         return { success: true, data: result.filePaths[0] };
@@ -5192,23 +5192,32 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
         const isCompleted = data.status === 'completed';
         const orderKey = (data.orderNumber || data.ecommerceExportCode || '').trim();
 
-        if (orderKey) {
-            const existing = await prisma.ecommerceExport.findFirst({
-                where: {
-                    OR: [
-                        { orderNumber: orderKey },
-                        { ecommerceExportCode: orderKey }
-                    ]
-                },
-                select: { id: true, status: true }
-            });
-            if (existing) {
-                return { success: true, skipped: true, reason: 'duplicate', data: existing };
-            }
-        }
-
         // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
-        const record = await withStockLock(() => prisma.$transaction(async (tx) => {
+        const result = await withStockLock(() => prisma.$transaction(async (tx) => {
+            if (orderKey) {
+                const existing = await tx.ecommerceExport.findFirst({
+                    where: {
+                        OR: [
+                            { orderNumber: orderKey },
+                            { ecommerceExportCode: orderKey }
+                        ]
+                    },
+                    select: { id: true, orderNumber: true, ecommerceExportCode: true, status: true }
+                });
+                if (existing) {
+                    return { skipped: true, reason: 'duplicate', data: existing };
+                }
+                if (isCompleted) {
+                    const existingOrder = await tx.order.findUnique({
+                        where: { orderNumber: orderKey },
+                        select: { id: true, orderNumber: true, status: true }
+                    });
+                    if (existingOrder) {
+                        return { skipped: true, reason: 'existing_order', data: { ...existingOrder, status: 'completed' } };
+                    }
+                }
+            }
+
             const newRecord = await tx.ecommerceExport.create({
                 data: {
                     customerName: data.customerName,
@@ -5238,15 +5247,53 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
                         }, { allowMissing: true });
                     }
                 }
+                await ensureMarketplaceOrderInTx(tx, newRecord, data.pickedBy || data.createdBy || null);
             }
-            return newRecord;
+            return { skipped: false, data: newRecord };
         }, { timeout: 30000, maxWait: 10000 }));
 
+        if (result?.skipped) {
+            return { success: true, skipped: true, reason: result.reason, data: result.data };
+        }
+        const record = result.data;
         console.log(`âœ… Created ecommerce export #${record.id}`);
         void logActivity({ module: 'export', action: 'CREATE', description: `Táº¡o bÃ n giao TMDT #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
         return { success: true, data: record };
     } catch (error) {
         console.error('âŒ Create ecommerce export error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('ecommerceExports:getCompletedKeys', async () => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+
+        const [completedExports, marketplaceOrders] = await Promise.all([
+            prisma.ecommerceExport.findMany({
+                where: { status: 'completed' },
+                select: { orderNumber: true, ecommerceExportCode: true }
+            }),
+            prisma.order.findMany({
+                where: {
+                    source: { in: ['tiktok', 'shopee', 'lazada', 'tmdt'] }
+                },
+                select: { orderNumber: true }
+            })
+        ]);
+
+        const keys = new Set();
+        for (const record of completedExports) {
+            if (record.orderNumber) keys.add(record.orderNumber.trim());
+            if (record.ecommerceExportCode) keys.add(record.ecommerceExportCode.trim());
+        }
+        for (const order of marketplaceOrders) {
+            if (order.orderNumber) keys.add(order.orderNumber.trim());
+        }
+
+        return { success: true, data: Array.from(keys) };
+    } catch (error) {
+        console.error('Get completed ecommerce keys error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5264,12 +5311,105 @@ function isNetworkError(err) {
     );
 }
 
+function extractTrackingFromNotes(notes) {
+    const match = notes?.match(/Tracking: ([^|]+)/);
+    return match ? match[1].trim() : null;
+}
+
+function normalizeMarketplaceSource(name) {
+    const value = String(name || '').toLowerCase();
+    if (value.includes('tiktok')) return 'tiktok';
+    if (value.includes('shopee')) return 'shopee';
+    if (value.includes('lazada')) return 'lazada';
+    return 'tmdt';
+}
+
+async function ensureMarketplaceOrderInTx(tx, record, actorName) {
+    const orderNumber = (record.orderNumber || record.ecommerceExportCode || '').trim();
+    if (!orderNumber) return;
+
+    const existing = await tx.order.findUnique({
+        where: { orderNumber },
+        select: { id: true }
+    });
+    if (existing) return;
+
+    let createdByUserId = null;
+    if (actorName) {
+        const user = await tx.user.findFirst({
+            where: {
+                OR: [
+                    { username: actorName },
+                    { fullName: actorName }
+                ]
+            },
+            select: { id: true }
+        });
+        if (user) createdByUserId = user.id;
+    }
+
+    const items = typeof record.items === 'string' ? JSON.parse(record.items || '[]') : (record.items || []);
+    const subtotal = items.reduce((sum, item) => sum + Number(item.total || (item.unitPrice || 0) * (item.quantity || 0) || 0), 0);
+    const total = Number(record.totalAmount || subtotal || 0);
+    const trackingNumber = extractTrackingFromNotes(record.notes || null);
+
+    const order = await tx.order.create({
+        data: {
+            orderNumber,
+            source: normalizeMarketplaceSource(record.customerName),
+            status: 'completed',
+            paymentStatus: 'paid',
+            paymentMethod: 'platform',
+            subtotal,
+            shippingFee: 0,
+            total,
+            profit: 0,
+            trackingNumber,
+            note: record.notes || null,
+            createdBy: createdByUserId,
+            createdAt: record.updatedAt || new Date(),
+        }
+    });
+
+    for (const item of items) {
+        await tx.orderItem.create({
+            data: {
+                orderId: order.id,
+                productId: item.productId || null,
+                sku: item.variantSku || `TMDT-${orderNumber}`,
+                productName: item.productName || 'Đơn TMDT',
+                variant: item.color || null,
+                quantity: Number(item.quantity || 0),
+                price: Number(item.unitPrice || 0),
+                cost: 0,
+                discount: 0,
+                subtotal: Number(item.total || (item.unitPrice || 0) * (item.quantity || 0) || 0),
+            }
+        });
+    }
+}
+
 // --- Core logic tach rieng de dung lai khi sync queue ---
 async function execEcommerceExportUpdate(id, data) {
     if (!prisma) throw new Error('Prisma not available');
-    const record = await withStockLock(() => prisma.$transaction(async (tx) => {
+    const result = await withStockLock(() => prisma.$transaction(async (tx) => {
         const oldRecord = await tx.ecommerceExport.findUnique({ where: { id } });
         if (!oldRecord) throw new Error('Khong tim thay phieu xuat.');
+        const nextOrderKey = String(data.orderNumber || data.ecommerceExportCode || oldRecord.orderNumber || oldRecord.ecommerceExportCode || '').trim();
+
+        if (data.status === 'completed' && oldRecord.status !== 'completed' && nextOrderKey) {
+            const existingOrder = await tx.order.findUnique({
+                where: { orderNumber: nextOrderKey },
+                select: { id: true, orderNumber: true, status: true }
+            });
+            if (existingOrder) {
+                return {
+                    skipped: true,
+                    reason: 'existing_order',
+                    data: { ...existingOrder, status: 'completed' }
+                };
+            }
+        }
 
         if (oldRecord.status === 'completed') {
             const oldItemsStr = oldRecord.items || '[]';
@@ -5325,14 +5465,22 @@ async function execEcommerceExportUpdate(id, data) {
                 }
             }
         }
-        return newRecord;
+
+        if (data.status === 'completed' && oldRecord.status !== 'completed') {
+            await ensureMarketplaceOrderInTx(tx, newRecord, data.pickedBy || data.createdBy || oldRecord.pickedBy || oldRecord.createdBy || null);
+        }
+        return { skipped: false, data: newRecord };
     }, { timeout: 30000, maxWait: 10000 }));
-    return record;
+    return result;
 }
 
 ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
     try {
-        const record = await execEcommerceExportUpdate(id, data);
+        const result = await execEcommerceExportUpdate(id, data);
+        if (result?.skipped) {
+            return { success: true, skipped: true, reason: result.reason, data: result.data };
+        }
+        const record = result.data;
         console.log('Updated ecommerce export #' + record.id);
         void logActivity({ module: 'export', action: 'UPDATE', description: 'Cap nhat ban giao TMDT #' + record.id, recordId: record.id });
         return { success: true, data: record };
@@ -5444,11 +5592,21 @@ ipcMain.handle('ecommerceExports:deleteAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
 
-        const count = await prisma.ecommerceExport.deleteMany({});
+        const count = await prisma.$transaction(async (tx) => {
+            const completedDocs = await tx.ecommerceExport.findMany({
+                where: { status: 'completed' }
+            });
+            for (const doc of completedDocs) {
+                await ensureMarketplaceOrderInTx(tx, doc, doc.pickedBy || doc.createdBy || null);
+            }
 
-        console.log(`ðŸ—‘ï¸ Deleted ALL ${count.count} ecommerce exports`);
-        void logActivity({ module: 'export', action: 'DELETE', description: `XÃ³a toÃ n bá»™ ${count.count} bÃ n giao TMDT` });
-        return { success: true, data: count.count };
+            const deleted = await tx.ecommerceExport.deleteMany({});
+            return deleted.count;
+        });
+
+        console.log(`ðŸ—‘ï¸ Deleted ALL ${count} ecommerce exports`);
+        void logActivity({ module: 'export', action: 'DELETE', description: `XÃ³a toÃ n bá»™ ${count} bÃ n giao TMDT` });
+        return { success: true, data: count };
     } catch (error) {
         console.error('âŒ Delete all ecommerce exports error:', error);
         return { success: false, error: error.message };
@@ -5496,23 +5654,32 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
             });
         }
 
-        const existingRecords = orderKeys.length > 0
-            ? await prisma.ecommerceExport.findMany({
-                where: {
-                    status: 'completed',
-                    OR: [
-                        { orderNumber: { in: orderKeys } },
-                        { ecommerceExportCode: { in: orderKeys } }
-                    ]
-                },
-                select: { orderNumber: true, ecommerceExportCode: true }
-            })
-            : [];
+        const [existingRecords, existingOrders] = orderKeys.length > 0
+            ? await Promise.all([
+                prisma.ecommerceExport.findMany({
+                    where: {
+                        status: 'completed',
+                        OR: [
+                            { orderNumber: { in: orderKeys } },
+                            { ecommerceExportCode: { in: orderKeys } }
+                        ]
+                    },
+                    select: { orderNumber: true, ecommerceExportCode: true }
+                }),
+                prisma.order.findMany({
+                    where: { orderNumber: { in: orderKeys } },
+                    select: { orderNumber: true }
+                })
+            ])
+            : [[], []];
 
         const existingOrderKeys = new Set();
         for (const record of existingRecords) {
             if (record.orderNumber) existingOrderKeys.add(record.orderNumber.trim());
             if (record.ecommerceExportCode) existingOrderKeys.add(record.ecommerceExportCode.trim());
+        }
+        for (const order of existingOrders) {
+            if (order.orderNumber) existingOrderKeys.add(order.orderNumber.trim());
         }
 
         const seenIncomingOrderKeys = new Set();
@@ -5611,6 +5778,35 @@ ipcMain.handle('ecommerceExports:bulkCancel', async (event, ids) => {
         return { success: true, data: result.count };
     } catch (error) {
         console.error('âŒ Bulk cancel ecommerce exports error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('marketplaceOrders:getAll', async (event, { since } = {}) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const orders = await prisma.order.findMany({
+            where: {
+                source: { in: ['tiktok', 'shopee', 'lazada', 'tmdt'] },
+                status: 'completed',
+                ...(since ? { createdAt: { gte: new Date(since) } } : {}),
+            },
+            include: {
+                items: true,
+                user: { select: { username: true, fullName: true } },
+            },
+            orderBy: { createdAt: 'desc' },
+        });
+
+        const formatted = orders.map(o => ({
+            ...o,
+            userName: o.user?.username || o.user?.fullName || null,
+            createdAt: o.createdAt.toISOString(),
+            updatedAt: o.updatedAt.toISOString(),
+        }));
+        return { success: true, data: formatted };
+    } catch (error) {
+        console.error('❌ Get marketplace orders error:', error);
         return { success: false, error: error.message };
     }
 });

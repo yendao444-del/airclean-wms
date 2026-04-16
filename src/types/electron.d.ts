@@ -160,6 +160,8 @@ export interface ElectronAPI {
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         bulkDelete: (ids: number[]) => Promise<{ success: boolean; data?: number; error?: string }>;
+        deleteAll: () => Promise<{ success: boolean; data?: number; error?: string }>;
+        getCompletedKeys: () => Promise<{ success: boolean; data?: string[]; error?: string }>;
         bulkCreate: (records: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         selectFolder: () => Promise<{ success: boolean; data?: string; error?: string }>;
         loadExcelFiles: (folderPath: string) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -167,6 +169,9 @@ export interface ElectronAPI {
         startWatch: (folderPath: string) => Promise<{ success: boolean; data?: any; error?: string }>;
         stopWatch: () => Promise<{ success: boolean; error?: string }>;
         onNewFile: (callback: (data: { name: string; base64: string; path: string }) => void) => () => void;
+    };
+    marketplaceOrders: {
+        getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     };
     exportOrders: {
         getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;

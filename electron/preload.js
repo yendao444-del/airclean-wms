@@ -97,6 +97,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         bulkDelete: (ids) => ipcRenderer.invoke('ecommerceExports:bulkDelete', ids),
         deleteAll: () => ipcRenderer.invoke('ecommerceExports:deleteAll'),
         deleteCancelled: () => ipcRenderer.invoke('ecommerceExports:deleteCancelled'),
+        getCompletedKeys: () => ipcRenderer.invoke('ecommerceExports:getCompletedKeys'),
         bulkCreate: (records) => ipcRenderer.invoke('ecommerceExports:bulkCreate', records),
         bulkCancel: (ids) => ipcRenderer.invoke('ecommerceExports:bulkCancel', ids),
         selectFolder: () => ipcRenderer.invoke('ecommerceExport:selectFolder'),
@@ -108,6 +109,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
             ipcRenderer.on('ecommerceExport:newFile', (event, data) => callback(data));
             return () => ipcRenderer.removeAllListeners('ecommerceExport:newFile');
         },
+    },
+    marketplaceOrders: {
+        getAll: (args) => ipcRenderer.invoke('marketplaceOrders:getAll', args),
     },
 
     // Export Orders (XUẤT HÀNG POS)

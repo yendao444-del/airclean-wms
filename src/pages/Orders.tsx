@@ -49,7 +49,7 @@ export default function OrdersPage() {
     const [loading, setLoading] = useState(false);
     const [searchKeyword, setSearchKeyword] = useState('');
     const [sourceFilter, setSourceFilter] = useState<'all' | 'pos' | 'export' | 'tmdt'>('all');
-    const [datePreset, setDatePreset] = useState<DatePreset>('today');
+    const [datePreset, setDatePreset] = useState<DatePreset>('30days');
     const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
 
     // Edit/Delete state
@@ -99,10 +99,14 @@ export default function OrdersPage() {
         try {
             const api = (window as any).electronAPI;
             const since = getSince();
-            const [posRes, exRes, ecRes] = await Promise.all([
+            const marketplacePromise = (async () => ({
+                mode: 'marketplace',
+                res: await api.marketplaceOrders.getAll({ since }),
+            }))();
+            const [posRes, exRes, marketplaceLoad] = await Promise.all([
                 api.posOrder.getAll({ startDate: since }),
                 api.exportOrders.getAll({ since }),
-                api.ecommerceExports.getAll({ since, sinceField: 'updatedAt' }),
+                marketplacePromise,
             ]);
 
             const unified: UnifiedOrder[] = [];
@@ -143,27 +147,48 @@ export default function OrdersPage() {
                 }
             }
 
-            if (ecRes.success && ecRes.data) {
-                for (const ec of ecRes.data) {
-                    if (ec.status !== 'completed') continue;
-                    const trackingMatch = ec.notes?.match(/Tracking: ([^|]+)/);
-                    const shippingMatch = ec.notes?.match(/Shipping: ([^|]+)/);
-                    const ecItemsStr = typeof ec.items === 'string' ? ec.items : JSON.stringify(ec.items || []);
-                    const effectiveDate = ec.updatedAt || ec.ecommerceExportDate || ec.createdAt || '';
-                    unified.push({
-                        id: `TMDT-${ec.id}`, originalId: ec.id, source: 'tmdt',
-                        sourceLabel: ec.customerName?.toLowerCase().includes('tiktok') ? 'TikTok' :
-                            ec.customerName?.toLowerCase().includes('shopee') ? 'Shopee' : 'TMDT',
-                        orderNumber: ec.orderNumber || ec.ecommerceExportCode || `#TMDT-${ec.id}`,
-                        customer: ec.customerName || 'Sàn TMDT', items: ecItemsStr,
-                        totalAmount: ec.totalAmount || 0, status: ec.status,
-                        // TMDT should be counted by pickup/completion time, not import date.
-                        date: effectiveDate,
-                        tracking: trackingMatch ? trackingMatch[1].trim() : undefined,
-                        shipping: shippingMatch ? shippingMatch[1].trim() : undefined,
-                        notes: ec.notes || '',
-                        createdBy: (typeof ec.pickedBy === 'string' && ec.pickedBy) ? ec.pickedBy : (ec.createdBy || ''),
-                    });
+            if (marketplaceLoad.res.success && marketplaceLoad.res.data) {
+                if (marketplaceLoad.mode === 'marketplace') {
+                    for (const ec of marketplaceLoad.res.data) {
+                        const shippingMatch = ec.note?.match(/Shipping: ([^|]+)/);
+                        const ecItemsStr = JSON.stringify(ec.items || []);
+                        const effectiveDate = ec.updatedAt || ec.createdAt || '';
+                        unified.push({
+                            id: `TMDT-${ec.id}`, originalId: ec.id, source: 'tmdt',
+                            sourceLabel: ec.source === 'tiktok' ? 'TikTok' :
+                                ec.source === 'shopee' ? 'Shopee' :
+                                    ec.source === 'lazada' ? 'Lazada' : 'TMDT',
+                            orderNumber: ec.orderNumber || `#TMDT-${ec.id}`,
+                            customer: ec.source ? ec.source.toUpperCase() : 'Sàn TMDT', items: ecItemsStr,
+                            totalAmount: ec.total || 0, status: ec.status,
+                            date: effectiveDate,
+                            tracking: ec.trackingNumber || undefined,
+                            shipping: shippingMatch ? shippingMatch[1].trim() : undefined,
+                            notes: ec.note || '',
+                            createdBy: ec.userName || '',
+                        });
+                    }
+                } else {
+                    for (const ec of marketplaceLoad.res.data) {
+                        if (ec.status !== 'completed') continue;
+                        const trackingMatch = ec.notes?.match(/Tracking: ([^|]+)/);
+                        const shippingMatch = ec.notes?.match(/Shipping: ([^|]+)/);
+                        const ecItemsStr = typeof ec.items === 'string' ? ec.items : JSON.stringify(ec.items || []);
+                        const effectiveDate = ec.updatedAt || ec.ecommerceExportDate || ec.createdAt || '';
+                        unified.push({
+                            id: `TMDT-${ec.id}`, originalId: ec.id, source: 'tmdt',
+                            sourceLabel: ec.customerName?.toLowerCase().includes('tiktok') ? 'TikTok' :
+                                ec.customerName?.toLowerCase().includes('shopee') ? 'Shopee' : 'TMDT',
+                            orderNumber: ec.orderNumber || ec.ecommerceExportCode || `#TMDT-${ec.id}`,
+                            customer: ec.customerName || 'SÃ n TMDT', items: ecItemsStr,
+                            totalAmount: ec.totalAmount || 0, status: ec.status,
+                            date: effectiveDate,
+                            tracking: trackingMatch ? trackingMatch[1].trim() : undefined,
+                            shipping: shippingMatch ? shippingMatch[1].trim() : undefined,
+                            notes: ec.notes || '',
+                            createdBy: (typeof ec.pickedBy === 'string' && ec.pickedBy) ? ec.pickedBy : (ec.createdBy || ''),
+                        });
+                    }
                 }
             }
 
@@ -433,11 +458,7 @@ export default function OrdersPage() {
                 }
                 // Xóa TMDT (bulk)
                 if (tmdtOrders.length > 0) {
-                    try {
-                        const ids = tmdtOrders.map(o => o.originalId);
-                        const res = await api.ecommerceExports.bulkDelete(ids);
-                        if (res.success) successCount += tmdtOrders.length; else errorCount += tmdtOrders.length;
-                    } catch { errorCount += tmdtOrders.length; }
+                    message.warning('Bo qua xoa don TMDT tu man Don hang de tranh xoa nham.');
                 }
 
                 if (successCount > 0) message.success(`✅ Đã xóa ${successCount} đơn hàng!`);

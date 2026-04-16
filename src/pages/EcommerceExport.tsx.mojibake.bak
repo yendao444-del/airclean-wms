@@ -49,16 +49,16 @@ interface ExportItem {
 interface EcommerceExport {
     id: number;
     customerName: string;
-    ecommerceExportCode?: string; // Mã hoàn hàng
-    orderNumber?: string; // S� �ơn hàng g�c
-    ecommerceExportReason?: string; // Lý do hoàn
+    ecommerceExportCode?: string; // MÃ£ hoÃ n hÃ ng
+    orderNumber?: string; // Sá»‘ Ä‘Æ¡n hÃ ng gá»‘c
+    ecommerceExportReason?: string; // LÃ½ do hoÃ n
     ecommerceExportDate: string;
     items: string; // JSON string
     totalAmount: number;
     notes?: string;
     status: string;
     createdBy?: string;
-    pickedBy?: string; // �x� Người �óng gói/pickup
+    pickedBy?: string; // ðŸ‘¤ NgÆ°á»i Ä‘Ã³ng gÃ³i/pickup
     createdAt?: Date;
 }
 
@@ -120,11 +120,10 @@ export default function EcommerceExportPage() {
     const [scanStatus, setScanStatus] = useState<{
         type: 'idle' | 'success' | 'error' | 'warning';
         message: string;
-    }>({ type: 'idle', message: 'Sẵn sàng quét mã...' });
+    }>({ type: 'idle', message: 'Sáºµn sÃ ng quÃ©t mÃ£...' });
     const [scanValue, setScanValue] = useState('');
     const scanInputRef = useRef<any>(null);
     const tempPendingIdRef = useRef(-1);
-    const inFlightScanKeysRef = useRef<Set<string>>(new Set());
     // ðŸš€ In-memory mirror giá»‘ng allOrders cá»§a tool gá»‘c â€” khÃ´ng await DB má»—i láº§n quÃ©t
     const exportsRef = useRef<EcommerceExport[]>([]);
     // ðŸ—ºï¸ O(1) Tracking lookup Map â€” tracking â†’ record ID (khÃ´ng dÃ¹ng index vÃ¬ index sáº½ stale sau reload)
@@ -234,16 +233,16 @@ export default function EcommerceExportPage() {
         const handleOnline = async () => {
             const res = await (window as any).electronAPI.offlineQueue.status();
             if (!res.success || res.pendingCount === 0) return;
-            message.loading({ content: `Đang đồng bộ ${res.pendingCount} đơn chờ...`, key: 'offlineSync', duration: 0 });
+            message.loading({ content: `Äang Ä‘á»“ng bá»™ ${res.pendingCount} Ä‘Æ¡n chá»...`, key: 'offlineSync', duration: 0 });
             const syncRes = await (window as any).electronAPI.offlineQueue.sync();
             if (syncRes.success) {
                 setOfflinePending(syncRes.remaining || 0);
                 if (syncRes.synced > 0) {
-                    message.success({ content: `Đã đồng bộ ${syncRes.synced} đơn thành công!`, key: 'offlineSync', duration: 3 });
+                    message.success({ content: `ÄÃ£ Ä‘á»“ng bá»™ ${syncRes.synced} Ä‘Æ¡n thÃ nh cÃ´ng!`, key: 'offlineSync', duration: 3 });
                     loadEcommerceExports(true);
                 }
                 if (syncRes.failed > 0) {
-                    message.warning({ content: `${syncRes.failed} đơn đồng bộ thất bại, sẽ thử lại sau.`, key: 'offlineSync', duration: 4 });
+                    message.warning({ content: `${syncRes.failed} Ä‘Æ¡n Ä‘á»“ng bá»™ tháº¥t báº¡i, sáº½ thá»­ láº¡i sau.`, key: 'offlineSync', duration: 4 });
                 }
             }
         };
@@ -340,11 +339,6 @@ export default function EcommerceExportPage() {
         return String(record.orderNumber || record.ecommerceExportCode || '').trim();
     }, []);
 
-    const getTrackingKey = useCallback((record: Partial<EcommerceExport>) => {
-        const match = record.notes?.match(/Tracking: ([^|]+)/);
-        return match ? match[1].trim() : '';
-    }, []);
-
     const normalizeDbExports = useCallback((records: EcommerceExport[]) => {
         return records.filter(r => r.status !== 'pending');
     }, []);
@@ -357,55 +351,13 @@ export default function EcommerceExportPage() {
         setEcommerceExports(merged);
     }, [rebuildTrackingMap]);
 
-    const loadCompletedOrderKeys = useCallback(async () => {
-        const [exportsResult, ordersResult] = await Promise.all([
-            window.electronAPI.ecommerceExports.getAll({}),
-            window.electronAPI.marketplaceOrders.getAll({}),
-        ]);
-
-        if (!exportsResult?.success || !Array.isArray(exportsResult.data)) {
-            throw new Error(exportsResult?.error || 'Khong tai duoc danh sach TMDT da hoan tat.');
-        }
-        if (!ordersResult?.success || !Array.isArray(ordersResult.data)) {
-            throw new Error(ordersResult?.error || 'Khong tai duoc danh sach don hang TMDT.');
-        }
-
-        const exportKeys = exportsResult.data
-            .filter((record: any) => record?.status === 'completed')
-            .flatMap((record: any) => [record?.orderNumber, record?.ecommerceExportCode]);
-
-        const orderKeys = ordersResult.data
-            .flatMap((record: any) => [record?.orderNumber, record?.trackingNumber, record?.tracking]);
-
-        const keys = [...exportKeys, ...orderKeys]
-            .map((key: string) => String(key || '').trim())
-            .filter(Boolean);
-
-        return new Set<string>(keys);
-    }, []);
-
-    const normalizeFolderImportError = useCallback((error?: string) => {
-        const text = String(error || '').trim();
-        if (!text) return 'Lỗi import từ thư mục!';
-        if (text === 'Không có thư mục được chọn' || text.includes('KhÃ´ng cÃ³ thÆ° má»¥c Ä‘Æ°á»£c chá»n')) {
-            return 'Không có thư mục được chọn';
-        }
-        if (text.includes('KhÃ´ng tÃ¬m tháº¥y file Excel nÃ o trong thÆ° má»¥c')) {
-            return 'Không tìm thấy file Excel nào trong thư mục';
-        }
-        return text;
-    }, []);
-
-    const appendPendingToLocalQueue = useCallback((records: EcommerceExport[], persistedCompletedKeys?: Set<string>) => {
+    const appendPendingToLocalQueue = useCallback((records: EcommerceExport[]) => {
         const existingCompletedKeys = new Set(
             exportsRef.current
                 .filter(r => r.status === 'completed')
                 .map(r => getOrderKey(r))
                 .filter(Boolean)
         );
-        for (const key of persistedCompletedKeys || []) {
-            existingCompletedKeys.add(key);
-        }
         const existingPendingKeys = new Set(
             exportsRef.current
                 .filter(r => r.status === 'pending')
@@ -474,7 +426,7 @@ export default function EcommerceExportPage() {
 
             const result = await window.electronAPI.ecommerceExports.bulkDelete(cancelledIds);
             if (!result?.success) {
-                if (!silent) message.error(result?.error || 'Không thỒ xóa �ơn TMDT �ã hủy');
+                if (!silent) message.error(result?.error || 'KhÃ´ng thá»ƒ xÃ³a Ä‘Æ¡n TMDT Ä‘Ã£ há»§y');
                 return 0;
             }
             const deletedCount = result.data || cancelledIds.length;
@@ -501,7 +453,7 @@ export default function EcommerceExportPage() {
                 setProducts(result.data);
             }
         } catch (error) {
-            message.error('Lỗi khi tải sản phẩm');
+            message.error('Lá»—i khi táº£i sáº£n pháº©m');
         }
     };
 
@@ -510,10 +462,10 @@ export default function EcommerceExportPage() {
         setEcommerceExportItems([]);
         form.resetFields();
         form.setFieldsValue({
-            customerName: 'Khách sàn TMDT',
+            customerName: 'KhÃ¡ch sÃ n TMDT',
             ecommerceExportDate: dayjs(),
             status: 'completed',
-            ecommerceExportReason: 'Lỗi sản phẩm',
+            ecommerceExportReason: 'Lá»—i sáº£n pháº©m',
         });
 
         setMethodModalVisible(true);
@@ -547,36 +499,36 @@ export default function EcommerceExportPage() {
     const handleDelete = (ecommerceExportRecord: EcommerceExport) => {
         // ðŸ” Chá»‰ admin má»›i Ä‘Æ°á»£c xÃ³a
         if (!isAdmin) {
-            message.error('Chỉ quản trị viên mới có quyền xóa đơn hàng!');
+            message.error('Chá»‰ quáº£n trá»‹ viÃªn má»›i cÃ³ quyá»n xÃ³a Ä‘Æ¡n hÃ ng!');
             return;
         }
 
         Modal.confirm({
-            title: 'Xóa phiếu xuất?',
-            content: `Bạn có chắc muốn xóa phiếu xuất #${ecommerceExportRecord.id}?`,
-            okText: 'Xóa',
+            title: 'XÃ³a phiáº¿u xuáº¥t?',
+            content: `Báº¡n cÃ³ cháº¯c muá»‘n xÃ³a phiáº¿u xuáº¥t #${ecommerceExportRecord.id}?`,
+            okText: 'XÃ³a',
             okType: 'danger',
-            cancelText: 'Hủy',
+            cancelText: 'Há»§y',
             onOk: async () => {
                 if (ecommerceExportRecord.status === 'pending') {
                     const nextRecords = ecommerceExports.filter(r => r.id !== ecommerceExportRecord.id);
                     exportsRef.current = nextRecords;
                     rebuildTrackingMap(nextRecords);
                     setEcommerceExports(nextRecords);
-                    message.success('Đã xóa đơn chờ khỏi danh sách tạm!');
+                    message.success('Ã„ÂÃƒÂ£ xÃƒÂ³a Ã„â€˜Ã†Â¡n chÃ¡Â»Â khÃ¡Â»Âi danh sÃƒÂ¡ch tÃ¡ÂºÂ¡m!');
                     return;
                 }
                 try {
                     const result = await window.electronAPI.ecommerceExports.delete(ecommerceExportRecord.id);
                     if (result.success) {
-                        message.success('Đã xóa phiếu xuất!');
+                        message.success('ÄÃ£ xÃ³a phiáº¿u xuáº¥t!');
                         loadEcommerceExports();
                     } else {
-                        message.error('Lỗi khi xóa phiếu xuất: ' + (result.error || 'Unknown error'));
+                        message.error('Lá»—i khi xÃ³a phiáº¿u xuáº¥t: ' + (result.error || 'Unknown error'));
                     }
                 } catch (error) {
                     console.error('Delete error:', error);
-                    message.error('Lỗi khi xóa phiếu xuất!');
+                    message.error('Lá»—i khi xÃ³a phiáº¿u xuáº¥t!');
                 }
             },
         });
@@ -586,48 +538,48 @@ export default function EcommerceExportPage() {
     const handleBulkDelete = () => {
         // ðŸ” Chá»‰ admin má»›i Ä‘Æ°á»£c xÃ³a
         if (!isAdmin) {
-            message.error('Chỉ quản trị viên mới có quyền xóa đơn hàng!');
+            message.error('Chá»‰ quáº£n trá»‹ viÃªn má»›i cÃ³ quyá»n xÃ³a Ä‘Æ¡n hÃ ng!');
             return;
         }
 
         if (selectedRowKeys.length === 0) {
-            message.warning('Vui lòng chọn ít nhất 1 phiếu để xóa!');
+            message.warning('Vui lÃ²ng chá»n Ã­t nháº¥t 1 phiáº¿u Ä‘á»ƒ xÃ³a!');
             return;
         }
 
         const selectedecommerceExports = ecommerceExports.filter(r => selectedRowKeys.includes(r.id));
 
         Modal.confirm({
-            title: `Xác nhận xóa ${selectedRowKeys.length} phiếu xuất?`,
+            title: `XÃ¡c nháº­n xÃ³a ${selectedRowKeys.length} phiáº¿u xuáº¥t?`,
             content: (
                 <div>
-                    <p>Ban co chac muon xoa cac phieu xuat sau:</p>
+                    <p>Báº¡n cÃ³ cháº¯c muá»‘n xÃ³a cÃ¡c phiáº¿u xuáº¥t sau:</p>
                     <div style={{ maxHeight: 200, overflowY: 'auto', padding: 8, background: '#f5f5f5', borderRadius: 4 }}>
                         {selectedecommerceExports.map(r => (
                             <div key={r.id} style={{ padding: '4px 0' }}>
-                                - {r.orderNumber || r.ecommerceExportCode || `#${r.id}`} - {r.customerName}
+                                â€¢ {r.orderNumber || r.ecommerceExportCode || `#${r.id}`} - {r.customerName}
                             </div>
                         ))}
                     </div>
                 </div>
             ),
-            okText: 'Xoa tat ca',
+            okText: 'XÃ³a táº¥t cáº£',
             okType: 'danger',
-            cancelText: 'Huy',
+            cancelText: 'Há»§y',
             width: 600,
             onOk: async () => {
                 try {
                     const result = await window.electronAPI.ecommerceExports.bulkDelete(selectedRowKeys);
                     if (result.success) {
-                        message.success(`Đã xóa ${selectedRowKeys.length} phiếu xuất!`);
+                        message.success(`ÄÃ£ xÃ³a ${selectedRowKeys.length} phiáº¿u xuáº¥t!`);
                         setSelectedRowKeys([]);
                         loadEcommerceExports();
                     } else {
-                        message.error('Lỗi khi xóa phiếu xuất: ' + (result.error || 'Unknown error'));
+                        message.error('Lá»—i khi xÃ³a phiáº¿u xuáº¥t: ' + (result.error || 'Unknown error'));
                     }
                 } catch (error) {
                     console.error('Bulk delete error:', error);
-                    message.error('Lỗi khi xóa phiếu xuất hàng loạt!');
+                    message.error('Lá»—i khi xÃ³a phiáº¿u xuáº¥t hÃ ng loáº¡t!');
                 }
             },
         });
@@ -645,7 +597,7 @@ export default function EcommerceExportPage() {
         }
 
         Modal.confirm({
-            title: `Xóa ${statusCounts.cancelled} �ơn TMDT �ã hủy?`,
+            title: `XÃ³a ${statusCounts.cancelled} Ä‘Æ¡n TMDT Ä‘Ã£ há»§y?`,
             content: 'Thao tÃ¡c nÃ y sáº½ xÃ³a toÃ n bá»™ Ä‘Æ¡n cÃ³ tráº¡ng thÃ¡i cancelled trong Xuáº¥t hÃ ng TMDT. KhÃ´ng áº£nh hÆ°á»Ÿng Ä‘Æ¡n Ä‘Ã£ hoÃ n thÃ nh á»Ÿ má»¥c ÄÆ¡n hÃ ng.',
             okText: 'XÃ³a Ä‘Æ¡n há»§y',
             okType: 'danger',
@@ -665,20 +617,20 @@ export default function EcommerceExportPage() {
         const { chatId, apiToken } = telegramSettings;
 
         if (!chatId || !apiToken) {
-            console.warn('Chưa cấu hình Telegram, bỏ qua gửi thông báo');
+            console.warn('âš ï¸ ChÆ°a cáº¥u hÃ¬nh Telegram, bá» qua gá»­i thÃ´ng bÃ¡o');
             return;
         }
 
         try {
-            // Xác định nguồn (TikTok hoặc Shopee)
+            // XÃ¡c Ä‘á»‹nh nguá»“n (TikTok hoáº·c Shopee)
             const customerName = ecommerceExport.customerName || '';
             const isTikTok = customerName.toLowerCase().includes('tiktok');
             const source = isTikTok ? 'TIKTOK' : 'SHOPEE';
 
-            // Lấy tracking number
+            // Láº¥y tracking number
             const trackingNumber = ecommerceExport.notes?.match(/Tracking: ([^|]+)/)?.[1]?.trim() || 'N/A';
 
-            // Đếm số thứ tự (reset theo ngày)
+            // Äáº¿m sá»‘ thá»© tá»± (reset theo ngÃ y)
             const today = dayjs().format('YYYY-MM-DD');
             const counterDateResult = await window.electronAPI.appConfig.get('telegramOrderCounterDate');
             const lastDate = counterDateResult.success && counterDateResult.data ? counterDateResult.data : '';
@@ -686,7 +638,7 @@ export default function EcommerceExportPage() {
             const counterResult = await window.electronAPI.appConfig.get('telegramOrderCounter');
             let orderCounter = counterResult.success && counterResult.data ? parseInt(counterResult.data) : 0;
 
-            // Reset counter nếu sang ngày mới
+            // Reset counter náº¿u sang ngÃ y má»›i
             if (lastDate !== today) {
                 orderCounter = 0;
                 await window.electronAPI.appConfig.set('telegramOrderCounterDate', today);
@@ -695,15 +647,15 @@ export default function EcommerceExportPage() {
             orderCounter++;
             await window.electronAPI.appConfig.set('telegramOrderCounter', orderCounter.toString());
 
-            // Thời gian hiện tại
+            // Thá»i gian hiá»‡n táº¡i
             const currentTime = dayjs().format('YYYY-MM-DD HH:mm:ss');
 
-            // Format message đơn giản như Python
-            const messageText = `✅ ĐƠN HÀNG ${source}
-Số thứ tự: ${orderCounter}
-Mã vận đơn: ${trackingNumber}
+            // Format message Ä‘Æ¡n giáº£n nhÆ° Python
+            const messageText = `âœ… ÄÆ N HÃ€NG ${source}
+Sá»‘ thá»© tá»±: ${orderCounter}
+MÃ£ váº­n Ä‘Æ¡n: ${trackingNumber}
 File: Web App - ${ecommerceExport.orderNumber || ecommerceExport.ecommerceExportCode}
-Thời gian: ${currentTime}`;
+Thá»i gian: ${currentTime}`;
 
             const url = `https://api.telegram.org/bot${apiToken}/sendMessage`;
             const response = await fetch(url, {
@@ -719,10 +671,10 @@ Thời gian: ${currentTime}`;
                 throw new Error('Failed to send Telegram message');
             }
 
-            console.log('Đã gửi thông báo Telegram thành công');
+            console.log('âœ… ÄÃ£ gá»­i thÃ´ng bÃ¡o Telegram thÃ nh cÃ´ng');
         } catch (error) {
-            console.error('Lỗi khi gửi Telegram:', error);
-            // Không hiện message lỗi cho user để không làm gián đoạn workflow
+            console.error('âŒ Lá»—i khi gá»­i Telegram:', error);
+            // KhÃ´ng hiá»‡n message lá»—i cho user Ä‘á»ƒ khÃ´ng lÃ m giÃ¡n Ä‘oáº¡n workflow
         }
     };
 
@@ -738,16 +690,6 @@ Thời gian: ${currentTime}`;
     const handleScan = async (code: string) => {
         const trimmed = code.trim();
         if (!trimmed) return;
-        if (inFlightScanKeysRef.current.has(trimmed)) {
-            setScanStatus({
-                type: 'warning',
-                message: `ĐANG XỬ LÝ - ${trimmed}`,
-            });
-            message.warning(`Mã ${trimmed} đang được xử lý, vui lòng chờ.`);
-            setScanValue('');
-            scanInputRef.current?.focus();
-            return;
-        }
 
         // ðŸ§¹ Clear input
         setScanValue('');
@@ -793,26 +735,20 @@ Thời gian: ${currentTime}`;
                 playAlert();
                 setScanStatus({
                     type: 'error',
-                    message: `ĐƠN ĐÃ HỦY - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                    message: `ðŸš¨ ÄÆ N ÄÃƒ Há»¦Y - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                 });
-                message.error(`Đơn đã bị hủy trên sàn, không được giao: ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`);
+                message.error(`â›” ÄÆ N ÄÃƒ Bá»Š Há»¦Y TRÃŠN SÃ€N! KhÃ´ng Ä‘Æ°á»£c giao: ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`);
             } else if (foundEcommerceExport.status === 'completed') {
                 // âš ï¸ ÄÆ¡n hÃ ng Ä‘Ã£ Ä‘Æ°á»£c bÃ n giao DVVC rá»“i
                 playAlert();
                 setScanStatus({
                     type: 'warning',
-                    message: `ĐÃ PICKUP - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                    message: `âš ï¸ ÄÃƒ PICKUP - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                 });
-                message.warning(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} đã gửi rồi!`);
+                message.warning(`ÄÆ¡n ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} Ä‘Ã£ gá»­i rá»“i!`);
             } else {
                 // âœ… ÄÆ¡n hÃ ng chÆ°a pickup â†’ Cáº­p nháº­t thÃ nh "ÄÃ£ bÃ n giao DVVC" + TRá»ª Tá»’N KHO
                 const targetId = foundEcommerceExport.id;
-                const orderKey = getOrderKey(foundEcommerceExport);
-                const trackingKey = getTrackingKey(foundEcommerceExport);
-                const requestKeys = [trimmed, orderKey, trackingKey].filter(Boolean);
-                for (const key of requestKeys) {
-                    inFlightScanKeysRef.current.add(key);
-                }
                 const pickerName = activePackerRef.current || currentUser || null;
                 const completedPayload = {
                     ...foundEcommerceExport,
@@ -825,7 +761,7 @@ Thời gian: ${currentTime}`;
                 playSuccess();
                 setScanStatus({
                     type: 'success',
-                    message: `SẼ CẬP NHẬT - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                    message: `âœ… Sáº¼ Cáº¬P NHáº¬T - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                 });
 
                 // ðŸš€ Cáº­p nháº­t ref ngay láº­p tá»©c Ä‘á»ƒ scan tiáº¿p khÃ´ng bá»‹ stale
@@ -848,22 +784,9 @@ Thời gian: ${currentTime}`;
                             playAlert();
                             setScanStatus({
                                 type: 'warning',
-                                message: `ĐÃ PICKUP - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
+                                message: `ÄÃƒ PICKUP - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
                             });
-                            message.warning(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} đã gửi rồi!`);
-                            const nextRecords = exportsRef.current.filter(r => r.id !== targetId);
-                            exportsRef.current = nextRecords;
-                            rebuildTrackingMap(nextRecords);
-                            setEcommerceExports(nextRecords);
-                            return;
-                        }
-                        if (updateResAny?.skipped && updateResAny?.data?.status === 'completed') {
-                            playAlert();
-                            setScanStatus({
-                                type: 'warning',
-                                message: `ĐÃ PICKUP - ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode}`,
-                            });
-                            message.warning(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} đã hoàn tất rồi!`);
+                            message.warning(`ÄÆ¡n ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} Ä‘Ã£ gá»­i rá»“i!`);
                             const nextRecords = exportsRef.current.filter(r => r.id !== targetId);
                             exportsRef.current = nextRecords;
                             rebuildTrackingMap(nextRecords);
@@ -916,12 +839,8 @@ Thời gian: ${currentTime}`;
                         scheduleBgSync();
                     } catch (error) {
                         console.error('Error updating stock/status:', error);
-                        message.error('Lỗi khi cập nhật!');
+                        message.error('Lá»—i khi cáº­p nháº­t!');
                         playAlert();
-                    } finally {
-                        for (const key of requestKeys) {
-                            inFlightScanKeysRef.current.delete(key);
-                        }
                     }
                 })();
             }
@@ -929,9 +848,9 @@ Thời gian: ${currentTime}`;
             playAlert();
             setScanStatus({
                 type: 'error',
-                message: `KHÔNG TÌM THẤY - Mã quét: ${trimmed}`,
+                message: `âŒ KHÃ”NG TÃŒM THáº¤Y - MÃ£ quÃ©t: ${trimmed}`,
             });
-            message.warning(`Không tìm thấy đơn hàng với mã: ${trimmed}`);
+            message.warning(`KhÃ´ng tÃ¬m tháº¥y Ä‘Æ¡n hÃ ng vá»›i mÃ£: ${trimmed}`);
 
             // âš¡ LÆ°u vÃ o danh sÃ¡ch "Lá»‡ch Ä‘Æ¡n" (trÃ¡nh trÃ¹ng)
             setUnmatchedScans(prev => {
@@ -970,7 +889,7 @@ Thời gian: ${currentTime}`;
                     const json = XLSX.utils.sheet_to_json(sheet) as any[];
 
                     if (json.length === 0) {
-                        message.warning('File Excel trong!');
+                        message.warning('File Excel trá»‘ng!');
                         return;
                     }
 
@@ -986,17 +905,17 @@ Thời gian: ${currentTime}`;
                     // Náº¿u khÃ´ng tÃ¬m tháº¥y báº±ng keyword, há»i ngÆ°á»i dÃ¹ng hoáº·c láº¥y cá»™t Ä‘áº§u tiÃªn cÃ³ váº» chá»©a tracking
                     if (!trackingKey) {
                         trackingKey = Object.keys(firstRow)[0]; // Fallback láº¥y cá»™t Ä‘áº§u tiÃªn
-                        message.info(`Khong tim thay cot Tracking ID, dang dung cot: [${trackingKey}]`);
+                        message.info(`KhÃ´ng tÃ¬m tháº¥y cá»™t 'MÃ£ váº­n Ä‘Æ¡n', Ä‘ang dÃ¹ng cá»™t: [${trackingKey}]`);
                     }
 
                     const trackings = [...new Set(json.map(row => String(row[trackingKey] || '').trim()).filter(Boolean))];
 
                     if (trackings.length === 0) {
-                        message.error('Khong tim thay du lieu Tracking ID trong file!');
+                        message.error('KhÃ´ng tÃ¬m tháº¥y dá»¯ liá»‡u mÃ£ váº­n Ä‘Æ¡n trong file!');
                         return;
                     }
 
-                    message.loading({ content: `Dang xu ly ${trackings.length} ma van don...`, key: 'bulkScan' });
+                    message.loading({ content: `Äang xá»­ lÃ½ ${trackings.length} mÃ£ váº­n Ä‘Æ¡n...`, key: 'bulkScan' });
 
                     let successCount = 0;
                     let errorCount = 0;
@@ -1012,11 +931,11 @@ Thời gian: ${currentTime}`;
                         await handleScan(tracking);
                     }
 
-                    message.success({ content: `Da xu ly xong file Excel (${trackings.length} ma).`, key: 'bulkScan', duration: 4 });
+                    message.success({ content: `ÄÃ£ xá»­ lÃ½ xong file Excel (Nháº­p: ${trackings.length} mÃ£).`, key: 'bulkScan', duration: 4 });
 
                 } catch (error) {
                     console.error('Scan Excel Error:', error);
-                    message.error({ content: 'Loi doc file Excel!', key: 'bulkScan' });
+                    message.error({ content: 'Lá»—i Ä‘á»c file Excel!', key: 'bulkScan' });
                 }
             };
             reader.readAsBinaryString(file);
@@ -1070,7 +989,7 @@ Thời gian: ${currentTime}`;
                     'NgÃ y hoÃ n': dayjs(ecommerceExport.ecommerceExportDate).format('DD/MM/YYYY'),
                     'Shipping Provider': shipping,
                     'Tá»•ng tiá»n': ecommerceExport.totalAmount,
-                    'Trạng thái': ecommerceExport.status === 'completed' ? 'Hoàn thành' : 'Đang xử lý',
+                    'Tráº¡ng thÃ¡i': ecommerceExport.status === 'completed' ? 'HoÃ n thÃ nh' : 'Äang xá»­ lÃ½',
                     'Ghi chÃº': ecommerceExport.notes,
                 };
             });
@@ -1139,11 +1058,6 @@ Thời gian: ${currentTime}`;
             let shouldUpdateStock = false;
             let oldStatus = '';
 
-            if (values.status === 'pending') {
-                message.error('Khong duoc tao pending thu cong. Pending chi duoc nap tu file Excel.');
-                return;
-            }
-
             if (editingEcommerceExport) {
                 // EDIT MODE - Kiá»ƒm tra xem cÃ³ chuyá»ƒn tá»« pending â†’ completed khÃ´ng
                 oldStatus = editingEcommerceExport.status;
@@ -1197,8 +1111,8 @@ Thời gian: ${currentTime}`;
             saveEcommerceExports(updatedEcommerceExports);
 
             const successMsg = editingEcommerceExport
-                ? '�S& Đã cập nhật phiếu xuất!' + (shouldUpdateStock ? ' + Trừ t�n kho!' : '')
-                : '�S& Đã tạo phiếu xuất m�:i!' + (shouldUpdateStock ? ' + Trừ t�n kho!' : '');
+                ? 'âœ… ÄÃ£ cáº­p nháº­t phiáº¿u xuáº¥t!' + (shouldUpdateStock ? ' + Trá»« tá»“n kho!' : '')
+                : 'âœ… ÄÃ£ táº¡o phiáº¿u xuáº¥t má»›i!' + (shouldUpdateStock ? ' + Trá»« tá»“n kho!' : '');
 
             message.success(successMsg);
             setModalVisible(false);
@@ -1267,7 +1181,6 @@ Thời gian: ${currentTime}`;
 
         reader.onload = async (e) => {
             try {
-                const persistedCompletedKeys = await loadCompletedOrderKeys();
                 const data = e.target?.result;
                 const workbook = XLSX.read(data, { type: 'binary' });
                 const sheetName = workbook.SheetNames[0];
@@ -1284,7 +1197,7 @@ Thời gian: ${currentTime}`;
                 console.log('ðŸ” Detected source:', { isTikTok, isShopee });
 
                 if (!isTikTok && !isShopee) {
-                    message.error('File Excel khong dung dinh dang TikTok hoac Shopee!');
+                    message.error('âŒ File Excel khÃ´ng Ä‘Ãºng Ä‘á»‹nh dáº¡ng TikTok hoáº·c Shopee!');
                     return;
                 }
 
@@ -1378,7 +1291,7 @@ Thời gian: ${currentTime}`;
                         const shippingProvider = row['ÄÆ¡n Vá»‹ Váº­n Chuyá»ƒn'] || '';
                         const trackingId = row['MÃ£ váº­n Ä‘Æ¡n'] || '';
                         const ecommerceExportReason = row['Tráº¡ng ThÃ¡i ÄÆ¡n HÃ ng'] || 'Há»§y Ä‘Æ¡n Shopee';
-                        const rawAmount = row['T�"ng s� tiền Người mua thanh toán'] ?? row['T�"ng giá tr�9 �ơn hàng (VND)'] ?? row['T�"ng giá bán (sản phẩm)'] ?? row['T�"ng �ơn hàng'] ?? row['Thành tiền'] ?? row['T�"ng c�"ng'] ?? 0;
+                        const rawAmount = row['Tá»•ng sá»‘ tiá»n NgÆ°á»i mua thanh toÃ¡n'] ?? row['Tá»•ng giÃ¡ trá»‹ Ä‘Æ¡n hÃ ng (VND)'] ?? row['Tá»•ng giÃ¡ bÃ¡n (sáº£n pháº©m)'] ?? row['Tá»•ng Ä‘Æ¡n hÃ ng'] ?? row['ThÃ nh tiá»n'] ?? row['Tá»•ng cá»™ng'] ?? 0;
                         const totalAmount = typeof rawAmount === 'number' ? rawAmount : parseFloat(String(rawAmount).replace(/,/g, '')) || 0;
                         const unitPrice = quantity > 0 ? totalAmount / quantity : totalAmount;
 
@@ -1457,40 +1370,41 @@ Thời gian: ${currentTime}`;
                     newEcommerceExports.push(newEcommerceExport);
                 });
 
-                let importedCount = 0;
                 if (newEcommerceExports.length > 0) {
                     try {
-                        const bulkResult = appendPendingToLocalQueue(newEcommerceExports, persistedCompletedKeys);
-                        importedCount = bulkResult.count ?? newEcommerceExports.length;
+                        const bulkResult = appendPendingToLocalQueue(newEcommerceExports);
+                        const insertedCount = bulkResult.count ?? newEcommerceExports.length;
                         const skippedInDb = bulkResult.skipped ?? 0;
                         if (skippedInDb > 0) {
                             skippedCount += skippedInDb;
                         }
-                        console.log(`Loaded ${importedCount} pending records into local queue`);
+                        console.log(`Loaded ${insertedCount} pending records into local queue`);
+                        newEcommerceExports.splice(insertedCount);
                     } catch (dbError) {
                         console.error('Error loading pending records into local queue:', dbError);
-                        message.error('Lỗi khi nạp dữ liệu vào danh sách pending tạm!');
+                        message.error('L?i khi n?p d? li?u vào danh sách pending t?m!');
                         return;
                     }
                 }
 
                 const source = isTikTok ? 'TikTok' : 'Shopee';
 
-                if (importedCount === 0) {
+                if (newEcommerceExports.length === 0) {
+                    // KhÃ´ng cÃ³ gÃ¬ má»›i, khÃ´ng cÃ³ gÃ¬ há»§y
                     if (skippedCount > 0) {
-                        message.warning(`Tất cả ${skippedCount} đơn hàng đều đã tồn tại trong hệ thống!`);
+                        message.warning(`âš ï¸ Táº¥t cáº£ ${skippedCount} Ä‘Æ¡n hÃ ng Ä‘á»u Ä‘Ã£ tá»“n táº¡i trong há»‡ thá»‘ng!`);
                     } else {
-                        message.warning('Không tìm thấy dữ liệu hợp lệ trong file Excel!');
+                        message.warning('KhÃ´ng tÃ¬m tháº¥y dá»¯ liá»‡u há»£p lá»‡ trong file Excel!');
                     }
                 } else {
                     const parts: string[] = [];
-                    parts.push(`Đã import ${importedCount} đơn mới từ ${source}`);
-                    if (skippedCount > 0) parts.push(`bỏ qua ${skippedCount} đơn trùng`);
+                    if (newEcommerceExports.length > 0) parts.push(`âœ… Import ${newEcommerceExports.length} Ä‘Æ¡n má»›i tá»« ${source}`);
+                    if (skippedCount > 0) parts.push(`bá» qua ${skippedCount} trÃ¹ng`);
                     message.success(parts.join(' | '));
                 }
             } catch (error) {
                 console.error('Import error:', error);
-                message.error(error instanceof Error ? error.message : 'Loi import Excel.');
+                message.error('Lá»—i khi Ä‘á»c file Excel!');
             }
         };
 
@@ -1505,22 +1419,20 @@ Thời gian: ${currentTime}`;
             const folderResult = await (window as any).electronAPI.ecommerceExports.selectFolder();
 
             if (!folderResult.success) {
-                const folderError = normalizeFolderImportError(folderResult.error);
-                if (folderError !== 'Không có thư mục được chọn') {
-                    message.error(folderError);
+                if (folderResult.error !== 'KhÃ´ng cÃ³ thÆ° má»¥c Ä‘Æ°á»£c chá»n') {
+                    message.error(folderResult.error);
                 }
                 return;
             }
 
             const folderPath = folderResult.data;
-            message.loading({ content: 'Đang đọc file từ thư mục...', key: 'import-folder', duration: 0 });
-            const persistedCompletedKeys = await loadCompletedOrderKeys();
+            message.loading({ content: `Äang Ä‘á»c file tá»« thÆ° má»¥c...`, key: 'import-folder', duration: 0 });
 
             // Äá»c táº¥t cáº£ file Excel
             const filesResult = await (window as any).electronAPI.ecommerceExports.loadExcelFiles(folderPath);
 
             if (!filesResult.success) {
-                message.error({ content: normalizeFolderImportError(filesResult.error), key: 'import-folder' });
+                message.error({ content: filesResult.error, key: 'import-folder' });
                 return;
             }
 
@@ -1535,9 +1447,6 @@ Thời gian: ${currentTime}`;
                     .map(r => getOrderKey(r))
                     .filter(Boolean)
             );
-            for (const key of persistedCompletedKeys) {
-                importedOrderNumbers.add(key);
-            }
             const allOrderIdsBySource = new Map<string, Set<string>>();
             // ðŸš« Thu tháº­p Táº¤T Cáº¢ Order IDs theo nguá»“n â€” dÃ¹ng cho Ä‘á»‘i soÃ¡t sau khi import xong
 
@@ -1545,7 +1454,7 @@ Thời gian: ${currentTime}`;
             for (const fileData of files) {
                 try {
                     message.loading({
-                        content: `Đang xử lý ${fileData.name} (${processedFiles + 1}/${files.length})...`,
+                        content: `Äang xá»­ lÃ½ ${fileData.name} (${processedFiles + 1}/${files.length})...`,
                         key: 'import-folder',
                         duration: 0
                     });
@@ -1572,7 +1481,7 @@ Thời gian: ${currentTime}`;
                     if (!allOrderIdsBySource.has(fileSource)) allOrderIdsBySource.set(fileSource, new Set());
                     const sourceOrderIds = allOrderIdsBySource.get(fileSource)!;
                     jsonData.forEach((row: any) => {
-                        const oid = isTikTok ? (row['Order ID'] || '') : (row['Mã �ơn hàng'] || '');
+                        const oid = isTikTok ? (row['Order ID'] || '') : (row['MÃ£ Ä‘Æ¡n hÃ ng'] || '');
                         if (oid) sourceOrderIds.add(oid);
                     });
 
@@ -1643,7 +1552,7 @@ Thời gian: ${currentTime}`;
                             const shippingProvider = row['ÄÆ¡n Vá»‹ Váº­n Chuyá»ƒn'] || '';
                             const trackingId = row['MÃ£ váº­n Ä‘Æ¡n'] || '';
                             const ecommerceExportReason = row['Tráº¡ng ThÃ¡i ÄÆ¡n HÃ ng'] || 'Há»§y Ä‘Æ¡n Shopee';
-                            const rawAmount2 = row['T�"ng s� tiền Người mua thanh toán'] ?? row['T�"ng giá tr�9 �ơn hàng (VND)'] ?? row['T�"ng giá bán (sản phẩm)'] ?? row['T�"ng �ơn hàng'] ?? row['Thành tiền'] ?? row['T�"ng c�"ng'] ?? 0;
+                            const rawAmount2 = row['Tá»•ng sá»‘ tiá»n NgÆ°á»i mua thanh toÃ¡n'] ?? row['Tá»•ng giÃ¡ trá»‹ Ä‘Æ¡n hÃ ng (VND)'] ?? row['Tá»•ng giÃ¡ bÃ¡n (sáº£n pháº©m)'] ?? row['Tá»•ng Ä‘Æ¡n hÃ ng'] ?? row['ThÃ nh tiá»n'] ?? row['Tá»•ng cá»™ng'] ?? 0;
                             const totalAmount = typeof rawAmount2 === 'number' ? rawAmount2 : parseFloat(String(rawAmount2).replace(/,/g, '')) || 0;
                             const unitPrice2 = quantity > 0 ? totalAmount / quantity : totalAmount;
 
@@ -1724,19 +1633,20 @@ Thời gian: ${currentTime}`;
                         importedOrderNumbers.add(orderId);
                     });
 
+                    totalImported += newEcommerceExports.length;
                     totalSkipped += skippedCount;
 
                     if (newEcommerceExports.length > 0) {
                         try {
-                            const bulkResult = appendPendingToLocalQueue(newEcommerceExports, persistedCompletedKeys);
+                            const bulkResult = appendPendingToLocalQueue(newEcommerceExports);
                             const insertedCount = bulkResult.count ?? newEcommerceExports.length;
                             const skippedInDb = bulkResult.skipped ?? 0;
-                            totalImported += insertedCount;
                             totalSkipped += skippedInDb;
                             console.log(`Loaded ${insertedCount} pending records into local queue`);
+                            totalImported += insertedCount - newEcommerceExports.length;
                         } catch (dbError) {
-                            console.error('Lỗi lưu vào database:', dbError);
-                            message.error(`Lỗi lưu ${newEcommerceExports.length} đơn: ${dbError instanceof Error ? dbError.message : 'Unknown'}`);
+                            console.error('âŒ Lá»—i lÆ°u vÃ o database:', dbError);
+                            message.error(`Lá»—i lÆ°u ${newEcommerceExports.length} Ä‘Æ¡n: ${dbError instanceof Error ? dbError.message : 'Unknown'}`);
                         }
                     }
 
@@ -1749,21 +1659,18 @@ Thời gian: ${currentTime}`;
 
             // ThÃ´ng bÃ¡o káº¿t quáº£
             const resultParts: string[] = [];
-            if (totalImported > 0) resultParts.push(`Đã import ${totalImported} đơn từ ${processedFiles} file`);
-            if (totalSkipped > 0) resultParts.push(`bỏ qua ${totalSkipped} đơn trùng`);
+            if (totalImported > 0) resultParts.push(`âœ… Import ${totalImported} Ä‘Æ¡n tá»« ${processedFiles} file`);
+            if (totalSkipped > 0) resultParts.push(`bá» qua ${totalSkipped} trÃ¹ng`);
 
             if (resultParts.length === 0) {
-                message.warning({ content: 'Không có thay đổi nào, tất cả đơn đều đã tồn tại!', key: 'import-folder', duration: 5 });
+                message.warning({ content: 'âš ï¸ KhÃ´ng cÃ³ thay Ä‘á»•i nÃ o â€” táº¥t cáº£ Ä‘Æ¡n Ä‘á»u Ä‘Ã£ tá»“n táº¡i!', key: 'import-folder', duration: 5 });
             } else {
                 message.success({ content: resultParts.join(' | '), key: 'import-folder', duration: 5 });
             }
 
         } catch (error) {
             console.error('Folder import error:', error);
-            message.error({
-                content: normalizeFolderImportError(error instanceof Error ? error.message : 'Lỗi import từ thư mục!'),
-                key: 'import-folder'
-            });
+            message.error({ content: 'Lá»—i khi import tá»« thÆ° má»¥c!', key: 'import-folder' });
         }
     };
 
@@ -1783,10 +1690,10 @@ Thời gian: ${currentTime}`;
             },
         },
         {
-            title: 'Nguồn',
+            title: 'Nguá»“n',
             dataIndex: 'customerName',
             key: 'customerName',
-            width: 90,
+            width: 60,
             align: 'center' as const,
             render: (name) => {
                 if (name === 'Shopee') {
@@ -1796,17 +1703,16 @@ Thời gian: ${currentTime}`;
                             style={{
                                 background: 'linear-gradient(135deg, #ee4d2d 0%, #ff6b35 100%)',
                                 color: '#fff',
-                                padding: '4px 6px',
+                                padding: '6px',
                                 borderRadius: 6,
-                                fontSize: 10,
-                                fontWeight: 700,
+                                fontSize: 18,
                                 textAlign: 'center',
                                 boxShadow: '0 2px 8px rgba(238, 77, 45, 0.3)',
                                 display: 'inline-block',
                                 cursor: 'pointer'
                             }}
                         >
-                            Shopee
+                            ðŸ›’
                         </div>
                     );
                 } else if (name === 'TikTok') {
@@ -1816,21 +1722,20 @@ Thời gian: ${currentTime}`;
                             style={{
                                 background: 'linear-gradient(135deg, #000000 0%, #ff0050 50%, #00f2ea 100%)',
                                 color: '#fff',
-                                padding: '4px 6px',
+                                padding: '6px',
                                 borderRadius: 6,
-                                fontSize: 10,
-                                fontWeight: 700,
+                                fontSize: 18,
                                 textAlign: 'center',
                                 boxShadow: '0 2px 8px rgba(255, 0, 80, 0.3)',
                                 display: 'inline-block',
                                 cursor: 'pointer'
                             }}
                         >
-                            TikTok
+                            ðŸŽµ
                         </div>
                     );
                 } else {
-                    return <span title={name}>?</span>;
+                    return <span title={name}>â“</span>;
                 }
             },
         },
@@ -1841,17 +1746,17 @@ Thời gian: ${currentTime}`;
             width: 180,
             render: (orderNumber, record) => {
                 // Láº¥y tracking tá»« notes
-                let tracking = '-';
+                let tracking = 'â€”';
                 if (record.notes) {
                     const trackingMatch = record.notes.match(/Tracking: ([^|]+)/);
-                    tracking = trackingMatch ? trackingMatch[1].trim() : '-';
+                    tracking = trackingMatch ? trackingMatch[1].trim() : 'â€”';
                 }
 
                 const handleCopy = (text: string, label: string) => {
                     navigator.clipboard.writeText(text).then(() => {
-                        message.success(`Đã copy ${label}: ${text}`);
+                        message.success(`âœ… ÄÃ£ copy ${label}: ${text}`);
                     }).catch(() => {
-                        message.error('Lỗi khi copy');
+                        message.error('âŒ Lá»—i khi copy');
                     });
                 };
 
@@ -1869,17 +1774,17 @@ Thời gian: ${currentTime}`;
                                         userSelect: 'none'
                                     }}
                                     onDoubleClick={() => handleCopy(orderNumber, 'Order ID')}
-                                    title="Double-click de copy"
+                                    title="Double-click Ä‘á»ƒ copy"
                                 >
                                     {orderNumber}
                                 </Tag>
                             ) : (
-                                <span style={{ color: '#bfbfbf' }}>-</span>
+                                <span style={{ color: '#bfbfbf' }}>â€”</span>
                             )}
                         </div>
                         {/* Tracking ID - dÃ²ng dÆ°á»›i */}
                         <div style={{ fontSize: 11 }}>
-                            {tracking !== '-' ? (
+                            {tracking !== 'â€”' ? (
                                 <Tag
                                     color="orange"
                                     style={{
@@ -1889,12 +1794,12 @@ Thời gian: ${currentTime}`;
                                         userSelect: 'none'
                                     }}
                                     onDoubleClick={() => handleCopy(tracking, 'Tracking ID')}
-                                    title="Double-click de copy"
+                                    title="Double-click Ä‘á»ƒ copy"
                                 >
                                     {tracking}
                                 </Tag>
                             ) : (
-                                <span style={{ color: '#bfbfbf' }}>-</span>
+                                <span style={{ color: '#bfbfbf' }}>â€”</span>
                             )}
                         </div>
                     </div>
@@ -1909,7 +1814,7 @@ Thời gian: ${currentTime}`;
             render: (_, record) => {
                 // âš¡ Äá»c tá»« persistent cache â€” KHÃ”NG JSON.parse láº¡i
                 const parsed = getParsedItems(record);
-                if (parsed.length === 0) return <span style={{ color: '#bfbfbf' }}>-</span>;
+                if (parsed.length === 0) return <span style={{ color: '#bfbfbf' }}>â€”</span>;
                 const firstItem = parsed[0];
 
                 return (
@@ -1923,7 +1828,7 @@ Thời gian: ${currentTime}`;
                             maxWidth: '180px'
                         }}
                     >
-                        {firstItem.productName || '-'}
+                        {firstItem.productName || 'â€”'}
                     </span>
                 );
             },
@@ -1951,18 +1856,18 @@ Thời gian: ${currentTime}`;
             render: (_, record) => {
                 // âš¡ Äá»c tá»« persistent cache
                 const parsed = getParsedItems(record);
-                if (parsed.length === 0) return <span style={{ color: '#bfbfbf' }}>-</span>;
+                if (parsed.length === 0) return <span style={{ color: '#bfbfbf' }}>â€”</span>;
                 const firstItem = parsed[0];
-                return firstItem.color ? <Tag color="purple">{firstItem.color}</Tag> : <span style={{ color: '#bfbfbf' }}>-</span>;
+                return firstItem.color ? <Tag color="purple">{firstItem.color}</Tag> : <span style={{ color: '#bfbfbf' }}>â€”</span>;
             },
         },
         {
-            title: 'Tổng tiền',
+            title: 'Tá»•ng tiá»n',
             dataIndex: 'totalAmount',
             key: 'totalAmount',
             width: 120,
             align: 'right',
-            render: (amount) => <span style={{ fontWeight: 600 }}>{amount.toLocaleString('vi-VN')} VND</span>,
+            render: (amount) => <span style={{ fontWeight: 600 }}>{amount.toLocaleString('vi-VN')} Ä‘</span>,
         },
         {
             title: 'Shipping Provider',
@@ -1970,7 +1875,7 @@ Thời gian: ${currentTime}`;
             key: 'shippingProvider',
             width: 130,
             render: (notes) => {
-                if (!notes) return <span style={{ color: '#bfbfbf' }}>-</span>;
+                if (!notes) return <span style={{ color: '#bfbfbf' }}>â€”</span>;
                 const shippingMatch = notes.match(/Shipping: ([^|]+)/);
                 const shipping = shippingMatch ? shippingMatch[1].trim() : 'N/A';
                 return <Tag color="green">{shipping}</Tag>;
@@ -1993,13 +1898,13 @@ Thời gian: ${currentTime}`;
                     {
                         key: 'edit',
                         icon: <EditOutlined />,
-                        label: 'Sửa',
+                        label: 'Sá»­a',
                         onClick: () => handleEdit(record),
                     },
                     {
                         key: 'delete',
                         icon: <DeleteOutlined />,
-                        label: 'Xóa',
+                        label: 'XÃ³a',
                         danger: true,
                         disabled: !isAdmin || record.status === 'completed', // ðŸ” Chá»‰ admin + khÃ´ng xÃ³a Ä‘Æ¡n Ä‘Ã£ pickup
                         onClick: () => handleDelete(record),
@@ -2009,7 +1914,7 @@ Thời gian: ${currentTime}`;
                 return (
                     <Dropdown menu={{ items: menuItems }} trigger={['click']}>
                         <Button size="small">
-                            Xem thêm <MoreOutlined />
+                            Xem thÃªm <MoreOutlined />
                         </Button>
                     </Dropdown>
                 );
@@ -2025,14 +1930,14 @@ Thời gian: ${currentTime}`;
             render: (sku) => sku ? <Tag color="cyan">{sku}</Tag> : <span style={{ color: '#bfbfbf' }}>N/A</span>,
         },
         {
-            title: 'Sản phẩm',
+            title: 'Sáº£n pháº©m',
             dataIndex: 'productName',
         },
         {
-            title: 'Màu',
+            title: 'MÃ u',
             dataIndex: 'color',
             width: 100,
-            render: (color) => color || <span style={{ color: '#bfbfbf' }}>-</span>,
+            render: (color) => color || <span style={{ color: '#bfbfbf' }}>â€”</span>,
         },
         {
             title: 'SL',
@@ -2041,25 +1946,25 @@ Thời gian: ${currentTime}`;
             align: 'center',
         },
         {
-            title: 'Đơn giá',
+            title: 'ÄÆ¡n giÃ¡',
             dataIndex: 'unitPrice',
             width: 120,
             align: 'right',
             render: (price) => price.toLocaleString('vi-VN'),
         },
         {
-            title: 'Tổng',
+            title: 'Tá»•ng',
             dataIndex: 'total',
             width: 150,
             align: 'right',
-            render: (total) => <span style={{ fontWeight: 600 }}>{total.toLocaleString('vi-VN')} VND</span>,
+            render: (total) => <span style={{ fontWeight: 600 }}>{total.toLocaleString('vi-VN')} Ä‘</span>,
         },
         {
             title: '',
             width: 60,
             render: (_, __, index) => (
                 <Button type="link" size="small" danger onClick={() => handleRemoveItem(index)}>
-                    Xóa
+                    XÃ³a
                 </Button>
             ),
         },
@@ -2137,6 +2042,20 @@ Thời gian: ${currentTime}`;
             {/* DÃ²ng 1: Stats + Search + Actions */}
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'nowrap' }}>
                 <Tag
+                    onClick={() => setStatusFilter('all')}
+                    style={{
+                        cursor: 'pointer', flexShrink: 0,
+                        padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                        borderRadius: 8, border: 'none',
+                        background: statusFilter === 'all'
+                            ? 'linear-gradient(135deg, #1677ff 0%, #4096ff 100%)'
+                            : 'linear-gradient(135deg, #bae0ff 0%, #d6e4ff 100%)',
+                        color: '#fff',
+                    }}
+                >
+                    ðŸ“‹ All: {statusCounts.all}
+                </Tag>
+                <Tag
                     onClick={() => setStatusFilter('pending')}
                     style={{
                         cursor: 'pointer', flexShrink: 0,
@@ -2148,7 +2067,7 @@ Thời gian: ${currentTime}`;
                         color: '#fff',
                     }}
                 >
-                    Pending: {statusCounts.pending}
+                    ðŸ“¦ Pending: {statusCounts.pending}
                 </Tag>
                 <Tag
                     onClick={() => setStatusFilter('completed')}
@@ -2162,7 +2081,35 @@ Thời gian: ${currentTime}`;
                         color: statusFilter === 'completed' ? '#fff' : '#389e0d',
                     }}
                 >
-                    Complete: {statusCounts.completed}
+                    âœ… Complete: {statusCounts.completed}
+                </Tag>
+                <Tag
+                    onClick={() => setStatusFilter('overdue')}
+                    style={{
+                        cursor: 'pointer', flexShrink: 0,
+                        padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                        borderRadius: 8, border: 'none',
+                        background: statusFilter === 'overdue'
+                            ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
+                            : 'linear-gradient(135deg, #ffccc7 0%, #ffd8d6 100%)',
+                        color: '#fff',
+                    }}
+                >
+                    âš ï¸ Overdue: {statusCounts.overdue}
+                </Tag>
+                <Tag
+                    onClick={() => setStatusFilter('cancelled')}
+                    style={{
+                        cursor: 'pointer', flexShrink: 0,
+                        padding: '4px 10px', fontSize: 12, fontWeight: 600,
+                        borderRadius: 8, border: 'none',
+                        background: statusFilter === 'cancelled'
+                            ? 'linear-gradient(135deg, #595959 0%, #262626 100%)'
+                            : 'linear-gradient(135deg, #d9d9d9 0%, #f5f5f5 100%)',
+                        color: statusFilter === 'cancelled' ? '#fff' : '#434343',
+                    }}
+                >
+                    ðŸš« Cancelled: {statusCounts.cancelled}
                 </Tag>
                 <Tag
                     onClick={() => setStatusFilter('no_data')}
@@ -2176,14 +2123,14 @@ Thời gian: ${currentTime}`;
                         color: '#fff',
                     }}
                 >
-                    Mismatch: {unmatchedScans.length}
+                    âš¡ Mismatch: {unmatchedScans.length}
                 </Tag>
                 <div style={{ width: 1, height: 24, background: '#d9d9d9', flexShrink: 0 }} />
 
                 <Input
                     value={searchKeyword}
                     onChange={(e) => setSearchKeyword(e.target.value)}
-                    placeholder="Tìm Tracking / Order ID..."
+                    placeholder="TÃ¬m Tracking / Order ID..."
                     allowClear
                     style={{ flex: 1, minWidth: 0, borderColor: '#1890ff', borderWidth: 2, borderRadius: 8 }}
                     prefix={<SearchOutlined style={{ color: '#1890ff' }} />}
@@ -2193,7 +2140,7 @@ Thời gian: ${currentTime}`;
 
                 {selectedRowKeys.length > 0 && (
                     <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete} style={{ flexShrink: 0 }}>
-                        Xóa ({selectedRowKeys.length})
+                        XÃ³a ({selectedRowKeys.length})
                     </Button>
                 )}
                 {isAdmin && statusCounts.cancelled > 0 && (
@@ -2203,20 +2150,20 @@ Thời gian: ${currentTime}`;
                         onClick={handleDeleteCancelled}
                         style={{ flexShrink: 0 }}
                     >
-                        Xóa đơn hủy ({statusCounts.cancelled})
+                        XÃ³a Ä‘Æ¡n há»§y ({statusCounts.cancelled})
                     </Button>
                 )}
                 <Dropdown
                     menu={{
                         items: [
-                            { key: 'all', label: 'Xuất tất cả', onClick: () => handleExportExcel('all') },
-                            { key: 'completed', label: 'Chỉ xuất đã hoàn', onClick: () => handleExportExcel('completed') },
-                            { key: 'processing', label: 'Chỉ xuất đang xử lý', onClick: () => handleExportExcel('processing') },
+                            { key: 'all', label: 'ðŸ“‹ Xuáº¥t táº¥t cáº£', onClick: () => handleExportExcel('all') },
+                            { key: 'completed', label: 'âœ… Chá»‰ xuáº¥t Ä‘Ã£ hoÃ n', onClick: () => handleExportExcel('completed') },
+                            { key: 'processing', label: 'â³ Chá»‰ xuáº¥t Ä‘ang xá»­ lÃ½', onClick: () => handleExportExcel('processing') },
                         ],
                     }}
                     trigger={['click']}
                 >
-                    <Button icon={<DownloadOutlined />} style={{ flexShrink: 0 }}>Xuất Excel</Button>
+                    <Button icon={<DownloadOutlined />} style={{ flexShrink: 0 }}>Xuáº¥t Excel</Button>
                 </Dropdown>
                 <Button
                     type="primary"
@@ -2224,12 +2171,12 @@ Thời gian: ${currentTime}`;
                     onClick={handleImportFolder}
                     style={{ background: '#52c41a', borderColor: '#52c41a', flexShrink: 0 }}
                 >
-                    Nhập Excel
+                    Nháº­p Excel
                 </Button>
                 <Button
                     icon={<SettingOutlined />}
                     onClick={() => setSettingsModalVisible(true)}
-                    title="Cài đặt Telegram"
+                    title="CÃ i Ä‘áº·t Telegram"
                     style={{ flexShrink: 0 }}
                 />
             </div>
@@ -2244,18 +2191,14 @@ Thời gian: ${currentTime}`;
                     }}
                 >
                     <UserOutlined style={{ fontSize: 16, color: '#8c8c8c', flexShrink: 0 }} />
-                    <Text type="secondary" style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, flexShrink: 0 }}>Nguoi dong goi:</Text>
+                    <Text type="secondary" style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, flexShrink: 0 }}>NgÆ°á»i ÄG:</Text>
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', flex: 1 }}>
                         {packerEmployees.map(emp => {
                             const isActive = activePacker === emp.username;
-                            const rawName = (emp.name || '').trim();
-                            const normalizedName = rawName
-                                .toLowerCase()
-                                .normalize('NFD')
-                                .replace(/[\u0300-\u036f]/g, '');
-                            const isGenericName = ['quan ly', 'nhan vien', 'quan tri vien', 'admin', 'administrator', 'user'].includes(normalizedName);
-                            const displayName = isGenericName || !rawName ? emp.username : rawName;
-                            const shortName = displayName;
+                            // Kiá»ƒm tra náº¿u tÃªn lÃ  cÃ¡c tá»« chung chung thÃ¬ láº¥y username
+                            const isGenericName = ['quáº£n lÃ½', 'nhÃ¢n viÃªn', 'quáº£n trá»‹ viÃªn'].includes((emp.name || '').toLowerCase());
+                            const displayName = isGenericName ? emp.username : (emp.name || emp.username);
+                            const shortName = isGenericName ? emp.username : displayName.split(' ').pop();
 
                             return (
                                 <div
@@ -2289,7 +2232,7 @@ Thời gian: ${currentTime}`;
                                     <span style={{ fontWeight: isActive ? 800 : 600, fontSize: isActive ? 15 : 13, letterSpacing: isActive ? 0.5 : 0 }}>
                                         {shortName}
                                     </span>
-                                    {isActive && <span style={{ fontSize: 16, textShadow: '0 2px 4px rgba(0,0,0,0.3)' }}>✓</span>}
+                                    {isActive && <span style={{ fontSize: 16, textShadow: '0 2px 4px rgba(0,0,0,0.3)' }}>âœ…</span>}
                                 </div>
                             );
                         })}
@@ -2299,7 +2242,7 @@ Thời gian: ${currentTime}`;
                             display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
                             background: '#ECFFF3', padding: '6px 12px', borderRadius: 8, border: '1px dashed #A2F0C1'
                         }}>
-                            <span style={{ fontSize: 10, color: '#00C868', fontWeight: 700, textTransform: 'uppercase' }}>Đang gán cho</span>
+                            <span style={{ fontSize: 10, color: '#00C868', fontWeight: 700, textTransform: 'uppercase' }}>Äang gÃ¡n cho</span>
                             <span style={{ fontSize: 15, color: '#00A352', fontWeight: 900 }}>{activePacker}</span>
                         </div>
                     )}
@@ -2309,27 +2252,27 @@ Thời gian: ${currentTime}`;
             {/* Badge offline pending */}
             {offlinePending > 0 && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px', background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, marginBottom: 6 }}>
-                    <span style={{ fontSize: 16 }}>Pending</span>
+                    <span style={{ fontSize: 16 }}>ðŸ“¦</span>
                     <span style={{ color: '#d48806', fontWeight: 600, fontSize: 13 }}>
-                        {offlinePending} đơn đang chờ đồng bộ (lưu offline khi mất mạng)
+                        {offlinePending} Ä‘Æ¡n Ä‘ang chá» Ä‘á»“ng bá»™ (lÆ°u offline khi máº¥t máº¡ng)
                     </span>
                     <Button
                         size="small"
                         type="primary"
                         style={{ marginLeft: 'auto', background: '#d48806', borderColor: '#d48806' }}
                         onClick={async () => {
-                            message.loading({ content: 'Đang đồng bộ...', key: 'manualSync', duration: 0 });
+                            message.loading({ content: 'Äang Ä‘á»“ng bá»™...', key: 'manualSync', duration: 0 });
                             const res = await (window as any).electronAPI.offlineQueue.sync();
                             setOfflinePending(res.remaining || 0);
                             if (res.synced > 0) {
-                                message.success({ content: `Đã đồng bộ ${res.synced} đơn!`, key: 'manualSync', duration: 3 });
+                                message.success({ content: `ÄÃ£ Ä‘á»“ng bá»™ ${res.synced} Ä‘Æ¡n!`, key: 'manualSync', duration: 3 });
                                 loadEcommerceExports(true);
                             } else {
-                                message.warning({ content: 'Không thể đồng bộ, kiểm tra kết nối mạng.', key: 'manualSync', duration: 3 });
+                                message.warning({ content: 'KhÃ´ng thá»ƒ Ä‘á»“ng bá»™, kiá»ƒm tra káº¿t ná»‘i máº¡ng.', key: 'manualSync', duration: 3 });
                             }
                         }}
                     >
-                        Đồng bộ ngay
+                        Äá»“ng bá»™ ngay
                     </Button>
                 </div>
             )}
@@ -2353,7 +2296,7 @@ Thời gian: ${currentTime}`;
                         value={scanValue}
                         onChange={(e) => setScanValue(e.target.value)}
                         onKeyDown={handleScanKeyDown}
-                        placeholder={activePacker ? `ĐANG GÁN ĐƠN CHO: [${activePacker.toUpperCase()}] - Quét mã ngay...` : "Quét hoặc nhập Tracking ID để kiểm tra đơn hàng..."}
+                        placeholder={activePacker ? `ÄANG GÃN ÄÆ N CHO: [${activePacker.toUpperCase()}] - QuÃ©t mÃ£ ngay...` : "QuÃ©t hoáº·c nháº­p Tracking ID Ä‘á»ƒ kiá»ƒm tra Ä‘Æ¡n hÃ ng..."}
                         autoFocus
                         size="large"
                         style={{
@@ -2378,7 +2321,7 @@ Thời gian: ${currentTime}`;
                         color: activePacker ? '#fff' : '#fff'
                     }}
                 >
-                    {activePacker ? 'QUÉT GÁN ĐƠN' : 'Quét'}
+                    {activePacker ? 'QUÃ‰T GÃN ÄÆ N' : 'QuÃ©t'}
                 </Button>
             </div>
 
@@ -2408,12 +2351,20 @@ Thời gian: ${currentTime}`;
                 </div>
             )}
 
+            {statusFilter !== 'no_data' && filteredEcommerceExports.length === 0 && ecommerceExports.length > 0 && (
+                <div style={{ marginBottom: 8, padding: '8px 12px', borderRadius: 8, background: '#fff7e6', border: '1px solid #ffd591', color: '#ad6800', fontSize: 13, fontWeight: 500 }}>
+                    Bá»™ lá»c hiá»‡n táº¡i khÃ´ng cÃ³ dá»¯ liá»‡u. Há»‡ thá»‘ng váº«n Ä‘ang cÃ³ {statusCounts.all} Ä‘Æ¡n:
+                    {` ${statusCounts.pending} chá», ${statusCounts.completed} hoÃ n thÃ nh, ${statusCounts.cancelled} há»§y.`}
+                    {statusFilter !== 'all' ? ' Chuyá»ƒn sang "Táº¥t cáº£" Ä‘á»ƒ kiá»ƒm tra láº¡i.' : ''}
+                </div>
+            )}
+
             {statusFilter === 'no_data' ? (
-                /* Mismatch table */
+                /* ðŸš« Báº¢NG "KHÃ”NG CÃ“ DL" */
                 <Card>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                         <Title level={5} style={{ margin: 0 }}>
-                            Tracking ID không khớp dữ liệu ({unmatchedScans.length})
+                            âš¡ Lá»‡ch Ä‘Æ¡n â€” Tracking ID khÃ´ng khá»›p dá»¯ liá»‡u ({unmatchedScans.length})
                         </Title>
                         {unmatchedScans.length > 0 && (
                             <Button
@@ -2422,21 +2373,21 @@ Thời gian: ${currentTime}`;
                                 icon={<DeleteOutlined />}
                                 onClick={() => {
                                     Modal.confirm({
-                                        title: 'Xóa tất cả?',
-                                        content: `Xóa ${unmatchedScans.length} tracking ID không có dữ liệu?`,
-                                        okText: 'Xóa',
+                                        title: 'XÃ³a táº¥t cáº£?',
+                                        content: `XÃ³a ${unmatchedScans.length} tracking ID khÃ´ng cÃ³ dá»¯ liá»‡u?`,
+                                        okText: 'XÃ³a',
                                         okType: 'danger',
                                         onOk: () => setUnmatchedScans([]),
                                     });
                                 }}
                             >
-                                Xóa tất cả
+                                XÃ³a táº¥t cáº£
                             </Button>
                         )}
                     </div>
                     {unmatchedScans.length === 0 ? (
                         <div style={{ textAlign: 'center', padding: 40, color: '#8c8c8c' }}>
-                            Không có tracking lệch nào
+                            âœ… KhÃ´ng cÃ³ Ä‘Æ¡n lá»‡ch nÃ o
                         </div>
                     ) : (
                         <Table
@@ -2461,7 +2412,7 @@ Thời gian: ${currentTime}`;
                                     ),
                                 },
                                 {
-                                    title: 'Thoi gian scan',
+                                    title: 'Thá»i gian scan',
                                     dataIndex: 'scannedAt',
                                     width: 200,
                                 },
@@ -2575,7 +2526,7 @@ Thời gian: ${currentTime}`;
 
             {/* Manual Input Modal */}
             <Modal
-                title={editingEcommerceExport ? '�S�️ Sửa phiếu xuất' : '�~" Tạo phiếu xuất m�:i'}
+                title={editingEcommerceExport ? 'âœï¸ Sá»­a phiáº¿u xuáº¥t' : 'âž• Táº¡o phiáº¿u xuáº¥t má»›i'}
                 open={modalVisible}
                 onCancel={() => setModalVisible(false)}
                 footer={null}
@@ -2631,6 +2582,7 @@ Thời gian: ${currentTime}`;
                         <Form.Item label="Tráº¡ng thÃ¡i" name="status">
                             <Select size="large">
                                 <Select.Option value="completed">HoÃ n thÃ nh</Select.Option>
+                                <Select.Option value="pending">Äang xá»­ lÃ½</Select.Option>
                             </Select>
                         </Form.Item>
                     </div>
@@ -2705,7 +2657,7 @@ Thời gian: ${currentTime}`;
                                             </Table.Summary.Cell>
                                             <Table.Summary.Cell index={1} align="right">
                                                 <strong style={{ fontSize: 16, color: '#52c41a' }}>
-                                                    {ecommerceExportItems.reduce((sum, item) => sum + item.total, 0).toLocaleString('vi-VN')} VND
+                                                    {ecommerceExportItems.reduce((sum, item) => sum + item.total, 0).toLocaleString('vi-VN')} Ä‘
                                                 </strong>
                                             </Table.Summary.Cell>
                                             <Table.Summary.Cell index={2} />
@@ -2730,7 +2682,7 @@ Thời gian: ${currentTime}`;
                             size="large"
                             style={{ background: '#52c41a', borderColor: '#52c41a' }}
                         >
-                            {editingEcommerceExport ? 'Cập nhật' : 'Lưu phiếu'}
+                            {editingEcommerceExport ? 'Cáº­p nháº­t' : 'LÆ°u phiáº¿u'}
                         </Button>
                     </div>
                 </Form>
