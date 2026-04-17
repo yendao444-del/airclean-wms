@@ -70,8 +70,8 @@ interface PackerEmployee {
 
 // TÃªn cá»™t SKU phá»• biáº¿n trong file Shopee export
 const SHOPEE_SKU_COLUMN_NAMES = [
-    'SKU sáº£n pháº©m', 'SKU Sáº£n Pháº©m', 'Seller SKU', 'MÃ£ SKU',
-    'SKU', 'MÃ£ hÃ ng', 'MÃ£ HÃ ng', 'Model',
+    'SKU sản phẩm', 'SKU Sản Phẩm', 'Seller SKU', 'Mã SKU',
+    'SKU', 'Mã hàng', 'Mã Hàng', 'Model',
 ];
 
 /**
@@ -358,26 +358,15 @@ export default function EcommerceExportPage() {
         // Chỉ load 365 ngày gần nhất — đủ để check trùng, tránh load toàn bộ DB
         const since365 = dayjs().subtract(365, 'day').toISOString();
         const untilNow = dayjs().endOf('day').toISOString();
-        const [exportsResult, ordersResult] = await Promise.all([
-            window.electronAPI.ecommerceExports.getAll({ since: since365, until: untilNow, limit: 10000 }),
-            window.electronAPI.marketplaceOrders.getAll({ since: since365 }),
-        ]);
+        const exportsResult = await window.electronAPI.ecommerceExports.getAll({ since: since365, until: untilNow, limit: 10000 });
 
         if (!exportsResult?.success || !Array.isArray(exportsResult.data)) {
             throw new Error(exportsResult?.error || 'Khong tai duoc danh sach TMDT da hoan tat.');
         }
-        if (!ordersResult?.success || !Array.isArray(ordersResult.data)) {
-            throw new Error(ordersResult?.error || 'Khong tai duoc danh sach don hang TMDT.');
-        }
 
-        const exportKeys = exportsResult.data
+        const keys = exportsResult.data
             .filter((record: any) => record?.status === 'completed')
-            .flatMap((record: any) => [record?.orderNumber, record?.ecommerceExportCode]);
-
-        const orderKeys = ordersResult.data
-            .flatMap((record: any) => [record?.orderNumber, record?.trackingNumber, record?.tracking]);
-
-        const keys = [...exportKeys, ...orderKeys]
+            .flatMap((record: any) => [record?.orderNumber, record?.ecommerceExportCode])
             .map((key: string) => String(key || '').trim())
             .filter(Boolean);
 
@@ -1308,7 +1297,7 @@ Thời gian: ${currentTime}`;
                 // ðŸ” PhÃ¡t hiá»‡n nguá»“n dá»¯ liá»‡u (TikTok vs Shopee)
                 const firstRow: any = jsonData[0] || {};
                 const isTikTok = 'Order ID' in firstRow || 'Cancelled Time' in firstRow;
-                const isShopee = 'MÃ£ Ä‘Æ¡n hÃ ng' in firstRow || 'ÄÆ¡n Vá»‹ Váº­n Chuyá»ƒn' in firstRow;
+                const isShopee = 'Mã đơn hàng' in firstRow || 'Đơn Vị Vận Chuyển' in firstRow;
 
                 console.log('ðŸ” Detected source:', { isTikTok, isShopee });
 
@@ -1398,21 +1387,21 @@ Thời gian: ${currentTime}`;
                     }
 
                     jsonData.forEach((row: any) => {
-                        const orderId = row['MÃ£ Ä‘Æ¡n hÃ ng'] || '';
-                        const productName = row['TÃªn sáº£n pháº©m'] || row['TÃªn Sáº£n Pháº©m'] || '';
-                        const variation = row['TÃªn phÃ¢n loáº¡i hÃ ng'] || row['PhÃ¢n loáº¡i hÃ ng'] || '';
+                        const orderId = row['Mã đơn hàng'] || '';
+                        const productName = row['Tên sản phẩm'] || row['Tên Sản Phẩm'] || '';
+                        const variation = row['Tên phân loại hàng'] || row['Phân loại hàng'] || '';
                         const sku = row[shopeeSkuHeader] || '';
-                        const quantity = parseInt(row['Sá»‘ lÆ°á»£ng'] || '1');
-                        const cancelledTime = row['NgÃ y gá»­i hÃ ng'] || row['Thá»i gian táº¡o Ä‘Æ¡n hÃ ng'] || '';
-                        const shippingProvider = row['ÄÆ¡n Vá»‹ Váº­n Chuyá»ƒn'] || '';
-                        const trackingId = row['MÃ£ váº­n Ä‘Æ¡n'] || '';
-                        const ecommerceExportReason = row['Tráº¡ng ThÃ¡i ÄÆ¡n HÃ ng'] || 'Há»§y Ä‘Æ¡n Shopee';
-                        const rawAmount = row['T�"ng s� tiền Người mua thanh toán'] ?? row['T�"ng giá tr�9 �ơn hàng (VND)'] ?? row['T�"ng giá bán (sản phẩm)'] ?? row['T�"ng �ơn hàng'] ?? row['Thành tiền'] ?? row['T�"ng c�"ng'] ?? 0;
+                        const quantity = parseInt(row['Số lượng'] || '1');
+                        const cancelledTime = row['Ngày gửi hàng'] || row['Thời gian tạo đơn hàng'] || row['Ngày đặt hàng'] || '';
+                        const shippingProvider = row['Đơn Vị Vận Chuyển'] || '';
+                        const trackingId = row['Mã vận đơn'] || '';
+                        const ecommerceExportReason = row['Trạng Thái Đơn Hàng'] || 'Hủy đơn Shopee';
+                        const rawAmount = row['Tổng số tiền Người mua thanh toán'] ?? row['Tổng giá trị đơn hàng (VND)'] ?? row['Tổng giá bán (sản phẩm)'] ?? row['Tổng đơn hàng'] ?? row['Thành tiền'] ?? row['Tổng cộng'] ?? 0;
                         const totalAmount = typeof rawAmount === 'number' ? rawAmount : parseFloat(String(rawAmount).replace(/,/g, '')) || 0;
                         const unitPrice = quantity > 0 ? totalAmount / quantity : totalAmount;
 
                         if (!orderId || !productName) {
-                            console.warn('âš ï¸ Skip row: missing MÃ£ Ä‘Æ¡n hÃ ng or TÃªn sáº£n pháº©m', row);
+                            console.warn('⚠️ Skip row: missing Mã đơn hàng or Tên sản phẩm', row);
                             return;
                         }
 
@@ -1602,7 +1591,7 @@ Thời gian: ${currentTime}`;
                     // Detect source
                     const firstRow: any = jsonData[0] || {};
                     const isTikTok = 'Order ID' in firstRow || 'Cancelled Time' in firstRow;
-                    const isShopee = 'MÃ£ Ä‘Æ¡n hÃ ng' in firstRow || 'ÄÆ¡n Vá»‹ Váº­n Chuyá»ƒn' in firstRow;
+                    const isShopee = 'Mã đơn hàng' in firstRow || 'Đơn Vị Vận Chuyển' in firstRow;
 
                     if (!isTikTok && !isShopee) {
                         console.warn(`âš ï¸ Skip file ${fileData.name}: khÃ´ng Ä‘Ãºng Ä‘á»‹nh dáº¡ng`);
@@ -1614,7 +1603,7 @@ Thời gian: ${currentTime}`;
                     if (!allOrderIdsBySource.has(fileSource)) allOrderIdsBySource.set(fileSource, new Set());
                     const sourceOrderIds = allOrderIdsBySource.get(fileSource)!;
                     jsonData.forEach((row: any) => {
-                        const oid = isTikTok ? (row['Order ID'] || '') : (row['Mã �ơn hàng'] || '');
+                        const oid = isTikTok ? (row['Order ID'] || '') : (row['Mã đơn hàng'] || '');
                         if (oid) sourceOrderIds.add(oid);
                     });
 
@@ -1676,16 +1665,16 @@ Thời gian: ${currentTime}`;
                         });
                     } else if (isShopee) {
                         jsonData.forEach((row: any) => {
-                            const orderId = row['MÃ£ Ä‘Æ¡n hÃ ng'] || '';
-                            const productName = row['TÃªn sáº£n pháº©m'] || row['TÃªn Sáº£n Pháº©m'] || '';
-                            const variation = row['TÃªn phÃ¢n loáº¡i hÃ ng'] || row['PhÃ¢n loáº¡i hÃ ng'] || '';
+                            const orderId = row['Mã đơn hàng'] || '';
+                            const productName = row['Tên sản phẩm'] || row['Tên Sản Phẩm'] || '';
+                            const variation = row['Tên phân loại hàng'] || row['Phân loại hàng'] || '';
                             const sku = row[shopeeSkuHeader] || '';
-                            const quantity = parseInt(row['Sá»‘ lÆ°á»£ng'] || '1');
-                            const cancelledTime = row['NgÃ y gá»­i hÃ ng'] || row['Thá»i gian táº¡o Ä‘Æ¡n hÃ ng'] || '';
-                            const shippingProvider = row['ÄÆ¡n Vá»‹ Váº­n Chuyá»ƒn'] || '';
-                            const trackingId = row['MÃ£ váº­n Ä‘Æ¡n'] || '';
-                            const ecommerceExportReason = row['Tráº¡ng ThÃ¡i ÄÆ¡n HÃ ng'] || 'Há»§y Ä‘Æ¡n Shopee';
-                            const rawAmount2 = row['T�"ng s� tiền Người mua thanh toán'] ?? row['T�"ng giá tr�9 �ơn hàng (VND)'] ?? row['T�"ng giá bán (sản phẩm)'] ?? row['T�"ng �ơn hàng'] ?? row['Thành tiền'] ?? row['T�"ng c�"ng'] ?? 0;
+                            const quantity = parseInt(row['Số lượng'] || '1');
+                            const cancelledTime = row['Ngày gửi hàng'] || row['Thời gian tạo đơn hàng'] || row['Ngày đặt hàng'] || '';
+                            const shippingProvider = row['Đơn Vị Vận Chuyển'] || '';
+                            const trackingId = row['Mã vận đơn'] || '';
+                            const ecommerceExportReason = row['Trạng Thái Đơn Hàng'] || 'Hủy đơn Shopee';
+                            const rawAmount2 = row['Tổng số tiền Người mua thanh toán'] ?? row['Tổng giá trị đơn hàng (VND)'] ?? row['Tổng giá bán (sản phẩm)'] ?? row['Tổng đơn hàng'] ?? row['Thành tiền'] ?? row['Tổng cộng'] ?? 0;
                             const totalAmount = typeof rawAmount2 === 'number' ? rawAmount2 : parseFloat(String(rawAmount2).replace(/,/g, '')) || 0;
                             const unitPrice2 = quantity > 0 ? totalAmount / quantity : totalAmount;
 

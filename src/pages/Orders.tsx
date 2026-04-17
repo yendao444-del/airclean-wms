@@ -96,9 +96,6 @@ export default function OrdersPage() {
 
     const getUntil = () => {
         switch (datePreset) {
-            case 'today': return dayjs().endOf('day').toISOString();
-            case '7days': return dayjs().endOf('day').toISOString();
-            case '30days': return dayjs().endOf('day').toISOString();
             case 'month': return dayjs().endOf('month').toISOString();
             case 'custom': return customRange ? customRange[1].endOf('day').toISOString() : dayjs().endOf('day').toISOString();
             default: return dayjs().endOf('day').toISOString();
@@ -106,9 +103,7 @@ export default function OrdersPage() {
     };
 
     const getEcommerceFetchLimit = () => {
-        const since = dayjs(getSince());
-        const until = dayjs(getUntil());
-        const days = Math.max(until.diff(since, 'day') + 1, 1);
+        const days = Math.max(dayjs(getUntil()).diff(dayjs(getSince()), 'day') + 1, 1);
         return Math.min(Math.max(days * 800, 2000), 10000);
     };
 
@@ -239,7 +234,11 @@ export default function OrdersPage() {
             }
 
             unified.sort((a, b) => dayjs(b.date).unix() - dayjs(a.date).unix());
-            setOrders(unified);
+            // Khi silent reload (interval 30s), chỉ cập nhật nếu lấy được dữ liệu hợp lệ
+            // Tránh ghi đè danh sách hiện tại bằng array rỗng khi API lỗi tạm thời
+            if (!silent || unified.length > 0) {
+                setOrders(unified);
+            }
         } catch (error) {
             console.error('Error loading orders:', error);
         } finally {
@@ -375,6 +374,7 @@ export default function OrdersPage() {
     }, [productDetailName, filteredOrders]);
 
     const openEdit = (record: UnifiedOrder) => {
+        setEditItems([]); // clear state cũ trước khi load đơn mới
         let items: any[] = [];
         try { items = JSON.parse(record.items); } catch { }
         const mappedItems = items.map(it => ({
@@ -939,7 +939,7 @@ export default function OrdersPage() {
             <Modal
                 title={<span>✏️ Sửa đơn hàng <Text type="secondary" style={{ fontSize: 13 }}>{editOrder?.orderNumber}</Text></span>}
                 open={!!editOrder}
-                onCancel={() => setEditOrder(null)}
+                onCancel={() => { setEditOrder(null); setEditItems([]); editForm.resetFields(); }}
                 onOk={handleEditSave}
                 confirmLoading={editSaving}
                 okText="Lưu thay đổi" cancelText="Hủy"
