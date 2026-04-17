@@ -92,7 +92,7 @@ function getShopeeSkuHeader(worksheet: any, jsonData: any[]): string {
             if (candidate in firstRow) return candidate;
         }
     }
-    return cellHeader; // tráº£ vá» gÃ¬ cÃ³ (dÃ¹ sai) Ä‘á»ƒ giá»¯ behavior cÅ©
+    return cellHeader; // trả về gì có (dù sai) để giữ behavior cũ
 }
 
 export default function EcommerceExportPage() {
@@ -109,7 +109,7 @@ export default function EcommerceExportPage() {
     const [editingEcommerceExport, setEditingEcommerceExport] = useState<EcommerceExport | null>(null);
     const [form] = Form.useForm();
 
-    // Items trong phiáº¿u xuáº¥t
+    // Items trong phiếu xuất
     const [ecommerceExportItems, setEcommerceExportItems] = useState<ExportItem[]>([]);
     const [selectedProductVariants, setSelectedProductVariants] = useState<any[]>([]);
 
@@ -211,7 +211,7 @@ export default function EcommerceExportPage() {
             if (today !== unmatchedDateRef.current) {
                 unmatchedDateRef.current = today;
                 setUnmatchedScans([]);
-                console.log('ðŸ—“ï¸ [Lá»‡ch Ä‘Æ¡n] ÄÃ£ tá»± Ä‘á»™ng xÃ³a - sang ngÃ y má»›i:', today);
+                console.log('🗓️ [Lệch đơn] Đã tự động xóa - sang ngày mới:', today);
             }
         }, 60000);
 
@@ -224,7 +224,7 @@ export default function EcommerceExportPage() {
         };
         checkOfflinePending();
 
-        // Auto-sync khi máº¡ng khÃ´i phá»¥c
+        // Auto-sync khi mạng khôi phục
         const handleOnline = async () => {
             const res = await (window as any).electronAPI.offlineQueue.status();
             if (!res.success || res.pendingCount === 0) return;
@@ -266,11 +266,11 @@ export default function EcommerceExportPage() {
                     username: u.username,
                 })));
             }
-            // Load active packer tá»« session
+            // Load active packer từ session
             // KhÃ´ng load activePacker tá»« session cÅ© â€” má»—i ca pháº£i chá»n láº¡i ngÆ°á»i Ä‘Ã³ng gÃ³i
             // (trÃ¡nh tÃ¬nh tráº¡ng lá»‡nh Ä‘Æ°á»£c gÃ¡n nháº§m ngÆ°á»i tá»« ca trÆ°á»›c)
         } catch (err) {
-            console.error('Lá»—i táº£i danh sÃ¡ch nhÃ¢n viÃªn:', err);
+            console.error('Lỗi tải danh sách nhân viên:', err);
         }
     };
 
@@ -376,10 +376,10 @@ export default function EcommerceExportPage() {
     const normalizeFolderImportError = useCallback((error?: string) => {
         const text = String(error || '').trim();
         if (!text) return 'Lỗi import từ thư mục!';
-        if (text === 'Không có thư mục được chọn' || text.includes('KhÃ´ng cÃ³ thÆ° má»¥c Ä‘Æ°á»£c chá»n')) {
+        if (text === 'Không có thư mục được chọn' || text.includes('Không có thư mục được chọn')) {
             return 'Không có thư mục được chọn';
         }
-        if (text.includes('KhÃ´ng tÃ¬m tháº¥y file Excel nÃ o trong thÆ° má»¥c')) {
+        if (text.includes('Không tìm thấy file Excel nào trong thư mục')) {
             return 'Không tìm thấy file Excel nào trong thư mục';
         }
         return text;
@@ -457,7 +457,7 @@ export default function EcommerceExportPage() {
                 mergeDbWithLocalPending(normalizedDb, exportsRef.current);
             }
         } catch (error) {
-            if (!silent) message.error('Lá»—i khi táº£i dá»¯ liá»‡u');
+            if (!silent) message.error('Lỗi khi tải dữ liệu');
         } finally {
             if (!silent) setLoading(false);
         }
@@ -470,7 +470,7 @@ export default function EcommerceExportPage() {
                 .map(r => r.id);
 
             if (cancelledIds.length === 0) {
-                if (!silent) message.info('KhÃ´ng cÃ³ Ä‘Æ¡n TMDT Ä‘Ã£ há»§y Ä‘á»ƒ xÃ³a.');
+                if (!silent) message.info('Không có đơn TMDT đã hủy để xóa.');
                 return 0;
             }
 
@@ -481,11 +481,11 @@ export default function EcommerceExportPage() {
             }
             const deletedCount = result.data || cancelledIds.length;
             if (!silent && deletedCount > 0) {
-                message.success(`ÄÃ£ xÃ³a ${deletedCount} Ä‘Æ¡n TMDT Ä‘Ã£ há»§y`);
+                message.success(`Đã xóa ${deletedCount} đơn TMDT đã hủy`);
             }
             return deletedCount;
         } catch (error) {
-            if (!silent) message.error('KhÃ´ng thá»ƒ xÃ³a Ä‘Æ¡n TMDT Ä‘Ã£ há»§y');
+            if (!silent) message.error('Không thể xóa đơn TMDT đã hủy');
             return 0;
         }
     };
@@ -637,21 +637,21 @@ export default function EcommerceExportPage() {
 
     const handleDeleteCancelled = () => {
         if (!isAdmin) {
-            message.error('Chá»‰ quáº£n trá»‹ viÃªn má»›i cÃ³ quyá»n xÃ³a Ä‘Æ¡n hÃ ng!');
+            message.error('Chỉ quản trị viên mới có quyền xóa đơn hàng!');
             return;
         }
 
         if (statusCounts.cancelled === 0) {
-            message.info('KhÃ´ng cÃ³ Ä‘Æ¡n TMDT Ä‘Ã£ há»§y Ä‘á»ƒ xÃ³a.');
+            message.info('Không có đơn TMDT đã hủy để xóa.');
             return;
         }
 
         Modal.confirm({
             title: `Xóa ${statusCounts.cancelled} �ơn TMDT �ã hủy?`,
-            content: 'Thao tÃ¡c nÃ y sáº½ xÃ³a toÃ n bá»™ Ä‘Æ¡n cÃ³ tráº¡ng thÃ¡i cancelled trong Xuáº¥t hÃ ng TMDT. KhÃ´ng áº£nh hÆ°á»Ÿng Ä‘Æ¡n Ä‘Ã£ hoÃ n thÃ nh á»Ÿ má»¥c ÄÆ¡n hÃ ng.',
-            okText: 'XÃ³a Ä‘Æ¡n há»§y',
+            content: 'Thao tác này sẽ xóa toàn bộ đơn có trạng thái cancelled trong Xuất hàng TMDT. Không ảnh hưởng đơn đã hoàn thành ở mục Đơn hàng.',
+            okText: 'Xóa đơn hủy',
             okType: 'danger',
-            cancelText: 'Há»§y',
+            cancelText: 'Hủy',
             onOk: async () => {
                 const deletedCount = await purgeCancelledExports(false);
                 if (deletedCount > 0) {
@@ -732,8 +732,8 @@ Thời gian: ${currentTime}`;
     const scheduleBgSync = useCallback(() => {
         if (bgSyncTimerRef.current) clearTimeout(bgSyncTimerRef.current);
         bgSyncTimerRef.current = setTimeout(() => {
-            loadEcommerceExports(true); // silent reload â€” khÃ´ng hiá»‡n loading spinner
-        }, 3000); // chá» 3s sau scan cuá»‘i cÃ¹ng má»›i reload
+            loadEcommerceExports(true); // silent reload — không hiện loading spinner
+        }, 3000); // chờ 3s sau scan cuối cùng mới reload
     }, []);
 
     // ðŸ“¦ Xá»­ lÃ½ quÃ©t mÃ£ váº­n Ä‘Æ¡n â€” Tá»I Æ¯U: O(1) lookup + surgical state update
@@ -770,7 +770,7 @@ Thời gian: ${currentTime}`;
                 return tracking === trimmed || orderId === trimmed;
             });
             if (foundEcommerceExport) {
-                console.warn(`âš ï¸ trackingMap miss nhÆ°ng .find() tÃ¬m tháº¥y â€” rebuild map. Input: ${trimmed}`);
+                console.warn(`⚠️ trackingMap miss nhưng .find() tìm thấy — rebuild map. Input: ${trimmed}`);
                 rebuildTrackingMap(exportsRef.current);
             }
         }
@@ -783,7 +783,7 @@ Thời gian: ${currentTime}`;
                 return tracking === trimmed || orderId === trimmed;
             });
             if (foundEcommerceExport) {
-                console.warn(`âš ï¸ exportsRef miss nhÆ°ng state tÃ¬m tháº¥y â€” resync ref. Input: ${trimmed}`);
+                console.warn(`⚠️ exportsRef miss nhưng state tìm thấy — resync ref. Input: ${trimmed}`);
                 exportsRef.current = [...ecommerceExports];
                 rebuildTrackingMap(exportsRef.current);
             }
@@ -807,7 +807,7 @@ Thời gian: ${currentTime}`;
                 });
                 message.warning(`Đơn ${foundEcommerceExport.orderNumber || foundEcommerceExport.ecommerceExportCode} đã gửi rồi!`);
             } else {
-                // âœ… ÄÆ¡n hÃ ng chÆ°a pickup â†’ Cáº­p nháº­t thÃ nh "ÄÃ£ bÃ n giao DVVC" + TRá»ª Tá»’N KHO
+                // âœ… ÄÆ¡n hÃ ng chÆ°a pickup â†’ Cáº­p nháº­t thÃ nh "Đã bàn giao DVVC" + TRá»ª Tá»’N KHO
                 const targetId = foundEcommerceExport.id;
                 const orderKey = getOrderKey(foundEcommerceExport);
                 const trackingKey = getTrackingKey(foundEcommerceExport);
@@ -931,7 +931,7 @@ Thời gian: ${currentTime}`;
             });
             message.warning(`Không tìm thấy đơn hàng với mã: ${trimmed}`);
 
-            // âš¡ LÆ°u vÃ o danh sÃ¡ch "Lá»‡ch Ä‘Æ¡n" (trÃ¡nh trÃ¹ng)
+            // âš¡ LÆ°u vÃ o danh sÃ¡ch "Lệch đơn" (trÃ¡nh trÃ¹ng)
             setUnmatchedScans(prev => {
                 if (prev.some(s => s.trackingId === trimmed)) return prev;
                 return [...prev, {
@@ -973,13 +973,13 @@ Thời gian: ${currentTime}`;
                         return;
                     }
 
-                    // TÃ¬m cá»™t cÃ³ tá»« khÃ³a "MÃ£ Váº­n ÄÆ¡n", "Tracking", v.v.
+                    // TÃ¬m cá»™t cÃ³ tá»« khÃ³a "Mã Vận Đơn", "Tracking", v.v.
                     const firstRow = json[0] || {};
                     let trackingKey = Object.keys(firstRow).find(k =>
-                        k.toLowerCase().includes('mÃ£ váº­n Ä‘Æ¡n') ||
+                        k.toLowerCase().includes('mã vận đơn') ||
                         k.toLowerCase().includes('tracking') ||
-                        k.toLowerCase().includes('váº­n Ä‘Æ¡n') ||
-                        k.toLowerCase().includes('mÃ£ vd')
+                        k.toLowerCase().includes('vận đơn') ||
+                        k.toLowerCase().includes('mã vd')
                     );
 
                     // Náº¿u khÃ´ng tÃ¬m tháº¥y báº±ng keyword, há»i ngÆ°á»i dÃ¹ng hoáº·c láº¥y cá»™t Ä‘áº§u tiÃªn cÃ³ váº» chá»©a tracking
@@ -1002,7 +1002,7 @@ Thời gian: ${currentTime}`;
 
                     for (const tracking of trackings) {
                         // ChÃºng ta cháº¡y tuáº§n tá»± Ä‘á»ƒ Backend khÃ´ng bá»‹ Rate Limit / Race Condition trÃªn SQLite/Supabase
-                        await new Promise(r => setTimeout(r, 100)); // Delay nhá» Ä‘á»ƒ trÃ¡nh spam API
+                        await new Promise(r => setTimeout(r, 100)); // Delay nhỏ để tránh spam API
 
                         // Fake input ref value to avoid rewriting handleScan
                         if (scanInputRef.current?.input) scanInputRef.current.input.value = tracking;
@@ -1044,7 +1044,7 @@ Thời gian: ${currentTime}`;
             console.log('ðŸ“Š Data to export:', dataToExport.length, dataToExport);
 
             if (dataToExport.length === 0) {
-                message.warning('KhÃ´ng cÃ³ dá»¯ liá»‡u Ä‘á»ƒ xuáº¥t!');
+                message.warning('Không có dữ liệu để xuất!');
                 return;
             }
 
@@ -1057,7 +1057,7 @@ Thời gian: ${currentTime}`;
                     items = [];
                 }
 
-                // Láº¥y thÃ´ng tin shipping
+                // Lấy thông tin shipping
                 const shippingMatch = ecommerceExport.notes?.match(/Shipping: ([^|]+)/);
                 const trackingMatch = ecommerceExport.notes?.match(/Tracking: ([^|]+)/);
                 const shipping = shippingMatch ? shippingMatch[1].trim() : '';
@@ -1065,23 +1065,23 @@ Thời gian: ${currentTime}`;
 
                 return {
                     'STT': index + 1,
-                    'Nguá»“n Ä‘Æ¡n hÃ ng': ecommerceExport.customerName,
+                    'Nguồn đơn hàng': ecommerceExport.customerName,
                     'Order ID': ecommerceExport.orderNumber || ecommerceExport.ecommerceExportCode,
                     'Tracking ID': tracking,
-                    'Sá»‘ SKU': items.length,
-                    'LÃ½ do hoÃ n': ecommerceExport.ecommerceExportReason,
-                    'NgÃ y hoÃ n': dayjs(ecommerceExport.ecommerceExportDate).format('DD/MM/YYYY'),
+                    'Số SKU': items.length,
+                    'Lý do hoàn': ecommerceExport.ecommerceExportReason,
+                    'Ngày hoàn': dayjs(ecommerceExport.ecommerceExportDate).format('DD/MM/YYYY'),
                     'Shipping Provider': shipping,
-                    'Tá»•ng tiá»n': ecommerceExport.totalAmount,
+                    'Tổng tiền': ecommerceExport.totalAmount,
                     'Trạng thái': ecommerceExport.status === 'completed' ? 'Hoàn thành' : 'Đang xử lý',
-                    'Ghi chÃº': ecommerceExport.notes,
+                    'Ghi chú': ecommerceExport.notes,
                 };
             });
 
-            // Táº¡o workbook vÃ  worksheet
+            // Tạo workbook và worksheet
             const worksheet = XLSX.utils.json_to_sheet(excelData);
             const workbook = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(workbook, worksheet, 'Xuáº¥t hÃ ng TMDT');
+            XLSX.utils.book_append_sheet(workbook, worksheet, 'Xuất hàng TMDT');
 
             // Set column widths
             worksheet['!cols'] = [
@@ -1090,24 +1090,24 @@ Thời gian: ${currentTime}`;
                 { wch: 22 }, // Order ID
                 { wch: 18 }, // Tracking
                 { wch: 8 },  // Sá»‘ SKU
-                { wch: 15 }, // LÃ½ do
-                { wch: 12 }, // NgÃ y
+                { wch: 15 }, // Lý do
+                { wch: 12 }, // Ngày
                 { wch: 15 }, // Shipping
                 { wch: 12 }, // Tá»•ng tiá»n
-                { wch: 15 }, // Tráº¡ng thÃ¡i
-                { wch: 30 }, // Ghi chÃº
+                { wch: 15 }, // Trạng thái
+                { wch: 30 }, // Ghi chú
             ];
 
             // Táº¡o tÃªn file vá»›i timestamp
             const filterLabel = filterStatus === 'all' ? 'TatCa' : filterStatus === 'completed' ? 'DaHoan' : 'DangXuLy';
             const fileName = `XuatHangTMDT_${filterLabel}_${dayjs().format('YYYYMMDD_HHmmss')}.xlsx`;
 
-            // Xuáº¥t file
+            // Xuất file
             XLSX.writeFile(workbook, fileName);
-            message.success(`âœ… ÄÃ£ xuáº¥t ${dataToExport.length} phiáº¿u xuáº¥t!`);
+            message.success(`✅ Đã xuất ${dataToExport.length} phiếu xuất!`);
         } catch (error) {
             console.error('Export error:', error);
-            message.error('Lá»—i khi xuáº¥t file Excel!');
+            message.error('Lỗi khi xuất file Excel!');
         }
     };
 
@@ -1132,7 +1132,7 @@ Thời gian: ${currentTime}`;
             const values = await form.validateFields();
 
             if (ecommerceExportItems.length === 0) {
-                message.warning('Vui lÃ²ng thÃªm Ã­t nháº¥t má»™t sáº£n pháº©m!');
+                message.warning('Vui lòng thêm ít nhất một sản phẩm!');
                 return;
             }
 
@@ -1224,7 +1224,7 @@ Thời gian: ${currentTime}`;
             setEditingEcommerceExport(null);
         } catch (error) {
             console.error('Submit error:', error);
-            message.error('Lá»—i khi lÆ°u phiáº¿u xuáº¥t');
+            message.error('Lỗi khi lưu phiếu xuất');
         }
     };
 
@@ -1236,7 +1236,7 @@ Thời gian: ${currentTime}`;
         const unitPrice = form.getFieldValue('tempUnitPrice');
 
         if (!productId || !quantity || !unitPrice) {
-            message.warning('Vui lÃ²ng Ä‘iá»n Ä‘áº§y Ä‘á»§ thÃ´ng tin sáº£n pháº©m!');
+            message.warning('Vui lòng điền đầy đủ thông tin sản phẩm!');
             return;
         }
 
@@ -1272,7 +1272,7 @@ Thời gian: ${currentTime}`;
             tempUnitPrice: undefined,
         });
         setSelectedProductVariants([]);
-        message.success('ÄÃ£ thÃªm sáº£n pháº©m');
+        message.success('Đã thêm sản phẩm');
     };
 
     const handleRemoveItem = (index: number) => {
@@ -1311,10 +1311,10 @@ Thời gian: ${currentTime}`;
 
                 // ðŸ“Š Shopee: tÃ¬m tÃªn cá»™t SKU (Ã´ T1 â†’ fallback tÃªn cá»™t phá»• biáº¿n)
                 const shopeeSkuHeader = isShopee ? getShopeeSkuHeader(worksheet, jsonData) : '';
-                if (isShopee) console.log('ðŸ”‘ Shopee SKU header detected:', shopeeSkuHeader || '(KHÃ”NG TÃŒM THáº¤Y)');
+                if (isShopee) console.log('ðŸ”‘ Shopee SKU header detected:', shopeeSkuHeader || '(KHÔNG TÌM THẤY)');
 
                 if (isTikTok) {
-                    // ===== Xá»¬ LÃ TIKTOK =====
+                    // ===== XỬ LÝ TIKTOK =====
                     console.log('ðŸ“± Processing TikTok data...');
                     // Debug: log keys cá»§a row Ä‘áº§u tiÃªn
                     if (jsonData[0]) {
@@ -1373,13 +1373,13 @@ Thời gian: ${currentTime}`;
                             cancelledTime,
                             shippingProvider,
                             trackingId,
-                            ecommerceExportReason: 'Há»§y Ä‘Æ¡n TikTok',
+                            ecommerceExportReason: 'Hủy đơn TikTok',
                             customerName: 'TikTok',
                             totalAmount: orderAmount,
                         });
                     });
                 } else if (isShopee) {
-                    // ===== Xá»¬ LÃ SHOPEE =====
+                    // ===== XỬ LÝ SHOPEE =====
                     console.log('ðŸ›’ Processing Shopee data...');
                     if (jsonData.length > 0) {
                         console.log('ðŸ“‹ Shopee columns:', Object.keys(jsonData[0]));
@@ -1449,7 +1449,7 @@ Thời gian: ${currentTime}`;
                     if (!hasTracking) {
                         console.warn(`âš ï¸ Skip order ${orderId} - No Tracking ID`);
                         skippedCount++;
-                        return; // Skip order khÃ´ng cÃ³ Tracking ID
+                        return; // Skip order không có Tracking ID
                     }
 
 
@@ -1523,7 +1523,7 @@ Thời gian: ${currentTime}`;
     // ðŸ“ Nháº­p tá»« thÆ° má»¥c
     const handleImportFolder = async () => {
         try {
-            // Chá»n thÆ° má»¥c
+            // Chọn thư mục
             const folderResult = await (window as any).electronAPI.ecommerceExports.selectFolder();
 
             if (!folderResult.success) {
@@ -1538,7 +1538,7 @@ Thời gian: ${currentTime}`;
             message.loading({ content: 'Đang đọc file từ thư mục...', key: 'import-folder', duration: 0 });
             const persistedCompletedKeys = await loadCompletedOrderKeys();
 
-            // Äá»c táº¥t cáº£ file Excel
+            // Đọc tất cả file Excel
             const filesResult = await (window as any).electronAPI.ecommerceExports.loadExcelFiles(folderPath);
 
             if (!filesResult.success) {
@@ -1563,7 +1563,7 @@ Thời gian: ${currentTime}`;
             const allOrderIdsBySource = new Map<string, Set<string>>();
             // ðŸš« Thu tháº­p Táº¤T Cáº¢ Order IDs theo nguá»“n â€” dÃ¹ng cho Ä‘á»‘i soÃ¡t sau khi import xong
 
-            // Xá»­ lÃ½ tá»«ng file
+            // Xử lý từng file
             for (const fileData of files) {
                 try {
                     message.loading({
@@ -1594,7 +1594,7 @@ Thời gian: ${currentTime}`;
                     const isShopee = 'Mã đơn hàng' in firstRow || 'Đơn Vị Vận Chuyển' in firstRow;
 
                     if (!isTikTok && !isShopee) {
-                        console.warn(`âš ï¸ Skip file ${fileData.name}: khÃ´ng Ä‘Ãºng Ä‘á»‹nh dáº¡ng`);
+                        console.warn(`âš ï¸ Skip file ${fileData.name}: không đúng định dạng`);
                         continue;
                     }
 
@@ -1612,7 +1612,7 @@ Thời gian: ${currentTime}`;
 
                     // ðŸ“Š Shopee: tÃ¬m tÃªn cá»™t SKU (Ã´ T1 â†’ fallback tÃªn cá»™t phá»• biáº¿n)
                     const shopeeSkuHeader = isShopee ? getShopeeSkuHeader(worksheet, jsonData) : '';
-                    if (isShopee) console.log('ðŸ”‘ [Folder] Shopee SKU header detected:', shopeeSkuHeader || '(KHÃ”NG TÃŒM THáº¤Y)');
+                    if (isShopee) console.log('ðŸ”‘ [Folder] Shopee SKU header detected:', shopeeSkuHeader || '(KHÔNG TÌM THẤY)');
 
                     if (isTikTok) {
                         jsonData.forEach((row: any) => {
@@ -1658,7 +1658,7 @@ Thời gian: ${currentTime}`;
                                 cancelledTime,
                                 shippingProvider,
                                 trackingId,
-                                ecommerceExportReason: 'Há»§y Ä‘Æ¡n TikTok',
+                                ecommerceExportReason: 'Hủy đơn TikTok',
                                 customerName: 'TikTok',
                                 totalAmount: orderAmount,
                             });
@@ -1778,7 +1778,7 @@ Thời gian: ${currentTime}`;
             }
 
 
-            // ThÃ´ng bÃ¡o káº¿t quáº£
+            // Thông báo kết quả
             const resultParts: string[] = [];
             if (totalImported > 0) resultParts.push(`Đã import ${totalImported} đơn từ ${processedFiles} file`);
             if (totalSkipped > 0) resultParts.push(`bỏ qua ${totalSkipped} đơn trùng`);
@@ -1871,7 +1871,7 @@ Thời gian: ${currentTime}`;
             key: 'orderTracking',
             width: 180,
             render: (orderNumber, record) => {
-                // Láº¥y tracking tá»« notes
+                // Lấy tracking từ notes
                 let tracking = '-';
                 if (record.notes) {
                     const trackingMatch = record.notes.match(/Tracking: ([^|]+)/);
@@ -1888,7 +1888,7 @@ Thời gian: ${currentTime}`;
 
                 return (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        {/* Order ID - dÃ²ng trÃªn */}
+                        {/* Order ID - dòng trên */}
                         <div style={{ fontSize: 11, color: '#8c8c8c' }}>
                             {orderNumber ? (
                                 <Tag
@@ -2009,10 +2009,10 @@ Thời gian: ${currentTime}`;
         },
         // ðŸ”½ áº¨n cá»™t Tráº¡ng thÃ¡i & NgÆ°á»i ÄG â€” Ä‘Ã£ cÃ³ filter tabs hiá»ƒn thá»‹ tráº¡ng thÃ¡i
         // {
-        //     title: 'Tráº¡ng thÃ¡i', ...
+        //     title: 'Trạng thái', ...
         // },
         // {
-        //     title: 'NgÆ°á»i ÄG', ...
+        //     title: 'Người ĐG', ...
         // },
         {
             title: '',
@@ -2102,7 +2102,7 @@ Thời gian: ${currentTime}`;
     const filteredEcommerceExports = useMemo(() => {
         const today = dayjs().startOf('day');
         return ecommerceExports.filter(ecommerceExport => {
-            // Lá»c theo tráº¡ng thÃ¡i
+            // Lọc theo trạng thái
             let statusMatch = true;
             if (statusFilter === 'pending') statusMatch = ecommerceExport.status !== 'completed' && ecommerceExport.status !== 'cancelled';
             else if (statusFilter === 'completed') statusMatch = ecommerceExport.status === 'completed';
@@ -2165,7 +2165,7 @@ Thời gian: ${currentTime}`;
 
     return (
         <div>
-            {/* DÃ²ng 1: Stats + Search + Actions */}
+            {/* Dòng 1: Stats + Search + Actions */}
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'nowrap' }}>
                 <Tag
                     onClick={() => setStatusFilter('pending')}
@@ -2506,7 +2506,7 @@ Thời gian: ${currentTime}`;
                                             danger
                                             onClick={() => setUnmatchedScans(prev => prev.filter(s => s.trackingId !== record.trackingId))}
                                         >
-                                            XÃ³a
+                                            Xóa
                                         </Button>
                                     ),
                                 },
@@ -2515,7 +2515,7 @@ Thời gian: ${currentTime}`;
                     )}
                 </Card>
             ) : (
-                /* ðŸ“‹ Báº¢NG ÄÆ N HÃ€NG CHÃNH */
+                /* 📋 BẢNG ĐƠN HÀNG CHÍNH */
                 <Card>
                     <Table
                         columns={columns}
@@ -2553,7 +2553,7 @@ Thời gian: ${currentTime}`;
                                 }
 
                                 if (items.length === 0) {
-                                    return <p style={{ margin: 0, color: '#bfbfbf' }}>KhÃ´ng cÃ³ sáº£n pháº©m</p>;
+                                    return <p style={{ margin: 0, color: '#bfbfbf' }}>Không có sản phẩm</p>;
                                 }
 
                                 return (
@@ -2576,7 +2576,7 @@ Thời gian: ${currentTime}`;
                             defaultPageSize: 10,
                             showSizeChanger: true,
                             pageSizeOptions: ['10', '20', '50', '100'],
-                            showTotal: (total) => `Tá»•ng ${total} phiáº¿u`,
+                            showTotal: (total) => `Tổng ${total} phiếu`,
                         }}
                         scroll={{ x: 'max-content' }}
                     />
@@ -2585,7 +2585,7 @@ Thời gian: ${currentTime}`;
 
             {/* Method Selection Modal */}
             <Modal
-                title="ðŸ” Chá»n phÆ°Æ¡ng thá»©c nháº­p liá»‡u"
+                title="🔍 Chọn phương thức nhập liệu"
                 open={methodModalVisible}
                 onCancel={() => setMethodModalVisible(false)}
                 footer={null}
@@ -2598,8 +2598,8 @@ Thời gian: ${currentTime}`;
                         style={{ textAlign: 'center', cursor: 'pointer', maxWidth: 300 }}
                     >
                         <FormOutlined style={{ fontSize: 48, color: '#52c41a', marginBottom: 16 }} />
-                        <Title level={4}>Nháº­p thá»§ cÃ´ng</Title>
-                        <Typography.Text type="secondary">Nháº­p tá»«ng phiáº¿u má»™t</Typography.Text>
+                        <Title level={4}>Nhập thủ công</Title>
+                        <Typography.Text type="secondary">Nhập từng phiếu một</Typography.Text>
                     </Card>
                 </div>
             </Modal>
@@ -2620,17 +2620,17 @@ Thời gian: ${currentTime}`;
                     {/* Row 1: Customer + EcommerceExport Date */}
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                         <Form.Item
-                            label="TÃªn khÃ¡ch hÃ ng"
+                            label="Tên khách hàng"
                             name="customerName"
-                            rules={[{ required: true, message: 'Vui lÃ²ng nháº­p tÃªn khÃ¡ch hÃ ng!' }]}
+                            rules={[{ required: true, message: 'Vui lòng nhập tên khách hàng!' }]}
                         >
-                            <Input placeholder="Nháº­p tÃªn khÃ¡ch hÃ ng" size="large" />
+                            <Input placeholder="Nhập tên khách hàng" size="large" />
                         </Form.Item>
 
                         <Form.Item
-                            label="NgÃ y hoÃ n"
+                            label="Ngày hoàn"
                             name="ecommerceExportDate"
-                            rules={[{ required: true, message: 'Vui lÃ²ng chá»n ngÃ y!' }]}
+                            rules={[{ required: true, message: 'Vui lòng chọn ngày!' }]}
                         >
                             <DatePicker style={{ width: '100%' }} size="large" format="DD/MM/YYYY" />
                         </Form.Item>
@@ -2638,30 +2638,30 @@ Thời gian: ${currentTime}`;
 
                     {/* Row 2: EcommerceExport Code + Order Number */}
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                        <Form.Item label="MÃ£ hoÃ n hÃ ng" name="ecommerceExportCode">
-                            <Input placeholder="MÃ£ hoÃ n hÃ ng (tÃ¹y chá»n)" size="large" />
+                        <Form.Item label="Mã hoàn hàng" name="ecommerceExportCode">
+                            <Input placeholder="Mã hoàn hàng (tùy chọn)" size="large" />
                         </Form.Item>
 
-                        <Form.Item label="Sá»‘ Ä‘Æ¡n hÃ ng gá»‘c" name="orderNumber">
-                            <Input placeholder="Sá»‘ Ä‘Æ¡n hÃ ng gá»‘c (tÃ¹y chá»n)" size="large" />
+                        <Form.Item label="Số đơn hàng gốc" name="orderNumber">
+                            <Input placeholder="Số đơn hàng gốc (tùy chọn)" size="large" />
                         </Form.Item>
                     </div>
 
                     {/* Row 3: EcommerceExport Reason + Status */}
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                        <Form.Item label="LÃ½ do hoÃ n" name="ecommerceExportReason">
-                            <Select size="large" placeholder="Chá»n lÃ½ do">
-                                <Select.Option value="Lá»—i sáº£n pháº©m">Lá»—i sáº£n pháº©m</Select.Option>
-                                <Select.Option value="KhÃ´ng Ä‘Ãºng mÃ´ táº£">KhÃ´ng Ä‘Ãºng mÃ´ táº£</Select.Option>
-                                <Select.Option value="Giao nháº§m">Giao nháº§m</Select.Option>
-                                <Select.Option value="KhÃ¡ch Ä‘á»•i Ã½">KhÃ¡ch Ä‘á»•i Ã½</Select.Option>
-                                <Select.Option value="KhÃ¡c">KhÃ¡c</Select.Option>
+                        <Form.Item label="Lý do hoàn" name="ecommerceExportReason">
+                            <Select size="large" placeholder="Chọn lý do">
+                                <Select.Option value="Lỗi sản phẩm">Lỗi sản phẩm</Select.Option>
+                                <Select.Option value="Không đúng mô tả">Không đúng mô tả</Select.Option>
+                                <Select.Option value="Giao nhầm">Giao nhầm</Select.Option>
+                                <Select.Option value="Khách đổi ý">Khách đổi ý</Select.Option>
+                                <Select.Option value="Khác">Khác</Select.Option>
                             </Select>
                         </Form.Item>
 
-                        <Form.Item label="Tráº¡ng thÃ¡i" name="status">
+                        <Form.Item label="Trạng thái" name="status">
                             <Select size="large">
-                                <Select.Option value="completed">HoÃ n thÃ nh</Select.Option>
+                                <Select.Option value="completed">Hoàn thành</Select.Option>
                             </Select>
                         </Form.Item>
                     </div>
@@ -2675,13 +2675,13 @@ Thời gian: ${currentTime}`;
                         border: '2px dashed #52c41a',
                     }}>
                         <Title level={5} style={{ color: '#52c41a', marginBottom: 16 }}>
-                            âž• ThÃªm sáº£n pháº©m hoÃ n
+                            ➕ Thêm sản phẩm hoàn
                         </Title>
 
                         <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.5fr 1fr 1.2fr auto', gap: 12, alignItems: 'end' }}>
-                            <Form.Item label="Sáº£n pháº©m" name="tempProductId" style={{ marginBottom: 0 }}>
+                            <Form.Item label="Sản phẩm" name="tempProductId" style={{ marginBottom: 0 }}>
                                 <Select
-                                    placeholder="Chá»n sáº£n pháº©m"
+                                    placeholder="Chọn sản phẩm"
                                     size="large"
                                     onChange={handleProductSelect}
                                     showSearch
@@ -2690,19 +2690,19 @@ Thời gian: ${currentTime}`;
                                 />
                             </Form.Item>
 
-                            <Form.Item label="MÃ u sáº¯c" name="tempColor" style={{ marginBottom: 0 }}>
-                                <Select placeholder="Chá»n mÃ u" size="large" disabled={selectedProductVariants.length === 0}>
+                            <Form.Item label="Màu sắc" name="tempColor" style={{ marginBottom: 0 }}>
+                                <Select placeholder="Chọn màu" size="large" disabled={selectedProductVariants.length === 0}>
                                     {selectedProductVariants.map((v, i) => (
                                         <Select.Option key={i} value={v.color}>{v.color}</Select.Option>
                                     ))}
                                 </Select>
                             </Form.Item>
 
-                            <Form.Item label="Sá»‘ lÆ°á»£ng" name="tempQuantity" style={{ marginBottom: 0 }} initialValue={1}>
+                            <Form.Item label="Số lượng" name="tempQuantity" style={{ marginBottom: 0 }} initialValue={1}>
                                 <InputNumber placeholder="SL" min={1} style={{ width: '100%' }} size="large" />
                             </Form.Item>
 
-                            <Form.Item label="ÄÆ¡n giÃ¡" name="tempUnitPrice" style={{ marginBottom: 0 }}>
+                            <Form.Item label="Đơn giá" name="tempUnitPrice" style={{ marginBottom: 0 }}>
                                 <InputNumber
                                     placeholder="0"
                                     min={0}
@@ -2713,7 +2713,7 @@ Thời gian: ${currentTime}`;
                             </Form.Item>
 
                             <Button type="primary" size="large" onClick={handleAddItem} style={{ background: '#52c41a', borderColor: '#52c41a' }}>
-                                ThÃªm
+                                Thêm
                             </Button>
                         </div>
                     </div>
@@ -2721,7 +2721,7 @@ Thời gian: ${currentTime}`;
                     {/* Items Table */}
                     {ecommerceExportItems.length > 0 && (
                         <div style={{ marginBottom: 24 }}>
-                            <Title level={5}>Danh sÃ¡ch sáº£n pháº©m ({ecommerceExportItems.length})</Title>
+                            <Title level={5}>Danh sách sản phẩm ({ecommerceExportItems.length})</Title>
                             <Table
                                 columns={itemColumns}
                                 dataSource={ecommerceExportItems}
@@ -2732,7 +2732,7 @@ Thời gian: ${currentTime}`;
                                     <Table.Summary fixed>
                                         <Table.Summary.Row>
                                             <Table.Summary.Cell index={0} colSpan={5} align="right">
-                                                <strong>Tá»•ng cá»™ng:</strong>
+                                                <strong>Tổng cộng:</strong>
                                             </Table.Summary.Cell>
                                             <Table.Summary.Cell index={1} align="right">
                                                 <strong style={{ fontSize: 16, color: '#52c41a' }}>
@@ -2747,13 +2747,13 @@ Thời gian: ${currentTime}`;
                         </div>
                     )}
 
-                    <Form.Item label="Ghi chÃº" name="notes">
-                        <TextArea rows={3} placeholder="Ghi chÃº thÃªm (tÃ¹y chá»n)" />
+                    <Form.Item label="Ghi chú" name="notes">
+                        <TextArea rows={3} placeholder="Ghi chú thêm (tùy chọn)" />
                     </Form.Item>
 
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
                         <Button onClick={() => setModalVisible(false)} size="large">
-                            Há»§y
+                            Hủy
                         </Button>
                         <Button
                             type="primary"
@@ -2769,22 +2769,22 @@ Thời gian: ${currentTime}`;
 
             {/* âš™ï¸ Settings Modal - Telegram Config */}
             <Modal
-                title="âš™ï¸ CÃ i Ä‘áº·t Telegram"
+                title="⚙️ Cài đặt Telegram"
                 open={settingsModalVisible}
                 onCancel={() => setSettingsModalVisible(false)}
                 onOk={() => {
                     settingsForm.validateFields().then(async (values) => {
-                        // LÆ°u vÃ o database
+                        // Lưu vào database
                         await window.electronAPI.appConfig.set('telegramChatId', values.chatId || '');
                         await window.electronAPI.appConfig.set('telegramApiToken', values.apiToken || '');
 
-                        // Cáº­p nháº­t state
+                        // Cập nhật state
                         setTelegramSettings({
                             chatId: values.chatId || '',
                             apiToken: values.apiToken || '',
                         });
 
-                        message.success('âœ… ÄÃ£ lÆ°u cÃ i Ä‘áº·t Telegram!');
+                        message.success('✅ Đã lưu cài đặt Telegram!');
                         setSettingsModalVisible(false);
                     });
                 }}
@@ -2798,19 +2798,19 @@ Thời gian: ${currentTime}`;
                     <Form.Item
                         label="Chat ID"
                         name="chatId"
-                        rules={[{ required: true, message: 'Vui lÃ²ng nháº­p Chat ID!' }]}
-                        extra="Láº¥y Chat ID tá»« bot @userinfobot trÃªn Telegram"
+                        rules={[{ required: true, message: 'Vui lòng nhập Chat ID!' }]}
+                        extra="Lấy Chat ID từ bot @userinfobot trên Telegram"
                     >
-                        <Input placeholder="Nháº­p Chat ID" size="large" />
+                        <Input placeholder="Nhập Chat ID" size="large" />
                     </Form.Item>
 
                     <Form.Item
                         label="API Token"
                         name="apiToken"
-                        rules={[{ required: true, message: 'Vui lÃ²ng nháº­p API Token!' }]}
-                        extra="Láº¥y API Token tá»« @BotFather trÃªn Telegram"
+                        rules={[{ required: true, message: 'Vui lòng nhập API Token!' }]}
+                        extra="Lấy API Token từ @BotFather trên Telegram"
                     >
-                        <Input.Password placeholder="Nháº­p API Token" size="large" />
+                        <Input.Password placeholder="Nhập API Token" size="large" />
                     </Form.Item>
 
                     <div style={{
@@ -2820,11 +2820,11 @@ Thời gian: ${currentTime}`;
                         border: '1px solid #91d5ff'
                     }}>
                         <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-                            <strong>ðŸ’¡ HÆ°á»›ng dáº«n:</strong><br />
-                            1. Táº¡o bot má»›i vá»›i @BotFather â†’ Láº¥y API Token<br />
-                            2. Chat vá»›i bot @userinfobot â†’ Láº¥y Chat ID<br />
-                            3. Nháº­p 2 thÃ´ng tin trÃªn vÃ o form nÃ y<br />
-                            4. Má»—i khi quÃ©t Ä‘Æ¡n thÃ nh cÃ´ng sáº½ tá»± Ä‘á»™ng gá»­i thÃ´ng bÃ¡o lÃªn Telegram
+                            <strong>💡 Hướng dẫn:</strong><br />
+                            1. Tạo bot mới với @BotFather → Lấy API Token<br />
+                            2. Chat với bot @userinfobot → Lấy Chat ID<br />
+                            3. Nhập 2 thông tin trên vào form này<br />
+                            4. Mỗi khi quét đơn thành công sẽ tự động gửi thông báo lên Telegram
                         </Typography.Text>
                     </div>
                 </Form>

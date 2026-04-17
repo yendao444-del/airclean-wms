@@ -196,7 +196,7 @@ export default function OrdersPage() {
                             sourceLabel: ec.customerName?.toLowerCase().includes('tiktok') ? 'TikTok' :
                                 ec.customerName?.toLowerCase().includes('shopee') ? 'Shopee' : 'TMDT',
                             orderNumber: ec.orderNumber || ec.ecommerceExportCode || `#TMDT-${ec.id}`,
-                            customer: ec.customerName || 'SÃ n TMDT', items: ecItemsStr,
+                            customer: ec.customerName || 'Sàn TMDT', items: ecItemsStr,
                             totalAmount: ec.totalAmount || 0, status: ec.status,
                             date: effectiveDate,
                             tracking: trackingMatch ? trackingMatch[1].trim() : undefined,
