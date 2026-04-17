@@ -1945,6 +1945,17 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
         const totalCost = items.reduce((s, it) => s + (it.cost || 0) * it.qty, 0);
         const profit = total - totalCost;
 
+        // Resolve user ID before transaction to avoid tx.user.findUnique inside tx
+        let resolvedCreatedById = null;
+        if (userName) {
+            const resolvedUser = await prisma.user.findFirst({
+                where: { OR: [{ username: userName }, { fullName: userName }] },
+                select: { id: true }
+            });
+            resolvedCreatedById = resolvedUser ? resolvedUser.id : null;
+        }
+
+
         // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
         await withStockLock(() => prisma.$transaction(async (tx) => {
             // 1. HoÃ n láº¡i kho theo items cÅ©
@@ -1954,7 +1965,7 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
                     referenceType: 'POS_EDIT',
                     reference: oldOrder.orderNumber,
                     note: `Hoàn tồn (sửa đơn POS #${oldOrder.orderNumber})`,
-                    createdBy: userName || 'System'
+                    createdBy: resolvedCreatedById
                 });
             }
 
@@ -1987,7 +1998,7 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
                     referenceType: 'POS_EDIT',
                     reference: oldOrder.orderNumber,
                     note: `Trừ tồn mới (sửa đơn POS #${oldOrder.orderNumber})`,
-                    createdBy: userName || 'System'
+                    createdBy: resolvedCreatedById
                 });
             }
 
@@ -1996,7 +2007,7 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
                 where: { orderId: id },
                 data: { method: paymentMethod || oldOrder.paymentMethod, amount: total },
             });
-        }));
+        }, { timeout: 30000, maxWait: 10000 }));
 
         void logActivity({ module: 'sales', action: 'UPDATE', description: `Sá»­a Ä‘Æ¡n POS #${oldOrder.orderNumber}`, userName: userName || 'System' });
         return { success: true };
