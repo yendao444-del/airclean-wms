@@ -1,14 +1,14 @@
-﻿const { ipcMain, dialog, shell, app } = require('electron');
+const { ipcMain, dialog, shell, app } = require('electron');
 const path = require('path');
 
-// âœ… PRODUCTION CONFIG - KhÃ´ng cáº§n .env ná»¯a
+// ✅ PRODUCTION CONFIG - Không cần .env nữa
 const config = require('./config');
 
 // 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
 const offlineQueue = require('./offline-queue');
 try { offlineQueue.init(app.getPath('userData')); } catch (e) { console.error('[OfflineQueue] Init failed:', e.message); }
 
-// Set environment variables tá»« config
+// Set environment variables từ config
 process.env.DATABASE_URL = config.DATABASE_URL;
 process.env.DIRECT_URL = config.DIRECT_URL;
 
@@ -19,9 +19,9 @@ const http = require('http');
 const crypto = require('crypto');
 
 // ========================================
-// ðŸ”’ STOCK MUTEX â€” Serialize stock operations
-// NgÄƒn race condition khi nhiá»u scan/import cháº¡y Ä‘á»“ng thá»i
-// Äáº£m báº£o Tá»“n Ä‘áº§u/Tá»“n cuá»‘i trong Tháº» Kho luÃ´n Ä‘Ãºng
+// 🔒 STOCK MUTEX — Serialize stock operations
+// Ngăn race condition khi nhiều scan/import chạy đồng thời
+// Đảm bảo Tồn đầu/Tồn cuối trong Thẻ Kho luôn đúng
 // ========================================
 const _stockQueue = [];
 let _stockLocked = false;
@@ -55,8 +55,8 @@ async function withStockLock(fn) {
     }
 }
 
-// âš¡ LAZY LOADING â€” Module náº·ng chá»‰ load khi cáº§n, khÃ´ng block startup
-// googleapis (~3-5s), xlsx (~1-2s), bcryptjs (~0.5s) â†’ tiáº¿t kiá»‡m ~5-7s
+// ⚡ LAZY LOADING — Module nặng chỉ load khi cần, không block startup
+// googleapis (~3-5s), xlsx (~1-2s), bcryptjs (~0.5s) → tiết kiệm ~5-7s
 function lazyRequire(moduleName) {
     let mod = null;
     return new Proxy({}, {
@@ -75,7 +75,7 @@ const XLSX = lazyRequire('xlsx');
 const bcrypt = lazyRequire('bcryptjs');
 
 // ========================================
-// GOOGLE DRIVE + TELEGRAM â€” HÄÄT BACKUP
+// GOOGLE DRIVE + TELEGRAM — HĐĐT BACKUP
 // ========================================
 
 const GDRIVE_FOLDER_ID = config.GDRIVE_FOLDER_ID;
@@ -86,7 +86,7 @@ const TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID;
 const OAUTH_CLIENT_ID = config.OAUTH_CLIENT_ID;
 const OAUTH_CLIENT_SECRET = config.OAUTH_CLIENT_SECRET;
 
-// Google Drive auth (OAuth2 â€” dÃ¹ng storage cá»§a user, khÃ´ng bá»‹ quota limit)
+// Google Drive auth (OAuth2 — dùng storage của user, không bị quota limit)
 let driveClient = null;
 let driveClientTokenMtime = 0;
 
@@ -140,10 +140,10 @@ function resetDriveClient() {
     console.log('[Drive] Client reset - se tai khoi tao voi token moi nhat');
 }
 
-// TÃ¬m hoáº·c táº¡o subfolder theo thÃ¡ng: HDDT-AIRCLEAN/2026-03/
+// Tìm hoặc tạo subfolder theo tháng: HDDT-AIRCLEAN/2026-03/
 async function getOrCreateMonthFolder(drive, parentFolderId, monthStr) {
     try {
-        // TÃ¬m folder Ä‘Ã£ cÃ³
+        // Tìm folder đã có
         const res = await drive.files.list({
             q: `'${parentFolderId}' in parents and name='${monthStr}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
             fields: 'files(id, name)',
@@ -151,7 +151,7 @@ async function getOrCreateMonthFolder(drive, parentFolderId, monthStr) {
         if (res.data.files.length > 0) {
             return res.data.files[0].id;
         }
-        // Táº¡o má»›i
+        // Tạo mới
         const folder = await drive.files.create({
             requestBody: {
                 name: monthStr,
@@ -160,15 +160,15 @@ async function getOrCreateMonthFolder(drive, parentFolderId, monthStr) {
             },
             fields: 'id',
         });
-        console.log(`ðŸ“ Created Drive folder: ${monthStr}`);
+        console.log(`📁 Created Drive folder: ${monthStr}`);
         return folder.data.id;
     } catch (err) {
-        console.error('âŒ Create month folder error:', err.message);
-        return parentFolderId; // Fallback: upload vÃ o root folder
+        console.error('❌ Create month folder error:', err.message);
+        return parentFolderId; // Fallback: upload vào root folder
     }
 }
 
-// Upload file lÃªn Google Drive
+// Upload file lên Google Drive
 async function uploadToDrive(drive, folderId, fileName, content, mimeType) {
     try {
         const { Readable } = require('stream');
@@ -188,16 +188,16 @@ async function uploadToDrive(drive, folderId, fileName, content, mimeType) {
             fields: 'id, webViewLink',
         });
 
-        // Set quyá»n "Anyone with link can view" â€” fire-and-forget, khÃ´ng block upload
+        // Set quyền "Anyone with link can view" — fire-and-forget, không block upload
         drive.permissions.create({
             fileId: file.data.id,
             requestBody: { role: 'reader', type: 'anyone' },
-        }).catch(permErr => console.warn(`âš ï¸ Could not set public permission for ${fileName}:`, permErr.message));
+        }).catch(permErr => console.warn(`⚠️ Could not set public permission for ${fileName}:`, permErr.message));
 
-        console.log(`â˜ï¸ Uploaded to Drive: ${fileName} (${file.data.id}) [public]`);
+        console.log(`☁️ Uploaded to Drive: ${fileName} (${file.data.id}) [public]`);
         return { fileId: file.data.id, webViewLink: file.data.webViewLink };
     } catch (err) {
-        console.error(`âŒ Drive upload error (${fileName}):`, err.message);
+        console.error(`❌ Drive upload error (${fileName}):`, err.message);
         return null;
     }
 }
@@ -239,10 +239,10 @@ async function sendTelegramDocument(buffer, fileName, caption) {
                 res.on('data', chunk => data += chunk);
                 res.on('end', () => {
                     if (res.statusCode === 200) {
-                        console.log(`ðŸ“± Telegram sent: ${fileName}`);
+                        console.log(`📱 Telegram sent: ${fileName}`);
                         resolve({ success: true });
                     } else {
-                        console.error(`âŒ Telegram error ${res.statusCode}:`, data.substring(0, 200));
+                        console.error(`❌ Telegram error ${res.statusCode}:`, data.substring(0, 200));
                         resolve({ success: false, error: `HTTP ${res.statusCode}` });
                     }
                 });
@@ -258,7 +258,7 @@ async function sendTelegramDocument(buffer, fileName, caption) {
     });
 }
 
-// Gá»­i tin nháº¯n text qua Telegram
+// Gửi tin nhắn text qua Telegram
 async function sendTelegramMessage(text) {
     return new Promise((resolve) => {
         const postData = JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode: 'HTML' });
@@ -281,7 +281,7 @@ async function sendTelegramMessage(text) {
     });
 }
 
-// Táº¡o XML hÃ³a Ä‘Æ¡n (chuáº©n bá»‹ â€” khi tÃ­ch há»£p MISA sáº½ láº¥y tá»« API)
+// Tạo XML hóa đơn (chuẩn bị — khi tích hợp MISA sẽ lấy từ API)
 function generateInvoiceXML(order, invoiceNumber, taxCode) {
     const items = typeof order.items === 'string' ? JSON.parse(order.items) : (order.items || []);
     const itemsXml = items.map((item, idx) => `
@@ -312,7 +312,7 @@ function generateInvoiceXML(order, invoiceNumber, taxCode) {
     <Items>${itemsXml}
     </Items>
     <DigitalSignature>PENDING_MISA_INTEGRATION</DigitalSignature>
-    <Note>File XML nÃ y Ä‘Æ°á»£c táº¡o tá»± Ä‘á»™ng. Khi tÃ­ch há»£p MISA MeInvoice, file XML cÃ³ chá»¯ kÃ½ sá»‘ há»£p lá»‡ sáº½ thay tháº¿ file nÃ y.</Note>
+    <Note>File XML này được tạo tự động. Khi tích hợp MISA MeInvoice, file XML có chữ ký số hợp lệ sẽ thay thế file này.</Note>
 </Invoice>`;
 }
 
@@ -320,7 +320,7 @@ function escapeXml(str) {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// Upload + gá»­i 1 hÃ³a Ä‘Æ¡n lÃªn Drive & Telegram (cháº¡y ngáº§m, khÃ´ng block)
+// Upload + gửi 1 hóa đơn lên Drive & Telegram (chạy ngầm, không block)
 async function backupInvoiceToCloudAndTelegram(order, invoiceNumber, taxCode) {
     const results = { drive: { xml: null, pdf: null }, telegram: { xml: false, pdf: false } };
 
@@ -328,22 +328,22 @@ async function backupInvoiceToCloudAndTelegram(order, invoiceNumber, taxCode) {
         const xmlContent = generateInvoiceXML(order, invoiceNumber, taxCode);
         const xmlFileName = `${invoiceNumber}_${order.orderId}.xml`;
 
-        // Táº¡o ná»™i dung text Ä‘Æ¡n giáº£n thay cho PDF (vÃ¬ chÆ°a cÃ³ MISA API tráº£ PDF tháº­t)
-        const pdfContent = `HÃ“A ÄÆ N ÄIá»†N Tá»¬ - Báº¢N THá»‚ HIá»†N\n` +
+        // Tạo nội dung text đơn giản thay cho PDF (vì chưa có MISA API trả PDF thật)
+        const pdfContent = `HÓA ĐƠN ĐIỆN TỬ - BẢN THỂ HIỆN\n` +
             `========================================\n` +
-            `Sá»‘ HÄ: ${invoiceNumber}\n` +
-            `NgÃ y: ${new Date().toLocaleDateString('vi-VN')}\n` +
-            `MÃ£ tra cá»©u: ${taxCode}\n` +
-            `\nNGÆ¯á»œI BÃN: AIRCLEAN\n` +
-            `\nNGÆ¯á»œI MUA: ${order.customerName}\n` +
-            `SÄT: ${order.customerPhone || 'N/A'}\n` +
-            `SÃ n: ${order.platform}\n` +
-            `MÃ£ Ä‘Æ¡n: ${order.orderId}\n` +
-            `\nTá»”NG TIá»€N: ${Number(order.totalAmount).toLocaleString('vi-VN')}Ä‘\n` +
+            `Số HĐ: ${invoiceNumber}\n` +
+            `Ngày: ${new Date().toLocaleDateString('vi-VN')}\n` +
+            `Mã tra cứu: ${taxCode}\n` +
+            `\nNGƯỜI BÁN: AIRCLEAN\n` +
+            `\nNGƯỜI MUA: ${order.customerName}\n` +
+            `SĐT: ${order.customerPhone || 'N/A'}\n` +
+            `Sàn: ${order.platform}\n` +
+            `Mã đơn: ${order.orderId}\n` +
+            `\nTỔNG TIỀN: ${Number(order.totalAmount).toLocaleString('vi-VN')}đ\n` +
             `========================================\n` +
-            `âœ… ÄÃ£ kÃ½ sá»‘ Ä‘iá»‡n tá»­\n` +
-            `ðŸ“‹ LÆ°u Ã½: ÄÃ¢y lÃ  báº£n thá»ƒ hiá»‡n. File XML gá»‘c cÃ³ giÃ¡ trá»‹ phÃ¡p lÃ½.`;
-        const pdfFileName = `${invoiceNumber}_${order.orderId}.txt`; // .txt vÃ¬ chÆ°a cÃ³ PDF tháº­t
+            `✅ Đã ký số điện tử\n` +
+            `📋 Lưu ý: Đây là bản thể hiện. File XML gốc có giá trị pháp lý.`;
+        const pdfFileName = `${invoiceNumber}_${order.orderId}.txt`; // .txt vì chưa có PDF thật
 
         const monthStr = new Date().toISOString().slice(0, 7); // 2026-03
 
@@ -361,34 +361,34 @@ async function backupInvoiceToCloudAndTelegram(order, invoiceNumber, taxCode) {
         }
 
         // === TELEGRAM ===
-        const caption = `ðŸ§¾ ${invoiceNumber}\n` +
-            `ðŸ‘¤ ${order.customerName}\n` +
-            `ðŸ’° ${Number(order.totalAmount).toLocaleString('vi-VN')}Ä‘\n` +
-            `ðŸ›’ ${order.platform} | ${order.orderId}\n` +
-            `ðŸ“… ${new Date().toLocaleDateString('vi-VN')}`;
+        const caption = `🧾 ${invoiceNumber}\n` +
+            `👤 ${order.customerName}\n` +
+            `💰 ${Number(order.totalAmount).toLocaleString('vi-VN')}đ\n` +
+            `🛒 ${order.platform} | ${order.orderId}\n` +
+            `📅 ${new Date().toLocaleDateString('vi-VN')}`;
 
         const [tgXml, tgPdf] = await Promise.all([
-            sendTelegramDocument(Buffer.from(xmlContent, 'utf-8'), xmlFileName, `ðŸ“Ž XML gá»‘c â€” ${caption}`),
-            sendTelegramDocument(Buffer.from(pdfContent, 'utf-8'), pdfFileName, `ðŸ“„ Báº£n thá»ƒ hiá»‡n â€” ${caption}`),
+            sendTelegramDocument(Buffer.from(xmlContent, 'utf-8'), xmlFileName, `📎 XML gốc — ${caption}`),
+            sendTelegramDocument(Buffer.from(pdfContent, 'utf-8'), pdfFileName, `📄 Bản thể hiện — ${caption}`),
         ]);
         results.telegram.xml = tgXml.success;
         results.telegram.pdf = tgPdf.success;
 
     } catch (err) {
-        console.error(`âŒ Backup invoice ${invoiceNumber} error:`, err.message);
+        console.error(`❌ Backup invoice ${invoiceNumber} error:`, err.message);
     }
 
     return results;
 }
 
 // ========================================
-// PRISMA CLIENT - Báº®T BUá»˜C SUPABASE
+// PRISMA CLIENT - BẮT BUỘC SUPABASE
 // ========================================
 
 let prisma;
-let prismaDirectTx; // DÃ¹ng DIRECT_URL cho transactions náº·ng (bypass PgBouncer)
+let prismaDirectTx; // Dùng DIRECT_URL cho transactions nặng (bypass PgBouncer)
 
-// âš¡ LAZY INIT â€” chá»‰ táº¡o khi láº§n Ä‘áº§u cáº§n (tiáº¿t kiá»‡m ~500ms startup)
+// ⚡ LAZY INIT — chỉ tạo khi lần đầu cần (tiết kiệm ~500ms startup)
 function getPrismaDirectTx() {
     if (!prismaDirectTx) {
         console.time('âš¡ lazy-init prismaDirectTx');
@@ -397,19 +397,19 @@ function getPrismaDirectTx() {
             datasources: { db: { url: config.DIRECT_URL } }
         });
         prismaDirectTx.$connect()
-            .then(() => console.log('âœ… Connected Prisma Direct (for transactions)'))
-            .catch(err => console.error('âš ï¸ Prisma Direct connect failed:', err.message));
+            .then(() => console.log('✅ Connected Prisma Direct (for transactions)'))
+            .catch(err => console.error('⚠️ Prisma Direct connect failed:', err.message));
         console.timeEnd('âš¡ lazy-init prismaDirectTx');
     }
     return prismaDirectTx;
 }
 
 try {
-    console.log('ðŸ”„ Initializing Prisma Client...');
-    console.log('   ðŸ†• CODE VERSION: 3.0 (Production with embedded config)');
+    console.log('🔄 Initializing Prisma Client...');
+    console.log('   🆕 CODE VERSION: 3.0 (Production with embedded config)');
     console.log('   APP:', config.APP_NAME, config.APP_VERSION);
     console.log('   ENVIRONMENT:', config.ENVIRONMENT);
-    console.log('   DATABASE_URL:', config.DATABASE_URL.split('@')[1] || 'Invalid'); // Chá»‰ log domain, khÃ´ng log password
+    console.log('   DATABASE_URL:', config.DATABASE_URL.split('@')[1] || 'Invalid'); // Chỉ log domain, không log password
 
     prisma = new PrismaClient({
         log: ['error', 'warn'],
@@ -419,38 +419,38 @@ try {
             }
         }
     });
-    console.log('âœ… Prisma Client initialized successfully');
+    console.log('✅ Prisma Client initialized successfully');
 
     // Test connection - REQUIRED
     prisma.$connect()
         .then(() => {
-            console.log('âœ… Connected to Supabase PostgreSQL');
+            console.log('✅ Connected to Supabase PostgreSQL');
         })
         .catch(err => {
-            console.error('âŒ CRITICAL: Database connection failed!');
+            console.error('❌ CRITICAL: Database connection failed!');
             console.error('   Error:', err.message);
             console.error('   Stack:', err.stack);
 
             // Show error dialog to user
             const { dialog } = require('electron');
             dialog.showErrorBox(
-                'Lá»—i káº¿t ná»‘i Database',
-                `KhÃ´ng thá»ƒ káº¿t ná»‘i Ä‘áº¿n database.\n\nChi tiáº¿t: ${err.message}\n\nVui lÃ²ng kiá»ƒm tra káº¿t ná»‘i internet vÃ  thá»­ láº¡i.`
+                'Lỗi kết nối Database',
+                `Không thể kết nối đến database.\n\nChi tiết: ${err.message}\n\nVui lòng kiểm tra kết nối internet và thử lại.`
             );
 
             // Exit app if can't connect to database
             app.quit();
         });
 } catch (error) {
-    console.error('âŒ CRITICAL: Prisma Client initialization failed!');
+    console.error('❌ CRITICAL: Prisma Client initialization failed!');
     console.error('   Error:', error.message);
     console.error('   Stack:', error.stack);
 
     // Show error dialog
     const { dialog } = require('electron');
     dialog.showErrorBox(
-        'Lá»—i khá»Ÿi táº¡o Database',
-        `KhÃ´ng thá»ƒ khá»Ÿi táº¡o káº¿t ná»‘i database.\n\nChi tiáº¿t: ${error.message}\n\ná»¨ng dá»¥ng sáº½ thoÃ¡t.`
+        'Lỗi khởi tạo Database',
+        `Không thể khởi tạo kết nối database.\n\nChi tiết: ${error.message}\n\nỨng dụng sẽ thoát.`
     );
 
     // Exit app
@@ -469,10 +469,10 @@ let currentSession = null; // { id, username, role }
 
 function requireRole(...roles) {
     if (!currentSession) {
-        throw new Error('ChÆ°a Ä‘Äƒng nháº­p');
+        throw new Error('Chưa đăng nhập');
     }
     if (roles.length > 0 && !roles.includes(currentSession.role)) {
-        throw new Error(`KhÃ´ng cÃ³ quyá»n thá»±c hiá»‡n thao tÃ¡c nÃ y (yÃªu cáº§u: ${roles.join('/')})`);
+        throw new Error(`Không có quyền thực hiện thao tác này (yêu cầu: ${roles.join('/')})`);
     }
 }
 
@@ -495,28 +495,28 @@ async function logActivity({ module, action, description, recordId, recordName, 
             }
         });
     } catch (err) {
-        console.error('âš ï¸ Activity log failed:', err.message);
+        console.error('⚠️ Activity log failed:', err.message);
     }
 }
 
 // ========================================
-// AUTO CLEANUP - XÃ³a log cÅ© hÆ¡n 7 ngÃ y
+// AUTO CLEANUP - Xóa log cũ hơn 7 ngày
 // ========================================
 async function cleanupOldLogs() {
     try {
         if (!prisma) return;
 
-        // 1. XÃ³a ActivityLog cÅ© hÆ¡n 30 ngÃ y
+        // 1. Xóa ActivityLog cũ hơn 30 ngày
         const logCutoff = new Date();
         logCutoff.setDate(logCutoff.getDate() - 30);
         const logResult = await prisma.activityLog.deleteMany({
             where: { timestamp: { lt: logCutoff } }
         });
         if (logResult.count > 0) {
-            console.log(`ðŸ§¹ Cleanup: ÄÃ£ xÃ³a ${logResult.count} activity log cÅ© hÆ¡n 30 ngÃ y`);
+            console.log(`🧹 Cleanup: Đã xóa ${logResult.count} activity log cũ hơn 30 ngày`);
         }
 
-        // 2. XÃ³a EcommerceExport Ä‘Ã£ hoÃ n thÃ nh cÅ© hÆ¡n 2 thÃ¡ng
+        // 2. Xóa EcommerceExport đã hoàn thành cũ hơn 2 tháng
         const exportCutoff = new Date();
         exportCutoff.setMonth(exportCutoff.getMonth() - 2);
         const exportResult = await prisma.ecommerceExport.deleteMany({
@@ -526,18 +526,18 @@ async function cleanupOldLogs() {
             }
         });
         if (exportResult.count > 0) {
-            console.log(`ðŸ§¹ Cleanup: ÄÃ£ xÃ³a ${exportResult.count} Ä‘Æ¡n TMDT hoÃ n thÃ nh cÅ© hÆ¡n 2 thÃ¡ng`);
+            console.log(`🧹 Cleanup: Đã xóa ${exportResult.count} đơn TMDT hoàn thành cũ hơn 2 tháng`);
         }
 
     } catch (err) {
-        console.error('âš ï¸ Cleanup failed:', err.message);
+        console.error('⚠️ Cleanup failed:', err.message);
     }
 }
 
-// Cháº¡y cleanup khi app khá»Ÿi Ä‘á»™ng (delay 10s Ä‘á»ƒ DB sáºµn sÃ ng)
+// Chạy cleanup khi app khởi động (delay 10s để DB sẵn sàng)
 setTimeout(cleanupOldLogs, 10000);
 
-// Láº·p láº¡i má»—i 24 tiáº¿ng
+// Lặp lại mỗi 24 tiếng
 setInterval(cleanupOldLogs, 24 * 60 * 60 * 1000);
 
 // ========================================
@@ -571,7 +571,7 @@ ipcMain.handle('system:getInfo', async () => {
             }
         };
     } catch (error) {
-        console.error('âŒ system:getInfo error:', error.message);
+        console.error('❌ system:getInfo error:', error.message);
         return { success: false, error: error.message };
     }
 });
@@ -583,7 +583,7 @@ ipcMain.handle('system:getInfo', async () => {
 ipcMain.handle('products:getAll', async () => {
     try {
         if (!prisma) {
-            throw new Error('Database chÆ°a Ä‘Æ°á»£c khá»Ÿi táº¡o. Vui lÃ²ng khá»Ÿi Ä‘á»™ng láº¡i á»©ng dá»¥ng.');
+            throw new Error('Database chưa được khởi tạo. Vui lòng khởi động lại ứng dụng.');
         }
 
         const products = await prisma.product.findMany({
@@ -609,10 +609,10 @@ ipcMain.handle('products:getAll', async () => {
             orderBy: { createdAt: 'desc' }
         });
 
-        console.log(`âœ… Loaded ${products.length} products from Supabase`);
+        console.log(`✅ Loaded ${products.length} products from Supabase`);
         return { success: true, data: products };
     } catch (error) {
-        console.error('âŒ Error loading products:', error.message);
+        console.error('❌ Error loading products:', error.message);
         return { success: false, error: error.message };
     }
 });
@@ -633,7 +633,7 @@ ipcMain.handle('products:getById', async (event, id) => {
 ipcMain.handle('products:create', async (event, data) => {
     try {
         requireRole('admin', 'manager');
-        console.log('ðŸ“ Create product called with:', JSON.stringify(data, null, 2));
+        console.log('📝 Create product called with:', JSON.stringify(data, null, 2));
         if (!prisma) throw new Error('Prisma not available');
 
         const product = await prisma.product.create({
@@ -646,31 +646,31 @@ ipcMain.handle('products:create', async (event, data) => {
                 cost: data.cost !== undefined ? data.cost : 0,
                 stock: data.stock || 0,
                 minStock: data.minStock || 10,
-                unit: data.unit || 'CÃ¡i',
+                unit: data.unit || 'Cái',
                 status: data.status || 'active',
                 variants: data.variants || null
             },
             include: { category: true }
         });
-        console.log(`âœ… Created product: ${product.name} (ID: ${product.id})`);
-        void logActivity({ module: 'products', action: 'CREATE', description: `Táº¡o sáº£n pháº©m "${product.name}" (SKU: ${product.sku})`, recordId: product.id, recordName: product.name, userName: data.userName || 'Admin' });
+        console.log(`✅ Created product: ${product.name} (ID: ${product.id})`);
+        void logActivity({ module: 'products', action: 'CREATE', description: `Tạo sản phẩm "${product.name}" (SKU: ${product.sku})`, recordId: product.id, recordName: product.name, userName: data.userName || 'Admin' });
         return { success: true, data: product };
     } catch (error) {
-        console.error('âŒ Create product ERROR:', error.code, error.message);
+        console.error('❌ Create product ERROR:', error.code, error.message);
 
         // Prisma unique constraint error
         if (error.code === 'P2002') {
             const field = error.meta?.target?.[0] || 'unknown';
             if (field === 'sku') {
-                return { success: false, error: `MÃ£ SKU "${data.sku}" Ä‘Ã£ tá»“n táº¡i. Vui lÃ²ng sá»­ dá»¥ng mÃ£ khÃ¡c.` };
+                return { success: false, error: `Mã SKU "${data.sku}" đã tồn tại. Vui lòng sử dụng mã khác.` };
             }
             if (field === 'barcode') {
-                return { success: false, error: `MÃ£ váº¡ch "${data.barcode}" Ä‘Ã£ tá»“n táº¡i. Vui lÃ²ng sá»­ dá»¥ng mÃ£ khÃ¡c.` };
+                return { success: false, error: `Mã vạch "${data.barcode}" đã tồn tại. Vui lòng sử dụng mã khác.` };
             }
-            return { success: false, error: `Dá»¯ liá»‡u trÃ¹ng láº·p (${field})` };
+            return { success: false, error: `Dữ liệu trùng lặp (${field})` };
         }
 
-        return { success: false, error: error.message || 'Lá»—i khi táº¡o sáº£n pháº©m' };
+        return { success: false, error: error.message || 'Lỗi khi tạo sản phẩm' };
     }
 });
 
@@ -695,23 +695,23 @@ ipcMain.handle('products:update', async (event, id, data) => {
             },
             include: { category: true }
         });
-        console.log(`âœ… Updated product: ${product.name}`);
-        void logActivity({ module: 'products', action: 'UPDATE', description: `Cáº­p nháº­t sáº£n pháº©m "${product.name}"`, recordId: product.id, recordName: product.name, changes: data, userName: data.userName || 'Admin' });
+        console.log(`✅ Updated product: ${product.name}`);
+        void logActivity({ module: 'products', action: 'UPDATE', description: `Cập nhật sản phẩm "${product.name}"`, recordId: product.id, recordName: product.name, changes: data, userName: data.userName || 'Admin' });
         return { success: true, data: product };
     } catch (error) {
-        console.error('âŒ Update product error:', error.code, error.message);
+        console.error('❌ Update product error:', error.code, error.message);
 
         if (error.code === 'P2002') {
             const field = error.meta?.target?.[0] || 'unknown';
             if (field === 'sku') {
-                return { success: false, error: `MÃ£ SKU "${data.sku}" Ä‘Ã£ tá»“n táº¡i. Vui lÃ²ng sá»­ dá»¥ng mÃ£ khÃ¡c.` };
+                return { success: false, error: `Mã SKU "${data.sku}" đã tồn tại. Vui lòng sử dụng mã khác.` };
             }
             if (field === 'barcode') {
-                return { success: false, error: `MÃ£ váº¡ch "${data.barcode}" Ä‘Ã£ tá»“n táº¡i. Vui lÃ²ng sá»­ dá»¥ng mÃ£ khÃ¡c.` };
+                return { success: false, error: `Mã vạch "${data.barcode}" đã tồn tại. Vui lòng sử dụng mã khác.` };
             }
         }
 
-        return { success: false, error: error.message || 'Lá»—i khi cáº­p nháº­t sáº£n pháº©m' };
+        return { success: false, error: error.message || 'Lỗi khi cập nhật sản phẩm' };
     }
 });
 
@@ -721,23 +721,23 @@ ipcMain.handle('products:delete', async (event, id) => {
         if (!prisma) throw new Error('Prisma not available');
         const product = await prisma.product.findUnique({ where: { id } });
         await prisma.product.delete({ where: { id } });
-        console.log(`âœ… Deleted product ID: ${id}`);
-        void logActivity({ module: 'products', action: 'DELETE', description: `XÃ³a sáº£n pháº©m "${product?.name || id}"`, recordId: id, recordName: product?.name });
+        console.log(`✅ Deleted product ID: ${id}`);
+        void logActivity({ module: 'products', action: 'DELETE', description: `Xóa sản phẩm "${product?.name || id}"`, recordId: id, recordName: product?.name });
         return { success: true };
     } catch (error) {
-        console.error('âŒ Delete product error:', error.message);
+        console.error('❌ Delete product error:', error.message);
         return { success: false, error: error.message };
     }
 });
 
 // ========================================
-// CATEGORIES - Danh má»¥c sáº£n pháº©m (PRISMA)
+// CATEGORIES - Danh mục sản phẩm (PRISMA)
 // ========================================
 
 ipcMain.handle('categories:getAll', async () => {
     try {
         if (!prisma) {
-            throw new Error('Database chÆ°a Ä‘Æ°á»£c khá»Ÿi táº¡o.');
+            throw new Error('Database chưa được khởi tạo.');
         }
 
         const categories = await prisma.category.findMany({
@@ -745,7 +745,7 @@ ipcMain.handle('categories:getAll', async () => {
         });
         return { success: true, data: categories };
     } catch (error) {
-        console.error('âŒ Error getting categories:', error);
+        console.error('❌ Error getting categories:', error);
         return { success: false, error: error.message };
     }
 });
@@ -753,7 +753,7 @@ ipcMain.handle('categories:getAll', async () => {
 ipcMain.handle('categories:create', async (event, data) => {
     try {
         if (!prisma) {
-            throw new Error('Database chÆ°a Ä‘Æ°á»£c khá»Ÿi táº¡o.');
+            throw new Error('Database chưa được khởi tạo.');
         }
 
         const newCategory = await prisma.category.create({
@@ -762,11 +762,11 @@ ipcMain.handle('categories:create', async (event, data) => {
             }
         });
 
-        console.log('âœ… Category created:', newCategory);
-        void logActivity({ module: 'products', action: 'CREATE', description: `Táº¡o danh má»¥c "${newCategory.name}"`, recordName: newCategory.name });
+        console.log('✅ Category created:', newCategory);
+        void logActivity({ module: 'products', action: 'CREATE', description: `Tạo danh mục "${newCategory.name}"`, recordName: newCategory.name });
         return { success: true, data: newCategory };
     } catch (error) {
-        console.error('âŒ Error creating category:', error);
+        console.error('❌ Error creating category:', error);
         return { success: false, error: error.message };
     }
 });
@@ -774,7 +774,7 @@ ipcMain.handle('categories:create', async (event, data) => {
 ipcMain.handle('categories:update', async (event, id, data) => {
     try {
         if (!prisma) {
-            throw new Error('Database chÆ°a Ä‘Æ°á»£c khá»Ÿi táº¡o.');
+            throw new Error('Database chưa được khởi tạo.');
         }
 
         const updatedCategory = await prisma.category.update({
@@ -784,11 +784,11 @@ ipcMain.handle('categories:update', async (event, id, data) => {
             }
         });
 
-        console.log('âœ… Category updated:', updatedCategory);
-        void logActivity({ module: 'products', action: 'UPDATE', description: `Cáº­p nháº­t danh má»¥c "${updatedCategory.name}"`, recordName: updatedCategory.name });
+        console.log('✅ Category updated:', updatedCategory);
+        void logActivity({ module: 'products', action: 'UPDATE', description: `Cập nhật danh mục "${updatedCategory.name}"`, recordName: updatedCategory.name });
         return { success: true, data: updatedCategory };
     } catch (error) {
-        console.error('âŒ Error updating category:', error);
+        console.error('❌ Error updating category:', error);
         return { success: false, error: error.message };
     }
 });
@@ -796,7 +796,7 @@ ipcMain.handle('categories:update', async (event, id, data) => {
 ipcMain.handle('categories:delete', async (event, id) => {
     try {
         if (!prisma) {
-            throw new Error('Database chÆ°a Ä‘Æ°á»£c khá»Ÿi táº¡o.');
+            throw new Error('Database chưa được khởi tạo.');
         }
 
         // Check if category is being used by any products
@@ -807,7 +807,7 @@ ipcMain.handle('categories:delete', async (event, id) => {
         if (productsCount > 0) {
             return {
                 success: false,
-                error: `KhÃ´ng thá»ƒ xÃ³a danh má»¥c nÃ y vÃ¬ Ä‘ang cÃ³ ${productsCount} sáº£n pháº©m sá»­ dá»¥ng!`
+                error: `Không thể xóa danh mục này vì đang có ${productsCount} sản phẩm sử dụng!`
             };
         }
 
@@ -815,17 +815,17 @@ ipcMain.handle('categories:delete', async (event, id) => {
             where: { id: parseInt(id) }
         });
 
-        console.log('âœ… Category deleted:', id);
-        void logActivity({ module: 'products', action: 'DELETE', description: `XÃ³a danh má»¥c #${id}` });
+        console.log('✅ Category deleted:', id);
+        void logActivity({ module: 'products', action: 'DELETE', description: `Xóa danh mục #${id}` });
         return { success: true };
     } catch (error) {
-        console.error('âŒ Error deleting category:', error);
+        console.error('❌ Error deleting category:', error);
         return { success: false, error: error.message };
     }
 });
 
 // ========================================
-// PICKUP - QuÃ©t mÃ£ váº­n Ä‘Æ¡n
+// PICKUP - Quét mã vận đơn
 // ========================================
 
 // In-memory state
@@ -834,7 +834,7 @@ let pickupHistory = [];       // { trackingNumber, source, file, scannedAt }
 let pickupDataFolder = '';
 let pickupLogFile = '';
 
-const HEADER_FILTER_REGEX = /tracking|order|number|the |description|seller|sku|váº­n chuyá»ƒn/i;
+const HEADER_FILTER_REGEX = /tracking|order|number|the |description|seller|sku|vận chuyển/i;
 
 function normalizeStr(value) {
     if (value === null || value === undefined) return '';
@@ -866,10 +866,10 @@ function extractTrackingNumbers(folderPath) {
 
         if (jsonData.length === 0) continue;
 
-        // ðŸ” PhÃ¡t hiá»‡n nguá»“n (TikTok vs Shopee)
+        // 🔍 Phát hiện nguồn (TikTok vs Shopee)
         const firstRow = jsonData[0] || {};
         const isTikTok = 'Order ID' in firstRow || 'Tracking ID' in firstRow;
-        const isShopee = 'MÃ£ Ä‘Æ¡n hÃ ng' in firstRow || 'MÃ£ váº­n Ä‘Æ¡n' in firstRow;
+        const isShopee = 'Mã đơn hàng' in firstRow || 'Mã vận đơn' in firstRow;
 
         console.log(`[Pickup] Processing ${file}: TikTok=${isTikTok}, Shopee=${isShopee}`);
 
@@ -909,15 +909,15 @@ function extractTrackingNumbers(folderPath) {
         } else if (isShopee) {
             // ===== PARSE SHOPEE =====
             jsonData.forEach((row) => {
-                const trackingId = normalizeStr(row['MÃ£ váº­n Ä‘Æ¡n'] || '');
-                const orderId = normalizeStr(row['MÃ£ Ä‘Æ¡n hÃ ng'] || '');
-                const productName = normalizeStr(row['TÃªn sáº£n pháº©m'] || row['TÃªn Sáº£n Pháº©m'] || '');
-                const variation = normalizeStr(row['TÃªn phÃ¢n loáº¡i hÃ ng'] || row['PhÃ¢n loáº¡i hÃ ng'] || '');
-                const sku = normalizeStr(row['MÃ£ phÃ¢n loáº¡i hÃ ng'] || row['SKU phÃ¢n loáº¡i hÃ ng'] || '');
-                const quantity = parseInt(row['Sá»‘ lÆ°á»£ng'] || '1');
-                const shippingProvider = normalizeStr(row['ÄÆ¡n Vá»‹ Váº­n Chuyá»ƒn'] || '');
-                const totalAmount = parseFloat(row['Tá»•ng giÃ¡ bÃ¡n (sáº£n pháº©m)'] || row['Tá»•ng cá»™ng'] || '0');
-                const unitPrice = parseFloat(row['GiÃ¡ gá»‘c'] || row['ÄÆ¡n giÃ¡'] || '0');
+                const trackingId = normalizeStr(row['Mã vận đơn'] || '');
+                const orderId = normalizeStr(row['Mã đơn hàng'] || '');
+                const productName = normalizeStr(row['Tên sản phẩm'] || row['Tên Sản Phẩm'] || '');
+                const variation = normalizeStr(row['Tên phân loại hàng'] || row['Phân loại hàng'] || '');
+                const sku = normalizeStr(row['Mã phân loại hàng'] || row['SKU phân loại hàng'] || '');
+                const quantity = parseInt(row['Số lượng'] || '1');
+                const shippingProvider = normalizeStr(row['Đơn Vị Vận Chuyển'] || '');
+                const totalAmount = parseFloat(row['Tổng giá bán (sản phẩm)'] || row['Tổng cộng'] || '0');
+                const unitPrice = parseFloat(row['Giá gốc'] || row['Đơn giá'] || '0');
 
                 if (!trackingId || HEADER_FILTER_REGEX.test(trackingId)) return;
 
@@ -953,15 +953,15 @@ function loadPickupLog(logFilePath) {
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const rows = XLSX.utils.sheet_to_json(sheet);
         return rows.map(row => ({
-            trackingNumber: normalizeStr(row['MÃ£ váº­n Ä‘Æ¡n'] || ''),
+            trackingNumber: normalizeStr(row['Mã vận đơn'] || ''),
             orderNumber: normalizeStr(row['Order ID'] || ''),
-            source: normalizeStr(row['Nguá»“n'] || row['Cá»™t nguá»“n'] || ''),
+            source: normalizeStr(row['Nguồn'] || row['Cột nguồn'] || ''),
             file: normalizeStr(row['File'] || ''),
-            scannedAt: normalizeStr(row['Thá»i gian quÃ©t'] || ''),
+            scannedAt: normalizeStr(row['Thời gian quét'] || ''),
             items: normalizeStr(row['Items'] || '[]'),
             shippingProvider: normalizeStr(row['Shipping Provider'] || ''),
-            totalAmount: parseFloat(row['Tá»•ng tiá»n'] || '0'),
-            status: normalizeStr(row['Tráº¡ng thÃ¡i'] || 'scanned'),
+            totalAmount: parseFloat(row['Tổng tiền'] || '0'),
+            status: normalizeStr(row['Trạng thái'] || 'scanned'),
         }));
     } catch (e) {
         console.error('[Pickup] Error reading pickup log:', e.message);
@@ -971,15 +971,15 @@ function loadPickupLog(logFilePath) {
 
 function savePickupLog(logFilePath, history) {
     const wsData = history.map(item => ({
-        'MÃ£ váº­n Ä‘Æ¡n': item.trackingNumber,
+        'Mã vận đơn': item.trackingNumber,
         'Order ID': item.orderNumber || '',
-        'Nguá»“n': item.source,
+        'Nguồn': item.source,
         'File': item.file,
-        'Thá»i gian quÃ©t': item.scannedAt,
+        'Thời gian quét': item.scannedAt,
         'Items': item.items || '[]',
         'Shipping Provider': item.shippingProvider || '',
-        'Tá»•ng tiá»n': item.totalAmount || 0,
-        'Tráº¡ng thÃ¡i': item.status || 'scanned',
+        'Tổng tiền': item.totalAmount || 0,
+        'Trạng thái': item.status || 'scanned',
     }));
     const ws = XLSX.utils.json_to_sheet(wsData);
     const wb = XLSX.utils.book_new();
@@ -987,15 +987,15 @@ function savePickupLog(logFilePath, history) {
     XLSX.writeFile(wb, logFilePath);
 }
 
-// Chá»n thÆ° má»¥c
+// Chọn thư mục
 ipcMain.handle('pickup:selectFolder', async () => {
     try {
         const result = await dialog.showOpenDialog({
             properties: ['openDirectory'],
-            title: 'Chá»n thÆ° má»¥c chá»©a file Ä‘Æ¡n hÃ ng',
+            title: 'Chọn thư mục chứa file đơn hàng',
         });
         if (result.canceled || result.filePaths.length === 0) {
-            return { success: false, error: 'KhÃ´ng cÃ³ thÆ° má»¥c Ä‘Æ°á»£c chá»n' };
+            return { success: false, error: 'Không có thư mục được chọn' };
         }
         return { success: true, data: result.filePaths[0] };
     } catch (error) {
@@ -1003,11 +1003,11 @@ ipcMain.handle('pickup:selectFolder', async () => {
     }
 });
 
-// Táº£i dá»¯ liá»‡u tá»« thÆ° má»¥c
+// Tải dữ liệu từ thư mục
 ipcMain.handle('pickup:loadData', async (event, folderPath) => {
     try {
         if (!folderPath || !fs.existsSync(folderPath)) {
-            return { success: false, error: 'ThÆ° má»¥c khÃ´ng tá»“n táº¡i' };
+            return { success: false, error: 'Thư mục không tồn tại' };
         }
 
         pickupDataFolder = folderPath;
@@ -1038,31 +1038,31 @@ ipcMain.handle('pickup:loadData', async (event, folderPath) => {
     }
 });
 
-// QuÃ©t mÃ£ váº­n Ä‘Æ¡n
+// Quét mã vận đơn
 ipcMain.handle('pickup:scan', async (event, trackingNumber) => {
     try {
         const trimmed = normalizeStr(trackingNumber);
         if (!trimmed) {
-            return { success: false, error: 'Vui lÃ²ng nháº­p mÃ£ váº­n Ä‘Æ¡n', errorType: 'empty' };
+            return { success: false, error: 'Vui lòng nhập mã vận đơn', errorType: 'empty' };
         }
 
         if (pickupTrackingData.length === 0) {
-            return { success: false, error: 'ChÆ°a cÃ³ dá»¯ liá»‡u. Vui lÃ²ng chá»n thÆ° má»¥c vÃ  táº£i dá»¯ liá»‡u', errorType: 'no_data' };
+            return { success: false, error: 'Chưa có dữ liệu. Vui lòng chọn thư mục và tải dữ liệu', errorType: 'no_data' };
         }
 
-        // Kiá»ƒm tra Ä‘Ã£ quÃ©t chÆ°a
+        // Kiểm tra đã quét chưa
         const alreadyScanned = pickupHistory.some(h => h.trackingNumber === trimmed);
         if (alreadyScanned) {
-            return { success: false, error: `MÃ£ ${trimmed} Ä‘Ã£ pickup rá»“i!`, errorType: 'duplicate' };
+            return { success: false, error: `Mã ${trimmed} đã pickup rồi!`, errorType: 'duplicate' };
         }
 
-        // TÃ¬m kiáº¿m
+        // Tìm kiếm
         const matches = pickupTrackingData.filter(d => d.trackingNumber === trimmed);
         if (matches.length === 0) {
-            return { success: false, error: `KhÃ´ng tÃ¬m tháº¥y: ${trimmed}`, errorType: 'not_found' };
+            return { success: false, error: `Không tìm thấy: ${trimmed}`, errorType: 'not_found' };
         }
 
-        // Æ¯u tiÃªn Shopee
+        // Ưu tiên Shopee
         const shopeeMatch = matches.find(m => m.source === 'Shopee');
         const match = shopeeMatch || matches[0];
 
@@ -1082,7 +1082,7 @@ ipcMain.handle('pickup:scan', async (event, trackingNumber) => {
 
         pickupHistory.push(historyEntry);
 
-        // LÆ°u vÃ o Pickup.xlsx
+        // Lưu vào Pickup.xlsx
         try {
             savePickupLog(pickupLogFile, pickupHistory);
         } catch (e) {
@@ -1105,7 +1105,7 @@ ipcMain.handle('pickup:scan', async (event, trackingNumber) => {
     }
 });
 
-// Láº¥y lá»‹ch sá»­ quÃ©t
+// Lấy lịch sử quét
 ipcMain.handle('pickup:getHistory', async (event, limit = 10) => {
     try {
         const recent = [...pickupHistory].reverse().slice(0, limit);
@@ -1115,7 +1115,7 @@ ipcMain.handle('pickup:getHistory', async (event, limit = 10) => {
     }
 });
 
-// Láº¥y thá»‘ng kÃª
+// Lấy thống kê
 ipcMain.handle('pickup:getStats', async () => {
     try {
         const shopeeCount = pickupTrackingData.filter(d => d.source === 'G').length;
@@ -1136,11 +1136,11 @@ ipcMain.handle('pickup:getStats', async () => {
     }
 });
 
-// Gá»­i thÃ´ng bÃ¡o Telegram
+// Gửi thông báo Telegram
 ipcMain.handle('pickup:sendTelegram', async (event, { token, chatId, message }) => {
     try {
         if (!token || !chatId || !message) {
-            return { success: false, error: 'Thiáº¿u thÃ´ng tin Telegram' };
+            return { success: false, error: 'Thiếu thông tin Telegram' };
         }
 
         return new Promise((resolve) => {
@@ -1172,17 +1172,17 @@ ipcMain.handle('pickup:sendTelegram', async (event, { token, chatId, message }) 
     }
 });
 
-// Xuáº¥t file Pickup
+// Xuất file Pickup
 ipcMain.handle('pickup:exportPickup', async () => {
     try {
         const result = await dialog.showSaveDialog({
-            title: 'Xuáº¥t file Pickup',
+            title: 'Xuất file Pickup',
             defaultPath: `Pickup_${new Date().toISOString().slice(0, 10)}.xlsx`,
             filters: [{ name: 'Excel', extensions: ['xlsx'] }],
         });
 
         if (result.canceled || !result.filePath) {
-            return { success: false, error: 'ÄÃ£ há»§y xuáº¥t file' };
+            return { success: false, error: 'Đã hủy xuất file' };
         }
 
         savePickupLog(result.filePath, pickupHistory);
@@ -1193,27 +1193,27 @@ ipcMain.handle('pickup:exportPickup', async () => {
 });
 
 // ========================================
-// PICKUP - AUTO WATCH THÆ¯ Má»¤C
+// PICKUP - AUTO WATCH THƯ MỤC
 // ========================================
 
 let pickupWatcher = null;
 let pickupWatchFolder = '';
 let pickupKnownFiles = new Set();
 
-// Chá»n thÆ° má»¥c + báº¯t Ä‘áº§u theo dÃµi
+// Chọn thư mục + bắt đầu theo dõi
 ipcMain.handle('pickup:selectAndWatch', async () => {
     try {
         const result = await dialog.showOpenDialog({
             properties: ['openDirectory'],
-            title: 'Chá»n thÆ° má»¥c chá»©a file Ä‘Æ¡n hÃ ng (sáº½ tá»± Ä‘á»™ng import)',
+            title: 'Chọn thư mục chứa file đơn hàng (sẽ tự động import)',
         });
         if (result.canceled || result.filePaths.length === 0) {
-            return { success: false, error: 'KhÃ´ng cÃ³ thÆ° má»¥c Ä‘Æ°á»£c chá»n' };
+            return { success: false, error: 'Không có thư mục được chọn' };
         }
 
         const folderPath = result.filePaths[0];
 
-        // Láº¥y danh sÃ¡ch file hiá»‡n cÃ³
+        // Lấy danh sách file hiện có
         const existingFiles = fs.readdirSync(folderPath).filter(f => {
             const ext = path.extname(f).toLowerCase();
             return ['.xlsx', '.xls', '.csv'].includes(ext) && !f.startsWith('~$');
@@ -1222,36 +1222,36 @@ ipcMain.handle('pickup:selectAndWatch', async () => {
         pickupKnownFiles = new Set(existingFiles);
         pickupWatchFolder = folderPath;
 
-        // Dá»«ng watcher cÅ© náº¿u cÃ³
+        // Dừng watcher cũ nếu có
         if (pickupWatcher) {
             pickupWatcher.close();
             pickupWatcher = null;
         }
 
-        // Báº¯t Ä‘áº§u theo dÃµi thÆ° má»¥c
+        // Bắt đầu theo dõi thư mục
         let debounceTimer = null;
         pickupWatcher = fs.watch(folderPath, (eventType, filename) => {
             if (!filename) return;
             const ext = path.extname(filename).toLowerCase();
             if (!['.xlsx', '.xls', '.csv'].includes(ext)) return;
-            if (filename.startsWith('~$')) return; // File táº¡m Excel
+            if (filename.startsWith('~$')) return; // File tạm Excel
 
-            // Debounce 2 giÃ¢y (file cÃ³ thá»ƒ Ä‘ang copy)
+            // Debounce 2 giây (file có thể đang copy)
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(() => {
                 const filePath = path.join(folderPath, filename);
 
-                // Chá»‰ xá»­ lÃ½ file Má»šI (chÆ°a cÃ³ trong danh sÃ¡ch)
+                // Chỉ xử lý file MỚI (chưa có trong danh sách)
                 if (!pickupKnownFiles.has(filename) && fs.existsSync(filePath)) {
-                    console.log(`ðŸ“ [AutoWatch] File má»›i: ${filename}`);
+                    console.log(`📁 [AutoWatch] File mới: ${filename}`);
                     pickupKnownFiles.add(filename);
 
-                    // Äá»c file vÃ  gá»­i vá» frontend
+                    // Đọc file và gửi về frontend
                     try {
                         const fileBuffer = fs.readFileSync(filePath);
                         const base64 = fileBuffer.toString('base64');
 
-                        // Gá»­i event vá» táº¥t cáº£ cá»­a sá»•
+                        // Gửi event về tất cả cửa sổ
                         const { BrowserWindow } = require('electron');
                         const windows = BrowserWindow.getAllWindows();
                         for (const win of windows) {
@@ -1261,15 +1261,15 @@ ipcMain.handle('pickup:selectAndWatch', async () => {
                                 path: filePath
                             });
                         }
-                        console.log(`âœ… [AutoWatch] ÄÃ£ gá»­i ${filename} vá» frontend`);
+                        console.log(`✅ [AutoWatch] Đã gửi ${filename} về frontend`);
                     } catch (readErr) {
-                        console.error(`âŒ [AutoWatch] Lá»—i Ä‘á»c file ${filename}:`, readErr.message);
+                        console.error(`❌ [AutoWatch] Lỗi đọc file ${filename}:`, readErr.message);
                     }
                 }
             }, 2000);
         });
 
-        console.log(`ðŸ‘ï¸ [AutoWatch] Äang theo dÃµi: ${folderPath} (${existingFiles.length} file cÃ³ sáºµn)`);
+        console.log(`👁️ [AutoWatch] Đang theo dõi: ${folderPath} (${existingFiles.length} file có sẵn)`);
 
         return {
             success: true,
@@ -1283,24 +1283,24 @@ ipcMain.handle('pickup:selectAndWatch', async () => {
     }
 });
 
-// Dá»«ng theo dÃµi
+// Dừng theo dõi
 ipcMain.handle('pickup:stopWatch', async () => {
     if (pickupWatcher) {
         pickupWatcher.close();
         pickupWatcher = null;
         pickupWatchFolder = '';
         pickupKnownFiles.clear();
-        console.log('ðŸ›‘ [AutoWatch] ÄÃ£ dá»«ng theo dÃµi');
+        console.log('🛑 [AutoWatch] Đã dừng theo dõi');
         return { success: true };
     }
-    return { success: false, error: 'KhÃ´ng cÃ³ watcher nÃ o Ä‘ang cháº¡y' };
+    return { success: false, error: 'Không có watcher nào đang chạy' };
 });
 
-// Äá»c táº¥t cáº£ file Excel trong thÆ° má»¥c (tráº£ vá» base64, khÃ´ng má»Ÿ dialog)
+// Đọc tất cả file Excel trong thư mục (trả về base64, không mở dialog)
 ipcMain.handle('pickup:readFolderFiles', async (event, folderPath) => {
     try {
         if (!folderPath || !fs.existsSync(folderPath)) {
-            return { success: false, error: 'ThÆ° má»¥c khÃ´ng tá»“n táº¡i' };
+            return { success: false, error: 'Thư mục không tồn tại' };
         }
 
         const excelFiles = fs.readdirSync(folderPath).filter(f => {
@@ -1318,25 +1318,25 @@ ipcMain.handle('pickup:readFolderFiles', async (event, folderPath) => {
                     base64: buffer.toString('base64')
                 });
             } catch (e) {
-                console.warn(`âš ï¸ KhÃ´ng Ä‘á»c Ä‘Æ°á»£c ${filename}:`, e.message);
+                console.warn(`⚠️ Không đọc được ${filename}:`, e.message);
             }
         }
 
-        console.log(`ðŸ“‚ [ReadFolder] Äá»c ${files.length}/${excelFiles.length} files tá»« ${folderPath}`);
+        console.log(`📂 [ReadFolder] Đọc ${files.length}/${excelFiles.length} files từ ${folderPath}`);
         return { success: true, data: files };
     } catch (error) {
         return { success: false, error: error.message };
     }
 });
 
-// Báº¯t Ä‘áº§u theo dÃµi trá»±c tiáº¿p (khÃ´ng dialog â€” dÃ¹ng khi auto-restore)
+// Bắt đầu theo dõi trực tiếp (không dialog — dùng khi auto-restore)
 ipcMain.handle('pickup:startWatch', async (event, folderPath) => {
     try {
         if (!folderPath || !fs.existsSync(folderPath)) {
-            return { success: false, error: 'ThÆ° má»¥c khÃ´ng tá»“n táº¡i' };
+            return { success: false, error: 'Thư mục không tồn tại' };
         }
 
-        // Láº¥y danh sÃ¡ch file hiá»‡n cÃ³
+        // Lấy danh sách file hiện có
         const existingFiles = fs.readdirSync(folderPath).filter(f => {
             const ext = path.extname(f).toLowerCase();
             return ['.xlsx', '.xls', '.csv'].includes(ext) && !f.startsWith('~$');
@@ -1345,13 +1345,13 @@ ipcMain.handle('pickup:startWatch', async (event, folderPath) => {
         pickupKnownFiles = new Set(existingFiles);
         pickupWatchFolder = folderPath;
 
-        // Dá»«ng watcher cÅ© náº¿u cÃ³
+        // Dừng watcher cũ nếu có
         if (pickupWatcher) {
             pickupWatcher.close();
             pickupWatcher = null;
         }
 
-        // Báº¯t Ä‘áº§u theo dÃµi
+        // Bắt đầu theo dõi
         let debounceTimer = null;
         pickupWatcher = fs.watch(folderPath, (eventType, filename) => {
             if (!filename) return;
@@ -1363,7 +1363,7 @@ ipcMain.handle('pickup:startWatch', async (event, folderPath) => {
             debounceTimer = setTimeout(() => {
                 const filePath = path.join(folderPath, filename);
                 if (!pickupKnownFiles.has(filename) && fs.existsSync(filePath)) {
-                    console.log(`ðŸ“ [AutoWatch] File má»›i: ${filename}`);
+                    console.log(`📁 [AutoWatch] File mới: ${filename}`);
                     pickupKnownFiles.add(filename);
                     try {
                         const fileBuffer = fs.readFileSync(filePath);
@@ -1375,15 +1375,15 @@ ipcMain.handle('pickup:startWatch', async (event, folderPath) => {
                                 name: filename, base64, path: filePath
                             });
                         }
-                        console.log(`âœ… [AutoWatch] ÄÃ£ gá»­i ${filename} vá» frontend`);
+                        console.log(`✅ [AutoWatch] Đã gửi ${filename} về frontend`);
                     } catch (readErr) {
-                        console.error(`âŒ [AutoWatch] Lá»—i Ä‘á»c file ${filename}:`, readErr.message);
+                        console.error(`❌ [AutoWatch] Lỗi đọc file ${filename}:`, readErr.message);
                     }
                 }
             }, 2000);
         });
 
-        console.log(`ðŸ‘ï¸ [AutoWatch-Restore] Äang theo dÃµi: ${folderPath} (${existingFiles.length} file cÃ³ sáºµn)`);
+        console.log(`👁️ [AutoWatch-Restore] Đang theo dõi: ${folderPath} (${existingFiles.length} file có sẵn)`);
 
         return {
             success: true,
@@ -1398,74 +1398,74 @@ ipcMain.handle('pickup:startWatch', async (event, folderPath) => {
 // INVENTORY - UPDATE STOCK
 // ========================================
 
-// Update stock khi export hoáº·c cÃ¢n báº±ng kho
+// Update stock khi export hoặc cân bằng kho
 ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = false, logContext = null, allowMissing = false }) => {
     try {
         requireRole('admin', 'manager', 'staff');
-        console.log(`ðŸ“¦ Update stock: SKU=${sku}, Qty=${quantity}, Add=${isAdd}`);
+        console.log(`📦 Update stock: SKU=${sku}, Qty=${quantity}, Add=${isAdd}`);
 
         if (!prisma) {
-            throw new Error('Database chÆ°a Ä‘Æ°á»£c khá»Ÿi táº¡o.');
+            throw new Error('Database chưa được khởi tạo.');
         }
 
         const delta = isAdd ? quantity : -quantity;
 
-        // Bá»c toÃ n bá»™ vÃ o 1 Transaction duy nháº¥t
-        // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition
+        // Bọc toàn bộ vào 1 Transaction duy nhất
+        // 🔒 StockMutex: serialize stock operations — tránh race condition
         return await withStockLock(() => prisma.$transaction(async (tx) => {
-            // ðŸŽ CHECK IF SKU IS A COMBO
+            // 🎁 CHECK IF SKU IS A COMBO
             const combo = await tx.comboProduct.findUnique({
                 where: { sku }
             });
 
             if (combo) {
-                // â­ THIS IS A COMBO - Update stock for components
+                // ⭐ THIS IS A COMBO - Update stock for components
                 const action = isAdd ? 'Adding' : 'Deducting';
-                console.log(`ðŸŽ Detected COMBO (${action}): ${combo.name}`);
+                console.log(`🎁 Detected COMBO (${action}): ${combo.name}`);
                 const items = JSON.parse(combo.items || '[]');
 
                 const updateResults = [];
                 for (const item of items) {
-                    const componentQty = item.quantity * quantity; // Qty per combo Ã— combos sold
+                    const componentQty = item.quantity * quantity; // Qty per combo × combos sold
                     const componentDelta = isAdd ? componentQty : -componentQty;
-                    console.log(`  â†’ ${action} ${componentQty} ${isAdd ? 'to' : 'from'} ${item.sku}`);
+                    console.log(`  → ${action} ${componentQty} ${isAdd ? 'to' : 'from'} ${item.sku}`);
 
                     const updateResult = await updateProductStockInTx(tx, item.sku, componentDelta, logContext, { allowMissing });
                     updateResults.push(updateResult);
                 }
 
-                console.log(`âœ… Combo ${sku}: ${action} ${quantity} combo(s)`);
+                console.log(`✅ Combo ${sku}: ${action} ${quantity} combo(s)`);
                 return { success: true, isCombo: true, deductResults: updateResults };
             }
 
             // Regular product/variant stock update
             const result = await updateProductStockInTx(tx, sku, delta, logContext, { allowMissing });
             if (result === false) {
-                // allowMissing=true vÃ  khÃ´ng tÃ¬m tháº¥y SKU
-                return { success: false, skipped: true, error: `SKU "${sku}" khÃ´ng tÃ¬m tháº¥y trong kho` };
+                // allowMissing=true và không tìm thấy SKU
+                return { success: false, skipped: true, error: `SKU "${sku}" không tìm thấy trong kho` };
             }
             return { success: true, data: result };
         }));
     } catch (error) {
-        console.error('âŒ Update stock error:', error);
+        console.error('❌ Update stock error:', error);
         return { success: false, error: error.message };
     }
 });
 
 /**
- * ðŸš€ BATCH OPTIMIZATION HELPERS â€” tá»‘i Æ°u import/delete hÃ ng loáº¡t
+ * 🚀 BATCH OPTIMIZATION HELPERS — tối ưu import/delete hàng loạt
  */
 
 /**
- * XÃ¢y cache SKU â†’ Product/Variant 1 láº§n duy nháº¥t cho cáº£ batch.
- * Thay vÃ¬ full table scan má»—i láº§n tÃ¬m variant, cache O(1) lookup.
+ * Xây cache SKU → Product/Variant 1 lần duy nhất cho cả batch.
+ * Thay vì full table scan mỗi lần tìm variant, cache O(1) lookup.
  */
 async function buildSkuCache(tx) {
     const allProducts = await tx.product.findMany();
     const allCombos = await tx.comboProduct.findMany();
 
-    const productMap = new Map(); // sku â†’ { product, isVariant, variantIndex }
-    const comboMap = new Map();   // sku â†’ { combo, items[] }
+    const productMap = new Map(); // sku → { product, isVariant, variantIndex }
+    const comboMap = new Map();   // sku → { combo, items[] }
 
     for (const p of allProducts) {
         productMap.set(p.sku, { product: p, isVariant: false, variantIndex: -1 });
@@ -1491,17 +1491,17 @@ async function buildSkuCache(tx) {
 }
 
 /**
- * Batch stock update: gom táº¥t cáº£ SKU thay Ä‘á»•i â†’ nhÃ³m theo SKU â†’ 1 láº§n update/SKU.
+ * Batch stock update: gom tất cả SKU thay đổi → nhóm theo SKU → 1 lần update/SKU.
  * @param {object} tx - Prisma transaction
- * @param {Array<{sku: string, quantity: number}>} skuChanges - Danh sÃ¡ch {sku, quantity} (quantity < 0 = trá»« kho)
+ * @param {Array<{sku: string, quantity: number}>} skuChanges - Danh sách {sku, quantity} (quantity < 0 = trừ kho)
  * @param {object} logContext - Context log cho inventory
- * @param {object} skuCache - Cache tá»« buildSkuCache()
+ * @param {object} skuCache - Cache từ buildSkuCache()
  */
 async function batchStockUpdate(tx, skuChanges, logContext, skuCache) {
     const { productMap, comboMap } = skuCache;
 
-    // BÆ°á»›c 1: Resolve combo â†’ flat list of actual SKU changes
-    const flatChanges = new Map(); // sku â†’ tá»•ng quantity
+    // Bước 1: Resolve combo → flat list of actual SKU changes
+    const flatChanges = new Map(); // sku → tổng quantity
     for (const { sku, quantity } of skuChanges) {
         const combo = comboMap.get(sku);
         if (combo) {
@@ -1515,7 +1515,7 @@ async function batchStockUpdate(tx, skuChanges, logContext, skuCache) {
         }
     }
 
-    // BÆ°á»›c 2: Lookup user ID 1 láº§n
+    // Bước 2: Lookup user ID 1 lần
     let createdById = null;
     if (logContext.createdBy) {
         if (typeof logContext.createdBy === 'string') {
@@ -1526,11 +1526,11 @@ async function batchStockUpdate(tx, skuChanges, logContext, skuCache) {
         }
     }
 
-    // BÆ°á»›c 3: Update stock + create log cho má»—i SKU (Ä‘Ã£ gom)
+    // Bước 3: Update stock + create log cho mỗi SKU (đã gom)
     for (const [sku, totalQty] of flatChanges) {
         const info = productMap.get(sku);
         if (!info) {
-            console.warn(`âš ï¸ [Batch] Bá» qua SKU ${sku} â€” khÃ´ng tÃ¬m tháº¥y sáº£n pháº©m`);
+            console.warn(`⚠️ [Batch] Bỏ qua SKU ${sku} — không tìm thấy sản phẩm`);
             continue;
         }
 
@@ -1538,7 +1538,7 @@ async function batchStockUpdate(tx, skuChanges, logContext, skuCache) {
         let oldStock = 0, newStock = 0, variantColor = null;
 
         if (isVariant) {
-            // âš ï¸ Äá»c variants Má»šI NHáº¤T tá»« cache (cÃ³ thá»ƒ Ä‘Ã£ bá»‹ update bá»Ÿi variant khÃ¡c cÃ¹ng product)
+            // ⚠️ Đọc variants MỚI NHẤT từ cache (có thể đã bị update bởi variant khác cùng product)
             let variants = JSON.parse(product.variants);
             oldStock = variants[variantIndex].stock || 0;
             newStock = oldStock + totalQty;
@@ -1550,8 +1550,8 @@ async function batchStockUpdate(tx, skuChanges, logContext, skuCache) {
                 where: { id: product.id },
                 data: { variants: updatedVariantsStr }
             });
-            // ðŸ”§ SYNC CACHE: cáº­p nháº­t product.variants trong cache
-            // Ä‘á»ƒ variant khÃ¡c cÃ¹ng product Ä‘á»c Ä‘Ãºng data má»›i nháº¥t
+            // 🔧 SYNC CACHE: cập nhật product.variants trong cache
+            // để variant khác cùng product đọc đúng data mới nhất
             product.variants = updatedVariantsStr;
         } else {
             oldStock = product.stock || 0;
@@ -1561,7 +1561,7 @@ async function batchStockUpdate(tx, skuChanges, logContext, skuCache) {
                 data: { stock: op }
             });
             newStock = updated.stock;
-            // ðŸ”§ SYNC CACHE cho non-variant
+            // 🔧 SYNC CACHE cho non-variant
             product.stock = newStock;
         }
 
@@ -1580,8 +1580,8 @@ async function batchStockUpdate(tx, skuChanges, logContext, skuCache) {
 }
 
 /**
- * Deduct/restore stock cho 1 item â€” tá»± Ä‘á»™ng expand náº¿u lÃ  ComboProduct.
- * DÃ¹ng thay cho updateProductStockInTx khi xá»­ lÃ½ TMDT/POS items.
+ * Deduct/restore stock cho 1 item — tự động expand nếu là ComboProduct.
+ * Dùng thay cho updateProductStockInTx khi xử lý TMDT/POS items.
  */
 async function deductItemOrCombo(tx, variantSku, quantity, logContext, options = {}) {
     const combo = await tx.comboProduct.findUnique({ where: { sku: variantSku } });
@@ -1599,12 +1599,12 @@ async function deductItemOrCombo(tx, variantSku, quantity, logContext, options =
 }
 
 /**
- * HÃ m lÃµi do AI Agent cáº­p nháº­t theo "Má»‡nh lá»‡nh tá»‘i cao":
- * Báº¯t buá»™c 100% cháº¡y trong Prisma Transaction, kÃ¨m logContext.
+ * Hàm lõi do AI Agent cập nhật theo "Mệnh lệnh tối cao":
+ * Bắt buộc 100% chạy trong Prisma Transaction, kèm logContext.
  */
 async function updateProductStockInTx(tx, sku, quantity, logContext, options = {}) {
     if (!logContext || !logContext.type || !logContext.referenceType || !logContext.reference) {
-        throw new Error(`[Inventory Error] Thiáº¿u logContext cho SKU: ${sku}. KhÃ´ng thá»ƒ cáº­p nháº­t kho mÃ  khÃ´ng cÃ³ lÃ½ do.`);
+        throw new Error(`[Inventory Error] Thiếu logContext cho SKU: ${sku}. Không thể cập nhật kho mà không có lý do.`);
     }
 
     let product = await tx.product.findUnique({ where: { sku } });
@@ -1630,10 +1630,10 @@ async function updateProductStockInTx(tx, sku, quantity, logContext, options = {
 
     if (!product) {
         if (options.allowMissing) {
-            console.warn(`âš ï¸ [Inventory Warning] Bá» qua trá»« kho - Sáº£n pháº©m vá»›i SKU ${sku} khÃ´ng tá»“n táº¡i.`);
+            console.warn(`⚠️ [Inventory Warning] Bỏ qua trừ kho - Sản phẩm với SKU ${sku} không tồn tại.`);
             return false;
         }
-        throw new Error(`Sáº£n pháº©m vá»›i SKU ${sku} khÃ´ng tá»“n táº¡i.`);
+        throw new Error(`Sản phẩm với SKU ${sku} không tồn tại.`);
     }
 
     let oldStock = 0;
@@ -1643,20 +1643,20 @@ async function updateProductStockInTx(tx, sku, quantity, logContext, options = {
     if (isVariant) {
         let variants = JSON.parse(product.variants);
         const variantIndex = variants.findIndex(v => v.sku === sku);
-        if (variantIndex < 0) throw new Error(`Variant ${sku} khÃ´ng tÃ¬m tháº¥y`);
+        if (variantIndex < 0) throw new Error(`Variant ${sku} không tìm thấy`);
 
         oldStock = variants[variantIndex].stock || 0;
         newStock = oldStock + quantity;
         variants[variantIndex].stock = newStock;
         variantColor = variants[variantIndex].color || variants[variantIndex].name || null;
 
-        // LÆ°u biáº¿n thá»ƒ: Báº¯t buá»™c serialize xuá»‘ng JSON, phÃ³ thÃ¡c cho Transaction Sequential cá»§a SQLite
+        // Lưu biến thể: Bắt buộc serialize xuống JSON, phó thác cho Transaction Sequential của SQLite
         await tx.product.update({
             where: { id: product.id },
             data: { variants: JSON.stringify(variants) }
         });
     } else {
-        // [VÃ Lá»–I RACE CONDITION] DÃ¹ng cÆ¡ cháº¿ Atomic Increment cá»§a Database cho trÆ°á»ng Integer Native
+        // [VÁ LỖI RACE CONDITION] Dùng cơ chế Atomic Increment của Database cho trường Integer Native
         oldStock = product.stock || 0;
         const op = quantity >= 0 ? { increment: quantity } : { decrement: Math.abs(quantity) };
         const updatedProduct = await tx.product.update({
@@ -1666,7 +1666,7 @@ async function updateProductStockInTx(tx, sku, quantity, logContext, options = {
         newStock = updatedProduct.stock;
     }
 
-    // Táº¡o báº£n ghi Tháº» kho Náº°M TRONG TRANSACTION
+    // Tạo bản ghi Thẻ kho NẰM TRONG TRANSACTION
     let createdById = null;
     if (logContext.createdBy) {
         if (typeof logContext.createdBy === 'string') {
@@ -1698,14 +1698,14 @@ async function updateProductStockInTx(tx, sku, quantity, logContext, options = {
 }
 
 // ========================================
-// POS ORDER - BÃN HÃ€NG Táº I QUáº¦Y
+// POS ORDER - BÁN HÀNG TẠI QUẦY
 // ========================================
 
-// Táº¡o Ä‘Æ¡n hÃ ng POS (thanh toÃ¡n)
+// Tạo đơn hàng POS (thanh toán)
 ipcMain.handle('posOrder:create', async (event, data) => {
     try {
-        if (!prisma) throw new Error('Database chÆ°a Ä‘Æ°á»£c khá»Ÿi táº¡o.');
-        console.log('ðŸ’° [POS] Creating order...', JSON.stringify(data, null, 2));
+        if (!prisma) throw new Error('Database chưa được khởi tạo.');
+        console.log('💰 [POS] Creating order...', JSON.stringify(data, null, 2));
 
         // 1. Generate order number: POS-YYYYMMDD-XXX (unique)
         const today = new Date();
@@ -1753,14 +1753,14 @@ ipcMain.handle('posOrder:create', async (event, data) => {
                 });
                 if (user) createdByUserId = user.id;
             } catch (e) {
-                console.log('  âš ï¸ Could not find user:', data.userName);
+                console.log('  ⚠️ Could not find user:', data.userName);
             }
         }
 
         const paidAmount = data.paidAmount || 0;
         const paymentStatus = paidAmount >= total ? 'paid' : paidAmount > 0 ? 'partial' : 'unpaid';
 
-        // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         const order = await withStockLock(() => prisma.$transaction(async (tx) => {
             // Create Order
             const newOrder = await tx.order.create({
@@ -1831,7 +1831,7 @@ ipcMain.handle('posOrder:create', async (event, data) => {
                 data: {
                     module: 'sales',
                     action: 'CREATE',
-                    description: `BÃ¡n hÃ ng POS: ${orderNumber} - ${items.length} SP - ${new Intl.NumberFormat('vi-VN').format(total)}Ä‘ (${data.paymentMethod || 'cash'})`,
+                    description: `Bán hàng POS: ${orderNumber} - ${items.length} SP - ${new Intl.NumberFormat('vi-VN').format(total)}đ (${data.paymentMethod || 'cash'})`,
                     userName: data.userName || 'System',
                     severity: 'INFO',
                     details: JSON.stringify({
@@ -1844,25 +1844,25 @@ ipcMain.handle('posOrder:create', async (event, data) => {
                 }
             });
         } catch (logErr) {
-            console.error('  âš ï¸ Activity log failed:', logErr.message);
+            console.error('  ⚠️ Activity log failed:', logErr.message);
         }
 
-        console.log(`âœ… [POS] Order created: ${orderNumber}, Total: ${total}`);
+        console.log(`✅ [POS] Order created: ${orderNumber}, Total: ${total}`);
         return { success: true, data: { ...order, orderNumber } };
     } catch (error) {
-        console.error('âŒ [POS] Create order error:', error.message);
+        console.error('❌ [POS] Create order error:', error.message);
         return { success: false, error: error.message };
     }
 });
 
-// Láº¥y danh sÃ¡ch Ä‘Æ¡n hÃ ng POS
+// Lấy danh sách đơn hàng POS
 ipcMain.handle('posOrder:getAll', async (event, filters = {}) => {
     try {
-        if (!prisma) throw new Error('Database chÆ°a Ä‘Æ°á»£c khá»Ÿi táº¡o.');
+        if (!prisma) throw new Error('Database chưa được khởi tạo.');
 
         const where = { source: 'pos' };
 
-        // Máº·c Ä‘á»‹nh áº©n Ä‘Æ¡n Ä‘Ã£ há»§y â€” trá»« khi explicitly yÃªu cáº§u status cá»¥ thá»ƒ
+        // Mặc định ẩn đơn đã hủy — trừ khi explicitly yêu cầu status cụ thể
         if (filters.status) {
             where.status = filters.status;
         } else {
@@ -1903,18 +1903,18 @@ ipcMain.handle('posOrder:getAll', async (event, filters = {}) => {
             userName: o.user?.username || o.user?.fullName || null,
         }));
 
-        console.log(`âœ… [POS] Loaded ${orders.length} POS orders`);
+        console.log(`✅ [POS] Loaded ${orders.length} POS orders`);
         return { success: true, data: ordersWithUser };
     } catch (error) {
-        console.error('âŒ [POS] Get orders error:', error.message);
+        console.error('❌ [POS] Get orders error:', error.message);
         return { success: false, error: error.message };
     }
 });
 
-// Xem chi tiáº¿t Ä‘Æ¡n hÃ ng POS
+// Xem chi tiết đơn hàng POS
 ipcMain.handle('posOrder:getById', async (event, id) => {
     try {
-        if (!prisma) throw new Error('Database chÆ°a Ä‘Æ°á»£c khá»Ÿi táº¡o.');
+        if (!prisma) throw new Error('Database chưa được khởi tạo.');
         const order = await prisma.order.findUnique({
             where: { id },
             include: { items: true, payments: true, customer: true },
@@ -1925,20 +1925,20 @@ ipcMain.handle('posOrder:getById', async (event, id) => {
     }
 });
 
-// Sá»­a Ä‘Æ¡n hÃ ng POS (note, discount, items)
+// Sửa đơn hàng POS (note, discount, items)
 ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, paymentMethod, userName }) => {
     try {
-        if (!prisma) throw new Error('Database chÆ°a Ä‘Æ°á»£c khá»Ÿi táº¡o.');
+        if (!prisma) throw new Error('Database chưa được khởi tạo.');
 
-        // Láº¥y Ä‘Æ¡n cÅ©
+        // Lấy đơn cũ
         const oldOrder = await prisma.order.findUnique({
             where: { id },
             include: { items: true },
         });
-        if (!oldOrder) throw new Error('KhÃ´ng tÃ¬m tháº¥y Ä‘Æ¡n hÃ ng.');
-        if (oldOrder.status === 'cancelled') throw new Error('ÄÆ¡n hÃ ng Ä‘Ã£ há»§y, khÃ´ng thá»ƒ sá»­a.');
+        if (!oldOrder) throw new Error('Không tìm thấy đơn hàng.');
+        if (oldOrder.status === 'cancelled') throw new Error('Đơn hàng đã hủy, không thể sửa.');
 
-        // TÃ­nh láº¡i tá»•ng tiá»n
+        // Tính lại tổng tiền
         const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
         const disc = discount ?? 0;
         const total = subtotal - disc;
@@ -1956,9 +1956,9 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
         }
 
 
-        // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         await withStockLock(() => prisma.$transaction(async (tx) => {
-            // 1. HoÃ n láº¡i kho theo items cÅ©
+            // 1. Hoàn lại kho theo items cũ
             for (const oldItem of oldOrder.items) {
                 await updateProductStockInTx(tx, oldItem.sku, oldItem.quantity, {
                     type: 'adjustment',
@@ -1969,13 +1969,13 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
                 });
             }
 
-            // 2. Cáº­p nháº­t order
+            // 2. Cập nhật order
             await tx.order.update({
                 where: { id },
                 data: { note: note ?? null, discount: disc, subtotal, total, profit, paymentMethod: paymentMethod || oldOrder.paymentMethod },
             });
 
-            // 3. XÃ³a items cÅ©, thÃªm items má»›i
+            // 3. Xóa items cũ, thêm items mới
             await tx.orderItem.deleteMany({ where: { orderId: id } });
             for (const it of items) {
                 await tx.orderItem.create({
@@ -1992,7 +1992,7 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
                     },
                 });
 
-                // 4. Trá»« kho theo items má»›i
+                // 4. Trừ kho theo items mới
                 await updateProductStockInTx(tx, it.sku, -it.qty, {
                     type: 'pos_sale',
                     referenceType: 'POS_EDIT',
@@ -2002,38 +2002,38 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
                 });
             }
 
-            // 5. Cáº­p nháº­t payment
+            // 5. Cập nhật payment
             await tx.payment.updateMany({
                 where: { orderId: id },
                 data: { method: paymentMethod || oldOrder.paymentMethod, amount: total },
             });
         }, { timeout: 30000, maxWait: 10000 }));
 
-        void logActivity({ module: 'sales', action: 'UPDATE', description: `Sá»­a Ä‘Æ¡n POS #${oldOrder.orderNumber}`, userName: userName || 'System' });
+        void logActivity({ module: 'sales', action: 'UPDATE', description: `Sửa đơn POS #${oldOrder.orderNumber}`, userName: userName || 'System' });
         return { success: true };
     } catch (error) {
-        console.error('âŒ [POS] Update order error:', error.message);
+        console.error('❌ [POS] Update order error:', error.message);
         return { success: false, error: error.message };
     }
 });
 
-// XÃ³a Ä‘Æ¡n hÃ ng POS (hoÃ n kho) - KHÃ”NG XÃ“A Cá»¨NG (Soft Cancel)
+// Xóa đơn hàng POS (hoàn kho) - KHÔNG XÓA CỨNG (Soft Cancel)
 ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
-    console.log(`ðŸ—‘ï¸ [DELETE] posOrder:delete called, id=${id}, type=${typeof id}`);
+    console.log(`🗑️ [DELETE] posOrder:delete called, id=${id}, type=${typeof id}`);
     try {
-        if (!prisma) throw new Error('Database chÆ°a Ä‘Æ°á»£c khá»Ÿi táº¡o.');
+        if (!prisma) throw new Error('Database chưa được khởi tạo.');
 
         const order = await prisma.order.findUnique({
             where: { id },
             include: { items: true },
         });
-        console.log(`ðŸ—‘ï¸ [DELETE] order found:`, order ? `#${order.orderNumber} status=${order.status} items=${order.items.length}` : 'NOT FOUND');
-        if (!order) throw new Error('KhÃ´ng tÃ¬m tháº¥y Ä‘Æ¡n hÃ ng.');
+        console.log(`🗑️ [DELETE] order found:`, order ? `#${order.orderNumber} status=${order.status} items=${order.items.length}` : 'NOT FOUND');
+        if (!order) throw new Error('Không tìm thấy đơn hàng.');
         if (order.status === 'cancelled') return { success: true };
 
-        // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         await withStockLock(() => prisma.$transaction(async (tx) => {
-            // HoÃ n kho â€” dÃ¹ng deductItemOrCombo Ä‘á»ƒ xá»­ lÃ½ cáº£ combo SKU
+            // Hoàn kho — dùng deductItemOrCombo để xử lý cả combo SKU
             const logCtx = {
                 type: 'adjustment',
                 referenceType: 'POS_CANCEL',
@@ -2042,20 +2042,20 @@ ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
                 createdBy: userName || 'System'
             };
             for (const item of order.items) {
-                // +quantity = cá»™ng láº¡i kho (vÃ¬ Ä‘ang há»§y Ä‘Æ¡n bÃ¡n)
+                // +quantity = cộng lại kho (vì đang hủy đơn bán)
                 await deductItemOrCombo(tx, item.sku, item.quantity, logCtx, { allowMissing: true });
             }
-            // Cáº­p nháº­t tráº¡ng thÃ¡i phiáº¿u thay vÃ¬ xÃ³a cá»©ng
+            // Cập nhật trạng thái phiếu thay vì xóa cứng
             await tx.order.update({ where: { id }, data: { status: 'cancelled' } });
 
-            // XÃ³a payment liÃªn quan náº¿u cáº§n thiáº¿t hoáº·c Ä‘Ã¡nh dáº¥u há»§y (táº¡m comment delete payment)
+            // Xóa payment liên quan nếu cần thiết hoặc đánh dấu hủy (tạm comment delete payment)
             // await tx.payment.deleteMany({ where: { orderId: id } });
         }));
 
-        void logActivity({ module: 'sales', action: 'DELETE', description: `Há»§y Ä‘Æ¡n POS #${order.orderNumber}`, userName: userName || 'System' });
+        void logActivity({ module: 'sales', action: 'DELETE', description: `Hủy đơn POS #${order.orderNumber}`, userName: userName || 'System' });
         return { success: true };
     } catch (error) {
-        console.error('âŒ [POS] Cancel order error:', error.message);
+        console.error('❌ [POS] Cancel order error:', error.message);
         return { success: false, error: error.message };
     }
 });
@@ -2088,7 +2088,7 @@ ipcMain.handle('activityLog:getAll', async (event, filters = {}) => {
 
         return { success: true, data: logs };
     } catch (error) {
-        console.error('âŒ Get activity logs error:', error);
+        console.error('❌ Get activity logs error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -2114,10 +2114,10 @@ ipcMain.handle('activityLog:create', async (event, data) => {
             }
         });
 
-        console.log(`âœ… Created activity log: ${data.description}`);
+        console.log(`✅ Created activity log: ${data.description}`);
         return { success: true, data: log };
     } catch (error) {
-        console.error('âŒ Create activity log error:', error);
+        console.error('❌ Create activity log error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -2137,7 +2137,7 @@ ipcMain.handle('activityLog:getByRecord', async (event, { module, recordId }) =>
 
         return { success: true, data: logs };
     } catch (error) {
-        console.error('âŒ Get record logs error:', error);
+        console.error('❌ Get record logs error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -2173,7 +2173,7 @@ ipcMain.handle('activityLog:getStats', async () => {
             }
         };
     } catch (error) {
-        console.error('âŒ Get activity stats error:', error);
+        console.error('❌ Get activity stats error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -2287,7 +2287,7 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
                 }
             },
             orderBy: { createdAt: 'desc' },
-            take: 100 // âš¡ Giáº£m tá»« 300 â†’ 100 phiáº¿u gáº§n nháº¥t
+            take: 100 // ⚡ Giảm từ 300 → 100 phiếu gần nhất
         });
 
         const purchaseMap = new Map(purchases.map(p => [p.id, p]));
@@ -2339,9 +2339,9 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
                 quantity: item.quantity,
                 unitPrice: item.price,
                 total: item.subtotal,
-                color: item.color || null, // ðŸŽ¨ Äá»c tá»« database
-                variantSku: item.variantSku || null, // ðŸŽ¨ Äá»c tá»« database
-                unit: item.product.unit || 'CÃ¡i' // ThÃªm unit
+                color: item.color || null, // 🎨 Đọc từ database
+                variantSku: item.variantSku || null, // 🎨 Đọc từ database
+                unit: item.product.unit || 'Cái' // Thêm unit
             }));
 
             const vatGroupMeta = purchaseGroupMeta.get(p.id) || {};
@@ -2354,7 +2354,7 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
                 totalAmount: p.total, // Frontend expects 'totalAmount', DB has 'total'
                 items: JSON.stringify(itemsFormatted), // Convert to JSON string for frontend
                 notes: p.note,
-                // HÄ VAT
+                // HĐ VAT
                 vatInvoiceNumber: p.vatInvoiceNumber,
                 vatInvoiceDate: p.vatInvoiceDate,
                 vatInvoiceFile: p.vatInvoiceFile,
@@ -2376,7 +2376,7 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
                 vatGroupVatFileName: vatGroups[vatGroupMeta.vatGroupId]?.vatFileName || null,
                 vatGroupVatFileSize: vatGroups[vatGroupMeta.vatGroupId]?.vatFileSize || null,
                 sharedVatPurchaseIds: sameVatIdMap.get(p.id) || [],
-                // Phiáº¿u nháº­p kho
+                // Phiếu nhập kho
                 importReceiptStatus: p.importReceiptStatus,
                 importReceiptFile: p.importReceiptFile,
                 importReceiptDriveUrl: p.importReceiptDriveUrl,
@@ -2385,7 +2385,7 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
 
         return { success: true, data: formatted };
     } catch (error) {
-        console.error('âŒ Get purchases error:', error);
+        console.error('❌ Get purchases error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -2442,7 +2442,7 @@ ipcMain.handle('purchases:createVatGroup', async (event, { purchaseIds = [], not
 
         return { success: true, data: { vatGroupId: newGroupId, purchaseIds: normalizedIds, note: note || '' } };
     } catch (error) {
-        console.error('âŒ Create VAT group error:', error);
+        console.error('❌ Create VAT group error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -2513,7 +2513,7 @@ ipcMain.handle('purchases:uploadVatGroupInvoice', async (event, { vatGroupId, in
                     }
                 }
             } catch (driveErr) {
-                console.error(`âš ï¸ Drive upload group VAT failed for file ${i + 1}:`, driveErr.message);
+                console.error(`⚠️ Drive upload group VAT failed for file ${i + 1}:`, driveErr.message);
             }
         }
 
@@ -2573,7 +2573,7 @@ ipcMain.handle('purchases:uploadVatGroupInvoice', async (event, { vatGroupId, in
         });
 
         const driveWarning = driveUrls.length === 0
-            ? 'âš ï¸ File nhóm đã lưu local + Telegram, nhưng Google Drive upload thất bại. Kiểm tra lại Google Drive.'
+            ? '⚠️ File nhóm đã lưu local + Telegram, nhưng Google Drive upload thất bại. Kiểm tra lại Google Drive.'
             : null;
 
         return {
@@ -2588,7 +2588,7 @@ ipcMain.handle('purchases:uploadVatGroupInvoice', async (event, { vatGroupId, in
             driveWarning,
         };
     } catch (error) {
-        console.error('âŒ Upload group VAT invoice error:', error);
+        console.error('❌ Upload group VAT invoice error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -2627,7 +2627,7 @@ ipcMain.handle('purchases:removeVatGroup', async (event, { purchaseId } = {}) =>
 
         return { success: true, data: { purchaseId: targetId, removedGroupId } };
     } catch (error) {
-        console.error('âŒ Remove VAT group error:', error);
+        console.error('❌ Remove VAT group error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -2637,11 +2637,11 @@ ipcMain.handle('purchases:create', async (event, data) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
 
-        console.log('ðŸ“¦ Creating purchase order with data:', data);
+        console.log('📦 Creating purchase order with data:', data);
 
         // Parse items and validate productIds
         const items = JSON.parse(data.items);
-        console.log('ðŸ“¦ Items to create:', items);
+        console.log('📦 Items to create:', items);
 
         // Validate all productIds exist (single batch query)
         const productIds = items.map(i => i.productId);
@@ -2655,7 +2655,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
                 throw new Error(`Product ID ${item.productId} not found. Item: ${item.productName}`);
             }
         }
-        // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         const purchase = await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
             // Generate standard PN-YYMMDD-XXX
             const today = new Date();
@@ -2686,7 +2686,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
                     note: data.notes,
                     receivedAt: new Date(data.purchaseDate),
                     createdBy: data.createdBy || 'Admin',
-                    vatInvoiceStatus: data.isThht ? 'thht' : (data.isNoVat ? 'no_vat' : 'pending'), // ðŸ“¦ THHT / KhÃ´ng VAT flag
+                    vatInvoiceStatus: data.isThht ? 'thht' : (data.isNoVat ? 'no_vat' : 'pending'), // 📦 THHT / Không VAT flag
                     items: {
                         create: items.map(item => ({
                             productId: item.productId,
@@ -2701,7 +2701,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
                 include: { supplier: true, items: true }
             });
 
-            // ðŸŒŸ Láº¥y map Product SKU Ä‘á»ƒ cáº­p nháº­t tá»“n
+            // 🌟 Lấy map Product SKU để cập nhật tồn
             const purchaseProducts = await tx.product.findMany({
                 where: { id: { in: productIds } }
             });
@@ -2714,7 +2714,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
                 const skuToUpdate = item.variantSku || product.sku;
                 if (!skuToUpdate) continue;
 
-                // ðŸŒŸ Gá»i hÃ m Má»‡nh lá»‡nh tá»‘i cao Ä‘á»ƒ tÄƒng tá»“n kho an toÃ n & sinh tháº» kho
+                // 🌟 Gọi hàm Mệnh lệnh tối cao để tăng tồn kho an toàn & sinh thẻ kho
                 await updateProductStockInTx(tx, skuToUpdate, item.quantity, {
                     type: 'purchase',
                     referenceType: 'NHAP',
@@ -2727,12 +2727,12 @@ ipcMain.handle('purchases:create', async (event, data) => {
             return newOrder;
         }, { timeout: 60000, maxWait: 10000 }));
 
-        console.log(`âœ… Created purchase order: ${purchase.poNumber}`);
-        void logActivity({ module: 'purchases', action: 'CREATE', description: `Táº¡o phiáº¿u nháº­p ${purchase.poNumber} - ${new Intl.NumberFormat('vi-VN').format(data.totalAmount)}Ä‘`, recordName: purchase.poNumber, userName: data.createdBy || 'Admin' });
+        console.log(`✅ Created purchase order: ${purchase.poNumber}`);
+        void logActivity({ module: 'purchases', action: 'CREATE', description: `Tạo phiếu nhập ${purchase.poNumber} - ${new Intl.NumberFormat('vi-VN').format(data.totalAmount)}đ`, recordName: purchase.poNumber, userName: data.createdBy || 'Admin' });
 
         return { success: true, data: purchase };
     } catch (error) {
-        console.error('âŒ Create purchase error:', error);
+        console.error('❌ Create purchase error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -2753,34 +2753,34 @@ ipcMain.handle('purchases:update', async (event, { id, data }) => {
                 receivedAt: new Date(data.purchaseDate),
                 ...(data.isThht !== undefined || data.isNoVat !== undefined ? {
                     vatInvoiceStatus: data.isThht ? 'thht' : (data.isNoVat ? 'no_vat' : 'pending')
-                } : {}), // ðŸ“¦ THHT / KhÃ´ng VAT
+                } : {}), // 📦 THHT / Không VAT
             }
         });
 
-        console.log(`âœ… Updated purchase order: ${purchase.poNumber}`);
-        void logActivity({ module: 'purchases', action: 'UPDATE', description: `Cáº­p nháº­t phiáº¿u nháº­p ${purchase.poNumber}`, recordName: purchase.poNumber });
+        console.log(`✅ Updated purchase order: ${purchase.poNumber}`);
+        void logActivity({ module: 'purchases', action: 'UPDATE', description: `Cập nhật phiếu nhập ${purchase.poNumber}`, recordName: purchase.poNumber });
         return { success: true, data: purchase };
     } catch (error) {
-        console.error('âŒ Update purchase error:', error);
+        console.error('❌ Update purchase error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// Delete purchase (Soft-delete & HoÃ n kho)
+// Delete purchase (Soft-delete & Hoàn kho)
 ipcMain.handle('purchases:delete', async (event, id) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
 
-        console.log(`ðŸ—‘ï¸  Soft-deleting purchase order #${id}...`);
+        console.log(`🗑️  Soft-deleting purchase order #${id}...`);
 
         const order = await prisma.purchaseOrder.findUnique({
             where: { id },
             include: { items: true }
         });
-        if (!order) throw new Error(`KhÃ´ng tÃ¬m tháº¥y phiáº¿u nháº­p #${id}`);
+        if (!order) throw new Error(`Không tìm thấy phiếu nhập #${id}`);
         if (order.status === 'cancelled') return { success: true };
 
-        // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
             const productIds = [...new Set(order.items.map(i => i.productId))];
             const products = await tx.product.findMany({
@@ -2788,7 +2788,7 @@ ipcMain.handle('purchases:delete', async (event, id) => {
             });
             const productMap = new Map(products.map(p => [p.id, p]));
 
-            // 1. HoÃ n lÆ°á»£ng tá»“n kho Ä‘Ã£ nháº­p (Ã¢m quantity) - ghi tháº» kho Reversal
+            // 1. Hoàn lượng tồn kho đã nhập (âm quantity) - ghi thẻ kho Reversal
             for (const item of order.items) {
                 const product = productMap.get(item.productId);
                 if (!product) continue;
@@ -2805,18 +2805,18 @@ ipcMain.handle('purchases:delete', async (event, id) => {
                 });
             }
 
-            // 2. Chuyá»ƒn tráº¡ng thÃ¡i sang cancelled thay vÃ¬ xÃ³a váº­t lÃ½ khá»‘i item
+            // 2. Chuyển trạng thái sang cancelled thay vì xóa vật lý khối item
             await tx.purchaseOrder.update({
                 where: { id },
                 data: { status: 'cancelled' }
             });
         }));
 
-        console.log(`âœ… Successfully cancelled purchase order #${id}`);
-        void logActivity({ module: 'purchases', action: 'DELETE', description: `Há»§y phiáº¿u nháº­p #${id}`, recordName: order.poNumber });
+        console.log(`✅ Successfully cancelled purchase order #${id}`);
+        void logActivity({ module: 'purchases', action: 'DELETE', description: `Hủy phiếu nhập #${id}`, recordName: order.poNumber });
         return { success: true };
     } catch (error) {
-        console.error('âŒ Delete purchase error:', error);
+        console.error('❌ Delete purchase error:', error);
         console.error('   Error code:', error.code);
         console.error('   Error meta:', error.meta);
         return { success: false, error: error.message };
@@ -2824,37 +2824,37 @@ ipcMain.handle('purchases:delete', async (event, id) => {
 });
 
 // ========================================
-// UPLOAD HÄ VAT NHÃ€ CUNG Cáº¤P
-// Bot Telegram: tool HÄ cÅ© (8091...)
+// UPLOAD HĐ VAT NHÀ CUNG CẤP
+// Bot Telegram: tool HĐ cũ (8091...)
 // Google Drive: folder LUUTRU-HOADONVAT
 // Email: Nodemailer + Gmail OAuth2
 // ========================================
 
-// Config riÃªng cho module HÄ VAT nháº­p hÃ ng
+// Config riêng cho module HĐ VAT nhập hàng
 const VAT_TELEGRAM_BOT = '***REDACTED_VAT_TELEGRAM_TOKEN***';
 const VAT_TELEGRAM_CHAT = '1397184795';
 const VAT_DRIVE_FOLDER_NAME = 'LUUTRU-HOADONVAT';
 let vatDriveFolderId = null; // Cache folder ID
 
-// TÃ¬m hoáº·c táº¡o folder LUUTRU-HOADONVAT trÃªn Drive
+// Tìm hoặc tạo folder LUUTRU-HOADONVAT trên Drive
 async function getOrCreateVatDriveFolder() {
     if (vatDriveFolderId) return vatDriveFolderId;
     const drive = getDriveClient();
     if (!drive) return null;
 
     try {
-        // TÃ¬m folder Ä‘Ã£ tá»“n táº¡i
+        // Tìm folder đã tồn tại
         const search = await drive.files.list({
             q: `name='${VAT_DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
             fields: 'files(id)',
         });
         if (search.data.files && search.data.files.length > 0) {
             vatDriveFolderId = search.data.files[0].id;
-            console.log(`ðŸ“ Found Drive folder ${VAT_DRIVE_FOLDER_NAME}: ${vatDriveFolderId}`);
+            console.log(`📁 Found Drive folder ${VAT_DRIVE_FOLDER_NAME}: ${vatDriveFolderId}`);
             return vatDriveFolderId;
         }
 
-        // Táº¡o má»›i
+        // Tạo mới
         const folder = await drive.files.create({
             requestBody: {
                 name: VAT_DRIVE_FOLDER_NAME,
@@ -2863,15 +2863,15 @@ async function getOrCreateVatDriveFolder() {
             fields: 'id',
         });
         vatDriveFolderId = folder.data.id;
-        console.log(`ðŸ“ Created Drive folder ${VAT_DRIVE_FOLDER_NAME}: ${vatDriveFolderId}`);
+        console.log(`📁 Created Drive folder ${VAT_DRIVE_FOLDER_NAME}: ${vatDriveFolderId}`);
         return vatDriveFolderId;
     } catch (err) {
-        console.error('âŒ VAT Drive folder error:', err.message);
+        console.error('❌ VAT Drive folder error:', err.message);
         if (err.response) {
-            console.error('âŒ Drive API response:', err.response.status, JSON.stringify(err.response.data));
+            console.error('❌ Drive API response:', err.response.status, JSON.stringify(err.response.data));
         }
         if (err.code) {
-            console.error('âŒ Drive error code:', err.code);
+            console.error('❌ Drive error code:', err.code);
         }
         return null;
     }
@@ -2892,7 +2892,7 @@ async function getOrCreateImportReceiptDriveFolder() {
         });
         if (search.data.files && search.data.files.length > 0) {
             importReceiptDriveFolderId = search.data.files[0].id;
-            console.log(`ðŸ“ Found Drive folder ${IMPORT_RECEIPT_DRIVE_FOLDER_NAME}: ${importReceiptDriveFolderId}`);
+            console.log(`📁 Found Drive folder ${IMPORT_RECEIPT_DRIVE_FOLDER_NAME}: ${importReceiptDriveFolderId}`);
             return importReceiptDriveFolderId;
         }
 
@@ -2904,15 +2904,15 @@ async function getOrCreateImportReceiptDriveFolder() {
             fields: 'id',
         });
         importReceiptDriveFolderId = folder.data.id;
-        console.log(`ðŸ“ Created Drive folder ${IMPORT_RECEIPT_DRIVE_FOLDER_NAME}: ${importReceiptDriveFolderId}`);
+        console.log(`📁 Created Drive folder ${IMPORT_RECEIPT_DRIVE_FOLDER_NAME}: ${importReceiptDriveFolderId}`);
         return importReceiptDriveFolderId;
     } catch (err) {
-        console.error('âŒ Import Receipt Drive folder error:', err.message);
+        console.error('❌ Import Receipt Drive folder error:', err.message);
         return null;
     }
 }
 
-// Gá»­i Telegram báº±ng bot HÄ cÅ©
+// Gửi Telegram bằng bot HĐ cũ
 function sendVatTelegramMessage(text) {
     return new Promise((resolve) => {
         const postData = JSON.stringify({ chat_id: VAT_TELEGRAM_CHAT, text, parse_mode: 'HTML' });
@@ -2935,7 +2935,7 @@ function sendVatTelegramMessage(text) {
     });
 }
 
-// Gá»­i file qua Telegram bot HÄ cÅ©
+// Gửi file qua Telegram bot HĐ cũ
 function sendVatTelegramDocument(buffer, fileName, caption) {
     return new Promise((resolve) => {
         try {
@@ -2970,20 +2970,20 @@ function sendVatTelegramDocument(buffer, fileName, caption) {
     });
 }
 
-// Gá»­i email thÃ´ng bÃ¡o HÄ VAT qua Gmail (Nodemailer + OAuth2)
+// Gửi email thông báo HĐ VAT qua Gmail (Nodemailer + OAuth2)
 async function sendVatEmail(invoiceData) {
     try {
         const nodemailer = require('nodemailer');
         const tokenPath = path.join(__dirname, 'gdrive-token.json');
         if (!fs.existsSync(tokenPath)) {
-            console.warn('âš ï¸ No OAuth2 token â€” skip email');
+            console.warn('⚠️ No OAuth2 token — skip email');
             return { success: false };
         }
         const tokens = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
         const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET);
         oauth2Client.setCredentials(tokens);
 
-        // Láº¥y access token má»›i
+        // Lấy access token mới
         const { token } = await oauth2Client.getAccessToken();
 
         const transporter = nodemailer.createTransport({
@@ -2999,18 +2999,18 @@ async function sendVatEmail(invoiceData) {
         });
 
         const mailOptions = {
-            from: '"Há»‡ thá»‘ng Quáº£n lÃ½" <yendao444@gmail.com>',
+            from: '"Hệ thống Quản lý" <yendao444@gmail.com>',
             to: 'yendao444@gmail.com',
-            subject: `ðŸ§¾ HÄ VAT má»›i: ${invoiceData.invoiceNumber} â€” ${invoiceData.supplierName}`,
+            subject: `🧾 HĐ VAT mới: ${invoiceData.invoiceNumber} — ${invoiceData.supplierName}`,
             html: `
-                <h2>ðŸ§¾ HÃ³a Ä‘Æ¡n VAT nhÃ  cung cáº¥p</h2>
+                <h2>🧾 Hóa đơn VAT nhà cung cấp</h2>
                 <table style="border-collapse:collapse; font-size:14px;">
-                    <tr><td style="padding:6px 12px;"><b>ðŸ“‹ Phiáº¿u nháº­p:</b></td><td>#${invoiceData.purchaseId}</td></tr>
-                    <tr><td style="padding:6px 12px;"><b>ðŸ¢ NCC:</b></td><td>${invoiceData.supplierName}</td></tr>
-                    <tr><td style="padding:6px 12px;"><b>ðŸ”¢ Sá»‘ HÄ:</b></td><td>${invoiceData.invoiceNumber}</td></tr>
-                    <tr><td style="padding:6px 12px;"><b>ðŸ“… NgÃ y:</b></td><td>${invoiceData.invoiceDate}</td></tr>
-                    <tr><td style="padding:6px 12px;"><b>ðŸ’° Tá»•ng tiá»n:</b></td><td>${invoiceData.totalAmount}</td></tr>
-                    ${invoiceData.driveUrl ? `<tr><td style="padding:6px 12px;"><b>ðŸ“Ž Drive:</b></td><td><a href="${invoiceData.driveUrl}">Xem file</a></td></tr>` : ''}
+                    <tr><td style="padding:6px 12px;"><b>📋 Phiếu nhập:</b></td><td>#${invoiceData.purchaseId}</td></tr>
+                    <tr><td style="padding:6px 12px;"><b>🏢 NCC:</b></td><td>${invoiceData.supplierName}</td></tr>
+                    <tr><td style="padding:6px 12px;"><b>🔢 Số HĐ:</b></td><td>${invoiceData.invoiceNumber}</td></tr>
+                    <tr><td style="padding:6px 12px;"><b>📅 Ngày:</b></td><td>${invoiceData.invoiceDate}</td></tr>
+                    <tr><td style="padding:6px 12px;"><b>💰 Tổng tiền:</b></td><td>${invoiceData.totalAmount}</td></tr>
+                    ${invoiceData.driveUrl ? `<tr><td style="padding:6px 12px;"><b>📎 Drive:</b></td><td><a href="${invoiceData.driveUrl}">Xem file</a></td></tr>` : ''}
                 </table>
             `,
         };
@@ -3023,10 +3023,10 @@ async function sendVatEmail(invoiceData) {
         }
 
         await transporter.sendMail(mailOptions);
-        console.log('ðŸ“§ VAT email sent successfully');
+        console.log('📧 VAT email sent successfully');
         return { success: true };
     } catch (err) {
-        console.error('âš ï¸ VAT email error (non-blocking):', err.message);
+        console.error('⚠️ VAT email error (non-blocking):', err.message);
         return { success: false, error: err.message };
     }
 }
@@ -3036,14 +3036,14 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
         if (!prisma) throw new Error('Prisma not available');
         const vatFileMeta = await getPurchaseVatFileMeta();
 
-        // 1. Láº¥y thÃ´ng tin phiáº¿u nháº­p
+        // 1. Lấy thông tin phiếu nhập
         const purchase = await prisma.purchaseOrder.findUnique({
             where: { id: purchaseId },
             include: { supplier: true },
         });
-        if (!purchase) throw new Error(`KhÃ´ng tÃ¬m tháº¥y phiáº¿u nháº­p #${purchaseId}`);
+        if (!purchase) throw new Error(`Không tìm thấy phiếu nhập #${purchaseId}`);
 
-        // Normalize: há»— trá»£ cáº£ nhiá»u file (files[]) vÃ  1 file (fileBase64/fileName)
+        // Normalize: hỗ trợ cả nhiều file (files[]) và 1 file (fileBase64/fileName)
         const filesList = files.length > 0 ? files : (fileBase64 ? [{ fileBase64, fileName }] : []);
 
         const userDataPath = app.getPath('userData');
@@ -3056,7 +3056,7 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
         const savedFileNames = [];
         let primaryVatMeta = null;
 
-        // 2. LÆ°u tá»«ng file local + upload Drive
+        // 2. Lưu từng file local + upload Drive
         for (let i = 0; i < filesList.length; i++) {
             const { fileBase64: b64, fileName: fn } = filesList[i];
             const ext = (fn || 'jpg').split('.').pop() || 'jpg';
@@ -3066,7 +3066,7 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
 
             const fileBuffer = Buffer.from(b64, 'base64');
             fs.writeFileSync(localPath, fileBuffer);
-            console.log(`ðŸ“ Saved VAT invoice [${i + 1}/${filesList.length}]: ${localPath}`);
+            console.log(`📁 Saved VAT invoice [${i + 1}/${filesList.length}]: ${localPath}`);
             localPaths.push(localPath);
             savedBuffers.push(fileBuffer);
             savedFileNames.push(localFileName);
@@ -3079,28 +3079,28 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
                 };
             }
 
-            // Upload lÃªn Google Drive
+            // Upload lên Google Drive
             try {
                 const drive = getDriveClient();
                 if (drive) {
                     const folderId = await getOrCreateVatDriveFolder();
                     if (folderId) {
-                        const driveFileName = `HÄ_VAT_${purchase.supplier?.name || 'NCC'}_PO${purchaseId}_${invoiceNumber}${suffix}.${ext}`;
+                        const driveFileName = `HĐ_VAT_${purchase.supplier?.name || 'NCC'}_PO${purchaseId}_${invoiceNumber}${suffix}.${ext}`;
                         const result = await uploadToDrive(drive, folderId, driveFileName, fileBuffer, ext === 'pdf' ? 'application/pdf' : 'image/jpeg');
                         if (result) {
                             driveUrls.push(result.webViewLink);
-                            console.log(`â˜ï¸ Uploaded to Drive [${i + 1}]: ${result.webViewLink}`);
+                            console.log(`☁️ Uploaded to Drive [${i + 1}]: ${result.webViewLink}`);
                         } else {
-                            console.error(`âš ï¸ Drive upload returned null for file ${i + 1}`);
+                            console.error(`⚠️ Drive upload returned null for file ${i + 1}`);
                         }
                     } else {
-                        console.error('âš ï¸ Drive folder creation failed - folderId is null');
+                        console.error('⚠️ Drive folder creation failed - folderId is null');
                     }
                 } else {
-                    console.error('âš ï¸ Google Drive client not available (token missing or expired)');
+                    console.error('⚠️ Google Drive client not available (token missing or expired)');
                 }
             } catch (driveErr) {
-                console.error(`âš ï¸ Drive upload failed for file ${i + 1}:`, driveErr.message);
+                console.error(`⚠️ Drive upload failed for file ${i + 1}:`, driveErr.message);
             }
         }
 
@@ -3109,7 +3109,7 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
             await savePurchaseVatFileMeta(vatFileMeta);
         }
 
-        // 3. Cáº­p nháº­t DB
+        // 3. Cập nhật DB
         const dbUpdate = {
             vatInvoiceNumber: invoiceNumber,
             vatInvoiceDate: new Date(invoiceDate),
@@ -3143,14 +3143,14 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
             ).catch(err => console.error('Telegram doc error:', err));
         }
 
-        // 5. Gá»­i Email (file Ä‘áº§u tiÃªn)
+        // 5. Gửi Email (file đầu tiên)
         if (savedBuffers.length > 0) {
             sendVatEmail({
                 purchaseId,
                 supplierName: purchase.supplier?.name || 'N/A',
                 invoiceNumber,
                 invoiceDate: new Date(invoiceDate).toLocaleDateString('vi-VN'),
-                totalAmount: purchase.total.toLocaleString('vi-VN') + 'Ä‘',
+                totalAmount: purchase.total.toLocaleString('vi-VN') + 'đ',
                 driveUrl: driveUrls[0] || null,
                 fileBuffer: savedBuffers[0],
                 fileName: savedFileNames[0],
@@ -3159,35 +3159,35 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
 
         void logActivity({
             module: 'purchases', action: 'VAT_UPLOAD',
-            description: `Upload ${filesList.length} file HÄ VAT #${invoiceNumber} cho phiáº¿u nháº­p #${purchaseId} (${purchase.supplier?.name})`,
+            description: `Upload ${filesList.length} file HĐ VAT #${invoiceNumber} cho phiếu nhập #${purchaseId} (${purchase.supplier?.name})`,
             userName: 'System',
         });
 
         const driveWarning = driveUrls.length === 0 && filesList.length > 0
-            ? 'âš ï¸ File Ä‘Ã£ lÆ°u local + Telegram, nhÆ°ng Google Drive upload THáº¤T Báº I. Kiá»ƒm tra káº¿t ná»‘i Google Drive.'
+            ? '⚠️ File đã lưu local + Telegram, nhưng Google Drive upload THẤT BẠI. Kiểm tra kết nối Google Drive.'
             : null;
         if (driveWarning) console.warn(driveWarning);
-        console.log(`âœ… VAT invoice uploaded for PO#${purchaseId}: ${invoiceNumber} (${filesList.length} files, Drive: ${driveUrls.length > 0 ? 'OK' : 'FAILED'})`);
+        console.log(`✅ VAT invoice uploaded for PO#${purchaseId}: ${invoiceNumber} (${filesList.length} files, Drive: ${driveUrls.length > 0 ? 'OK' : 'FAILED'})`);
         return { success: true, data: { localPaths, driveUrls, invoiceNumber, vatId: primaryVatMeta?.vatId || null }, driveWarning };
     } catch (error) {
-        console.error('âŒ Upload VAT invoice error:', error);
+        console.error('❌ Upload VAT invoice error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// Upload Phiáº¿u Nháº­p Kho
+// Upload Phiếu Nhập Kho
 ipcMain.handle('purchases:uploadImportReceipt', async (event, { purchaseId, files = [], fileBase64, fileName }) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
 
-        // 1. Láº¥y thÃ´ng tin phiáº¿u nháº­p
+        // 1. Lấy thông tin phiếu nhập
         const purchase = await prisma.purchaseOrder.findUnique({
             where: { id: purchaseId },
             include: { supplier: true },
         });
-        if (!purchase) throw new Error(`KhÃ´ng tÃ¬m tháº¥y phiáº¿u nháº­p #${purchaseId}`);
+        if (!purchase) throw new Error(`Không tìm thấy phiếu nhập #${purchaseId}`);
 
-        // Normalize: há»— trá»£ cáº£ nhiá»u file (files[]) vÃ  1 file (fileBase64/fileName)
+        // Normalize: hỗ trợ cả nhiều file (files[]) và 1 file (fileBase64/fileName)
         const filesList = files.length > 0 ? files : (fileBase64 ? [{ fileBase64, fileName }] : []);
 
         const userDataPath = app.getPath('userData');
@@ -3197,7 +3197,7 @@ ipcMain.handle('purchases:uploadImportReceipt', async (event, { purchaseId, file
         const localPaths = [];
         const driveUrls = [];
 
-        // 2. LÆ°u tá»«ng file local + upload Drive
+        // 2. Lưu từng file local + upload Drive
         for (let i = 0; i < filesList.length; i++) {
             const { fileBase64: b64, fileName: fn } = filesList[i];
             const ext = (fn || 'jpg').split('.').pop() || 'jpg';
@@ -3207,29 +3207,29 @@ ipcMain.handle('purchases:uploadImportReceipt', async (event, { purchaseId, file
 
             const fileBuffer = Buffer.from(b64, 'base64');
             fs.writeFileSync(localPath, fileBuffer);
-            console.log(`ðŸ“ Saved Import Receipt [${i + 1}/${filesList.length}]: ${localPath}`);
+            console.log(`📁 Saved Import Receipt [${i + 1}/${filesList.length}]: ${localPath}`);
             localPaths.push(localPath);
 
-            // Upload lÃªn Google Drive
+            // Upload lên Google Drive
             try {
                 const drive = getDriveClient();
                 if (drive) {
                     const folderId = await getOrCreateImportReceiptDriveFolder(); // Separated folder
                     if (folderId) {
-                        const driveFileName = `Phiáº¿u_Nháº­p_${purchase.supplier?.name || 'NCC'}_PO${purchaseId}${suffix}.${ext}`;
+                        const driveFileName = `Phiếu_Nhập_${purchase.supplier?.name || 'NCC'}_PO${purchaseId}${suffix}.${ext}`;
                         const result = await uploadToDrive(drive, folderId, driveFileName, fileBuffer, ext === 'pdf' ? 'application/pdf' : 'image/jpeg');
                         if (result) {
                             driveUrls.push(result.webViewLink);
-                            console.log(`â˜ï¸ Uploaded Receipt to Drive [${i + 1}]: ${result.webViewLink}`);
+                            console.log(`☁️ Uploaded Receipt to Drive [${i + 1}]: ${result.webViewLink}`);
                         }
                     }
                 }
             } catch (driveErr) {
-                console.error(`âš ï¸ Drive upload failed for Receipt file ${i + 1}:`, driveErr.message);
+                console.error(`⚠️ Drive upload failed for Receipt file ${i + 1}:`, driveErr.message);
             }
         }
 
-        // 3. Cáº­p nháº­t DB
+        // 3. Cập nhật DB
         const dbUpdate = {
             importReceiptStatus: 'uploaded',
         };
@@ -3243,18 +3243,18 @@ ipcMain.handle('purchases:uploadImportReceipt', async (event, { purchaseId, file
 
         void logActivity({
             module: 'purchases', action: 'RECEIPT_UPLOAD',
-            description: `Upload Phiáº¿u Nháº­p cá»§a phiáº¿u #${purchaseId} (${purchase.supplier?.name})`,
+            description: `Upload Phiếu Nhập của phiếu #${purchaseId} (${purchase.supplier?.name})`,
             userName: 'System',
         });
 
         return { success: true, data: { localPaths, driveUrls } };
     } catch (error) {
-        console.error('âŒ Upload Import Receipt error:', error);
+        console.error('❌ Upload Import Receipt error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// XÃ³a Phiáº¿u Nháº­p Kho
+// Xóa Phiếu Nhập Kho
 ipcMain.handle('purchases:deleteImportReceipt', async (event, purchaseId) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
@@ -3262,9 +3262,9 @@ ipcMain.handle('purchases:deleteImportReceipt', async (event, purchaseId) => {
             where: { id: purchaseId },
             include: { supplier: true },
         });
-        if (!purchase) throw new Error(`KhÃ´ng tÃ¬m tháº¥y phiáº¿u nháº­p #${purchaseId}`);
+        if (!purchase) throw new Error(`Không tìm thấy phiếu nhập #${purchaseId}`);
 
-        // Chá»‰ cáº­p nháº­t DB Ä‘á»ƒ bá» mapping
+        // Chỉ cập nhật DB để bỏ mapping
         await prisma.purchaseOrder.update({
             where: { id: purchaseId },
             data: {
@@ -3276,17 +3276,17 @@ ipcMain.handle('purchases:deleteImportReceipt', async (event, purchaseId) => {
 
         void logActivity({
             module: 'purchases', action: 'RECEIPT_DELETE',
-            description: `XÃ³a Phiáº¿u Nháº­p cá»§a phiáº¿u #${purchaseId} (${purchase.supplier?.name})`,
+            description: `Xóa Phiếu Nhập của phiếu #${purchaseId} (${purchase.supplier?.name})`,
             userName: 'System',
         });
 
         return { success: true };
     } catch (error) {
-        console.error('âŒ Delete Import Receipt error:', error);
+        console.error('❌ Delete Import Receipt error:', error);
         return { success: false, error: error.message };
     }
 });
-// ÄÃ¡nh dáº¥u phiáº¿u nháº­p lÃ  "ÄÆ¡n THHT" (khÃ´ng cáº§n HÄ VAT)
+// Đánh dấu phiếu nhập là "Đơn THHT" (không cần HĐ VAT)
 // Xóa HĐ VAT của phiếu nhập (đơn lẻ, không thuộc nhóm gộp)
 ipcMain.handle('purchases:deleteVatInvoice', async (event, purchaseId) => {
     try {
@@ -3338,7 +3338,7 @@ ipcMain.handle('purchases:markAsThht', async (event, { purchaseId, revert }) => 
         });
         void logActivity({
             module: 'purchases', action: revert ? 'THHT_REVERT' : 'THHT_MARK',
-            description: `${revert ? 'HoÃ n tÃ¡c' : 'ÄÃ¡nh dáº¥u'} phiáº¿u nháº­p #${purchaseId} lÃ  ÄÆ¡n THHT`,
+            description: `${revert ? 'Hoàn tác' : 'Đánh dấu'} phiếu nhập #${purchaseId} là Đơn THHT`,
             userName: 'System',
         });
         return { success: true };
@@ -3347,16 +3347,16 @@ ipcMain.handle('purchases:markAsThht', async (event, { purchaseId, revert }) => 
     }
 });
 
-// ðŸ‘ï¸ Äá»c file HÄ VAT local â†’ tráº£ vá» base64 data URL Ä‘á»ƒ hiá»ƒn thá»‹ trong app
+// 👁️ Đọc file HĐ VAT local → trả về base64 data URL để hiển thị trong app
 ipcMain.handle('purchases:getVATFileData', async (event, { purchaseId }) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const purchase = await prisma.purchaseOrder.findUnique({ where: { id: purchaseId } });
         if (!purchase || !purchase.vatInvoiceFile) {
-            return { success: false, error: 'KhÃ´ng tÃ¬m tháº¥y file HÄ VAT' };
+            return { success: false, error: 'Không tìm thấy file HĐ VAT' };
         }
 
-        // vatInvoiceFile cÃ³ thá»ƒ lÃ  1 path hoáº·c JSON array nhiá»u paths
+        // vatInvoiceFile có thể là 1 path hoặc JSON array nhiều paths
         let filePaths = [];
         try {
             filePaths = JSON.parse(purchase.vatInvoiceFile);
@@ -3364,7 +3364,7 @@ ipcMain.handle('purchases:getVATFileData', async (event, { purchaseId }) => {
             filePaths = [purchase.vatInvoiceFile];
         }
 
-        // Äá»c tá»«ng file â†’ tráº£ vá» array data URLs
+        // Đọc từng file → trả về array data URLs
         const filesData = [];
         for (const fp of filePaths) {
             if (!fs.existsSync(fp)) continue;
@@ -3376,26 +3376,26 @@ ipcMain.handle('purchases:getVATFileData', async (event, { purchaseId }) => {
         }
 
         if (filesData.length === 0) {
-            return { success: false, error: 'File khÃ´ng tá»“n táº¡i trÃªn mÃ¡y' };
+            return { success: false, error: 'File không tồn tại trên máy' };
         }
 
         return { success: true, data: filesData };
     } catch (error) {
-        console.error('âŒ Get VAT file data error:', error);
+        console.error('❌ Get VAT file data error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// ðŸ‘ï¸ Äá»c file Phiáº¿u Nháº­p Kho local â†’ tráº£ vá» base64 data URL Ä‘á»ƒ hiá»ƒn thá»‹ trong app
+// 👁️ Đọc file Phiếu Nhập Kho local → trả về base64 data URL để hiển thị trong app
 ipcMain.handle('purchases:getImportReceiptFileData', async (event, { purchaseId }) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const purchase = await prisma.purchaseOrder.findUnique({ where: { id: purchaseId } });
         if (!purchase || !purchase.importReceiptFile) {
-            return { success: false, error: 'KhÃ´ng tÃ¬m tháº¥y file Phiáº¿u Nháº­p Kho' };
+            return { success: false, error: 'Không tìm thấy file Phiếu Nhập Kho' };
         }
 
-        // importReceiptFile cÃ³ thá»ƒ lÃ  1 path hoáº·c JSON array nhiá»u paths
+        // importReceiptFile có thể là 1 path hoặc JSON array nhiều paths
         let filePaths = [];
         try {
             filePaths = JSON.parse(purchase.importReceiptFile);
@@ -3403,7 +3403,7 @@ ipcMain.handle('purchases:getImportReceiptFileData', async (event, { purchaseId 
             filePaths = [purchase.importReceiptFile];
         }
 
-        // Äá»c tá»«ng file â†’ tráº£ vá» array data URLs
+        // Đọc từng file → trả về array data URLs
         const filesData = [];
         for (const fp of filePaths) {
             if (!fs.existsSync(fp)) continue;
@@ -3415,12 +3415,12 @@ ipcMain.handle('purchases:getImportReceiptFileData', async (event, { purchaseId 
         }
 
         if (filesData.length === 0) {
-            return { success: false, error: 'File khÃ´ng tá»“n táº¡i trÃªn mÃ¡y' };
+            return { success: false, error: 'File không tồn tại trên máy' };
         }
 
         return { success: true, data: filesData };
     } catch (error) {
-        console.error('âŒ Get Import Receipt file data error:', error);
+        console.error('❌ Get Import Receipt file data error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -3440,7 +3440,7 @@ ipcMain.handle('suppliers:getAll', async () => {
 
         return { success: true, data: suppliers };
     } catch (error) {
-        console.error('âŒ Get suppliers error:', error);
+        console.error('❌ Get suppliers error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -3462,11 +3462,11 @@ ipcMain.handle('suppliers:create', async (event, data) => {
             }
         });
 
-        console.log(`âœ… Created supplier: ${supplier.name}`);
-        void logActivity({ module: 'purchases', action: 'CREATE', description: `Táº¡o NCC "${supplier.name}"`, recordName: supplier.name });
+        console.log(`✅ Created supplier: ${supplier.name}`);
+        void logActivity({ module: 'purchases', action: 'CREATE', description: `Tạo NCC "${supplier.name}"`, recordName: supplier.name });
         return { success: true, data: supplier };
     } catch (error) {
-        console.error('âŒ Create supplier error:', error);
+        console.error('❌ Create supplier error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -3489,11 +3489,11 @@ ipcMain.handle('suppliers:update', async (event, id, data) => {
             }
         });
 
-        console.log(`âœ… Updated supplier: ${supplier.name}`);
-        void logActivity({ module: 'purchases', action: 'UPDATE', description: `Cáº­p nháº­t NCC "${supplier.name}"`, recordName: supplier.name });
+        console.log(`✅ Updated supplier: ${supplier.name}`);
+        void logActivity({ module: 'purchases', action: 'UPDATE', description: `Cập nhật NCC "${supplier.name}"`, recordName: supplier.name });
         return { success: true, data: supplier };
     } catch (error) {
-        console.error('âŒ Update supplier error:', error);
+        console.error('❌ Update supplier error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -3503,7 +3503,7 @@ ipcMain.handle('suppliers:delete', async (event, id) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
 
-        // Kiá»ƒm tra xem cÃ³ phiáº¿u nháº­p nÃ o Ä‘ang dÃ¹ng supplier nÃ y khÃ´ng
+        // Kiểm tra xem có phiếu nhập nào đang dùng supplier này không
         const purchaseCount = await prisma.purchaseOrder.count({
             where: { supplierId: id }
         });
@@ -3511,7 +3511,7 @@ ipcMain.handle('suppliers:delete', async (event, id) => {
         if (purchaseCount > 0) {
             return {
                 success: false,
-                error: `KhÃ´ng thá»ƒ xÃ³a! NhÃ  cung cáº¥p nÃ y Ä‘ang Ä‘Æ°á»£c sá»­ dá»¥ng trong ${purchaseCount} phiáº¿u nháº­p.`
+                error: `Không thể xóa! Nhà cung cấp này đang được sử dụng trong ${purchaseCount} phiếu nhập.`
             };
         }
 
@@ -3519,15 +3519,15 @@ ipcMain.handle('suppliers:delete', async (event, id) => {
             where: { id }
         });
 
-        console.log(`âœ… Deleted supplier #${id}`);
-        void logActivity({ module: 'purchases', action: 'DELETE', description: `XÃ³a nhÃ  cung cáº¥p #${id}` });
+        console.log(`✅ Deleted supplier #${id}`);
+        void logActivity({ module: 'purchases', action: 'DELETE', description: `Xóa nhà cung cấp #${id}` });
         return { success: true };
     } catch (error) {
-        console.error('âŒ Delete supplier error:', error);
+        console.error('❌ Delete supplier error:', error);
 
-        // Xá»­ lÃ½ lá»—i foreign key constraint
+        // Xử lý lỗi foreign key constraint
         if (error.code === 'P2003') {
-            return { success: false, error: 'KhÃ´ng thá»ƒ xÃ³a! NhÃ  cung cáº¥p Ä‘ang Ä‘Æ°á»£c sá»­ dá»¥ng trong cÃ¡c phiáº¿u nháº­p.' };
+            return { success: false, error: 'Không thể xóa! Nhà cung cấp đang được sử dụng trong các phiếu nhập.' };
         }
 
         return { success: false, error: error.message };
@@ -3543,7 +3543,7 @@ ipcMain.handle('database:exportAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
 
-        console.log('ðŸ“¤ Starting database export...');
+        console.log('📤 Starting database export...');
 
         // Query all data from Prisma
         const [categories, products, suppliers, purchaseOrders, purchaseItems, customers, orders, orderItems, payments, users, expenses, inventoryLogs, activityLogs] = await Promise.all([
@@ -3562,7 +3562,7 @@ ipcMain.handle('database:exportAll', async () => {
             prisma.activityLog.findMany({ orderBy: { id: 'desc' }, take: 1000 })
         ]);
 
-        console.log(`  âœ… Queried data: ${categories.length} categories, ${products.length} products, ${suppliers.length} suppliers`);
+        console.log(`  ✅ Queried data: ${categories.length} categories, ${products.length} products, ${suppliers.length} suppliers`);
 
         // Remove passwords from users for security
         const usersWithoutPasswords = users.map(user => {
@@ -3632,19 +3632,19 @@ ipcMain.handle('database:exportAll', async () => {
 
         // Show save dialog
         const { filePath } = await dialog.showSaveDialog({
-            title: 'LÆ°u file sao lÆ°u dá»¯ liá»‡u',
+            title: 'Lưu file sao lưu dữ liệu',
             defaultPath: `DataBackup_${new Date().toISOString().split('T')[0]}.xlsx`,
             filters: [{ name: 'Excel Files', extensions: ['xlsx'] }]
         });
 
         if (!filePath) {
-            console.log('âŒ User cancelled save dialog');
+            console.log('❌ User cancelled save dialog');
             return { success: false, error: 'User cancelled' };
         }
 
         // Write file
         XLSX.writeFile(wb, filePath);
-        console.log(`âœ… Database exported successfully to: ${filePath}`);
+        console.log(`✅ Database exported successfully to: ${filePath}`);
 
         // Log activity
         await prisma.activityLog.create({
@@ -3660,7 +3660,7 @@ ipcMain.handle('database:exportAll', async () => {
 
         return { success: true, data: filePath };
     } catch (error) {
-        console.error('âŒ Database export error:', error);
+        console.error('❌ Database export error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -3670,22 +3670,22 @@ ipcMain.handle('database:importAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
 
-        console.log('ðŸ“¥ Starting database import...');
+        console.log('📥 Starting database import...');
 
         // Show open dialog
         const { filePaths } = await dialog.showOpenDialog({
-            title: 'Chá»n file sao lÆ°u Ä‘á»ƒ nháº­p',
+            title: 'Chọn file sao lưu để nhập',
             filters: [{ name: 'Excel Files', extensions: ['xlsx'] }],
             properties: ['openFile']
         });
 
         if (!filePaths || filePaths.length === 0) {
-            console.log('âŒ User cancelled open dialog');
+            console.log('❌ User cancelled open dialog');
             return { success: false, error: 'No file selected' };
         }
 
         const filePath = filePaths[0];
-        console.log(`ðŸ“‚ Reading file: ${filePath}`);
+        console.log(`📂 Reading file: ${filePath}`);
 
         // Read Excel file
         const wb = XLSX.readFile(filePath);
@@ -3702,7 +3702,7 @@ ipcMain.handle('database:importAll', async () => {
         const payments = wb.Sheets['Payments'] ? XLSX.utils.sheet_to_json(wb.Sheets['Payments']) : [];
         const expenses = wb.Sheets['Expenses'] ? XLSX.utils.sheet_to_json(wb.Sheets['Expenses']) : [];
 
-        console.log(`  âœ… Parsed data: ${categories.length} categories, ${products.length} products, ${suppliers.length} suppliers`);
+        console.log(`  ✅ Parsed data: ${categories.length} categories, ${products.length} products, ${suppliers.length} suppliers`);
 
         // Import with transaction
         const result = await prisma.$transaction(async (tx) => {
@@ -3799,7 +3799,7 @@ ipcMain.handle('database:importAll', async () => {
                         stock: prod.stock || 0,
                         minStock: prod.minStock || 0,
                         maxStock: prod.maxStock || null,
-                        unit: prod.unit || 'CÃ¡i',
+                        unit: prod.unit || 'Cái',
                         weight: prod.weight || null,
                         images: prod.images || null,
                         variants: prod.variants || null,
@@ -3818,7 +3818,7 @@ ipcMain.handle('database:importAll', async () => {
                         stock: prod.stock || 0,
                         minStock: prod.minStock || 0,
                         maxStock: prod.maxStock || null,
-                        unit: prod.unit || 'CÃ¡i',
+                        unit: prod.unit || 'Cái',
                         weight: prod.weight || null,
                         images: prod.images || null,
                         variants: prod.variants || null,
@@ -3978,7 +3978,7 @@ ipcMain.handle('database:importAll', async () => {
             for (const item of orderItems) {
                 // Skip if productId is missing (required field)
                 if (!item.productId) {
-                    console.warn(`âš ï¸  Skipping OrderItem ${item.id}: missing productId`);
+                    console.warn(`⚠️  Skipping OrderItem ${item.id}: missing productId`);
                     continue;
                 }
 
@@ -4060,7 +4060,7 @@ ipcMain.handle('database:importAll', async () => {
                 stats.expenses++;
             }
 
-            console.log('  âœ… Import stats:', stats);
+            console.log('  ✅ Import stats:', stats);
             return stats;
         });
 
@@ -4076,10 +4076,10 @@ ipcMain.handle('database:importAll', async () => {
             }
         });
 
-        console.log(`âœ… Database imported successfully from: ${filePath}`);
+        console.log(`✅ Database imported successfully from: ${filePath}`);
         return { success: true, data: result };
     } catch (error) {
-        console.error('âŒ Database import error:', error);
+        console.error('❌ Database import error:', error);
         console.error('   Stack:', error.stack);
         return { success: false, error: error.message };
     }
@@ -4096,10 +4096,10 @@ ipcMain.handle('users:changePassword', async (event, { userId, oldPassword, newP
 
         const user = await prisma.user.findUnique({ where: { id: userId } });
         if (!user) {
-            return { success: false, error: 'NgÆ°á»i dÃ¹ng khÃ´ng tá»“n táº¡i' };
+            return { success: false, error: 'Người dùng không tồn tại' };
         }
 
-        // Verify old password (bcrypt compare â€” há»— trá»£ cáº£ plaintext legacy)
+        // Verify old password (bcrypt compare — hỗ trợ cả plaintext legacy)
         let passwordValid = false;
         if (user.password && user.password.startsWith('$2')) {
             passwordValid = await bcrypt.compare(oldPassword, user.password);
@@ -4107,7 +4107,7 @@ ipcMain.handle('users:changePassword', async (event, { userId, oldPassword, newP
             passwordValid = user.password === oldPassword;
         }
         if (!passwordValid) {
-            return { success: false, error: 'Máº­t kháº©u hiá»‡n táº¡i khÃ´ng Ä‘Ãºng' };
+            return { success: false, error: 'Mật khẩu hiện tại không đúng' };
         }
 
         // Hash new password before storing
@@ -4117,11 +4117,11 @@ ipcMain.handle('users:changePassword', async (event, { userId, oldPassword, newP
             data: { password: hashedNew }
         });
 
-        console.log(`âœ… Changed password for user: ${user.username}`);
-        void logActivity({ module: 'users', action: 'UPDATE', description: `Äá»•i máº­t kháº©u: ${user.username}`, recordName: user.username, userName: user.username });
+        console.log(`✅ Changed password for user: ${user.username}`);
+        void logActivity({ module: 'users', action: 'UPDATE', description: `Đổi mật khẩu: ${user.username}`, recordName: user.username, userName: user.username });
         return { success: true };
     } catch (error) {
-        console.error('âŒ Change password error:', error);
+        console.error('❌ Change password error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -4134,7 +4134,7 @@ ipcMain.handle('users:resetPassword', async (event, { userId, newPassword }) => 
 
         const user = await prisma.user.findUnique({ where: { id: userId } });
         if (!user) {
-            return { success: false, error: 'NgÆ°á»i dÃ¹ng khÃ´ng tá»“n táº¡i' };
+            return { success: false, error: 'Người dùng không tồn tại' };
         }
 
         // Update password
@@ -4143,10 +4143,10 @@ ipcMain.handle('users:resetPassword', async (event, { userId, newPassword }) => 
             data: { password: newPassword }
         });
 
-        console.log(`âœ… Reset password for user: ${user.username}`);
+        console.log(`✅ Reset password for user: ${user.username}`);
         return { success: true };
     } catch (error) {
-        console.error('âŒ Reset password error:', error);
+        console.error('❌ Reset password error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -4157,31 +4157,31 @@ ipcMain.handle('users:resetPassword', async (event, { userId, newPassword }) => 
 
 const AdmZip = require('adm-zip');
 
-// Backup toÃ n bá»™ folder desktop thÃ nh ZIP
+// Backup toàn bộ folder desktop thành ZIP
 ipcMain.handle('system:backup', async () => {
     try {
-        console.log('ðŸ”„ Starting FULL system backup (including node_modules)...');
+        console.log('🔄 Starting FULL system backup (including node_modules)...');
 
-        // Sá»­ dá»¥ng thÆ° má»¥c backup máº·c Ä‘á»‹nh
+        // Sử dụng thư mục backup mặc định
         const backupDir = 'G:\\QUAN LY BAN HANG\\apps\\BACKUP';
 
-        // Táº¡o thÆ° má»¥c backup náº¿u chÆ°a tá»“n táº¡i
+        // Tạo thư mục backup nếu chưa tồn tại
         if (!fs.existsSync(backupDir)) {
             fs.mkdirSync(backupDir, { recursive: true });
-            console.log('ðŸ“ Created backup directory:', backupDir);
+            console.log('📁 Created backup directory:', backupDir);
         }
 
-        console.log('ðŸ“‚ Backup directory:', backupDir);
+        console.log('📂 Backup directory:', backupDir);
 
-        // ÄÆ°á»ng dáº«n folder cáº§n backup (toÃ n bá»™ desktop)
+        // Đường dẫn folder cần backup (toàn bộ desktop)
         const sourceFolder = path.join(__dirname, '..');
-        console.log('ðŸ“ Source folder:', sourceFolder);
+        console.log('📁 Source folder:', sourceFolder);
 
-        // TÃªn file backup vá»›i format: BACKUP-MMDDYY-HHMMSS.zip
+        // Tên file backup với format: BACKUP-MMDDYY-HHMMSS.zip
         const now = new Date();
         const month = String(now.getMonth() + 1).padStart(2, '0');
         const day = String(now.getDate()).padStart(2, '0');
-        const year = String(now.getFullYear()).slice(-2); // 2 chá»¯ sá»‘ cuá»‘i
+        const year = String(now.getFullYear()).slice(-2); // 2 chữ số cuối
         const hours = String(now.getHours()).padStart(2, '0');
         const minutes = String(now.getMinutes()).padStart(2, '0');
         const seconds = String(now.getSeconds()).padStart(2, '0');
@@ -4189,16 +4189,16 @@ ipcMain.handle('system:backup', async () => {
         const backupFileName = `BACKUP-${month}${day}${year}-${hours}${minutes}${seconds}.zip`;
         const backupFilePath = path.join(backupDir, backupFileName);
 
-        console.log('ðŸ“¦ Creating ZIP file:', backupFilePath);
-        console.log('âš ï¸  This will take several minutes due to large size...');
+        console.log('📦 Creating ZIP file:', backupFilePath);
+        console.log('⚠️  This will take several minutes due to large size...');
 
-        // Sá»­ dá»¥ng AdmZip Ä‘á»ƒ backup
+        // Sử dụng AdmZip để backup
         const zip = new AdmZip();
 
-        // Äáº¿m files Ä‘á»ƒ track progress
+        // Đếm files để track progress
         let addedCount = 0;
 
-        // HÃ m Ä‘á»‡ quy Ä‘á»ƒ thÃªm toÃ n bá»™ folder
+        // Hàm đệ quy để thêm toàn bộ folder
         function addFolderToZip(folderPath, zipPath) {
             const items = fs.readdirSync(folderPath);
 
@@ -4209,38 +4209,38 @@ ipcMain.handle('system:backup', async () => {
                 const stats = fs.statSync(itemPath);
 
                 if (stats.isDirectory()) {
-                    // ThÃªm folder Ä‘á»‡ quy
+                    // Thêm folder đệ quy
                     addFolderToZip(itemPath, itemZipPath);
                 } else if (stats.isFile()) {
-                    // ThÃªm file
+                    // Thêm file
                     zip.addLocalFile(itemPath, path.dirname(itemZipPath), path.basename(itemPath));
                     addedCount++;
 
                     if (addedCount % 1000 === 0) {
-                        console.log(`   â³ Added ${addedCount} files...`);
+                        console.log(`   ⏳ Added ${addedCount} files...`);
                     }
                 }
             }
         }
 
-        console.log('ðŸ”„ Adding all files (this may take 2-5 minutes)...');
+        console.log('🔄 Adding all files (this may take 2-5 minutes)...');
 
-        // ThÃªm TOÃ€N Bá»˜ folder desktop
+        // Thêm TOÀN BỘ folder desktop
         addFolderToZip(sourceFolder, '');
 
-        console.log(`âœ… Total files added: ${addedCount}`);
-        console.log('ðŸ’¾ Writing ZIP file (this may take another 1-2 minutes)...');
+        console.log(`✅ Total files added: ${addedCount}`);
+        console.log('💾 Writing ZIP file (this may take another 1-2 minutes)...');
 
-        // LÆ°u file ZIP
+        // Lưu file ZIP
         zip.writeZip(backupFilePath);
 
-        // Láº¥y kÃ­ch thÆ°á»›c file
+        // Lấy kích thước file
         const stats = fs.statSync(backupFilePath);
         const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
 
-        console.log(`âœ… Backup completed: ${backupFilePath}`);
-        console.log(`ðŸ“Š Size: ${sizeMB} MB (${stats.size} bytes)`);
-        console.log(`ðŸ“ Files: ${addedCount}`);
+        console.log(`✅ Backup completed: ${backupFilePath}`);
+        console.log(`📊 Size: ${sizeMB} MB (${stats.size} bytes)`);
+        console.log(`📁 Files: ${addedCount}`);
 
         return {
             success: true,
@@ -4251,13 +4251,13 @@ ipcMain.handle('system:backup', async () => {
             }
         };
     } catch (error) {
-        console.error('âŒ Backup error:', error);
+        console.error('❌ Backup error:', error);
         console.error('   Stack:', error.stack);
         return { success: false, error: error.message };
     }
 });
 
-// Láº¥y danh sÃ¡ch backups
+// Lấy danh sách backups
 ipcMain.handle('system:listBackups', async () => {
     try {
         const backupDir = path.join(__dirname, '..', '..', 'Backups');
@@ -4279,72 +4279,72 @@ ipcMain.handle('system:listBackups', async () => {
                     modifiedAt: stats.mtime
                 };
             })
-            .sort((a, b) => b.createdAt - a.createdAt); // Má»›i nháº¥t á»Ÿ Ä‘áº§u
+            .sort((a, b) => b.createdAt - a.createdAt); // Mới nhất ở đầu
 
-        console.log(`ðŸ“‚ Found ${files.length} backup files`);
+        console.log(`📂 Found ${files.length} backup files`);
         return { success: true, data: files };
     } catch (error) {
-        console.error('âŒ List backups error:', error);
+        console.error('❌ List backups error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// Restore tá»« backup (giáº£i nÃ©n ZIP)
+// Restore từ backup (giải nén ZIP)
 ipcMain.handle('system:restore', async (event, backupPath) => {
     try {
-        console.log('ðŸ”„ Starting restore from:', backupPath);
+        console.log('🔄 Starting restore from:', backupPath);
 
         if (!fs.existsSync(backupPath)) {
-            return { success: false, error: 'File backup khÃ´ng tá»“n táº¡i!' };
+            return { success: false, error: 'File backup không tồn tại!' };
         }
 
-        // ThÆ° má»¥c restore
+        // Thư mục restore
         const restoreDir = path.join(__dirname, '..');
 
-        // Sá»­ dá»¥ng adm-zip Ä‘á»ƒ giáº£i nÃ©n
+        // Sử dụng adm-zip để giải nén
         const zip = new AdmZip(backupPath);
 
-        // Táº¡o backup táº¡m cá»§a database trÆ°á»›c khi restore
+        // Tạo backup tạm của database trước khi restore
         const dbPath = path.join(restoreDir, 'prisma', 'dev.db');
         const dbBackupPath = path.join(restoreDir, 'prisma', `dev.backup.${Date.now()}.db`);
         if (fs.existsSync(dbPath)) {
             fs.copyFileSync(dbPath, dbBackupPath);
-            console.log(`ðŸ“¦ Created database backup: ${dbBackupPath}`);
+            console.log(`📦 Created database backup: ${dbBackupPath}`);
         }
 
-        // Extract táº¥t cáº£ files
+        // Extract tất cả files
         zip.extractAllTo(restoreDir, true); // true = overwrite
 
-        console.log(`âœ… Restore completed to: ${restoreDir}`);
+        console.log(`✅ Restore completed to: ${restoreDir}`);
 
         return {
             success: true,
             data: {
                 restoreDir,
-                message: 'KhÃ´i phá»¥c thÃ nh cÃ´ng! Vui lÃ²ng khá»Ÿi Ä‘á»™ng láº¡i á»©ng dá»¥ng.'
+                message: 'Khôi phục thành công! Vui lòng khởi động lại ứng dụng.'
             }
         };
     } catch (error) {
-        console.error('âŒ Restore error:', error);
+        console.error('❌ Restore error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// Inspect/Preview backup - Xem thÃ´ng tin chi tiáº¿t
+// Inspect/Preview backup - Xem thông tin chi tiết
 ipcMain.handle('system:inspectBackup', async (event, backupPath) => {
     try {
-        console.log('ðŸ” Inspecting backup:', backupPath);
+        console.log('🔍 Inspecting backup:', backupPath);
 
         if (!fs.existsSync(backupPath)) {
-            return { success: false, error: 'File backup khÃ´ng tá»“n táº¡i!' };
+            return { success: false, error: 'File backup không tồn tại!' };
         }
 
-        // Láº¥y thÃ´ng tin file
+        // Lấy thông tin file
         const stats = fs.statSync(backupPath);
         const zip = new AdmZip(backupPath);
         const entries = zip.getEntries();
 
-        // PhÃ¢n loáº¡i entries
+        // Phân loại entries
         const folders = new Set();
         const files = [];
         let totalSize = 0;
@@ -4363,14 +4363,14 @@ ipcMain.handle('system:inspectBackup', async (event, backupPath) => {
             }
         });
 
-        // Kiá»ƒm tra cÃ¡c folder quan trá»ng
+        // Kiểm tra các folder quan trọng
         const hasSrc = entries.some(e => e.entryName.startsWith('src/'));
         const hasElectron = entries.some(e => e.entryName.startsWith('electron/'));
         const hasPrisma = entries.some(e => e.entryName.startsWith('prisma/'));
         const hasNodeModules = entries.some(e => e.entryName.startsWith('node_modules/'));
         const hasPackageJson = entries.some(e => e.entryName === 'package.json');
 
-        // Top 10 files lá»›n nháº¥t
+        // Top 10 files lớn nhất
         const largestFiles = files
             .sort((a, b) => b.size - a.size)
             .slice(0, 10)
@@ -4414,27 +4414,27 @@ ipcMain.handle('system:inspectBackup', async (event, backupPath) => {
                 .sort()
         };
 
-        console.log('âœ… Backup inspection complete');
+        console.log('✅ Backup inspection complete');
         console.log(`   Files: ${info.totalFiles}, Folders: ${info.totalFolders}`);
         console.log(`   Size: ${info.fileSizeMB} MB (${info.compressionRatio}% compression)`);
         console.log(`   Valid: ${info.isValid}`);
 
         return { success: true, data: info };
     } catch (error) {
-        console.error('âŒ Inspect backup error:', error);
+        console.error('❌ Inspect backup error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// Browse vÃ  chá»n file backup Ä‘á»ƒ restore
+// Browse và chọn file backup để restore
 ipcMain.handle('system:browseAndRestore', async () => {
     try {
-        console.log('ðŸ“‚ Opening file browser for backup selection...');
+        console.log('📂 Opening file browser for backup selection...');
 
-        // Cho user chá»n file ZIP
+        // Cho user chọn file ZIP
         const result = await dialog.showOpenDialog({
             properties: ['openFile'],
-            title: 'Chá»n file backup Ä‘á»ƒ khÃ´i phá»¥c',
+            title: 'Chọn file backup để khôi phục',
             filters: [
                 { name: 'Backup Files', extensions: ['zip'] },
                 { name: 'All Files', extensions: ['*'] }
@@ -4447,35 +4447,35 @@ ipcMain.handle('system:browseAndRestore', async () => {
         }
 
         const selectedFile = result.filePaths[0];
-        console.log('âœ… Selected file:', selectedFile);
+        console.log('✅ Selected file:', selectedFile);
 
-        // Tráº£ vá» file path Ä‘á»ƒ UI xá»­ lÃ½ tiáº¿p
+        // Trả về file path để UI xử lý tiếp
         return {
             success: true,
             data: {
                 filePath: selectedFile,
-                message: 'File Ä‘Ã£ Ä‘Æ°á»£c chá»n. Nháº¥n OK Ä‘á»ƒ tiáº¿p tá»¥c khÃ´i phá»¥c.'
+                message: 'File đã được chọn. Nhấn OK để tiếp tục khôi phục.'
             }
         };
     } catch (error) {
-        console.error('âŒ Browse error:', error);
+        console.error('❌ Browse error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// XÃ³a backup
+// Xóa backup
 ipcMain.handle('system:deleteBackup', async (event, backupPath) => {
     try {
         if (!fs.existsSync(backupPath)) {
-            return { success: false, error: 'File backup khÃ´ng tá»“n táº¡i!' };
+            return { success: false, error: 'File backup không tồn tại!' };
         }
 
         fs.unlinkSync(backupPath);
-        console.log(`âœ… Deleted backup: ${backupPath}`);
+        console.log(`✅ Deleted backup: ${backupPath}`);
 
         return { success: true };
     } catch (error) {
-        console.error('âŒ Delete backup error:', error);
+        console.error('❌ Delete backup error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -4536,7 +4536,7 @@ ipcMain.handle('dailyTasks:create', async (event, taskData) => {
             }
         });
 
-        void logActivity({ module: 'system', action: 'CREATE', description: `Táº¡o cÃ´ng viá»‡c "${task.title}"`, recordName: task.title, userName: taskData.assignee || 'ChÆ°a phÃ¢n cÃ´ng' });
+        void logActivity({ module: 'system', action: 'CREATE', description: `Tạo công việc "${task.title}"`, recordName: task.title, userName: taskData.assignee || 'Chưa phân công' });
         return { success: true, data: task };
     } catch (error) {
         console.error('Error creating task:', error);
@@ -4561,7 +4561,7 @@ ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
             updateData.attachments = JSON.stringify(updates.attachments);
         }
 
-        // Auto set completedAt khi status thay Ä‘á»•i
+        // Auto set completedAt khi status thay đổi
         if (updates.status === 'completed' && !updates.completedAt) {
             updateData.completedAt = new Date();
         } else if (updates.status === 'pending') {
@@ -4573,7 +4573,7 @@ ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
             data: updateData
         });
 
-        void logActivity({ module: 'system', action: 'UPDATE', description: `Cáº­p nháº­t cÃ´ng viá»‡c #${id}`, recordId: id });
+        void logActivity({ module: 'system', action: 'UPDATE', description: `Cập nhật công việc #${id}`, recordId: id });
         return { success: true, data: task };
     } catch (error) {
         console.error('Error updating task:', error);
@@ -4612,7 +4612,7 @@ ipcMain.handle('dailyTasks:delete', async (event, id) => {
             where: { id }
         });
 
-        void logActivity({ module: 'system', action: 'DELETE', description: `XÃ³a cÃ´ng viá»‡c #${id}` });
+        void logActivity({ module: 'system', action: 'DELETE', description: `Xóa công việc #${id}` });
         return { success: true };
     } catch (error) {
         console.error('Error deleting task:', error);
@@ -4670,20 +4670,20 @@ ipcMain.handle('dailyTasks:stats', async (event, filters = {}) => {
     }
 });
 
-// Reset daily tasks - tá»± Ä‘á»™ng reset khi sang ngÃ y má»›i
+// Reset daily tasks - tự động reset khi sang ngày mới
 ipcMain.handle('dailyTasks:resetDaily', async () => {
     try {
-        if (!prisma) throw new Error('Database chÆ°a Ä‘Æ°á»£c khá»Ÿi táº¡o.');
+        if (!prisma) throw new Error('Database chưa được khởi tạo.');
 
-        // Fix null assignee/verifier (tÆ°Æ¡ng thÃ­ch Prisma client cÅ©)
+        // Fix null assignee/verifier (tương thích Prisma client cũ)
         await prisma.$executeRawUnsafe(`UPDATE "DailyTask" SET assignee = '' WHERE assignee IS NULL`);
         await prisma.$executeRawUnsafe(`UPDATE "DailyTask" SET verifier = '' WHERE verifier IS NULL`);
 
-        // Láº¥y ngÃ y hÃ´m nay (theo timezone local)
+        // Lấy ngày hôm nay (theo timezone local)
         const now = new Date();
         const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
-        // Kiá»ƒm tra ngÃ y reset cuá»‘i cÃ¹ng
+        // Kiểm tra ngày reset cuối cùng
         const lastResetConfig = await prisma.appConfig.findUnique({
             where: { key: 'dailyTasksLastResetDate' }
         });
@@ -4691,31 +4691,31 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
         const lastResetDate = lastResetConfig ? JSON.parse(lastResetConfig.value) : null;
 
         if (lastResetDate === today) {
-            // ÄÃ£ reset hÃ´m nay rá»“i
-            return { success: true, data: { reset: false, message: 'ÄÃ£ reset hÃ´m nay rá»“i' } };
+            // Đã reset hôm nay rồi
+            return { success: true, data: { reset: false, message: 'Đã reset hôm nay rồi' } };
         }
 
-        // Fix dá»¯ liá»‡u cÅ©: CÃ¡c task category='BÃ n giao' nhÆ°ng type='daily' â†’ sá»­a thÃ nh 'assignment'
+        // Fix dữ liệu cũ: Các task category='Bàn giao' nhưng type='daily' → sửa thành 'assignment'
         await prisma.dailyTask.updateMany({
-            where: { category: 'BÃ n giao', type: 'daily' },
+            where: { category: 'Bàn giao', type: 'daily' },
             data: { type: 'assignment' }
         });
 
-        // Láº¥y danh sÃ¡ch task HÃ€NG NGÃ€Y Ä‘Ã£ completed Ä‘á»ƒ lÆ°u history trÆ°á»›c khi reset
-        // BÃ n giao (type: 'assignment') KHÃ”NG reset - chá»‰ reset daily tasks
+        // Lấy danh sách task HÀNG NGÀY đã completed để lưu history trước khi reset
+        // Bàn giao (type: 'assignment') KHÔNG reset - chỉ reset daily tasks
         const completedTasks = await prisma.dailyTask.findMany({
             where: { status: 'completed', type: 'daily' }
         });
 
-        // LÆ°u vÃ o history trÆ°á»›c khi reset
+        // Lưu vào history trước khi reset
         if (completedTasks.length > 0) {
-            // Äá»c history cÅ©
+            // Đọc history cũ
             const historyConfig = await prisma.appConfig.findUnique({
                 where: { key: 'dailyTasksHistory' }
             });
             const existingHistory = historyConfig ? JSON.parse(historyConfig.value) : [];
 
-            // ThÃªm entry cho má»—i task Ä‘Ã£ hoÃ n thÃ nh
+            // Thêm entry cho mỗi task đã hoàn thành
             const newEntries = completedTasks.map(task => ({
                 taskId: task.id,
                 taskTitle: task.title,
@@ -4724,10 +4724,10 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
                 verifier: task.verifier || '',
                 action: 'daily_reset',
                 timestamp: task.completedAt ? task.completedAt.toISOString() : lastResetDate || now.toISOString(),
-                description: `âœ… ÄÃ£ hoÃ n thÃ nh: "${task.title}" (tá»± Ä‘á»™ng reset sang ngÃ y ${today})`
+                description: `✅ Đã hoàn thành: "${task.title}" (tự động reset sang ngày ${today})`
             }));
 
-            const updatedHistory = [...newEntries, ...existingHistory].slice(0, 500); // Giá»¯ tá»‘i Ä‘a 500 entries
+            const updatedHistory = [...newEntries, ...existingHistory].slice(0, 500); // Giữ tối đa 500 entries
 
             await prisma.appConfig.upsert({
                 where: { key: 'dailyTasksHistory' },
@@ -4735,31 +4735,31 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
                 create: { key: 'dailyTasksHistory', value: JSON.stringify(updatedHistory) }
             });
 
-            // Reset chá»‰ daily tasks completed vá» pending (khÃ´ng reset bÃ n giao)
+            // Reset chỉ daily tasks completed về pending (không reset bàn giao)
             await prisma.dailyTask.updateMany({
                 where: { status: 'completed', type: 'daily' },
                 data: {
                     status: 'pending',
                     completedAt: null,
                     verifier: '',
-                    assignee: ''  // XÃ³a ngÆ°á»i thá»±c hiá»‡n â†’ ai ráº£nh nháº­n viá»‡c láº¡i má»—i ngÃ y
+                    assignee: ''  // Xóa người thực hiện → ai rảnh nhận việc lại mỗi ngày
                 }
             });
 
-            console.log(`âœ… [DAILY RESET] NgÃ y ${today}: Reset ${completedTasks.length} tasks completed â†’ pending`);
+            console.log(`✅ [DAILY RESET] Ngày ${today}: Reset ${completedTasks.length} tasks completed → pending`);
         }
 
-        // Reset assignee cá»§a Táº¤T Cáº¢ daily tasks sang ngÃ y má»›i (ai ráº£nh nháº­n viá»‡c láº¡i)
-        // BÃ n giao (assignment) KHÃ”NG reset assignee
+        // Reset assignee của TẤT CẢ daily tasks sang ngày mới (ai rảnh nhận việc lại)
+        // Bàn giao (assignment) KHÔNG reset assignee
         const resetAssigneeResult = await prisma.dailyTask.updateMany({
             where: { type: 'daily' },
             data: { assignee: '', verifier: '' }
         });
-        console.log(`âœ… [DAILY RESET] ÄÃ£ xÃ³a assignee cá»§a ${resetAssigneeResult.count} daily tasks`);
+        console.log(`✅ [DAILY RESET] Đã xóa assignee của ${resetAssigneeResult.count} daily tasks`);
 
-        // Cáº­p nháº­t dueDate cá»§a chá»‰ DAILY tasks sang ngÃ y hÃ´m nay (giá»¯ nguyÃªn giá»)
-        // Fix bug: task váº«n mang dueDate cÅ© â†’ calendar hiá»ƒn thá»‹ sai ngÃ y hoÃ n thÃ nh
-        // BÃ n giao (assignment) giá»¯ nguyÃªn deadline riÃªng, khÃ´ng cáº­p nháº­t
+        // Cập nhật dueDate của chỉ DAILY tasks sang ngày hôm nay (giữ nguyên giờ)
+        // Fix bug: task vẫn mang dueDate cũ → calendar hiển thị sai ngày hoàn thành
+        // Bàn giao (assignment) giữ nguyên deadline riêng, không cập nhật
         const allTasks = await prisma.dailyTask.findMany({ where: { type: 'daily' } });
         for (const task of allTasks) {
             const oldDueDate = new Date(task.dueDate);
@@ -4770,9 +4770,9 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
                 data: { dueDate: newDueDate }
             });
         }
-        console.log(`âœ… [DAILY RESET] ÄÃ£ cáº­p nháº­t dueDate cá»§a ${allTasks.length} tasks sang ngÃ y ${today}`);
+        console.log(`✅ [DAILY RESET] Đã cập nhật dueDate của ${allTasks.length} tasks sang ngày ${today}`);
 
-        // LÆ°u ngÃ y reset
+        // Lưu ngày reset
         await prisma.appConfig.upsert({
             where: { key: 'dailyTasksLastResetDate' },
             update: { value: JSON.stringify(today) },
@@ -4785,8 +4785,8 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
                 reset: completedTasks.length > 0,
                 resetCount: completedTasks.length,
                 message: completedTasks.length > 0
-                    ? `ÄÃ£ reset ${completedTasks.length} cÃ´ng viá»‡c sang ngÃ y má»›i`
-                    : 'Sang ngÃ y má»›i, khÃ´ng cÃ³ cÃ´ng viá»‡c cáº§n reset'
+                    ? `Đã reset ${completedTasks.length} công việc sang ngày mới`
+                    : 'Sang ngày mới, không có công việc cần reset'
             }
         };
     } catch (error) {
@@ -4849,7 +4849,7 @@ ipcMain.handle('combos:create', async (event, data) => {
             create: { sku: data.sku, ...comboData },
             update: comboData,
         });
-        void logActivity({ module: 'products', action: 'CREATE', description: `Táº¡o combo "${combo.name}" (SKU: ${combo.sku})`, recordName: combo.name });
+        void logActivity({ module: 'products', action: 'CREATE', description: `Tạo combo "${combo.name}" (SKU: ${combo.sku})`, recordName: combo.name });
         return { success: true, data: combo };
     } catch (error) {
         console.error('Error creating combo:', error);
@@ -4866,7 +4866,7 @@ ipcMain.handle('combos:update', async (event, id, data) => {
             where: { id: parseInt(id) },
             data: updateData,
         });
-        void logActivity({ module: 'products', action: 'UPDATE', description: `Cáº­p nháº­t combo "${combo.name}"`, recordName: combo.name });
+        void logActivity({ module: 'products', action: 'UPDATE', description: `Cập nhật combo "${combo.name}"`, recordName: combo.name });
         return { success: true, data: combo };
     } catch (error) {
         console.error('Error updating combo:', error);
@@ -4878,7 +4878,7 @@ ipcMain.handle('combos:delete', async (event, id) => {
     try {
         if (!prisma) throw new Error('Database not initialized');
         await prisma.comboProduct.delete({ where: { id: parseInt(id) } });
-        void logActivity({ module: 'products', action: 'DELETE', description: `XÃ³a combo #${id}` });
+        void logActivity({ module: 'products', action: 'DELETE', description: `Xóa combo #${id}` });
         return { success: true };
     } catch (error) {
         console.error('Error deleting combo:', error);
@@ -4894,21 +4894,21 @@ let ecommerceExportWatcher = null;
 let ecommerceExportKnownFiles = new Set();
 let ecommerceExportWatchFolder = '';
 
-// KÃ­ch hoáº¡t dialog chá»n thÆ° má»¥c vÃ  tá»± Ä‘á»™ng start watcher
+// Kích hoạt dialog chọn thư mục và tự động start watcher
 ipcMain.handle('ecommerceExport:selectAndWatch', async () => {
     try {
         const result = await dialog.showOpenDialog({
             properties: ['openDirectory'],
-            title: 'Chá»n thÆ° má»¥c theo dÃµi file Excel TMÄT (Realtime)',
+            title: 'Chọn thư mục theo dõi file Excel TMĐT (Realtime)',
         });
 
         if (result.canceled || result.filePaths.length === 0) {
-            return { success: false, error: 'KhÃ´ng cÃ³ thÆ° má»¥c Ä‘Æ°á»£c chá»n' };
+            return { success: false, error: 'Không có thư mục được chọn' };
         }
 
         const folderPath = result.filePaths[0];
 
-        // Láº¥y danh sÃ¡ch file hiá»‡n cÃ³
+        // Lấy danh sách file hiện có
         const existingFiles = fs.readdirSync(folderPath).filter(f => {
             const ext = path.extname(f).toLowerCase();
             return ['.xlsx', '.xls', '.csv'].includes(ext) && !f.startsWith('~$');
@@ -4917,36 +4917,36 @@ ipcMain.handle('ecommerceExport:selectAndWatch', async () => {
         ecommerceExportKnownFiles = new Set(existingFiles);
         ecommerceExportWatchFolder = folderPath;
 
-        // Dá»«ng watcher cÅ© náº¿u cÃ³
+        // Dừng watcher cũ nếu có
         if (ecommerceExportWatcher) {
             ecommerceExportWatcher.close();
             ecommerceExportWatcher = null;
         }
 
-        // Báº¯t Ä‘áº§u theo dÃµi thÆ° má»¥c
+        // Bắt đầu theo dõi thư mục
         let debounceTimer = null;
         ecommerceExportWatcher = fs.watch(folderPath, (eventType, filename) => {
             if (!filename) return;
             const ext = path.extname(filename).toLowerCase();
             if (!['.xlsx', '.xls', '.csv'].includes(ext)) return;
-            if (filename.startsWith('~$')) return; // File táº¡m Excel
+            if (filename.startsWith('~$')) return; // File tạm Excel
 
-            // Debounce 2 giÃ¢y (file cÃ³ thá»ƒ Ä‘ang copy)
+            // Debounce 2 giây (file có thể đang copy)
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(() => {
                 const filePath = path.join(folderPath, filename);
 
-                // Chá»‰ xá»­ lÃ½ file Má»šI (chÆ°a cÃ³ trong danh sÃ¡ch)
+                // Chỉ xử lý file MỚI (chưa có trong danh sách)
                 if (!ecommerceExportKnownFiles.has(filename) && fs.existsSync(filePath)) {
-                    console.log(`ðŸ“ [TMDT Watcher] File má»›i: ${filename}`);
+                    console.log(`📁 [TMDT Watcher] File mới: ${filename}`);
                     ecommerceExportKnownFiles.add(filename);
 
-                    // Äá»c file vÃ  gá»­i vá» frontend
+                    // Đọc file và gửi về frontend
                     try {
                         const fileBuffer = fs.readFileSync(filePath);
                         const base64 = fileBuffer.toString('base64');
 
-                        // Gá»­i event vá» táº¥t cáº£ cá»­a sá»•
+                        // Gửi event về tất cả cửa sổ
                         const { BrowserWindow } = require('electron');
                         const windows = BrowserWindow.getAllWindows();
                         for (const win of windows) {
@@ -4956,24 +4956,24 @@ ipcMain.handle('ecommerceExport:selectAndWatch', async () => {
                                 path: filePath
                             });
                         }
-                        console.log(`âœ… [TMDT Watcher] ÄÃ£ gá»­i ${filename} vá» frontend`);
+                        console.log(`✅ [TMDT Watcher] Đã gửi ${filename} về frontend`);
                     } catch (readErr) {
-                        console.error(`âŒ [TMDT Watcher] Lá»—i Ä‘á»c file ${filename}:`, readErr.message);
+                        console.error(`❌ [TMDT Watcher] Lỗi đọc file ${filename}:`, readErr.message);
                     }
                 }
             }, 2000);
         });
 
-        console.log(`ðŸ‘ï¸ [TMDT Watcher] Äang theo dÃµi: ${folderPath} (${existingFiles.length} file cÃ³ sáºµn â€” chá»‰ watch file Má»šI)`);
+        console.log(`👁️ [TMDT Watcher] Đang theo dõi: ${folderPath} (${existingFiles.length} file có sẵn — chỉ watch file MỚI)`);
 
-        // âš¡ KHÃ”NG Ä‘á»c ná»™i dung file cÅ© â€” chÃºng Ä‘Ã£ tá»“n táº¡i trong DB hoáº·c user sáº½ import thá»§ cÃ´ng
-        // Chá»‰ track tÃªn file Ä‘á»ƒ watcher biáº¿t Ä‘Ã¢u lÃ  file Má»šI
+        // ⚡ KHÔNG đọc nội dung file cũ — chúng đã tồn tại trong DB hoặc user sẽ import thủ công
+        // Chỉ track tên file để watcher biết đâu là file MỚI
         return {
             success: true,
             data: {
                 folderPath,
                 existingFiles: existingFiles.length,
-                existingFileList: [] // âš¡ Tráº£ rá»—ng â€” khÃ´ng load file cÅ©
+                existingFileList: [] // ⚡ Trả rỗng — không load file cũ
             }
         };
     } catch (error) {
@@ -4981,14 +4981,14 @@ ipcMain.handle('ecommerceExport:selectAndWatch', async () => {
     }
 });
 
-// Báº¯t Ä‘áº§u theo dÃµi trá»±c tiáº¿p (khÃ´ng dialog â€” dÃ¹ng khi auto-restore)
+// Bắt đầu theo dõi trực tiếp (không dialog — dùng khi auto-restore)
 ipcMain.handle('ecommerceExport:startWatch', async (event, folderPath) => {
     try {
         if (!folderPath || !fs.existsSync(folderPath)) {
-            return { success: false, error: 'ThÆ° má»¥c khÃ´ng tá»“n táº¡i' };
+            return { success: false, error: 'Thư mục không tồn tại' };
         }
 
-        // Láº¥y danh sÃ¡ch file hiá»‡n cÃ³ (CHá»ˆ Äá»‚ TRACK â€” khÃ´ng Ä‘á»c ná»™i dung)
+        // Lấy danh sách file hiện có (CHỈ ĐỂ TRACK — không đọc nội dung)
         const existingFiles = fs.readdirSync(folderPath).filter(f => {
             const ext = path.extname(f).toLowerCase();
             return ['.xlsx', '.xls', '.csv'].includes(ext) && !f.startsWith('~$');
@@ -4997,13 +4997,13 @@ ipcMain.handle('ecommerceExport:startWatch', async (event, folderPath) => {
         ecommerceExportKnownFiles = new Set(existingFiles);
         ecommerceExportWatchFolder = folderPath;
 
-        // Dá»«ng watcher cÅ© náº¿u cÃ³
+        // Dừng watcher cũ nếu có
         if (ecommerceExportWatcher) {
             ecommerceExportWatcher.close();
             ecommerceExportWatcher = null;
         }
 
-        // Báº¯t Ä‘áº§u theo dÃµi â€” CHá»ˆ phÃ¡t hiá»‡n file Má»šI
+        // Bắt đầu theo dõi — CHỈ phát hiện file MỚI
         let debounceTimer = null;
         ecommerceExportWatcher = fs.watch(folderPath, (eventType, filename) => {
             if (!filename) return;
@@ -5016,7 +5016,7 @@ ipcMain.handle('ecommerceExport:startWatch', async (event, folderPath) => {
                 const filePath = path.join(folderPath, filename);
 
                 if (!ecommerceExportKnownFiles.has(filename) && fs.existsSync(filePath)) {
-                    console.log(`ðŸ“ [TMDT Watcher] File má»›i: ${filename}`);
+                    console.log(`📁 [TMDT Watcher] File mới: ${filename}`);
                     ecommerceExportKnownFiles.add(filename);
 
                     try {
@@ -5033,15 +5033,15 @@ ipcMain.handle('ecommerceExport:startWatch', async (event, folderPath) => {
                             });
                         }
                     } catch (readErr) {
-                        console.error(`âŒ [TMDT Watcher] Lá»—i Ä‘á»c file ${filename}:`, readErr.message);
+                        console.error(`❌ [TMDT Watcher] Lỗi đọc file ${filename}:`, readErr.message);
                     }
                 }
             }, 2000);
         });
 
-        // âš¡ KHÃ”NG Äá»ŒC Ná»˜I DUNG FILE CÅ¨ â€” chÃºng Ä‘Ã£ Ä‘Æ°á»£c import trÆ°á»›c Ä‘Ã³
-        // Chá»‰ tráº£ vá» sá»‘ lÆ°á»£ng file Ä‘Ã£ biáº¿t (Ä‘á»ƒ UI hiá»ƒn thá»‹)
-        console.log(`ðŸ‘ï¸ [TMDT Watcher] ÄÃ£ khÃ´i phá»¥c session theo dÃµi: ${folderPath} (${existingFiles.length} file Ä‘Ã£ cÃ³)`);
+        // ⚡ KHÔNG ĐỌC NỘI DUNG FILE CŨ — chúng đã được import trước đó
+        // Chỉ trả về số lượng file đã biết (để UI hiển thị)
+        console.log(`👁️ [TMDT Watcher] Đã khôi phục session theo dõi: ${folderPath} (${existingFiles.length} file đã có)`);
 
         return {
             success: true,
@@ -5052,17 +5052,17 @@ ipcMain.handle('ecommerceExport:startWatch', async (event, folderPath) => {
     }
 });
 
-// Dá»«ng theo dÃµi
+// Dừng theo dõi
 ipcMain.handle('ecommerceExport:stopWatch', async () => {
     if (ecommerceExportWatcher) {
         ecommerceExportWatcher.close();
         ecommerceExportWatcher = null;
         ecommerceExportWatchFolder = '';
         ecommerceExportKnownFiles.clear();
-        console.log('ðŸ›‘ [TMDT Watcher] ÄÃ£ dá»«ng theo dÃµi');
+        console.log('🛑 [TMDT Watcher] Đã dừng theo dõi');
         return { success: true };
     }
-    return { success: false, error: 'KhÃ´ng cÃ³ watcher nÃ o Ä‘ang cháº¡y' };
+    return { success: false, error: 'Không có watcher nào đang chạy' };
 });
 
 // Chon thu muc chua file Excel xuat hang TMDT
@@ -5083,33 +5083,33 @@ ipcMain.handle('ecommerceExport:selectFolder', async () => {
     }
 });
 
-// Äá»c táº¥t cáº£ file Excel tá»« thÆ° má»¥c
+// Đọc tất cả file Excel từ thư mục
 ipcMain.handle('ecommerceExport:loadExcelFiles', async (event, folderPath) => {
     try {
         if (!folderPath || !fs.existsSync(folderPath)) {
-            return { success: false, error: 'ThÆ° má»¥c khÃ´ng tá»“n táº¡i' };
+            return { success: false, error: 'Thư mục không tồn tại' };
         }
 
-        // Äá»c táº¥t cáº£ file trong thÆ° má»¥c
+        // Đọc tất cả file trong thư mục
         const files = fs.readdirSync(folderPath);
 
-        // Lá»c chá»‰ láº¥y file Excel (.xlsx, .xls)
+        // Lọc chỉ lấy file Excel (.xlsx, .xls)
         const excelFiles = files.filter(file => {
             const ext = path.extname(file).toLowerCase();
             return ext === '.xlsx' || ext === '.xls';
         });
 
         if (excelFiles.length === 0) {
-            return { success: false, error: 'KhÃ´ng tÃ¬m tháº¥y file Excel nÃ o trong thÆ° má»¥c' };
+            return { success: false, error: 'Không tìm thấy file Excel nào trong thư mục' };
         }
 
-        // Äá»c ná»™i dung tá»«ng file
+        // Đọc nội dung từng file
         const filesData = [];
         for (const fileName of excelFiles) {
             const filePath = path.join(folderPath, fileName);
             try {
                 const fileBuffer = fs.readFileSync(filePath);
-                // Convert buffer to base64 Ä‘á»ƒ gá»­i qua IPC
+                // Convert buffer to base64 để gửi qua IPC
                 const base64Data = fileBuffer.toString('base64');
                 filesData.push({
                     name: fileName,
@@ -5120,7 +5120,7 @@ ipcMain.handle('ecommerceExport:loadExcelFiles', async (event, folderPath) => {
             }
         }
 
-        console.log(`âœ… Loaded ${filesData.length} Excel files from ${folderPath}`);
+        console.log(`✅ Loaded ${filesData.length} Excel files from ${folderPath}`);
         return { success: true, data: filesData };
     } catch (error) {
         console.error('Error loading Excel files:', error);
@@ -5143,10 +5143,10 @@ ipcMain.handle('shell:openExternal', async (event, url) => {
         }
 
         await shell.openExternal(url);
-        console.log(`âœ… Opened external URL: ${url}`);
+        console.log(`✅ Opened external URL: ${url}`);
         return { success: true };
     } catch (error) {
-        console.error('âŒ Error opening external URL:', error);
+        console.error('❌ Error opening external URL:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5172,13 +5172,13 @@ function getUpdateHistory() {
 require('./update-handlers')(prisma);
 
 // ========================================
-// ECOMMERCE EXPORTS HANDLERS (XUáº¤T HÃ€NG TMDT)
+// ECOMMERCE EXPORTS HANDLERS (XUẤT HÀNG TMDT)
 // ========================================
 
 ipcMain.handle('ecommerceExports:getAll', async (event, { since, sinceField, until, limit } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
-        // sinceField: 'ecommerceExportDate' (BusinessReport) hoáº·c 'updatedAt' (Attendance packing)
+        // sinceField: 'ecommerceExportDate' (BusinessReport) hoặc 'updatedAt' (Attendance packing)
         const field = sinceField || 'ecommerceExportDate';
         const dateFilter = {};
         if (since) dateFilter.gte = new Date(since);
@@ -5197,7 +5197,7 @@ ipcMain.handle('ecommerceExports:getAll', async (event, { since, sinceField, unt
         }));
         return { success: true, data: formatted };
     } catch (error) {
-        console.error('âŒ Get ecommerce exports error:', error);
+        console.error('❌ Get ecommerce exports error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5208,7 +5208,7 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
         const isCompleted = data.status === 'completed';
         const orderKey = (data.orderNumber || data.ecommerceExportCode || '').trim();
 
-        // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         const result = await withStockLock(() => prisma.$transaction(async (tx) => {
             if (orderKey) {
                 const existing = await tx.ecommerceExport.findFirst({
@@ -5257,7 +5257,7 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
                         await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
                             type: 'ecom_sale',
                             referenceType: 'TMDT',
-                            reference: data.orderNumber || data.ecommerceExportCode || 'LÆ°u thá»§ cÃ´ng',
+                            reference: data.orderNumber || data.ecommerceExportCode || 'Lưu thủ công',
                             note: `Xuất hàng TMDT: ${data.customerName}`,
                             createdBy: data.createdBy || 'System'
                         }, { allowMissing: true });
@@ -5272,11 +5272,11 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
             return { success: true, skipped: true, reason: result.reason, data: result.data };
         }
         const record = result.data;
-        console.log(`âœ… Created ecommerce export #${record.id}`);
-        void logActivity({ module: 'export', action: 'CREATE', description: `Táº¡o bÃ n giao TMDT #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
+        console.log(`✅ Created ecommerce export #${record.id}`);
+        void logActivity({ module: 'export', action: 'CREATE', description: `Tạo bàn giao TMDT #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
         return { success: true, data: record };
     } catch (error) {
-        console.error('âŒ Create ecommerce export error:', error);
+        console.error('❌ Create ecommerce export error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5518,7 +5518,7 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
 
-        // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         await withStockLock(() => prisma.$transaction(async (tx) => {
             const doc = await tx.ecommerceExport.findUnique({ where: { id } });
             if (!doc) return;
@@ -5530,7 +5530,7 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
                         await updateProductStockInTx(tx, item.variantSku, item.quantity, {
                             type: 'adjustment',
                             referenceType: 'TMDT_CANCEL',
-                            reference: doc.orderNumber || doc.ecommerceExportCode || 'XÃ³a thá»§ cÃ´ng',
+                            reference: doc.orderNumber || doc.ecommerceExportCode || 'Xóa thủ công',
                             note: `Hoàn tồn do xóa đơn TMDT #${id}`,
                             createdBy: 'System'
                         }, { allowMissing: true });
@@ -5540,11 +5540,11 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
             await tx.ecommerceExport.delete({ where: { id } });
         }, { timeout: 30000, maxWait: 10000 }));
 
-        console.log(`âœ… Deleted ecommerce export #${id}`);
-        void logActivity({ module: 'export', action: 'DELETE', description: `XÃ³a bÃ n giao TMDT #${id}` });
+        console.log(`✅ Deleted ecommerce export #${id}`);
+        void logActivity({ module: 'export', action: 'DELETE', description: `Xóa bàn giao TMDT #${id}` });
         return { success: true };
     } catch (error) {
-        console.error('âŒ Delete ecommerce export error:', error);
+        console.error('❌ Delete ecommerce export error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5554,15 +5554,15 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
         if (!prisma) throw new Error('Prisma not available');
         const startTime = Date.now();
 
-        // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         const count = await withStockLock(() => prisma.$transaction(async (tx) => {
-            // ðŸš€ BÆ°á»›c 1: Láº¥y Táº¤T Cáº¢ Ä‘Æ¡n cáº§n xÃ³a trong 1 query
+            // 🚀 Bước 1: Lấy TẤT CẢ đơn cần xóa trong 1 query
             const docs = await tx.ecommerceExport.findMany({
                 where: { id: { in: ids } }
             });
             if (docs.length === 0) return 0;
 
-            // ðŸš€ BÆ°á»›c 2: Gom SKU cáº§n hoÃ n kho tá»« Ä‘Æ¡n completed
+            // 🚀 Bước 2: Gom SKU cần hoàn kho từ đơn completed
             const completedDocs = docs.filter(d => d.status === 'completed');
             if (completedDocs.length > 0) {
                 const skuCache = await buildSkuCache(tx);
@@ -5571,7 +5571,7 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
                     const items = JSON.parse(doc.items || '[]');
                     for (const item of items) {
                         if (item.variantSku) {
-                            skuChanges.push({ sku: item.variantSku, quantity: item.quantity }); // + quantity = hoÃ n kho
+                            skuChanges.push({ sku: item.variantSku, quantity: item.quantity }); // + quantity = hoàn kho
                         }
                     }
                 }
@@ -5579,14 +5579,14 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
                     await batchStockUpdate(tx, skuChanges, {
                         type: 'adjustment',
                         referenceType: 'TMDT_CANCEL',
-                        reference: `XÃ³a hÃ ng loáº¡t ${docs.length} Ä‘Æ¡n`,
+                        reference: `Xóa hàng loạt ${docs.length} đơn`,
                         note: `Hoàn tồn do xóa ${completedDocs.length} đơn TMDT completed`,
                         createdBy: 'System'
                     }, skuCache);
                 }
             }
 
-            // ðŸš€ BÆ°á»›c 3: XÃ³a táº¥t cáº£ trong 1 DELETE statement
+            // 🚀 Bước 3: Xóa tất cả trong 1 DELETE statement
             const deleted = await tx.ecommerceExport.deleteMany({
                 where: { id: { in: ids } }
             });
@@ -5594,16 +5594,16 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
         }, { timeout: 60000, maxWait: 10000 }));
 
         const elapsed = Date.now() - startTime;
-        console.log(`âœ… Bulk deleted ${count} ecommerce exports in ${elapsed}ms`);
-        void logActivity({ module: 'export', action: 'DELETE', description: `XÃ³a hÃ ng loáº¡t ${count} bÃ n giao TMDT (${elapsed}ms)` });
+        console.log(`✅ Bulk deleted ${count} ecommerce exports in ${elapsed}ms`);
+        void logActivity({ module: 'export', action: 'DELETE', description: `Xóa hàng loạt ${count} bàn giao TMDT (${elapsed}ms)` });
         return { success: true, data: count };
     } catch (error) {
-        console.error('âŒ Bulk delete ecommerce exports error:', error);
+        console.error('❌ Bulk delete ecommerce exports error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// âš¡ XÃ³a Táº¤T Cáº¢ Ä‘Æ¡n TMDT (dÃ¹ng khi cáº§n reset/cleanup)
+// ⚡ Xóa TẤT CẢ đơn TMDT (dùng khi cần reset/cleanup)
 ipcMain.handle('ecommerceExports:deleteAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
@@ -5620,11 +5620,11 @@ ipcMain.handle('ecommerceExports:deleteAll', async () => {
             return deleted.count;
         });
 
-        console.log(`ðŸ—‘ï¸ Deleted ALL ${count} ecommerce exports`);
-        void logActivity({ module: 'export', action: 'DELETE', description: `XÃ³a toÃ n bá»™ ${count} bÃ n giao TMDT` });
+        console.log(`🗑️ Deleted ALL ${count} ecommerce exports`);
+        void logActivity({ module: 'export', action: 'DELETE', description: `Xóa toàn bộ ${count} bàn giao TMDT` });
         return { success: true, data: count };
     } catch (error) {
-        console.error('âŒ Delete all ecommerce exports error:', error);
+        console.error('❌ Delete all ecommerce exports error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5637,11 +5637,11 @@ ipcMain.handle('ecommerceExports:deleteCancelled', async () => {
             where: { status: 'cancelled' }
         });
 
-        console.log(`ðŸ—‘ï¸ Deleted ${result.count} cancelled ecommerce exports`);
-        void logActivity({ module: 'export', action: 'DELETE', description: `XÃ³a ${result.count} Ä‘Æ¡n TMDT Ä‘Ã£ há»§y` });
+        console.log(`🗑️ Deleted ${result.count} cancelled ecommerce exports`);
+        void logActivity({ module: 'export', action: 'DELETE', description: `Xóa ${result.count} đơn TMDT đã hủy` });
         return { success: true, data: result.count };
     } catch (error) {
-        console.error('âŒ Delete cancelled ecommerce exports error:', error);
+        console.error('❌ Delete cancelled ecommerce exports error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5715,9 +5715,9 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
             return { success: true, data: { count: 0, skipped: records.length } };
         }
 
-        // ðŸ”’ StockMutex: serialize stock operations â€” trÃ¡nh race condition Tháº» Kho
+        // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         const result = await withStockLock(() => prisma.$transaction(async (tx) => {
-            // ðŸš€ BÆ°á»›c 1: Batch INSERT táº¥t cáº£ Ä‘Æ¡n cÃ¹ng lÃºc (1 SQL statement)
+            // 🚀 Bước 1: Batch INSERT tất cả đơn cùng lúc (1 SQL statement)
             const createData = dedupedRecords.map(data => ({
                 customerName: data.customerName,
                 ecommerceExportCode: data.ecommerceExportCode || null,
@@ -5733,7 +5733,7 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
 
             await tx.ecommerceExport.createMany({ data: createData });
 
-            // ðŸš€ BÆ°á»›c 2: Gom táº¥t cáº£ SKU cáº§n trá»« kho â†’ batch update
+            // 🚀 Bước 2: Gom tất cả SKU cần trừ kho → batch update
             const completedRecords = dedupedRecords.filter(d => d.status === 'completed');
             if (completedRecords.length > 0) {
                 const skuCache = await buildSkuCache(tx);
@@ -5750,7 +5750,7 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
                     await batchStockUpdate(tx, skuChanges, {
                         type: 'ecom_sale',
                         referenceType: 'TMDT',
-                        reference: `Nháº­p hÃ ng loáº¡t ${records.length} Ä‘Æ¡n`,
+                        reference: `Nhập hàng loạt ${records.length} đơn`,
                         note: `Tạo hàng loạt ${completedRecords.length} đơn TMDT completed`,
                         createdBy: dedupedRecords[0]?.createdBy || 'System'
                     }, skuCache);
@@ -5764,18 +5764,18 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
         }));
 
         const elapsed = Date.now() - startTime;
-        console.log(`âœ… Bulk created ${result} ecommerce exports in ${elapsed}ms`);
-        void logActivity({ module: 'export', action: 'CREATE', description: `Táº¡o hÃ ng loáº¡t ${result} bÃ n giao TMDT (${elapsed}ms)` });
+        console.log(`✅ Bulk created ${result} ecommerce exports in ${elapsed}ms`);
+        void logActivity({ module: 'export', action: 'CREATE', description: `Tạo hàng loạt ${result} bàn giao TMDT (${elapsed}ms)` });
         return { success: true, data: { count: result, skipped: records.length - result } };
 
     } catch (error) {
-        console.error('âŒ Bulk create ecommerce exports error:', error);
+        console.error('❌ Bulk create ecommerce exports error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// ðŸš« ÄÃ¡nh dáº¥u hÃ ng loáº¡t Ä‘Æ¡n TMDT Ä‘Ã£ bá»‹ há»§y trÃªn sÃ n (Ä‘á»‘i soÃ¡t khi import file má»›i)
-// Chá»‰ cancel Ä‘Æ¡n pending â€” khÃ´ng Ä‘á»¥ng vÃ o Ä‘Æ¡n completed (Ä‘Ã£ giao rá»“i)
+// 🚫 Đánh dấu hàng loạt đơn TMDT đã bị hủy trên sàn (đối soát khi import file mới)
+// Chỉ cancel đơn pending — không đụng vào đơn completed (đã giao rồi)
 ipcMain.handle('ecommerceExports:bulkCancel', async (event, ids) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
@@ -5784,16 +5784,16 @@ ipcMain.handle('ecommerceExports:bulkCancel', async (event, ids) => {
         const result = await prisma.ecommerceExport.updateMany({
             where: {
                 id: { in: ids },
-                status: { notIn: ['completed'] } // Chá»‰ cancel Ä‘Æ¡n chÆ°a giao
+                status: { notIn: ['completed'] } // Chỉ cancel đơn chưa giao
             },
             data: { status: 'cancelled' }
         });
 
-        console.log(`ðŸš« Bulk cancelled ${result.count} ecommerce exports (Ä‘á»‘i soÃ¡t sÃ n)`);
-        void logActivity({ module: 'export', action: 'UPDATE', description: `Tá»± Ä‘á»™ng há»§y ${result.count} Ä‘Æ¡n TMDT (Ä‘á»‘i soÃ¡t sÃ n)` });
+        console.log(`🚫 Bulk cancelled ${result.count} ecommerce exports (đối soát sàn)`);
+        void logActivity({ module: 'export', action: 'UPDATE', description: `Tự động hủy ${result.count} đơn TMDT (đối soát sàn)` });
         return { success: true, data: result.count };
     } catch (error) {
-        console.error('âŒ Bulk cancel ecommerce exports error:', error);
+        console.error('❌ Bulk cancel ecommerce exports error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5828,7 +5828,7 @@ ipcMain.handle('marketplaceOrders:getAll', async (event, { since } = {}) => {
 });
 
 // ========================================
-// EXPORT ORDERS HANDLERS (XUáº¤T HÃ€NG POS)
+// EXPORT ORDERS HANDLERS (XUẤT HÀNG POS)
 // ========================================
 
 ipcMain.handle('exportOrders:getAll', async (event, { since } = {}) => {
@@ -5845,7 +5845,7 @@ ipcMain.handle('exportOrders:getAll', async (event, { since } = {}) => {
         }));
         return { success: true, data: formatted };
     } catch (error) {
-        console.error('âŒ Get export orders error:', error);
+        console.error('❌ Get export orders error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5864,11 +5864,11 @@ ipcMain.handle('exportOrders:create', async (event, data) => {
                 createdBy: data.createdBy || null
             }
         });
-        console.log(`âœ… Created export order #${record.id}`);
-        void logActivity({ module: 'export', action: 'CREATE', description: `Táº¡o xuáº¥t hÃ ng #${record.id} - ${data.customer}`, recordName: data.customer, userName: data.createdBy });
+        console.log(`✅ Created export order #${record.id}`);
+        void logActivity({ module: 'export', action: 'CREATE', description: `Tạo xuất hàng #${record.id} - ${data.customer}`, recordName: data.customer, userName: data.createdBy });
         return { success: true, data: record };
     } catch (error) {
-        console.error('âŒ Create export order error:', error);
+        console.error('❌ Create export order error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5887,11 +5887,11 @@ ipcMain.handle('exportOrders:update', async (event, id, data) => {
                 items: data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : undefined
             }
         });
-        console.log(`âœ… Updated export order #${record.id}`);
-        void logActivity({ module: 'export', action: 'UPDATE', description: `Cáº­p nháº­t xuáº¥t hÃ ng #${record.id}` });
+        console.log(`✅ Updated export order #${record.id}`);
+        void logActivity({ module: 'export', action: 'UPDATE', description: `Cập nhật xuất hàng #${record.id}` });
         return { success: true, data: record };
     } catch (error) {
-        console.error('âŒ Update export order error:', error);
+        console.error('❌ Update export order error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5900,17 +5900,17 @@ ipcMain.handle('exportOrders:delete', async (event, id) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         await prisma.exportOrder.delete({ where: { id } });
-        console.log(`âœ… Deleted export order #${id}`);
-        void logActivity({ module: 'export', action: 'DELETE', description: `XÃ³a xuáº¥t hÃ ng #${id}` });
+        console.log(`✅ Deleted export order #${id}`);
+        void logActivity({ module: 'export', action: 'DELETE', description: `Xóa xuất hàng #${id}` });
         return { success: true };
     } catch (error) {
-        console.error('âŒ Delete export order error:', error);
+        console.error('❌ Delete export order error:', error);
         return { success: false, error: error.message };
     }
 });
 
 // ========================================
-// RETURNS HANDLERS (TRáº¢ HÃ€NG)
+// RETURNS HANDLERS (TRẢ HÀNG)
 // ========================================
 
 ipcMain.handle('returns:getAll', async (event, { since } = {}) => {
@@ -5919,21 +5919,22 @@ ipcMain.handle('returns:getAll', async (event, { since } = {}) => {
         const returns = await prisma.return.findMany({
             where: since ? { createdAt: { gte: new Date(since) } } : undefined,
             orderBy: { createdAt: 'desc' },
-            take: 500 // âš¡ Giá»›i háº¡n 500 phiáº¿u tráº£ gáº§n nháº¥t
+            take: 500 // ⚡ Giới hạn 500 phiếu trả gần nhất
         });
         const formatted = returns.map(r => ({
             ...r,
-            // Map DB fields â†’ frontend fields
-            complaintCode: r.returnCode || '',      // returnCode â†’ complaintCode
-            productName: r.customerName || '',       // customerName â†’ productName (frontend uses productName)
-            complaintDate: r.returnDate.toISOString().split('T')[0],  // returnDate â†’ complaintDate
-            reason: r.returnReason || '',            // returnReason â†’ reason
+            // Map DB fields → frontend fields
+            complaintCode: r.returnCode || '',      // returnCode → complaintCode
+            productName: r.customerName || '',       // customerName → productName (frontend uses productName)
+            complaintDate: r.returnDate.toISOString().split('T')[0],  // returnDate → complaintDate
+            reason: r.returnReason || '',            // returnReason → reason
             returnDate: r.returnDate.toISOString().split('T')[0],
-            processNotes: r.notes || null,           // notes â†’ processNotes
+            processNotes: r.notes || null,           // notes → processNotes
+            faultParty: r.faultParty || 'warehouse', // ✅ Map faultParty (mặc định warehouse)
         }));
         return { success: true, data: formatted };
     } catch (error) {
-        console.error('âŒ Get returns error:', error);
+        console.error('❌ Get returns error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5953,14 +5954,15 @@ ipcMain.handle('returns:create', async (event, data) => {
                 notes: data.notes || null,
                 status: data.status || 'pending',
                 packer: data.packer || null,
+                faultParty: data.faultParty === 'customer' ? 'customer' : 'warehouse', // ✅ Lưu lý do lỗi
                 createdBy: data.createdBy || null
             }
         });
-        console.log(`âœ… Created return #${record.id}`);
-        void logActivity({ module: 'returns', action: 'CREATE', description: `Táº¡o tráº£ hÃ ng #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
+        console.log(`✅ Created return #${record.id}`);
+        void logActivity({ module: 'returns', action: 'CREATE', description: `Tạo trả hàng #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
         return { success: true, data: record };
     } catch (error) {
-        console.error('âŒ Create return error:', error);
+        console.error('❌ Create return error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5968,7 +5970,7 @@ ipcMain.handle('returns:create', async (event, data) => {
 ipcMain.handle('returns:update', async (event, id, data) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
-        // ðŸ”§ FIX: Chá»‰ update field Ä‘Æ°á»£c gá»­i, khÃ´ng ghi Ä‘Ã¨ null cÃ¡c field khÃ¡c
+        // 🔧 FIX: Chỉ update field được gửi, không ghi đè null các field khác
         const updateData = {};
         if (data.customerName !== undefined) updateData.customerName = data.customerName;
         if (data.returnCode !== undefined) updateData.returnCode = data.returnCode || null;
@@ -5980,16 +5982,17 @@ ipcMain.handle('returns:update', async (event, id, data) => {
         if (data.notes !== undefined) updateData.notes = data.notes || null;
         if (data.status !== undefined) updateData.status = data.status;
         if (data.packer !== undefined) updateData.packer = data.packer || null;
+        if (data.faultParty !== undefined) updateData.faultParty = data.faultParty === 'customer' ? 'customer' : 'warehouse'; // ✅ Cập nhật lý do lỗi
 
         const record = await prisma.return.update({
             where: { id },
             data: updateData
         });
-        console.log(`âœ… Updated return #${record.id}`);
-        void logActivity({ module: 'returns', action: 'UPDATE', description: `Cáº­p nháº­t tráº£ hÃ ng #${record.id}`, changes: data });
+        console.log(`✅ Updated return #${record.id}`);
+        void logActivity({ module: 'returns', action: 'UPDATE', description: `Cập nhật trả hàng #${record.id}`, changes: data });
         return { success: true, data: record };
     } catch (error) {
-        console.error('âŒ Update return error:', error);
+        console.error('❌ Update return error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5998,11 +6001,11 @@ ipcMain.handle('returns:delete', async (event, id) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         await prisma.return.delete({ where: { id } });
-        console.log(`âœ… Deleted return #${id}`);
-        void logActivity({ module: 'returns', action: 'DELETE', description: `XÃ³a tráº£ hÃ ng #${id}` });
+        console.log(`✅ Deleted return #${id}`);
+        void logActivity({ module: 'returns', action: 'DELETE', description: `Xóa trả hàng #${id}` });
         return { success: true };
     } catch (error) {
-        console.error('âŒ Delete return error:', error);
+        console.error('❌ Delete return error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6010,15 +6013,15 @@ ipcMain.handle('returns:delete', async (event, id) => {
 ipcMain.handle('returns:bulkCreate', async (event, records) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
-        console.log(`ðŸ“¦ returns:bulkCreate called with ${records.length} records`);
+        console.log(`📦 returns:bulkCreate called with ${records.length} records`);
         const created = [];
         for (let i = 0; i < records.length; i++) {
             const data = records[i];
             try {
-                // ðŸ”§ Safe date parsing
+                // 🔧 Safe date parsing
                 let returnDate = new Date(data.returnDate);
                 if (isNaN(returnDate.getTime())) {
-                    console.warn(`âš ï¸ Record ${i}: Invalid returnDate: "${data.returnDate}", using current date`);
+                    console.warn(`⚠️ Record ${i}: Invalid returnDate: "${data.returnDate}", using current date`);
                     returnDate = new Date();
                 }
                 const record = await prisma.return.create({
@@ -6033,25 +6036,26 @@ ipcMain.handle('returns:bulkCreate', async (event, records) => {
                         notes: data.notes || null,
                         status: data.status || 'pending',
                         packer: data.packer || null,
+                        faultParty: data.faultParty === 'customer' ? 'customer' : 'warehouse', // ✅ Lưu lý do lỗi (bulkCreate)
                         createdBy: data.createdBy || null
                     }
                 });
                 created.push(record);
             } catch (recordError) {
-                console.error(`âŒ Record ${i} failed:`, recordError.message, 'Data:', JSON.stringify(data));
+                console.error(`❌ Record ${i} failed:`, recordError.message, 'Data:', JSON.stringify(data));
             }
         }
-        console.log(`âœ… Bulk created ${created.length}/${records.length} returns`);
-        void logActivity({ module: 'returns', action: 'CREATE', description: `Táº¡o hÃ ng loáº¡t ${created.length} tráº£ hÃ ng` });
+        console.log(`✅ Bulk created ${created.length}/${records.length} returns`);
+        void logActivity({ module: 'returns', action: 'CREATE', description: `Tạo hàng loạt ${created.length} trả hàng` });
         return { success: true, data: created };
     } catch (error) {
-        console.error('âŒ Bulk create returns error:', error);
+        console.error('❌ Bulk create returns error:', error);
         return { success: false, error: error.message };
     }
 });
 
 // ========================================
-// REFUNDS HANDLERS (HÃ€NG HOÃ€N)
+// REFUNDS HANDLERS (HÀNG HOÀN)
 // ========================================
 
 ipcMain.handle('refunds:getAll', async (event, { since } = {}) => {
@@ -6067,7 +6071,7 @@ ipcMain.handle('refunds:getAll', async (event, { since } = {}) => {
         }));
         return { success: true, data: formatted };
     } catch (error) {
-        console.error('âŒ Get refunds error:', error);
+        console.error('❌ Get refunds error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6075,10 +6079,10 @@ ipcMain.handle('refunds:getAll', async (event, { since } = {}) => {
 ipcMain.handle('refunds:create', async (event, data) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
-        // ðŸ”§ Safe date parsing
+        // 🔧 Safe date parsing
         let refundDate = new Date(data.refundDate);
         if (isNaN(refundDate.getTime())) {
-            console.warn(`âš ï¸ Invalid refundDate: "${data.refundDate}", using current date`);
+            console.warn(`⚠️ Invalid refundDate: "${data.refundDate}", using current date`);
             refundDate = new Date();
         }
         const record = await prisma.refund.create({
@@ -6095,11 +6099,11 @@ ipcMain.handle('refunds:create', async (event, data) => {
                 createdBy: data.createdBy || null
             }
         });
-        console.log(`âœ… Created refund #${record.id}`);
-        void logActivity({ module: 'refunds', action: 'CREATE', description: `Táº¡o hÃ ng hoÃ n #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
+        console.log(`✅ Created refund #${record.id}`);
+        void logActivity({ module: 'refunds', action: 'CREATE', description: `Tạo hàng hoàn #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
         return { success: true, data: record };
     } catch (error) {
-        console.error('âŒ Create refund error:', error);
+        console.error('❌ Create refund error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6107,7 +6111,7 @@ ipcMain.handle('refunds:create', async (event, data) => {
 ipcMain.handle('refunds:update', async (event, id, data) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
-        // ðŸ”§ FIX: Chá»‰ update cÃ¡c field Ä‘Æ°á»£c gá»­i lÃªn, KHÃ”NG overwrite field khÃ´ng cÃ³
+        // 🔧 FIX: Chỉ update các field được gửi lên, KHÔNG overwrite field không có
         const updateData = {};
         if (data.customerName !== undefined) updateData.customerName = data.customerName;
         if (data.refundCode !== undefined) updateData.refundCode = data.refundCode || null;
@@ -6119,16 +6123,16 @@ ipcMain.handle('refunds:update', async (event, id, data) => {
         if (data.notes !== undefined) updateData.notes = data.notes || null;
         if (data.status !== undefined) updateData.status = data.status;
 
-        console.log(`ðŸ“ Updating refund #${id} with fields:`, Object.keys(updateData));
+        console.log(`📝 Updating refund #${id} with fields:`, Object.keys(updateData));
         const record = await prisma.refund.update({
             where: { id },
             data: updateData
         });
-        console.log(`âœ… Updated refund #${record.id}`);
-        void logActivity({ module: 'refunds', action: 'UPDATE', description: `Cáº­p nháº­t hÃ ng hoÃ n #${record.id}`, changes: data });
+        console.log(`✅ Updated refund #${record.id}`);
+        void logActivity({ module: 'refunds', action: 'UPDATE', description: `Cập nhật hàng hoàn #${record.id}`, changes: data });
         return { success: true, data: record };
     } catch (error) {
-        console.error('âŒ Update refund error:', error);
+        console.error('❌ Update refund error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6137,11 +6141,11 @@ ipcMain.handle('refunds:delete', async (event, id) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         await prisma.refund.delete({ where: { id } });
-        console.log(`âœ… Deleted refund #${id}`);
-        void logActivity({ module: 'refunds', action: 'DELETE', description: `XÃ³a hÃ ng hoÃ n #${id}` });
+        console.log(`✅ Deleted refund #${id}`);
+        void logActivity({ module: 'refunds', action: 'DELETE', description: `Xóa hàng hoàn #${id}` });
         return { success: true };
     } catch (error) {
-        console.error('âŒ Delete refund error:', error);
+        console.error('❌ Delete refund error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6152,11 +6156,11 @@ ipcMain.handle('refunds:bulkDelete', async (event, ids) => {
         const result = await prisma.refund.deleteMany({
             where: { id: { in: ids } }
         });
-        console.log(`âœ… Bulk deleted ${result.count} refunds`);
-        void logActivity({ module: 'refunds', action: 'DELETE', description: `XÃ³a hÃ ng loáº¡t ${result.count} hÃ ng hoÃ n` });
+        console.log(`✅ Bulk deleted ${result.count} refunds`);
+        void logActivity({ module: 'refunds', action: 'DELETE', description: `Xóa hàng loạt ${result.count} hàng hoàn` });
         return { success: true, data: result.count };
     } catch (error) {
-        console.error('âŒ Bulk delete refunds error:', error);
+        console.error('❌ Bulk delete refunds error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6164,17 +6168,17 @@ ipcMain.handle('refunds:bulkDelete', async (event, ids) => {
 ipcMain.handle('refunds:bulkCreate', async (event, records) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
-        console.log(`ðŸ“¦ refunds:bulkCreate called with ${records.length} records`);
+        console.log(`📦 refunds:bulkCreate called with ${records.length} records`);
         const created = [];
         for (let i = 0; i < records.length; i++) {
             const data = records[i];
             try {
-                // ðŸ”§ Safe date parsing
+                // 🔧 Safe date parsing
                 let refundDate;
                 try {
                     refundDate = new Date(data.refundDate);
                     if (isNaN(refundDate.getTime())) {
-                        console.warn(`âš ï¸ Invalid refundDate for record ${i}: "${data.refundDate}", using current date`);
+                        console.warn(`⚠️ Invalid refundDate for record ${i}: "${data.refundDate}", using current date`);
                         refundDate = new Date();
                     }
                 } catch {
@@ -6197,22 +6201,22 @@ ipcMain.handle('refunds:bulkCreate', async (event, records) => {
                 });
                 created.push(record);
             } catch (itemError) {
-                console.error(`âŒ Error creating refund record ${i}:`, itemError.message);
+                console.error(`❌ Error creating refund record ${i}:`, itemError.message);
                 console.error(`   Data:`, JSON.stringify(data).substring(0, 200));
                 // Continue with other records
             }
         }
-        console.log(`âœ… Bulk created ${created.length}/${records.length} refunds`);
-        void logActivity({ module: 'refunds', action: 'CREATE', description: `Táº¡o hÃ ng loáº¡t ${created.length} hÃ ng hoÃ n` });
+        console.log(`✅ Bulk created ${created.length}/${records.length} refunds`);
+        void logActivity({ module: 'refunds', action: 'CREATE', description: `Tạo hàng loạt ${created.length} hàng hoàn` });
         return { success: true, data: created };
     } catch (error) {
-        console.error('âŒ Bulk create refunds error:', error);
+        console.error('❌ Bulk create refunds error:', error);
         return { success: false, error: error.message };
     }
 });
 
 // ========================================
-// STOCK BALANCE HANDLERS (CÃ‚N Báº°NG KHO)
+// STOCK BALANCE HANDLERS (CÂN BẰNG KHO)
 // ========================================
 
 ipcMain.handle('stockBalance:getAll', async () => {
@@ -6228,7 +6232,7 @@ ipcMain.handle('stockBalance:getAll', async () => {
         }));
         return { success: true, data: formatted };
     } catch (error) {
-        console.error('âŒ Get stock balance records error:', error);
+        console.error('❌ Get stock balance records error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6244,28 +6248,28 @@ ipcMain.handle('stockBalance:create', async (event, data) => {
                 notes: data.notes || null
             }
         });
-        console.log(`âœ… Created stock balance record #${record.id}`);
+        console.log(`✅ Created stock balance record #${record.id}`);
         const effectiveUser = currentSession?.username || data.adjustedBy || 'System';
-        void logActivity({ module: 'products', action: 'UPDATE', description: `CÃ¢n báº±ng kho - ${effectiveUser}`, recordName: effectiveUser, userName: effectiveUser });
+        void logActivity({ module: 'products', action: 'UPDATE', description: `Cân bằng kho - ${effectiveUser}`, recordName: effectiveUser, userName: effectiveUser });
         return { success: true, data: record };
     } catch (error) {
-        console.error('âŒ Create stock balance error:', error);
+        console.error('❌ Create stock balance error:', error);
         return { success: false, error: error.message };
     }
 });
 
 // ========================================
-// INVENTORY LOGS / THáºº KHO
+// INVENTORY LOGS / THẺ KHO
 // ========================================
 
-// Helper: Ghi log tháº» kho â€” Ä‘Æ°á»£c gá»i tá»« táº¥t cáº£ module (POS, Purchase, Export, Returns, Refunds, StockBalance)
+// Helper: Ghi log thẻ kho — được gọi từ tất cả module (POS, Purchase, Export, Returns, Refunds, StockBalance)
 async function createInventoryLog({ sku, productId, productName, variantColor, type, referenceType, reference, quantity, oldStock, newStock, note, createdBy }) {
     try {
         if (!prisma) return null;
 
         let reporterId = null;
 
-        // ÄÃ­ch danh user Ä‘ang thao tÃ¡c (chá»‘ng ghi Ä‘Ã¨ 'System' hay 'Admin' mÃ¹ má»)
+        // Đích danh user đang thao tác (chống ghi đè 'System' hay 'Admin' mù mờ)
         let actualUsername = currentSession?.username;
         if (!actualUsername && typeof createdBy === 'string') actualUsername = createdBy;
 
@@ -6292,24 +6296,24 @@ async function createInventoryLog({ sku, productId, productName, variantColor, t
                 createdBy: reporterId,
             }
         });
-        console.log(`ðŸ“‹ [Tháº»Kho] ${referenceType || type}: ${sku} ${quantity > 0 ? '+' : ''}${quantity} â†’ Tá»“n cuá»‘i: ${newStock}`);
+        console.log(`📋 [ThẻKho] ${referenceType || type}: ${sku} ${quantity > 0 ? '+' : ''}${quantity} → Tồn cuối: ${newStock}`);
         return log;
     } catch (err) {
-        console.error('âŒ [Tháº»Kho] Error:', err.message);
+        console.error('❌ [ThẻKho] Error:', err.message);
         return null;
     }
 }
 
-// Helper: Láº¥y stock hiá»‡n táº¡i cá»§a SKU (product hoáº·c variant)
+// Helper: Lấy stock hiện tại của SKU (product hoặc variant)
 async function getCurrentStock(sku) {
     try {
         if (!prisma) return 0;
 
-        // TÃ¬m product trá»±c tiáº¿p
+        // Tìm product trực tiếp
         const product = await prisma.product.findUnique({ where: { sku } });
         if (product) return product.stock || 0;
 
-        // TÃ¬m trong variants
+        // Tìm trong variants
         const products = await prisma.product.findMany({
             where: { variants: { contains: sku } }
         });
@@ -6327,7 +6331,7 @@ async function getCurrentStock(sku) {
     }
 }
 
-// Helper: Láº¥y productId + product info tá»« SKU
+// Helper: Lấy productId + product info từ SKU
 async function getProductInfoBySku(sku) {
     try {
         if (!prisma) return null;
@@ -6337,7 +6341,7 @@ async function getProductInfoBySku(sku) {
             return { productId: product.id, productName: product.name, variantColor: null };
         }
 
-        // TÃ¬m trong variants
+        // Tìm trong variants
         const products = await prisma.product.findMany({
             where: { variants: { contains: sku } }
         });
@@ -6357,7 +6361,7 @@ async function getProductInfoBySku(sku) {
     }
 }
 
-// Láº¥y táº¥t cáº£ inventory logs (cÃ³ filter + phÃ¢n trang)
+// Lấy tất cả inventory logs (có filter + phân trang)
 ipcMain.handle('inventoryLogs:getAll', async (event, filters = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
@@ -6402,15 +6406,15 @@ ipcMain.handle('inventoryLogs:getAll', async (event, filters = {}) => {
             userName: l.user?.username || null,
         }));
 
-        console.log(`ðŸ“‹ [Tháº»Kho] Loaded ${formatted.length} logs`);
+        console.log(`📋 [ThẻKho] Loaded ${formatted.length} logs`);
         return { success: true, data: formatted };
     } catch (error) {
-        console.error('âŒ Get inventory logs error:', error);
+        console.error('❌ Get inventory logs error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// Láº¥y log theo SKU (tháº» kho 1 sáº£n pháº©m)
+// Lấy log theo SKU (thẻ kho 1 sản phẩm)
 ipcMain.handle('inventoryLogs:getBySku', async (event, { sku, limit = 100 }) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
@@ -6432,16 +6436,16 @@ ipcMain.handle('inventoryLogs:getBySku', async (event, { sku, limit = 100 }) => 
 
         return { success: true, data: formatted };
     } catch (error) {
-        console.error('âŒ Get inventory logs by SKU error:', error);
+        console.error('❌ Get inventory logs by SKU error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// Láº¥y chi tiáº¿t chá»©ng tá»« gá»‘c tá»« inventory log (click MÃ£ CT)
+// Lấy chi tiết chứng từ gốc từ inventory log (click Mã CT)
 ipcMain.handle('inventoryLogs:getRefDetail', async (event, { referenceType, reference }) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
-        if (!reference) return { success: false, error: 'KhÃ´ng cÃ³ mÃ£ chá»©ng tá»«' };
+        if (!reference) return { success: false, error: 'Không có mã chứng từ' };
 
         const refType = (referenceType || '').toUpperCase();
 
@@ -6450,10 +6454,10 @@ ipcMain.handle('inventoryLogs:getRefDetail', async (event, { referenceType, refe
             const doc = await prisma.ecommerceExport.findFirst({
                 where: { OR: [{ orderNumber: reference }, { ecommerceExportCode: reference }] }
             });
-            if (!doc) return { success: false, error: `Chi tiáº¿t chá»©ng tá»« gá»‘c khÃ´ng cÃ²n trÃªn há»‡ thá»‘ng: ${reference}` };
+            if (!doc) return { success: false, error: `Chi tiết chứng từ gốc không còn trên hệ thống: ${reference}` };
             let items = [];
             try { items = typeof doc.items === 'string' ? JSON.parse(doc.items) : (doc.items || []); } catch { }
-            // Vá»›i má»—i item lÃ  combo, load combo definition Ä‘á»ƒ biáº¿t components
+            // Với mỗi item là combo, load combo definition để biết components
             const itemsWithCombo = await Promise.all(items.map(async (item) => {
                 const sku = item.variantSku || item.sku || '';
                 console.log(`[getRefDetail] item sku: "${sku}"`);
@@ -6475,7 +6479,7 @@ ipcMain.handle('inventoryLogs:getRefDetail', async (event, { referenceType, refe
                 where: { orderNumber: reference },
                 include: { items: true, payments: true, customer: true }
             });
-            if (!order) return { success: false, error: `Chi tiáº¿t chá»©ng tá»« gá»‘c khÃ´ng cÃ²n trÃªn há»‡ thá»‘ng: ${reference}` };
+            if (!order) return { success: false, error: `Chi tiết chứng từ gốc không còn trên hệ thống: ${reference}` };
             return { success: true, type: 'POS', data: order };
         }
 
@@ -6485,33 +6489,33 @@ ipcMain.handle('inventoryLogs:getRefDetail', async (event, { referenceType, refe
                 where: { poNumber: reference },
                 include: { supplier: true, items: { include: { product: { select: { name: true, sku: true, unit: true } } } } }
             });
-            if (!po) return { success: false, error: `Chi tiáº¿t chá»©ng tá»« gá»‘c khÃ´ng cÃ²n trÃªn há»‡ thá»‘ng: ${reference}` };
+            if (!po) return { success: false, error: `Chi tiết chứng từ gốc không còn trên hệ thống: ${reference}` };
             return { success: true, type: 'PURCHASE', data: po };
         }
 
-        // Adjustment / other â€” khÃ´ng cÃ³ chá»©ng tá»« gá»‘c
-        return { success: false, error: 'Loáº¡i chá»©ng tá»« nÃ y khÃ´ng cÃ³ chi tiáº¿t Ä‘á»ƒ xem.' };
+        // Adjustment / other — không có chứng từ gốc
+        return { success: false, error: 'Loại chứng từ này không có chi tiết để xem.' };
     } catch (error) {
-        console.error('âŒ getRefDetail error:', error);
+        console.error('❌ getRefDetail error:', error);
         return { success: false, error: error.message };
     }
 });
 
-// Táº¡o inventory log thá»§ cÃ´ng (Ä‘iá»u chá»‰nh / cÃ¢n báº±ng kho)
+// Tạo inventory log thủ công (điều chỉnh / cân bằng kho)
 ipcMain.handle('inventoryLogs:create', async (event, data) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const log = await createInventoryLog(data);
         return { success: true, data: log };
     } catch (error) {
-        console.error('âŒ Create inventory log error:', error);
+        console.error('❌ Create inventory log error:', error);
         return { success: false, error: error.message };
     }
 });
 
 
 // ========================================
-// APP CONFIG HANDLERS (Cáº¤U HÃŒNH á»¨NG Dá»¤NG)
+// APP CONFIG HANDLERS (CẤU HÌNH ỨNG DỤNG)
 // ========================================
 
 ipcMain.handle('appConfig:get', async (event, key) => {
@@ -6525,7 +6529,7 @@ ipcMain.handle('appConfig:get', async (event, key) => {
         }
         return { success: true, data: null };
     } catch (error) {
-        console.error(`âŒ Get config "${key}" error:`, error);
+        console.error(`❌ Get config "${key}" error:`, error);
         return { success: false, error: error.message };
     }
 });
@@ -6538,22 +6542,22 @@ ipcMain.handle('appConfig:set', async (event, key, value) => {
             update: { value: JSON.stringify(value) },
             create: { key, value: JSON.stringify(value) }
         });
-        console.log(`âœ… Set config "${key}"`);
+        console.log(`✅ Set config "${key}"`);
         return { success: true, data: config };
     } catch (error) {
-        console.error(`âŒ Set config "${key}" error:`, error);
+        console.error(`❌ Set config "${key}" error:`, error);
         return { success: false, error: error.message };
     }
 });
 
 // ========================================
-// USERS HANDLERS (NGÆ¯á»œI DÃ™NG / PHÃ‚N QUYá»€N)
+// USERS HANDLERS (NGƯỜI DÙNG / PHÂN QUYỀN)
 // ========================================
 
 ipcMain.handle('users:getAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
-        // DÃ¹ng raw SQL Ä‘á»ƒ luÃ´n láº¥y Ä‘Æ°á»£c lastActiveAt ká»ƒ cáº£ khi Prisma client cÅ© chÆ°a generate láº¡i
+        // Dùng raw SQL để luôn lấy được lastActiveAt kể cả khi Prisma client cũ chưa generate lại
         const users = await prisma.$queryRaw`SELECT id, username, "fullName", email, role, status, "createdAt", "lastActiveAt" FROM "User" ORDER BY id ASC`;
         const formatted = users.map(u => ({
             id: u.id,
@@ -6567,7 +6571,7 @@ ipcMain.handle('users:getAll', async () => {
         }));
         return { success: true, data: formatted };
     } catch (error) {
-        console.error('âŒ Get users error:', error);
+        console.error('❌ Get users error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6576,7 +6580,7 @@ ipcMain.handle('users:create', async (event, data) => {
     try {
         requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
-        // ðŸ”’ SECURITY: Hash password trÆ°á»›c khi lÆ°u
+        // 🔒 SECURITY: Hash password trước khi lưu
         const hashedPassword = await bcrypt.hash(data.password, 10);
         const user = await prisma.user.create({
             data: {
@@ -6588,13 +6592,13 @@ ipcMain.handle('users:create', async (event, data) => {
                 status: data.isActive !== false ? 'active' : 'inactive'
             }
         });
-        console.log(`âœ… Created user: ${user.username}`);
-        void logActivity({ module: 'users', action: 'CREATE', description: `Táº¡o ngÆ°á»i dÃ¹ng "${user.username}" (${data.role || 'staff'})`, recordName: user.username });
+        console.log(`✅ Created user: ${user.username}`);
+        void logActivity({ module: 'users', action: 'CREATE', description: `Tạo người dùng "${user.username}" (${data.role || 'staff'})`, recordName: user.username });
         return { success: true, data: { ...user, isActive: user.status === 'active' } };
     } catch (error) {
-        console.error('âŒ Create user error:', error);
+        console.error('❌ Create user error:', error);
         if (error.code === 'P2002') {
-            return { success: false, error: 'TÃªn Ä‘Äƒng nháº­p Ä‘Ã£ tá»“n táº¡i!' };
+            return { success: false, error: 'Tên đăng nhập đã tồn tại!' };
         }
         return { success: false, error: error.message };
     }
@@ -6609,7 +6613,7 @@ ipcMain.handle('users:update', async (event, id, data) => {
         if (data.fullName !== undefined) updateData.fullName = data.fullName;
         if (data.email !== undefined) updateData.email = data.email;
         if (data.role !== undefined) updateData.role = data.role;
-        // ðŸ”’ SECURITY: Hash password má»›i náº¿u Ä‘á»•i máº­t kháº©u
+        // 🔒 SECURITY: Hash password mới nếu đổi mật khẩu
         if (data.password !== undefined) updateData.password = await bcrypt.hash(data.password, 10);
         if (data.isActive !== undefined) updateData.status = data.isActive ? 'active' : 'inactive';
 
@@ -6617,11 +6621,11 @@ ipcMain.handle('users:update', async (event, id, data) => {
             where: { id },
             data: updateData
         });
-        console.log(`âœ… Updated user: ${user.username}`);
-        void logActivity({ module: 'users', action: 'UPDATE', description: `Cáº­p nháº­t ngÆ°á»i dÃ¹ng "${user.username}"`, recordName: user.username });
+        console.log(`✅ Updated user: ${user.username}`);
+        void logActivity({ module: 'users', action: 'UPDATE', description: `Cập nhật người dùng "${user.username}"`, recordName: user.username });
         return { success: true, data: { ...user, isActive: user.status === 'active' } };
     } catch (error) {
-        console.error('âŒ Update user error:', error);
+        console.error('❌ Update user error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6631,11 +6635,11 @@ ipcMain.handle('users:delete', async (event, id) => {
         requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         await prisma.user.delete({ where: { id } });
-        console.log(`âœ… Deleted user #${id}`);
-        void logActivity({ module: 'users', action: 'DELETE', description: `XÃ³a ngÆ°á»i dÃ¹ng #${id}` });
+        console.log(`✅ Deleted user #${id}`);
+        void logActivity({ module: 'users', action: 'DELETE', description: `Xóa người dùng #${id}` });
         return { success: true };
     } catch (error) {
-        console.error('âŒ Delete user error:', error);
+        console.error('❌ Delete user error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6648,34 +6652,34 @@ ipcMain.handle('users:login', async (event, username, password) => {
             where: { username: normalizedUsername }
         });
         if (!user || user.status !== 'active') {
-            return { success: false, error: 'TÃ i khoáº£n khÃ´ng tá»“n táº¡i hoáº·c Ä‘Ã£ bá»‹ vÃ´ hiá»‡u hÃ³a' };
+            return { success: false, error: 'Tài khoản không tồn tại hoặc đã bị vô hiệu hóa' };
         }
-        // ðŸ”’ SECURITY: So sÃ¡nh báº±ng bcrypt
+        // 🔒 SECURITY: So sánh bằng bcrypt
         const isHashed = typeof user.password === 'string' && user.password.startsWith('$2');
         let passwordValid = false;
         if (isHashed) {
             passwordValid = await bcrypt.compare(password, user.password);
         } else {
-            // Backward compatible: plaintext password cÅ© â†’ auto-upgrade sang hash
+            // Backward compatible: plaintext password cũ → auto-upgrade sang hash
             passwordValid = (user.password === password);
             if (passwordValid) {
                 const hashed = await bcrypt.hash(password, 10);
                 await prisma.user.update({ where: { id: user.id }, data: { password: hashed } });
-                console.log(`ðŸ”’ Auto-upgraded password for user: ${user.username}`);
+                console.log(`🔒 Auto-upgraded password for user: ${user.username}`);
             }
         }
         if (!passwordValid) {
-            return { success: false, error: 'Máº­t kháº©u khÃ´ng Ä‘Ãºng' };
+            return { success: false, error: 'Mật khẩu không đúng' };
         }
         // Return user without password
         const { password: _, ...userWithoutPassword } = user;
-        // LÆ°u session phÃ­a backend
+        // Lưu session phía backend
         currentSession = { id: user.id, username: user.username, role: user.role };
         prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(() => { });
-        void logActivity({ module: 'users', action: 'LOGIN', description: `ÄÄƒng nháº­p: ${user.username}`, recordName: user.username, userName: user.username });
+        void logActivity({ module: 'users', action: 'LOGIN', description: `Đăng nhập: ${user.username}`, recordName: user.username, userName: user.username });
         return { success: true, data: { ...userWithoutPassword, isActive: user.status === 'active' } };
     } catch (error) {
-        console.error('âŒ Login error:', error);
+        console.error('❌ Login error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6688,7 +6692,7 @@ ipcMain.handle('users:logout', async () => {
     return { success: true };
 });
 
-// Restore session khi auto-login tá»« localStorage (khÃ´ng cáº§n password)
+// Restore session khi auto-login từ localStorage (không cần password)
 ipcMain.handle('users:restoreSession', async (event, userId) => {
     try {
         if (!prisma) return { success: false };
@@ -6727,23 +6731,23 @@ ipcMain.handle('users:ensureAdmin', async () => {
                 create: {
                     username: 'admin',
                     password: await bcrypt.hash('admin', 10),
-                    fullName: 'Quáº£n trá»‹ viÃªn',
+                    fullName: 'Quản trị viên',
                     email: 'admin@example.com',
                     role: 'admin',
                     status: 'active'
                 }
             });
-            console.log('âœ… Ensured default admin exists');
+            console.log('✅ Ensured default admin exists');
         }
         return { success: true };
     } catch (error) {
-        console.error('âŒ Ensure admin error:', error);
+        console.error('❌ Ensure admin error:', error);
         return { success: false, error: error.message };
     }
 });
 
 // ========================================
-// DAILY EXPENSES HANDLERS (CHI PHÃ HÃ€NG NGÃ€Y - P&L)
+// DAILY EXPENSES HANDLERS (CHI PHÍ HÀNG NGÀY - P&L)
 // ========================================
 
 ipcMain.handle('dailyExpenses:getAll', async (event, filters) => {
@@ -6766,7 +6770,7 @@ ipcMain.handle('dailyExpenses:getAll', async (event, filters) => {
         }));
         return { success: true, data: formatted };
     } catch (error) {
-        console.error('âŒ Get daily expenses error:', error);
+        console.error('❌ Get daily expenses error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6795,10 +6799,10 @@ ipcMain.handle('dailyExpenses:upsert', async (event, data) => {
             update: expenseData,
             create: { date: dateObj, ...expenseData },
         });
-        console.log(`âœ… Upserted daily expense for ${data.date}`);
+        console.log(`✅ Upserted daily expense for ${data.date}`);
         return { success: true, data: { ...record, date: record.date.toISOString().split('T')[0] } };
     } catch (error) {
-        console.error('âŒ Upsert daily expense error:', error);
+        console.error('❌ Upsert daily expense error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6807,23 +6811,23 @@ ipcMain.handle('dailyExpenses:delete', async (event, id) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         await prisma.dailyExpense.delete({ where: { id } });
-        console.log(`âœ… Deleted daily expense #${id}`);
+        console.log(`✅ Deleted daily expense #${id}`);
         return { success: true };
     } catch (error) {
-        console.error('âŒ Delete daily expense error:', error);
+        console.error('❌ Delete daily expense error:', error);
         return { success: false, error: error.message };
     }
 });
 
 module.exports = { prisma };
 
-// ===== REFUNDS: Import tá»« thÆ° má»¥c =====
+// ===== REFUNDS: Import từ thư mục =====
 ipcMain.handle('refunds:importFromFolder', async () => {
     try {
-        // 1. Má»Ÿ dialog chá»n thÆ° má»¥c
+        // 1. Mở dialog chọn thư mục
         const result = await dialog.showOpenDialog({
             properties: ['openDirectory'],
-            title: 'Chá»n thÆ° má»¥c chá»©a file Excel hÃ ng hoÃ n',
+            title: 'Chọn thư mục chứa file Excel hàng hoàn',
         });
 
         if (result.canceled || result.filePaths.length === 0) {
@@ -6831,9 +6835,9 @@ ipcMain.handle('refunds:importFromFolder', async () => {
         }
 
         const folderPath = result.filePaths[0];
-        console.log(`ðŸ“‚ Selected folder: ${folderPath}`);
+        console.log(`📂 Selected folder: ${folderPath}`);
 
-        // 2. TÃ¬m táº¥t cáº£ file .xlsx / .xls trong thÆ° má»¥c
+        // 2. Tìm tất cả file .xlsx / .xls trong thư mục
         const allFiles = fs.readdirSync(folderPath);
         const excelFiles = allFiles.filter(f => {
             const ext = path.extname(f).toLowerCase();
@@ -6841,12 +6845,12 @@ ipcMain.handle('refunds:importFromFolder', async () => {
         });
 
         if (excelFiles.length === 0) {
-            return { success: false, error: 'KhÃ´ng tÃ¬m tháº¥y file Excel (.xlsx/.xls) trong thÆ° má»¥c!' };
+            return { success: false, error: 'Không tìm thấy file Excel (.xlsx/.xls) trong thư mục!' };
         }
 
-        console.log(`ðŸ“Š Found ${excelFiles.length} Excel files:`, excelFiles);
+        console.log(`📊 Found ${excelFiles.length} Excel files:`, excelFiles);
 
-        // 3. Äá»c dá»¯ liá»‡u tá»« táº¥t cáº£ file â€” TÃCH RIÃŠNG tá»«ng file
+        // 3. Đọc dữ liệu từ tất cả file — TÁCH RIÊNG từng file
         const filesData = [];
         const fileResults = [];
         let totalRows = 0;
@@ -6859,17 +6863,17 @@ ipcMain.handle('refunds:importFromFolder', async () => {
                 const worksheet = workbook.Sheets[sheetName];
                 const jsonData = XLSX.utils.sheet_to_json(worksheet);
 
-                console.log(`  ðŸ“„ ${fileName}: ${jsonData.length} rows`);
+                console.log(`  📄 ${fileName}: ${jsonData.length} rows`);
                 filesData.push({ name: fileName, data: jsonData });
                 fileResults.push({ name: fileName, rows: jsonData.length, success: true });
                 totalRows += jsonData.length;
             } catch (fileError) {
-                console.error(`  âŒ ${fileName}: ${fileError.message}`);
+                console.error(`  ❌ ${fileName}: ${fileError.message}`);
                 fileResults.push({ name: fileName, rows: 0, success: false, error: fileError.message });
             }
         }
 
-        console.log(`âœ… Total: ${totalRows} rows from ${excelFiles.length} files`);
+        console.log(`✅ Total: ${totalRows} rows from ${excelFiles.length} files`);
 
         return {
             success: true,
@@ -6880,7 +6884,7 @@ ipcMain.handle('refunds:importFromFolder', async () => {
             totalRows,
         };
     } catch (error) {
-        console.error('âŒ Import from folder error:', error);
+        console.error('❌ Import from folder error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6891,7 +6895,7 @@ ipcMain.handle('refunds:importFromFolder', async () => {
 
 const { v4: uuidv4 } = (() => {
     try { return require('uuid'); } catch {
-        // Fallback UUID generator náº¿u chÆ°a install uuid
+        // Fallback UUID generator nếu chưa install uuid
         return {
             v4: () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
                 const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
@@ -6903,7 +6907,7 @@ const { v4: uuidv4 } = (() => {
 // Cache token MISA
 let misaTokenCache = { token: null, expiresAt: 0 };
 
-// MÃ£ hÃ³a / giáº£i mÃ£ password Ä‘Æ¡n giáº£n (obfuscation)
+// Mã hóa / giải mã password đơn giản (obfuscation)
 function encodeSecret(plain) {
     if (!plain) return '';
     return Buffer.from(plain).toString('base64');
@@ -6917,25 +6921,25 @@ function maskString(str, showChars = 3) {
     return str.substring(0, showChars) + '***';
 }
 
-// Láº¥y cáº¥u hÃ¬nh MISA tá»« AppConfig
+// Lấy cấu hình MISA từ AppConfig
 async function getMisaConfig() {
     if (!prisma) throw new Error('Database not initialized');
     const configRecord = await prisma.appConfig.findUnique({ where: { key: 'misaConfig' } });
-    if (!configRecord?.value) throw new Error('ChÆ°a cáº¥u hÃ¬nh MISA meInvoice! VÃ o âš™ï¸ Cáº¥u hÃ¬nh Ä‘á»ƒ thiáº¿t láº­p.');
+    if (!configRecord?.value) throw new Error('Chưa cấu hình MISA meInvoice! Vào ⚙️ Cấu hình để thiết lập.');
     const config = JSON.parse(configRecord.value);
-    // Giáº£i mÃ£ password náº¿u Ä‘Ã£ mÃ£ hÃ³a
+    // Giải mã password nếu đã mã hóa
     if (config.password) {
         config.password = decodeSecret(config.password);
     }
     if (!config.appid || !config.taxcode || !config.username || !config.password) {
-        throw new Error('Cáº¥u hÃ¬nh MISA thiáº¿u thÃ´ng tin! Cáº§n: AppID, MST, Username, Password.');
+        throw new Error('Cấu hình MISA thiếu thông tin! Cần: AppID, MST, Username, Password.');
     }
     return config;
 }
 
-// Láº¥y token MISA (cÃ³ cache)
+// Lấy token MISA (có cache)
 async function getMisaToken() {
-    // Tráº£ vá» cached token náº¿u chÆ°a háº¿t háº¡n (trá»« 5 phÃºt buffer)
+    // Trả về cached token nếu chưa hết hạn (trừ 5 phút buffer)
     if (misaTokenCache.token && Date.now() < misaTokenCache.expiresAt - 300000) {
         return misaTokenCache.token;
     }
@@ -6943,16 +6947,16 @@ async function getMisaToken() {
     const config = await getMisaConfig();
     const baseUrl = 'https://api.meinvoice.vn';
 
-    // Trim táº¥t cáº£ field Ä‘á»ƒ loáº¡i bá» khoáº£ng tráº¯ng áº©n
+    // Trim tất cả field để loại bỏ khoảng trắng ẩn
     const appid = (config.appid || '').trim();
     const taxcode = (config.taxcode || '').trim();
     const username = (config.username || '').trim();
     const password = (config.password || '').trim();
 
-    console.log(`ðŸ”‘ MISA: Requesting token from ${baseUrl}...`);
-    console.log(`ðŸ”‘ MISA: AppID=${maskString(appid)}, TaxCode=${maskString(taxcode)}, User=${maskString(username)}, PassLen=${password.length}`);
+    console.log(`🔑 MISA: Requesting token from ${baseUrl}...`);
+    console.log(`🔑 MISA: AppID=${maskString(appid)}, TaxCode=${maskString(taxcode)}, User=${maskString(username)}, PassLen=${password.length}`);
 
-    // Thá»­ cáº£ 2 URL endpoint (v3 vÃ  integration)
+    // Thử cả 2 URL endpoint (v3 và integration)
     const tokenUrls = [
         `${baseUrl}/api/integration/auth/token`,
         `${baseUrl}/api/v3/auth/token`,
@@ -6962,7 +6966,7 @@ async function getMisaToken() {
     let lastResult = null;
 
     for (const tokenUrl of tokenUrls) {
-        console.log(`ðŸ”‘ MISA: Trying ${tokenUrl}...`);
+        console.log(`🔑 MISA: Trying ${tokenUrl}...`);
         let response;
         try {
             response = await fetch(tokenUrl, {
@@ -6976,90 +6980,90 @@ async function getMisaToken() {
                 }),
             });
         } catch (fetchErr) {
-            console.error(`âŒ MISA fetch error (${tokenUrl}):`, fetchErr.message);
+            console.error(`❌ MISA fetch error (${tokenUrl}):`, fetchErr.message);
             lastError = fetchErr.message;
             continue;
         }
 
         const responseText = await response.text();
-        console.log(`ðŸ”‘ MISA Response from ${tokenUrl} (${response.status}):`, responseText.substring(0, 800));
+        console.log(`🔑 MISA Response from ${tokenUrl} (${response.status}):`, responseText.substring(0, 800));
 
         let result;
         try {
             result = JSON.parse(responseText);
         } catch {
-            console.error(`âŒ MISA: Non-JSON response from ${tokenUrl}`);
-            lastError = `Response khÃ´ng há»£p lá»‡ (status ${response.status}): ${responseText.substring(0, 200)}`;
+            console.error(`❌ MISA: Non-JSON response from ${tokenUrl}`);
+            lastError = `Response không hợp lệ (status ${response.status}): ${responseText.substring(0, 200)}`;
             continue;
         }
 
-        // MISA API cÃ³ thá»ƒ tráº£ vá» Success hoáº·c success
+        // MISA API có thể trả về Success hoặc success
         const isSuccess = result.Success === true || result.success === true;
         const data = result.Data || result.data;
         const errorCode = result.ErrorCode || result.errorCode || '';
 
         if (isSuccess && data) {
-            // ThÃ nh cÃ´ng!
+            // Thành công!
             misaTokenCache = {
                 token: data,
-                expiresAt: Date.now() + 2 * 60 * 60 * 1000, // Cache 2 giá» (MISA token expire nhanh)
+                expiresAt: Date.now() + 2 * 60 * 60 * 1000, // Cache 2 giờ (MISA token expire nhanh)
             };
-            console.log(`âœ… MISA: Token obtained successfully from ${tokenUrl}`);
+            console.log(`✅ MISA: Token obtained successfully from ${tokenUrl}`);
             return data;
         }
 
-        // LÆ°u láº¡i lá»—i, thá»­ URL tiáº¿p theo
-        console.error(`âŒ MISA Auth Error from ${tokenUrl}:`, JSON.stringify(result, null, 2));
+        // Lưu lại lỗi, thử URL tiếp theo
+        console.error(`❌ MISA Auth Error from ${tokenUrl}:`, JSON.stringify(result, null, 2));
         lastResult = result;
         lastError = errorCode;
     }
 
-    // Cáº£ 2 URL Ä‘á»u tháº¥t báº¡i â€” phÃ¢n tÃ­ch lá»—i chi tiáº¿t
+    // Cả 2 URL đều thất bại — phân tích lỗi chi tiết
     const errorCode = lastError;
     const errors = lastResult?.Errors || lastResult?.errors || [];
     const errorsStr = Array.isArray(errors) ? errors.join(', ') : String(errors);
     const fullResponse = lastResult ? JSON.stringify(lastResult).substring(0, 400) : 'No response';
 
-    // Check Errors array trÆ°á»›c â€” MISA thÆ°á»ng ghi chi tiáº¿t lá»—i á»Ÿ Ä‘Ã¢y
+    // Check Errors array trước — MISA thường ghi chi tiết lỗi ở đây
     let errorMsg;
     if (errorsStr.includes('TaxCodeNotExist')) {
-        errorMsg = `âŒ MÃ£ sá»‘ thuáº¿ "${taxcode}" KHÃ”NG tá»“n táº¡i trÃªn MISA! Kiá»ƒm tra láº¡i MST hoáº·c Ä‘Äƒng kÃ½ MST trÃªn meinvoice.vn trÆ°á»›c.`;
+        errorMsg = `❌ Mã số thuế "${taxcode}" KHÔNG tồn tại trên MISA! Kiểm tra lại MST hoặc đăng ký MST trên meinvoice.vn trước.`;
     } else if (errorCode === 'InvalidAppID') {
-        errorMsg = `âŒ Sai AppID MISA! [${fullResponse}]`;
+        errorMsg = `❌ Sai AppID MISA! [${fullResponse}]`;
     } else if (errorCode === 'InactiveAppID') {
-        errorMsg = `âŒ AppID MISA Ä‘Ã£ bá»‹ khÃ³a! [${fullResponse}]`;
+        errorMsg = `❌ AppID MISA đã bị khóa! [${fullResponse}]`;
     } else if (errorCode === 'UnAuthorize') {
-        errorMsg = `âŒ Lá»—i xÃ¡c thá»±c MISA (UnAuthorize). Chi tiáº¿t: ${errorsStr || 'KhÃ´ng rÃµ'}. [User=${username}, TaxCode=${taxcode}]`;
+        errorMsg = `❌ Lỗi xác thực MISA (UnAuthorize). Chi tiết: ${errorsStr || 'Không rõ'}. [User=${username}, TaxCode=${taxcode}]`;
     } else {
-        errorMsg = `âŒ Lá»—i MISA: ${errorsStr || fullResponse}`;
+        errorMsg = `❌ Lỗi MISA: ${errorsStr || fullResponse}`;
     }
     throw new Error(errorMsg);
 }
 
-// XÃ³a token cache khi bá»‹ reject (Ä‘á»ƒ láº§n sau láº¥y token má»›i)
+// Xóa token cache khi bị reject (để lần sau lấy token mới)
 function invalidateMisaToken() {
     misaTokenCache = { token: null, expiresAt: 0 };
-    console.log('ðŸ”„ MISA: Token cache invalidated â€” sáº½ láº¥y token má»›i láº§n tá»›i');
+    console.log('🔄 MISA: Token cache invalidated — sẽ lấy token mới lần tới');
 }
 
-// Chuyá»ƒn sá»‘ thÃ nh chá»¯ tiáº¿ng Viá»‡t
+// Chuyển số thành chữ tiếng Việt
 function numberToVietnameseWords(num) {
-    if (num === 0) return 'KhÃ´ng Ä‘á»“ng.';
-    const units = ['', 'má»™t', 'hai', 'ba', 'bá»‘n', 'nÄƒm', 'sÃ¡u', 'báº£y', 'tÃ¡m', 'chÃ­n'];
-    const groups = ['', 'nghÃ¬n', 'triá»‡u', 'tá»·'];
+    if (num === 0) return 'Không đồng.';
+    const units = ['', 'một', 'hai', 'ba', 'bốn', 'năm', 'sáu', 'bảy', 'tám', 'chín'];
+    const groups = ['', 'nghìn', 'triệu', 'tỷ'];
 
     function readThreeDigits(n, showZeroHundred) {
         const h = Math.floor(n / 100);
         const t = Math.floor((n % 100) / 10);
         const u = n % 10;
         let result = '';
-        if (h > 0) result += units[h] + ' trÄƒm ';
-        else if (showZeroHundred) result += 'khÃ´ng trÄƒm ';
-        if (t > 1) result += units[t] + ' mÆ°Æ¡i ';
-        else if (t === 1) result += 'mÆ°á»i ';
-        else if (t === 0 && h > 0 && u > 0) result += 'láº» ';
-        if (u === 1 && t > 1) result += 'má»‘t';
-        else if (u === 5 && t > 0) result += 'lÄƒm';
+        if (h > 0) result += units[h] + ' trăm ';
+        else if (showZeroHundred) result += 'không trăm ';
+        if (t > 1) result += units[t] + ' mươi ';
+        else if (t === 1) result += 'mười ';
+        else if (t === 0 && h > 0 && u > 0) result += 'lẻ ';
+        if (u === 1 && t > 1) result += 'mốt';
+        else if (u === 5 && t > 0) result += 'lăm';
         else if (u > 0) result += units[u];
         return result.trim();
     }
@@ -7081,11 +7085,11 @@ function numberToVietnameseWords(num) {
     }
 
     result = result.trim();
-    result = result.charAt(0).toUpperCase() + result.slice(1) + ' Ä‘á»“ng.';
+    result = result.charAt(0).toUpperCase() + result.slice(1) + ' đồng.';
     return result;
 }
 
-// Build InvoiceData cho MISA API tá»« DB record
+// Build InvoiceData cho MISA API từ DB record
 function buildMisaInvoiceData(order, config) {
     let items = [];
     try { items = typeof order.items === 'string' ? JSON.parse(order.items) : order.items; } catch { items = []; }
@@ -7099,8 +7103,8 @@ function buildMisaInvoiceData(order, config) {
         LineNumber: idx + 1,
         SortOrder: idx + 1,
         ItemCode: item.sku || '',
-        ItemName: item.productName || 'HÃ ng hÃ³a',
-        UnitName: 'CÃ¡i',
+        ItemName: item.productName || 'Hàng hóa',
+        UnitName: 'Cái',
         Quantity: item.quantity || 1,
         UnitPrice: item.unitPrice || 0,
         DiscountRate: 0,
@@ -7131,14 +7135,14 @@ function buildMisaInvoiceData(order, config) {
         CurrencyCode: 'VND',
         ExchangeRate: 1.0,
         PaymentMethodName: config.paymentMethod || 'TM/CK',
-        // ThÃ´ng tin ngÆ°á»i mua
-        BuyerLegalName: order.customerName || 'NgÆ°á»i mua khÃ´ng láº¥y hÃ³a Ä‘Æ¡n',
+        // Thông tin người mua
+        BuyerLegalName: order.customerName || 'Người mua không lấy hóa đơn',
         BuyerTaxCode: '',
         BuyerAddress: '',
-        BuyerFullName: order.customerName || 'NgÆ°á»i mua khÃ´ng láº¥y hÃ³a Ä‘Æ¡n',
+        BuyerFullName: order.customerName || 'Người mua không lấy hóa đơn',
         BuyerPhoneNumber: order.customerPhone || '',
         BuyerEmail: '',
-        // Tá»•ng tiá»n
+        // Tổng tiền
         TotalSaleAmountOC: totalAmount,
         TotalSaleAmount: totalAmount,
         TotalDiscountAmountOC: 0,
@@ -7150,7 +7154,7 @@ function buildMisaInvoiceData(order, config) {
         TotalAmountOC: totalAmount,
         TotalAmount: totalAmount,
         TotalAmountInWords: numberToVietnameseWords(totalAmount),
-        // Chi tiáº¿t
+        // Chi tiết
         OriginalInvoiceDetail: invoiceDetails,
         TaxRateInfo: taxRateInfo,
         OptionUserDefined: {
@@ -7164,25 +7168,25 @@ function buildMisaInvoiceData(order, config) {
     };
 }
 
-// Gá»i MISA API phÃ¡t hÃ nh hÃ³a Ä‘Æ¡n â€” Theo tÃ i liá»‡u Má»¥c 6
+// Gọi MISA API phát hành hóa đơn — Theo tài liệu Mục 6
 // URL: {BaseURL}/invoice
-// SignType: 2 = HSM (kÃ½ sá»‘ tá»« xa), 5 = KhÃ´ng kÃ½ (MTT/VÃ©)
+// SignType: 2 = HSM (ký số từ xa), 5 = Không ký (MTT/Vé)
 async function publishMisaInvoice(invoiceDataList) {
     const config = await getMisaConfig();
     const token = await getMisaToken();
     const baseUrl = 'https://api.meinvoice.vn/api/integration';
 
-    // Body theo tÃ i liá»‡u Má»¥c 6: { SignType, InvoiceData, PublishInvoiceData }
+    // Body theo tài liệu Mục 6: { SignType, InvoiceData, PublishInvoiceData }
     const body = {
-        SignType: 2,  // 2=HSM kÃ½ sá»‘ tá»« xa, 5=KhÃ´ng kÃ½ (MTT)
+        SignType: 2,  // 2=HSM ký số từ xa, 5=Không ký (MTT)
         InvoiceData: invoiceDataList,
         PublishInvoiceData: null,
     };
 
-    console.log(`ðŸ“¤ MISA: Publishing ${invoiceDataList.length} invoice(s) to ${baseUrl}/invoice ...`);
-    console.log(`ðŸ“¤ MISA: SignType=${body.SignType}, Sample:`, JSON.stringify(invoiceDataList[0]).substring(0, 500));
+    console.log(`📤 MISA: Publishing ${invoiceDataList.length} invoice(s) to ${baseUrl}/invoice ...`);
+    console.log(`📤 MISA: SignType=${body.SignType}, Sample:`, JSON.stringify(invoiceDataList[0]).substring(0, 500));
 
-    // Helper: gá»i API publish 1 láº§n
+    // Helper: gọi API publish 1 lần
     async function doPublishRequest(authToken) {
         const response = await fetch(`${baseUrl}/invoice`, {
             method: 'POST',
@@ -7194,27 +7198,27 @@ async function publishMisaInvoice(invoiceDataList) {
         });
 
         const responseText = await response.text();
-        console.log(`ðŸ“¤ MISA Publish Response (${response.status}):`, responseText.substring(0, 800));
+        console.log(`📤 MISA Publish Response (${response.status}):`, responseText.substring(0, 800));
 
         let result;
         try {
             result = JSON.parse(responseText);
         } catch {
-            throw new Error(`MISA tráº£ vá» response khÃ´ng há»£p lá»‡ khi phÃ¡t hÃ nh (status ${response.status}): ${responseText.substring(0, 200)}`);
+            throw new Error(`MISA trả về response không hợp lệ khi phát hành (status ${response.status}): ${responseText.substring(0, 200)}`);
         }
         return { result, status: response.status };
     }
 
     let { result, status } = await doPublishRequest(token);
 
-    // Check success (MISA API tráº£ vá» success hoáº·c Success)
+    // Check success (MISA API trả về success hoặc Success)
     let isSuccess = result.Success === true || result.success === true;
 
-    // AUTO-RETRY: Náº¿u bá»‹ UnAuthorize hoáº·c HTTP 401 â†’ xÃ³a cache, láº¥y token má»›i, thá»­ láº¡i 1 láº§n
+    // AUTO-RETRY: Nếu bị UnAuthorize hoặc HTTP 401 → xóa cache, lấy token mới, thử lại 1 lần
     if (!isSuccess) {
         const errCode = result.ErrorCode || result.errorCode || '';
         if (errCode === 'UnAuthorize' || status === 401) {
-            console.log('ðŸ”„ MISA: Token expired â€” invalidating cache and retrying with fresh token...');
+            console.log('🔄 MISA: Token expired — invalidating cache and retrying with fresh token...');
             invalidateMisaToken();
             const newToken = await getMisaToken();
             const retry = await doPublishRequest(newToken);
@@ -7226,22 +7230,22 @@ async function publishMisaInvoice(invoiceDataList) {
     if (!isSuccess) {
         const errCode = result.ErrorCode || result.errorCode || '';
         const errDesc = result.descriptionErrorCode || result.Errors || '';
-        console.error('âŒ MISA Publish FULL Response:', JSON.stringify(result, null, 2));
-        throw new Error(`MISA Publish Error: ${errCode} â€” ${errDesc || JSON.stringify(result).substring(0, 300)}`);
+        console.error('❌ MISA Publish FULL Response:', JSON.stringify(result, null, 2));
+        throw new Error(`MISA Publish Error: ${errCode} — ${errDesc || JSON.stringify(result).substring(0, 300)}`);
     }
 
-    // Parse publishInvoiceResult (cÃ³ thá»ƒ lÃ  string JSON) â€” theo tÃ i liá»‡u Má»¥c 6
+    // Parse publishInvoiceResult (có thể là string JSON) — theo tài liệu Mục 6
     let publishResults = result.publishInvoiceResult;
     if (typeof publishResults === 'string') {
         try { publishResults = JSON.parse(publishResults); } catch { publishResults = []; }
     }
     if (!publishResults) publishResults = [];
 
-    console.log(`âœ… MISA: Published ${publishResults.length} invoice(s)`);
+    console.log(`✅ MISA: Published ${publishResults.length} invoice(s)`);
     return publishResults;
 }
 
-// Táº£i PDF hÃ³a Ä‘Æ¡n tá»« MISA â€” Theo tÃ i liá»‡u Má»¥c 8
+// Tải PDF hóa đơn từ MISA — Theo tài liệu Mục 8
 // URL: {BaseURL}/invoice/download?downloadDataType=2  (2=PDF)
 async function downloadMisaInvoicePDF(transactionId) {
     const config = await getMisaConfig();
@@ -7259,11 +7263,11 @@ async function downloadMisaInvoicePDF(transactionId) {
         });
 
         const responseText = await response.text();
-        console.log(`ðŸ“¥ MISA Download Response (${response.status}):`, responseText.substring(0, 300));
+        console.log(`📥 MISA Download Response (${response.status}):`, responseText.substring(0, 300));
 
         let result;
         try { result = JSON.parse(responseText); } catch {
-            throw new Error(`MISA download tráº£ vá» response khÃ´ng há»£p lá»‡ (status ${response.status})`);
+            throw new Error(`MISA download trả về response không hợp lệ (status ${response.status})`);
         }
         return { result, status: response.status };
     }
@@ -7271,11 +7275,11 @@ async function downloadMisaInvoicePDF(transactionId) {
     let { result, status } = await doDownloadRequest(token);
     let isSuccess = result.Success === true || result.success === true;
 
-    // AUTO-RETRY: token expired â†’ láº¥y má»›i vÃ  thá»­ láº¡i
+    // AUTO-RETRY: token expired → lấy mới và thử lại
     if (!isSuccess) {
         const errCode = result.ErrorCode || result.errorCode || '';
         if (errCode === 'UnAuthorize' || status === 401) {
-            console.log('ðŸ”„ MISA Download: Token expired â€” retrying with fresh token...');
+            console.log('🔄 MISA Download: Token expired — retrying with fresh token...');
             invalidateMisaToken();
             token = await getMisaToken();
             const retry = await doDownloadRequest(token);
@@ -7286,10 +7290,10 @@ async function downloadMisaInvoicePDF(transactionId) {
 
     const data = result.Data || result.data;
     if (!isSuccess || !data) {
-        throw new Error(`Lá»—i táº£i PDF: ${result.ErrorCode || result.errorCode || JSON.stringify(result).substring(0, 200)}`);
+        throw new Error(`Lỗi tải PDF: ${result.ErrorCode || result.errorCode || JSON.stringify(result).substring(0, 200)}`);
     }
 
-    // Data tráº£ vá» dáº¡ng: [{ TransactionID, Data (base64) }]
+    // Data trả về dạng: [{ TransactionID, Data (base64) }]
     if (Array.isArray(data) && data.length > 0) {
         return data[0].Data; // Base64 PDF string
     }
@@ -7305,8 +7309,8 @@ ipcMain.handle('misa:getConfig', async () => {
         if (!prisma) throw new Error('Database not initialized');
         const record = await prisma.appConfig.findUnique({ where: { key: 'misaConfig' } });
         const config = record?.value ? JSON.parse(record.value) : {};
-        // KhÃ´ng tráº£ password ra frontend
-        return { success: true, data: { ...config, password: '' } }; // KhÃ´ng tráº£ password, frontend tá»± hiá»‡n placeholder
+        // Không trả password ra frontend
+        return { success: true, data: { ...config, password: '' } }; // Không trả password, frontend tự hiện placeholder
     } catch (error) {
         return { success: false, error: error.message };
     }
@@ -7315,15 +7319,15 @@ ipcMain.handle('misa:getConfig', async () => {
 ipcMain.handle('misa:saveConfig', async (event, config) => {
     try {
         if (!prisma) throw new Error('Database not initialized');
-        // Náº¿u password rá»—ng hoáº·c lÃ  masked â†’ giá»¯ nguyÃªn password cÅ© (Ä‘Ã£ mÃ£ hÃ³a)
-        if (!config.password || config.password === 'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢') {
+        // Nếu password rỗng hoặc là masked → giữ nguyên password cũ (đã mã hóa)
+        if (!config.password || config.password === '••••••••') {
             const existing = await prisma.appConfig.findUnique({ where: { key: 'misaConfig' } });
             if (existing?.value) {
                 const old = JSON.parse(existing.value);
-                config.password = old.password; // Giá»¯ nguyÃªn password Ä‘Ã£ mÃ£ hÃ³a
+                config.password = old.password; // Giữ nguyên password đã mã hóa
             }
         } else {
-            // MÃ£ hÃ³a password má»›i trÆ°á»›c khi lÆ°u
+            // Mã hóa password mới trước khi lưu
             config.password = encodeSecret(config.password);
         }
         await prisma.appConfig.upsert({
@@ -7331,10 +7335,10 @@ ipcMain.handle('misa:saveConfig', async (event, config) => {
             update: { value: JSON.stringify(config) },
             create: { key: 'misaConfig', value: JSON.stringify(config) },
         });
-        // Clear token cache khi Ä‘á»•i config
+        // Clear token cache khi đổi config
         invalidateMisaToken();
-        console.log(`âœ… MISA config saved (password length: ${config.password?.length || 0})`);
-        void logActivity({ module: 'einvoice', action: 'UPDATE', description: 'Cáº­p nháº­t cáº¥u hÃ¬nh MISA meInvoice', userName: 'Admin' });
+        console.log(`✅ MISA config saved (password length: ${config.password?.length || 0})`);
+        void logActivity({ module: 'einvoice', action: 'UPDATE', description: 'Cập nhật cấu hình MISA meInvoice', userName: 'Admin' });
         return { success: true };
     } catch (error) {
         return { success: false, error: error.message };
@@ -7350,7 +7354,7 @@ ipcMain.handle('misa:testConnection', async () => {
     }
 });
 
-// Láº¥y danh sÃ¡ch máº«u HÄ â€” TÃ i liá»‡u Má»¥c 3
+// Lấy danh sách mẫu HĐ — Tài liệu Mục 3
 ipcMain.handle('misa:getTemplates', async () => {
     try {
         const config = await getMisaConfig();
@@ -7359,25 +7363,25 @@ ipcMain.handle('misa:getTemplates', async () => {
             ? 'https://api.meinvoice.vn/api/integration'
             : 'https://testapi.meinvoice.vn/api/integration';
 
-        // Thá»­ nhiá»u combinations Ä‘á»ƒ tÃ¬m táº¥t cáº£ máº«u HÄ
+        // Thử nhiều combinations để tìm tất cả mẫu HĐ
         const queries = [
             'invoiceWithCode=true&ticket=false',
             'invoiceWithCode=false&ticket=false',
             'ticket=true',
-            '', // KhÃ´ng filter
+            '', // Không filter
         ];
 
         let allTemplates = [];
         let lastResponse = '';
         for (const q of queries) {
             const url = q ? `${baseUrl}/invoice/templates?${q}` : `${baseUrl}/invoice/templates`;
-            console.log(`ðŸ“‹ MISA: Trying templates URL: ${url}`);
+            console.log(`📋 MISA: Trying templates URL: ${url}`);
             const response = await fetch(url, {
                 method: 'GET',
                 headers: { 'Authorization': `Bearer ${token}` },
             });
             const responseText = await response.text();
-            console.log(`ðŸ“‹ MISA Templates Response (${q}):`, responseText.substring(0, 500));
+            console.log(`📋 MISA Templates Response (${q}):`, responseText.substring(0, 500));
 
             let result;
             try { result = JSON.parse(responseText); } catch { continue; }
@@ -7385,7 +7389,7 @@ ipcMain.handle('misa:getTemplates', async () => {
             const isSuccess = result.Success === true || result.success === true;
             let data = result.Data || result.data;
 
-            // Data cÃ³ thá»ƒ lÃ  string JSON
+            // Data có thể là string JSON
             if (typeof data === 'string') {
                 try { data = JSON.parse(data); } catch { }
             }
@@ -7395,22 +7399,22 @@ ipcMain.handle('misa:getTemplates', async () => {
                     allTemplates = [...allTemplates, ...data];
                     break;
                 } else if (typeof data === 'object' && !Array.isArray(data)) {
-                    // CÃ³ thá»ƒ lÃ  object Ä‘Æ¡n
+                    // Có thể là object đơn
                     allTemplates.push(data);
                     break;
                 }
             }
-            // LÆ°u láº¡i response cuá»‘i Ä‘á»ƒ debug
+            // Lưu lại response cuối để debug
             lastResponse = responseText.substring(0, 400);
         }
 
-        // Loáº¡i bá» trÃ¹ng
+        // Loại bỏ trùng
         const uniqueMap = new Map();
         allTemplates.forEach(t => uniqueMap.set(t.InvSeries || t.invSeries, t));
         const unique = Array.from(uniqueMap.values());
 
         if (unique.length === 0) {
-            return { success: false, error: `KhÃ´ng tÃ¬m tháº¥y máº«u HÄ. MISA Response: ${lastResponse || 'Empty'}` };
+            return { success: false, error: `Không tìm thấy mẫu HĐ. MISA Response: ${lastResponse || 'Empty'}` };
         }
         return { success: true, data: unique };
     } catch (error) {
@@ -7418,7 +7422,7 @@ ipcMain.handle('misa:getTemplates', async () => {
     }
 });
 
-// Xem nhÃ¡p HÄ (unpublishview) â€” TÃ i liá»‡u Má»¥c 4 â€” KHÃ”NG phÃ¡t hÃ nh, chá»‰ xem
+// Xem nháp HĐ (unpublishview) — Tài liệu Mục 4 — KHÔNG phát hành, chỉ xem
 ipcMain.handle('misa:previewInvoice', async (event, invoiceData) => {
     try {
         const config = await getMisaConfig();
@@ -7426,7 +7430,7 @@ ipcMain.handle('misa:previewInvoice', async (event, invoiceData) => {
         const baseUrl = config.env === 'live'
             ? 'https://api.meinvoice.vn/api/integration'
             : 'https://testapi.meinvoice.vn/api/integration';
-        console.log('ðŸ‘€ MISA Preview: Sending unpublishview...', JSON.stringify(invoiceData).substring(0, 500));
+        console.log('👀 MISA Preview: Sending unpublishview...', JSON.stringify(invoiceData).substring(0, 500));
         const response = await fetch(`${baseUrl}/invoice/unpublishview`, {
             method: 'POST',
             headers: {
@@ -7436,19 +7440,19 @@ ipcMain.handle('misa:previewInvoice', async (event, invoiceData) => {
             body: JSON.stringify(invoiceData),
         });
         const responseText = await response.text();
-        console.log('ðŸ‘€ MISA Preview Response:', responseText.substring(0, 500));
+        console.log('👀 MISA Preview Response:', responseText.substring(0, 500));
         let result;
         try { result = JSON.parse(responseText); } catch {
-            throw new Error(`MISA preview tráº£ vá» response khÃ´ng há»£p lá»‡ (status ${response.status})`);
+            throw new Error(`MISA preview trả về response không hợp lệ (status ${response.status})`);
         }
         const isSuccess = result.Success === true || result.success === true;
         const data = result.Data || result.data;
         if (!isSuccess || !data) {
             const errCode = result.ErrorCode || result.errorCode || '';
             const errors = result.Errors || result.errors || [];
-            throw new Error(`Lá»—i xem nhÃ¡p: ${errCode} â€” ${Array.isArray(errors) ? errors.join(', ') : errors || JSON.stringify(result).substring(0, 300)}`);
+            throw new Error(`Lỗi xem nháp: ${errCode} — ${Array.isArray(errors) ? errors.join(', ') : errors || JSON.stringify(result).substring(0, 300)}`);
         }
-        return { success: true, data: data }; // data = link xem HÄ
+        return { success: true, data: data }; // data = link xem HĐ
     } catch (error) {
         return { success: false, error: error.message };
     }
@@ -7457,15 +7461,15 @@ ipcMain.handle('misa:previewInvoice', async (event, invoiceData) => {
 ipcMain.handle('misa:downloadPDF', async (event, transactionId) => {
     try {
         const base64PDF = await downloadMisaInvoicePDF(transactionId);
-        // Cho user chá»n nÆ¡i lÆ°u
+        // Cho user chọn nơi lưu
         const result = await dialog.showSaveDialog({
-            title: 'LÆ°u hÃ³a Ä‘Æ¡n PDF',
+            title: 'Lưu hóa đơn PDF',
             defaultPath: `HoaDon_${transactionId}.pdf`,
             filters: [{ name: 'PDF', extensions: ['pdf'] }],
         });
-        if (result.canceled || !result.filePath) return { success: false, error: 'ÄÃ£ há»§y' };
+        if (result.canceled || !result.filePath) return { success: false, error: 'Đã hủy' };
         fs.writeFileSync(result.filePath, Buffer.from(base64PDF, 'base64'));
-        console.log(`âœ… PDF saved: ${result.filePath}`);
+        console.log(`✅ PDF saved: ${result.filePath}`);
         return { success: true, data: { filePath: result.filePath } };
     } catch (error) {
         return { success: false, error: error.message };
@@ -7473,10 +7477,10 @@ ipcMain.handle('misa:downloadPDF', async (event, transactionId) => {
 });
 
 // ========================================
-// E-INVOICE / HÃ“A ÄÆ N ÄIá»†N Tá»¬ (HÄÄT)
+// E-INVOICE / HÓA ĐƠN ĐIỆN TỬ (HĐĐT)
 // ========================================
 
-// Láº¥y táº¥t cáº£ Ä‘Æ¡n HÄÄT
+// Lấy tất cả đơn HĐĐT
 ipcMain.handle('einvoice:getAll', async () => {
     try {
         if (!prisma) throw new Error('Database not initialized');
@@ -7489,25 +7493,25 @@ ipcMain.handle('einvoice:getAll', async () => {
             invoiceDate: r.invoiceDate ? r.invoiceDate.toISOString() : null,
             createdAt: r.createdAt.toISOString(),
         }));
-        console.log(`âœ… Loaded ${records.length} einvoice records`);
+        console.log(`✅ Loaded ${records.length} einvoice records`);
         return { success: true, data: formatted };
     } catch (error) {
-        console.error('âŒ einvoice:getAll error:', error.message);
+        console.error('❌ einvoice:getAll error:', error.message);
         return { success: false, error: error.message };
     }
 });
 
-// Import hÃ ng loáº¡t â€” chá»‘ng trÃ¹ng orderId á»Ÿ táº§ng DB
+// Import hàng loạt — chống trùng orderId ở tầng DB
 ipcMain.handle('einvoice:bulkImport', async (event, orders) => {
     try {
         if (!prisma) throw new Error('Database not initialized');
         if (!Array.isArray(orders) || orders.length === 0) {
-            return { success: false, error: 'KhÃ´ng cÃ³ Ä‘Æ¡n hÃ ng Ä‘á»ƒ import' };
+            return { success: false, error: 'Không có đơn hàng để import' };
         }
 
         const isTMDT = (platform) => ['Shopee', 'TikTok', 'Lazada', 'Sendo'].includes(platform);
 
-        // Chuáº©n bá»‹ data batch
+        // Chuẩn bị data batch
         const dataForInsert = orders.map(order => ({
             orderId: order.orderId,
             platform: order.platform,
@@ -7525,21 +7529,21 @@ ipcMain.handle('einvoice:bulkImport', async (event, orders) => {
             status: 'pending',
         }));
 
-        // ðŸš€ Batch insert â€” 1 query duy nháº¥t thay vÃ¬ N queries
+        // 🚀 Batch insert — 1 query duy nhất thay vì N queries
         const result = await prisma.eInvoice.createMany({
             data: dataForInsert,
-            skipDuplicates: true, // Tá»± Ä‘á»™ng bá» qua orderId trÃ¹ng
+            skipDuplicates: true, // Tự động bỏ qua orderId trùng
         });
 
         const imported = result.count;
         const duplicated = orders.length - imported;
 
-        console.log(`âœ… EInvoice import: ${imported} new, ${duplicated} duplicates skipped (batch insert)`);
+        console.log(`✅ EInvoice import: ${imported} new, ${duplicated} duplicates skipped (batch insert)`);
 
         void logActivity({
             module: 'einvoice',
             action: 'CREATE',
-            description: `Import ${imported} Ä‘Æ¡n HÄÄT${duplicated > 0 ? `, bá» qua ${duplicated} Ä‘Æ¡n trÃ¹ng` : ''} (batch)`,
+            description: `Import ${imported} đơn HĐĐT${duplicated > 0 ? `, bỏ qua ${duplicated} đơn trùng` : ''} (batch)`,
             userName: 'System',
         });
 
@@ -7548,36 +7552,36 @@ ipcMain.handle('einvoice:bulkImport', async (event, orders) => {
             data: { imported, duplicated, duplicateIds: [] },
         };
     } catch (error) {
-        console.error('âŒ einvoice:bulkImport error:', error.message);
+        console.error('❌ einvoice:bulkImport error:', error.message);
         return { success: false, error: error.message };
     }
 });
 
-// Xem nhÃ¡p HÄ tá»« Ä‘Æ¡n hÃ ng tháº­t â€” gá»i unpublishview, KHÃ”NG phÃ¡t hÃ nh
+// Xem nháp HĐ từ đơn hàng thật — gọi unpublishview, KHÔNG phát hành
 ipcMain.handle('einvoice:previewDraft', async (event, orderId) => {
     try {
         if (!prisma) throw new Error('Database not initialized');
         const misaConfig = await getMisaConfig();
         const token = await getMisaToken();
 
-        // Láº¥y Ä‘Æ¡n hÃ ng tá»« DB
+        // Lấy đơn hàng từ DB
         const order = await prisma.eInvoice.findFirst({ where: { orderId } });
-        if (!order) throw new Error(`KhÃ´ng tÃ¬m tháº¥y Ä‘Æ¡n ${orderId}`);
+        if (!order) throw new Error(`Không tìm thấy đơn ${orderId}`);
 
-        // Build data HÄ giá»‘ng khi xuáº¥t tháº­t
+        // Build data HĐ giống khi xuất thật
         let customerName = order.customerName;
         if (!customerName || customerName.trim() === '' || customerName === '***') {
-            customerName = 'NgÆ°á»i mua khÃ´ng láº¥y hÃ³a Ä‘Æ¡n';
+            customerName = 'Người mua không lấy hóa đơn';
         }
         const invoiceData = buildMisaInvoiceData({ ...order, customerName }, misaConfig);
         delete invoiceData._refId;
 
-        // Gá»i unpublishview
+        // Gọi unpublishview
         const baseUrl = misaConfig.env === 'live'
             ? 'https://api.meinvoice.vn/api/integration'
             : 'https://testapi.meinvoice.vn/api/integration';
 
-        console.log('ðŸ‘€ Preview Draft:', JSON.stringify(invoiceData).substring(0, 500));
+        console.log('👀 Preview Draft:', JSON.stringify(invoiceData).substring(0, 500));
 
         const response = await fetch(`${baseUrl}/invoice/unpublishview`, {
             method: 'POST',
@@ -7589,7 +7593,7 @@ ipcMain.handle('einvoice:previewDraft', async (event, orderId) => {
         });
 
         const responseText = await response.text();
-        console.log('ðŸ‘€ Preview Response:', responseText.substring(0, 500));
+        console.log('👀 Preview Response:', responseText.substring(0, 500));
 
         let result;
         try { result = JSON.parse(responseText); } catch {
@@ -7601,24 +7605,24 @@ ipcMain.handle('einvoice:previewDraft', async (event, orderId) => {
         if (!isSuccess || !data) {
             const errCode = result.ErrorCode || result.errorCode || '';
             const errors = result.Errors || result.errors || [];
-            throw new Error(`Lá»—i nhÃ¡p: ${errCode} â€” ${Array.isArray(errors) ? errors.join(', ') : JSON.stringify(result).substring(0, 300)}`);
+            throw new Error(`Lỗi nháp: ${errCode} — ${Array.isArray(errors) ? errors.join(', ') : JSON.stringify(result).substring(0, 300)}`);
         }
 
-        return { success: true, data: data }; // data = link xem HÄ
+        return { success: true, data: data }; // data = link xem HĐ
     } catch (error) {
         return { success: false, error: error.message };
     }
 });
 
-// Xuáº¥t HÄÄT â€” gá»i MISA meInvoice API tháº­t (SignType=2 â€” HSM kÃ½ tá»± Ä‘á»™ng)
+// Xuất HĐĐT — gọi MISA meInvoice API thật (SignType=2 — HSM ký tự động)
 ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
     try {
         if (!prisma) throw new Error('Database not initialized');
         if (!Array.isArray(orderIds) || orderIds.length === 0) {
-            return { success: false, error: 'KhÃ´ng cÃ³ Ä‘Æ¡n nÃ o Ä‘á»ƒ xuáº¥t' };
+            return { success: false, error: 'Không có đơn nào để xuất' };
         }
 
-        // Kiá»ƒm tra config MISA trÆ°á»›c
+        // Kiểm tra config MISA trước
         let misaConfig;
         try {
             misaConfig = await getMisaConfig();
@@ -7626,7 +7630,7 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
             return { success: false, error: configErr.message };
         }
 
-        // Chá»‰ láº¥y Ä‘Æ¡n PENDING â€” tuyá»‡t Ä‘á»‘i khÃ´ng xuáº¥t láº¡i
+        // Chỉ lấy đơn PENDING — tuyệt đối không xuất lại
         const pendingOrders = await prisma.eInvoice.findMany({
             where: {
                 orderId: { in: orderIds },
@@ -7635,20 +7639,20 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
         });
 
         if (pendingOrders.length === 0) {
-            return { success: false, error: 'Táº¥t cáº£ Ä‘Æ¡n Ä‘Ã£ Ä‘Æ°á»£c xuáº¥t HÄÄT trÆ°á»›c Ä‘Ã³!' };
+            return { success: false, error: 'Tất cả đơn đã được xuất HĐĐT trước đó!' };
         }
 
         const batchId = `BATCH-${Date.now()}`;
         const issuedOrders = [];
         const errorLog = [];
 
-        // Xuáº¥t tá»«ng Ä‘Æ¡n qua MISA API (1 Ä‘Æ¡n = 1 API call Ä‘á»ƒ dá»… track lá»—i)
+        // Xuất từng đơn qua MISA API (1 đơn = 1 API call để dễ track lỗi)
         for (const order of pendingOrders) {
             try {
                 // Validate data
                 let customerName = order.customerName;
                 if (!customerName || customerName.trim() === '' || customerName === '***') {
-                    customerName = 'NgÆ°á»i mua khÃ´ng láº¥y hÃ³a Ä‘Æ¡n';
+                    customerName = 'Người mua không lấy hóa đơn';
                     await prisma.eInvoice.update({
                         where: { id: order.id },
                         data: { customerName }
@@ -7660,23 +7664,23 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
                 // Build MISA InvoiceData
                 const invoiceData = buildMisaInvoiceData(orderForBuild, misaConfig);
                 const refId = invoiceData._refId;
-                delete invoiceData._refId; // XÃ³a field internal trÆ°á»›c khi gá»­i MISA
+                delete invoiceData._refId; // Xóa field internal trước khi gửi MISA
 
-                // Gá»i MISA API phÃ¡t hÃ nh (SignType=2)
+                // Gọi MISA API phát hành (SignType=2)
                 const publishResults = await publishMisaInvoice([invoiceData]);
 
                 if (!publishResults || publishResults.length === 0) {
-                    throw new Error('MISA khÃ´ng tráº£ vá» káº¿t quáº£ phÃ¡t hÃ nh');
+                    throw new Error('MISA không trả về kết quả phát hành');
                 }
 
                 const misaResult = publishResults[0];
 
-                // Kiá»ƒm tra lá»—i tá»« MISA cho tá»«ng HÄ
+                // Kiểm tra lỗi từ MISA cho từng HĐ
                 if (misaResult.ErrorCode && misaResult.ErrorCode !== '') {
                     throw new Error(`MISA: ${misaResult.ErrorCode}`);
                 }
 
-                // ThÃ nh cÃ´ng â€” cáº­p nháº­t DB vá»›i dá»¯ liá»‡u tháº­t tá»« MISA
+                // Thành công — cập nhật DB với dữ liệu thật từ MISA
                 await prisma.eInvoice.update({
                     where: { id: order.id },
                     data: {
@@ -7700,9 +7704,9 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
                     refId,
                 });
 
-                console.log(`âœ… MISA issued: ${order.orderId} â†’ HÄ sá»‘ ${invoiceNumber} | MÃ£: ${transactionId}`);
+                console.log(`✅ MISA issued: ${order.orderId} → HĐ số ${invoiceNumber} | Mã: ${transactionId}`);
 
-                // Backup PDF lÃªn Google Drive & Telegram (cháº¡y ngáº§m)
+                // Backup PDF lên Google Drive & Telegram (chạy ngầm)
                 (async () => {
                     try {
                         const pdfBase64 = await downloadMisaInvoicePDF(transactionId);
@@ -7710,20 +7714,20 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
                         const pdfPath = path.join(os.tmpdir(), `HD_${invoiceNumber}_${transactionId}.pdf`);
                         fs.writeFileSync(pdfPath, pdfBuffer);
 
-                        // LÆ°u path PDF vÃ o DB
+                        // Lưu path PDF vào DB
                         await prisma.eInvoice.update({
                             where: { id: order.id },
                             data: { pdfFilePath: pdfPath }
                         });
 
-                        console.log(`ðŸ“„ PDF saved: ${pdfPath}`);
+                        console.log(`📄 PDF saved: ${pdfPath}`);
                     } catch (backupErr) {
-                        console.error(`âš ï¸ Backup PDF for ${invoiceNumber} failed:`, backupErr.message);
+                        console.error(`⚠️ Backup PDF for ${invoiceNumber} failed:`, backupErr.message);
                     }
                 })();
 
             } catch (orderErr) {
-                console.error(`âŒ MISA issue error for ${order.orderId}:`, orderErr.message);
+                console.error(`❌ MISA issue error for ${order.orderId}:`, orderErr.message);
                 errorLog.push({
                     orderId: order.orderId,
                     error: orderErr.message,
@@ -7733,7 +7737,7 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
                 void logActivity({
                     module: 'einvoice',
                     action: 'ERROR',
-                    description: `Lá»—i xuáº¥t HÄÄT MISA cho Ä‘Æ¡n ${order.orderId}: ${orderErr.message}`,
+                    description: `Lỗi xuất HĐĐT MISA cho đơn ${order.orderId}: ${orderErr.message}`,
                     recordId: order.id,
                     severity: 'ERROR',
                     userName: 'System',
@@ -7743,30 +7747,30 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
 
         const skippedCount = orderIds.length - pendingOrders.length;
 
-        console.log(`âœ… MISA Issued ${issuedOrders.length} einvoices (skipped ${skippedCount} already issued, ${errorLog.length} errors)`);
+        console.log(`✅ MISA Issued ${issuedOrders.length} einvoices (skipped ${skippedCount} already issued, ${errorLog.length} errors)`);
 
-        // Gá»­i tÃ³m táº¯t batch lÃªn Telegram
+        // Gửi tóm tắt batch lên Telegram
         if (issuedOrders.length > 0) {
             const totalAmount = pendingOrders
                 .filter(o => issuedOrders.some(i => i.orderId === o.orderId))
                 .reduce((s, o) => s + (o.totalAmount || 0), 0);
-            const summaryMsg = `ðŸ“Š <b>BATCH XUáº¤T HÄÄT (MISA)</b>\n` +
-                `â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n` +
-                `ðŸ§¾ Sá»‘ HÄ: ${issuedOrders.length}\n` +
-                `ðŸ’° Tá»•ng: ${totalAmount.toLocaleString('vi-VN')}Ä‘\n` +
-                `ðŸ“‹ Batch: ${batchId}\n` +
-                `ðŸ”‘ KÃ½ sá»‘: HSM (SignType=2)\n` +
-                `ðŸ“… ${new Date().toLocaleDateString('vi-VN')} ${new Date().toLocaleTimeString('vi-VN')}\n` +
-                (skippedCount > 0 ? `âš ï¸ Bá» qua: ${skippedCount} Ä‘Æ¡n Ä‘Ã£ xuáº¥t\n` : '') +
-                (errorLog.length > 0 ? `âŒ Lá»—i: ${errorLog.length} Ä‘Æ¡n\n` : '') +
-                `â”â”â”â”â”â”â”â”â”â”â”â”â”â”`;
+            const summaryMsg = `📊 <b>BATCH XUẤT HĐĐT (MISA)</b>\n` +
+                `━━━━━━━━━━━━━━\n` +
+                `🧾 Số HĐ: ${issuedOrders.length}\n` +
+                `💰 Tổng: ${totalAmount.toLocaleString('vi-VN')}đ\n` +
+                `📋 Batch: ${batchId}\n` +
+                `🔑 Ký số: HSM (SignType=2)\n` +
+                `📅 ${new Date().toLocaleDateString('vi-VN')} ${new Date().toLocaleTimeString('vi-VN')}\n` +
+                (skippedCount > 0 ? `⚠️ Bỏ qua: ${skippedCount} đơn đã xuất\n` : '') +
+                (errorLog.length > 0 ? `❌ Lỗi: ${errorLog.length} đơn\n` : '') +
+                `━━━━━━━━━━━━━━`;
             sendTelegramMessage(summaryMsg).catch(err => console.error('Telegram summary error:', err));
         }
 
         void logActivity({
             module: 'einvoice',
             action: 'UPDATE',
-            description: `MISA: Xuáº¥t ${issuedOrders.length} HÄÄT tháº­t (batch: ${batchId}, HSM kÃ½ sá»‘)${skippedCount > 0 ? ` â€” Bá» qua ${skippedCount} Ä‘Æ¡n Ä‘Ã£ xuáº¥t` : ''}${errorLog.length > 0 ? ` â€” ${errorLog.length} Ä‘Æ¡n lá»—i` : ''}`,
+            description: `MISA: Xuất ${issuedOrders.length} HĐĐT thật (batch: ${batchId}, HSM ký số)${skippedCount > 0 ? ` — Bỏ qua ${skippedCount} đơn đã xuất` : ''}${errorLog.length > 0 ? ` — ${errorLog.length} đơn lỗi` : ''}`,
             userName: 'System',
         });
 
@@ -7782,17 +7786,17 @@ ipcMain.handle('einvoice:issueInvoices', async (event, orderIds) => {
             },
         };
     } catch (error) {
-        console.error('âŒ einvoice:issueInvoices error:', error.message);
+        console.error('❌ einvoice:issueInvoices error:', error.message);
         return { success: false, error: error.message };
     }
 });
 
-// Thá»‘ng kÃª
+// Thống kê
 ipcMain.handle('einvoice:getStats', async () => {
     try {
         if (!prisma) throw new Error('Database not initialized');
 
-        // ðŸš€ Gá»™p thÃ nh 2 queries thay vÃ¬ 5 + ÃP Dá»¤NG Bá»˜ Lá»ŒC 3 NGÃ€Y CHá»NG Äáº¾M TRÃ€N RÃC (842 bills cÅ©)
+        // 🚀 Gộp thành 2 queries thay vì 5 + ÁP DỤNG BỘ LỌC 3 NGÀY CHỐNG ĐẾM TRÀN RÁC (842 bills cũ)
         const dateThreshold = new Date();
         dateThreshold.setDate(dateThreshold.getDate() - 3);
 
@@ -7834,7 +7838,7 @@ ipcMain.handle('einvoice:getStats', async () => {
     }
 });
 
-// Xuáº¥t Excel bÃ¡o cÃ¡o
+// Xuất Excel báo cáo
 ipcMain.handle('einvoice:exportExcel', async (event, filters) => {
     try {
         if (!prisma) throw new Error('Database not initialized');
@@ -7849,29 +7853,29 @@ ipcMain.handle('einvoice:exportExcel', async (event, filters) => {
         });
 
         if (records.length === 0) {
-            return { success: false, error: 'KhÃ´ng cÃ³ dá»¯ liá»‡u Ä‘á»ƒ xuáº¥t' };
+            return { success: false, error: 'Không có dữ liệu để xuất' };
         }
 
-        // Táº¡o data cho Excel
+        // Tạo data cho Excel
         const excelData = records.map((r, idx) => {
             let items = [];
             try { items = JSON.parse(r.items); } catch { }
 
             return {
                 'STT': idx + 1,
-                'SÃ n': r.platform,
-                'MÃ£ Ä‘Æ¡n hÃ ng': r.orderId,
-                'KhÃ¡ch hÃ ng': r.customerName,
-                'SÄT': r.customerPhone || '',
-                'Sáº£n pháº©m': items.map(i => `${i.productName} x${i.quantity}`).join('; '),
-                'Tá»•ng SL': r.totalQuantity,
-                'ThÃ nh tiá»n': r.totalAmount,
-                'NgÃ y giao': r.deliveryDate ? new Date(r.deliveryDate).toLocaleDateString('vi-VN') : '',
-                'Sá»‘ HÄÄT': r.invoiceNumber || '',
-                'NgÃ y xuáº¥t HÄ': r.invoiceDate ? new Date(r.invoiceDate).toLocaleDateString('vi-VN') : '',
-                'MÃ£ tra cá»©u': r.taxCode || '',
-                'Tráº¡ng thÃ¡i': r.status === 'issued' ? 'ÄÃ£ xuáº¥t' : 'ChÆ°a xuáº¥t',
-                'File gá»‘c': r.sourceFile || '',
+                'Sàn': r.platform,
+                'Mã đơn hàng': r.orderId,
+                'Khách hàng': r.customerName,
+                'SĐT': r.customerPhone || '',
+                'Sản phẩm': items.map(i => `${i.productName} x${i.quantity}`).join('; '),
+                'Tổng SL': r.totalQuantity,
+                'Thành tiền': r.totalAmount,
+                'Ngày giao': r.deliveryDate ? new Date(r.deliveryDate).toLocaleDateString('vi-VN') : '',
+                'Số HĐĐT': r.invoiceNumber || '',
+                'Ngày xuất HĐ': r.invoiceDate ? new Date(r.invoiceDate).toLocaleDateString('vi-VN') : '',
+                'Mã tra cứu': r.taxCode || '',
+                'Trạng thái': r.status === 'issued' ? 'Đã xuất' : 'Chưa xuất',
+                'File gốc': r.sourceFile || '',
             };
         });
 
@@ -7880,48 +7884,48 @@ ipcMain.handle('einvoice:exportExcel', async (event, filters) => {
         // Set column widths
         ws['!cols'] = [
             { wch: 5 },  // STT
-            { wch: 10 }, // SÃ n
-            { wch: 25 }, // MÃ£ Ä‘Æ¡n
-            { wch: 20 }, // KhÃ¡ch hÃ ng
-            { wch: 15 }, // SÄT
-            { wch: 50 }, // Sáº£n pháº©m
-            { wch: 8 },  // Tá»•ng SL
-            { wch: 15 }, // ThÃ nh tiá»n
-            { wch: 12 }, // NgÃ y giao
-            { wch: 15 }, // Sá»‘ HÄÄT
-            { wch: 12 }, // NgÃ y xuáº¥t
-            { wch: 18 }, // MÃ£ tra cá»©u
-            { wch: 12 }, // Tráº¡ng thÃ¡i
-            { wch: 30 }, // File gá»‘c
+            { wch: 10 }, // Sàn
+            { wch: 25 }, // Mã đơn
+            { wch: 20 }, // Khách hàng
+            { wch: 15 }, // SĐT
+            { wch: 50 }, // Sản phẩm
+            { wch: 8 },  // Tổng SL
+            { wch: 15 }, // Thành tiền
+            { wch: 12 }, // Ngày giao
+            { wch: 15 }, // Số HĐĐT
+            { wch: 12 }, // Ngày xuất
+            { wch: 18 }, // Mã tra cứu
+            { wch: 12 }, // Trạng thái
+            { wch: 30 }, // File gốc
         ];
 
         const wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, ws, 'HÄÄT');
+        XLSX.utils.book_append_sheet(wb, ws, 'HĐĐT');
 
         // Show save dialog
         const result = await dialog.showSaveDialog({
-            title: 'Xuáº¥t bÃ¡o cÃ¡o HÄÄT',
+            title: 'Xuất báo cáo HĐĐT',
             defaultPath: `BaoCao_HDDT_${new Date().toISOString().slice(0, 10)}.xlsx`,
             filters: [{ name: 'Excel', extensions: ['xlsx'] }],
         });
 
         if (result.canceled || !result.filePath) {
-            return { success: false, error: 'ÄÃ£ há»§y xuáº¥t file' };
+            return { success: false, error: 'Đã hủy xuất file' };
         }
 
         XLSX.writeFile(wb, result.filePath);
-        console.log(`âœ… Exported ${records.length} einvoice records to ${result.filePath}`);
+        console.log(`✅ Exported ${records.length} einvoice records to ${result.filePath}`);
 
         void logActivity({
             module: 'einvoice',
             action: 'EXPORT',
-            description: `Xuáº¥t bÃ¡o cÃ¡o HÄÄT: ${records.length} dÃ²ng â†’ ${path.basename(result.filePath)}`,
+            description: `Xuất báo cáo HĐĐT: ${records.length} dòng → ${path.basename(result.filePath)}`,
             userName: 'System',
         });
 
         return { success: true, data: { filePath: result.filePath, count: records.length } };
     } catch (error) {
-        console.error('âŒ einvoice:exportExcel error:', error.message);
+        console.error('❌ einvoice:exportExcel error:', error.message);
         return { success: false, error: error.message };
     }
 });
@@ -7931,7 +7935,7 @@ ipcMain.handle('einvoice:delete', async (event, id) => {
         requireRole('admin');
         if (!prisma) throw new Error('Database not initialized');
         await prisma.eInvoice.delete({ where: { id: parseInt(id) } });
-        console.log(`âœ… Deleted einvoice #${id}`);
+        console.log(`✅ Deleted einvoice #${id}`);
         return { success: true };
     } catch (error) {
         return { success: false, error: error.message };
@@ -7943,45 +7947,45 @@ ipcMain.handle('einvoice:bulkDelete', async (event, orderIds) => {
         requireRole('admin');
         if (!prisma) throw new Error('Database not initialized');
         if (!Array.isArray(orderIds) || orderIds.length === 0) {
-            return { success: false, error: 'KhÃ´ng cÃ³ Ä‘Æ¡n Ä‘á»ƒ xÃ³a' };
+            return { success: false, error: 'Không có đơn để xóa' };
         }
         const result = await prisma.eInvoice.deleteMany({
             where: { orderId: { in: orderIds } }
         });
-        console.log(`âœ… Bulk deleted ${result.count} einvoice records`);
+        console.log(`✅ Bulk deleted ${result.count} einvoice records`);
         void logActivity({
             module: 'einvoice', action: 'DELETE',
-            description: `XÃ³a hÃ ng loáº¡t ${result.count} Ä‘Æ¡n HÄÄT`,
+            description: `Xóa hàng loạt ${result.count} đơn HĐĐT`,
             userName: 'Admin',
         });
         return { success: true, data: { deleted: result.count } };
     } catch (error) {
-        console.error('âŒ einvoice:bulkDelete error:', error.message);
+        console.error('❌ einvoice:bulkDelete error:', error.message);
         return { success: false, error: error.message };
     }
 });
 
-// âš ï¸ TEST ONLY â€” XÃ³a toÃ n bá»™ HÄÄT (sáº½ táº¯t sau khi test xong)
+// ⚠️ TEST ONLY — Xóa toàn bộ HĐĐT (sẽ tắt sau khi test xong)
 ipcMain.handle('einvoice:deleteAll', async () => {
     try {
         requireRole('admin');
         if (!prisma) throw new Error('Database not initialized');
         const result = await prisma.eInvoice.deleteMany({});
-        console.log(`âš ï¸ DELETED ALL ${result.count} einvoice records`);
+        console.log(`⚠️ DELETED ALL ${result.count} einvoice records`);
         void logActivity({
             module: 'einvoice', action: 'DELETE',
-            description: `âš ï¸ XÃ“A Táº¤T Cáº¢ ${result.count} Ä‘Æ¡n HÄÄT (TEST MODE)`,
+            description: `⚠️ XÓA TẤT CẢ ${result.count} đơn HĐĐT (TEST MODE)`,
             userName: 'Admin',
         });
         return { success: true, data: { deleted: result.count } };
     } catch (error) {
-        console.error('âŒ einvoice:deleteAll error:', error.message);
+        console.error('❌ einvoice:deleteAll error:', error.message);
         return { success: false, error: error.message };
     }
 });
 
 // ============================================================
-// TASK 1: Truy xuáº¥t HÄ gá»‘c
+// TASK 1: Truy xuất HĐ gốc
 // ============================================================
 ipcMain.handle('einvoice:getOriginalInvoice', async (event, orderId) => {
     try {
@@ -7990,7 +7994,7 @@ ipcMain.handle('einvoice:getOriginalInvoice', async (event, orderId) => {
             where: { orderId, status: 'issued' },
         });
         if (!invoice) {
-            return { success: false, error: `ÄÆ¡n ${orderId} chÆ°a cÃ³ HÄÄT â€” khÃ´ng thá»ƒ Ä‘iá»u chá»‰nh` };
+            return { success: false, error: `Đơn ${orderId} chưa có HĐĐT — không thể điều chỉnh` };
         }
         return { success: true, data: invoice };
     } catch (error) {
@@ -7999,13 +8003,13 @@ ipcMain.handle('einvoice:getOriginalInvoice', async (event, orderId) => {
 });
 
 // ============================================================
-// TASK 2+3+4: Äiá»u chá»‰nh / Há»§y hÃ³a Ä‘Æ¡n
+// TASK 2+3+4: Điều chỉnh / Hủy hóa đơn
 // ============================================================
 function buildAdjustmentPayload(orig, adjustmentType, reason) {
     let items = [];
     try { items = typeof orig.items === 'string' ? JSON.parse(orig.items) : orig.items; } catch (e) { items = []; }
 
-    const autoReason = reason || `Tráº£ láº¡i hÃ ng hÃ³a cho HÄ Máº«u sá»‘ ${orig.templateCode || 'N/A'}, KÃ½ hiá»‡u ${orig.invoiceSeries || 'N/A'}, Sá»‘ ${orig.invoiceNumber}, ngÃ y ${orig.invoiceDate ? new Date(orig.invoiceDate).toLocaleDateString('vi-VN') : 'N/A'}`;
+    const autoReason = reason || `Trả lại hàng hóa cho HĐ Mẫu số ${orig.templateCode || 'N/A'}, Ký hiệu ${orig.invoiceSeries || 'N/A'}, Số ${orig.invoiceNumber}, ngày ${orig.invoiceDate ? new Date(orig.invoiceDate).toLocaleDateString('vi-VN') : 'N/A'}`;
 
     const payload = {
         OriginalInvoiceData: {
@@ -8023,7 +8027,7 @@ function buildAdjustmentPayload(orig, adjustmentType, reason) {
             LineNumber: idx + 1,
             ItemName: item.productName || '',
             SKU: item.sku || '',
-            Unit: 'CÃ¡i',
+            Unit: 'Cái',
             Quantity: -(item.quantity || 1),
             UnitPrice: item.unitPrice || 0,
             Amount: -(item.total || 0),
@@ -8037,14 +8041,14 @@ ipcMain.handle('einvoice:adjustInvoice', async (event, { orderId, adjustmentType
     try {
         if (!prisma) throw new Error('Database not initialized');
 
-        // TÃ¬m HÄ gá»‘c (issued HOáº¶C adjusted â€” Ä‘Ã£ Ä‘iá»u chá»‰nh 1 pháº§n váº«n cho tiáº¿p)
+        // Tìm HĐ gốc (issued HOẶC adjusted — đã điều chỉnh 1 phần vẫn cho tiếp)
         const orig = await prisma.eInvoice.findFirst({
             where: { orderId, status: { in: ['issued', 'adjusted'] }, adjustmentType: null },
             orderBy: { createdAt: 'asc' },
         });
-        if (!orig) return { success: false, error: `ÄÆ¡n ${orderId} chÆ°a cÃ³ HÄÄT hoáº·c Ä‘Ã£ bá»‹ há»§y` };
+        if (!orig) return { success: false, error: `Đơn ${orderId} chưa có HĐĐT hoặc đã bị hủy` };
 
-        // TÃ¬m chain Ä‘iá»u chá»‰nh
+        // Tìm chain điều chỉnh
         const chain = await prisma.eInvoice.findMany({
             where: { refInvoiceId: orig.id },
             orderBy: { createdAt: 'asc' },
@@ -8054,15 +8058,15 @@ ipcMain.handle('einvoice:adjustInvoice', async (event, { orderId, adjustmentType
         const remaining = (orig.totalAmount || 0) - totalAdjusted;
 
         if (remaining <= 0) {
-            return { success: false, error: `HÄ ${orig.invoiceNumber} Ä‘Ã£ Ä‘iá»u chá»‰nh háº¿t (${totalAdjusted.toLocaleString()}Ä‘ / ${(orig.totalAmount || 0).toLocaleString()}Ä‘)` };
+            return { success: false, error: `HĐ ${orig.invoiceNumber} đã điều chỉnh hết (${totalAdjusted.toLocaleString()}đ / ${(orig.totalAmount || 0).toLocaleString()}đ)` };
         }
 
-        // NÄ 123: giá»¯ nguyÃªn hÃ¬nh thá»©c láº§n Ä‘áº§u
+        // NĐ 123: giữ nguyên hình thức lần đầu
         if (chain.length > 0 && chain[0].adjustmentType && chain[0].adjustmentType !== adjustmentType) {
-            return { success: false, error: `Theo NÄ 123/2020: Láº§n Ä‘áº§u Ä‘Ã£ chá»n "${chain[0].adjustmentType}", cÃ¡c láº§n sau pháº£i giá»¯ nguyÃªn.` };
+            return { success: false, error: `Theo NĐ 123/2020: Lần đầu đã chọn "${chain[0].adjustmentType}", các lần sau phải giữ nguyên.` };
         }
 
-        // XÃ¡c Ä‘á»‹nh items + amount
+        // Xác định items + amount
         let adjItems, adjAmount, adjQuantity;
         if (partialItems && partialItems.length > 0) {
             adjItems = JSON.stringify(partialItems);
@@ -8074,15 +8078,15 @@ ipcMain.handle('einvoice:adjustInvoice', async (event, { orderId, adjustmentType
             adjQuantity = orig.totalQuantity || 0;
         }
 
-        // Validate khÃ´ng vÆ°á»£t remaining
+        // Validate không vượt remaining
         if (adjAmount > remaining + 0.01) {
-            return { success: false, error: `VÆ°á»£t quÃ¡: ${adjAmount.toLocaleString()}Ä‘ > cÃ²n láº¡i ${remaining.toLocaleString()}Ä‘` };
+            return { success: false, error: `Vượt quá: ${adjAmount.toLocaleString()}đ > còn lại ${remaining.toLocaleString()}đ` };
         }
 
-        // Tham chiáº¿u HÄ cuá»‘i chain (NÄ 123 yÃªu cáº§u)
+        // Tham chiếu HĐ cuối chain (NĐ 123 yêu cầu)
         const lastInChain = chain.length > 0 ? chain[chain.length - 1] : orig;
         const chainNum = chain.length + 1;
-        const autoReason = reason || `Äiá»u chá»‰nh láº§n ${chainNum} cho HÄ Sá»‘ ${lastInChain.invoiceNumber}, ngÃ y ${lastInChain.invoiceDate ? new Date(lastInChain.invoiceDate).toLocaleDateString('vi-VN') : 'N/A'}`;
+        const autoReason = reason || `Điều chỉnh lần ${chainNum} cho HĐ Số ${lastInChain.invoiceNumber}, ngày ${lastInChain.invoiceDate ? new Date(lastInChain.invoiceDate).toLocaleDateString('vi-VN') : 'N/A'}`;
 
         // Simulation
         const last = await prisma.eInvoice.findFirst({ where: { invoiceNumber: { not: null } }, orderBy: { invoiceNumber: 'desc' }, select: { invoiceNumber: true } });
@@ -8111,10 +8115,10 @@ ipcMain.handle('einvoice:adjustInvoice', async (event, { orderId, adjustmentType
             }),
         ]);
 
-        console.log(`âœ… Äiá»u chá»‰nh láº§n ${chainNum}: ${orig.invoiceNumber} â†’ ${newNum} | -${adjAmount.toLocaleString()}Ä‘ | CÃ²n láº¡i: ${(remaining - adjAmount).toLocaleString()}Ä‘`);
+        console.log(`✅ Điều chỉnh lần ${chainNum}: ${orig.invoiceNumber} → ${newNum} | -${adjAmount.toLocaleString()}đ | Còn lại: ${(remaining - adjAmount).toLocaleString()}đ`);
         void logActivity({
             module: 'einvoice', action: adjustmentType === 'replacement' ? 'REPLACE' : 'ADJUST',
-            description: `Láº§n ${chainNum}: ${orig.invoiceNumber} â†’ ${newNum}. -${adjAmount.toLocaleString()}Ä‘. CÃ²n: ${(remaining - adjAmount).toLocaleString()}Ä‘. ${autoReason}`,
+            description: `Lần ${chainNum}: ${orig.invoiceNumber} → ${newNum}. -${adjAmount.toLocaleString()}đ. Còn: ${(remaining - adjAmount).toLocaleString()}đ. ${autoReason}`,
             userName: 'System',
         });
 
@@ -8125,17 +8129,17 @@ ipcMain.handle('einvoice:adjustInvoice', async (event, { orderId, adjustmentType
             }
         };
     } catch (error) {
-        console.error('âŒ einvoice:adjustInvoice error:', error.message);
+        console.error('❌ einvoice:adjustInvoice error:', error.message);
         return { success: false, error: error.message };
     }
 });
 
-// Láº¥y chuá»—i chain HÄ Ä‘iá»u chá»‰nh
+// Lấy chuỗi chain HĐ điều chỉnh
 ipcMain.handle('einvoice:getInvoiceChain', async (event, orderId) => {
     try {
         if (!prisma) throw new Error('Database not initialized');
         const orig = await prisma.eInvoice.findFirst({ where: { orderId, adjustmentType: null }, orderBy: { createdAt: 'asc' } });
-        if (!orig) return { success: false, error: 'KhÃ´ng tÃ¬m tháº¥y HÄ gá»‘c' };
+        if (!orig) return { success: false, error: 'Không tìm thấy HĐ gốc' };
         const adjustments = await prisma.eInvoice.findMany({ where: { refInvoiceId: orig.id }, orderBy: { createdAt: 'asc' } });
         const totalAdjusted = adjustments.reduce((sum, inv) => sum + Math.abs(inv.totalAmount || 0), 0);
         return { success: true, data: { original: orig, adjustments, totalAdjusted, remaining: (orig.totalAmount || 0) - totalAdjusted, chainLength: adjustments.length } };
@@ -8143,31 +8147,31 @@ ipcMain.handle('einvoice:getInvoiceChain', async (event, orderId) => {
 });
 
 // ========================================
-// ZKTECO / RONALD JACK â€” MÃY CHáº¤M CÃ”NG VÃ‚N TAY
+// ZKTECO / RONALD JACK — MÁY CHẤM CÔNG VÂN TAY
 // ========================================
-// Ronald Jack 1800 WiFi chá»‰ há»— trá»£ ADMS Push (HTTP).
-// MÃ¡y tá»± gá»­i data lÃªn server, KHÃ”NG há»— trá»£ Pull (UDP/ZK Protocol).
+// Ronald Jack 1800 WiFi chỉ hỗ trợ ADMS Push (HTTP).
+// Máy tự gửi data lên server, KHÔNG hỗ trợ Pull (UDP/ZK Protocol).
 
 const admsServer = require('./zkteco-adms');
 
-// Auto-start ADMS server khi app khá»Ÿi Ä‘á»™ng
+// Auto-start ADMS server khi app khởi động
 (async () => {
     try {
         await admsServer.startServer(5005);
-        console.log('âœ… [ADMS] Server Ä‘Ã£ tá»± Ä‘á»™ng khá»Ÿi Ä‘á»™ng trÃªn port 5005');
+        console.log('✅ [ADMS] Server đã tự động khởi động trên port 5005');
     } catch (err) {
-        console.error('âŒ [ADMS] KhÃ´ng thá»ƒ khá»Ÿi Ä‘á»™ng server:', err.message);
+        console.error('❌ [ADMS] Không thể khởi động server:', err.message);
     }
 })();
 
 // Start/Stop ADMS server
 ipcMain.handle('zkteco:connect', async (event, config) => {
     try {
-        console.log('ðŸ”Œ [IPC] zkteco:connect (ADMS mode)');
+        console.log('🔌 [IPC] zkteco:connect (ADMS mode)');
         const result = await admsServer.startServer(config?.port || 8098);
         return result;
     } catch (error) {
-        console.error('âŒ zkteco:connect error:', error.message);
+        console.error('❌ zkteco:connect error:', error.message);
         return { success: false, error: error.message };
     }
 });
@@ -8180,7 +8184,7 @@ ipcMain.handle('zkteco:disconnect', async () => {
     }
 });
 
-// Tráº¡ng thÃ¡i ADMS server
+// Trạng thái ADMS server
 ipcMain.handle('zkteco:getStatus', async () => {
     try {
         return { success: true, data: admsServer.getStatus() };
@@ -8189,7 +8193,7 @@ ipcMain.handle('zkteco:getStatus', async () => {
     }
 });
 
-// Láº¥y danh sÃ¡ch NV Ä‘Ã£ nháº­n tá»« ADMS
+// Lấy danh sách NV đã nhận từ ADMS
 ipcMain.handle('zkteco:getUsers', async () => {
     try {
         const data = admsServer.getData();
@@ -8199,7 +8203,7 @@ ipcMain.handle('zkteco:getUsers', async () => {
     }
 });
 
-// Láº¥y logs cháº¥m cÃ´ng Ä‘Ã£ nháº­n tá»« ADMS
+// Lấy logs chấm công đã nhận từ ADMS
 ipcMain.handle('zkteco:getAttendanceLogs', async () => {
     try {
         const data = admsServer.getData();
@@ -8209,12 +8213,12 @@ ipcMain.handle('zkteco:getAttendanceLogs', async () => {
     }
 });
 
-// Full sync: láº¥y toÃ n bá»™ data Ä‘Ã£ nháº­n tá»« ADMS push
+// Full sync: lấy toàn bộ data đã nhận từ ADMS push
 ipcMain.handle('zkteco:fullSync', async (event, config) => {
     try {
-        console.log('ðŸ”„ [IPC] zkteco:fullSync (ADMS mode) â€” láº¥y data Ä‘Ã£ nháº­n');
+        console.log('🔄 [IPC] zkteco:fullSync (ADMS mode) — lấy data đã nhận');
 
-        // Äáº£m báº£o server Ä‘ang cháº¡y
+        // Đảm bảo server đang chạy
         if (!admsServer.getStatus().isRunning) {
             await admsServer.startServer(config?.port || 5005);
         }
@@ -8225,14 +8229,14 @@ ipcMain.handle('zkteco:fullSync', async (event, config) => {
             void logActivity({
                 module: 'attendance',
                 action: 'SYNC',
-                description: `Láº¥y dá»¯ liá»‡u ADMS: ${data.logCount} báº£n ghi, ${data.userCount} nhÃ¢n viÃªn`,
+                description: `Lấy dữ liệu ADMS: ${data.logCount} bản ghi, ${data.userCount} nhân viên`,
                 userName: currentSession?.username || 'Admin',
             });
         }
 
         return data;
     } catch (error) {
-        console.error('âŒ zkteco:fullSync error:', error.message);
+        console.error('❌ zkteco:fullSync error:', error.message);
         return { success: false, error: error.message };
     }
 });
@@ -8283,16 +8287,16 @@ ipcMain.handle('zkteco:zkbridge', async (event, config) => {
 });
 
 // ========================================
-// ATTENDANCE / CHáº¤M CÃ”NG KHUÃ”N Máº¶T
-// On-demand: Python chá»‰ cháº¡y khi vÃ o tab Äiá»ƒm danh
-// Tá»± táº¯t sau 10 phÃºt ko dÃ¹ng
+// ATTENDANCE / CHẤM CÔNG KHUÔN MẶT
+// On-demand: Python chỉ chạy khi vào tab Điểm danh
+// Tự tắt sau 10 phút ko dùng
 // ========================================
 
 const net = require('net');
 
 const FACE_SERVICE_URL = 'http://127.0.0.1:5001';
 const FACE_SERVICE_PORT = 5001;
-const FACE_SERVICE_IDLE_TIMEOUT = 30 * 60 * 1000; // TÄƒng lÃªn 30 phÃºt thay vÃ¬ 10 phÃºt
+const FACE_SERVICE_IDLE_TIMEOUT = 30 * 60 * 1000; // Tăng lên 30 phút thay vì 10 phút
 const FACE_SERVICE_NAME = 'attendance';
 
 let faceServiceProcess = null;   // child_process reference
@@ -8300,18 +8304,18 @@ let faceServiceReady = false;
 let faceServiceIdleTimer = null;
 let faceExeDisabled = false;
 
-// Reset idle timer má»—i khi cÃ³ request â†’ tá»± kill sau 30 phÃºt idle
+// Reset idle timer mỗi khi có request → tự kill sau 30 phút idle
 function resetFaceServiceIdleTimer() {
     if (faceServiceIdleTimer) clearTimeout(faceServiceIdleTimer);
     faceServiceIdleTimer = setTimeout(async () => {
         if (faceServiceProcess) {
-            console.log('[Face] â¹ Tá»± táº¯t Python service sau 30 phÃºt khÃ´ng dÃ¹ng');
+            console.log('[Face] ⏹ Tự tắt Python service sau 30 phút không dùng');
             try {
                 await faceServiceFetch('/shutdown', { method: 'POST' });
-            } catch { /* Python Ä‘Ã£ táº¯t hoáº·c khÃ´ng pháº£n há»“i */ }
-            // Chá» 2s cho Python tá»± thoÃ¡t
+            } catch { /* Python đã tắt hoặc không phản hồi */ }
+            // Chờ 2s cho Python tự thoát
             await new Promise(r => setTimeout(r, 2000));
-            // Náº¿u váº«n cÃ²n sá»‘ng thÃ¬ force kill
+            // Nếu vẫn còn sống thì force kill
             if (faceServiceProcess) {
                 faceServiceProcess.kill();
                 faceServiceProcess = null;
@@ -8322,11 +8326,11 @@ function resetFaceServiceIdleTimer() {
 }
 
 // Spawn Python service on-demand
-let _faceLastSpawnFail = 0;      // Timestamp láº§n spawn tháº¥t báº¡i cuá»‘i
-let _ensurePromise = null;       // Promise quáº£n lÃ½ viá»‡c spawn chá»‘ng race condition
+let _faceLastSpawnFail = 0;      // Timestamp lần spawn thất bại cuối
+let _ensurePromise = null;       // Promise quản lý việc spawn chống race condition
 
 function isLiveFaceService(data) {
-    // Service Ä‘Ã£ sá»‘ng (cÃ³ thá»ƒ Ä‘ang initializing hoáº·c ready)
+    // Service đã sống (có thể đang initializing hoặc ready)
     return Boolean(
         data &&
         data.ok === true &&
@@ -8337,7 +8341,7 @@ function isLiveFaceService(data) {
 }
 
 function isValidFaceServiceStatus(data) {
-    // Service Ä‘Ã£ sá»‘ng VÃ€ sáºµn sÃ ng xá»­ lÃ½ request
+    // Service đã sống VÀ sẵn sàng xử lý request
     return Boolean(
         data &&
         data.ok === true &&
@@ -8384,74 +8388,74 @@ async function waitForFacePortFree(maxAttempts = 10, delayMs = 1000) {
         if (await isFaceServicePortFree()) {
             return true;
         }
-        console.log(`[Face] Chá» port ${FACE_SERVICE_PORT} free... láº§n ${attempt}/${maxAttempts}`);
+        console.log(`[Face] Chờ port ${FACE_SERVICE_PORT} free... lần ${attempt}/${maxAttempts}`);
         await sleep(delayMs);
     }
     return false;
 }
 
 function ensureFaceService() {
-    // Náº¿u Ä‘ang cÃ³ 1 tiáº¿n trÃ¬nh spawn dang dá»Ÿ, tráº£ vá» luÃ´n tiáº¿n trÃ¬nh Ä‘Ã³ (Chá»‘ng Race Condition)
+    // Nếu đang có 1 tiến trình spawn dang dở, trả về luôn tiến trình đó (Chống Race Condition)
     if (_ensurePromise) return _ensurePromise;
 
     _ensurePromise = (async () => {
         try {
-            // 1. ÄÃ£ cháº¡y vÃ  ready â†’ dÃ¹ng luÃ´n
+            // 1. Đã chạy và ready → dùng luôn
             if (faceServiceProcess && faceServiceReady) {
                 resetFaceServiceIdleTimer();
                 return true;
             }
 
-            // 2. Kiá»ƒm tra port 5001 Ä‘Ã£ cÃ³ service sáºµn chÆ°a (zombie hoáº·c process tá»« láº§n trÆ°á»›c)
+            // 2. Kiểm tra port 5001 đã có service sẵn chưa (zombie hoặc process từ lần trước)
             try {
                 const data = await faceServiceFetch('/status');
                 if (isValidFaceServiceStatus(data)) {
-                    console.log('[Face] âœ… PhÃ¡t hiá»‡n service Ä‘ang cháº¡y sáºµn trÃªn port 5001');
+                    console.log('[Face] ✅ Phát hiện service đang chạy sẵn trên port 5001');
                     faceServiceReady = true;
                     resetFaceServiceIdleTimer();
                     return true;
                 }
-                console.warn('[Face] âš ï¸ Port 5001 cÃ³ pháº£n há»“i nhÆ°ng khÃ´ng Ä‘Ãºng attendance service, sáº½ thay tháº¿ báº±ng service ná»™i bá»™');
+                console.warn('[Face] ⚠️ Port 5001 có phản hồi nhưng không đúng attendance service, sẽ thay thế bằng service nội bộ');
             } catch {
-                // Port chÆ°a cÃ³ service â†’ sáº½ spawn bÃªn dÆ°á»›i
+                // Port chưa có service → sẽ spawn bên dưới
             }
 
-            // 3. Cooldown: trÃ¡nh spawn loop (Ä‘á»£i 10s giá»¯a cÃ¡c láº§n tháº¥t báº¡i)
+            // 3. Cooldown: tránh spawn loop (đợi 10s giữa các lần thất bại)
             const cooldown = Date.now() - _faceLastSpawnFail;
             if (cooldown < 10000) {
-                throw new Error(`Äá»£i ${Math.ceil((10000 - cooldown) / 1000)}s trÆ°á»›c khi thá»­ láº¡i`);
+                throw new Error(`Đợi ${Math.ceil((10000 - cooldown) / 1000)}s trước khi thử lại`);
             }
 
             // 4. Spawn má»›i
             const { spawn, execSync } = require('child_process');
 
-            // Kill process Ä‘ang giá»¯ port 5001 rá»“i chá» Windows nháº£ port tháº­t sá»±.
+            // Kill process đang giữ port 5001 rồi chờ Windows nhả port thật sự.
             try {
                 killProcessOnFacePort(execSync);
             } catch {
-                /* Bá» qua náº¿u lá»‡nh kill lá»—i hoáº·c khÃ´ng cÃ³ ai dÃ¹ng port */
+                /* Bỏ qua nếu lệnh kill lỗi hoặc không có ai dùng port */
             }
             if (!(await waitForFacePortFree())) {
-                throw new Error(`Port ${FACE_SERVICE_PORT} khÃ´ng giáº£i phÃ³ng Ä‘Æ°á»£c sau 10s`);
+                throw new Error(`Port ${FACE_SERVICE_PORT} không giải phóng được sau 10s`);
             }
 
-            // â”€â”€ XÃ¡c Ä‘á»‹nh cÃ¡ch cháº¡y: EXE (Æ°u tiÃªn) hoáº·c Python (fallback) â”€â”€â”€â”€â”€â”€
+            // ── Xác định cách chạy: EXE (ưu tiên) hoặc Python (fallback) ──────
             const exePath = path.join(__dirname, '..', 'python', 'dist', 'attendance_service.exe');
             const scriptPath = path.join(__dirname, '..', 'python', 'attendance_service.py');
             let spawnCmd, spawnArgs;
 
             const preferFaceExe = app.isPackaged && !faceExeDisabled;
             if (preferFaceExe && fs.existsSync(exePath)) {
-                console.log('[Face] ðŸš€ DÃ¹ng attendance_service.exe (standalone)');
+                console.log('[Face] 🚀 Dùng attendance_service.exe (standalone)');
                 spawnCmd = exePath;
                 spawnArgs = [];
             } else if (fs.existsSync(scriptPath)) {
                 if (!app.isPackaged && fs.existsSync(exePath)) {
-                    console.log('[Face] ðŸ›  Dev mode â†’ bá» qua attendance_service.exe, dÃ¹ng Python script Ä‘á»ƒ debug á»•n Ä‘á»‹nh hÆ¡n');
+                    console.log('[Face] 🛠 Dev mode → bỏ qua attendance_service.exe, dùng Python script để debug ổn định hơn');
                 } else if (faceExeDisabled) {
-                    console.log('[Face] âš ï¸ attendance_service.exe Ä‘Ã£ bá»‹ vÃ´ hiá»‡u hÃ³a cho phiÃªn nÃ y â†’ fallback sang Python script');
+                    console.log('[Face] ⚠️ attendance_service.exe đã bị vô hiệu hóa cho phiên này → fallback sang Python script');
                 }
-                console.log('[Face] ðŸ KhÃ´ng cÃ³ EXE â†’ tÃ¬m Python...');
+                console.log('[Face] 🐍 Không có EXE → tìm Python...');
                 function findPythonForFace() {
                     const { spawnSync } = require('child_process');
                     const usernames = [...new Set(['Admin', 'NCPC', process.env.USERNAME || ''].filter(Boolean))];
@@ -8469,7 +8473,7 @@ function ensureFaceService() {
                         { exe: 'python', args: [] }, { exe: 'python3', args: [] }
                     );
 
-                    console.log(`[Face] ðŸ” TÃ¬m Python cÃ³ face_recognition (${candidates.length} candidates, users: ${usernames.join(',')})`);
+                    console.log(`[Face] 🔍 Tìm Python có face_recognition (${candidates.length} candidates, users: ${usernames.join(',')})`);
 
                     for (const c of candidates) {
                         try {
@@ -8484,7 +8488,7 @@ function ensureFaceService() {
                             const verify = spawnSync(c.exe, verifyArgs, { windowsHide: true, timeout: 15000, stdio: 'pipe' });
                             if (verify.error || verify.status !== 0) continue;
 
-                            console.log(`[Face]   âœ… CHá»ŒN: ${c.exe} ${c.args.join(' ')} â†’ cÃ³ face_recognition`);
+                            console.log(`[Face]   ✅ CHỌN: ${c.exe} ${c.args.join(' ')} → có face_recognition`);
                             return c;
                         } catch (err) { }
                     }
@@ -8492,12 +8496,12 @@ function ensureFaceService() {
                 }
                 const pyFound = findPythonForFace();
                 if (!pyFound) {
-                    throw new Error('KhÃ´ng cÃ³ EXE vÃ  khÃ´ng tÃ¬m tháº¥y Python. LiÃªn há»‡ ká»¹ thuáº­t.');
+                    throw new Error('Không có EXE và không tìm thấy Python. Liên hệ kỹ thuật.');
                 }
                 spawnCmd = pyFound.exe;
                 spawnArgs = [...pyFound.args, scriptPath];
             } else {
-                throw new Error('KhÃ´ng tÃ¬m tháº¥y attendance_service.exe hoáº·c .py');
+                throw new Error('Không tìm thấy attendance_service.exe hoặc .py');
             }
             console.log('[Face] Spawn:', spawnCmd, spawnArgs.join(' '));
 
@@ -8522,7 +8526,7 @@ function ensureFaceService() {
             });
 
             faceServiceProcess.on('error', (err) => {
-                console.error('[Face] âŒ KhÃ´ng thá»ƒ cháº¡y Python:', err.message);
+                console.error('[Face] ❌ Không thể chạy Python:', err.message);
                 faceServiceProcess = null;
                 faceServiceReady = false;
                 _faceLastSpawnFail = Date.now();
@@ -8532,7 +8536,7 @@ function ensureFaceService() {
                 console.log(`[Face] Python service exited (code ${code})`);
                 if (spawnCmd === exePath && code !== 0) {
                     faceExeDisabled = true;
-                    console.warn('[Face] âš ï¸ attendance_service.exe lá»—i, sáº½ fallback sang Python script á»Ÿ láº§n thá»­ tiáº¿p theo');
+                    console.warn('[Face] ⚠️ attendance_service.exe lỗi, sẽ fallback sang Python script ở lần thử tiếp theo');
                 }
                 faceServiceProcess = null;
                 faceServiceReady = false;
@@ -8540,28 +8544,28 @@ function ensureFaceService() {
                 if (faceServiceIdleTimer) { clearTimeout(faceServiceIdleTimer); faceServiceIdleTimer = null; }
             });
 
-            // Poll chá» service sá»‘ng (initializing hoáº·c ready Ä‘á»u OK)
-            // KHÃ”NG Ä‘á»£i ready vÃ¬ rebuild encodings cÃ³ thá»ƒ > 30s trÃªn mÃ¡y cháº­m
+            // Poll chờ service sống (initializing hoặc ready đều OK)
+            // KHÔNG đợi ready vì rebuild encodings có thể > 30s trên máy chậm
             return await new Promise((res, rej) => {
                 let attempts = 0;
-                const maxAttempts = 180; // 180 x 500ms = 90s (mÃ¡y khÃ¡ch cháº­m cáº§n thÃªm thá»i gian load)
+                const maxAttempts = 180; // 180 x 500ms = 90s (máy khách chậm cần thêm thời gian load)
                 const pollReady = setInterval(async () => {
                     attempts++;
                     if (!faceServiceProcess) {
                         clearInterval(pollReady);
                         _faceLastSpawnFail = Date.now();
-                        return rej(new Error('Python process thoÃ¡t báº¥t ngá»'));
+                        return rej(new Error('Python process thoát bất ngờ'));
                     }
                     try {
                         const statusData = await faceServiceFetch('/status');
                         if (isLiveFaceService(statusData)) {
                             clearInterval(pollReady);
-                            // Náº¿u Ä‘Ã£ ready thÃ¬ set luÃ´n, náº¿u initializing thÃ¬ chÆ°a set ready
+                            // Nếu đã ready thì set luôn, nếu initializing thì chưa set ready
                             if (statusData.status === 'ready') {
                                 faceServiceReady = true;
-                                console.log(`[Face] âœ… Python face service sáºµn sÃ ng sau ${attempts * 0.5}s!`);
+                                console.log(`[Face] ✅ Python face service sẵn sàng sau ${attempts * 0.5}s!`);
                             } else {
-                                console.log(`[Face] âœ… Python service Ä‘Ã£ má»Ÿ port sau ${attempts * 0.5}s (Ä‘ang load encodings...)`);
+                                console.log(`[Face] ✅ Python service đã mở port sau ${attempts * 0.5}s (đang load encodings...)`);
                             }
                             resetFaceServiceIdleTimer();
                             res(true);
@@ -8572,9 +8576,9 @@ function ensureFaceService() {
                         if (attempts >= maxAttempts) {
                             clearInterval(pollReady);
                             _faceLastSpawnFail = Date.now();
-                            console.error('[Face] âŒ Python service khÃ´ng pháº£n há»“i sau 90s');
+                            console.error('[Face] ❌ Python service không phản hồi sau 90s');
                             if (faceServiceProcess) { faceServiceProcess.kill(); faceServiceProcess = null; }
-                            rej(new Error('Python service khá»Ÿi Ä‘á»™ng tháº¥t báº¡i (Timeout 90s)'));
+                            rej(new Error('Python service khởi động thất bại (Timeout 90s)'));
                         }
                     }
                 }, 500);
@@ -8584,7 +8588,7 @@ function ensureFaceService() {
             _faceLastSpawnFail = Date.now();
             throw err;
         } finally {
-            // Khi spawn thÃ nh cÃ´ng hoáº·c tháº¥t báº¡i, giáº£i phÃ³ng Promise Ä‘á»ƒ lá»‡nh sau cÃ³ thá»ƒ thá»­ láº¡i
+            // Khi spawn thành công hoặc thất bại, giải phóng Promise để lệnh sau có thể thử lại
             _ensurePromise = null;
         }
     })();
@@ -8592,10 +8596,10 @@ function ensureFaceService() {
     return _ensurePromise;
 }
 
-// Tá»± dá»n process khi app thoÃ¡t
+// Tự dọn process khi app thoát
 app.on('before-quit', () => {
     if (faceServiceProcess) {
-        console.log('[Face] ðŸ§¹ Táº¯t Python service khi app thoÃ¡t');
+        console.log('[Face] 🧹 Tắt Python service khi app thoát');
         faceServiceProcess.kill();
         faceServiceProcess = null;
     }
@@ -8625,7 +8629,7 @@ function faceServiceFetch(urlPath, options = {}) {
                 catch { reject(new Error('Invalid JSON response')); }
             });
         });
-        // /register: 120s (50 áº£nh Ã— HOG + encoding), /recognize: 15s, /profile (delete+rebuild): 60s, cÃ²n láº¡i: 5s
+        // /register: 120s (50 ảnh × HOG + encoding), /recognize: 15s, /profile (delete+rebuild): 60s, còn lại: 5s
         const timeout = urlPath.includes('/register') ? 120000 : urlPath.includes('/recognize') ? 15000 : urlPath.includes('/profile') ? 60000 : 5000;
         req.setTimeout(timeout, () => { req.destroy(); reject(new Error('Timeout')); });
         req.on('error', reject);
@@ -8634,36 +8638,36 @@ function faceServiceFetch(urlPath, options = {}) {
     });
 }
 
-// XÃ¡c Ä‘á»‹nh loáº¡i cháº¥m cÃ´ng theo giá» hiá»‡n táº¡i
+// Xác định loại chấm công theo giờ hiện tại
 function getCheckType() {
     const h = new Date().getHours();
     const m = new Date().getMinutes();
     const total = h * 60 + m;
 
-    // Ca sÃ¡ng
-    // Check-in: 07:00 Ä‘áº¿n trÆ°á»›c 11:50
-    // Check-out: 11:50 Ä‘áº¿n 12:30
+    // Ca sáng
+    // Check-in: 07:00 đến trước 11:50
+    // Check-out: 11:50 đến 12:30
     if (total >= 7 * 60 && total <= 12 * 60 + 30) {
         if (total < 11 * 60 + 50) return 'morning_in';
         return 'morning_out';
     }
 
-    // Ca chiá»u
-    // Check-in: 13:00 Ä‘áº¿n trÆ°á»›c 17:30
-    // Check-out: 17:30 Ä‘áº¿n 20:30
+    // Ca chiều
+    // Check-in: 13:00 đến trước 17:30
+    // Check-out: 17:30 đến 20:30
     if (total >= 13 * 60 && total <= 20 * 60 + 30) {
         if (total < 17 * 60 + 30) return 'afternoon_in';
         return 'evening_out';
     }
 
-    // DEBUG: Táº¡m bá» giá»›i háº¡n giá» â€” luÃ´n cho phÃ©p cháº¥m cÃ´ng
-    // NgoÃ i khung giá» â†’ tá»± chá»n ca gáº§n nháº¥t thay vÃ¬ block
-    if (total < 7 * 60) return 'morning_in';           // TrÆ°á»›c 7h â†’ coi nhÆ° sÃ¡ng vÃ o sá»›m
-    if (total <= 13 * 60) return 'morning_out';         // 12:30-13:00 (nghá»‰ trÆ°a) â†’ sÃ¡ng ra
-    return 'evening_out';                               // Sau 20:30 â†’ tá»‘i ra
+    // DEBUG: Tạm bỏ giới hạn giờ — luôn cho phép chấm công
+    // Ngoài khung giờ → tự chọn ca gần nhất thay vì block
+    if (total < 7 * 60) return 'morning_in';           // Trước 7h → coi như sáng vào sớm
+    if (total <= 13 * 60) return 'morning_out';         // 12:30-13:00 (nghỉ trưa) → sáng ra
+    return 'evening_out';                               // Sau 20:30 → tối ra
 }
 
-// Kiá»ƒm tra + tá»± khá»Ÿi Ä‘á»™ng Python service khi vÃ o tab Äiá»ƒm danh
+// Kiểm tra + tự khởi động Python service khi vào tab Điểm danh
 ipcMain.handle('attendance:status', async () => {
     const exePath = path.join(__dirname, '..', 'python', 'dist', 'attendance_service.exe');
     const scriptPath = path.join(__dirname, '..', 'python', 'attendance_service.py');
@@ -8678,25 +8682,25 @@ ipcMain.handle('attendance:status', async () => {
     };
     console.log('[Face:status] debug:', JSON.stringify(debug));
     try {
-        // Tá»± Ä‘á»™ng spawn Python náº¿u chÆ°a cháº¡y
+        // Tự động spawn Python nếu chưa chạy
         await ensureFaceService();
         const data = await faceServiceFetch('/status');
         if (!isLiveFaceService(data)) {
-            throw new Error('Attendance service tráº£ vá» /status khÃ´ng há»£p lá»‡: ' + JSON.stringify(data));
+            throw new Error('Attendance service trả về /status không hợp lệ: ' + JSON.stringify(data));
         }
-        // Náº¿u Ä‘ang initializing â†’ váº«n bÃ¡o success nhÆ°ng ghi nháº­n chÆ°a ready
+        // Nếu đang initializing → vẫn báo success nhưng ghi nhận chưa ready
         if (data.status === 'ready' && !faceServiceReady) {
             faceServiceReady = true;
         }
-        console.log('[Face:status] OK â†’', data.status);
+        console.log('[Face:status] OK →', data.status);
         return { success: true, data, debug };
     } catch (err) {
         console.warn('[Face:status] FAILED:', err.message);
-        return { success: false, error: err.message || 'Python service chÆ°a sáºµn sÃ ng', debug };
+        return { success: false, error: err.message || 'Python service chưa sẵn sàng', debug };
     }
 });
 
-// PhÃ¡t hiá»‡n khuÃ´n máº·t (khÃ´ng so khá»›p) â€” dÃ¹ng cho modal Ä‘Äƒng kÃ½
+// Phát hiện khuôn mặt (không so khớp) — dùng cho modal đăng ký
 ipcMain.handle('attendance:detect', async (event, { image }) => {
     try {
         await ensureFaceService();
@@ -8707,12 +8711,12 @@ ipcMain.handle('attendance:detect', async (event, { image }) => {
         });
         return { success: true, face_box: result.face_box, img_height: result.img_height, found: result.found, reason: result.reason };
     } catch (err) {
-        console.error('âŒ attendance:detect error:', err.message);
+        console.error('❌ attendance:detect error:', err.message);
         return { success: false, error: err.message };
     }
 });
 
-// Nháº­n diá»‡n khuÃ´n máº·t + ghi cháº¥m cÃ´ng
+// Nhận diện khuôn mặt + ghi chấm công
 ipcMain.handle('attendance:recognize', async (event, { image }) => {
     try {
         await ensureFaceService();
@@ -8722,7 +8726,7 @@ ipcMain.handle('attendance:recognize', async (event, { image }) => {
             body: JSON.stringify({ image }),
         });
 
-        // â”€â”€ DEBUG LOG â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // ── DEBUG LOG ──────────────────────────────────────────────────
         console.log('[Face DEBUG] Python result:', JSON.stringify({
             found: result.found,
             face_id: result.face_id,
@@ -8732,20 +8736,20 @@ ipcMain.handle('attendance:recognize', async (event, { image }) => {
             _debug: result._debug,
         }));
 
-        // LuÃ´n Ä‘Ã­nh kÃ¨m face_box Ä‘á»ƒ frontend váº½ overlay real-time
+        // Luôn đính kèm face_box để frontend vẽ overlay real-time
         const faceInfo = {
             face_box: result.face_box || null,
             img_width: result.img_width || 640,
             img_height: result.img_height || 480,
         };
 
-        // KhÃ´ng phÃ¡t hiá»‡n máº·t
+        // Không phát hiện mặt
         if (!result.found) return { success: false, reason: result.reason, ...faceInfo };
 
-        // PhÃ¡t hiá»‡n máº·t nhÆ°ng khÃ´ng khá»›p profile nÃ o
+        // Phát hiện mặt nhưng không khớp profile nào
         if (!result.face_id) return { success: false, reason: 'no_match', ...faceInfo };
 
-        // Láº¥y thÃ´ng tin user tá»« FaceProfile (cáº§n trÆ°á»›c cáº£ out_of_hours Ä‘á»ƒ cÃ³ userName)
+        // Lấy thông tin user từ FaceProfile (cần trước cả out_of_hours để có userName)
         const profile = await prisma.faceProfile.findUnique({ where: { faceId: result.face_id } });
         const userName = profile?.userName || result.face_id;
         const userId = profile?.userId || null;
@@ -8753,7 +8757,7 @@ ipcMain.handle('attendance:recognize', async (event, { image }) => {
         const checkType = getCheckType();
         if (!checkType) return { success: false, reason: 'out_of_hours', face_id: result.face_id, userName, ...faceInfo };
 
-        // Kiá»ƒm tra trÃ¹ng trong 30 phÃºt
+        // Kiểm tra trùng trong 30 phút
         const since = new Date(Date.now() - 30 * 60 * 1000);
         const today = new Date().toISOString().slice(0, 10);
         const existing = await prisma.attendanceLog.findFirst({
@@ -8772,12 +8776,12 @@ ipcMain.handle('attendance:recognize', async (event, { image }) => {
 
         return { success: true, data: { ...log, confidence: result.confidence, userName, ...faceInfo } };
     } catch (err) {
-        console.error('âŒ attendance:recognize error:', err.message);
+        console.error('❌ attendance:recognize error:', err.message);
         return { success: false, error: err.message };
     }
 });
 
-// ÄÄƒng kÃ½ khuÃ´n máº·t nhÃ¢n viÃªn
+// Đăng ký khuôn mặt nhân viên
 ipcMain.handle('attendance:register', async (event, { face_id, user_name, user_id, images }) => {
     try {
         await ensureFaceService();
@@ -8788,7 +8792,7 @@ ipcMain.handle('attendance:register', async (event, { face_id, user_name, user_i
         });
         if (!result.ok) throw new Error('Python register failed');
 
-        // LÆ°u FaceProfile vÃ o DB
+        // Lưu FaceProfile vào DB
         await prisma.faceProfile.upsert({
             where: { faceId: face_id },
             update: { userName: user_name, userId: user_id || null, photoCount: result.saved, isActive: true },
@@ -8801,7 +8805,7 @@ ipcMain.handle('attendance:register', async (event, { face_id, user_name, user_i
     }
 });
 
-// Láº¥y lá»‹ch sá»­ cháº¥m cÃ´ng
+// Lấy lịch sử chấm công
 ipcMain.handle('attendance:getLogs', async (event, { date, month, userId } = {}) => {
     try {
         const where = {};
@@ -8820,8 +8824,8 @@ ipcMain.handle('attendance:getLogs', async (event, { date, month, userId } = {})
     }
 });
 
-// Kiá»ƒm tra toÃ n bá»™ profiles â€” so sÃ¡nh DB, disk, Python memory
-// Tráº£ vá» danh sÃ¡ch profiles á»Ÿ tá»«ng nÆ¡i vÃ  highlight mismatch
+// Kiểm tra toàn bộ profiles — so sánh DB, disk, Python memory
+// Trả về danh sách profiles ở từng nơi và highlight mismatch
 ipcMain.handle('attendance:verifyAll', async () => {
     const result = { db: [], disk: [], pythonMemory: [], mismatches: [], serviceOnline: false };
     try {
@@ -8854,7 +8858,7 @@ ipcMain.handle('attendance:verifyAll', async () => {
         result.serviceOnline = false;
     }
 
-    // So sÃ¡nh tÃ¬m mismatch
+    // So sánh tìm mismatch
     const allIds = new Set([...result.db, ...result.disk, ...result.pythonMemory]);
     for (const id of allIds) {
         const inDb = result.db.includes(id);
@@ -8870,7 +8874,7 @@ ipcMain.handle('attendance:verifyAll', async () => {
     return { success: true, ...result };
 });
 
-// Láº¥y danh sÃ¡ch profiles khuÃ´n máº·t
+// Lấy danh sách profiles khuôn mặt
 ipcMain.handle('attendance:getProfiles', async () => {
     try {
         const profiles = await prisma.faceProfile.findMany({ where: { isActive: true } });
@@ -8880,15 +8884,15 @@ ipcMain.handle('attendance:getProfiles', async () => {
     }
 });
 
-// XÃ³a profile khuÃ´n máº·t
+// Xóa profile khuôn mặt
 ipcMain.handle('attendance:deleteProfile', async (event, { face_id }) => {
-    // XÃ³a Python encodings qua service
+    // Xóa Python encodings qua service
     try {
         await faceServiceFetch(`/profile/${encodeURIComponent(face_id)}`, { method: 'DELETE' });
     } catch (err) {
         console.warn('[attendance] Python delete failed, fallback to direct fs delete:', err.message);
-        // Fallback: service offline â†’ xÃ³a folder áº£nh trá»±c tiáº¿p báº±ng fs
-        // TrÃ¡nh trÆ°á»ng há»£p DB xÃ³a thÃ nh cÃ´ng nhÆ°ng áº£nh váº«n cÃ²n trÃªn disk
+        // Fallback: service offline → xóa folder ảnh trực tiếp bằng fs
+        // Tránh trường hợp DB xóa thành công nhưng ảnh vẫn còn trên disk
         try {
             const facesDir = path.join(app.getPath('userData'), 'faces', face_id);
             if (fs.existsSync(facesDir)) {
@@ -8899,7 +8903,7 @@ ipcMain.handle('attendance:deleteProfile', async (event, { face_id }) => {
             console.error('[attendance] fs delete also failed:', fsErr.message);
         }
     }
-    // LuÃ´n xÃ³a DB record
+    // Luôn xóa DB record
     try {
         await prisma.faceProfile.updateMany({ where: { faceId: face_id }, data: { isActive: false } });
     } catch (err) {
@@ -8907,24 +8911,24 @@ ipcMain.handle('attendance:deleteProfile', async (event, { face_id }) => {
         return { success: false, error: err.message };
     }
 
-    // Verify sau khi xÃ³a â€” kiá»ƒm tra cáº£ 3 nÆ¡i Ä‘á»ƒ cháº¯c cháº¯n sáº¡ch
+    // Verify sau khi xóa — kiểm tra cả 3 nơi để chắc chắn sạch
     const verify = { db: false, disk: false, pythonMemory: false };
     try {
         const dbRecord = await prisma.faceProfile.findFirst({ where: { faceId: face_id, isActive: true } });
-        verify.db = dbRecord === null; // true = khÃ´ng cÃ²n record active
+        verify.db = dbRecord === null; // true = không còn record active
     } catch (_) { }
     try {
         const facesDir = path.join(app.getPath('userData'), 'faces', face_id);
-        verify.disk = !fs.existsSync(facesDir); // true = folder Ä‘Ã£ bá»‹ xÃ³a
+        verify.disk = !fs.existsSync(facesDir); // true = folder đã bị xóa
     } catch (_) { }
     try {
         const status = await faceServiceFetch('/status');
         if (!isValidFaceServiceStatus(status)) {
             throw new Error('Invalid attendance service status payload');
         }
-        verify.pythonMemory = !status.face_ids?.includes(face_id); // true = khÃ´ng cÃ²n trong memory
+        verify.pythonMemory = !status.face_ids?.includes(face_id); // true = không còn trong memory
     } catch (_) {
-        verify.pythonMemory = null; // null = service offline, khÃ´ng kiá»ƒm tra Ä‘Æ°á»£c
+        verify.pythonMemory = null; // null = service offline, không kiểm tra được
     }
 
     const allClean = verify.db && verify.disk && (verify.pythonMemory === true || verify.pythonMemory === null);
@@ -8934,11 +8938,11 @@ ipcMain.handle('attendance:deleteProfile', async (event, { face_id }) => {
 
 
 
-//                                                                              
-// OFFLINE QUEUE  Sync & Status handlers
-//                                                                              
+// 
+// OFFLINE QUEUE  Sync & Status handlers
+// 
 
-// Tr� v� s� �n ang ch� sync
+// Tr� v� s� �n ang ch� sync
 ipcMain.handle('offlineQueue:status', () => {
     return { success: true, pendingCount: offlineQueue.count() };
 });
@@ -8959,17 +8963,17 @@ ipcMain.handle('offlineQueue:sync', async () => {
                 synced++;
                 console.log('[OfflineQueue] Synced:', item._filename);
             } else {
-                // Unknown type  b� qua, x�a � kh�ng b� loop
+                // Unknown type  b� qua, x�a � kh�ng b� loop
                 offlineQueue.remove(item._filename);
             }
         } catch (err) {
             failed++;
             errors.push({ file: item._filename, error: err.message });
             console.error('[OfflineQueue] Sync failed for', item._filename, ':', err.message);
-            // Kh�ng x�a file  gi� l�i � retry l�n sau
+            // Kh�ng x�a file  gi� l�i � retry l�n sau
         }
     }
 
-    console.log('[OfflineQueue] Sync complete  synced:', synced, '| failed:', failed, '| remaining:', offlineQueue.count());
+    console.log('[OfflineQueue] Sync complete  synced:', synced, '| failed:', failed, '| remaining:', offlineQueue.count());
     return { success: true, synced, failed, remaining: offlineQueue.count(), errors };
 });

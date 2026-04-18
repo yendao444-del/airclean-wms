@@ -2090,7 +2090,7 @@ export default function Attendance() {
                 setPurchaseVatTracking(result.data);
             }
         } catch (error) {
-            console.error('Lá»—i táº£i dá»¯ liá»‡u VAT nháº­p hÃ ng:', error);
+            console.error('Lỗi tải dữ liệu VAT nhập hàng:', error);
         } finally {
             loadPurchasesRef.current = false;
         }

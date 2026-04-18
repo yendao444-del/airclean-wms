@@ -22,6 +22,7 @@ import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, UploadOutli
 import type { ColumnsType } from 'antd/es/table';
 import type { MenuProps } from 'antd';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
+import { useAuth } from '../contexts/AuthContext';
 import dayjs from 'dayjs';
 import * as XLSX from 'xlsx';
 
@@ -37,6 +38,7 @@ interface Return {
     reason: string; // Lí do Trả hàng/Hoàn tiền
     packer?: string; // Nhân viên đóng gói
     processNotes?: string; // JSON array of timeline logs
+    faultParty?: 'warehouse' | 'customer'; // Lỗi do kho hay do khách hàng
     createdAt?: Date;
 }
 
@@ -48,6 +50,8 @@ interface ProcessLog {
 
 export default function ReturnsPage() {
     const currentUser = useCurrentUser();
+    const { user } = useAuth();
+    const isAdmin = user?.role === 'admin';
     const [returns, setReturns] = useState<Return[]>([]);
     const [loading, setLoading] = useState(false);
     const [importLoading, setImportLoading] = useState(false);
@@ -180,6 +184,7 @@ export default function ReturnsPage() {
         form.setFieldsValue({
             ...returnRecord,
             complaintDate: dayjs(returnRecord.complaintDate),
+            faultParty: returnRecord.faultParty || 'warehouse',
         });
         setModalVisible(true);
     };
@@ -209,6 +214,7 @@ export default function ReturnsPage() {
     };
 
     const handleDelete = (id: number) => {
+        const returnRecord = returns.find(r => r.id === id);
         Modal.confirm({
             title: 'Xóa phiếu trả?',
             content: 'Bạn có chắc muốn xóa phiếu này?',
@@ -217,6 +223,12 @@ export default function ReturnsPage() {
             cancelText: 'Hủy',
             onOk: async () => {
                 try {
+                    // Xóa khoản phạt nếu phiếu đã hoàn thành và lỗi do kho
+                    if (returnRecord?.status === 'completed' &&
+                        returnRecord?.faultParty !== 'customer' &&
+                        returnRecord?.complaintCode) {
+                        await processReturnFineRemoval(returnRecord.complaintCode);
+                    }
                     await window.electronAPI.returns.delete(id);
                     console.log(`✅ Đã xóa phiếu trả #${id} từ database`);
                     await loadReturns();
@@ -258,8 +270,14 @@ export default function ReturnsPage() {
             width: 600,
             onOk: async () => {
                 try {
-                    // 🔧 FIX: Gọi API delete cho từng phiếu
                     for (const id of selectedRowKeys) {
+                        const returnRecord = returns.find(r => r.id === id);
+                        // Xóa khoản phạt nếu phiếu đã hoàn thành và lỗi do kho
+                        if (returnRecord?.status === 'completed' &&
+                            returnRecord?.faultParty !== 'customer' &&
+                            returnRecord?.complaintCode) {
+                            await processReturnFineRemoval(returnRecord.complaintCode);
+                        }
                         await window.electronAPI.returns.delete(id);
                         console.log(`✅ Đã xóa phiếu trả #${id}`);
                     }
@@ -315,6 +333,7 @@ export default function ReturnsPage() {
                 );
                 if (!packerEmp) {
                     console.warn(`[Returns] Không tìm thấy NV "${packerName}" trong danh sách chấm công.`);
+                    message.warning(`⚠️ Không tìm thấy nhân viên "${packerName}" trong danh sách chấm công. Phạt chưa được ghi nhận!`);
                     return;
                 }
 
@@ -346,6 +365,9 @@ export default function ReturnsPage() {
         try {
             const values = await form.validateFields();
 
+            // Xác định faultParty (mặc định 'warehouse' nếu chưa chọn)
+            const faultParty: 'warehouse' | 'customer' = values.faultParty || 'warehouse';
+
             // Map frontend fields → DB fields
             const dbData = {
                 customerName: values.productName,
@@ -358,6 +380,7 @@ export default function ReturnsPage() {
                 notes: processLogs.length > 0 ? JSON.stringify(processLogs) : null,
                 status: values.status,
                 packer: values.packer || null,
+                faultParty,
             };
 
             let updatedReturns: Return[];
@@ -380,6 +403,7 @@ export default function ReturnsPage() {
                     status: values.status,
                     reason: values.reason,
                     packer: values.packer || undefined,
+                    faultParty,
                     processNotes: processLogs.length > 0 ? JSON.stringify(processLogs) : undefined,
                     createdAt: new Date(),
                 };
@@ -402,6 +426,12 @@ export default function ReturnsPage() {
                 if (editingReturn.packer !== values.packer) {
                     changes.packer = { old: editingReturn.packer || 'Chưa chỉ định', new: values.packer || 'Chưa chỉ định' };
                 }
+                if (editingReturn.faultParty !== faultParty) {
+                    changes.faultParty = {
+                        old: editingReturn.faultParty === 'customer' ? 'Lỗi do khách hàng' : 'Lỗi do kho',
+                        new: faultParty === 'customer' ? 'Lỗi do khách hàng' : 'Lỗi do kho',
+                    };
+                }
 
                 const changeDescriptions = [];
                 if (changes.status) {
@@ -409,6 +439,9 @@ export default function ReturnsPage() {
                 }
                 if (changes.packer) {
                     changeDescriptions.push(`nhân viên đóng gói: ${changes.packer.old} → ${changes.packer.new}`);
+                }
+                if (changes.faultParty) {
+                    changeDescriptions.push(`lỗi do: ${changes.faultParty.old} → ${changes.faultParty.new}`);
                 }
 
                 await window.electronAPI.activityLog.create({
@@ -429,18 +462,20 @@ export default function ReturnsPage() {
                     action: 'CREATE',
                     recordId: newReturn.id,
                     recordName: `RT${newReturn.complaintCode}`,
-                    description: `Tạo phiếu trả hàng mới "${newReturn.complaintCode}" (Đơn: ${newReturn.orderNumber}, Sản phẩm: ${newReturn.productName})`,
+                    description: `Tạo phiếu trả hàng mới "${newReturn.complaintCode}" (Đơn: ${newReturn.orderNumber}, SP: ${newReturn.productName}, Lỗi do: ${faultParty === 'customer' ? 'khách hàng' : 'kho'})`,
                     userName: currentUser,
                     severity: 'INFO'
                 });
             }
 
-            // Tự động đẩy phạt nếu hoàn thành & có packer
-            if (values.status === 'completed' && values.packer) {
+            // ✅ Chỉ ghi phạt nếu "Lỗi do kho" + hoàn thành + có packer
+            if (values.status === 'completed' && values.packer && faultParty === 'warehouse') {
                 const isStatusChanged = !editingReturn || editingReturn.status !== 'completed';
                 if (isStatusChanged) {
                     await processReturnFine(values.packer, values.complaintCode);
                 }
+            } else if (values.status === 'completed' && values.packer && faultParty === 'customer') {
+                console.log(`[Returns] Bỏ qua ghi phạt - Lỗi do khách hàng (phiếu: ${values.complaintCode})`);
             }
 
             message.success(editingReturn ? '✅ Đã cập nhật phiếu trả!' : '✅ Đã tạo phiếu trả mới!');
@@ -493,6 +528,10 @@ export default function ReturnsPage() {
                     const complaintDate = row['Thời gian khiếu nại'] || row['Thoi gian khieu nai'] || row['Time Requested'] || row['Request Time'] || row['Created Time'] || '';
                     const status = row['Trạng thái Trả hàng/Hoàn tiền'] || row['Trang thai Tra hang/Hoan tien'] || row['Return Status'] || row['Status'] || row['Resolution Status'] || 'pending';
                     const reason = row['Lí do Trả hàng/Hoàn tiền'] || row['Li do Tra hang/Hoan tien'] || row['Buyer Note'] || row['Return Reason'] || row['Reason'] || row['Return Type'] || '';
+                    const faultPartyRaw = String(row['Lỗi do'] || row['Loi do'] || row['Fault Party'] || row['Fault Reason'] || '').toLowerCase();
+                    const faultParty: 'warehouse' | 'customer' =
+                        faultPartyRaw.includes('khách') || faultPartyRaw.includes('kh') || faultPartyRaw.includes('customer')
+                            ? 'customer' : 'warehouse';
 
                     // 🔍 DEBUG: Log chi tiết cho 3 row đầu
                     if (index < 3) {
@@ -521,6 +560,7 @@ export default function ReturnsPage() {
                         complaintDate: parsedDate.format('YYYY-MM-DD'),
                         status: status.includes('Hoàn thành') || status.includes('Hoan thanh') || status.includes('Refund rejected') || status.includes('Complete') || status.includes('Completed') ? 'completed' : 'pending',
                         reason,
+                        faultParty,
                         createdAt: new Date(),
                     };
 
@@ -554,16 +594,17 @@ export default function ReturnsPage() {
                 // Database: returnCode, customerName, returnDate, returnReason, items
                 try {
                     const dbRecords = uniqueReturns.map(r => ({
-                        customerName: r.productName,        // productName → customerName
-                        returnCode: r.complaintCode,        // complaintCode → returnCode
+                        customerName: r.productName,
+                        returnCode: r.complaintCode,
                         orderNumber: r.orderNumber,
-                        returnReason: r.reason,             // reason → returnReason
-                        returnDate: r.complaintDate,        // complaintDate → returnDate
-                        items: JSON.stringify([]),           // Required field
+                        returnReason: r.reason,
+                        returnDate: r.complaintDate,
+                        items: JSON.stringify([]),
                         totalAmount: 0,
                         notes: r.processNotes || null,
                         status: r.status || 'pending',
                         packer: currentUser || null,
+                        faultParty: r.faultParty || 'warehouse',
                     }));
                     const result = await window.electronAPI.returns.bulkCreate(dbRecords);
                     if (!result.success) throw new Error(result.error || 'Lỗi DB');
@@ -602,47 +643,40 @@ export default function ReturnsPage() {
         {
             title: 'Thông tin đơn hàng',
             key: 'info',
-            width: 350,
+            width: 320,
             render: (_, record) => {
                 return (
-                    <div style={{ lineHeight: 1.8 }}>
-                        {/* Row 1: Mã khiếu nại + Thời gian */}
-                        <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
+                    <div style={{ lineHeight: 1.7, fontSize: 12 }}>
+                        <div style={{ display: 'flex', gap: 12, marginBottom: 4 }}>
                             <div>
-                                <Text type="secondary" style={{ fontSize: 12 }}>Mã số khiếu nại:</Text>
-                                <div><Tag color="orange">{record.complaintCode}</Tag></div>
+                                <Text type="secondary" style={{ fontSize: 11 }}>Mã KN:</Text>
+                                <div><Tag color="orange" style={{ fontSize: 11 }}>{record.complaintCode}</Tag></div>
                             </div>
                             <div>
-                                <Text type="secondary" style={{ fontSize: 12 }}>Thời gian khiếu nại:</Text>
-                                <div><Text strong>{dayjs(record.complaintDate).format('DD/MM/YYYY')}</Text></div>
+                                <Text type="secondary" style={{ fontSize: 11 }}>Ngày:</Text>
+                                <div><Text strong style={{ fontSize: 12 }}>{dayjs(record.complaintDate).format('DD/MM/YYYY')}</Text></div>
                             </div>
                         </div>
-
-                        {/* Row 2: Mã đơn hàng + Lý do */}
-                        <div style={{ display: 'flex', gap: 16 }}>
-                            <div>
-                                <Text type="secondary" style={{ fontSize: 12 }}>Mã đơn hàng:</Text>
-                                <div><Text>{record.orderNumber}</Text></div>
-                            </div>
-                            <div>
-                                <Text type="secondary" style={{ fontSize: 12 }}>Lí do:</Text>
-                                <div><Text>{record.reason}</Text></div>
-                            </div>
+                        <div style={{ marginBottom: 2 }}>
+                            <Text type="secondary" style={{ fontSize: 11 }}>Đơn: </Text>
+                            <Text style={{ fontSize: 12 }}>{record.orderNumber}</Text>
+                        </div>
+                        <div style={{ marginBottom: 2 }}>
+                            <Text type="secondary" style={{ fontSize: 11 }}>SP: </Text>
+                            <Text style={{ fontSize: 12 }}>{record.productName}</Text>
+                        </div>
+                        <div>
+                            <Text type="secondary" style={{ fontSize: 11 }}>Lí do: </Text>
+                            <Text style={{ fontSize: 12 }}>{record.reason}</Text>
                         </div>
                     </div>
                 );
             },
         },
         {
-            title: 'Tên sản phẩm',
-            dataIndex: 'productName',
-            key: 'productName',
-            width: 200,
-        },
-        {
             title: 'Ghi chú xử lý',
             key: 'processNotes',
-            width: 350,
+            width: 280,
             render: (_, record) => {
                 // Parse process notes
                 let logs: ProcessLog[] = [];
@@ -784,10 +818,10 @@ export default function ReturnsPage() {
             title: 'Nhân viên đóng gói',
             dataIndex: 'packer',
             key: 'packer',
-            width: 200,
+            width: 170,
             render: (packer, record) => {
                 // Disable packer change in history tab
-                const isInHistory = activeTab === 'history' && isFinalStatus(record.status);
+                const isInHistory = !isAdmin;
 
                 return (
                     <Select
@@ -819,10 +853,46 @@ export default function ReturnsPage() {
             },
         },
         {
+            title: 'Lỗi do',
+            key: 'faultParty',
+            dataIndex: 'faultParty',
+            width: 140,
+            render: (faultParty: string | undefined, record: Return) => {
+                const isCompleted = !isAdmin && (record.status === 'completed' || isFinalStatus(record.status));
+                return (
+                    <Select
+                        value={faultParty === 'customer' ? 'customer' : 'warehouse'}
+                        size="small"
+                        style={{ width: '100%' }}
+                        disabled={isCompleted}
+                        onChange={async (value) => {
+                            // Optimistic update: cập nhật UI ngay lập tức
+                            const updated = returns.map(r =>
+                                r.id === record.id ? { ...r, faultParty: value as 'warehouse' | 'customer' } : r
+                            );
+                            setReturns(updated);
+                            try {
+                                const result = await window.electronAPI.returns.update(record.id, { faultParty: value });
+                                if (!result.success) throw new Error(result.error || 'Lỗi DB');
+                                message.success('Đã cập nhật!');
+                            } catch (err: any) {
+                                // Hoàn tác nếu lỗi
+                                await loadReturns();
+                                message.error(`Lỗi cập nhật: ${err.message}`);
+                            }
+                        }}
+                    >
+                        <Select.Option value="warehouse">Lỗi do kho</Select.Option>
+                        <Select.Option value="customer">Lỗi do khách hàng</Select.Option>
+                    </Select>
+                );
+            },
+        },
+        {
             title: 'Trạng thái',
             dataIndex: 'status',
             key: 'status',
-            width: 200,
+            width: 170,
             render: (status, record) => {
                 const getStatusTag = (statusValue: string) => {
                     const statusConfig = statusList.find(s => s.value === statusValue);
@@ -850,8 +920,14 @@ export default function ReturnsPage() {
                                 try {
                                     await window.electronAPI.returns.update(record.id, { status: newStatus });
 
+                                    // ✅ Chỉ ghi phạt nếu "Lỗi do kho"
                                     if (newStatus === 'completed' && record.packer) {
-                                        await processReturnFine(record.packer, record.complaintCode);
+                                        if (record.faultParty === 'customer') {
+                                            console.log(`[Returns] Bỏ qua ghi phạt - Lỗi do khách hàng (phiếu: ${record.complaintCode})`);
+                                        } else {
+                                            // 'warehouse' hoặc undefined (mặc định = lỗi kho)
+                                            await processReturnFine(record.packer, record.complaintCode);
+                                        }
                                     } else if (record.status === 'completed' && newStatus !== 'completed' && record.complaintCode) {
                                         await processReturnFineRemoval(record.complaintCode);
                                     }
@@ -980,9 +1056,9 @@ export default function ReturnsPage() {
             },
         },
         {
-            title: 'Xem thêm',
+            title: '',
             key: 'actions',
-            width: 100,
+            width: 90,
             fixed: 'right',
             render: (_, record) => {
                 // Check if in history tab and completed
@@ -1000,7 +1076,7 @@ export default function ReturnsPage() {
                 // Only show delete if:
                 // 1. Not in history OR
                 // 2. In history but user is Admin
-                if (!isHistoryCompleted || currentUser?.toLowerCase() === 'admin') {
+                if (!isHistoryCompleted || isAdmin) {
                     items.push({
                         key: 'delete',
                         label: 'Xóa',
@@ -1250,6 +1326,30 @@ export default function ReturnsPage() {
                                 </Select>
                             </Form.Item>
                         </div>
+
+                        {/* Lỗi do */}
+                        <Form.Item
+                            label={
+                                <span>
+                                    ⚖️ Lỗi do{' '}
+                                    <Tag color="orange" style={{ fontSize: 11, marginLeft: 4 }}>Ảnh hưởng tính phạt</Tag>
+                                </span>
+                            }
+                            name="faultParty"
+                            initialValue="warehouse"
+                            rules={[{ required: true, message: 'Vui lòng chọn!' }]}
+                        >
+                            <Select size="large">
+                                <Select.Option value="warehouse">
+                                    <Tag color="red">🏭 Lỗi do kho</Tag>
+                                    &nbsp;— Sẽ tự động ghi phạt nhân viên đóng gói
+                                </Select.Option>
+                                <Select.Option value="customer">
+                                    <Tag color="blue">👤 Lỗi do khách hàng</Tag>
+                                    &nbsp;— Không ghi phạt
+                                </Select.Option>
+                            </Select>
+                        </Form.Item>
 
                         <Form.Item
                             label="Tên sản phẩm"

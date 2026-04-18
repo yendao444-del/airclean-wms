@@ -416,6 +416,7 @@ model Return {
   notes         String?
   status        String   @default("pending") // pending, approved, completed, rejected
   packer        String?  // Người đóng gói
+  faultParty    String?  @default("warehouse") // "warehouse" = lỗi kho (ghi phạt), "customer" = lỗi KH (bỏ qua phạt)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   createdBy     String?
