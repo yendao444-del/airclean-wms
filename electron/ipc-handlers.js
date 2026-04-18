@@ -1894,7 +1894,7 @@ ipcMain.handle('posOrder:getAll', async (event, filters = {}) => {
             where.OR = [
                 { orderNumber: { contains: filters.search, mode: 'insensitive' } },
                 { customerName: { contains: filters.search, mode: 'insensitive' } },
-                { tracking: { contains: filters.search, mode: 'insensitive' } },
+                { trackingNumber: { contains: filters.search, mode: 'insensitive' } },
                 ...(numericId ? [{ id: numericId }] : []),
             ];
         }
@@ -5852,7 +5852,7 @@ ipcMain.handle('marketplaceOrders:getAll', async (event, { since, search } = {})
         if (search) where.OR = [
             { orderNumber: { contains: search, mode: 'insensitive' } },
             { customerName: { contains: search, mode: 'insensitive' } },
-            { tracking: { contains: search, mode: 'insensitive' } },
+            { trackingNumber: { contains: search, mode: 'insensitive' } },
             ...(numericId ? [{ id: numericId }] : []),
         ];
         const orders = await prisma.order.findMany({
@@ -5890,8 +5890,8 @@ ipcMain.handle('exportOrders:getAll', async (event, { since, search } = {}) => {
         const numericId = syntheticIdMatch ? Number(syntheticIdMatch[1]) : null;
         const where = search ? {
             OR: [
-                { orderNumber: { contains: search, mode: 'insensitive' } },
                 { customer: { contains: search, mode: 'insensitive' } },
+                { notes: { contains: search, mode: 'insensitive' } },
                 ...(numericId ? [{ id: numericId }] : []),
             ]
         } : (since ? { exportDate: { gte: new Date(since) } } : undefined);
