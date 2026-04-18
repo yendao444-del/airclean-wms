@@ -1885,6 +1885,20 @@ ipcMain.handle('posOrder:getAll', async (event, filters = {}) => {
             where.paymentMethod = filters.paymentMethod;
         }
 
+        // Search mode: bỏ qua date filter, tìm theo mã đơn/khách hàng
+        if (filters.search) {
+            const trimmedSearch = String(filters.search).trim();
+            const syntheticIdMatch = trimmedSearch.match(/^#?POS-(\d+)$/i);
+            const numericId = syntheticIdMatch ? Number(syntheticIdMatch[1]) : null;
+            delete where.createdAt;
+            where.OR = [
+                { orderNumber: { contains: filters.search, mode: 'insensitive' } },
+                { customerName: { contains: filters.search, mode: 'insensitive' } },
+                { tracking: { contains: filters.search, mode: 'insensitive' } },
+                ...(numericId ? [{ id: numericId }] : []),
+            ];
+        }
+
         const orders = await prisma.order.findMany({
             where,
             include: {
@@ -1894,7 +1908,7 @@ ipcMain.handle('posOrder:getAll', async (event, filters = {}) => {
                 user: { select: { username: true, fullName: true } },
             },
             orderBy: { createdAt: 'desc' },
-            take: filters.limit || 200,
+            take: filters.search ? 50 : (filters.limit || 200),
         });
 
         // Map userName from user relation for frontend
@@ -5175,19 +5189,30 @@ require('./update-handlers')(prisma);
 // ECOMMERCE EXPORTS HANDLERS (XUẤT HÀNG TMDT)
 // ========================================
 
-ipcMain.handle('ecommerceExports:getAll', async (event, { since, sinceField, until, limit } = {}) => {
+ipcMain.handle('ecommerceExports:getAll', async (event, { since, sinceField, until, limit, search } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
-        // sinceField: 'ecommerceExportDate' (BusinessReport) hoặc 'updatedAt' (Attendance packing)
         const field = sinceField || 'ecommerceExportDate';
         const dateFilter = {};
-        if (since) dateFilter.gte = new Date(since);
-        if (until) dateFilter.lte = new Date(until);
+        if (since && !search) dateFilter.gte = new Date(since);
+        if (until && !search) dateFilter.lte = new Date(until);
+        const trimmedSearch = search ? String(search).trim() : '';
+        const syntheticIdMatch = trimmedSearch.match(/^#?(?:TMDT|TMDT-EX)-(\d+)$/i);
+        const numericId = syntheticIdMatch ? Number(syntheticIdMatch[1]) : null;
+
+        const where = search ? {
+            OR: [
+                { orderNumber: { contains: search, mode: 'insensitive' } },
+                { ecommerceExportCode: { contains: search, mode: 'insensitive' } },
+                { customerName: { contains: search, mode: 'insensitive' } },
+                ...(numericId ? [{ id: numericId }] : []),
+            ]
+        } : (Object.keys(dateFilter).length > 0 ? { [field]: dateFilter } : undefined);
 
         const exports = await prisma.ecommerceExport.findMany({
-            where: Object.keys(dateFilter).length > 0 ? { [field]: dateFilter } : undefined,
+            where,
             orderBy: { ecommerceExportDate: 'desc' },
-            take: limit || 2000,  // gioi han payload, tranh IPC block
+            take: search ? 50 : (limit || 2000),
         });
         // Format dates for frontend
         const formatted = exports.map(e => ({
@@ -5198,6 +5223,21 @@ ipcMain.handle('ecommerceExports:getAll', async (event, { since, sinceField, unt
         return { success: true, data: formatted };
     } catch (error) {
         console.error('❌ Get ecommerce exports error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('ecommerceExports:getPackersByOrderNumbers', async (event, orderNumbers) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const records = await prisma.ecommerceExport.findMany({
+            where: { orderNumber: { in: orderNumbers } },
+            select: { orderNumber: true, pickedBy: true },
+        });
+        const map = {};
+        records.forEach(r => { if (r.pickedBy) map[r.orderNumber] = r.pickedBy; });
+        return { success: true, data: map };
+    } catch (error) {
         return { success: false, error: error.message };
     }
 });
@@ -5798,20 +5838,31 @@ ipcMain.handle('ecommerceExports:bulkCancel', async (event, ids) => {
     }
 });
 
-ipcMain.handle('marketplaceOrders:getAll', async (event, { since } = {}) => {
+ipcMain.handle('marketplaceOrders:getAll', async (event, { since, search } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
+        const trimmedSearch = search ? String(search).trim() : '';
+        const syntheticIdMatch = trimmedSearch.match(/^#?TMDT-(\d+)$/i);
+        const numericId = syntheticIdMatch ? Number(syntheticIdMatch[1]) : null;
+        const where = {
+            source: { in: ['tiktok', 'shopee', 'lazada', 'tmdt'] },
+            status: 'completed',
+            ...(since && !search ? { createdAt: { gte: new Date(since) } } : {}),
+        };
+        if (search) where.OR = [
+            { orderNumber: { contains: search, mode: 'insensitive' } },
+            { customerName: { contains: search, mode: 'insensitive' } },
+            { tracking: { contains: search, mode: 'insensitive' } },
+            ...(numericId ? [{ id: numericId }] : []),
+        ];
         const orders = await prisma.order.findMany({
-            where: {
-                source: { in: ['tiktok', 'shopee', 'lazada', 'tmdt'] },
-                status: 'completed',
-                ...(since ? { createdAt: { gte: new Date(since) } } : {}),
-            },
+            where,
             include: {
                 items: true,
                 user: { select: { username: true, fullName: true } },
             },
             orderBy: { createdAt: 'desc' },
+            take: search ? 50 : undefined,
         });
 
         const formatted = orders.map(o => ({
@@ -5831,12 +5882,23 @@ ipcMain.handle('marketplaceOrders:getAll', async (event, { since } = {}) => {
 // EXPORT ORDERS HANDLERS (XUẤT HÀNG POS)
 // ========================================
 
-ipcMain.handle('exportOrders:getAll', async (event, { since } = {}) => {
+ipcMain.handle('exportOrders:getAll', async (event, { since, search } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
+        const trimmedSearch = search ? String(search).trim() : '';
+        const syntheticIdMatch = trimmedSearch.match(/^#?(?:XH|EX)-(\d+)$/i);
+        const numericId = syntheticIdMatch ? Number(syntheticIdMatch[1]) : null;
+        const where = search ? {
+            OR: [
+                { orderNumber: { contains: search, mode: 'insensitive' } },
+                { customer: { contains: search, mode: 'insensitive' } },
+                ...(numericId ? [{ id: numericId }] : []),
+            ]
+        } : (since ? { exportDate: { gte: new Date(since) } } : undefined);
         const orders = await prisma.exportOrder.findMany({
-            where: since ? { exportDate: { gte: new Date(since) } } : undefined,
-            orderBy: { exportDate: 'desc' }
+            where,
+            orderBy: { exportDate: 'desc' },
+            take: search ? 50 : undefined,
         });
         const formatted = orders.map(o => ({
             ...o,

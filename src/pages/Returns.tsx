@@ -593,6 +593,18 @@ export default function ReturnsPage() {
                 // Frontend: complaintCode, productName, complaintDate, reason
                 // Database: returnCode, customerName, returnDate, returnReason, items
                 try {
+                    // Tra cứu packer từ EcommerceExport theo orderNumber
+                    const orderNumbers = uniqueReturns.map(r => r.orderNumber).filter(Boolean);
+                    let packerMap: Record<string, string> = {};
+                    try {
+                        if (orderNumbers.length > 0) {
+                            const packerRes = await window.electronAPI.ecommerceExports.getPackersByOrderNumbers(orderNumbers);
+                            if (packerRes.success) packerMap = packerRes.data;
+                        }
+                    } catch {
+                        // Không tìm được packer → để trống, không block import
+                    }
+
                     const dbRecords = uniqueReturns.map(r => ({
                         customerName: r.productName,
                         returnCode: r.complaintCode,
@@ -603,7 +615,7 @@ export default function ReturnsPage() {
                         totalAmount: 0,
                         notes: r.processNotes || null,
                         status: r.status || 'pending',
-                        packer: currentUser || null,
+                        packer: packerMap[r.orderNumber] || null,
                         faultParty: r.faultParty || 'warehouse',
                     }));
                     const result = await window.electronAPI.returns.bulkCreate(dbRecords);

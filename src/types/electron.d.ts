@@ -155,13 +155,14 @@ export interface ElectronAPI {
         resetDaily: () => Promise<{ success: boolean; data?: { reset: boolean; resetCount: number; message: string }; error?: string }>;
     };
     ecommerceExports: {
-        getAll: (filters?: { since?: string; until?: string; sinceField?: string; limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { since?: string; until?: string; sinceField?: string; limit?: number; search?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         bulkDelete: (ids: number[]) => Promise<{ success: boolean; data?: number; error?: string }>;
         deleteAll: () => Promise<{ success: boolean; data?: number; error?: string }>;
         getCompletedKeys: () => Promise<{ success: boolean; data?: string[]; error?: string }>;
+        getPackersByOrderNumbers: (orderNumbers: string[]) => Promise<{ success: boolean; data?: Record<string, string>; error?: string }>;
         bulkCreate: (records: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         selectFolder: () => Promise<{ success: boolean; data?: string; error?: string }>;
         loadExcelFiles: (folderPath: string) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -171,10 +172,10 @@ export interface ElectronAPI {
         onNewFile: (callback: (data: { name: string; base64: string; path: string }) => void) => () => void;
     };
     marketplaceOrders: {
-        getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { since?: string; search?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     };
     exportOrders: {
-        getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { since?: string; search?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;

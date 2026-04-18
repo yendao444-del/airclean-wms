@@ -58,6 +58,9 @@ export default function OrdersPage() {
     const [editSaving, setEditSaving] = useState(false);
     const [editItems, setEditItems] = useState<any[]>([]);
     const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+    const [searchResults, setSearchResults] = useState<UnifiedOrder[] | null>(null);
+    const [searchLoading, setSearchLoading] = useState(false);
+    const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Product detail modal state
     const [productDetailName, setProductDetailName] = useState<string | null>(null);
@@ -71,9 +74,16 @@ export default function OrdersPage() {
 
     useEffect(() => {
         loadAllOrders();
+        if (datePreset !== 'today') return;
         const interval = setInterval(() => loadAllOrdersRef.current?.(true), 30000);
         return () => clearInterval(interval);
     }, [datePreset, customRange]);
+
+    useEffect(() => {
+        return () => {
+            if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+        };
+    }, []);
 
     const getSince = () => {
         const today = dayjs().startOf('day');
@@ -266,8 +276,106 @@ export default function OrdersPage() {
         return d.isSameOrAfter(rangeStart, 'day') && d.isSameOrBefore(rangeEnd, 'day');
     };
 
+    const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const kw = e.target.value;
+        setSearchKeyword(kw);
+        if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+        if (kw.trim().length < 2) {
+            setSearchResults(null);
+            return;
+        }
+        searchTimerRef.current = setTimeout(async () => {
+            setSearchLoading(true);
+            try {
+                const api = (window as any).electronAPI;
+                const s = kw.trim();
+                const [posRes, exRes, mktRes, ecomRes] = await Promise.all([
+                    api.posOrder.getAll({ search: s }),
+                    api.exportOrders.getAll({ search: s }),
+                    api.marketplaceOrders.getAll({ search: s }),
+                    api.ecommerceExports.getAll({ search: s }),
+                ]);
+                const unified: UnifiedOrder[] = [];
+                if (posRes.success) posRes.data?.forEach((o: any) => unified.push({
+                    id: `POS-${o.id}`,
+                    originalId: o.id,
+                    source: 'pos',
+                    sourceLabel: 'POS',
+                    orderNumber: o.orderNumber || `#POS-${o.id}`,
+                    customer: o.customer?.name || o.customerName || 'Khách lẻ',
+                    items: JSON.stringify((o.items || []).map((it: any) => ({
+                        productId: it.productId,
+                        productName: it.productName || it.name,
+                        variantSku: it.sku,
+                        variant: it.variant || null,
+                        quantity: it.quantity || it.qty,
+                        unitPrice: it.price,
+                        cost: it.cost || 0,
+                        total: it.subtotal || (it.price * (it.quantity || it.qty)),
+                    }))),
+                    totalAmount: o.total || 0,
+                    status: o.status || 'completed',
+                    date: o.createdAt || '',
+                    tracking: o.tracking || '',
+                    notes: o.note || '',
+                    createdBy: o.userName || '',
+                }));
+                if (exRes.success) exRes.data?.forEach((o: any) => unified.push({
+                    id: `EX-${o.id}`,
+                    originalId: o.id,
+                    source: 'export',
+                    sourceLabel: 'Xuất hàng',
+                    orderNumber: o.orderNumber || `#XH-${o.id}`,
+                    customer: o.customer || 'Khách lẻ',
+                    items: typeof o.items === 'string' ? o.items : JSON.stringify(o.items || []),
+                    totalAmount: o.totalAmount || 0,
+                    status: o.status || 'completed',
+                    date: o.createdAt || o.exportDate || '',
+                    notes: o.notes || '',
+                    createdBy: o.createdBy || '',
+                }));
+                if (mktRes.success) mktRes.data?.forEach((o: any) => unified.push({
+                    id: `TMDT-${o.id}`,
+                    originalId: o.id,
+                    source: 'tmdt',
+                    sourceLabel: o.source === 'tiktok' ? 'TikTok' : o.source === 'shopee' ? 'Shopee' : o.source === 'lazada' ? 'Lazada' : 'TMDT',
+                    orderNumber: o.orderNumber || `#TMDT-${o.id}`,
+                    customer: o.source ? o.source.toUpperCase() : 'Sàn TMDT',
+                    items: JSON.stringify(o.items || []),
+                    totalAmount: o.total || 0,
+                    status: o.status,
+                    date: o.updatedAt || o.createdAt || '',
+                    tracking: o.tracking || o.trackingNumber || '',
+                    shipping: o.note?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
+                    notes: o.note || '',
+                    createdBy: o.userName || '',
+                }));
+                if (ecomRes.success) ecomRes.data?.forEach((o: any) => unified.push({
+                    id: `TMDT-EX-${o.id}`,
+                    originalId: o.id,
+                    source: 'tmdt',
+                    sourceLabel: o.customerName?.toLowerCase().includes('tiktok') ? 'TikTok' : o.customerName?.toLowerCase().includes('shopee') ? 'Shopee' : 'TMDT',
+                    orderNumber: o.orderNumber || o.ecommerceExportCode || `#TMDT-${o.id}`,
+                    customer: o.customerName || 'Sàn TMDT',
+                    items: typeof o.items === 'string' ? o.items : JSON.stringify(o.items || []),
+                    totalAmount: o.totalAmount || 0,
+                    status: o.status,
+                    date: o.updatedAt || o.ecommerceExportDate || o.createdAt || '',
+                    tracking: o.notes?.match(/Tracking: ([^|]+)/)?.[1]?.trim(),
+                    shipping: o.notes?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
+                    notes: o.notes || '',
+                    createdBy: (typeof o.pickedBy === 'string' && o.pickedBy) ? o.pickedBy : (o.createdBy || ''),
+                }));
+                unified.sort((a, b) => dayjs(b.date).unix() - dayjs(a.date).unix());
+                setSearchResults(unified);
+            } finally {
+                setSearchLoading(false);
+            }
+        }, 400);
+    };
+
     // Filtered orders
-    const filteredOrders = orders.filter(order => {
+    const filteredOrders = (searchResults ?? orders).filter(order => {
         if (sourceFilter !== 'all' && order.source !== sourceFilter) return false;
         if (searchKeyword.trim()) {
             // Khi search: bỏ qua date range, tìm toàn bộ đơn
@@ -279,7 +387,7 @@ export default function OrdersPage() {
                 order.sourceLabel.toLowerCase().includes(kw)
             );
         }
-        if (!isInRange(order.date)) return false;
+        if (!searchResults && !isInRange(order.date)) return false;
         return true;
     });
 
@@ -671,8 +779,8 @@ export default function OrdersPage() {
                 </Title>
                 <Space>
                     <Input placeholder="Tìm mã đơn, tracking..." prefix={<SearchOutlined />}
-                        value={searchKeyword} onChange={e => setSearchKeyword(e.target.value)}
-                        allowClear style={{ width: 200 }}
+                        value={searchKeyword} onChange={handleSearchChange}
+                        allowClear style={{ width: 200 }} suffix={searchLoading ? <Spin size="small" /> : null}
                     />
                     {selectedRowKeys.length > 0 && isAdmin && (
                         <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete}>
