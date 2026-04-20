@@ -533,19 +533,10 @@ function calculatePayroll(
 
         const myFines = activeFines.filter(f => f.empId === emp.id).reduce((sum, f) => sum + f.amount, 0);
 
-        let fineShare = 0;
-        activeFines.forEach(f => {
-            if (f.source === 'returns' || f.source === ('purchase_vat_overdue' as any) || f.source === ('daily_task_overdue' as any)) return;
-            if (f.empId !== emp.id) {
-                const recipientCount = employeesList.length - 1;
-                if (recipientCount > 0) {
-                    fineShare += f.amount / recipientCount;
-                }
-            }
-        });
+        const fineShare = 0;
 
         const mBonus = bonusesData.filter(b => b.empId === emp.id).reduce((sum, b) => sum + b.amount, 0);
-        const totalBonus = fineShare + mBonus;
+        const totalBonus = mBonus;
         const finalSalary = salaryBase + packIncome + totalBonus - myFines + extraAdjust;
         return {
             ...emp, shifts, absentDays, salaryBase, packIncome, totalPackValue_100,
@@ -3038,7 +3029,6 @@ export default function Attendance() {
 
         const bonusTabsItems = payrollData.map(emp => {
             const empBonusRows: any[] = [];
-            empBonusRows.push({ key: `pool-${emp.id}`, name: emp.name, source: 'Pool Chia Phạt', sourceColor: 'orange', detail: 'Chia từ quỹ phạt của các thành viên vi phạm', amount: emp.fineShare, isManual: false });
             extraBonuses.filter(b => b.empId === emp.id).forEach((b) => {
                 empBonusRows.push({ key: `bonus-${b.id}`, name: emp.name, source: b.type, sourceColor: 'blue', detail: b.detail, amount: b.amount, isManual: true, bonusRef: b });
             });
@@ -3182,6 +3172,7 @@ export default function Attendance() {
             ...autoVatOverdueFines.map((f, i) => ({ ...f, key: `vat-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
             ...autoDeadlineOverdueFines.map((f, i) => ({ ...f, key: `deadline-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
         ];
+        combinedFines.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
         const totalFineAmount = combinedFines.reduce((sum, f) => sum + f.amount, 0);
 
         return (
@@ -3221,7 +3212,7 @@ export default function Attendance() {
                 <Card bodyStyle={{ padding: 0 }} style={{ borderTop: '3px solid #ff4d4f' }}>
                     <Table
                         dataSource={combinedFines}
-                        pagination={false}
+                        pagination={{ pageSize: 10, size: 'small', showTotal: (total) => `Tổng ${total} vi phạm` }}
                         size="middle"
                         columns={[
                             {
@@ -4250,10 +4241,9 @@ export default function Attendance() {
                             </div>
 
                             {/* 3. Thưởng */}
-                            {(p.fineShare > 0 || p.mBonus > 0 || empBonuses.length > 0) && (<>
+                            {(p.mBonus > 0 || empBonuses.length > 0) && (<>
                                 {sectionTitle('③ Thưởng')}
                                 <div style={{ background: '#eff6ff', borderRadius: 10, padding: '10px 14px', border: '1px solid #bfdbfe' }}>
-                                    {p.fineShare > 0 && row('Pool chia phạt', `+ ${fmt(p.fineShare)}`, '#1d4ed8', 'Chia từ quỹ phạt thành viên vi phạm')}
                                     {empBonuses.map((b: any, i: number) => row(b.detail || 'Thưởng lẻ', `+ ${fmt(b.amount)}`, '#1d4ed8', `Admin — ${b.type}`))}
                                     {p.mBonus > 0 && empBonuses.length === 0 && row('Thưởng lẻ (Admin)', `+ ${fmt(p.mBonus)}`, '#1d4ed8')}
                                 </div>
