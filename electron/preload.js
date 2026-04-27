@@ -98,6 +98,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         deleteAll: () => ipcRenderer.invoke('ecommerceExports:deleteAll'),
         deleteCancelled: () => ipcRenderer.invoke('ecommerceExports:deleteCancelled'),
         getCompletedKeys: () => ipcRenderer.invoke('ecommerceExports:getCompletedKeys'),
+        checkExistingKeys: (data) => ipcRenderer.invoke('ecommerceExports:checkExistingKeys', data),
         getPackersByOrderNumbers: (orderNumbers) => ipcRenderer.invoke('ecommerceExports:getPackersByOrderNumbers', orderNumbers),
         bulkCreate: (records) => ipcRenderer.invoke('ecommerceExports:bulkCreate', records),
         bulkCancel: (ids) => ipcRenderer.invoke('ecommerceExports:bulkCancel', ids),
@@ -143,7 +144,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // Refunds (HÀNG HOÀN)
     refunds: {
-        getAll: () => ipcRenderer.invoke('refunds:getAll'),
+        getAll: (args) => ipcRenderer.invoke('refunds:getAll', args),
         create: (data) => ipcRenderer.invoke('refunds:create', data),
         update: (id, data) => ipcRenderer.invoke('refunds:update', id, data),
         delete: (id) => ipcRenderer.invoke('refunds:delete', id),
@@ -154,7 +155,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // Stock Balance (CÂN BẰNG KHO)
     stockBalance: {
-        getAll: () => ipcRenderer.invoke('stockBalance:getAll'),
+        getAll: (args) => ipcRenderer.invoke('stockBalance:getAll', args),
         create: (data) => ipcRenderer.invoke('stockBalance:create', data),
     },
 
@@ -231,7 +232,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // E-Invoice (HÓA ĐƠN ĐIỆN TỬ)
     einvoice: {
-        getAll: () => ipcRenderer.invoke('einvoice:getAll'),
+        getAll: (args) => ipcRenderer.invoke('einvoice:getAll', args),
         bulkImport: (orders) => ipcRenderer.invoke('einvoice:bulkImport', orders),
         issueInvoices: (orderIds) => ipcRenderer.invoke('einvoice:issueInvoices', orderIds),
         exportExcel: (filters) => ipcRenderer.invoke('einvoice:exportExcel', filters),

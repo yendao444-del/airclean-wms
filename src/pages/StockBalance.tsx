@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { usePageHeader } from '../contexts/PageHeaderContext';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
+import { useAppData } from '../contexts/AppDataContext';
 import {
     Card,
     Button,
@@ -691,6 +692,7 @@ export default function StockBalancePage() {
     const isAdmin = user?.role === 'admin';
     
     const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
+    const { products: contextProducts, ecomExports: contextEcomExports } = useAppData();
     const [products, setProducts] = useState<Product[]>([]);
     const [balanceItems, setBalanceItems] = useState<StockBalanceItem[]>([]);
     const [productRows, setProductRows] = useState<ProductRow[]>([]);
@@ -878,21 +880,29 @@ export default function StockBalancePage() {
         loadConversionRates();
     }, []);
 
+    // Khi context products thay đổi (sau refresh), cập nhật bảng tồn kho
+    useEffect(() => {
+        if (contextProducts.length > 0 && productsRef.current.length === 0) return;
+        if (contextProducts.length > 0) {
+            const prods = contextProducts as unknown as Product[];
+            productsRef.current = prods;
+            setProducts(prods);
+            generateBalanceItems(prods, salesMap);
+        }
+    }, [contextProducts]);
+
     const initData = async () => {
         setLoading(true);
         try {
-            // Load song song: products + sales (90 ngày) → render 1 lần, không background re-render
-            const [productsResult, sales] = await Promise.all([
-                window.electronAPI.products.getAll(),
-                loadSalesData(),
-            ]);
-            if (productsResult.success && productsResult.data) {
-                productsRef.current = productsResult.data;
-                setProducts(productsResult.data);
-                generateBalanceItems(productsResult.data, sales);
-            } else {
-                message.error('Lỗi khi tải sản phẩm');
-            }
+            // Dùng products từ AppDataContext (đã load lúc app khởi động, không fetch lại)
+            const prods = contextProducts as unknown as Product[];
+            productsRef.current = prods;
+            setProducts(prods);
+            // Hiển thị ngay với salesMap hiện có, load POS sales ngầm
+            generateBalanceItems(prods, salesMap);
+            // Load POS sales data (ecomExports đã có trong context)
+            const sales = await loadSalesData();
+            generateBalanceItems(prods, sales);
         } catch {
             message.error('Lỗi khi tải dữ liệu');
         } finally {
@@ -900,46 +910,34 @@ export default function StockBalancePage() {
         }
     };
 
-    // Load doanh số bán từ POS + TMDT để sắp xếp (chỉ 90 ngày gần nhất)
+    // Load doanh số bán từ POS + TMDT để sắp xếp
+    // ecomExports dùng từ AppDataContext (đã có sẵn), chỉ fetch thêm POS orders
     const loadSalesData = async (): Promise<Map<string, number>> => {
         try {
             const api = (window as any).electronAPI;
             const skuSales = new Map<string, number>();
-            const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+            const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
-            // 1. POS orders
-            const posRes = await api.posOrder.getAll({ since: since90 });
+            const posRes = await api.posOrder.getAll({ since: since30 });
             if (posRes.success && posRes.data) {
                 for (const order of posRes.data) {
-                    const items = order.items || [];
-                    for (const item of items) {
+                    for (const item of (order.items || [])) {
                         const sku = item.sku || '';
-                        if (sku) {
-                            skuSales.set(sku, (skuSales.get(sku) || 0) + (item.quantity || item.qty || 1));
-                        }
+                        if (sku) skuSales.set(sku, (skuSales.get(sku) || 0) + (item.quantity || item.qty || 1));
                     }
                 }
             }
 
-            // 2. Ecommerce exports (completed, 90 ngày)
-            const ecRes = await api.ecommerceExports.getAll({
-                since: since90,
-                until: dayjs().endOf('day').toISOString(),
-                limit: 10000,
-            });
-            if (ecRes.success && ecRes.data) {
-                for (const ec of ecRes.data) {
-                    if (ec.status !== 'completed') continue;
-                    try {
-                        const items = typeof ec.items === 'string' ? JSON.parse(ec.items) : ec.items || [];
-                        for (const item of items) {
-                            const sku = item.variantSku || '';
-                            if (sku) {
-                                skuSales.set(sku, (skuSales.get(sku) || 0) + (item.quantity || 1));
-                            }
-                        }
-                    } catch { /* skip */ }
-                }
+            // Dùng ecomExports từ context thay vì fetch lại
+            for (const ec of contextEcomExports) {
+                if (ec.status !== 'completed') continue;
+                try {
+                    const items = typeof ec.items === 'string' ? JSON.parse(ec.items) : (ec.items as any) || [];
+                    for (const item of items) {
+                        const sku = item.variantSku || '';
+                        if (sku) skuSales.set(sku, (skuSales.get(sku) || 0) + (item.quantity || 1));
+                    }
+                } catch { /* skip */ }
             }
 
             setSalesMap(skuSales);
@@ -950,22 +948,11 @@ export default function StockBalancePage() {
         }
     };
 
-    const loadProducts = async (sales?: Map<string, number>) => {
-        setLoading(true);
-        try {
-            const result = await window.electronAPI.products.getAll();
-            if (result.success && result.data) {
-                productsRef.current = result.data;
-                setProducts(result.data);
-                generateBalanceItems(result.data, sales || salesMap);
-            } else {
-                message.error('Lỗi khi tải sản phẩm');
-            }
-        } catch (error) {
-            message.error('Lỗi khi tải sản phẩm');
-        } finally {
-            setLoading(false);
-        }
+    const loadProducts = (sales?: Map<string, number>) => {
+        const prods = contextProducts as unknown as Product[];
+        productsRef.current = prods;
+        setProducts(prods);
+        generateBalanceItems(prods, sales || salesMap);
     };
 
     const generateBalanceItems = (productList: Product[], currentSalesMap: Map<string, number>) => {

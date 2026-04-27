@@ -40,6 +40,7 @@ interface UnifiedOrder {
 }
 
 type DatePreset = 'today' | '7days' | '30days' | 'month' | 'custom';
+type TmdtPlatformFilter = 'all' | 'shopee' | 'tiktok';
 
 export default function OrdersPage() {
     const { message, modal } = App.useApp();
@@ -49,6 +50,7 @@ export default function OrdersPage() {
     const [loading, setLoading] = useState(false);
     const [searchKeyword, setSearchKeyword] = useState('');
     const [sourceFilter, setSourceFilter] = useState<'all' | 'pos' | 'export' | 'tmdt'>('all');
+    const [tmdtPlatformFilter, setTmdtPlatformFilter] = useState<TmdtPlatformFilter>('all');
     const [datePreset, setDatePreset] = useState<DatePreset>('today');
     const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
 
@@ -276,6 +278,27 @@ export default function OrdersPage() {
         return d.isSameOrAfter(rangeStart, 'day') && d.isSameOrBefore(rangeEnd, 'day');
     };
 
+    const getTmdtPlatform = (order: UnifiedOrder): TmdtPlatformFilter | 'other' => {
+        const label = (order.sourceLabel || '').toLowerCase();
+        const customer = (order.customer || '').toLowerCase();
+        if (label.includes('shopee') || customer.includes('shopee')) return 'shopee';
+        if (label.includes('tiktok') || customer.includes('tiktok')) return 'tiktok';
+        return 'other';
+    };
+
+    const matchesSourceFilters = (order: UnifiedOrder) => {
+        if (sourceFilter !== 'all' && order.source !== sourceFilter) return false;
+        if (sourceFilter === 'tmdt' && tmdtPlatformFilter !== 'all') {
+            return getTmdtPlatform(order) === tmdtPlatformFilter;
+        }
+        return true;
+    };
+
+    const setOrderSourceFilter = (nextSource: 'all' | 'pos' | 'export' | 'tmdt') => {
+        setSourceFilter(nextSource);
+        if (nextSource !== 'tmdt') setTmdtPlatformFilter('all');
+    };
+
     const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const kw = e.target.value;
         setSearchKeyword(kw);
@@ -376,7 +399,7 @@ export default function OrdersPage() {
 
     // Filtered orders
     const filteredOrders = (searchResults ?? orders).filter(order => {
-        if (sourceFilter !== 'all' && order.source !== sourceFilter) return false;
+        if (!matchesSourceFilters(order)) return false;
         if (searchKeyword.trim()) {
             // Khi search: bỏ qua date range, tìm toàn bộ đơn
             const kw = searchKeyword.trim().toLowerCase();
@@ -397,12 +420,18 @@ export default function OrdersPage() {
     const prevEnd = rangeStart.subtract(1, 'day');
 
     const prevOrders = orders.filter(o => {
+        if (!matchesSourceFilters(o)) return false;
         const d = dayjs(o.date);
         return d.isSameOrAfter(prevStart, 'day') && d.isSameOrBefore(prevEnd, 'day');
     });
 
-    const currentRevenue = filteredOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
-    const prevRevenue = prevOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
+    // Doanh thu chỉ tính từ: POS, xuất hàng, và phiếu xuất TMDT (TMDT-EX-)
+    // Không tính marketplaceOrders (TMDT-{id}) vì đó là đơn thô chưa xác nhận xuất kho
+    const isValidRevenue = (o: UnifiedOrder) =>
+        !['cancelled', 'returned', 'refunded'].includes((o.status || '').toLowerCase()) &&
+        !(o.id.startsWith('TMDT-') && !o.id.startsWith('TMDT-EX-'));
+    const currentRevenue = filteredOrders.filter(isValidRevenue).reduce((s, o) => s + (o.totalAmount || 0), 0);
+    const prevRevenue = prevOrders.filter(isValidRevenue).reduce((s, o) => s + (o.totalAmount || 0), 0);
 
     const calcQty = (list: UnifiedOrder[]) => list.reduce((s, o) => {
         let items: any[] = [];
@@ -769,6 +798,24 @@ export default function OrdersPage() {
         display: 'inline-flex', alignItems: 'center', gap: 6,
     });
 
+    const tmdtPlatformStyle = (active: boolean, color: string) => ({
+        padding: '4px 12px',
+        fontSize: 12,
+        fontWeight: active ? 700 : 500,
+        borderRadius: 999,
+        cursor: 'pointer' as const,
+        border: active ? `1px solid ${color}` : '1px solid #d9d9d9',
+        background: active ? color : '#fff',
+        color: active ? '#fff' : '#595959',
+        transition: 'all 0.2s ease',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+    });
+
+    const countCurrentRange = (predicate: (order: UnifiedOrder) => boolean) =>
+        orders.filter(order => predicate(order) && isInRange(order.date)).length;
+
     return (
         <div style={{ maxWidth: 1440 }}>
             {/* Header */}
@@ -795,33 +842,55 @@ export default function OrdersPage() {
             <Card bordered={false} style={{ borderRadius: 12, marginBottom: 16 }} bodyStyle={{ padding: '10px 16px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <Text type="secondary" style={{ fontSize: 12, fontWeight: 600, marginRight: 4 }}>Lọc nguồn:</Text>
-                    <button style={sourceTabStyle(sourceFilter === 'all', '#1890ff')} onClick={() => setSourceFilter('all')}>
+                    <button style={sourceTabStyle(sourceFilter === 'all', '#1890ff')} onClick={() => setOrderSourceFilter('all')}>
                         📋 Tất cả
                         <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', borderRadius: 10, background: sourceFilter === 'all' ? '#1890ff' : '#d9d9d9', color: '#fff', border: 'none', padding: '0 6px' }}>
-                            {orders.filter(o => isInRange(o.date)).length}
+                            {countCurrentRange(() => true)}
                         </Tag>
                     </button>
-                    <button style={sourceTabStyle(sourceFilter === 'tmdt', '#13c2c2')} onClick={() => setSourceFilter('tmdt')}>
+                    <button style={sourceTabStyle(sourceFilter === 'tmdt', '#13c2c2')} onClick={() => setOrderSourceFilter('tmdt')}>
                         🛒 TMDT
                         <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', borderRadius: 10, background: sourceFilter === 'tmdt' ? '#13c2c2' : '#d9d9d9', color: '#fff', border: 'none', padding: '0 6px' }}>
-                            {orders.filter(o => o.source === 'tmdt' && isInRange(o.date)).length}
+                            {countCurrentRange(o => o.source === 'tmdt')}
                         </Tag>
                     </button>
-                    <button style={sourceTabStyle(sourceFilter === 'pos', '#1890ff')} onClick={() => setSourceFilter('pos')}>
+                    <button style={sourceTabStyle(sourceFilter === 'pos', '#1890ff')} onClick={() => setOrderSourceFilter('pos')}>
                         🏪 Bán hàng
                         <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', borderRadius: 10, background: sourceFilter === 'pos' ? '#1890ff' : '#d9d9d9', color: '#fff', border: 'none', padding: '0 6px' }}>
-                            {orders.filter(o => o.source === 'pos' && isInRange(o.date)).length}
+                            {countCurrentRange(o => o.source === 'pos')}
                         </Tag>
                     </button>
-                    <button style={sourceTabStyle(sourceFilter === 'export', '#722ed1')} onClick={() => setSourceFilter('export')}>
+                    <button style={sourceTabStyle(sourceFilter === 'export', '#722ed1')} onClick={() => setOrderSourceFilter('export')}>
                         📦 Xuất hàng
                         <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', borderRadius: 10, background: sourceFilter === 'export' ? '#722ed1' : '#d9d9d9', color: '#fff', border: 'none', padding: '0 6px' }}>
-                            {orders.filter(o => o.source === 'export' && isInRange(o.date)).length}
+                            {countCurrentRange(o => o.source === 'export')}
                         </Tag>
                     </button>
                 </div>
+                {sourceFilter === 'tmdt' && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 10, paddingTop: 10, borderTop: '1px solid #f0f0f0' }}>
+                        <Text type="secondary" style={{ fontSize: 12, fontWeight: 600, marginRight: 4 }}>Sàn TMDT:</Text>
+                        <button style={tmdtPlatformStyle(tmdtPlatformFilter === 'all', '#13c2c2')} onClick={() => setTmdtPlatformFilter('all')}>
+                            Tất cả
+                            <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', borderRadius: 10, background: tmdtPlatformFilter === 'all' ? '#fff' : '#d9d9d9', color: tmdtPlatformFilter === 'all' ? '#13c2c2' : '#fff', border: 'none', padding: '0 6px' }}>
+                                {countCurrentRange(o => o.source === 'tmdt')}
+                            </Tag>
+                        </button>
+                        <button style={tmdtPlatformStyle(tmdtPlatformFilter === 'shopee', '#ee4d2d')} onClick={() => setTmdtPlatformFilter('shopee')}>
+                            Shopee
+                            <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', borderRadius: 10, background: tmdtPlatformFilter === 'shopee' ? '#fff' : '#d9d9d9', color: tmdtPlatformFilter === 'shopee' ? '#ee4d2d' : '#fff', border: 'none', padding: '0 6px' }}>
+                                {countCurrentRange(o => o.source === 'tmdt' && getTmdtPlatform(o) === 'shopee')}
+                            </Tag>
+                        </button>
+                        <button style={tmdtPlatformStyle(tmdtPlatformFilter === 'tiktok', '#000000')} onClick={() => setTmdtPlatformFilter('tiktok')}>
+                            TikTok
+                            <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', borderRadius: 10, background: tmdtPlatformFilter === 'tiktok' ? '#fff' : '#d9d9d9', color: tmdtPlatformFilter === 'tiktok' ? '#000000' : '#fff', border: 'none', padding: '0 6px' }}>
+                                {countCurrentRange(o => o.source === 'tmdt' && getTmdtPlatform(o) === 'tiktok')}
+                            </Tag>
+                        </button>
+                    </div>
+                )}
             </Card>
-
             {/* Date Filter Bar */}
             <Card bordered={false} style={{ borderRadius: 12, marginBottom: 16, padding: 0 }} bodyStyle={{ padding: '12px 16px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>

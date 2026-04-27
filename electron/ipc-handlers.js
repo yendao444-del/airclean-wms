@@ -1461,8 +1461,12 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
  * Thay vì full table scan mỗi lần tìm variant, cache O(1) lookup.
  */
 async function buildSkuCache(tx) {
-    const allProducts = await tx.product.findMany();
-    const allCombos = await tx.comboProduct.findMany();
+    const allProducts = await tx.product.findMany({
+        select: { id: true, sku: true, name: true, stock: true, unit: true, cost: true, variants: true }
+    });
+    const allCombos = await tx.comboProduct.findMany({
+        select: { id: true, sku: true, name: true, items: true }
+    });
 
     const productMap = new Map(); // sku → { product, isVariant, variantIndex }
     const comboMap = new Map();   // sku → { combo, items[] }
@@ -4823,13 +4827,16 @@ ipcMain.handle('combos:getAll', async () => {
     try {
         if (!prisma) return { success: true, data: [] };
         const combos = await prisma.comboProduct.findMany({ orderBy: { createdAt: 'desc' } });
-        const products = await prisma.product.findMany();
+        const products = await prisma.product.findMany({
+            select: { id: true, stock: true, cost: true, variants: true }
+        });
+        const productById = new Map(products.map(p => [p.id, p]));
         const combosWithStock = combos.map(combo => {
             const items = JSON.parse(combo.items || '[]');
             let availableStock = Infinity;
             let calculatedCost = 0;
             items.forEach(item => {
-                const product = products.find(p => p.id === item.productId);
+                const product = productById.get(item.productId);
                 if (product && product.variants) {
                     let variants;
                     try { variants = JSON.parse(product.variants); } catch { variants = []; }
@@ -5189,9 +5196,10 @@ require('./update-handlers')(prisma);
 // ECOMMERCE EXPORTS HANDLERS (XUẤT HÀNG TMDT)
 // ========================================
 
-ipcMain.handle('ecommerceExports:getAll', async (event, { since, sinceField, until, limit, search } = {}) => {
+ipcMain.handle('ecommerceExports:getAll', async (event, { since, sinceField, until, limit, search, statusIn, statusNotIn, skip } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
+        const startedAt = Date.now();
         const field = sinceField || 'ecommerceExportDate';
         const dateFilter = {};
         if (since && !search) dateFilter.gte = new Date(since);
@@ -5200,27 +5208,47 @@ ipcMain.handle('ecommerceExports:getAll', async (event, { since, sinceField, unt
         const syntheticIdMatch = trimmedSearch.match(/^#?(?:TMDT|TMDT-EX)-(\d+)$/i);
         const numericId = syntheticIdMatch ? Number(syntheticIdMatch[1]) : null;
 
+        const statusFilter = {};
+        if (Array.isArray(statusIn) && statusIn.length > 0) {
+            statusFilter.in = statusIn.map(s => String(s));
+        }
+        if (Array.isArray(statusNotIn) && statusNotIn.length > 0) {
+            statusFilter.notIn = statusNotIn.map(s => String(s));
+        }
+
         const where = search ? {
             OR: [
-                { orderNumber: { contains: search, mode: 'insensitive' } },
-                { ecommerceExportCode: { contains: search, mode: 'insensitive' } },
-                { customerName: { contains: search, mode: 'insensitive' } },
+                { orderNumber: { contains: trimmedSearch, mode: 'insensitive' } },
+                { ecommerceExportCode: { contains: trimmedSearch, mode: 'insensitive' } },
+                { customerName: { contains: trimmedSearch, mode: 'insensitive' } },
+                { notes: { contains: trimmedSearch, mode: 'insensitive' } },
                 ...(numericId ? [{ id: numericId }] : []),
-            ]
-        } : (Object.keys(dateFilter).length > 0 ? { [field]: dateFilter } : undefined);
+            ],
+            ...(Object.keys(statusFilter).length > 0 ? { status: statusFilter } : {}),
+        } : {
+            ...(Object.keys(dateFilter).length > 0 ? { [field]: dateFilter } : {}),
+            ...(Object.keys(statusFilter).length > 0 ? { status: statusFilter } : {}),
+        };
+
+        const take = search ? 50 : (limit || 2000);
 
         const exports = await prisma.ecommerceExport.findMany({
-            where,
+            where: Object.keys(where).length > 0 ? where : undefined,
             orderBy: { ecommerceExportDate: 'desc' },
-            take: search ? 50 : (limit || 2000),
+            skip: skip || 0,
+            take: take + 1,
         });
+        const hasMore = exports.length > take;
+        const rows = hasMore ? exports.slice(0, take) : exports;
         // Format dates for frontend
-        const formatted = exports.map(e => ({
+        const formatted = rows.map(e => ({
             ...e,
             ecommerceExportDate: e.ecommerceExportDate.toISOString(),
+            updatedAt: e.updatedAt ? e.updatedAt.toISOString() : null,
             items: e.items // Already JSON string
         }));
-        return { success: true, data: formatted };
+        console.log(`[Perf] ecommerceExports:getAll rows=${formatted.length} hasMore=${hasMore} search=${!!search} ms=${Date.now() - startedAt}`);
+        return { success: true, data: formatted, hasMore };
     } catch (error) {
         console.error('❌ Get ecommerce exports error:', error);
         return { success: false, error: error.message };
@@ -5238,6 +5266,57 @@ ipcMain.handle('ecommerceExports:getPackersByOrderNumbers', async (event, orderN
         records.forEach(r => { if (r.pickedBy) map[r.orderNumber] = r.pickedBy; });
         return { success: true, data: map };
     } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('ecommerceExports:checkExistingKeys', async (event, { orderNumbers = [], ecommerceExportCodes = [] } = {}) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const normalizeKeys = (keys) => [...new Set((keys || []).map(k => String(k || '').trim()).filter(Boolean))];
+        const normalizedOrderNumbers = normalizeKeys(orderNumbers);
+        const normalizedExportCodes = normalizeKeys(ecommerceExportCodes);
+        const totalKeys = normalizedOrderNumbers.length + normalizedExportCodes.length;
+        if (totalKeys === 0) return { success: true, data: { orderNumbers: [], ecommerceExportCodes: [] } };
+        if (totalKeys > 1000) throw new Error('Too many keys. Maximum 1000 keys per request.');
+
+        const clauses = [];
+        if (normalizedOrderNumbers.length > 0) clauses.push({ orderNumber: { in: normalizedOrderNumbers } });
+        if (normalizedExportCodes.length > 0) clauses.push({ ecommerceExportCode: { in: normalizedExportCodes } });
+
+        const [exports, marketplaceOrders] = await Promise.all([
+            prisma.ecommerceExport.findMany({
+                where: { OR: clauses },
+                select: { orderNumber: true, ecommerceExportCode: true },
+            }),
+            normalizedOrderNumbers.length > 0 ? prisma.order.findMany({
+                where: {
+                    source: { in: ['tiktok', 'shopee', 'lazada', 'tmdt'] },
+                    orderNumber: { in: normalizedOrderNumbers },
+                },
+                select: { orderNumber: true },
+            }) : Promise.resolve([]),
+        ]);
+
+        const existingOrderNumbers = new Set();
+        const existingExportCodes = new Set();
+        for (const record of exports) {
+            if (record.orderNumber) existingOrderNumbers.add(record.orderNumber.trim());
+            if (record.ecommerceExportCode) existingExportCodes.add(record.ecommerceExportCode.trim());
+        }
+        for (const order of marketplaceOrders) {
+            if (order.orderNumber) existingOrderNumbers.add(order.orderNumber.trim());
+        }
+
+        return {
+            success: true,
+            data: {
+                orderNumbers: Array.from(existingOrderNumbers),
+                ecommerceExportCodes: Array.from(existingExportCodes),
+            }
+        };
+    } catch (error) {
+        console.error('Check existing ecommerce keys error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5838,7 +5917,7 @@ ipcMain.handle('ecommerceExports:bulkCancel', async (event, ids) => {
     }
 });
 
-ipcMain.handle('marketplaceOrders:getAll', async (event, { since, search } = {}) => {
+ipcMain.handle('marketplaceOrders:getAll', async (event, { since, search, limit } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const trimmedSearch = search ? String(search).trim() : '';
@@ -5862,7 +5941,7 @@ ipcMain.handle('marketplaceOrders:getAll', async (event, { since, search } = {})
                 user: { select: { username: true, fullName: true } },
             },
             orderBy: { createdAt: 'desc' },
-            take: search ? 50 : undefined,
+            take: search ? 50 : (limit || 1000),
         });
 
         const formatted = orders.map(o => ({
@@ -5882,7 +5961,7 @@ ipcMain.handle('marketplaceOrders:getAll', async (event, { since, search } = {})
 // EXPORT ORDERS HANDLERS (XUẤT HÀNG POS)
 // ========================================
 
-ipcMain.handle('exportOrders:getAll', async (event, { since, search } = {}) => {
+ipcMain.handle('exportOrders:getAll', async (event, { since, search, limit } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const trimmedSearch = search ? String(search).trim() : '';
@@ -5898,7 +5977,7 @@ ipcMain.handle('exportOrders:getAll', async (event, { since, search } = {}) => {
         const orders = await prisma.exportOrder.findMany({
             where,
             orderBy: { exportDate: 'desc' },
-            take: search ? 50 : undefined,
+            take: search ? 50 : (limit || 1000),
         });
         const formatted = orders.map(o => ({
             ...o,
@@ -6120,12 +6199,13 @@ ipcMain.handle('returns:bulkCreate', async (event, records) => {
 // REFUNDS HANDLERS (HÀNG HOÀN)
 // ========================================
 
-ipcMain.handle('refunds:getAll', async (event, { since } = {}) => {
+ipcMain.handle('refunds:getAll', async (event, { since, limit } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const refunds = await prisma.refund.findMany({
             where: since ? { createdAt: { gte: new Date(since) } } : undefined,
-            orderBy: { createdAt: 'desc' }
+            orderBy: { createdAt: 'desc' },
+            take: limit || 1000,
         });
         const formatted = refunds.map(r => ({
             ...r,
@@ -6281,11 +6361,12 @@ ipcMain.handle('refunds:bulkCreate', async (event, records) => {
 // STOCK BALANCE HANDLERS (CÂN BẰNG KHO)
 // ========================================
 
-ipcMain.handle('stockBalance:getAll', async () => {
+ipcMain.handle('stockBalance:getAll', async (event, { limit } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const records = await prisma.stockBalance.findMany({
-            orderBy: { createdAt: 'desc' }
+            orderBy: { createdAt: 'desc' },
+            take: limit || 500,
         });
         const formatted = records.map(r => ({
             ...r,
@@ -7543,11 +7624,12 @@ ipcMain.handle('misa:downloadPDF', async (event, transactionId) => {
 // ========================================
 
 // Lấy tất cả đơn HĐĐT
-ipcMain.handle('einvoice:getAll', async () => {
+ipcMain.handle('einvoice:getAll', async (event, { limit } = {}) => {
     try {
         if (!prisma) throw new Error('Database not initialized');
         const records = await prisma.eInvoice.findMany({
-            orderBy: { createdAt: 'desc' }
+            orderBy: { createdAt: 'desc' },
+            take: limit || 1000,
         });
         const formatted = records.map(r => ({
             ...r,

@@ -155,13 +155,14 @@ export interface ElectronAPI {
         resetDaily: () => Promise<{ success: boolean; data?: { reset: boolean; resetCount: number; message: string }; error?: string }>;
     };
     ecommerceExports: {
-        getAll: (filters?: { since?: string; until?: string; sinceField?: string; limit?: number; search?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { since?: string; until?: string; sinceField?: string; limit?: number; search?: string; statusIn?: string[]; statusNotIn?: string[]; skip?: number }) => Promise<{ success: boolean; data?: any[]; hasMore?: boolean; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         bulkDelete: (ids: number[]) => Promise<{ success: boolean; data?: number; error?: string }>;
         deleteAll: () => Promise<{ success: boolean; data?: number; error?: string }>;
         getCompletedKeys: () => Promise<{ success: boolean; data?: string[]; error?: string }>;
+        checkExistingKeys: (data: { orderNumbers?: string[]; ecommerceExportCodes?: string[] }) => Promise<{ success: boolean; data?: { orderNumbers: string[]; ecommerceExportCodes: string[] }; error?: string }>;
         getPackersByOrderNumbers: (orderNumbers: string[]) => Promise<{ success: boolean; data?: Record<string, string>; error?: string }>;
         bulkCreate: (records: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         selectFolder: () => Promise<{ success: boolean; data?: string; error?: string }>;
@@ -172,10 +173,10 @@ export interface ElectronAPI {
         onNewFile: (callback: (data: { name: string; base64: string; path: string }) => void) => () => void;
     };
     marketplaceOrders: {
-        getAll: (filters?: { since?: string; search?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { since?: string; search?: string; limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     };
     exportOrders: {
-        getAll: (filters?: { since?: string; search?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { since?: string; search?: string; limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
@@ -193,7 +194,7 @@ export interface ElectronAPI {
         bulkCreate: (records: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     };
     refunds: {
-        getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { since?: string; limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
@@ -202,7 +203,7 @@ export interface ElectronAPI {
         importFromFolder: () => Promise<{ success: boolean; data?: any[]; error?: string; folderPath?: string; fileResults?: any[]; totalFiles?: number; totalRows?: number }>;
     };
     stockBalance: {
-        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     };
     inventoryLogs: {
@@ -256,7 +257,7 @@ export interface ElectronAPI {
         openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
     };
     einvoice: {
-        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getAll: (filters?: { limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         bulkImport: (orders: any[]) => Promise<{ success: boolean; data?: { imported: number; duplicated: number; duplicateIds: string[] }; error?: string }>;
         issueInvoices: (orderIds: string[]) => Promise<{ success: boolean; data?: { issued: any[]; issuedCount: number; skippedCount: number; batchId: string; errorLog?: any[]; errorCount?: number }; error?: string }>;
         exportExcel: (filters?: any) => Promise<{ success: boolean; data?: { filePath: string; count: number }; error?: string }>;

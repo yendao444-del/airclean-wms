@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { useAppData } from '../contexts/AppDataContext';
 import { Button, Input, Typography, Tag, message } from 'antd';
 import {
     ScanOutlined, FileExcelOutlined, InboxOutlined, CheckCircleOutlined,
@@ -422,6 +423,7 @@ export default function OrderPickingPage() {
     // State
     const [excelData, setExcelData] = useState<Map<string, ExcelOrderItem[]>>(new Map());
     const [importedFiles, setImportedFiles] = useState<ImportedFile[]>([]);
+    const { products: contextProducts, combos: contextCombos } = useAppData();
     const [products, setProducts] = useState<any[]>([]);
     const [combos, setCombos] = useState<any[]>([]);
     const [variantBaseMap, setVariantBaseMap] = useState<Map<string, { productName: string; color: string; unit: string }>>(new Map());
@@ -449,7 +451,6 @@ export default function OrderPickingPage() {
 
     // Load products + combos + telegram config from DB
     useEffect(() => {
-        loadProductData();
         loadTelegramSettings();
         autoRestoreWatcher();
 
@@ -502,28 +503,17 @@ export default function OrderPickingPage() {
         }
     };
 
-    const loadProductData = async () => {
-        try {
-            const [prodResult, comboResult] = await Promise.all([
-                window.electronAPI.products.getAll(),
-                window.electronAPI.combos.getAll()
-            ]);
-
-            const prods = prodResult.success && prodResult.data ? prodResult.data : [];
-            const cmbs = comboResult.success && comboResult.data ? comboResult.data : [];
-
-            setProducts(prods);
-            setCombos(cmbs);
-
-            const maps = buildSkuMaps(prods, cmbs);
-            setVariantBaseMap(maps.variantBaseMap);
-            setComboMap(maps.comboMap);
-
-            console.log(`✅ Loaded ${prods.length} products, ${cmbs.length} combos`);
-        } catch (error) {
-            console.error('Error loading product data:', error);
-        }
-    };
+    // Build SKU maps từ context data khi context sẵn sàng
+    useEffect(() => {
+        if (contextProducts.length === 0) return;
+        const prods = contextProducts as any[];
+        const cmbs = contextCombos as any[];
+        setProducts(prods);
+        setCombos(cmbs);
+        const maps = buildSkuMaps(prods, cmbs);
+        setVariantBaseMap(maps.variantBaseMap);
+        setComboMap(maps.comboMap);
+    }, [contextProducts, contextCombos]);
 
     // ===== AUTO-RESTORE WATCHER =====
     const importFilesFromBackend = async (folderPath: string) => {

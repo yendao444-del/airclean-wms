@@ -91,11 +91,10 @@ export default function ProductsPage() {
     const loadProducts = async () => {
         setLoading(true);
         try {
-            // Load regular products
-            const productsResult = await window.electronAPI.products.getAll();
-
-            // Load combo products
-            const combosResult = await window.electronAPI.combos.getAll();
+            const [productsResult, combosResult] = await Promise.all([
+                window.electronAPI.products.getAll(),
+                window.electronAPI.combos.getAll(),
+            ]);
 
             let allProducts: Product[] = [];
 

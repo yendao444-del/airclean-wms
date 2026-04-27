@@ -376,8 +376,13 @@ model EcommerceExport {
 
   @@index([status])
   @@index([customerName])
+  @@index([orderNumber])
+  @@index([ecommerceExportCode])
   @@index([ecommerceExportDate])
   @@index([createdAt])
+  @@index([status, ecommerceExportDate])
+  @@index([status, createdAt])
+  @@index([status, updatedAt])
 }
 
 // ========================================

@@ -103,6 +103,7 @@ export default function EcommerceExportPage() {
     const [ecommerceExports, setEcommerceExports] = useState<EcommerceExport[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(false);
+    const [hasMoreExports, setHasMoreExports] = useState(false);
     const [offlinePending, setOfflinePending] = useState(0); // Số đơn chờ sync
     const [modalVisible, setModalVisible] = useState(false);
     const [methodModalVisible, setMethodModalVisible] = useState(false);
@@ -131,6 +132,9 @@ export default function EcommerceExportPage() {
     const trackingMapRef = useRef<Map<string, number>>(new Map());
     // ⏱️ Debounced background sync — coalesce nhiều scan liên tiếp thành 1 DB reload
     const bgSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const requestIdRef = useRef(0);
+    const statusFilterRef = useRef<'all' | 'pending' | 'completed' | 'overdue' | 'cancelled' | 'no_data'>('pending');
+    const searchKeywordRef = useRef('');
     // ⚡ Persistent JSON parse cache — parse 1 lần duy nhất mỗi record, giữ nguyên qua re-render
     const itemsCacheRef = useRef<Map<number, { raw: string; parsed: ExportItem[] }>>(new Map());
     // 🔊 Web Audio API — decode 1 lần vào memory, play instant không delay
@@ -149,6 +153,9 @@ export default function EcommerceExportPage() {
 
     // 🔎 State cho tìm kiếm mã vận đơn đi
     const [searchKeyword, setSearchKeyword] = useState('');
+
+    useEffect(() => { statusFilterRef.current = statusFilter; }, [statusFilter]);
+    useEffect(() => { searchKeywordRef.current = searchKeyword; }, [searchKeyword]);
 
     // 👤 Quick-Tap Avatar: Người đóng gói đang active
     const [activePacker, setActivePacker] = useState<string>('');
@@ -183,7 +190,6 @@ export default function EcommerceExportPage() {
         window.addEventListener('click', resumeCtx, { once: true });
         window.addEventListener('keydown', resumeCtx, { once: true });
 
-        loadEcommerceExports();
         loadProducts();
         loadPackerEmployees();
 
@@ -201,9 +207,20 @@ export default function EcommerceExportPage() {
             }
         })();
 
-        const interval = setInterval(() => {
-            if (document.visibilityState === 'visible') loadEcommerceExports(true);
-        }, 60000);
+        const refreshOpenOrders = () => {
+            if (
+                document.visibilityState === 'visible' &&
+                statusFilterRef.current === 'pending' &&
+                !searchKeywordRef.current.trim()
+            ) {
+                loadEcommerceExports(true);
+            }
+        };
+        const interval = setInterval(refreshOpenOrders, 180000);
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'visible') refreshOpenOrders();
+        };
+        document.addEventListener('visibilitychange', handleVisibilityChange);
 
         // ⚡ Auto-reset danh sách lệch đơn khi sang ngày mới (check mỗi phút)
         const dailyResetInterval = setInterval(() => {
@@ -247,6 +264,7 @@ export default function EcommerceExportPage() {
             clearInterval(interval);
             clearInterval(dailyResetInterval);
             window.removeEventListener('online', handleOnline);
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
             // 🧹 Cleanup debounced sync timer
             if (bgSyncTimerRef.current) clearTimeout(bgSyncTimerRef.current);
         };
@@ -291,8 +309,10 @@ export default function EcommerceExportPage() {
     const getLatestExports = async () => {
         try {
             const result = await window.electronAPI.ecommerceExports.getAll({
+                statusNotIn: ['completed', 'cancelled'],
+                since: dayjs().subtract(30, 'day').toISOString(),
                 until: dayjs().endOf('day').toISOString(),
-                limit: 10000,
+                limit: 100,
             });
             if (result.success && result.data) return result.data;
         } catch { }
@@ -343,7 +363,7 @@ export default function EcommerceExportPage() {
     }, []);
 
     const normalizeDbExports = useCallback((records: EcommerceExport[]) => {
-        return records.filter(r => r.status !== 'pending');
+        return records;
     }, []);
 
     const mergeDbWithLocalPending = useCallback((dbRecords: EcommerceExport[], currentRecords: EcommerceExport[]) => {
@@ -354,23 +374,26 @@ export default function EcommerceExportPage() {
         setEcommerceExports(merged);
     }, [rebuildTrackingMap]);
 
-    const loadCompletedOrderKeys = useCallback(async () => {
+    const loadCompletedOrderKeys = useCallback(async (keys: string[] = []) => {
         // Chỉ load 365 ngày gần nhất — đủ để check trùng, tránh load toàn bộ DB
-        const since365 = dayjs().subtract(365, 'day').toISOString();
-        const untilNow = dayjs().endOf('day').toISOString();
-        const exportsResult = await window.electronAPI.ecommerceExports.getAll({ since: since365, until: untilNow, limit: 10000 });
+        const uniqueKeys = [...new Set(keys.map(key => String(key || '').trim()).filter(Boolean))];
+        if (uniqueKeys.length === 0) return new Set<string>();
 
-        if (!exportsResult?.success || !Array.isArray(exportsResult.data)) {
-            throw new Error(exportsResult?.error || 'Khong tai duoc danh sach TMDT da hoan tat.');
+        const existing = new Set<string>();
+        for (let i = 0; i < uniqueKeys.length; i += 1000) {
+            const chunk = uniqueKeys.slice(i, i + 1000);
+            const result = await window.electronAPI.ecommerceExports.checkExistingKeys({
+                orderNumbers: chunk,
+                ecommerceExportCodes: chunk,
+            });
+            if (!result?.success) {
+                throw new Error(result?.error || 'Khong kiem tra duoc danh sach TMDT da ton tai.');
+            }
+            for (const key of result.data?.orderNumbers || []) existing.add(String(key).trim());
+            for (const key of result.data?.ecommerceExportCodes || []) existing.add(String(key).trim());
         }
 
-        const keys = exportsResult.data
-            .filter((record: any) => record?.status === 'completed')
-            .flatMap((record: any) => [record?.orderNumber, record?.ecommerceExportCode])
-            .map((key: string) => String(key || '').trim())
-            .filter(Boolean);
-
-        return new Set<string>(keys);
+        return existing;
     }, []);
 
     const normalizeFolderImportError = useCallback((error?: string) => {
@@ -429,19 +452,52 @@ export default function EcommerceExportPage() {
         return { count: accepted.length, skipped };
     }, [getOrderKey, rebuildTrackingMap]);
 
-    const loadEcommerceExports = async (silent = false) => {
+    const buildEcommerceExportFilters = (append = false) => {
+        const keyword = searchKeywordRef.current.trim();
+        const currentStatus = statusFilterRef.current;
+        const base: any = {
+            until: dayjs().endOf('day').toISOString(),
+            skip: append ? exportsRef.current.filter(r => r.id > 0).length : 0,
+        };
+
+        if (keyword) {
+            base.search = keyword;
+            base.limit = 50;
+        }
+
+        if (currentStatus === 'completed') {
+            base.statusIn = ['completed'];
+            base.limit = base.limit || 500;
+            base.since = dayjs().subtract(7, 'day').startOf('day').toISOString();
+        } else if (currentStatus === 'cancelled') {
+            base.statusIn = ['cancelled'];
+            base.limit = base.limit || 500;
+            base.since = dayjs().subtract(30, 'day').startOf('day').toISOString();
+        } else if (currentStatus === 'all') {
+            base.limit = base.limit || 1000;
+            base.since = dayjs().subtract(7, 'day').startOf('day').toISOString();
+        } else {
+            base.statusNotIn = ['completed', 'cancelled'];
+            base.limit = base.limit || 1000;
+            base.since = dayjs().subtract(30, 'day').startOf('day').toISOString();
+        }
+
+        return base;
+    };
+
+    const loadEcommerceExports = async (silent = false, append = false) => {
+        if (statusFilterRef.current === 'no_data') return;
+        const myRequestId = ++requestIdRef.current;
         if (!silent) setLoading(true);
         try {
-            const result = await window.electronAPI.ecommerceExports.getAll({
-                until: dayjs().endOf('day').toISOString(),
-                limit: 10000,
-            });
+            const result = await window.electronAPI.ecommerceExports.getAll(buildEcommerceExportFilters(append));
+            if (myRequestId !== requestIdRef.current) return;
             if (result.success && result.data) {
                 // Purge cancelled ngay tu data DB tuoi - tranh dung state rong luc khoi dong
                 const cancelledIds = result.data
                     .filter((r: any) => r.status === 'cancelled')
                     .map((r: any) => r.id);
-                if (cancelledIds.length > 0) {
+                if (statusFilterRef.current !== 'cancelled' && cancelledIds.length > 0) {
                     window.electronAPI.ecommerceExports.bulkDelete(cancelledIds)
                         .then((res) => console.log('Purged ' + cancelledIds.length + ' don TMDT da huy'))
                         .catch(() => {});
@@ -454,14 +510,35 @@ export default function EcommerceExportPage() {
                     if (existing?.status === 'completed' && item.status !== 'completed') return existing;
                     return item;
                 }));
-                mergeDbWithLocalPending(normalizedDb, exportsRef.current);
+                const localPending = exportsRef.current.filter(r => r.id < 0);
+                const localKeys = new Set(localPending.map(r => getOrderKey(r)).filter(Boolean));
+                const mergedDb = localPending.length > 0
+                    ? normalizedDb.filter((r: any) => !localKeys.has(getOrderKey(r)))
+                    : normalizedDb;
+                const shouldKeepLocalPending = statusFilterRef.current === 'pending' && !searchKeywordRef.current.trim();
+                const nextRecords = append
+                    ? [...exportsRef.current, ...normalizedDb]
+                    : (shouldKeepLocalPending ? [...localPending, ...mergedDb] : normalizedDb);
+                exportsRef.current = nextRecords;
+                rebuildTrackingMap(nextRecords);
+                setEcommerceExports(nextRecords);
+                setHasMoreExports(!!result.hasMore);
             }
         } catch (error) {
+            if (myRequestId !== requestIdRef.current) return;
             if (!silent) message.error('Lỗi khi tải dữ liệu');
         } finally {
-            if (!silent) setLoading(false);
+            if (myRequestId === requestIdRef.current && !silent) setLoading(false);
         }
     };
+
+    useEffect(() => {
+        if (statusFilter === 'no_data') return;
+        const timer = setTimeout(() => {
+            loadEcommerceExports(false);
+        }, searchKeyword.trim() ? 400 : 0);
+        return () => clearTimeout(timer);
+    }, [statusFilter, searchKeyword]);
 
     const purgeCancelledExports = async (silent = true) => {
         try {
@@ -819,6 +896,7 @@ Thời gian: ${currentTime}`;
                 const completedPayload = {
                     ...foundEcommerceExport,
                     status: 'completed',
+                    ecommerceExportDate: dayjs().toISOString(),
                     createdBy: currentUser || foundEcommerceExport.createdBy || null,
                     pickedBy: pickerName
                 };
@@ -1284,7 +1362,7 @@ Thời gian: ${currentTime}`;
 
         reader.onload = async (e) => {
             try {
-                const persistedCompletedKeys = await loadCompletedOrderKeys();
+                const persistedCompletedKeys = new Set<string>();
                 const data = e.target?.result;
                 const isCSV = file.name.toLowerCase().endsWith('.csv');
                 const workbook = XLSX.read(data, { type: isCSV ? 'string' : 'binary' });
@@ -1435,6 +1513,10 @@ Thời gian: ${currentTime}`;
 
                 console.log('📦 Grouped orders:', orderMap);
 
+                for (const key of await loadCompletedOrderKeys(Array.from(orderMap.keys()))) {
+                    persistedCompletedKeys.add(key);
+                }
+
                 const newEcommerceExports: EcommerceExport[] = [];
                 let startId = ecommerceExports.length > 0 ? Math.max(...ecommerceExports.map(r => r.id)) + 1 : 1;
                 let skippedCount = 0; // Đếm số order bị skip do trùng lặp
@@ -1536,7 +1618,7 @@ Thời gian: ${currentTime}`;
 
             const folderPath = folderResult.data;
             message.loading({ content: 'Đang đọc file từ thư mục...', key: 'import-folder', duration: 0 });
-            const persistedCompletedKeys = await loadCompletedOrderKeys();
+            const persistedCompletedKeys = new Set<string>();
 
             // Đọc tất cả file Excel
             const filesResult = await (window as any).electronAPI.ecommerceExports.loadExcelFiles(folderPath);
@@ -1709,6 +1791,10 @@ Thời gian: ${currentTime}`;
                     }
 
                     // Create ecommerceExport records
+                    for (const key of await loadCompletedOrderKeys(Array.from(orderMap.keys()))) {
+                        persistedCompletedKeys.add(key);
+                    }
+
                     const newEcommerceExports: EcommerceExport[] = [];
                     let startId = ecommerceExports.length > 0 ? Math.max(...ecommerceExports.map(r => r.id)) + 1 : 1;
                     let skippedCount = 0;
@@ -2580,6 +2666,13 @@ Thời gian: ${currentTime}`;
                         }}
                         scroll={{ x: 'max-content' }}
                     />
+                    {hasMoreExports && (
+                        <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 12 }}>
+                            <Button onClick={() => loadEcommerceExports(true, true)} loading={loading}>
+                                Xem thÃªm
+                            </Button>
+                        </div>
+                    )}
                 </Card>
             )}
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { useAppData } from '../contexts/AppDataContext';
 import {
     Card,
     Button,
@@ -76,7 +77,7 @@ interface Refund {
 
 export default function RefundsPage() {
     const [refunds, setRefunds] = useState<Refund[]>([]);
-    const [products, setProducts] = useState<Product[]>([]);
+    const { products } = useAppData();
     const [loading, setLoading] = useState(false);
     const [importLoading, setImportLoading] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
@@ -150,7 +151,6 @@ export default function RefundsPage() {
         alertSoundRef.current = new Audio('./sounds/alert_louder.wav');
 
         loadRefunds();
-        loadProducts();
         const interval = setInterval(() => loadRefunds(true), 30000);
         return () => clearInterval(interval);
     }, []);
@@ -186,16 +186,6 @@ export default function RefundsPage() {
         loadRefunds();
     };
 
-    const loadProducts = async () => {
-        try {
-            const result = await window.electronAPI.products.getAll();
-            if (result.success && result.data) {
-                setProducts(result.data);
-            }
-        } catch (error) {
-            message.error('Lỗi khi tải sản phẩm');
-        }
-    };
 
     const handleAdd = () => {
         setEditingRefund(null);

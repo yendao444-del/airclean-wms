@@ -3,7 +3,8 @@ import { createContext, useContext, useState, useEffect, useCallback, ReactNode 
 // ===== INTERFACES =====
 export interface Product {
     id: number; name: string; sku: string; stock: number; price: number; cost: number;
-    minStock: number; variants?: string;
+    minStock: number; variants?: string; unit?: string;
+    category?: { id: number; name: string };
 }
 export interface ExportOrder {
     id: number; exportDate: string; customer: string; status: string;
@@ -53,7 +54,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
             const [pRes, exRes, ecRes, puRes, cbRes] = await Promise.all([
                 api.products.getAll(),
                 api.exportOrders.getAll({ since: since90 }),
-                api.ecommerceExports.getAll({ since: since90, until: untilNow, limit: 10000 }),
+                api.ecommerceExports.getAll({ since: since90, until: untilNow, limit: 2000 }),
                 api.purchases.getAll({ since: since90 }),
                 api.combos.getAll(),
             ]);

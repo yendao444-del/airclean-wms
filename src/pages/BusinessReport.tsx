@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { usePageHeader } from '../contexts/PageHeaderContext';
 import { Card, Row, Col, Statistic, DatePicker, Button, InputNumber, Modal, Form, Table, Tag, Tooltip, Typography, Divider, Space, Collapse, Input, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -539,9 +539,11 @@ export default function BusinessReportPage() {
     const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const [activeTab, setActiveTab] = useState<'pnl' | 'inventory' | 'xnt'>('pnl');
     const [allProducts, setAllProducts] = useState<any[]>([]);
+    // Cache products/combos — chỉ load 1 lần, không reload khi đổi ngày
+    const productsCacheRef = useRef<{ products: any[]; costMap: Record<string, number> } | null>(null);
 
     const [loading, setLoading] = useState(true);
-    const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs().startOf('month'), dayjs().endOf('day')]);
+    const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs().startOf('day'), dayjs().endOf('day')]);
     const [viewMode, setViewMode] = useState<'range' | 'daily'>('range');
     const [selectedDate, setSelectedDate] = useState<Dayjs>(dayjs());
 
@@ -617,66 +619,71 @@ export default function BusinessReportPage() {
             const until = dateRange[1].endOf('day').toISOString();
             const rangeDays = Math.max(dateRange[1].endOf('day').diff(dateRange[0].startOf('day'), 'day') + 1, 1);
             const ecommerceLimit = Math.min(Math.max(rangeDays * 800, 2000), 10000);
-            const [expRes, ecomRes, refRes, purRes, prodRes, comboRes] = await Promise.all([
+            // Fetch data + config song song trong 1 round duy nhất
+            // Products/combos dùng cache nếu đã có — chúng ít thay đổi theo ngày
+            const needProducts = !productsCacheRef.current;
+            const [expRes, ecomRes, refRes, purRes, deRes, cfgRes, shopeeFeesRes, tiktokFeesRes, prodRes, comboRes] = await Promise.all([
                 window.electronAPI.exportOrders.getAll({ since }),
-                window.electronAPI.ecommerceExports.getAll({ since, until, limit: ecommerceLimit }),
+                window.electronAPI.ecommerceExports.getAll({ since, until, limit: ecommerceLimit, statusIn: ['completed'], sinceField: 'updatedAt' }),
                 window.electronAPI.refunds.getAll({ since }),
                 window.electronAPI.purchases.getAll({ since }),
-                window.electronAPI.products.getAll(),
-                window.electronAPI.combos.getAll(),
+                window.electronAPI.dailyExpenses.getAll(),
+                window.electronAPI.appConfig.get(CONFIG_KEY_PNL),
+                window.electronAPI.appConfig.get('shopee_fees_v3'),
+                window.electronAPI.appConfig.get('tiktok_fees_v3'),
+                needProducts ? window.electronAPI.products.getAll() : Promise.resolve(null),
+                needProducts ? window.electronAPI.combos.getAll() : Promise.resolve(null),
             ]);
 
             if (expRes.success) setExportOrders(expRes.data || []);
             if (ecomRes.success) setEcomExports(ecomRes.data || []);
             if (refRes.success) setRefunds(refRes.data || []);
             if (purRes.success) setPurchases(purRes.data || []);
-            if (prodRes.success) setAllProducts(prodRes.data || []);
-
-            // Build map SKU → giá vốn từ Products + Variants + ComboProducts
-            const skuCostMap: Record<string, number> = {};
-            if (prodRes.success && prodRes.data) {
-                for (const p of prodRes.data) {
-                    if (p.sku) skuCostMap[p.sku] = p.cost ?? 0;
-                    try {
-                        const variants = p.variants ? JSON.parse(p.variants) : [];
-                        for (const v of variants) {
-                            if (v.sku) skuCostMap[v.sku] = (v.cost != null && v.cost > 0) ? v.cost : (p.cost ?? 0);
-                        }
-                    } catch { /* skip */ }
-                }
-            }
-            if (comboRes.success && comboRes.data) {
-                for (const c of comboRes.data) {
-                    if (c.sku) skuCostMap[c.sku] = c.cost || 0;
-                }
-            }
-            setCostMap(skuCostMap);
-
-            // Load daily expenses
-            const deRes = await window.electronAPI.dailyExpenses.getAll();
             if (deRes.success) setDailyExpenses(deRes.data || []);
 
-            // Load config vận hành
-            const cfgRes = await window.electronAPI.appConfig.get(CONFIG_KEY_PNL);
+            // Config vận hành
             if (cfgRes.success && cfgRes.data) {
                 setConfig({ ...DEFAULT_CONFIG, ...cfgRes.data });
             }
 
-            // Load phí sàn Shopee (dùng key v2 để reset config cũ)
-            const shopeeFeesRes = await window.electronAPI.appConfig.get('shopee_fees_v3');
+            // Phí sàn Shopee
             if (shopeeFeesRes.success && shopeeFeesRes.data && Array.isArray(shopeeFeesRes.data)) {
                 setShopeeFeeConfig(shopeeFeesRes.data);
             } else {
-                // Lần đầu hoặc config cũ → dùng default mới
                 await window.electronAPI.appConfig.set('shopee_fees_v3', DEFAULT_SHOPEE_FEES);
             }
 
-            // Load phí sàn TikTok (dùng key v2)
-            const tiktokFeesRes = await window.electronAPI.appConfig.get('tiktok_fees_v3');
+            // Phí sàn TikTok
             if (tiktokFeesRes.success && tiktokFeesRes.data && Array.isArray(tiktokFeesRes.data)) {
                 setTiktokFeeConfig(tiktokFeesRes.data);
             } else {
                 await window.electronAPI.appConfig.set('tiktok_fees_v3', DEFAULT_TIKTOK_FEES);
+            }
+
+            // Build / dùng cache cost map
+            if (needProducts && prodRes && comboRes) {
+                const skuCostMap: Record<string, number> = {};
+                if (prodRes.success && prodRes.data) {
+                    setAllProducts(prodRes.data);
+                    for (const p of prodRes.data) {
+                        if (p.sku) skuCostMap[p.sku] = p.cost ?? 0;
+                        try {
+                            const variants = p.variants ? JSON.parse(p.variants) : [];
+                            for (const v of variants) {
+                                if (v.sku) skuCostMap[v.sku] = (v.cost != null && v.cost > 0) ? v.cost : (p.cost ?? 0);
+                            }
+                        } catch { /* skip */ }
+                    }
+                }
+                if (comboRes.success && comboRes.data) {
+                    for (const c of comboRes.data) {
+                        if (c.sku) skuCostMap[c.sku] = c.cost || 0;
+                    }
+                }
+                productsCacheRef.current = { products: prodRes.data || [], costMap: skuCostMap };
+                setCostMap(skuCostMap);
+            } else if (productsCacheRef.current) {
+                setCostMap(productsCacheRef.current.costMap);
             }
         } catch (err) {
             console.error('Load data error:', err);
@@ -717,7 +724,7 @@ export default function BusinessReportPage() {
         [exportOrders, isInRange]);
 
     const filteredEcom = useMemo(() =>
-        ecomExports.filter(e => e.status === 'completed' && isInRange(e.ecommerceExportDate)),
+        ecomExports.filter(e => e.status === 'completed' && isInRange(e.updatedAt || e.ecommerceExportDate)),
         [ecomExports, isInRange]);
 
     const filteredRefunds = useMemo(() =>
