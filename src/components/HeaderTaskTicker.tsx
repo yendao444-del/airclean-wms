@@ -70,15 +70,18 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
             if (purRes.success && purRes.data) {
                 const CUTOFF = dayjs('2026-03-19');
                 const now = dayjs();
-                const missing = purRes.data.filter((p: any) =>
-                    p.vatInvoiceStatus !== 'uploaded' &&
-                    p.vatInvoiceStatus !== 'thht' &&
-                    p.vatInvoiceStatus !== 'no_vat' &&
-                    now.diff(dayjs(p.purchaseDate || p.invoiceDate || p.createdAt), 'day') >= 3 &&
-                    dayjs(p.purchaseDate || p.invoiceDate || p.createdAt).isAfter(CUTOFF)
-                );
+                const missing = purRes.data.filter((p: any) => {
+                    const vatStatus = p.vatInvoiceStatus;
+                    const hasVat = p.vatGroupId ? !!p.vatGroupHasVat : vatStatus === 'uploaded';
+                    const purchaseDate = dayjs(p.purchaseDate || p.invoiceDate || p.createdAt);
+                    return !hasVat &&
+                        vatStatus !== 'thht' &&
+                        vatStatus !== 'no_vat' &&
+                        now.diff(purchaseDate, 'day') >= 3 &&
+                        purchaseDate.isAfter(CUTOFF);
+                });
                 if (missing.length > 0) {
-                    const maxDays = Math.max(...missing.map((p: any) => now.diff(dayjs(p.purchaseDate), 'day')));
+                    const maxDays = Math.max(...missing.map((p: any) => now.diff(dayjs(p.purchaseDate || p.invoiceDate || p.createdAt), 'day')));
                     result.push({
                         key: 'vat', icon: '🧾', navTo: 'purchase', priority: 3,
                         color: maxDays >= 7 ? '#ff4d4f' : maxDays >= 5 ? '#fa541c' : '#faad14',

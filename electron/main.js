@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -134,38 +134,39 @@ function stopPythonService() {
     if (pythonProcess) { pythonProcess.kill(); pythonProcess = null; }
 }
 
+// Menu templates — dùng cho popup khi click Edit/View trong React header
+const EDIT_MENU_TEMPLATE = [
+    { role: 'undo' },
+    { role: 'redo' },
+    { type: 'separator' },
+    { role: 'cut' },
+    { role: 'copy' },
+    { role: 'paste' },
+    { role: 'selectAll' },
+];
+const VIEW_MENU_TEMPLATE = [
+    { role: 'reload' },
+    { role: 'forceReload' },
+    { role: 'toggleDevTools' },
+    { type: 'separator' },
+    { role: 'zoomIn' },
+    { role: 'zoomOut' },
+    { role: 'resetZoom' },
+    { type: 'separator' },
+    { role: 'togglefullscreen' },
+];
+
+// Popup native context menu khi click Edit/View từ React
+ipcMain.handle('menu:popup', (event, menuName) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const template = menuName === 'edit' ? EDIT_MENU_TEMPLATE : VIEW_MENU_TEMPLATE;
+    const contextMenu = Menu.buildFromTemplate(template);
+    contextMenu.popup({ window: win });
+});
+
 function createWindow() {
-    // Tạo Menu với Edit + View actions để Ctrl+C/V và Ctrl+R hoạt động
-    const template = [
-        {
-            label: 'Edit',
-            submenu: [
-                { role: 'undo' },
-                { role: 'redo' },
-                { type: 'separator' },
-                { role: 'cut' },
-                { role: 'copy' },
-                { role: 'paste' },
-                { role: 'selectAll' },
-            ],
-        },
-        {
-            label: 'View',
-            submenu: [
-                { role: 'reload' },
-                { role: 'forceReload' },
-                { role: 'toggleDevTools' },
-                { type: 'separator' },
-                { role: 'zoomIn' },
-                { role: 'zoomOut' },
-                { role: 'resetZoom' },
-                { type: 'separator' },
-                { role: 'togglefullscreen' },
-            ],
-        },
-    ];
-    const menu = Menu.buildFromTemplate(template);
-    Menu.setApplicationMenu(menu);
+    // Ẩn native menu bar — Edit/View được đưa vào React header
+    Menu.setApplicationMenu(null);
 
     mainWindow = new BrowserWindow({
         width: 1400,
@@ -173,25 +174,36 @@ function createWindow() {
         minWidth: 1200,
         minHeight: 700,
         show: false,
+        titleBarStyle: 'hidden',
+        titleBarOverlay: {
+            color: '#ffffff',
+            symbolColor: '#374151',
+            height: 40,
+        },
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
             sandbox: false,
             preload: path.join(__dirname, 'preload.js'),
             autoplayPolicy: 'no-user-gesture-required',
-            backgroundThrottling: false,  // Giữ timers chạy đúng tốc độ khi mất focus
+            backgroundThrottling: false,
         },
-        title: 'DBY POS - Quản lý bán hàng',
+        title: 'DBY POS',
         icon: app.isPackaged
             ? path.join(__dirname, '../dist/app_icon.ico')
             : path.join(__dirname, '../public/app_icon.ico'),
-        backgroundColor: '#1f1f1f',
+        backgroundColor: '#ffffff',
     });
 
     // Show full màn hình ngay khi render xong, không flash cửa sổ nhỏ
     mainWindow.once('ready-to-show', () => {
         mainWindow.maximize();
         mainWindow.show();
+        mainWindow.setTitleBarOverlay({
+            color: '#ffffff',
+            symbolColor: '#374151',
+            height: 40,
+        });
     });
 
     // Load React app - auto-detect dev server

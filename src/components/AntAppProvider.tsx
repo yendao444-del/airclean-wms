@@ -41,7 +41,7 @@ function AntAppPatcher({ children }: { children: ReactNode }) {
 
 export default function AntAppProvider({ children }: { children: ReactNode }) {
     return (
-        <App>
+        <App message={{ top: 72, maxCount: 3, getContainer: () => document.body }}>
             <AntAppPatcher>
                 {children}
             </AntAppPatcher>

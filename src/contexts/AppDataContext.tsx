@@ -1,23 +1,26 @@
-import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 
-// ===== INTERFACES =====
 export interface Product {
     id: number; name: string; sku: string; stock: number; price: number; cost: number;
     minStock: number; variants?: string; unit?: string;
     category?: { id: number; name: string };
 }
+
 export interface ExportOrder {
     id: number; exportDate: string; customer: string; status: string;
     totalAmount: number; items: string; createdAt: string;
 }
+
 export interface EcommerceExport {
     id: number; customerName: string; ecommerceExportDate: string; status: string;
     totalAmount: number; items: string; orderNumber?: string; createdAt: string;
 }
+
 export interface Purchase {
     id: number; supplierId: number; supplierName?: string; purchaseDate: string;
     totalAmount: number; status: string; items: string; createdAt: string;
 }
+
 export interface Combo {
     id: number; sku: string; name: string; cost?: number; items: string;
 }
@@ -33,7 +36,57 @@ interface AppDataContextValue {
     refresh: () => void;
 }
 
+type AppDataSnapshot = Omit<AppDataContextValue, 'loading' | 'refresh'>;
+
 const AppDataContext = createContext<AppDataContextValue | null>(null);
+
+let appDataInflight: Promise<AppDataSnapshot> | null = null;
+
+async function fetchAppDataSnapshot(): Promise<AppDataSnapshot> {
+    if (appDataInflight) return appDataInflight;
+
+    appDataInflight = (async () => {
+        const api = (window as any).electronAPI;
+        const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+        const untilNow = new Date().toISOString();
+        const [pRes, exRes, ecRes, puRes, cbRes] = await Promise.all([
+            api.products.getAll(),
+            api.exportOrders.getAll({ since: since90 }),
+            api.ecommerceExports.getAll({ since: since90, until: untilNow, limit: 2000 }),
+            api.purchases.getAll({ since: since90 }),
+            api.combos.getAll(),
+        ]);
+
+        const products = pRes.success ? (pRes.data || []) : [];
+        const exportOrders = exRes.success ? (exRes.data || []) : [];
+        const ecomExports = ecRes.success ? (ecRes.data || []) : [];
+        const purchases = puRes.success ? (puRes.data || []) : [];
+        const combos = cbRes.success ? (cbRes.data || []) : [];
+        const costMap: Record<string, number> = {};
+
+        for (const p of products) {
+            if (p.sku) costMap[p.sku] = p.cost ?? 0;
+            try {
+                const variants = p.variants ? JSON.parse(p.variants) : [];
+                for (const v of variants) {
+                    if (v.sku) costMap[v.sku] = (v.cost != null && v.cost > 0) ? v.cost : (p.cost ?? 0);
+                }
+            } catch { /* skip */ }
+        }
+
+        for (const c of combos) {
+            if (c.sku) costMap[c.sku] = c.cost || 0;
+        }
+
+        return { products, exportOrders, ecomExports, purchases, combos, costMap };
+    })();
+
+    try {
+        return await appDataInflight;
+    } finally {
+        appDataInflight = null;
+    }
+}
 
 export function AppDataProvider({ children }: { children: ReactNode }) {
     const [loading, setLoading] = useState(true);
@@ -43,46 +96,18 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     const [purchases, setPurchases] = useState<Purchase[]>([]);
     const [combos, setCombos] = useState<Combo[]>([]);
     const [costMap, setCostMap] = useState<Record<string, number>>({});
+    const stockRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const loadData = useCallback(async (silent = false) => {
         try {
             if (!silent) setLoading(true);
-            const api = (window as any).electronAPI;
-            // ⚡ Chỉ lấy 90 ngày gần nhất để giảm egress Supabase
-            const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-            const untilNow = new Date().toISOString();
-            const [pRes, exRes, ecRes, puRes, cbRes] = await Promise.all([
-                api.products.getAll(),
-                api.exportOrders.getAll({ since: since90 }),
-                api.ecommerceExports.getAll({ since: since90, until: untilNow, limit: 2000 }),
-                api.purchases.getAll({ since: since90 }),
-                api.combos.getAll(),
-            ]);
-            if (pRes.success) setProducts(pRes.data || []);
-            if (exRes.success) setExportOrders(exRes.data || []);
-            if (ecRes.success) setEcomExports(ecRes.data || []);
-            if (puRes.success) setPurchases(puRes.data || []);
-            if (cbRes.success) setCombos(cbRes.data || []);
-
-            // Build SKU → giá vốn (products + variants + combos)
-            const map: Record<string, number> = {};
-            if (pRes.success && pRes.data) {
-                for (const p of pRes.data) {
-                    if (p.sku) map[p.sku] = p.cost ?? 0;
-                    try {
-                        const variants = p.variants ? JSON.parse(p.variants) : [];
-                        for (const v of variants) {
-                            if (v.sku) map[v.sku] = (v.cost != null && v.cost > 0) ? v.cost : (p.cost ?? 0);
-                        }
-                    } catch { /* skip */ }
-                }
-            }
-            if (cbRes.success && cbRes.data) {
-                for (const c of cbRes.data) {
-                    if (c.sku) map[c.sku] = c.cost || 0;
-                }
-            }
-            setCostMap(map);
+            const snapshot = await fetchAppDataSnapshot();
+            setProducts(snapshot.products);
+            setExportOrders(snapshot.exportOrders);
+            setEcomExports(snapshot.ecomExports);
+            setPurchases(snapshot.purchases);
+            setCombos(snapshot.combos);
+            setCostMap(snapshot.costMap);
         } catch (e) {
             console.error('AppData load error:', e);
         } finally {
@@ -94,8 +119,25 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
         loadData();
         const iv = setInterval(() => {
             if (document.visibilityState === 'visible') loadData(true);
-        }, 300000); // ⚡ 5 phút thay vì 60 giây — giảm egress
+        }, 300000);
         return () => clearInterval(iv);
+    }, [loadData]);
+
+    useEffect(() => {
+        const api = (window as any).electronAPI;
+        if (!api?.products?.onStockChanged) return;
+
+        const unsubscribe = api.products.onStockChanged(() => {
+            if (stockRefreshTimerRef.current) clearTimeout(stockRefreshTimerRef.current);
+            stockRefreshTimerRef.current = setTimeout(() => {
+                if (document.visibilityState === 'visible') loadData(true);
+            }, 250);
+        });
+
+        return () => {
+            if (stockRefreshTimerRef.current) clearTimeout(stockRefreshTimerRef.current);
+            unsubscribe?.();
+        };
     }, [loadData]);
 
     return (

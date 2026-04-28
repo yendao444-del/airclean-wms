@@ -97,6 +97,8 @@ export interface ElectronAPI {
         update: (id: number, data: Partial<Product>) => Promise<{ success: boolean; data?: Product; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         updateStock: (data: { sku: string; quantity: number; isAdd?: boolean; logContext?: any; allowMissing?: boolean }) => Promise<{ success: boolean; skipped?: boolean; data?: Product; error?: string }>;
+        getTopSelling?: (args?: { limit?: number }) => Promise<{ success: boolean; data?: Array<{ productId: number | string; productName: string; soldQty: number }>; error?: string }>;
+        onStockChanged?: (callback: (data: any) => void) => () => void;
     };
     categories: {
         getAll: () => Promise<{ success: boolean; data?: Category[]; error?: string }>;
@@ -267,15 +269,6 @@ export interface ElectronAPI {
         getOriginalInvoice: (orderId: string) => Promise<{ success: boolean; data?: any; error?: string }>;
         adjustInvoice: (data: { orderId: string; adjustmentType: string; reason?: string; partialItems?: any[] }) => Promise<{ success: boolean; data?: { originalInvoice: string; newInvoice: string; adjustmentType: string; reason: string; chainNumber?: number; totalAdjusted?: number; remaining?: number }; error?: string }>;
         getInvoiceChain: (orderId: string) => Promise<{ success: boolean; data?: { original: any; adjustments: any[]; totalAdjusted: number; remaining: number; chainLength: number }; error?: string }>;
-    };
-    zkteco: {
-        connect: (config?: { ip?: string; port?: number }) => Promise<{ success: boolean; message?: string; deviceInfo?: any; error?: string; hint?: string }>;
-        disconnect: () => Promise<{ success: boolean }>;
-        getStatus: () => Promise<{ success: boolean; data?: { isConnected: boolean; lastSyncTime: string | null; cachedLogCount: number; cachedUserCount: number; deviceIp: string; devicePort: number } }>;
-        getUsers: () => Promise<{ success: boolean; data?: any[]; count?: number; error?: string }>;
-        getAttendanceLogs: () => Promise<{ success: boolean; data?: any[]; count?: number; syncTime?: string; error?: string }>;
-        fullSync: (config?: { ip?: string; port?: number }) => Promise<{ success: boolean; users?: any[]; logs?: any[]; userCount?: number; logCount?: number; syncTime?: string; deviceInfo?: any; error?: string; hint?: string }>;
-        zkbridge: (config?: { ip?: string; port?: number }) => Promise<{ success: boolean; logs?: any[]; logCount?: number; userCount?: number; syncTime?: string; error?: string }>;
     };
 }
 

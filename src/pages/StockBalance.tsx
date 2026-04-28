@@ -882,7 +882,6 @@ export default function StockBalancePage() {
 
     // Khi context products thay đổi (sau refresh), cập nhật bảng tồn kho
     useEffect(() => {
-        if (contextProducts.length > 0 && productsRef.current.length === 0) return;
         if (contextProducts.length > 0) {
             const prods = contextProducts as unknown as Product[];
             productsRef.current = prods;

@@ -421,17 +421,25 @@ interface AdjustLogRow {
     userName: string | null;
 }
 
-function XNTTab({ dateRange }: { dateRange: [Dayjs, Dayjs] }) {
+function XNTTab() {
     const [adjustLogs, setAdjustLogs] = useState<AdjustLogRow[]>([]);
     const [loading, setLoading] = useState(false);
+    const [viewMode, setViewMode] = useState<'day' | 'range'>('day');
+    const [selectedDate, setSelectedDate] = useState<Dayjs>(dayjs());
+    const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs().startOf('day'), dayjs().endOf('day')]);
+
+    const effectiveRange = useMemo<[Dayjs, Dayjs]>(() => {
+        if (viewMode === 'day') return [selectedDate.startOf('day'), selectedDate.endOf('day')];
+        return [dateRange[0].startOf('day'), dateRange[1].endOf('day')];
+    }, [viewMode, selectedDate, dateRange]);
 
     const loadData = useCallback(async () => {
         setLoading(true);
         try {
             const res = await window.electronAPI.inventoryLogs.getAll({
                 referenceType: 'CAN_BANG',
-                startDate: dateRange[0].startOf('day').toISOString(),
-                endDate: dateRange[1].endOf('day').toISOString(),
+                startDate: effectiveRange[0].toISOString(),
+                endDate: effectiveRange[1].toISOString(),
                 limit: 500,
             });
             if (res.success) setAdjustLogs(res.data || []);
@@ -440,21 +448,40 @@ function XNTTab({ dateRange }: { dateRange: [Dayjs, Dayjs] }) {
         } finally {
             setLoading(false);
         }
-    }, [dateRange]);
+    }, [effectiveRange]);
 
     useEffect(() => { loadData(); }, [loadData]);
 
     return (
         <Card>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 16, flexWrap: 'wrap' }}>
                 <div>
                     <Text strong style={{ fontSize: 15 }}>⚖️ Cân bằng kho</Text>
                     <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
-                        Kỳ: <strong>{dateRange[0].format('DD/MM/YYYY')}</strong> → <strong>{dateRange[1].format('DD/MM/YYYY')}</strong>
+                        Kỳ: <strong>{effectiveRange[0].format('DD/MM/YYYY')}</strong> → <strong>{effectiveRange[1].format('DD/MM/YYYY')}</strong>
                         {' · '}{adjustLogs.length} bản ghi
                     </Text>
                 </div>
-                <Button icon={<ReloadOutlined />} onClick={loadData} loading={loading}>Làm mới</Button>
+                <Space wrap>
+                    <Button size="small" type={viewMode === 'day' ? 'primary' : 'default'} onClick={() => setViewMode('day')}>Theo ngày</Button>
+                    <Button size="small" type={viewMode === 'range' ? 'primary' : 'default'} onClick={() => setViewMode('range')}>Theo khoảng</Button>
+                    {viewMode === 'day' ? (
+                        <>
+                            <DatePicker value={selectedDate} onChange={(d) => d && setSelectedDate(d)} format="DD/MM/YYYY" allowClear={false} />
+                            <Button size="small" onClick={() => setSelectedDate(prev => prev.subtract(1, 'day'))}>Hôm trước</Button>
+                            <Button size="small" onClick={() => setSelectedDate(dayjs())}>Hôm nay</Button>
+                            <Button size="small" onClick={() => setSelectedDate(prev => prev.add(1, 'day'))}>Hôm sau</Button>
+                        </>
+                    ) : (
+                        <>
+                            <RangePicker value={dateRange} onChange={(dates) => dates && setDateRange(dates as [Dayjs, Dayjs])} format="DD/MM/YYYY" allowClear={false} />
+                            <Button size="small" onClick={() => setDateRange([dayjs().startOf('day'), dayjs().endOf('day')])}>Hôm nay</Button>
+                            <Button size="small" onClick={() => setDateRange([dayjs().startOf('week'), dayjs().endOf('day')])}>Tuần này</Button>
+                            <Button size="small" onClick={() => setDateRange([dayjs().startOf('month'), dayjs().endOf('day')])}>Tháng này</Button>
+                        </>
+                    )}
+                    <Button icon={<ReloadOutlined />} onClick={loadData} loading={loading}>Làm mới</Button>
+                </Space>
             </div>
 
             {adjustLogs.length === 0 && !loading ? (
@@ -1493,7 +1520,7 @@ export default function BusinessReportPage() {
             {activeTab === 'inventory' && <InventoryValueTab />}
 
             {/* === TAB 3: XNT === */}
-            {activeTab === 'xnt' && <XNTTab dateRange={dateRange} />}
+            {activeTab === 'xnt' && <XNTTab />}
 
             {/* === TAB 1: P&L === */}
             {activeTab === 'pnl' && <>

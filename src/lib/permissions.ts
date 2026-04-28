@@ -26,6 +26,8 @@ export type Permission =
     | 'einvoice.view'
     | 'einvoice.create'
     | 'stock-balance.view'
+    | 'stock-check.view'
+    | 'stock-check.create'
     | 'combos.view'
     | 'combos.create'
     | 'combos.update'
@@ -64,6 +66,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'einvoice.view',
         'einvoice.create',
         'stock-balance.view',
+        'stock-check.view',
+        'stock-check.create',
         'combos.view',
         'combos.create',
         'combos.update',
@@ -93,6 +97,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'combos.create',
         'einvoice.view',
         'stock-balance.view',
+        'stock-check.view',
+        'stock-check.create',
 
         'fee-calculator',
         'settings',
@@ -192,6 +198,7 @@ export function getAccessibleMenuKeys(role: Role | undefined): string[] {
             'ecommerce-export',
             'einvoice',
             'stock-balance',
+            'stock-check',
             'combos',
             'reports',
             'history',

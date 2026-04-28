@@ -11,6 +11,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
         update: (id, data) => ipcRenderer.invoke('products:update', id, data),
         delete: (id) => ipcRenderer.invoke('products:delete', id),
         updateStock: (data) => ipcRenderer.invoke('products:updateStock', data),
+        getTopSelling: (args) => ipcRenderer.invoke('products:getTopSelling', args),
+        onStockChanged: (callback) => {
+            const handler = (event, data) => callback(data);
+            ipcRenderer.on('products:stockChanged', handler);
+            return () => ipcRenderer.removeListener('products:stockChanged', handler);
+        },
     },
 
     // Categories
@@ -268,19 +274,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
         verifyAll: () => ipcRenderer.invoke('attendance:verifyAll'),
     },
 
-    // ZKTeco / Ronald Jack — Máy chấm công vân tay
-    zkteco: {
-        connect: (config) => ipcRenderer.invoke('zkteco:connect', config),
-        disconnect: () => ipcRenderer.invoke('zkteco:disconnect'),
-        getStatus: () => ipcRenderer.invoke('zkteco:getStatus'),
-        getUsers: () => ipcRenderer.invoke('zkteco:getUsers'),
-        getAttendanceLogs: () => ipcRenderer.invoke('zkteco:getAttendanceLogs'),
-        fullSync: (config) => ipcRenderer.invoke('zkteco:fullSync', config),
-        zkbridge: (config) => ipcRenderer.invoke('zkteco:zkbridge', config),
-    },
     offlineQueue: {
         status: () => ipcRenderer.invoke('offlineQueue:status'),
         sync: () => ipcRenderer.invoke('offlineQueue:sync'),
+    },
+
+    // Native menu popup (Edit / View) — hiện từ React header thay thế menu bar OS
+    menu: {
+        popup: (menuName) => ipcRenderer.invoke('menu:popup', menuName),
     },
 });
 

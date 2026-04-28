@@ -17,7 +17,8 @@ import {
     message,
     DatePicker,
     Select,
-    Radio
+    Radio,
+    Alert
 } from 'antd';
 const { TextArea } = Input;
 const { Option } = Select;
@@ -34,6 +35,13 @@ import {
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useAuth } from '../contexts/AuthContext';
+import {
+    DAILY_REPORT_MISSING_FINE_OFFICIAL,
+    DAILY_REPORT_POLICY_START_DATE,
+    getFixedVietnamHolidayName,
+    isDailyReportRestDay,
+    isPastDailyReportWorkingDay,
+} from '../lib/workCalendar';
 import './DailyTasks.css';
 import AlertPopup, { AlertPopupItem } from '../components/AlertPopup';
 
@@ -866,6 +874,31 @@ const DailyTasks = () => {
 
     // Delete category
     const handleDeleteCategory = (categoryKey: string) => {
+        if (categoryKey === '__orphan__') {
+            const categoryKeys = categories.map(c => c.key);
+            const orphanTasks = dailyTasks.filter(t => !t.category || !categoryKeys.includes(t.category));
+
+            Modal.confirm({
+                title: 'Xóa cột Khác?',
+                content: `Cột "Khác" là cột tự động gom các công việc không còn thuộc danh mục nào. Bạn có chắc muốn xóa ${orphanTasks.length} công việc trong cột này?`,
+                okText: 'Xóa',
+                okType: 'danger',
+                cancelText: 'Hủy',
+                onOk: async () => {
+                    try {
+                        for (const task of orphanTasks) {
+                            await window.electronAPI.dailyTasks.delete(task.id);
+                        }
+                        await loadTasks();
+                        message.success(`Đã xóa ${orphanTasks.length} công việc trong cột "Khác"!`);
+                    } catch (error: any) {
+                        message.error('Lỗi khi xóa: ' + (error.message || 'Unknown'));
+                    }
+                }
+            });
+            return;
+        }
+
         const tasksInCategory = dailyTasks.filter(t => t.category === categoryKey);
         Modal.confirm({
             title: 'Xóa danh mục?',
@@ -1390,6 +1423,7 @@ const DailyTasks = () => {
             : dailyTasks.filter(t => t.category === category.key);
         const completed = columnTasks.filter(t => t.status === 'completed').length;
         const total = columnTasks.length;
+        const isOrphanColumn = category.key === '__orphan__';
 
         return (
             <div
@@ -1420,7 +1454,7 @@ const DailyTasks = () => {
                         display: 'flex',
                         gap: 4
                     }}>
-                        <Button
+                        {!isOrphanColumn && <Button
                             type="text"
                             size="small"
                             icon={<EditOutlined />}
@@ -1433,7 +1467,7 @@ const DailyTasks = () => {
                                 opacity: 0.8
                             }}
                             title="Sửa danh mục"
-                        />
+                        />}
                         <Button
                             type="text"
                             size="small"
@@ -1538,6 +1572,21 @@ const DailyTasks = () => {
 
     return (
         <div style={{ padding: 24, backgroundColor: '#f0f2f5', minHeight: '100vh' }}>
+            <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12, borderRadius: 10, padding: '8px 14px' }}
+                description={
+                    <span>
+                        Nếu một ngày làm việc không có bất kỳ lịch sử xử lý công việc hằng ngày nào, hệ thống sẽ tự động phạt{' '}
+                        <strong>{DAILY_REPORT_MISSING_FINE_OFFICIAL.toLocaleString('vi-VN')}đ / nhân viên chính thức</strong>
+                        {' '}trong Bảng công. Áp dụng từ ngày{' '}
+                        <strong>{dayjs(DAILY_REPORT_POLICY_START_DATE).format('DD/MM/YYYY')}</strong>.
+                        {' '}Chủ nhật và ngày lễ không tính.
+                    </span>
+                }
+            />
+
             {/* Header Stats */}
             <Card style={{
                 marginBottom: 24,
@@ -2359,13 +2408,17 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
         const historyOnDay = getHistoryForDate(date);
         const isCurrentMonth = date.month() === currentMonth.month();
         const isToday = date.isSame(dayjs(), 'day');
-        const isWeekend = date.day() === 0 || date.day() === 6;
+        const holidayName = getFixedVietnamHolidayName(date);
+        const isRestDay = isDailyReportRestDay(date);
         const completedCount = completedTasksOnDay.length;
         const totalCount = allTasksOnDay.length;
         const hasActivity = allTasksOnDay.length > 0 || historyOnDay.length > 0;
         const dateStr = date.format('YYYY-MM-DD');
         const isHovered = hoveredDate === dateStr;
         const pendingCount = allTasksOnDay.filter(t => t.status === 'pending').length;
+        const isPastWorkingDay = isCurrentMonth && isPastDailyReportWorkingDay(date);
+        const isMissingDailyReport = isPastWorkingDay && historyOnDay.length === 0;
+        const isInteractive = hasActivity || isMissingDailyReport;
 
         // Tính completion percentage
         const completionPercent = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
@@ -2375,6 +2428,9 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
             if (isToday) {
                 // Hôm nay - Purple vibrant
                 return 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+            }
+            if (isMissingDailyReport) {
+                return 'linear-gradient(135deg, #ff4d4f 0%, #cf1322 100%)';
             }
             // ⚠️ PRIORITY: Ngày có công việc CHƯA HOÀN THÀNH - ĐỎ GRADIENT ĐẸP
             if (pendingCount > 0) {
@@ -2388,12 +2444,12 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
             if (hasActivity) {
                 return 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)';
             }
-            return isWeekend ? 'linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%)' : '#ffffff';
+            return isRestDay ? 'linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%)' : '#ffffff';
         };
 
         return (
             <div
-                onClick={() => hasActivity && setSelectedDate(dateStr)}
+                onClick={() => isInteractive && setSelectedDate(dateStr)}
                 onMouseEnter={() => setHoveredDate(dateStr)}
                 onMouseLeave={() => setHoveredDate(null)}
                 style={{
@@ -2401,25 +2457,29 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                     background: getCardBackground(),
                     border: isToday
                         ? '3px solid #667eea'
-                        : hasActivity
-                            ? '2px solid rgba(102, 126, 234, 0.2)'
-                            : '1px solid rgba(0,0,0,0.06)',
+                        : isMissingDailyReport
+                            ? '2px solid rgba(207, 19, 34, 0.45)'
+                            : hasActivity
+                                ? '2px solid rgba(102, 126, 234, 0.2)'
+                                : '1px solid rgba(0,0,0,0.06)',
                     borderRadius: 20,
                     padding: '16px',
                     minHeight: 140,
-                    cursor: hasActivity ? 'pointer' : 'default',
+                    cursor: isInteractive ? 'pointer' : 'default',
                     opacity: isCurrentMonth ? 1 : 0.35,
                     transition: 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
-                    transform: isHovered && hasActivity ? 'translateY(-4px) scale(1.02)' : 'translateY(0) scale(1)',
-                    boxShadow: isHovered && hasActivity
+                    transform: isHovered && isInteractive ? 'translateY(-4px) scale(1.02)' : 'translateY(0) scale(1)',
+                    boxShadow: isHovered && isInteractive
                         ? '0 20px 40px rgba(0,0,0,0.15)'
                         : isToday
                             ? '0 12px 32px rgba(102, 126, 234, 0.4)'
-                            : pendingCount > 0
-                                ? '0 8px 24px rgba(238, 9, 121, 0.3)'
-                                : hasActivity
-                                    ? '0 8px 24px rgba(0,0,0,0.1)'
-                                    : '0 2px 8px rgba(0,0,0,0.04)',
+                            : isMissingDailyReport
+                                ? '0 10px 28px rgba(207, 19, 34, 0.28)'
+                                : pendingCount > 0
+                                    ? '0 8px 24px rgba(238, 9, 121, 0.3)'
+                                    : hasActivity
+                                        ? '0 8px 24px rgba(0,0,0,0.1)'
+                                        : '0 2px 8px rgba(0,0,0,0.04)',
                     display: 'flex',
                     flexDirection: 'column',
                     overflow: 'hidden'
@@ -2451,8 +2511,8 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                     <div style={{
                         fontSize: isToday ? 28 : 22,
                         fontWeight: isToday ? 900 : 700,
-                        color: isToday ? '#fff' : isCurrentMonth ? '#1f1f1f' : '#999',
-                        textShadow: isToday ? '0 2px 8px rgba(0,0,0,0.2)' : 'none',
+                        color: isToday || isMissingDailyReport ? '#fff' : isCurrentMonth ? '#1f1f1f' : '#999',
+                        textShadow: isToday || isMissingDailyReport ? '0 2px 8px rgba(0,0,0,0.2)' : 'none',
                         letterSpacing: '-0.5px'
                     }}>
                         {date.date()}
@@ -2472,13 +2532,50 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                 {/* Lunar/Weekday info */}
                 <div style={{
                     fontSize: 11,
-                    color: isToday ? 'rgba(255,255,255,0.85)' : '#999',
+                    color: isToday || isMissingDailyReport ? 'rgba(255,255,255,0.85)' : '#999',
                     fontWeight: 600,
                     textTransform: 'uppercase',
                     letterSpacing: '0.5px'
                 }}>
                     {date.format('ddd')}
                 </div>
+
+                {isMissingDailyReport && (
+                    <div style={{
+                        marginTop: allTasksOnDay.length > 0 ? 10 : 'auto',
+                        fontSize: 11,
+                        color: '#fff',
+                        fontWeight: 800,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        padding: '7px 9px',
+                        background: 'rgba(255,255,255,0.18)',
+                        border: '1px solid rgba(255,255,255,0.28)',
+                        borderRadius: 10,
+                        position: 'relative',
+                        zIndex: 1,
+                        boxShadow: '0 6px 14px rgba(0,0,0,0.12)'
+                    }}>
+                        <WarningOutlined style={{ fontSize: 13 }} />
+                        <span>Chưa ghi nhận</span>
+                    </div>
+                )}
+
+                {!isMissingDailyReport && isRestDay && !hasActivity && (
+                    <div style={{
+                        marginTop: 'auto',
+                        fontSize: 11,
+                        color: '#8c8c8c',
+                        fontWeight: 700,
+                        padding: '6px 9px',
+                        background: 'rgba(0,0,0,0.04)',
+                        borderRadius: 8,
+                        width: 'fit-content'
+                    }}>
+                        {holidayName || 'Chủ nhật'}
+                    </div>
+                )}
 
                 {/* Tasks Summary with Premium Design */}
                 {allTasksOnDay.length > 0 && (
@@ -2495,7 +2592,7 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                             position: 'relative',
                             width: '100%',
                             height: 8,
-                            backgroundColor: isToday ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.06)',
+                            backgroundColor: isToday || isMissingDailyReport ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.06)',
                             borderRadius: 20,
                             overflow: 'hidden'
                         }}>
@@ -2523,7 +2620,7 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                             fontWeight: 700
                         }}>
                             <span style={{
-                                color: isToday ? 'rgba(255,255,255,0.95)' : '#444',
+                                color: isToday || isMissingDailyReport ? 'rgba(255,255,255,0.95)' : '#444',
                                 display: 'flex',
                                 alignItems: 'center',
                                 gap: 4
@@ -2531,7 +2628,7 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                                 <span style={{ fontSize: 14 }}>📋</span> {totalCount}
                             </span>
                             <span style={{
-                                color: completionPercent === 100 ? '#11998e' : isToday ? '#fff' : '#fa8c16',
+                                color: isToday || isMissingDailyReport ? '#fff' : completionPercent === 100 ? '#11998e' : '#fa8c16',
                                 display: 'flex',
                                 alignItems: 'center',
                                 gap: 3
@@ -2601,16 +2698,16 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                 )}
 
                 {/* Hover Indicator */}
-                {isHovered && hasActivity && (
+                {isHovered && isInteractive && (
                     <div style={{
                         position: 'absolute',
                         top: 8,
                         right: 8,
                         width: 6,
                         height: 6,
-                        background: '#667eea',
+                        background: isMissingDailyReport ? '#fff' : '#667eea',
                         borderRadius: '50%',
-                        boxShadow: '0 0 0 3px rgba(102,126,234,0.2)',
+                        boxShadow: isMissingDailyReport ? '0 0 0 3px rgba(255,255,255,0.24)' : '0 0 0 3px rgba(102,126,234,0.2)',
                         animation: 'pulse 1s ease-in-out infinite'
                     }} />
                 )}
@@ -2827,11 +2924,33 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                         margin: '-24px -24px 0 -24px'
                     }}>
                         {(() => {
-                            const tasksOnDay = getAllTasksForDate(dayjs(selectedDate));
-                            const historyOnDay = getHistoryForDate(dayjs(selectedDate));
+                            const selectedDay = dayjs(selectedDate);
+                            const tasksOnDay = getAllTasksForDate(selectedDay);
+                            const historyOnDay = getHistoryForDate(selectedDay);
+                            const selectedIsMissingDailyReport =
+                                selectedDay.month() === currentMonth.month() &&
+                                isPastDailyReportWorkingDay(selectedDay) &&
+                                historyOnDay.length === 0;
 
                             return (
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
+                                    {selectedIsMissingDailyReport && (tasksOnDay.length > 0 || historyOnDay.length > 0) && (
+                                        <div style={{
+                                            background: '#fff1f0',
+                                            border: '1px solid #ffccc7',
+                                            borderRadius: 14,
+                                            padding: '14px 16px',
+                                            color: '#cf1322',
+                                            fontWeight: 700,
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: 10
+                                        }}>
+                                            <WarningOutlined />
+                                            <span>Ngày làm việc đã qua nhưng chưa ghi nhận công việc hằng ngày.</span>
+                                        </div>
+                                    )}
+
                                     {/* Summary Stats */}
                                     <div style={{
                                         display: 'grid',
@@ -2876,10 +2995,13 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                                     {/* Tasks Section */}
                                     {tasksOnDay.length > 0 && (
                                         <div style={{
-                                            background: '#fff',
+                                            background: selectedIsMissingDailyReport ? '#fff1f0' : '#fff',
+                                            border: selectedIsMissingDailyReport ? '1px solid #ffccc7' : 'none',
                                             borderRadius: 20,
                                             padding: 24,
-                                            boxShadow: '0 8px 24px rgba(0,0,0,0.08)'
+                                            boxShadow: selectedIsMissingDailyReport
+                                                ? '0 8px 24px rgba(207,19,34,0.12)'
+                                                : '0 8px 24px rgba(0,0,0,0.08)'
                                         }}>
                                             <h3 style={{
                                                 marginBottom: 20,
@@ -3060,8 +3182,30 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                                         </div>
                                     )}
 
+                                    {/* Missing Daily Report State */}
+                                    {tasksOnDay.length === 0 && historyOnDay.length === 0 && selectedIsMissingDailyReport && (
+                                        <div style={{
+                                            background: '#fff1f0',
+                                            border: '1px solid #ffccc7',
+                                            borderRadius: 20,
+                                            padding: 60,
+                                            textAlign: 'center',
+                                            boxShadow: '0 8px 24px rgba(207,19,34,0.12)'
+                                        }}>
+                                            <div style={{ fontSize: 64, marginBottom: 16, color: '#cf1322' }}>
+                                                <WarningOutlined />
+                                            </div>
+                                            <div style={{ fontSize: 18, fontWeight: 700, color: '#cf1322', marginBottom: 8 }}>
+                                                Chưa ghi nhận công việc hằng ngày
+                                            </div>
+                                            <div style={{ fontSize: 14, color: '#8c8c8c' }}>
+                                                Ngày làm việc đã qua nhưng chưa có lịch sử hoàn thành công việc.
+                                            </div>
+                                        </div>
+                                    )}
+
                                     {/* Empty State */}
-                                    {tasksOnDay.length === 0 && historyOnDay.length === 0 && (
+                                    {tasksOnDay.length === 0 && historyOnDay.length === 0 && !selectedIsMissingDailyReport && (
                                         <div style={{
                                             background: '#fff',
                                             borderRadius: 20,

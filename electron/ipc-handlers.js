@@ -617,6 +617,96 @@ ipcMain.handle('products:getAll', async () => {
     }
 });
 
+ipcMain.handle('products:getTopSelling', async (event, { limit = 10 } = {}) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+
+        const parseItems = (value) => {
+            try { return typeof value === 'string' ? JSON.parse(value) : (value || []); } catch { return []; }
+        };
+        const pickSku = (item) => item?.sku || item?.variantSku || item?.productSku || item?.code || item?.SKU || '';
+        const pickName = (item) => item?.productName || item?.name || item?.product || item?.product_name || '';
+        const pickQty = (item) => Number(item?.quantity ?? item?.qty ?? item?.count ?? item?.soLuong ?? 0) || 0;
+        const pickProductId = (item) => item?.productId ?? item?.product_id ?? item?.productID ?? null;
+
+        const [products, combos, posOrders, ecommerceExports, exportOrders] = await Promise.all([
+            prisma.product.findMany({ select: { id: true, sku: true, name: true, variants: true, isCombo: true, comboItems: true } }),
+            prisma.comboProduct.findMany({ select: { sku: true, items: true } }),
+            prisma.order.findMany({
+                where: { source: 'pos', status: 'completed' },
+                include: { items: true },
+            }),
+            prisma.ecommerceExport.findMany({ where: { status: 'completed' } }),
+            prisma.exportOrder.findMany({ where: { status: 'completed' } }),
+        ]);
+
+        const productById = new Map();
+        const productBySku = new Map();
+        const comboBySku = new Map();
+        for (const product of products) {
+            productById.set(String(product.id), { id: product.id, name: product.name });
+            if (product.sku) productBySku.set(product.sku, { id: product.id, name: product.name });
+            for (const variant of parseItems(product.variants)) {
+                if (variant?.sku) productBySku.set(variant.sku, { id: product.id, name: product.name });
+            }
+            if (product.isCombo && product.sku && product.comboItems) {
+                comboBySku.set(product.sku, parseItems(product.comboItems));
+            }
+        }
+
+        for (const combo of combos) {
+            if (combo.sku) comboBySku.set(combo.sku, parseItems(combo.items));
+        }
+
+        const totals = new Map();
+        const addProductSale = (product, quantity) => {
+            if (!product || !quantity) return;
+            const current = totals.get(product.id) || { productId: product.id, productName: product.name, soldQty: 0 };
+            current.soldQty += quantity;
+            totals.set(product.id, current);
+        };
+        const addSale = (sku, fallbackName, quantity, productId = null) => {
+            if (!quantity) return;
+            const comboItems = comboBySku.get(sku);
+            if (comboItems?.length) {
+                for (const component of comboItems) {
+                    const componentSku = pickSku(component);
+                    const componentProductId = pickProductId(component);
+                    const componentQty = Number(component?.quantity ?? component?.qty ?? 1) || 1;
+                    addProductSale(
+                        productBySku.get(componentSku) || (componentProductId ? productById.get(String(componentProductId)) : null),
+                        quantity * componentQty
+                    );
+                }
+                return;
+            }
+
+            const product = productBySku.get(sku) || (productId ? productById.get(String(productId)) : null);
+            if (product) addProductSale(product, quantity);
+            else if (fallbackName) addProductSale({ id: `unknown:${sku || fallbackName}`, name: fallbackName }, quantity);
+        };
+
+        for (const order of posOrders) {
+            for (const item of order.items || []) addSale(item.sku, item.productName, item.quantity, item.productId);
+        }
+        for (const doc of ecommerceExports) {
+            for (const item of parseItems(doc.items)) addSale(pickSku(item), pickName(item), pickQty(item), pickProductId(item));
+        }
+        for (const doc of exportOrders) {
+            for (const item of parseItems(doc.items)) addSale(pickSku(item), pickName(item), pickQty(item), pickProductId(item));
+        }
+
+        const ranked = Array.from(totals.values())
+            .sort((a, b) => b.soldQty - a.soldQty || String(a.productName).localeCompare(String(b.productName), 'vi'))
+            .slice(0, limit);
+
+        return { success: true, data: ranked };
+    } catch (error) {
+        console.error('❌ Get top selling products error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 ipcMain.handle('products:getById', async (event, id) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
@@ -1399,6 +1489,18 @@ ipcMain.handle('pickup:startWatch', async (event, folderPath) => {
 // ========================================
 
 // Update stock khi export hoặc cân bằng kho
+function emitStockChanged(payload = {}) {
+    try {
+        const { BrowserWindow } = require('electron');
+        const eventPayload = { ...payload, at: new Date().toISOString() };
+        BrowserWindow.getAllWindows().forEach(win => {
+            if (!win.isDestroyed()) win.webContents.send('products:stockChanged', eventPayload);
+        });
+    } catch (error) {
+        console.warn('[stock-sync] emit failed:', error.message);
+    }
+}
+
 ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = false, logContext = null, allowMissing = false }) => {
     try {
         requireRole('admin', 'manager', 'staff');
@@ -1412,7 +1514,7 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
 
         // Bọc toàn bộ vào 1 Transaction duy nhất
         // 🔒 StockMutex: serialize stock operations — tránh race condition
-        return await withStockLock(() => prisma.$transaction(async (tx) => {
+        const response = await withStockLock(() => prisma.$transaction(async (tx) => {
             // 🎁 CHECK IF SKU IS A COMBO
             const combo = await tx.comboProduct.findUnique({
                 where: { sku }
@@ -1446,6 +1548,16 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
             }
             return { success: true, data: result };
         }));
+        if (response?.success) {
+            emitStockChanged({
+                sku,
+                quantity,
+                isAdd,
+                referenceType: logContext?.referenceType || null,
+                reference: logContext?.reference || null,
+            });
+        }
+        return response;
     } catch (error) {
         console.error('❌ Update stock error:', error);
         return { success: false, error: error.message };
@@ -8288,146 +8400,6 @@ ipcMain.handle('einvoice:getInvoiceChain', async (event, orderId) => {
         const totalAdjusted = adjustments.reduce((sum, inv) => sum + Math.abs(inv.totalAmount || 0), 0);
         return { success: true, data: { original: orig, adjustments, totalAdjusted, remaining: (orig.totalAmount || 0) - totalAdjusted, chainLength: adjustments.length } };
     } catch (error) { return { success: false, error: error.message }; }
-});
-
-// ========================================
-// ZKTECO / RONALD JACK — MÁY CHẤM CÔNG VÂN TAY
-// ========================================
-// Ronald Jack 1800 WiFi chỉ hỗ trợ ADMS Push (HTTP).
-// Máy tự gửi data lên server, KHÔNG hỗ trợ Pull (UDP/ZK Protocol).
-
-const admsServer = require('./zkteco-adms');
-
-// Auto-start ADMS server khi app khởi động
-(async () => {
-    try {
-        await admsServer.startServer(5005);
-        console.log('✅ [ADMS] Server đã tự động khởi động trên port 5005');
-    } catch (err) {
-        console.error('❌ [ADMS] Không thể khởi động server:', err.message);
-    }
-})();
-
-// Start/Stop ADMS server
-ipcMain.handle('zkteco:connect', async (event, config) => {
-    try {
-        console.log('🔌 [IPC] zkteco:connect (ADMS mode)');
-        const result = await admsServer.startServer(config?.port || 8098);
-        return result;
-    } catch (error) {
-        console.error('❌ zkteco:connect error:', error.message);
-        return { success: false, error: error.message };
-    }
-});
-
-ipcMain.handle('zkteco:disconnect', async () => {
-    try {
-        return admsServer.stopServer();
-    } catch (error) {
-        return { success: false, error: error.message };
-    }
-});
-
-// Trạng thái ADMS server
-ipcMain.handle('zkteco:getStatus', async () => {
-    try {
-        return { success: true, data: admsServer.getStatus() };
-    } catch (error) {
-        return { success: false, error: error.message };
-    }
-});
-
-// Lấy danh sách NV đã nhận từ ADMS
-ipcMain.handle('zkteco:getUsers', async () => {
-    try {
-        const data = admsServer.getData();
-        return { success: true, data: data.users, count: data.userCount };
-    } catch (error) {
-        return { success: false, error: error.message };
-    }
-});
-
-// Lấy logs chấm công đã nhận từ ADMS
-ipcMain.handle('zkteco:getAttendanceLogs', async () => {
-    try {
-        const data = admsServer.getData();
-        return { success: true, data: data.logs, count: data.logCount };
-    } catch (error) {
-        return { success: false, error: error.message };
-    }
-});
-
-// Full sync: lấy toàn bộ data đã nhận từ ADMS push
-ipcMain.handle('zkteco:fullSync', async (event, config) => {
-    try {
-        console.log('🔄 [IPC] zkteco:fullSync (ADMS mode) — lấy data đã nhận');
-
-        // Đảm bảo server đang chạy
-        if (!admsServer.getStatus().isRunning) {
-            await admsServer.startServer(config?.port || 5005);
-        }
-
-        const data = admsServer.getData();
-
-        if (data.logCount > 0) {
-            void logActivity({
-                module: 'attendance',
-                action: 'SYNC',
-                description: `Lấy dữ liệu ADMS: ${data.logCount} bản ghi, ${data.userCount} nhân viên`,
-                userName: currentSession?.username || 'Admin',
-            });
-        }
-
-        return data;
-    } catch (error) {
-        console.error('❌ zkteco:fullSync error:', error.message);
-        return { success: false, error: error.message };
-    }
-});
-
-// ZKBridge: Goi ZKBridge.exe (C# + Zkemkeeper.dll) de keo data truc tiep tu may
-ipcMain.handle('zkteco:zkbridge', async (event, config) => {
-    const { execFile } = require('child_process');
-    const path = require('path');
-    const fs = require('fs');
-
-    const ip = config && config.ip ? config.ip : '192.168.0.225';
-    const port = config && config.port ? config.port : 4370;
-
-    const exePath = path.join(__dirname, '..', 'planing', 'zkteco-bridge', 'ZKBridge.exe');
-    const outputPath = path.join(__dirname, '..', 'planing', 'zkteco-bridge', 'attendance_output.json');
-
-    if (!fs.existsSync(exePath)) {
-        return { success: false, error: 'ZKBridge.exe chua duoc build. Chay build.bat trong planing/zkteco-bridge/' };
-    }
-
-    return new Promise(function (resolve) {
-        console.log('[ZKBridge] Goi ' + exePath + ' ' + ip + ':' + port);
-        execFile(exePath, [ip, String(port)], { timeout: 30000 }, function (err, stdout, stderr) {
-            if (stdout) console.log('[ZKBridge stdout]', stdout);
-            if (stderr) console.error('[ZKBridge stderr]', stderr);
-
-            if (fs.existsSync(outputPath)) {
-                try {
-                    const data = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
-                    const logs = (data.logs || []).map(function (l) {
-                        return Object.assign({}, l, {
-                            time: l.timestamp,
-                            empId: parseInt(l.odUserId, 10) || 0,
-                            empNameFallback: 'NV #' + l.odUserId,
-                            status: 'OK',
-                            source: 'ZKBridge',
-                        });
-                    });
-                    resolve({ success: data.success, logs: logs, logCount: logs.length, userCount: 0, syncTime: data.syncTime });
-                } catch (e) {
-                    resolve({ success: false, error: 'Loi parse JSON: ' + e.message });
-                }
-            } else {
-                resolve({ success: false, error: (err && err.message) || 'ZKBridge.exe khong tao duoc output file' });
-            }
-        });
-    });
 });
 
 // ========================================

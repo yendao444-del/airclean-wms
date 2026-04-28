@@ -1,5 +1,5 @@
 import { useState, useEffect, lazy, Suspense, Component, ErrorInfo, ReactNode } from 'react';
-import { Layout, Menu, Button, Typography, ConfigProvider, Space } from 'antd';
+import { Layout, Menu, Button, Typography, ConfigProvider, Space, Dropdown, Tooltip } from 'antd';
 import AntAppProvider from './components/AntAppProvider';
 import {
     DashboardOutlined,
@@ -27,6 +27,7 @@ import {
     FileTextOutlined,
     OrderedListOutlined,
     LineChartOutlined,
+    AuditOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import viVN from 'antd/locale/vi_VN';
@@ -64,6 +65,7 @@ const OrderPickingPage = lazy(() => import('./pages/OrderPicking'));
 const OrdersPage = lazy(() => import('./pages/Orders'));
 const BusinessReportPage = lazy(() => import('./pages/BusinessReport'));
 const AttendancePage = lazy(() => import('./pages/Attendance'));
+const StockCheckPage = lazy(() => import('./pages/StockCheck'));
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -205,6 +207,9 @@ function AppContent() {
         if (accessibleKeys.includes('stock-balance')) {
             inventoryChildren.push(createMenuItem('Tồn kho', 'stock-balance', <DatabaseOutlined />));
         }
+        if (accessibleKeys.includes('stock-check')) {
+            inventoryChildren.push(createMenuItem('Kiểm hàng', 'stock-check', <AuditOutlined />));
+        }
         if (accessibleKeys.includes('purchase')) {
             inventoryChildren.push(createMenuItem('Nhập hàng', 'purchase', <ImportOutlined />));
         }
@@ -313,6 +318,8 @@ function AppContent() {
                 return <OrdersPage />;
             case 'stock-balance':
                 return <StockBalancePage />;
+            case 'stock-check':
+                return <StockCheckPage />;
             case 'business-report':
                 return <BusinessReportPage />;
             case 'daily-tasks':
@@ -343,6 +350,7 @@ function AppContent() {
     }
 
     const { headerExtra } = usePageHeader();
+    const hideHeaderTitle = selectedKey === 'business-report' || selectedKey === 'stock-check';
 
     return (
         <ConfigProvider
@@ -359,7 +367,105 @@ function AppContent() {
         >
             <AntAppProvider>
                 <GlobalTaskAlerts />
-                <Layout style={{ minHeight: '100vh', background: '#f0f2f5' }}>
+                {/* ── Custom Title Bar ── */}
+                <div style={{
+                    height: 40,
+                    background: '#ffffff',
+                    borderBottom: '1px solid #f0f0f0',
+                    display: 'flex',
+                    alignItems: 'center',
+                    padding: '0 150px 0 12px',
+                    gap: 10,
+                    position: 'fixed',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    zIndex: 9999,
+                    WebkitAppRegion: 'drag',
+                    userSelect: 'none',
+                } as React.CSSProperties}>
+                    <img src="./logo_navbar.png" style={{ height: 22, width: 22, objectFit: 'contain', pointerEvents: 'none', flexShrink: 0 }} />
+                    <span style={{ fontSize: 13, fontWeight: 400, color: '#595959', pointerEvents: 'none' }}>DBY Software POS</span>
+                    <div style={{ flex: 1 }} />
+                    <div style={{ WebkitAppRegion: 'no-drag', display: 'flex', alignItems: 'center', gap: 6 } as React.CSSProperties}>
+                        {([
+                            { key: 'order-picking', icon: <ScanOutlined style={{ fontSize: 16 }} />, label: 'Nhặt hàng' },
+                            { key: 'stock-check', icon: <AuditOutlined style={{ fontSize: 16 }} />, label: 'Kiểm hàng' },
+                            { key: 'ecommerce-export', icon: <SendOutlined style={{ fontSize: 15 }} />, label: 'Xuất hàng TMDT' },
+                        ] as const).map(btn => (
+                            <Tooltip key={btn.key} title={btn.label} placement="bottom">
+                                <div
+                                    onClick={() => setSelectedKey(btn.key)}
+                                    style={{
+                                        width: 32, height: 32, borderRadius: '50%',
+                                        background: selectedKey === btn.key ? '#e6f4ff' : '#f4f4f5',
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                        cursor: 'pointer', transition: 'background 0.15s',
+                                        color: selectedKey === btn.key ? '#1677ff' : '#374151',
+                                    }}
+                                    onMouseEnter={e => { if (selectedKey !== btn.key) e.currentTarget.style.background = '#e9e9eb'; }}
+                                    onMouseLeave={e => { if (selectedKey !== btn.key) e.currentTarget.style.background = '#f4f4f5'; }}
+                                >
+                                    {btn.icon}
+                                </div>
+                            </Tooltip>
+                        ))}
+                    </div>
+                    <div style={{ width: 1, height: 16, background: '#e8e8e8', margin: '0 4px' }} />
+                    <div style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+                        <Dropdown
+                            trigger={['click']}
+                            placement="bottomRight"
+                            menu={{
+                                items: [
+                                    {
+                                        key: 'role',
+                                        label: user?.role === 'admin' ? '👑 Quản trị viên' :
+                                            user?.role === 'manager' ? '📊 Quản lý' :
+                                                user?.role === 'staff' ? '👤 Nhân viên' : '👁️ Chỉ xem',
+                                        disabled: true,
+                                    },
+                                    { type: 'divider' },
+                                    {
+                                        key: 'logout',
+                                        label: 'Đăng xuất',
+                                        icon: <LogoutOutlined />,
+                                        danger: true,
+                                        onClick: logout,
+                                    },
+                                ],
+                            }}
+                        >
+                            <div
+                                style={{ position: 'relative', width: 32, height: 32, cursor: 'pointer', borderRadius: '50%', transition: 'box-shadow 0.15s' }}
+                                onMouseEnter={e => (e.currentTarget.style.boxShadow = '0 0 0 3px #e5e7eb')}
+                                onMouseLeave={e => (e.currentTarget.style.boxShadow = 'none')}
+                            >
+                                <div style={{
+                                    width: 32, height: 32, borderRadius: '50%',
+                                    background: user?.role === 'admin'
+                                        ? 'linear-gradient(135deg, #f59e0b, #fbbf24)'
+                                        : user?.role === 'manager'
+                                            ? 'linear-gradient(135deg, #3b82f6, #60a5fa)'
+                                            : 'linear-gradient(135deg, #00ab56, #00d66c)',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    color: '#fff', fontWeight: 800, fontSize: 14,
+                                    boxShadow: '0 2px 8px rgba(0,0,0,0.18)',
+                                }}>
+                                    {user?.role === 'admin' ? '👑' : (user?.username || 'U')[0].toUpperCase()}
+                                </div>
+                                {/* Online dot */}
+                                <div style={{
+                                    position: 'absolute', bottom: 0, right: 0,
+                                    width: 9, height: 9, borderRadius: '50%',
+                                    background: '#22c55e',
+                                    border: '2px solid #fff',
+                                }} />
+                            </div>
+                        </Dropdown>
+                    </div>
+                </div>
+                <Layout style={{ minHeight: '100vh', background: '#f0f2f5', paddingTop: 40 }}>
                     <Sider
                         collapsible
                         collapsed={collapsed}
@@ -369,37 +475,15 @@ function AppContent() {
                         collapsedWidth={80}
                         style={{
                             overflow: 'auto',
-                            height: '100vh',
+                            height: 'calc(100vh - 40px)',
                             position: 'fixed',
                             left: 0,
-                            top: 0,
+                            top: 40,
                             bottom: 0,
                             background: '#fff',
                             boxShadow: '2px 0 8px rgba(0,0,0,0.06)',
                         }}
                     >
-                        <div
-                            style={{
-                                height: 64,
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                borderBottom: '1px solid #f0f0f0',
-                                padding: '0 12px',
-                            }}
-                        >
-                            <div className="logo-sheen-wrapper">
-                                <img
-                                    src="./logo-ngang.png"
-                                    alt="AIRCLEAN WMS"
-                                    style={{
-                                        height: collapsed ? 28 : 40,
-                                        maxWidth: collapsed ? 50 : '100%',
-                                        objectFit: 'contain',
-                                    }}
-                                />
-                            </div>
-                        </div>
                         <Menu
                             defaultSelectedKeys={['dashboard']}
                             selectedKeys={[selectedKey]}
@@ -425,33 +509,17 @@ function AppContent() {
                                 boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
                             }}
                         >
-                            {selectedKey !== 'business-report' && (
+                            {!hideHeaderTitle && (
                                 <Title level={4} style={{ margin: 0, color: '#262626', flexShrink: 0 }}>
                                     {getMenuLabel(selectedKey)}
                                 </Title>
                             )}
                             {headerExtra && (
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: selectedKey !== 'business-report' ? 16 : 0, flex: 1 }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: hideHeaderTitle ? 0 : 16, flex: 1 }}>
                                     {headerExtra}
                                 </div>
                             )}
                             <HeaderTaskTicker onNavigate={(key) => setSelectedKey(key)} />
-                            <Space size={16}>
-                                <Text strong>{user?.username || 'User'}</Text>
-                                <Text type="secondary">
-                                    {user?.role === 'admin' ? '👑 Quản trị viên' :
-                                        user?.role === 'manager' ? '📊 Quản lý' :
-                                            user?.role === 'staff' ? '👤 Nhân viên' : '👁️ Chỉ xem'}
-                                </Text>
-                                <Button
-                                    type="primary"
-                                    danger
-                                    icon={<LogoutOutlined />}
-                                    onClick={logout}
-                                >
-                                    Đăng xuất
-                                </Button>
-                            </Space>
                         </Header>
 
                         <Content

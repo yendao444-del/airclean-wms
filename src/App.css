@@ -14,6 +14,16 @@
     z-index: 9998;
 }
 
+/* Keep global toast messages above modals, previews, and page overlays. */
+.ant-message {
+    z-index: 20000 !important;
+    pointer-events: none;
+}
+
+.ant-message .ant-message-notice {
+    pointer-events: auto;
+}
+
 /* Logo Spin Animation - Custom loading indicator */
 .logo-spin-wrapper {
     display: flex;

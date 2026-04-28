@@ -1,6 +1,10 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer, Legend } from 'recharts';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
+import {
+    DAILY_REPORT_MISSING_FINE_OFFICIAL,
+    isPastDailyReportWorkingDay,
+} from '../lib/workCalendar';
 import './Attendance.css';
 import dayjs from 'dayjs';
 import {
@@ -340,7 +344,7 @@ const attendanceMatrix: ShiftStatus[][] = [
     [{ am: 0, pm: 1 }, { am: 0, pm: 1 }, { am: 1, pm: 0 }, { am: 1, pm: 1 }, { am: 0, pm: 1 }, { am: 1, pm: 1 }, { am: 0, pm: 0 }],
 ];
 
-const attendanceLogs: AttendanceLog[] = []; // Xóa mock — dùng liveAttendanceLogs từ ZKTeco
+const attendanceLogs: AttendanceLog[] = []; // Xóa mock — dùng liveAttendanceLogs từ DB
 
 const fundTransactions: FundTransaction[] = []; // Xóa mock — giao dịch thực nhập tay
 
@@ -1807,6 +1811,7 @@ export default function Attendance() {
     // === State cho phạt thủ công ===
     const [extraFines, setExtraFines] = useState<FineRecord[]>([]);
     const [fineAuditLog, setFineAuditLog] = useState<FineAuditLog[]>([]);
+    const [fineEmployeeFilter, setFineEmployeeFilter] = useState<number | 'all'>('all');
 
     // === State cho danh sách kỳ đã chốt ===
     const [lockedPeriods, setLockedPeriods] = useState<LockedPeriod[]>([]);
@@ -1815,6 +1820,7 @@ export default function Attendance() {
     const [payrollOverrides, setPayrollOverrides] = useState<Record<string, PayrollOverride>>({});
     const [purchaseVatTracking, setPurchaseVatTracking] = useState<PurchaseVatTracking[]>([]);
     const [dailyTaskTracking, setDailyTaskTracking] = useState<any[]>([]);
+    const [dailyTaskHistory, setDailyTaskHistory] = useState<any[]>([]);
 
     const [isDbLoaded, setIsDbLoaded] = useState(false);
     const [systemUsernames, setSystemUsernames] = useState<string[]>([]);
@@ -2090,9 +2096,15 @@ export default function Attendance() {
     const loadDailyTaskTracking = async () => {
         try {
             const api = (window as any).electronAPI;
-            const result = await api.dailyTasks.list({});
+            const [result, historyResult] = await Promise.all([
+                api.dailyTasks.list({}),
+                api.appConfig.get('dailyTasksHistory'),
+            ]);
             if (result?.success && Array.isArray(result.data)) {
                 setDailyTaskTracking(result.data);
+            }
+            if (historyResult?.success && Array.isArray(historyResult.data)) {
+                setDailyTaskHistory(historyResult.data);
             }
         } catch (error) {
             console.error('Lỗi tải dữ liệu deadline công việc:', error);
@@ -2196,9 +2208,49 @@ export default function Attendance() {
         });
     }, [employees, dailyTaskTracking, overviewDateRange]);
 
+    const autoDailyReportMissingFines = useMemo(() => {
+        const officialEmployees = employees.filter(emp => emp.type === 'Official');
+        if (officialEmployees.length === 0) return [] as FineRecord[];
+
+        const historyDates = new Set(
+            dailyTaskHistory
+                .map((h: any) => h?.timestamp ? dayjs(h.timestamp).format('YYYY-MM-DD') : '')
+                .filter(Boolean)
+        );
+
+        const endLimit = dayjs().subtract(1, 'day').endOf('day');
+        const rangeStart = overviewDateRange[0].startOf('day');
+        const rangeEnd = overviewDateRange[1].isBefore(endLimit)
+            ? overviewDateRange[1].endOf('day')
+            : endLimit;
+
+        if (rangeEnd.isBefore(rangeStart, 'day')) return [] as FineRecord[];
+
+        const fines: FineRecord[] = [];
+        for (let date = rangeStart; date.isBefore(rangeEnd) || date.isSame(rangeEnd, 'day'); date = date.add(1, 'day')) {
+            if (!isPastDailyReportWorkingDay(date)) continue;
+
+            const dateKey = date.format('YYYY-MM-DD');
+            if (historyDates.has(dateKey)) continue;
+
+            officialEmployees.forEach(emp => {
+                fines.push({
+                    empId: emp.id,
+                    type: 'Thiếu công việc hằng ngày',
+                    detail: `Không ghi nhận Công việc hàng ngày ngày ${date.format('DD/MM/YYYY')}`,
+                    amount: DAILY_REPORT_MISSING_FINE_OFFICIAL,
+                    date: date.hour(20).minute(0).second(0).millisecond(0).toISOString(),
+                    source: 'daily_report_missing' as any,
+                });
+            });
+        }
+
+        return fines;
+    }, [employees, dailyTaskHistory, overviewDateRange]);
+
     const allFines = useMemo(
-        () => [...finesData, ...extraFines, ...autoVatOverdueFines, ...autoDeadlineOverdueFines],
-        [extraFines, autoVatOverdueFines, autoDeadlineOverdueFines]
+        () => [...finesData, ...extraFines, ...autoVatOverdueFines, ...autoDeadlineOverdueFines, ...autoDailyReportMissingFines],
+        [extraFines, autoVatOverdueFines, autoDeadlineOverdueFines, autoDailyReportMissingFines]
     );
 
     // Helper: lọc theo overviewDateRange
@@ -3171,16 +3223,48 @@ export default function Attendance() {
             ...extraFines.map((f, i) => ({ ...f, key: `manual-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: true, manualIndex: i, source: f.source })),
             ...autoVatOverdueFines.map((f, i) => ({ ...f, key: `vat-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
             ...autoDeadlineOverdueFines.map((f, i) => ({ ...f, key: `deadline-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
+            ...autoDailyReportMissingFines.map((f, i) => ({ ...f, key: `daily-report-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
         ];
         combinedFines.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-        const totalFineAmount = combinedFines.reduce((sum, f) => sum + f.amount, 0);
+        const fineEmployeeOptions = Array.from(new Map(
+            combinedFines.map(f => [
+                f.empId,
+                employees.find(e => e.id === f.empId)?.name || f.empName || `Nhân viên #${f.empId}`,
+            ])
+        ).entries())
+            .map(([id, name]) => ({ value: id, label: name }))
+            .sort((a, b) => a.label.localeCompare(b.label, 'vi'));
+        const filteredFines = fineEmployeeFilter === 'all'
+            ? combinedFines
+            : combinedFines.filter(f => f.empId === fineEmployeeFilter);
+        const selectedFineEmployeeName = fineEmployeeFilter === 'all'
+            ? ''
+            : fineEmployeeOptions.find(option => option.value === fineEmployeeFilter)?.label || '';
+        const totalFineAmount = filteredFines.reduce((sum, f) => sum + f.amount, 0);
 
         return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                         <Title level={4} style={{ margin: 0, color: '#ff4d4f' }}>Khấu trừ & Phạt</Title>
-                        <Tag color="error" style={{ fontWeight: 800, fontSize: 13, padding: '2px 12px' }}>{combinedFines.length} khoản</Tag>
+                        <Tag color="error" style={{ fontWeight: 800, fontSize: 13, padding: '2px 12px' }}>
+                            {fineEmployeeFilter === 'all' ? `${combinedFines.length} khoản` : `${filteredFines.length}/${combinedFines.length} khoản`}
+                        </Tag>
+                        <Space size={8}>
+                            <Text type="secondary" style={{ fontSize: 12, fontWeight: 700 }}>Lọc nhân viên</Text>
+                            <Select
+                                size="middle"
+                                value={fineEmployeeFilter}
+                                onChange={(value) => setFineEmployeeFilter(value as number | 'all')}
+                                showSearch
+                                optionFilterProp="label"
+                                style={{ width: 220 }}
+                                options={[
+                                    { value: 'all', label: 'Tất cả nhân viên' },
+                                    ...fineEmployeeOptions,
+                                ]}
+                            />
+                        </Space>
                     </div>
                     {isAdmin && (
                         <Button
@@ -3204,14 +3288,16 @@ export default function Attendance() {
                 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <WarningOutlined style={{ color: '#ff4d4f', fontSize: 16 }} />
-                        <Text strong style={{ color: '#cf1322', fontSize: 13 }}>Tổng khấu trừ tháng này</Text>
+                        <Text strong style={{ color: '#cf1322', fontSize: 13 }}>
+                            {fineEmployeeFilter === 'all' ? 'Tổng khấu trừ tháng này' : `Tổng khấu trừ của ${selectedFineEmployeeName}`}
+                        </Text>
                     </div>
                     <Text strong style={{ color: '#cf1322', fontSize: 18 }}>- {fmt(totalFineAmount)}</Text>
                 </div>
 
                 <Card bodyStyle={{ padding: 0 }} style={{ borderTop: '3px solid #ff4d4f' }}>
                     <Table
-                        dataSource={combinedFines}
+                        dataSource={filteredFines}
                         pagination={{ pageSize: 10, size: 'small', showTotal: (total) => `Tổng ${total} vi phạm` }}
                         size="middle"
                         columns={[
