@@ -2017,11 +2017,14 @@ ipcMain.handle('posOrder:getAll', async (event, filters = {}) => {
 
         const orders = await prisma.order.findMany({
             where,
-            include: {
-                items: true,
-                payments: true,
-                customer: true,
+            select: {
+                id: true, orderNumber: true, source: true, status: true,
+                total: true, subtotal: true, discount: true, note: true,
+                trackingNumber: true, paymentMethod: true,
+                createdAt: true, updatedAt: true,
+                customer: { select: { name: true } },
                 user: { select: { username: true, fullName: true } },
+                items: { select: { productId: true, productName: true, sku: true, variant: true, quantity: true, price: true, subtotal: true } },
             },
             orderBy: { createdAt: 'desc' },
             take: filters.search ? 50 : (filters.limit || 200),
@@ -6048,9 +6051,12 @@ ipcMain.handle('marketplaceOrders:getAll', async (event, { since, search, limit 
         ];
         const orders = await prisma.order.findMany({
             where,
-            include: {
-                items: true,
+            select: {
+                id: true, orderNumber: true, source: true, status: true,
+                total: true, note: true, trackingNumber: true,
+                createdAt: true, updatedAt: true,
                 user: { select: { username: true, fullName: true } },
+                items: { select: { productName: true, quantity: true, price: true, sku: true } },
             },
             orderBy: { createdAt: 'desc' },
             take: search ? 50 : (limit || 1000),
@@ -8782,6 +8788,100 @@ function getCheckType() {
     if (total <= 13 * 60) return 'morning_out';         // 12:30-13:00 (nghỉ trưa) → sáng ra
     return 'evening_out';                               // Sau 20:30 → tối ra
 }
+
+function encodeMailHeader(value) {
+    return `=?UTF-8?B?${Buffer.from(String(value || ''), 'utf8').toString('base64')}?=`;
+}
+
+function toBase64Url(value) {
+    return Buffer.from(value, 'utf8')
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/g, '');
+}
+
+async function sendGmailWithAttachment({ to, subject, html, fileName, pdfBase64 }) {
+    const tokenPath = path.join(__dirname, 'gdrive-token.json');
+    if (!fs.existsSync(tokenPath)) {
+        return { success: false, reauthRequired: true, error: 'Chưa có token Google. Cần đăng nhập Google trước khi gửi Gmail.' };
+    }
+
+    const tokens = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
+    const scope = String(tokens.scope || '');
+    if (!scope.includes('https://www.googleapis.com/auth/gmail.send')) {
+        return {
+            success: false,
+            reauthRequired: true,
+            error: 'Token Google hiện tại chưa có quyền Gmail. Cần cấp lại quyền với scope gmail.send.',
+        };
+    }
+
+    const { google } = require('googleapis');
+    const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET);
+    oauth2Client.setCredentials(tokens);
+    oauth2Client.on('tokens', (newTokens) => {
+        try {
+            const saved = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
+            fs.writeFileSync(tokenPath, JSON.stringify({ ...saved, ...newTokens }, null, 2));
+        } catch (err) {
+            console.error('[Gmail] Failed to save refreshed token:', err.message);
+        }
+    });
+
+    const boundary = `payslip_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const sender = 'yendao444@gmail.com';
+    const safeFileName = fileName || 'phieu-luong.pdf';
+    const message = [
+        `From: ${encodeMailHeader('Hệ thống Quản lý')} <${sender}>`,
+        `To: ${to}`,
+        `Subject: ${encodeMailHeader(subject)}`,
+        'MIME-Version: 1.0',
+        `Content-Type: multipart/mixed; boundary="${boundary}"`,
+        '',
+        `--${boundary}`,
+        'Content-Type: text/html; charset="UTF-8"',
+        'Content-Transfer-Encoding: base64',
+        '',
+        Buffer.from(html || '', 'utf8').toString('base64'),
+        '',
+        `--${boundary}`,
+        `Content-Type: application/pdf; name="${safeFileName}"`,
+        'Content-Transfer-Encoding: base64',
+        `Content-Disposition: attachment; filename="${safeFileName}"`,
+        '',
+        String(pdfBase64 || '').replace(/^data:application\/pdf;base64,/, ''),
+        '',
+        `--${boundary}--`,
+    ].join('\r\n');
+
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    const sent = await gmail.users.messages.send({
+        userId: 'me',
+        requestBody: { raw: toBase64Url(message) },
+    });
+
+    return { success: true, data: { id: sent.data.id } };
+}
+
+ipcMain.handle('attendance:sendPayslipEmail', async (event, { to, employeeName, period, fileName, pdfBase64 } = {}) => {
+    try {
+        if (!to || !pdfBase64) throw new Error('Thiếu email nhận hoặc file PDF');
+        const subject = `Phiếu lương ${period || ''} - ${employeeName || ''}`.trim();
+        const html = `
+            <div style="font-family:Arial,sans-serif;font-size:14px;color:#111;">
+                <p>Chào bạn,</p>
+                <p>Đính kèm là phiếu lương ${period ? `kỳ <b>${period}</b>` : ''}${employeeName ? ` của <b>${employeeName}</b>` : ''}.</p>
+                <p>Trân trọng,<br/>Hệ thống quản lý nội bộ</p>
+            </div>
+        `;
+        return await sendGmailWithAttachment({ to, subject, html, fileName, pdfBase64 });
+    } catch (err) {
+        console.error('❌ attendance:sendPayslipEmail error:', err.message);
+        const message = err?.response?.data?.error || err.message || 'Gửi Gmail thất bại';
+        return { success: false, error: typeof message === 'string' ? message : JSON.stringify(message) };
+    }
+});
 
 // Kiểm tra + tự khởi động Python service khi vào tab Điểm danh
 ipcMain.handle('attendance:status', async () => {

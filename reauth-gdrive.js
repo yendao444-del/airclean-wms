@@ -1,5 +1,5 @@
 /**
- * Re-authenticate Google Drive — chạy 1 lần khi token hết hạn
+ * Re-authenticate Google Drive/Gmail — chạy 1 lần khi token hết hạn hoặc cần quyền gửi Gmail
  * node reauth-gdrive.js
  */
 const { google } = require('googleapis');
@@ -18,11 +18,14 @@ const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_U
 const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
-    scope: ['https://www.googleapis.com/auth/drive.file'],
+    scope: [
+        'https://www.googleapis.com/auth/drive.file',
+        'https://www.googleapis.com/auth/gmail.send',
+    ],
 });
 
 console.log('\n=========================================');
-console.log('  Google Drive Re-Authentication');
+console.log('  Google Drive/Gmail Re-Authentication');
 console.log('=========================================');
 console.log('\nMở trình duyệt và truy cập URL sau:\n');
 console.log(authUrl);

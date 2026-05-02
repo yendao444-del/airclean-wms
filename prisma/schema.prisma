@@ -273,6 +273,10 @@ model Order {
   
   items         OrderItem[]
   payments      Payment[]
+
+  @@index([source, createdAt])
+  @@index([source, status, createdAt])
+  @@index([createdAt])
 }
 
 model OrderItem {

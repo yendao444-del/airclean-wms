@@ -42,11 +42,14 @@ interface UnifiedOrder {
 type DatePreset = 'today' | '7days' | '30days' | 'month' | 'custom';
 type TmdtPlatformFilter = 'all' | 'shopee' | 'tiktok';
 
+// Cache tồn tại xuyên suốt session — hiển thị ngay khi quay lại tab
+let _ordersCache: UnifiedOrder[] = [];
+
 export default function OrdersPage() {
     const { message, modal } = App.useApp();
     const { user } = useAuth();
     const isAdmin = user?.role === 'admin';
-    const [orders, setOrders] = useState<UnifiedOrder[]>([]);
+    const [orders, setOrders] = useState<UnifiedOrder[]>(_ordersCache);
     const [loading, setLoading] = useState(false);
     const [searchKeyword, setSearchKeyword] = useState('');
     const [sourceFilter, setSourceFilter] = useState<'all' | 'pos' | 'export' | 'tmdt'>('all');
@@ -69,6 +72,7 @@ export default function OrdersPage() {
 
     // Ref để interval luôn gọi version loadAllOrders mới nhất (tránh stale closure)
     const loadAllOrdersRef = useRef<((silent?: boolean) => Promise<void>) | undefined>(undefined);
+    const hasAutoSwitchedRef = useRef(false);
 
     useEffect(() => {
         loadAllOrdersRef.current = loadAllOrders;
@@ -116,150 +120,133 @@ export default function OrdersPage() {
 
     const getEcommerceFetchLimit = () => {
         const days = Math.max(dayjs(getUntil()).diff(dayjs(getSince()), 'day') + 1, 1);
-        return Math.min(Math.max(days * 800, 2000), 10000);
+        return Math.min(Math.max(days * 100, 500), 3000);
     };
 
     const loadAllOrders = async (silent = false) => {
-        if (!silent) setLoading(true);
-        try {
-            const api = (window as any).electronAPI;
-            const since = getSince();
-            const until = getUntil();
-            const ecommerceLimit = getEcommerceFetchLimit();
-            const marketplacePromise = (async () => ({
-                mode: 'marketplace',
-                res: await api.marketplaceOrders.getAll({ since }),
-            }))();
-            const [posRes, exRes, marketplaceLoad, ecommerceExportsRes] = await Promise.all([
-                api.posOrder.getAll({ startDate: since }),
-                api.exportOrders.getAll({ since }),
-                marketplacePromise,
-                api.ecommerceExports.getAll({ since, until, limit: ecommerceLimit }),
-            ]);
+        const forcesilent = silent || _ordersCache.length > 0;
+        if (!forcesilent) setLoading(true);
 
-            const unified: UnifiedOrder[] = [];
+        const api = (window as any).electronAPI;
+        const since = getSince();
+        const until = getUntil();
+        const ecommerceLimit = getEcommerceFetchLimit();
 
+        const accumulated: UnifiedOrder[] = silent ? [..._ordersCache] : [];
+        const seenIds = new Set(accumulated.map(o => o.id));
+        let pending = 4;
+
+        const flush = (newItems: UnifiedOrder[]) => {
+            let changed = false;
+            for (const item of newItems) {
+                if (!seenIds.has(item.id)) { seenIds.add(item.id); accumulated.push(item); changed = true; }
+            }
+            if (changed) {
+                accumulated.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+                _ordersCache = [...accumulated];
+                setOrders([...accumulated]);
+            }
+            pending--;
+            if (pending === 0) {
+                if (!forcesilent) setLoading(false);
+                if (!silent && !hasAutoSwitchedRef.current && datePreset === 'today' && accumulated.length > 0) {
+                    const today = dayjs().startOf('day');
+                    if (!accumulated.some(o => o.date && dayjs(o.date).isSame(today, 'day'))) {
+                        const latestDate = dayjs(accumulated[0].date).startOf('day');
+                        setCustomRange([latestDate, latestDate.endOf('day')]);
+                        setDatePreset('custom');
+                    }
+                    hasAutoSwitchedRef.current = true;
+                }
+            }
+        };
+
+        api.posOrder.getAll({ startDate: since }).then((posRes: any) => {
+            const items: UnifiedOrder[] = [];
             if (posRes.success && posRes.data) {
                 for (const po of posRes.data) {
-                    const items = (po.items || []).map((it: any) => ({
-                        productId: it.productId,
-                        productName: it.productName || it.name,
-                        variantSku: it.sku,
-                        variant: it.variant || null,
-                        quantity: it.quantity || it.qty,
-                        unitPrice: it.price,
-                        cost: it.cost || 0,
-                        total: it.subtotal || (it.price * (it.quantity || it.qty)),
+                    const poItems = (po.items || []).map((it: any) => ({
+                        productId: it.productId, productName: it.productName || it.name,
+                        variantSku: it.sku, variant: it.variant || null,
+                        quantity: it.quantity || it.qty, unitPrice: it.price,
+                        cost: it.cost || 0, total: it.subtotal || (it.price * (it.quantity || it.qty)),
                     }));
-                    unified.push({
+                    items.push({
                         id: `POS-${po.id}`, originalId: po.id, source: 'pos', sourceLabel: 'POS',
                         orderNumber: po.orderNumber || `#POS-${po.id}`,
                         customer: po.customer?.name || po.customerName || 'Khách lẻ',
-                        items: JSON.stringify(items), totalAmount: po.total || 0,
+                        items: JSON.stringify(poItems), totalAmount: po.total || 0,
                         status: po.status || 'completed', date: po.createdAt || '', notes: po.note || '',
                         createdBy: po.userName || '',
                     });
                 }
             }
+            flush(items);
+        }).catch(() => flush([]));
 
+        api.exportOrders.getAll({ since }).then((exRes: any) => {
+            const items: UnifiedOrder[] = [];
             if (exRes.success && exRes.data) {
                 for (const ex of exRes.data) {
-                    const itemsStr = typeof ex.items === 'string' ? ex.items : JSON.stringify(ex.items || []);
-                    unified.push({
+                    items.push({
                         id: `EX-${ex.id}`, originalId: ex.id, source: 'export', sourceLabel: 'Xuất hàng',
                         orderNumber: `#XH-${ex.id}`, customer: ex.customer || 'Khách lẻ',
-                        items: itemsStr, totalAmount: ex.totalAmount || 0,
-                        status: ex.status || 'completed', date: ex.createdAt || ex.exportDate || '', notes: ex.notes || '',
-                        createdBy: ex.createdBy || '',
+                        items: typeof ex.items === 'string' ? ex.items : JSON.stringify(ex.items || []),
+                        totalAmount: ex.totalAmount || 0,
+                        status: ex.status || 'completed', date: ex.createdAt || ex.exportDate || '',
+                        notes: ex.notes || '', createdBy: ex.createdBy || '',
                     });
                 }
             }
+            flush(items);
+        }).catch(() => flush([]));
 
-            if (marketplaceLoad.res.success && marketplaceLoad.res.data) {
-                if (marketplaceLoad.mode === 'marketplace') {
-                    for (const ec of marketplaceLoad.res.data) {
-                        const shippingMatch = ec.note?.match(/Shipping: ([^|]+)/);
-                        const ecItemsStr = JSON.stringify(ec.items || []);
-                        const effectiveDate = ec.updatedAt || ec.createdAt || '';
-                        unified.push({
-                            id: `TMDT-${ec.id}`, originalId: ec.id, source: 'tmdt',
-                            sourceLabel: ec.source === 'tiktok' ? 'TikTok' :
-                                ec.source === 'shopee' ? 'Shopee' :
-                                    ec.source === 'lazada' ? 'Lazada' : 'TMDT',
-                            orderNumber: ec.orderNumber || `#TMDT-${ec.id}`,
-                            customer: ec.source ? ec.source.toUpperCase() : 'Sàn TMDT', items: ecItemsStr,
-                            totalAmount: ec.total || 0, status: ec.status,
-                            date: effectiveDate,
-                            tracking: ec.trackingNumber || undefined,
-                            shipping: shippingMatch ? shippingMatch[1].trim() : undefined,
-                            notes: ec.note || '',
-                            createdBy: ec.userName || '',
-                        });
-                    }
-                } else {
-                    for (const ec of marketplaceLoad.res.data) {
-                        if (ec.status !== 'completed') continue;
-                        const trackingMatch = ec.notes?.match(/Tracking: ([^|]+)/);
-                        const shippingMatch = ec.notes?.match(/Shipping: ([^|]+)/);
-                        const ecItemsStr = typeof ec.items === 'string' ? ec.items : JSON.stringify(ec.items || []);
-                        const effectiveDate = ec.updatedAt || ec.ecommerceExportDate || ec.createdAt || '';
-                        unified.push({
-                            id: `TMDT-${ec.id}`, originalId: ec.id, source: 'tmdt',
-                            sourceLabel: ec.customerName?.toLowerCase().includes('tiktok') ? 'TikTok' :
-                                ec.customerName?.toLowerCase().includes('shopee') ? 'Shopee' : 'TMDT',
-                            orderNumber: ec.orderNumber || ec.ecommerceExportCode || `#TMDT-${ec.id}`,
-                            customer: ec.customerName || 'SÃ n TMDT', items: ecItemsStr,
-                            totalAmount: ec.totalAmount || 0, status: ec.status,
-                            date: effectiveDate,
-                            tracking: trackingMatch ? trackingMatch[1].trim() : undefined,
-                            shipping: shippingMatch ? shippingMatch[1].trim() : undefined,
-                            notes: ec.notes || '',
-                            createdBy: (typeof ec.pickedBy === 'string' && ec.pickedBy) ? ec.pickedBy : (ec.createdBy || ''),
-                        });
-                    }
+        api.marketplaceOrders.getAll({ since }).then((mktRes: any) => {
+            const items: UnifiedOrder[] = [];
+            if (mktRes.success && mktRes.data) {
+                for (const ec of mktRes.data) {
+                    items.push({
+                        id: `TMDT-${ec.id}`, originalId: ec.id, source: 'tmdt',
+                        sourceLabel: ec.source === 'tiktok' ? 'TikTok' : ec.source === 'shopee' ? 'Shopee' : ec.source === 'lazada' ? 'Lazada' : 'TMDT',
+                        orderNumber: ec.orderNumber || `#TMDT-${ec.id}`,
+                        customer: ec.source ? ec.source.toUpperCase() : 'Sàn TMDT',
+                        items: JSON.stringify(ec.items || []),
+                        totalAmount: ec.total || 0, status: ec.status,
+                        date: ec.updatedAt || ec.createdAt || '',
+                        tracking: ec.trackingNumber || undefined,
+                        shipping: ec.note?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
+                        notes: ec.note || '', createdBy: ec.userName || '',
+                    });
                 }
             }
+            flush(items);
+        }).catch(() => flush([]));
 
-            if (ecommerceExportsRes.success && ecommerceExportsRes.data) {
-                for (const ec of ecommerceExportsRes.data) {
+        api.ecommerceExports.getAll({ since, until, limit: ecommerceLimit }).then((ecomRes: any) => {
+            const items: UnifiedOrder[] = [];
+            if (ecomRes.success && ecomRes.data) {
+                for (const ec of ecomRes.data) {
                     if (ec.status !== 'completed') continue;
-                    const trackingMatch = ec.notes?.match(/Tracking: ([^|]+)/);
-                    const shippingMatch = ec.notes?.match(/Shipping: ([^|]+)/);
-                    const ecItemsStr = typeof ec.items === 'string' ? ec.items : JSON.stringify(ec.items || []);
-                    const effectiveDate = ec.updatedAt || ec.ecommerceExportDate || ec.createdAt || '';
-                    unified.push({
+                    items.push({
                         id: `TMDT-EX-${ec.id}`, originalId: ec.id, source: 'tmdt',
-                        sourceLabel: ec.customerName?.toLowerCase().includes('tiktok') ? 'TikTok' :
-                            ec.customerName?.toLowerCase().includes('shopee') ? 'Shopee' : 'TMDT',
+                        sourceLabel: ec.customerName?.toLowerCase().includes('tiktok') ? 'TikTok' : ec.customerName?.toLowerCase().includes('shopee') ? 'Shopee' : 'TMDT',
                         orderNumber: ec.orderNumber || ec.ecommerceExportCode || `#TMDT-${ec.id}`,
                         customer: ec.customerName || 'Sàn TMDT',
-                        items: ecItemsStr,
-                        totalAmount: ec.totalAmount || 0,
-                        status: ec.status,
-                        date: effectiveDate,
-                        tracking: trackingMatch ? trackingMatch[1].trim() : undefined,
-                        shipping: shippingMatch ? shippingMatch[1].trim() : undefined,
+                        items: typeof ec.items === 'string' ? ec.items : JSON.stringify(ec.items || []),
+                        totalAmount: ec.totalAmount || 0, status: ec.status,
+                        date: ec.updatedAt || ec.ecommerceExportDate || ec.createdAt || '',
+                        tracking: ec.notes?.match(/Tracking: ([^|]+)/)?.[1]?.trim(),
+                        shipping: ec.notes?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
                         notes: ec.notes || '',
                         createdBy: (typeof ec.pickedBy === 'string' && ec.pickedBy) ? ec.pickedBy : (ec.createdBy || ''),
                     });
                 }
             }
-
-            unified.sort((a, b) => dayjs(b.date).unix() - dayjs(a.date).unix());
-            // Khi silent reload (interval 30s), chỉ cập nhật nếu lấy được dữ liệu hợp lệ
-            // Tránh ghi đè danh sách hiện tại bằng array rỗng khi API lỗi tạm thời
-            if (!silent || unified.length > 0) {
-                setOrders(unified);
-            }
-        } catch (error) {
-            console.error('Error loading orders:', error);
-        } finally {
-            if (!silent) setLoading(false);
-        }
+            flush(items);
+        }).catch(() => flush([]));
     };
-
     // === Date range logic ===
-    const getDateRange = (): [Dayjs, Dayjs] => {
+    const [rangeStart, rangeEnd] = useMemo((): [Dayjs, Dayjs] => {
         const today = dayjs().startOf('day');
         switch (datePreset) {
             case 'today': return [today, dayjs().endOf('day')];
@@ -269,14 +256,10 @@ export default function OrdersPage() {
             case 'custom': return customRange || [today, dayjs().endOf('day')];
             default: return [today, dayjs().endOf('day')];
         }
-    };
+    }, [datePreset, customRange]);
 
-    const [rangeStart, rangeEnd] = getDateRange();
-
-    const isInRange = (dateStr: string) => {
-        const d = dayjs(dateStr);
-        return d.isSameOrAfter(rangeStart, 'day') && d.isSameOrBefore(rangeEnd, 'day');
-    };
+    const rangeStartTs = rangeStart.startOf('day').valueOf();
+    const rangeEndTs = rangeEnd.endOf('day').valueOf();
 
     const getTmdtPlatform = (order: UnifiedOrder): TmdtPlatformFilter | 'other' => {
         const label = (order.sourceLabel || '').toLowerCase();
@@ -389,7 +372,7 @@ export default function OrdersPage() {
                     notes: o.notes || '',
                     createdBy: (typeof o.pickedBy === 'string' && o.pickedBy) ? o.pickedBy : (o.createdBy || ''),
                 }));
-                unified.sort((a, b) => dayjs(b.date).unix() - dayjs(a.date).unix());
+                unified.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
                 setSearchResults(unified);
             } finally {
                 setSearchLoading(false);
@@ -398,49 +381,61 @@ export default function OrdersPage() {
     };
 
     // Filtered orders
-    const filteredOrders = (searchResults ?? orders).filter(order => {
-        if (!matchesSourceFilters(order)) return false;
-        if (searchKeyword.trim()) {
-            // Khi search: bỏ qua date range, tìm toàn bộ đơn
-            const kw = searchKeyword.trim().toLowerCase();
-            return (
-                order.orderNumber.toLowerCase().includes(kw) ||
-                order.customer.toLowerCase().includes(kw) ||
-                (order.tracking || '').toLowerCase().includes(kw) ||
-                order.sourceLabel.toLowerCase().includes(kw)
-            );
-        }
-        if (!searchResults && !isInRange(order.date)) return false;
-        return true;
-    });
+    const filteredOrders = useMemo(() => {
+        const kw = searchKeyword.trim().toLowerCase();
+        const base = searchResults ?? orders;
+        return base.filter(order => {
+            if (!matchesSourceFilters(order)) return false;
+            if (kw) {
+                return (
+                    order.orderNumber.toLowerCase().includes(kw) ||
+                    order.customer.toLowerCase().includes(kw) ||
+                    (order.tracking || '').toLowerCase().includes(kw) ||
+                    order.sourceLabel.toLowerCase().includes(kw)
+                );
+            }
+            if (!searchResults) {
+                const ts = Date.parse(order.date);
+                if (ts < rangeStartTs || ts > rangeEndTs) return false;
+            }
+            return true;
+        });
+    }, [searchResults, orders, searchKeyword, sourceFilter, tmdtPlatformFilter, rangeStartTs, rangeEndTs]);
 
     // === Stats: current period vs previous period ===
-    const periodDays = rangeEnd.diff(rangeStart, 'day') + 1;
-    const prevStart = rangeStart.subtract(periodDays, 'day');
-    const prevEnd = rangeStart.subtract(1, 'day');
+    const { prevOrders, currentRevenue, prevRevenue, currentQty, prevQty } = useMemo(() => {
+        const periodDays = rangeEnd.diff(rangeStart, 'day') + 1;
+        const prevStartTs = rangeStart.subtract(periodDays, 'day').startOf('day').valueOf();
+        const prevEndTs = rangeStart.subtract(1, 'day').endOf('day').valueOf();
 
-    const prevOrders = orders.filter(o => {
-        if (!matchesSourceFilters(o)) return false;
-        const d = dayjs(o.date);
-        return d.isSameOrAfter(prevStart, 'day') && d.isSameOrBefore(prevEnd, 'day');
-    });
+        const isValidRevenue = (o: UnifiedOrder) =>
+            !['cancelled', 'returned', 'refunded'].includes((o.status || '').toLowerCase()) &&
+            !(o.id.startsWith('TMDT-') && !o.id.startsWith('TMDT-EX-'));
 
-    // Doanh thu chỉ tính từ: POS, xuất hàng, và phiếu xuất TMDT (TMDT-EX-)
-    // Không tính marketplaceOrders (TMDT-{id}) vì đó là đơn thô chưa xác nhận xuất kho
-    const isValidRevenue = (o: UnifiedOrder) =>
-        !['cancelled', 'returned', 'refunded'].includes((o.status || '').toLowerCase()) &&
-        !(o.id.startsWith('TMDT-') && !o.id.startsWith('TMDT-EX-'));
-    const currentRevenue = filteredOrders.filter(isValidRevenue).reduce((s, o) => s + (o.totalAmount || 0), 0);
-    const prevRevenue = prevOrders.filter(isValidRevenue).reduce((s, o) => s + (o.totalAmount || 0), 0);
+        const prev = orders.filter(o => {
+            if (!matchesSourceFilters(o)) return false;
+            const ts = Date.parse(o.date);
+            return ts >= prevStartTs && ts <= prevEndTs;
+        });
 
-    const calcQty = (list: UnifiedOrder[]) => list.reduce((s, o) => {
-        let items: any[] = [];
-        try { items = JSON.parse(o.items); } catch { }
-        return s + items.reduce((ss: number, it: any) => ss + (it.quantity || it.qty || 1), 0);
-    }, 0);
+        let curRevenue = 0, prvRevenue = 0, curQty = 0, prvQty = 0;
+        for (const o of filteredOrders) {
+            if (isValidRevenue(o)) curRevenue += o.totalAmount || 0;
+            try {
+                const items: any[] = JSON.parse(o.items);
+                curQty += items.reduce((s: number, it: any) => s + (it.quantity || it.qty || 1), 0);
+            } catch { curQty += 1; }
+        }
+        for (const o of prev) {
+            if (isValidRevenue(o)) prvRevenue += o.totalAmount || 0;
+            try {
+                const items: any[] = JSON.parse(o.items);
+                prvQty += items.reduce((s: number, it: any) => s + (it.quantity || it.qty || 1), 0);
+            } catch { prvQty += 1; }
+        }
 
-    const currentQty = calcQty(filteredOrders);
-    const prevQty = calcQty(prevOrders);
+        return { prevOrders: prev, currentRevenue: curRevenue, prevRevenue: prvRevenue, currentQty: curQty, prevQty: prvQty };
+    }, [orders, filteredOrders, rangeStart, rangeEnd, sourceFilter, tmdtPlatformFilter]);
 
     const periodLabel = datePreset === 'today' ? 'Hôm nay' : datePreset === '7days' ? '7 ngày qua' :
         datePreset === '30days' ? '30 ngày' : datePreset === 'month' ? 'Tháng này' : 'Kỳ chọn';
@@ -814,7 +809,7 @@ export default function OrdersPage() {
     });
 
     const countCurrentRange = (predicate: (order: UnifiedOrder) => boolean) =>
-        orders.filter(order => predicate(order) && isInRange(order.date)).length;
+        orders.filter(order => predicate(order) && Date.parse(order.date) >= rangeStartTs && Date.parse(order.date) <= rangeEndTs).length;
 
     return (
         <div style={{ maxWidth: 1440 }}>

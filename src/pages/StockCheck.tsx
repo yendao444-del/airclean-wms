@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+    Alert,
     Button,
     Dropdown,
     Empty,
@@ -29,6 +30,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useAppData } from '../contexts/AppDataContext';
 import { usePageHeader } from '../contexts/PageHeaderContext';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
+import { STOCK_CHECK_MISSING_FINE, STOCK_CHECK_POLICY_START_DATE } from '../lib/workCalendar';
 
 const LS_KEY = 'stock-check-sessions-v2';
 const DAILY_TOP_ROTATION_COUNT = 2;
@@ -374,19 +376,19 @@ export default function StockCheck() {
                                         icon: <span>👤</span>,
                                         onClick: () => { setSelectedStaffUsername(todaySession.assignedTo); setStaffModalOpen(true); },
                                     }] : []),
-                                    ...(isAdmin && isToday ? [
+                                    ...(isAdmin ? [
                                         { type: 'divider' as const },
                                         {
                                             key: 'undo',
                                             label: (
                                                 <Popconfirm
-                                                    title="Hoàn tác phiên kiểm?"
-                                                    description={`Xoá tiến độ phiên "${activeTab === 'full' ? 'Kiểm toàn bộ' : 'Kiểm hàng ngày'}" hôm nay.`}
+                                                    title="Xoá phiên kiểm?"
+                                                    description={`Xoá phiên "${activeTab === 'full' ? 'Kiểm toàn bộ' : 'Kiểm hàng ngày'}" ngày ${currentDate.format('DD/MM/YYYY')}.`}
                                                     okText="Xoá" cancelText="Huỷ"
                                                     okButtonProps={{ danger: true }}
                                                     onConfirm={handleUndoSession}
                                                 >
-                                                    <span style={{ color: '#ef4444' }}>↩ Hoàn tác phiên</span>
+                                                    <span style={{ color: '#ef4444' }}>↩ Xoá phiên này</span>
                                                 </Popconfirm>
                                             ),
                                             danger: false,
@@ -644,6 +646,33 @@ export default function StockCheck() {
         if (changed) persistSessions(updated);
     }, [contextProducts, sessions, todayStr]);
 
+    // Auto-assign người phụ trách khi page load — nếu hôm nay chưa có session thì gán ngay,
+    // không cần chờ nhân viên bấm "Tạo phiên kiểm". Nếu không kiểm → vẫn bị phạt.
+    useEffect(() => {
+        if (!isToday || activeTab !== 'daily' || !assignableManagers.length) return;
+        if (dayjs().day() === 0) return; // Chủ nhật — không kiểm
+        const current = loadSessions();
+        if (current.some(s => s.date === todayStr && s.type !== 'full')) return;
+
+        const previousSession = current
+            .filter(s => s.date !== todayStr && assignableManagers.some(m => m.username.toLowerCase() === s.assignedTo?.toLowerCase()))
+            .sort((a, b) => new Date(b.createdAt || b.date).getTime() - new Date(a.createdAt || a.date).getTime())[0];
+
+        const assignee = previousSession
+            ? assignableManagers[(assignableManagers.findIndex(m => m.username.toLowerCase() === previousSession.assignedTo?.toLowerCase()) + 1) % assignableManagers.length]
+            : assignableManagers[0];
+
+        const preSession: CheckSession = {
+            id: todayStr, date: todayStr, type: 'daily',
+            assignedTo: assignee.username, assignedName: assignee.username,
+            status: 'in_progress', items: [], notes: '',
+            createdAt: dayjs().toISOString(),
+        };
+        const updated = current.filter(s => s.id !== todayStr).concat(preSession);
+        setSessions(updated);
+        saveSessions(updated);
+    }, [isToday, activeTab, assignableManagers, todayStr]); // eslint-disable-line react-hooks/exhaustive-deps
+
     const handleGenerate = async () => {
         if (isPast) {
             message.warning('Ngày đã khóa, không thể tạo phiên kiểm.');
@@ -662,7 +691,11 @@ export default function StockCheck() {
                 : buildDailyProductPool(rankedProducts);
         const items = pool.flatMap((p: any) => expandToVariants(p));
         if (!items.length) { message.error('Không có sản phẩm.'); return; }
-        const assignee = pickNextAssignee();
+        // Giữ người phụ trách đã được gán trước đó (pre-assign), nếu có
+        const preAssigned = todaySession?.items.length === 0
+            ? assignableManagers.find(m => m.username === todaySession.assignedTo) ?? null
+            : null;
+        const assignee = preAssigned ?? pickNextAssignee();
         if (!assignee) {
             message.warning('Chưa có quản lý hoạt động để phân công phiên kiểm.');
             return;
@@ -1428,6 +1461,16 @@ export default function StockCheck() {
     return (
         <div style={{ background: '#F8FAFC', minHeight: '100vh' }}>
             <main style={{ maxWidth: 1280, margin: '0 auto', padding: '16px 20px 0' }}>
+                <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 12, borderRadius: 8, padding: '4px 10px', fontSize: 12 }}
+                    message={
+                        <span style={{ fontSize: 12 }}>
+                            Không kiểm hàng → người phụ trách bị phạt <strong>{STOCK_CHECK_MISSING_FINE.toLocaleString('vi-VN')}đ</strong> trong Bảng công (từ {dayjs(STOCK_CHECK_POLICY_START_DATE).format('DD/MM/YYYY')}, trừ CN & ngày lễ).
+                        </span>
+                    }
+                />
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, marginBottom: 16 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
                         <div style={{
@@ -1447,7 +1490,7 @@ export default function StockCheck() {
                     </div>
                 </div>
 
-                {todaySession && (
+                {todaySession && todaySession.items.length > 0 && (
                     <>
                         <div style={{
                             background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10,
@@ -1970,14 +2013,20 @@ export default function StockCheck() {
                     </>
                 )}
 
-                {/* ── Empty state ── */}
-                {!todaySession && (
+                {/* ── Empty state (chưa có items) ── */}
+                {(!todaySession || todaySession.items.length === 0) && (
                     <div style={{ textAlign: 'center', padding: '80px 0', color: '#94a3b8' }}>
                         {isPast ? (
                             <>
                                 <div style={{ fontSize: 40, marginBottom: 12 }}>🔒</div>
                                 <div style={{ fontSize: 15, fontWeight: 700, color: '#64748b', marginBottom: 6 }}>Ngày này đã khoá</div>
-                                <div style={{ fontSize: 13 }}>Không có phiên kiểm nào được ghi nhận.</div>
+                                {todaySession ? (
+                                    <div style={{ fontSize: 13 }}>
+                                        Người được giao: <strong style={{ color: '#ef4444' }}>{todaySession.assignedName}</strong> — Không thực hiện kiểm hàng.
+                                    </div>
+                                ) : (
+                                    <div style={{ fontSize: 13 }}>Không có phiên kiểm nào được ghi nhận.</div>
+                                )}
                             </>
                         ) : isFuture ? (
                             <>
@@ -1996,21 +2045,44 @@ export default function StockCheck() {
                             </>
                         ) : (
                             <>
-                                <div style={{ fontSize: 48, marginBottom: 16 }}>📋</div>
-                                <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>Chưa có phiên kiểm cho ngày này</div>
-                                <div style={{ fontSize: 13, marginBottom: 24 }}>
-                                    {activeTab === 'full'
-                                        ? 'Phiên này sẽ kiểm toàn bộ sản phẩm.'
-                                        : weekend
-                                            ? `Thứ 7: ${SATURDAY_TOP_COUNT} sản phẩm bán chạy + ${SATURDAY_RANDOM_COUNT} sản phẩm ngẫu nhiên.`
-                                            : `Mỗi ngày: 1 trong top ${DAILY_TOP_ROTATION_COUNT} bán chạy luân phiên + ${DAILY_RANDOM_COUNT} sản phẩm ngẫu nhiên.`}
-                                </div>
+                                {todaySession ? (
+                                    // Đã gán người phụ trách, chưa tạo danh sách kiểm
+                                    <>
+                                        <div style={{ fontSize: 48, marginBottom: 12 }}>👤</div>
+                                        <div style={{ fontSize: 14, fontWeight: 600, color: '#64748b', marginBottom: 4 }}>
+                                            Người phụ trách hôm nay
+                                        </div>
+                                        <div style={{ fontSize: 24, fontWeight: 800, color: '#10b981', marginBottom: 6 }}>
+                                            {todaySession.assignedName}
+                                        </div>
+                                        <div style={{ fontSize: 13, marginBottom: 24 }}>
+                                            {activeTab === 'full'
+                                                ? 'Kiểm toàn bộ sản phẩm.'
+                                                : weekend
+                                                    ? `Thứ 7: ${SATURDAY_TOP_COUNT} sản phẩm bán chạy + ${SATURDAY_RANDOM_COUNT} sản phẩm ngẫu nhiên.`
+                                                    : `${DAILY_TOP_ROTATION_COUNT + DAILY_RANDOM_COUNT} sản phẩm luân phiên & ngẫu nhiên.`}
+                                        </div>
+                                    </>
+                                ) : (
+                                    // Chưa có assignment nào (hiếm, thường staff chưa load xong)
+                                    <>
+                                        <div style={{ fontSize: 48, marginBottom: 16 }}>📋</div>
+                                        <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>Chưa có phiên kiểm cho ngày này</div>
+                                        <div style={{ fontSize: 13, marginBottom: 24 }}>
+                                            {activeTab === 'full'
+                                                ? 'Phiên này sẽ kiểm toàn bộ sản phẩm.'
+                                                : weekend
+                                                    ? `Thứ 7: ${SATURDAY_TOP_COUNT} sản phẩm bán chạy + ${SATURDAY_RANDOM_COUNT} sản phẩm ngẫu nhiên.`
+                                                    : `Mỗi ngày: 1 trong top ${DAILY_TOP_ROTATION_COUNT} bán chạy luân phiên + ${DAILY_RANDOM_COUNT} sản phẩm ngẫu nhiên.`}
+                                        </div>
+                                    </>
+                                )}
                                 {canManage && (
                                     <Button
                                         type="primary" size="large" onClick={handleGenerate}
                                         style={{ background: '#10b981', borderColor: '#10b981', borderRadius: 12, fontWeight: 700, height: 44, padding: '0 32px' }}
                                     >
-                                        Tạo phiên kiểm
+                                        Tạo danh sách kiểm
                                     </Button>
                                 )}
                             </>

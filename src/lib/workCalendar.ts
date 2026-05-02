@@ -11,6 +11,9 @@ export const FIXED_VIETNAM_HOLIDAYS: Record<string, string> = {
 export const DAILY_REPORT_MISSING_FINE_OFFICIAL = 30000;
 export const DAILY_REPORT_POLICY_START_DATE = '2026-04-28';
 
+export const STOCK_CHECK_MISSING_FINE = 50000;
+export const STOCK_CHECK_POLICY_START_DATE = '2026-05-02';
+
 export const getFixedVietnamHolidayName = (date: Dayjs) => {
     return FIXED_VIETNAM_HOLIDAYS[date.format('MM-DD')] || '';
 };
@@ -21,6 +24,13 @@ export const isDailyReportRestDay = (date: Dayjs) => {
 
 export const isPastDailyReportWorkingDay = (date: Dayjs, now: Dayjs = dayjs()) => {
     const policyStartDate = dayjs(DAILY_REPORT_POLICY_START_DATE).startOf('day');
+    return !date.isBefore(policyStartDate, 'day')
+        && date.isBefore(now, 'day')
+        && !isDailyReportRestDay(date);
+};
+
+export const isPastStockCheckWorkingDay = (date: Dayjs, now: Dayjs = dayjs()) => {
+    const policyStartDate = dayjs(STOCK_CHECK_POLICY_START_DATE).startOf('day');
     return !date.isBefore(policyStartDate, 'day')
         && date.isBefore(now, 'day')
         && !isDailyReportRestDay(date);

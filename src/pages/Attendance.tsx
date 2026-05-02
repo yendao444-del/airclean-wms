@@ -1,9 +1,14 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import html2canvas from 'html2canvas';
+import { jsPDF } from 'jspdf';
 import { PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer, Legend } from 'recharts';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import {
     DAILY_REPORT_MISSING_FINE_OFFICIAL,
     isPastDailyReportWorkingDay,
+    STOCK_CHECK_MISSING_FINE,
+    STOCK_CHECK_POLICY_START_DATE,
+    isPastStockCheckWorkingDay,
 } from '../lib/workCalendar';
 import './Attendance.css';
 import dayjs from 'dayjs';
@@ -31,6 +36,7 @@ import {
     Drawer,
     Spin,
     DatePicker,
+    Collapse,
 } from 'antd';
 import {
     CheckCircleOutlined,
@@ -53,6 +59,7 @@ import {
     TeamOutlined,
     PlusOutlined,
     FileTextOutlined,
+    EyeOutlined,
     WalletOutlined,
     HistoryOutlined,
     ProfileOutlined,
@@ -1773,6 +1780,85 @@ export default function Attendance() {
     const [configModalOpen, setConfigModalOpen] = useState(false);
     const [activeConfigTab, setActiveConfigTab] = useState('rules');
     const [payslipModal, setPayslipModal] = useState<any>(null);
+    const [pdfExporting, setPdfExporting] = useState(false);
+    const [payslipPdfDetailOpen, setPayslipPdfDetailOpen] = useState(false);
+    const [gmailSending, setGmailSending] = useState(false);
+
+    const buildPayslipPDF = async () => {
+        if (!payslipModal) return;
+        const el = document.querySelector('.ps-print-view') as HTMLElement;
+        if (!el) return;
+        const prev = el.style.cssText;
+        el.style.cssText = 'display:block!important;position:fixed;top:-9999px;left:0;width:580px;background:#fff;padding:24px 34px;visibility:visible;';
+        try {
+            const canvas = await html2canvas(el, { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
+            const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+            const pageW = pdf.internal.pageSize.getWidth();
+            const pageH = pdf.internal.pageSize.getHeight();
+            const margin = 15;
+            const maxW = pageW - margin * 2;
+            const maxH = pageH - margin * 2;
+            const fitByWidthH = (canvas.height * maxW) / canvas.width;
+            const imgW = fitByWidthH <= maxH ? maxW : (canvas.width * maxH) / canvas.height;
+            const imgH = fitByWidthH <= maxH ? fitByWidthH : maxH;
+            const x = (pageW - imgW) / 2;
+            const y = margin;
+            const imgData = canvas.toDataURL('image/png');
+            pdf.addImage(imgData, 'PNG', x, y, imgW, imgH);
+            const name = payslipModal.name.replace(/\s+/g, '-');
+            const period = overviewDateRange[0].format('MM-YYYY');
+            return { pdf, name, period, fileName: `phieu-luong-${name}-${period}.pdf` };
+        } finally {
+            el.style.cssText = prev;
+        }
+    };
+
+    const handleExportPayslipPDF = async () => {
+        if (!payslipModal) return;
+        setPdfExporting(true);
+        try {
+            const result = await buildPayslipPDF();
+            if (!result) return;
+            const { pdf, name, period, fileName } = result;
+            pdf.save(fileName);
+            message.success(`Đã tải xuống phiếu lương ${name.replace(/-/g, ' ')} — ${period}`);
+        } finally {
+            setPdfExporting(false);
+        }
+    };
+
+    const handleSendPayslipGmail = async () => {
+        if (!payslipModal) return;
+        const api = (window as any).electronAPI;
+        if (!api?.attendance?.sendPayslipEmail) {
+            message.error('Chưa có API gửi Gmail. Vui lòng khởi động lại app.');
+            return;
+        }
+        setGmailSending(true);
+        try {
+            const result = await buildPayslipPDF();
+            if (!result) return;
+            const { pdf, fileName, period } = result;
+            const pdfBase64 = pdf.output('datauristring').split(',')[1];
+            const res = await api.attendance.sendPayslipEmail({
+                to: 'Zicky.iluv@gmail.com',
+                employeeName: payslipModal.name,
+                period,
+                fileName,
+                pdfBase64,
+            });
+            if (res?.success) {
+                message.success(`Đã gửi phiếu lương tới Zicky.iluv@gmail.com`);
+            } else if (res?.reauthRequired) {
+                message.warning(res.error || 'Gmail chưa được cấp quyền gửi email. Cần đăng nhập Google lại với quyền Gmail.');
+            } else {
+                message.error(res?.error || 'Gửi Gmail thất bại');
+            }
+        } finally {
+            setGmailSending(false);
+        }
+    };
+
     const [activeTab, setActiveTab] = useState('overview');
     const [config, setConfig] = useState<PenaltyConfig>({
         graceMinutes: 5,
@@ -1821,6 +1907,7 @@ export default function Attendance() {
     const [purchaseVatTracking, setPurchaseVatTracking] = useState<PurchaseVatTracking[]>([]);
     const [dailyTaskTracking, setDailyTaskTracking] = useState<any[]>([]);
     const [dailyTaskHistory, setDailyTaskHistory] = useState<any[]>([]);
+    const [stockCheckSessions, setStockCheckSessions] = useState<any[]>([]);
 
     const [isDbLoaded, setIsDbLoaded] = useState(false);
     const [systemUsernames, setSystemUsernames] = useState<string[]>([]);
@@ -2106,12 +2193,17 @@ export default function Attendance() {
             if (historyResult?.success && Array.isArray(historyResult.data)) {
                 setDailyTaskHistory(historyResult.data);
             }
+            try {
+                const raw = localStorage.getItem('stock-check-sessions-v2');
+                setStockCheckSessions(raw ? JSON.parse(raw) : []);
+            } catch { setStockCheckSessions([]); }
         } catch (error) {
             console.error('Lỗi tải dữ liệu deadline công việc:', error);
         }
     };
 
     const [liveAttendanceLogs, setLiveAttendanceLogs] = useState<any[]>([]);
+    const [overviewAttendanceLogs, setOverviewAttendanceLogs] = useState<any[]>([]);
     const attendanceMatrixWrapRef = useRef<HTMLDivElement | null>(null);
 
     // === State cho đóng gói + lịch sử ===
@@ -2248,9 +2340,65 @@ export default function Attendance() {
         return fines;
     }, [employees, dailyTaskHistory, overviewDateRange]);
 
+    const autoStockCheckMissingFines = useMemo(() => {
+        const endLimit = dayjs().subtract(1, 'day').endOf('day');
+        const rangeStart = overviewDateRange[0].startOf('day');
+        const rangeEnd = overviewDateRange[1].isBefore(endLimit)
+            ? overviewDateRange[1].endOf('day')
+            : endLimit;
+
+        if (rangeEnd.isBefore(rangeStart, 'day')) return [] as FineRecord[];
+
+        const fines: FineRecord[] = [];
+        for (let date = rangeStart; date.isBefore(rangeEnd) || date.isSame(rangeEnd, 'day'); date = date.add(1, 'day')) {
+            if (!isPastStockCheckWorkingDay(date)) continue;
+
+            const dateKey = date.format('YYYY-MM-DD');
+            const session = stockCheckSessions.find((s: any) => s.date === dateKey && s.type !== 'full');
+            // Đã hoàn thành → không phạt
+            if (session?.status === 'completed') continue;
+
+            let assignee: typeof employees[number] | undefined;
+            if (session) {
+                // Session tồn tại nhưng chưa hoàn thành → phạt người được giao
+                assignee = employees.find(emp => matchTaskAssigneeToEmployee(session.assignedTo, emp));
+            } else {
+                // Không có session → tính ngược rotation để xác định ai đáng lẽ phải kiểm
+                const rotationUsernames = [...new Set(
+                    (stockCheckSessions as any[])
+                        .filter(s => s.type !== 'full' && s.assignedTo)
+                        .map(s => (s.assignedTo as string).toLowerCase())
+                )].sort((a, b) => a.localeCompare(b, 'vi'));
+                if (!rotationUsernames.length) continue;
+
+                const previousSession = (stockCheckSessions as any[])
+                    .filter(s => dayjs(s.date).isBefore(date, 'day') && s.type !== 'full' && s.assignedTo)
+                    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
+
+                const expectedUsername = previousSession
+                    ? rotationUsernames[(rotationUsernames.indexOf(previousSession.assignedTo.toLowerCase()) + 1) % rotationUsernames.length]
+                    : rotationUsernames[0];
+
+                assignee = employees.find(emp => matchTaskAssigneeToEmployee(expectedUsername, emp));
+            }
+            if (!assignee) continue;
+
+            fines.push({
+                empId: assignee.id,
+                type: 'Thiếu kiểm hàng ngày',
+                detail: `Không kiểm hàng ngày ${date.format('DD/MM/YYYY')}`,
+                amount: STOCK_CHECK_MISSING_FINE,
+                date: date.hour(20).minute(0).second(0).millisecond(0).toISOString(),
+                source: 'stock_check_missing' as any,
+            });
+        }
+
+        return fines;
+    }, [employees, stockCheckSessions, overviewDateRange]);
+
     const allFines = useMemo(
-        () => [...finesData, ...extraFines, ...autoVatOverdueFines, ...autoDeadlineOverdueFines, ...autoDailyReportMissingFines],
-        [extraFines, autoVatOverdueFines, autoDeadlineOverdueFines, autoDailyReportMissingFines]
+        () => [...finesData, ...extraFines, ...autoVatOverdueFines, ...autoDeadlineOverdueFines, ...autoDailyReportMissingFines, ...autoStockCheckMissingFines],
+        [extraFines, autoVatOverdueFines, autoDeadlineOverdueFines, autoDailyReportMissingFines, autoStockCheckMissingFines]
     );
 
     // Helper: lọc theo overviewDateRange
@@ -2281,8 +2429,8 @@ export default function Attendance() {
 
     const payrollData = useMemo(() => calculatePayroll(
         overviewFines, overviewWareHousePacking, employees, overviewBonuses,
-        liveAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, payrollOverrides
-    ), [overviewFines, overviewWareHousePacking, employees, overviewBonuses, liveAttendanceLogs, overviewDateRange, overviewPackingLogs, payrollOverrides]);
+        overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, payrollOverrides
+    ), [overviewFines, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, payrollOverrides]);
 
     // Totals cho Overview
     const totals = useMemo(() => {
@@ -2296,7 +2444,7 @@ export default function Attendance() {
         return { tSal, tPack, tBonus, fundBalance };
     }, [payrollData]);
 
-    // Tự động fetch logs theo tháng được chọn
+    // Tự động fetch logs theo tháng được chọn (tab Điểm danh)
     const fetchMonthLogs = async () => {
         try {
             const api = (window as any).electronAPI;
@@ -2309,9 +2457,26 @@ export default function Attendance() {
         }
     };
 
+    // Fetch logs cho tháng overview (tab Tổng quát) — tách biệt để không bị mismatch tháng
+    const fetchOverviewLogs = async (overviewMonth: number, overviewYear: number) => {
+        try {
+            const api = (window as any).electronAPI;
+            if (!api?.attendance) return;
+            const monthStr = `${overviewYear}-${String(overviewMonth).padStart(2, '0')}`;
+            const res = await api.attendance.getLogs({ month: monthStr });
+            if (res?.success) setOverviewAttendanceLogs(res.data);
+        } catch (err) {
+            console.error('Lỗi tải logs overview tháng:', err);
+        }
+    };
+
     useEffect(() => {
         if (isDbLoaded) fetchMonthLogs();
     }, [selectedYear, selectedMonth, isDbLoaded]);
+
+    useEffect(() => {
+        if (isDbLoaded) fetchOverviewLogs(overviewDateRange[0].month() + 1, overviewDateRange[0].year());
+    }, [overviewDateRange, isDbLoaded]);
 
     const daysInMonth = dayjs(`${selectedYear}-${selectedMonth}-01`).daysInMonth();
 
@@ -2679,11 +2844,7 @@ export default function Attendance() {
                 dataSource={payrollData.map(d => ({ ...d, key: d.id }))}
                 pagination={false}
                 size="middle"
-                scroll={{ x: 900 }}
-                onRow={(record) => ({
-                    onClick: () => setPayslipModal(record),
-                    style: { cursor: 'pointer' },
-                })}
+                scroll={{ x: 1050 }}
                 columns={[
                     {
                         title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 200, fixed: 'left' as const,
@@ -2706,26 +2867,34 @@ export default function Attendance() {
                         ),
                     },
                     {
-                        title: 'Lương CB/CA', dataIndex: 'salaryBase', key: 'base', align: 'right' as const, width: 140,
+                        title: 'A. Lương cơ bản', dataIndex: 'salaryBase', key: 'base', align: 'right' as const, width: 150,
                         render: (v: number) => (
                             <span className="att-money-gray">{fmt(v)}</span>
                         ),
                     },
                     {
-                        title: 'Đóng gói', dataIndex: 'packIncome', key: 'pack', align: 'right' as const, width: 130,
+                        title: 'B. Thưởng đóng gói', dataIndex: 'packIncome', key: 'pack', align: 'right' as const, width: 160,
                         render: (v: number, r: any) => <Tooltip title={`${r.packTotalUnits || 0} SP × ${PACKING_UNIT_PRICE}đ`}><span className="att-money-emerald">+ {fmt(v)}</span></Tooltip>,
                     },
                     {
-                        title: 'Thưởng', dataIndex: 'totalBonus', key: 'bonus', align: 'right' as const, width: 120,
+                        title: 'C. Thưởng', dataIndex: 'totalBonus', key: 'bonus', align: 'right' as const, width: 120,
                         render: (v: number) => <span className="att-money-emerald">+ {fmt(v)}</span>,
                     },
                     {
-                        title: 'Phạt & Nghỉ', dataIndex: 'myFines', key: 'fine', align: 'right' as const, width: 120,
+                        title: 'D. Phạt', dataIndex: 'myFines', key: 'fine', align: 'right' as const, width: 120,
                         render: (v: number) => <span className="att-money-red">{v > 0 ? `- ${fmt(v)}` : `${fmt(0)}`}</span>,
                     },
                     {
-                        title: 'Thực Lãnh', dataIndex: 'finalSalary', key: 'final', align: 'right' as const, width: 150,
+                        title: 'Tổng lương', dataIndex: 'finalSalary', key: 'final', align: 'right' as const, width: 150,
                         render: (v: number) => <span className="att-money-final">{fmt(v)}</span>,
+                    },
+                    {
+                        title: 'Chi tiết', key: 'detail', align: 'center' as const, width: 130, fixed: 'right' as const,
+                        render: (_: any, record: any) => (
+                            <Button size="small" icon={<EyeOutlined />} onClick={() => { setPayslipPdfDetailOpen(false); setPayslipModal(record); }}>
+                                Xem chi tiết
+                            </Button>
+                        ),
                     },
                 ]}
             />
@@ -3224,6 +3393,7 @@ export default function Attendance() {
             ...autoVatOverdueFines.map((f, i) => ({ ...f, key: `vat-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
             ...autoDeadlineOverdueFines.map((f, i) => ({ ...f, key: `deadline-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
             ...autoDailyReportMissingFines.map((f, i) => ({ ...f, key: `daily-report-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
+            ...autoStockCheckMissingFines.map((f, i) => ({ ...f, key: `stock-check-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
         ];
         combinedFines.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
         const fineEmployeeOptions = Array.from(new Map(
@@ -4052,7 +4222,7 @@ export default function Attendance() {
             <Modal
                 title={<div style={{ textAlign: 'center', fontWeight: 900, fontSize: 18, textTransform: 'uppercase' }}>Phiếu Lương Chi Tiết</div>}
                 open={!!payslipModal}
-                onCancel={() => setPayslipModal(null)}
+                onCancel={() => { setPayslipModal(null); setPayslipPdfDetailOpen(false); }}
                 footer={null}
                 width={520}
                 className="att-payslip-modal"
@@ -4065,6 +4235,25 @@ export default function Attendance() {
 
                     const empFines = overviewFines.filter(f => f.empId === p.id);
                     const empBonuses = overviewBonuses.filter(b => b.empId === p.id);
+                    const fineDescription = (f: FineRecord) => {
+                        const fineDate = f.date ? dayjs(f.date) : null;
+                        let text = (f.detail || f.type || 'Phạt').trim();
+                        if (fineDate?.isValid()) {
+                            const datePatterns = [
+                                fineDate.format('D/M/YYYY'),
+                                fineDate.format('DD/M/YYYY'),
+                                fineDate.format('D/MM/YYYY'),
+                                fineDate.format('DD/MM/YYYY'),
+                            ];
+                            datePatterns.forEach(dateText => {
+                                text = text
+                                    .replace(new RegExp(`\\s*[—-]\\s*${dateText.replace(/\//g, '\\/')}`, 'g'), '')
+                                    .replace(new RegExp(`\\s*ngày\\s+${dateText.replace(/\//g, '\\/')}`, 'gi'), '');
+                            });
+                        }
+                        return text.replace(/\s{2,}/g, ' ').replace(/\s*[—-]\s*$/, '').trim();
+                    };
+                    const fineTime = (f: FineRecord) => f.date ? dayjs(f.date).format('DD/MM HH:mm') : '';
 
                     // Helper: Lưu override cho NV này
                     const saveOverride = (patch: Partial<PayrollOverride>) => {
@@ -4106,12 +4295,12 @@ export default function Attendance() {
 
                     // Helper: row hiển thị
                     const row = (label: string, value: string, color?: string, sub?: string) => (
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '6px 0' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '4px 0' }}>
                             <div style={{ flex: 1 }}>
-                                <Text style={{ fontSize: 13, color: '#595959' }}>{label}</Text>
-                                {sub && <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 1 }}>{sub}</div>}
+                                <Text style={{ fontSize: 13, color: '#555' }}>{label}</Text>
+                                {sub && <div style={{ fontSize: 11, color: '#aaa', marginTop: 1 }}>{sub}</div>}
                             </div>
-                            <Text strong style={{ fontSize: 13, color: color || '#1f2937', whiteSpace: 'nowrap', marginLeft: 16 }}>{value}</Text>
+                            <Text strong style={{ fontSize: 13, color: '#111', whiteSpace: 'nowrap', marginLeft: 16 }}>{value}</Text>
                         </div>
                     );
 
@@ -4166,22 +4355,22 @@ export default function Attendance() {
                             });
                         };
                         return (
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', gap: 8 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', gap: 8 }}>
                                 <div style={{ flex: 1 }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                        <Text style={{ fontSize: 13, color: '#595959' }}>{label}</Text>
+                                        <Text style={{ fontSize: 13, color: '#555' }}>{label}</Text>
                                         {hasOv && (
                                             <Tooltip title={`Gốc (tự động): ${autoVal}${opts?.suffix || ''}`}>
-                                                <Tag color="orange" style={{ fontSize: 9, padding: '0 4px', lineHeight: '16px', border: 'none', cursor: 'help' }}>
-                                                    ✏️ Đã sửa
+                                                <Tag style={{ fontSize: 9, padding: '0 4px', lineHeight: '16px', border: '1px solid #ccc', background: '#f0f0f0', color: '#555', cursor: 'help' }}>
+                                                    ✏ Đã sửa
                                                 </Tag>
                                             </Tooltip>
                                         )}
                                     </div>
-                                    {opts?.sub && <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 1 }}>{opts.sub}</div>}
+                                    {opts?.sub && <div style={{ fontSize: 11, color: '#aaa', marginTop: 1 }}>{opts.sub}</div>}
                                 </div>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                    <Text strong style={{ fontSize: 14, color: hasOv ? '#d46b08' : (opts?.color || '#1f2937') }}>
+                                    <Text strong style={{ fontSize: 13, color: hasOv ? '#555' : '#111' }}>
                                         {displayVal}{opts?.suffix || ''}
                                     </Text>
                                     {isAdmin && (
@@ -4195,171 +4384,191 @@ export default function Attendance() {
                         );
                     };
 
-                    const sectionTitle = (label: string) => (
-                        <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 1, color: '#9ca3af', padding: '12px 0 4px' }}>{label}</div>
+                    const sectionTitle = (label: string, _color?: string, _bg?: string) => (
+                        <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 1.5, color: '#94a3b8', marginBottom: 6, marginTop: 2 }}>
+                            {label}
+                        </div>
                     );
 
                     return (
-                        <div style={{ fontSize: 13 }}>
-                            {/* Header */}
-                            <div style={{ textAlign: 'center', padding: '4px 0 16px', borderBottom: '1px dashed #e5e7eb' }}>
-                                <div style={{ fontSize: 20, fontWeight: 900, color: '#1f2937' }}>{p.name}</div>
-                                <div style={{ marginTop: 6, display: 'flex', justifyContent: 'center', gap: 8, flexWrap: 'wrap' }}>
-                                    <Tag color={p.type === 'Official' ? 'blue' : 'orange'}>{p.type === 'Official' ? 'Chính thức' : 'Thời vụ'}</Tag>
-                                    <Tag color="default">{overviewDateRange[0].format('DD/MM')} — {overviewDateRange[1].format('DD/MM/YYYY')}</Tag>
-                                    {p.hasOverride && <Tag color="volcano" style={{ fontWeight: 700 }}>🔧 Có điều chỉnh</Tag>}
+                        <div style={{ fontSize: 13, paddingTop: 0 }}>
+                            {!payslipPdfDetailOpen && (<>
+                            {/* ===== HEADER ===== */}
+                            <div className="ps-header">
+                                <div className="ps-header-avatar">
+                                    {p.name.split(' ').map((w: string) => w[0]).slice(-2).join('').toUpperCase()}
                                 </div>
-                                {/* Admin badge */}
-                                {isAdmin && (
-                                    <div style={{ marginTop: 8, display: 'flex', justifyContent: 'center', gap: 8 }}>
-                                        <Tag icon={<LockOutlined />} color="green" style={{ fontSize: 10, fontWeight: 700 }}>
-                                            Quyền Admin — Có thể chỉnh sửa
-                                        </Tag>
+                                <div className="ps-header-info">
+                                    <div className="ps-header-name">{p.name}</div>
+                                    <div className="ps-header-meta">
+                                        <span className={`ps-badge ps-badge-${p.type === 'Official' ? 'blue' : 'orange'}`}>
+                                            {p.type === 'Official' ? '● Chính thức' : '◆ Thời vụ'}
+                                        </span>
+                                        <span className="ps-badge ps-badge-gray">
+                                            <CalendarOutlined style={{ fontSize: 10 }} />
+                                            {overviewDateRange[0].format('DD/MM')} — {overviewDateRange[1].format('DD/MM/YYYY')}
+                                        </span>
+                                        {p.hasOverride && <span className="ps-badge ps-badge-orange">🔧 Đã chỉnh</span>}
+                                        {isAdmin && (
+                                            <span className="ps-admin-badge">
+                                                <LockOutlined style={{ fontSize: 10 }} />
+                                                Admin
+                                            </span>
+                                        )}
                                     </div>
-                                )}
+                                </div>
                             </div>
 
-                            {/* 1. Lương cơ bản */}
-                            {sectionTitle('① Lương cơ bản')}
-                            <div style={{ background: '#f9fafb', borderRadius: 10, padding: '10px 14px', border: '1px solid #f3f4f6' }}>
-                                {/* Số ca điểm danh (read-only — tự động từ hệ thống) */}
-                                {row('Từ điểm danh', `${p.autoShifts} ca`, '#1f2937',
-                                    p.isHourly ? `Mỗi ca 4 giờ × ${fmt(p.baseSalary)}/giờ = ${fmt(p.salaryPerShift)}/ca` : 'Tự động từ hệ thống chấm công')}
+                            {/* Sections 1–4: Collapse */}
+                            {(() => {
+                                const lbl = (icon: string, title: string, amount: string, highlight = false) => (
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', paddingRight: 8 }}>
+                                        <span style={{ fontSize: highlight ? 11 : 10, fontWeight: 900, textTransform: 'uppercase' as const, letterSpacing: 1.5, color: highlight ? '#047857' : '#94a3b8' }}>{icon} {title}</span>
+                                        <span style={{ fontSize: highlight ? 15 : 13, fontWeight: 900, color: highlight ? '#064e3b' : '#111' }}>{amount}</span>
+                                    </div>
+                                );
+                                const items: any[] = [];
 
-                                {/* Thêm ca thủ công (Admin only) */}
-                                {(isAdmin || (p.extraShifts && p.extraShifts !== 0)) && (
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', gap: 8 }}>
-                                        <div style={{ flex: 1 }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                <Text style={{ fontSize: 13, color: '#d46b08' }}>Thêm ca thủ công</Text>
-                                                {p.extraShifts > 0 && <Tag color="orange" style={{ fontSize: 9, padding: '0 4px', lineHeight: '16px', border: 'none' }}>✏️ Admin</Tag>}
-                                            </div>
-                                            <div style={{ fontSize: 11, color: '#b45309', marginTop: 1 }}>Bù ca điểm danh thiếu / sai</div>
-                                        </div>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                            <Text strong style={{ fontSize: 14, color: p.extraShifts > 0 ? '#d46b08' : '#8c8c8c' }}>
-                                                +{currentOverride.extraShifts || 0} ca
-                                            </Text>
-                                            {isAdmin && (
-                                                <Button type="text" size="small" icon={<EditOutlined />}
-                                                    style={{ color: '#8c8c8c', padding: '0 4px' }}
-                                                    onClick={() => {
-                                                        let newVal = currentOverride.extraShifts ?? 0;
-                                                        Modal.confirm({
-                                                            title: '⚠️ Thêm ca thủ công',
-                                                            icon: <ExclamationCircleOutlined style={{ color: '#fa8c16' }} />,
-                                                            width: 420,
-                                                            content: (
-                                                                <div style={{ padding: '12px 0' }}>
-                                                                    <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, padding: '12px 16px', marginBottom: 12 }}>
-                                                                        <div style={{ fontSize: 12, fontWeight: 700, color: '#ad6800', marginBottom: 4 }}>⚠️ LƯU Ý QUAN TRỌNG</div>
-                                                                        <div style={{ fontSize: 12, color: '#8c6d1f' }}>
-                                                                            Hệ thống ghi nhận <b>{p.autoShifts} ca</b> từ điểm danh.<br/>
-                                                                            Nhập số ca cần <b>cộng thêm</b> (VD: quên check-out, điểm danh bị lỗi).<br/>
-                                                                            Tổng ca = Điểm danh + Thêm ca.
-                                                                        </div>
-                                                                    </div>
-                                                                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Số ca cần thêm:</div>
-                                                                    <InputNumber
-                                                                        autoFocus
-                                                                        size="large"
-                                                                        defaultValue={currentOverride.extraShifts ?? 0}
-                                                                        min={0}
-                                                                        step={1}
-                                                                        style={{ width: '100%', fontWeight: 700 }}
-                                                                        onChange={(v) => { newVal = v ?? 0; }}
-                                                                        addonAfter="ca"
-                                                                    />
-                                                                    <div style={{ marginTop: 8, fontSize: 11, color: '#9ca3af' }}>
-                                                                        Đặt 0 để không thêm ca nào.
-                                                                    </div>
-                                                                </div>
-                                                            ),
-                                                            okText: '✅ Xác nhận',
-                                                            okType: 'primary',
-                                                            cancelText: 'Hủy',
-                                                            onOk: () => { saveOverride({ extraShifts: newVal }); },
-                                                        });
-                                                    }}
-                                                />
+                                // 1. Lương cơ bản
+                                items.push({
+                                    key: 'basic',
+                                    className: 'ps-collapse-emphasis',
+                                    label: lbl('A.', 'Lương cơ bản', fmt(p.salaryBase), true),
+                                    children: (
+                                        <div>
+                                            {row('Từ điểm danh', `${p.autoShifts} ca`, '#111',
+                                                p.isHourly ? `Mỗi ca 4 giờ × ${fmt(p.baseSalary)}/giờ = ${fmt(p.salaryPerShift)}/ca` : 'Tự động từ hệ thống chấm công')}
+                                            {(isAdmin || (p.extraShifts && p.extraShifts !== 0)) && (
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', gap: 8 }}>
+                                                    <div style={{ flex: 1 }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                            <Text style={{ fontSize: 13, color: '#555' }}>Thêm ca thủ công</Text>
+                                                            {p.extraShifts > 0 && <Tag style={{ fontSize: 9, padding: '0 4px', lineHeight: '16px', border: '1px solid #ccc', background: '#f0f0f0', color: '#555' }}>✏ Admin</Tag>}
+                                                        </div>
+                                                        <div style={{ fontSize: 11, color: '#aaa', marginTop: 1 }}>Bù ca điểm danh thiếu / sai</div>
+                                                    </div>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                        <Text strong style={{ fontSize: 13, color: '#555' }}>+{currentOverride.extraShifts || 0} ca</Text>
+                                                        {isAdmin && (
+                                                            <Button type="text" size="small" icon={<EditOutlined />}
+                                                                style={{ color: '#8c8c8c', padding: '0 4px' }}
+                                                                onClick={() => {
+                                                                    let newVal = currentOverride.extraShifts ?? 0;
+                                                                    Modal.confirm({
+                                                                        title: '⚠️ Thêm ca thủ công',
+                                                                        icon: <ExclamationCircleOutlined style={{ color: '#fa8c16' }} />,
+                                                                        width: 420,
+                                                                        content: (
+                                                                            <div style={{ padding: '12px 0' }}>
+                                                                                <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, padding: '12px 16px', marginBottom: 12 }}>
+                                                                                    <div style={{ fontSize: 12, fontWeight: 700, color: '#ad6800', marginBottom: 4 }}>⚠️ LƯU Ý QUAN TRỌNG</div>
+                                                                                    <div style={{ fontSize: 12, color: '#8c6d1f' }}>
+                                                                                        Hệ thống ghi nhận <b>{p.autoShifts} ca</b> từ điểm danh.<br/>
+                                                                                        Nhập số ca cần <b>cộng thêm</b> (VD: quên check-out, điểm danh bị lỗi).<br/>
+                                                                                        Tổng ca = Điểm danh + Thêm ca.
+                                                                                    </div>
+                                                                                </div>
+                                                                                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Số ca cần thêm:</div>
+                                                                                <InputNumber autoFocus size="large" defaultValue={currentOverride.extraShifts ?? 0} min={0} step={1} style={{ width: '100%', fontWeight: 700 }} onChange={(v) => { newVal = v ?? 0; }} addonAfter="ca" />
+                                                                                <div style={{ marginTop: 8, fontSize: 11, color: '#9ca3af' }}>Đặt 0 để không thêm ca nào.</div>
+                                                                            </div>
+                                                                        ),
+                                                                        okText: '✅ Xác nhận', okType: 'primary', cancelText: 'Hủy',
+                                                                        onOk: () => { saveOverride({ extraShifts: newVal }); },
+                                                                    });
+                                                                }}
+                                                            />
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {p.extraShifts > 0 && (
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderTop: '1px dashed #e8e8e8' }}>
+                                                    <Text style={{ fontSize: 12, fontWeight: 600, color: '#555' }}>Tổng số ca</Text>
+                                                    <Text strong style={{ fontSize: 13, color: '#111' }}>{p.shifts} ca</Text>
+                                                </div>
+                                            )}
+                                            {p.isHourly ? (
+                                                row('Lương theo ca', fmt(p.salaryBase), '#111', `${p.shifts} ca × ${fmt(p.salaryPerShift)}/ca`)
+                                            ) : (
+                                                <>
+                                                    {row('Lương cơ bản', fmt(p.baseSalary), '#111', p.absentDays > 0 ? `Đi làm ${26 - p.absentDays}/${26} ngày` : 'Đủ công 26/26 ngày')}
+                                                    {p.leaveDeduction > 0 && row('Trừ nghỉ không phép', `- ${fmt(p.leaveDeduction)}`, '#555', `${p.absentDays} ngày × ${fmt(p.baseSalary / 26)}/ngày`)}
+                                                </>
                                             )}
                                         </div>
-                                    </div>
-                                )}
+                                    ),
+                                });
 
-                                {/* Tổng ca */}
-                                {p.extraShifts > 0 && (
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderTop: '1px dashed #e5e7eb' }}>
-                                        <Text style={{ fontSize: 12, fontWeight: 600, color: '#374151' }}>Tổng số ca</Text>
-                                        <Text strong style={{ fontSize: 13, color: '#059669' }}>{p.shifts} ca</Text>
-                                    </div>
-                                )}
+                                // 2. Đóng gói
+                                items.push({
+                                    key: 'packing',
+                                    className: 'ps-collapse-emphasis',
+                                    label: lbl('B.', 'Thưởng đóng gói sản phẩm', `+ ${fmt(p.packIncome)}`, true),
+                                    children: (
+                                        <div>
+                                            {row('Đóng gói sản phẩm', `+ ${fmt(p.packIncome)}`, '#111', `${p.packTotalUnits || 0} SP × ${PACKING_UNIT_PRICE}đ (${p.packOrderCount || 0} đơn)`)}
+                                            {(p.autoPackIncome != null && p.packIncome !== p.autoPackIncome) && (
+                                                <div style={{ fontSize: 10, color: '#888', fontWeight: 600 }}>✏ Gốc: {fmt(p.autoPackIncome)}</div>
+                                            )}
+                                        </div>
+                                    ),
+                                });
 
-                                {p.isHourly ? (
-                                    row('Lương theo ca', `${fmt(p.salaryBase)}`, '#1f2937',
-                                        `${p.shifts} ca × ${fmt(p.salaryPerShift)}/ca`)
-                                ) : (
-                                    <>
-                                        {row('Lương cơ bản', `${fmt(p.baseSalary)}`, '#1f2937',
-                                            `${p.absentDays > 0 ? `Đi làm ${26 - p.absentDays}/${26} ngày` : 'Đủ công 26/26 ngày'}`)}
-                                        {p.leaveDeduction > 0 &&
-                                            row('Trừ nghỉ không phép', `- ${fmt(p.leaveDeduction)}`, '#d97706',
-                                                `${p.absentDays} ngày × ${fmt(p.baseSalary / 26)}/ngày`)}
-                                    </>
-                                )}
+                                // 3. Thưởng
+                                if (p.mBonus > 0 || empBonuses.length > 0) {
+                                    items.push({
+                                        key: 'bonus',
+                                        label: lbl('C.', 'Thưởng', `+ ${fmt(p.totalBonus || p.mBonus)}`, true),
+                                        children: (
+                                            <div>
+                                                {empBonuses.map((b: any, i: number) => row(b.detail || 'Thưởng lẻ', `+ ${fmt(b.amount)}`, '#111', `Admin — ${b.type}`))}
+                                                {p.mBonus > 0 && empBonuses.length === 0 && row('Thưởng lẻ (Admin)', `+ ${fmt(p.mBonus)}`, '#111')}
+                                            </div>
+                                        ),
+                                    });
+                                }
 
-                                <div style={{ borderTop: '1px solid #e5e7eb', marginTop: 8, paddingTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                    <Text style={{ fontSize: 12, fontWeight: 700 }}>Thực nhận lương CB</Text>
-                                    <Text strong style={{ color: '#1f2937', fontSize: 14 }}>{fmt(p.salaryBase)}</Text>
-                                </div>
-                            </div>
+                                // 4. Phạt
+                                if (p.myFines > 0) {
+                                    items.push({
+                                        key: 'fines',
+                                        label: lbl('D.', 'Phạt', `- ${fmt(p.myFines)}`, true),
+                                        children: (
+                                            <div>
+                                                {empFines.length > 0
+                                                    ? empFines.map((f: any, i: number) => row(f.type, `- ${fmt(f.amount)}`, '#555', f.detail))
+                                                    : row('Phạt', `- ${fmt(p.myFines)}`, '#555')}
+                                            </div>
+                                        ),
+                                    });
+                                }
 
-                            {/* 2. Đóng gói */}
-                            {sectionTitle('② Thu nhập đóng gói')}
-                            <div style={{ background: '#f0fdf4', borderRadius: 10, padding: '10px 14px', border: '1px solid #bbf7d0' }}>
-                                {row('Đóng gói sản phẩm', `+ ${fmt(p.packIncome)}`, '#059669',
-                                    `${p.packTotalUnits || 0} SP × ${PACKING_UNIT_PRICE}đ (${p.packOrderCount || 0} đơn)`)}
-                                {(p.autoPackIncome != null && p.packIncome !== p.autoPackIncome) && (
-                                    <div style={{ fontSize: 10, color: '#fa8c16', fontWeight: 600 }}>
-                                        ✏️ Gốc: {fmt(p.autoPackIncome)}
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* 3. Thưởng */}
-                            {(p.mBonus > 0 || empBonuses.length > 0) && (<>
-                                {sectionTitle('③ Thưởng')}
-                                <div style={{ background: '#eff6ff', borderRadius: 10, padding: '10px 14px', border: '1px solid #bfdbfe' }}>
-                                    {empBonuses.map((b: any, i: number) => row(b.detail || 'Thưởng lẻ', `+ ${fmt(b.amount)}`, '#1d4ed8', `Admin — ${b.type}`))}
-                                    {p.mBonus > 0 && empBonuses.length === 0 && row('Thưởng lẻ (Admin)', `+ ${fmt(p.mBonus)}`, '#1d4ed8')}
-                                </div>
-                            </>)}
-
-                            {/* 4. Phạt */}
-                            {p.myFines > 0 && (<>
-                                {sectionTitle('④ Khấu trừ')}
-                                <div style={{ background: '#fef2f2', borderRadius: 10, padding: '10px 14px', border: '1px solid #fecaca' }}>
-                                    {empFines.length > 0
-                                        ? empFines.map((f: any, i: number) => row(f.type, `- ${fmt(f.amount)}`, '#dc2626', f.detail))
-                                        : row('Phạt & Khấu trừ', `- ${fmt(p.myFines)}`, '#dc2626')
-                                    }
-                                </div>
-                            </>)}
+                                return (
+                                    <Collapse
+                                        className="ps-collapse"
+                                        bordered={false}
+                                        defaultActiveKey={[]}
+                                        expandIconPosition="end"
+                                        items={items}
+                                    />
+                                );
+                            })()}
 
                             {/* 5. Điều chỉnh thủ công (Admin only) */}
                             {isAdmin && (
                                 <>
-                                    {sectionTitle('⑤ Điều chỉnh thủ công (Admin)')}
-                                    <div style={{ background: '#fefce8', borderRadius: 10, padding: '10px 14px', border: '1px solid #fde68a' }}>
+                                    {sectionTitle('⑤ Điều chỉnh (Admin)')}
+                                    <div className="ps-section ps-section-yellow">
                                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', gap: 8 }}>
                                             <div style={{ flex: 1 }}>
-                                                <Text style={{ fontSize: 13, color: '#92400e' }}>Cộng / Trừ điều chỉnh</Text>
-                                                <div style={{ fontSize: 11, color: '#b45309', marginTop: 1 }}>
+                                                <Text style={{ fontSize: 13, color: '#555' }}>Cộng / Trừ điều chỉnh</Text>
+                                                <div style={{ fontSize: 11, color: '#aaa', marginTop: 1 }}>
                                                     {currentOverride.adjustNote || 'Chưa có điều chỉnh'}
                                                 </div>
                                             </div>
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                <Text strong style={{ fontSize: 14, color: (currentOverride.extraAdjust || 0) > 0 ? '#059669' : (currentOverride.extraAdjust || 0) < 0 ? '#dc2626' : '#8c8c8c' }}>
+                                                <Text strong style={{ fontSize: 13, color: '#555' }}>
                                                     {(currentOverride.extraAdjust || 0) > 0 ? '+' : ''}{fmt(currentOverride.extraAdjust || 0)}
                                                 </Text>
                                                 <Button type="text" size="small" icon={<EditOutlined />}
@@ -4417,30 +4626,123 @@ export default function Attendance() {
                             {!isAdmin && p.extraAdjust !== 0 && p.extraAdjust != null && (
                                 <>
                                     {sectionTitle('⑤ Điều chỉnh từ Admin')}
-                                    <div style={{ background: '#fefce8', borderRadius: 10, padding: '10px 14px', border: '1px solid #fde68a' }}>
+                                    <div className="ps-section ps-section-yellow">
                                         {row(
                                             p.adjustNote || 'Điều chỉnh thủ công',
                                             `${p.extraAdjust > 0 ? '+' : ''} ${fmt(p.extraAdjust)}`,
-                                            p.extraAdjust > 0 ? '#059669' : '#dc2626'
+                                            '#555'
                                         )}
                                     </div>
                                 </>
                             )}
 
-                            {/* Tổng */}
-                            <div style={{ marginTop: 16, padding: '16px 18px', background: 'linear-gradient(135deg, #ecfdf5, #d1fae5)', borderRadius: 12, border: '1px solid #6ee7b7', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <div>
-                                    <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: '#065f46' }}>Thực lĩnh</div>
-                                    <div style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>
-                                        {fmt(p.salaryBase)} + {fmt(p.packIncome)} + {fmt(p.totalBonus)} − {fmt(p.myFines)}
-                                        {p.extraAdjust ? ` ${p.extraAdjust > 0 ? '+' : '−'} ${fmt(Math.abs(p.extraAdjust))}` : ''}
+                            {/* ===== TỔNG THỰC LĨNH — PREMIUM ===== */}
+                            <div className="ps-total-card">
+                                <div className="ps-total-glow" />
+                                <div className="ps-total-content">
+                                    <div className="ps-total-left">
+                                        <div className="ps-total-eyebrow">
+                                            <WalletOutlined />
+                                            THỰC LĨNH THÁNG NÀY
+                                        </div>
+                                        <div className="ps-total-formula">
+                                            <span className="ps-f-base">{fmt(p.salaryBase)}</span>
+                                            {p.packIncome > 0 && <><span className="ps-f-op">+</span><span className="ps-f-pack">{fmt(p.packIncome)}</span></>}
+                                            {p.totalBonus > 0 && <><span className="ps-f-op">+</span><span className="ps-f-bonus">{fmt(p.totalBonus)}</span></>}
+                                            {p.myFines > 0 && <><span className="ps-f-op">−</span><span className="ps-f-fine">{fmt(p.myFines)}</span></>}
+                                            {!!p.extraAdjust && <><span className="ps-f-op">{p.extraAdjust > 0 ? '+' : '−'}</span><span className="ps-f-adj">{fmt(Math.abs(p.extraAdjust))}</span></>}
+                                        </div>
+                                    </div>
+                                    <div className="ps-total-amount">{fmt(p.finalSalary)}</div>
+                                </div>
+                            </div>
+                            </>)}
+
+                            {/* ===== PRINT VIEW — ẩn trên màn hình, hiện khi in ===== */}
+                            <div className={payslipPdfDetailOpen ? 'ps-print-view ps-print-view-detail' : 'ps-print-view'}>
+                                <div className="ps-pv-header">
+                                    <div className="ps-pv-label">PHIẾU LƯƠNG THÁNG {overviewDateRange[0].format('MM/YYYY')}</div>
+                                    <div className="ps-pv-name">{p.name}</div>
+                                    <div className="ps-pv-meta">
+                                        {p.type === 'Official' ? 'Nhân viên chính thức' : 'Nhân viên thời vụ'}
+                                        &nbsp;·&nbsp;
+                                        {overviewDateRange[0].format('DD/MM')} — {overviewDateRange[1].format('DD/MM/YYYY')}
                                     </div>
                                 </div>
-                                <div style={{ fontSize: 28, fontWeight: 900, color: '#059669' }}>{fmt(p.finalSalary)}</div>
+
+                                {/* 1. Lương cơ bản */}
+                                <div className="ps-pv-section">
+                                    <div className="ps-pv-section-title">A. Lương cơ bản</div>
+                                    {p.type !== 'Official' && <div className="ps-pv-row"><span>Số ca làm việc</span><span>{p.shifts} ca</span></div>}
+                                    {p.type !== 'Official' && p.extraShifts > 0 && <div className="ps-pv-row ps-pv-sub"><span>Trong đó: {p.autoShifts} ca điểm danh + {p.extraShifts} ca thêm</span></div>}
+                                    <div className="ps-pv-row ps-pv-emphasis"><span>Lương cơ bản</span><span>{fmt(p.salaryBase)}</span></div>
+                                </div>
+
+                                {/* 2. Thưởng đóng gói sản phẩm */}
+                                <div className="ps-pv-section">
+                                    <div className="ps-pv-section-title">B. Thưởng đóng gói sản phẩm</div>
+                                    <div className="ps-pv-row ps-pv-emphasis">
+                                        <span>Đóng gói sản phẩm &nbsp;<span className="ps-pv-note">({p.packOrderCount || 0} đơn · {p.packTotalUnits || 0} SP × {PACKING_UNIT_PRICE}đ)</span></span>
+                                        <span>+ {fmt(p.packIncome)}</span>
+                                    </div>
+                                </div>
+
+                                {/* 3. Thưởng */}
+                                {(p.mBonus > 0 || empBonuses.length > 0) && (
+                                    <div className="ps-pv-section">
+                                        <div className="ps-pv-section-title">C. Thưởng</div>
+                                        {empBonuses.map((b: any, i: number) => (
+                                            <div key={i} className="ps-pv-row ps-pv-emphasis"><span>{b.detail || 'Thưởng lẻ'}</span><span>+ {fmt(b.amount)}</span></div>
+                                        ))}
+                                        {p.mBonus > 0 && empBonuses.length === 0 && <div className="ps-pv-row ps-pv-emphasis"><span>Thưởng lẻ</span><span>+ {fmt(p.mBonus)}</span></div>}
+                                    </div>
+                                )}
+
+                                {/* 4. Phạt */}
+                                {p.myFines > 0 && (
+                                    <div className="ps-pv-section">
+                                        <div className="ps-pv-section-title">D. Phạt</div>
+                                        {empFines.length > 0
+                                            ? empFines.map((f: any, i: number) => (
+                                                <div key={i} className="ps-pv-row">
+                                                    <span><strong>{fineTime(f)}</strong> {fineDescription(f)}</span>
+                                                    <span className="ps-pv-money">- {fmt(f.amount)}</span>
+                                                </div>
+                                            ))
+                                            : <div className="ps-pv-row"><span>Phạt</span><span className="ps-pv-money">- {fmt(p.myFines)}</span></div>
+                                        }
+                                        <div className="ps-pv-row ps-pv-subtotal"><span>Tổng phạt</span><span className="ps-pv-money">- {fmt(p.myFines)}</span></div>
+                                    </div>
+                                )}
+
+                                {/* 5. Điều chỉnh */}
+                                {p.extraAdjust !== 0 && p.extraAdjust != null && (
+                                    <div className="ps-pv-section">
+                                        <div className="ps-pv-section-title">⑤ Điều chỉnh</div>
+                                        <div className="ps-pv-row"><span>{p.adjustNote || 'Điều chỉnh thủ công'}</span><span>{p.extraAdjust > 0 ? '+' : ''} {fmt(p.extraAdjust)}</span></div>
+                                    </div>
+                                )}
+
+                                {/* Tổng */}
+                                <div className="ps-pv-total">
+                                    <span>THỰC LĨNH THÁNG {overviewDateRange[0].format('MM/YYYY')}</span>
+                                    <span>{fmt(p.finalSalary)}</span>
+                                </div>
+                                <div className="ps-pv-formula">
+                                    <strong>Tổng lương = A + B + C - D = </strong>
+                                    {fmt(p.salaryBase)} + {fmt(p.packIncome)} + {fmt(p.totalBonus || 0)} - {fmt(p.myFines || 0)} = <strong>{fmt(p.salaryBase + p.packIncome + (p.totalBonus || 0) - (p.myFines || 0))}</strong>
+                                    {!!p.extraAdjust && (
+                                        <div>
+                                            <strong>Điều chỉnh khác:</strong> {p.extraAdjust > 0 ? '+' : '-'} {fmt(Math.abs(p.extraAdjust))} = <strong>{fmt(p.finalSalary)}</strong>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="ps-pv-footer">Xuất ngày {dayjs().format('DD/MM/YYYY HH:mm')} · Hệ thống quản lý nội bộ</div>
                             </div>
 
                             {/* Footer actions */}
-                            <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                            <div style={{ marginTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                                 <div>
                                     {isAdmin && p.hasOverride && (
                                         <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={clearOverride}>
@@ -4449,8 +4751,16 @@ export default function Attendance() {
                                     )}
                                 </div>
                                 <div style={{ display: 'flex', gap: 8 }}>
-                                    <Button onClick={() => window.print()} icon={<FileTextOutlined />}>In Phiếu</Button>
-                                    <Button type="primary" onClick={() => setPayslipModal(null)}>Đóng</Button>
+                                    {payslipPdfDetailOpen ? (
+                                        <>
+                                            <Button onClick={() => setPayslipPdfDetailOpen(false)}>Quay lại</Button>
+                                            <Button loading={gmailSending} onClick={handleSendPayslipGmail}>Gửi Gmail</Button>
+                                            <Button icon={<FileTextOutlined />} loading={pdfExporting} onClick={handleExportPayslipPDF}>Xuất PDF</Button>
+                                        </>
+                                    ) : (
+                                        <Button icon={<EyeOutlined />} onClick={() => setPayslipPdfDetailOpen(true)}>Xem chi tiết</Button>
+                                    )}
+                                    <Button type="primary" onClick={() => { setPayslipModal(null); setPayslipPdfDetailOpen(false); }}>Đóng</Button>
                                 </div>
                             </div>
 
