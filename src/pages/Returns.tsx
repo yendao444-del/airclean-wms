@@ -18,7 +18,7 @@ import {
     Tabs,
     Spin,
 } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, UploadOutlined, FormOutlined, FileExcelOutlined, MoreOutlined, SettingOutlined, BarcodeOutlined, ScanOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, UploadOutlined, FormOutlined, FileExcelOutlined, MoreOutlined, SettingOutlined, BarcodeOutlined, ScanOutlined, SearchOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import type { MenuProps } from 'antd';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
@@ -86,6 +86,9 @@ export default function ReturnsPage() {
 
     // ✨ State cho tab Lịch sử
     const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
+
+    // ✨ State tìm kiếm
+    const [searchText, setSearchText] = useState('');
 
     // ✨ State cho collapse/expand logs
     const [collapsedLogs, setCollapsedLogs] = useState<Record<number, boolean>>({});
@@ -474,8 +477,12 @@ export default function ReturnsPage() {
                 if (isStatusChanged) {
                     await processReturnFine(values.packer, values.complaintCode);
                 }
-            } else if (values.status === 'completed' && values.packer && faultParty === 'customer') {
-                console.log(`[Returns] Bỏ qua ghi phạt - Lỗi do khách hàng (phiếu: ${values.complaintCode})`);
+            } else if (faultParty === 'customer') {
+                // Đổi sang "lỗi do khách" → xóa phạt cũ nếu đã từng tạo
+                const wasWarehouse = editingReturn && editingReturn.faultParty !== 'customer';
+                if (wasWarehouse && editingReturn.status === 'completed') {
+                    await processReturnFineRemoval(values.complaintCode);
+                }
             }
 
             message.success(editingReturn ? '✅ Đã cập nhật phiếu trả!' : '✅ Đã tạo phiếu trả mới!');
@@ -886,6 +893,16 @@ export default function ReturnsPage() {
                             try {
                                 const result = await window.electronAPI.returns.update(record.id, { faultParty: value });
                                 if (!result.success) throw new Error(result.error || 'Lỗi DB');
+                                // Xử lý phạt khi đơn đã hoàn thành
+                                if (record.status === 'completed') {
+                                    if (value === 'customer' && record.faultParty !== 'customer') {
+                                        // Đổi sang "lỗi do khách" → xóa phạt cũ
+                                        await processReturnFineRemoval(record.complaintCode);
+                                    } else if (value === 'warehouse' && record.faultParty === 'customer' && record.packer) {
+                                        // Đổi sang "lỗi do kho" → tạo phạt mới
+                                        await processReturnFine(record.packer, record.complaintCode);
+                                    }
+                                }
                                 message.success('Đã cập nhật!');
                             } catch (err: any) {
                                 // Hoàn tác nếu lỗi
@@ -1113,8 +1130,23 @@ export default function ReturnsPage() {
     const activeReturns = returns.filter(r => r.status !== 'completed');
     const historyReturns = returns.filter(r => r.status === 'completed');
 
+    // ✨ Search filter
+    const matchSearch = (r: Return) => {
+        const q = searchText.trim().toLowerCase();
+        if (!q) return true;
+        return (
+            (r.complaintCode || '').toLowerCase().includes(q) ||
+            (r.orderNumber || '').toLowerCase().includes(q) ||
+            (r.productName || '').toLowerCase().includes(q) ||
+            (r.reason || '').toLowerCase().includes(q) ||
+            (r.packer || '').toLowerCase().includes(q)
+        );
+    };
+    const filteredActive = activeReturns.filter(matchSearch);
+    const filteredHistory = historyReturns.filter(matchSearch);
+
     // Determine which data to show based on active tab
-    const displayedReturns = activeTab === 'active' ? activeReturns : historyReturns;
+    const displayedReturns = activeTab === 'active' ? filteredActive : filteredHistory;
 
     return (
         <Spin spinning={importLoading} tip="⏳ Đang xử lý..." size="large">
@@ -1153,6 +1185,22 @@ export default function ReturnsPage() {
                 </div>
 
                 <Card>
+                    <div style={{ marginBottom: 16 }}>
+                        <Input.Search
+                            placeholder="Tìm theo mã KN, mã đơn, sản phẩm, lý do, nhân viên..."
+                            allowClear
+                            size="large"
+                            prefix={<SearchOutlined style={{ color: '#bfbfbf' }} />}
+                            value={searchText}
+                            onChange={e => setSearchText(e.target.value)}
+                            style={{ maxWidth: 520 }}
+                        />
+                        {searchText.trim() && (
+                            <Text type="secondary" style={{ marginLeft: 12, fontSize: 13 }}>
+                                Tìm thấy <b>{filteredActive.length + filteredHistory.length}</b> kết quả
+                            </Text>
+                        )}
+                    </div>
                     <Tabs
                         activeKey={activeTab}
                         onChange={(key) => {
@@ -1164,13 +1212,13 @@ export default function ReturnsPage() {
                                 key: 'active',
                                 label: (
                                     <span style={{ fontSize: 14, fontWeight: 600 }}>
-                                        📦 Đang xử lý ({activeReturns.length})
+                                        📦 Đang xử lý ({filteredActive.length}{searchText.trim() && filteredActive.length !== activeReturns.length ? `/${activeReturns.length}` : ''})
                                     </span>
                                 ),
                                 children: (
                                     <Table
                                         columns={columns}
-                                        dataSource={activeReturns}
+                                        dataSource={filteredActive}
                                         rowKey="id"
                                         loading={loading}
                                         scroll={{ x: 1400 }}
@@ -1199,13 +1247,13 @@ export default function ReturnsPage() {
                                 key: 'history',
                                 label: (
                                     <span style={{ fontSize: 14, fontWeight: 600 }}>
-                                        📜 Lịch sử ({historyReturns.length})
+                                        📜 Lịch sử ({filteredHistory.length}{searchText.trim() && filteredHistory.length !== historyReturns.length ? `/${historyReturns.length}` : ''})
                                     </span>
                                 ),
                                 children: (
                                     <Table
                                         columns={columns}
-                                        dataSource={historyReturns}
+                                        dataSource={filteredHistory}
                                         rowKey="id"
                                         loading={loading}
                                         scroll={{ x: 1400 }}

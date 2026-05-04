@@ -33,6 +33,7 @@ import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { STOCK_CHECK_MISSING_FINE, STOCK_CHECK_POLICY_START_DATE } from '../lib/workCalendar';
 
 const LS_KEY = 'stock-check-sessions-v2';
+const DB_KEY = 'stockCheckSessionsV2';
 const DAILY_TOP_ROTATION_COUNT = 2;
 const DAILY_RANDOM_COUNT = 4;
 const SATURDAY_TOP_COUNT = 6;
@@ -116,11 +117,34 @@ type ProductTabKey = 'check' | 'ledger' | 'conversion';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function loadSessions(): CheckSession[] {
+function loadLocalSessions(): CheckSession[] {
     try { return JSON.parse(localStorage.getItem(LS_KEY) || '[]'); } catch { return []; }
 }
+async function loadSessions(): Promise<CheckSession[]> {
+    const localSessions = loadLocalSessions();
+    try {
+        const result = await window.electronAPI.appConfig.get(DB_KEY);
+        if (result?.success && Array.isArray(result.data)) return result.data;
+        if (localSessions.length) {
+            await window.electronAPI.appConfig.set(DB_KEY, localSessions);
+        }
+    } catch { /* local fallback */ }
+    return localSessions;
+}
+function normalizeSessionStatus(session: CheckSession): CheckSession {
+    if (!session.items.length) return { ...session, status: 'in_progress', completedAt: undefined };
+    const completed = session.items.every(item => item.actualStock !== null);
+    return {
+        ...session,
+        status: completed ? 'completed' : 'in_progress',
+        completedAt: completed ? session.completedAt || dayjs().toISOString() : undefined,
+    };
+}
 function saveSessions(sessions: CheckSession[]) {
-    localStorage.setItem(LS_KEY, JSON.stringify(sessions.slice(-90)));
+    const normalized = sessions.map(normalizeSessionStatus).slice(-90);
+    localStorage.setItem(LS_KEY, JSON.stringify(normalized));
+    window.electronAPI.appConfig.set(DB_KEY, normalized).catch(() => { /* local cache still saved */ });
+    return normalized;
 }
 function isWeekend(date: dayjs.Dayjs): boolean {
     return date.day() === 6;
@@ -186,6 +210,7 @@ export default function StockCheck() {
     const [currentDate, setCurrentDate] = useState(dayjs());
     const [activeTab, setActiveTab] = useState<'daily' | 'full'>('daily');
     const [sessions, setSessions] = useState<CheckSession[]>([]);
+    const [sessionsLoaded, setSessionsLoaded] = useState(false);
     const [staffList, setStaffList] = useState<StaffUser[]>([]);
     const [staffModalOpen, setStaffModalOpen] = useState(false);
     const [selectedStaffUsername, setSelectedStaffUsername] = useState('');
@@ -312,11 +337,17 @@ export default function StockCheck() {
     }, [expandedRefId, refDetailCache]);
 
     useEffect(() => {
-        setSessions(loadSessions());
+        let cancelled = false;
+        loadSessions().then(loaded => {
+            if (cancelled) return;
+            setSessions(saveSessions(loaded));
+            setSessionsLoaded(true);
+        });
         fetchStaff();
         loadConversionRates();
         loadTopSellingProducts();
         loadBalanceRecords();
+        return () => { cancelled = true; };
     }, [loadTopSellingProducts, loadBalanceRecords]);
 
     useEffect(() => {
@@ -522,8 +553,7 @@ export default function StockCheck() {
                     }),
                 };
             });
-            saveSessions(updated);
-            return updated;
+            return saveSessions(updated);
         });
     }, [todaySessionId]);
 
@@ -572,7 +602,7 @@ export default function StockCheck() {
         return assignableManagers[(previousIndex + 1) % assignableManagers.length];
     };
 
-    const persistSessions = (updated: CheckSession[]) => { setSessions(updated); saveSessions(updated); };
+    const persistSessions = (updated: CheckSession[]) => { setSessions(saveSessions(updated)); };
 
     const productKey = (product: any) => String(product?.id ?? product?.sku ?? product?.name ?? '');
 
@@ -649,9 +679,9 @@ export default function StockCheck() {
     // Auto-assign người phụ trách khi page load — nếu hôm nay chưa có session thì gán ngay,
     // không cần chờ nhân viên bấm "Tạo phiên kiểm". Nếu không kiểm → vẫn bị phạt.
     useEffect(() => {
-        if (!isToday || activeTab !== 'daily' || !assignableManagers.length) return;
+        if (!sessionsLoaded || !isToday || activeTab !== 'daily' || !assignableManagers.length) return;
         if (dayjs().day() === 0) return; // Chủ nhật — không kiểm
-        const current = loadSessions();
+        const current = sessions;
         if (current.some(s => s.date === todayStr && s.type !== 'full')) return;
 
         const previousSession = current
@@ -669,9 +699,8 @@ export default function StockCheck() {
             createdAt: dayjs().toISOString(),
         };
         const updated = current.filter(s => s.id !== todayStr).concat(preSession);
-        setSessions(updated);
-        saveSessions(updated);
-    }, [isToday, activeTab, assignableManagers, todayStr]); // eslint-disable-line react-hooks/exhaustive-deps
+        persistSessions(updated);
+    }, [sessionsLoaded, isToday, activeTab, assignableManagers, todayStr, sessions]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleGenerate = async () => {
         if (isPast) {
@@ -789,8 +818,7 @@ export default function StockCheck() {
                     return { ...it, balanced: true, actualStock, systemStock: actualStock, difference: 0 };
                 }),
             });
-            saveSessions(updated);
-            return updated;
+            return saveSessions(updated);
         });
     };
 

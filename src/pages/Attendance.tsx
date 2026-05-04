@@ -2426,9 +2426,19 @@ export default function Attendance() {
                 setDailyTaskHistory(historyResult.data);
             }
             try {
-                const raw = localStorage.getItem('stock-check-sessions-v2');
-                setStockCheckSessions(raw ? JSON.parse(raw) : []);
-            } catch { setStockCheckSessions([]); }
+                const stockCheckResult = await api.appConfig.get('stockCheckSessionsV2');
+                if (stockCheckResult?.success && Array.isArray(stockCheckResult.data)) {
+                    setStockCheckSessions(stockCheckResult.data);
+                } else {
+                    const raw = localStorage.getItem('stock-check-sessions-v2');
+                    setStockCheckSessions(raw ? JSON.parse(raw) : []);
+                }
+            } catch {
+                try {
+                    const raw = localStorage.getItem('stock-check-sessions-v2');
+                    setStockCheckSessions(raw ? JSON.parse(raw) : []);
+                } catch { setStockCheckSessions([]); }
+            }
         } catch (error) {
             console.error('Lỗi tải dữ liệu deadline công việc:', error);
         }
@@ -2450,16 +2460,8 @@ export default function Attendance() {
     const [expandedPackingKeys, setExpandedPackingKeys] = useState<string[]>([]);
 
     // State cho chọn tháng (dùng cho tab Vân tay)
-    const [selectedMonth, setSelectedMonth] = useState(dayjs().month() + 1);
-    const [selectedYear, setSelectedYear] = useState(dayjs().year());
-    const monthNames = ['', 'Tháng 01', 'Tháng 02', 'Tháng 03', 'Tháng 04', 'Tháng 05', 'Tháng 06', 'Tháng 07', 'Tháng 08', 'Tháng 09', 'Tháng 10', 'Tháng 11', 'Tháng 12'];
-    const goMonth = (dir: -1 | 1) => {
-        let m = selectedMonth + dir;
-        let y = selectedYear;
-        if (m < 1) { m = 12; y--; }
-        if (m > 12) { m = 1; y++; }
-        setSelectedMonth(m); setSelectedYear(y);
-    };
+    const selectedMonth = overviewDateRange[0].month() + 1;
+    const selectedYear = overviewDateRange[0].year();
 
     // Reload packing orders khi đổi kỳ
     useEffect(() => {
@@ -2799,8 +2801,8 @@ export default function Attendance() {
     const openConfigModal = () => { setTempConfig({ ...config }); setConfigModalOpen(true); };
 
     const checkLocked = (): boolean => {
-        if (isCurrentPeriodLocked && currentUser !== 'admin') {
-            message.error('Kỳ này đã bị khóa. Chỉ admin mới có thể thực hiện thao tác này!');
+        if (isCurrentPeriodLocked) {
+            message.error('Kỳ này đã bị khóa. Cần mở khóa kỳ lương trước khi chỉnh sửa.');
             return true;
         }
         return false;
@@ -2888,7 +2890,7 @@ export default function Attendance() {
                 type: fineType,
                 detail: values.detail,
                 amount: values.amount,
-                date: new Date().toISOString(),
+                date: values.date ? values.date.toISOString() : new Date().toISOString(),
             };
             setExtraFines(prev => [...prev, newFine]);
 
@@ -3051,7 +3053,7 @@ export default function Attendance() {
 
 
 
-    const saveConfig = () => { setConfig({ ...tempConfig }); setConfigModalOpen(false); message.success('Đã lưu cấu hình!'); };
+    const saveConfig = () => { if (checkLocked()) return; setConfig({ ...tempConfig }); setConfigModalOpen(false); message.success('Đã lưu cấu hình!'); };
 
     const lockPayroll = () => {
         if (isCurrentPeriodLocked) {
@@ -3065,7 +3067,7 @@ export default function Attendance() {
             content: (
                 <div>
                     <p>Xác nhận chốt và khóa bảng lương kỳ <strong>{startStr} — {endStr}</strong>?</p>
-                    <p style={{ color: '#ff4d4f', fontSize: 13 }}>Sau khi chốt, chỉ admin mới có thể sửa đổi dữ liệu kỳ này.</p>
+                    <p style={{ color: '#ff4d4f', fontSize: 13 }}>Sau khi chốt, dữ liệu kỳ này sẽ bị khóa. Admin cần mở khóa trước khi chỉnh sửa.</p>
                 </div>
             ),
             okText: 'Chốt & Khóa',
@@ -3539,7 +3541,7 @@ export default function Attendance() {
                                     { title: <Text style={{ color: '#1890ff', fontWeight: 700 }}>SỐ TIỀN NHẬN</Text>, dataIndex: 'amount', key: 'amount', width: 160, align: 'right' as const, render: (v: number) => <Text strong style={{ color: '#1890ff', fontSize: 15 }}>+ {fmt(v)}</Text> },
                                     {
                                         title: '', key: 'actions', width: 100, align: 'center' as const,
-                                        render: (_: any, r: any) => (r.isManual && canManageBonuses) ? (
+                                        render: (_: any, r: any) => (r.isManual && canManageBonuses && !isCurrentPeriodLocked) ? (
                                             <Space size={8}>
                                                 <Tooltip title="Sửa">
                                                     <Button size="small" type="primary" ghost icon={<EditOutlined />} onClick={() => {
@@ -3582,7 +3584,7 @@ export default function Attendance() {
                         <div style={{ background: 'linear-gradient(135deg, #1890ff 0%, #36cfc9 100%)', width: 8, height: 24, borderRadius: 4 }} />
                         <Title level={4} style={{ margin: 0, color: '#1f2937' }}>Phân bổ Thưởng & Chia phạt</Title>
                     </div>
-                    {canManageBonuses && <Button type="primary" icon={<PlusOutlined />} style={{ fontWeight: 700, borderRadius: 8, height: 38, background: 'linear-gradient(to right, #1890ff, #36cfc9)', border: 'none', boxShadow: '0 4px 10px rgba(24,144,255,0.3)' }} onClick={() => { setEditingBonus(null); bonusForm.resetFields(); bonusForm.setFieldsValue({ bonusKind: 'manual' }); setBonusModalOpen(true); }}>Thêm thưởng thủ công</Button>}
+                    {canManageBonuses && !isCurrentPeriodLocked && <Button type="primary" icon={<PlusOutlined />} style={{ fontWeight: 700, borderRadius: 8, height: 38, background: 'linear-gradient(to right, #1890ff, #36cfc9)', border: 'none', boxShadow: '0 4px 10px rgba(24,144,255,0.3)' }} onClick={() => { setEditingBonus(null); bonusForm.resetFields(); bonusForm.setFieldsValue({ bonusKind: 'manual' }); setBonusModalOpen(true); }}>Thêm thưởng thủ công</Button>}
                 </div>
                 <Card
                     bodyStyle={{ padding: 0 }}
@@ -3705,12 +3707,12 @@ export default function Attendance() {
                             />
                         </Space>
                     </div>
-                    {isAdmin && (
+                    {isAdmin && !isCurrentPeriodLocked && (
                         <Button
                             type="primary"
                             danger
                             icon={<PlusOutlined />}
-                            onClick={() => setFineModalOpen(true)}
+                            onClick={() => { fineForm.setFieldsValue({ date: overviewDateRange[0] }); setFineModalOpen(true); }}
                             style={{ fontWeight: 700 }}
                         >
                             Thêm phạt thủ công
@@ -3949,13 +3951,7 @@ export default function Attendance() {
         >
             <Divider style={{ margin: '8px 0' }} />
 
-            {/* Filters */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div className="att-month-picker">
-                    <Button className="att-month-btn" icon={<LeftOutlined />} onClick={() => goMonth(-1)}>{monthNames[selectedMonth === 1 ? 12 : selectedMonth - 1]}</Button>
-                    <Button className="att-month-btn att-month-btn-active" icon={<CalendarOutlined />}>{monthNames[selectedMonth]}/{selectedYear}</Button>
-                    <Button className="att-month-btn" onClick={() => goMonth(1)}>{monthNames[selectedMonth === 12 ? 1 : selectedMonth + 1]} <RightOutlined /></Button>
-                </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
                 <Space size={12}>
                     <Badge color="#52c41a" text={<Text style={{ fontSize: 11, fontWeight: 700 }}>Đúng giờ</Text>} />
                     <Badge color="#fa8c16" text={<Text style={{ fontSize: 11, fontWeight: 700 }}>Đi muộn</Text>} />
@@ -4418,7 +4414,7 @@ export default function Attendance() {
                             </Dropdown>
                         );
                     })()}
-                    {isAdmin && <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal}>Cấu hình</Button>}
+                    {isAdmin && <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal} disabled={isCurrentPeriodLocked}>Cấu hình</Button>}
                     {isCurrentPeriodLocked ? (
                         currentUser === 'admin' ? (
                             <Button
@@ -4540,6 +4536,7 @@ export default function Attendance() {
 
                     // Helper: Lưu override cho NV này
                     const saveOverride = (patch: Partial<PayrollOverride>) => {
+                        if (checkLocked()) return;
                         setPayrollOverrides(prev => ({
                             ...prev,
                             [overrideKey]: {
@@ -4554,6 +4551,7 @@ export default function Attendance() {
 
                     // Helper: Xóa toàn bộ override
                     const clearOverride = () => {
+                        if (checkLocked()) return;
                         Modal.confirm({
                             title: 'Xóa tất cả điều chỉnh?',
                             content: 'Lương sẽ được tính tự động theo hệ thống chấm công. Thêm ca và điều chỉnh tiền sẽ bị xóa.',
@@ -4708,8 +4706,63 @@ export default function Attendance() {
                                                 <tr>
                                                     <td>
                                                         <span className="ps-summary-row-label">Lương cơ bản</span>
-                                                        <span className="ps-summary-row-note">
-                                                            {p.isHourly ? `${p.shifts} ca × ${fmt(p.salaryPerShift)}/ca` : 'Theo hợp đồng lao động'}
+                                                        <span className="ps-summary-row-note" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                                            {p.isHourly ? (
+                                                                <>
+                                                                    <span>{p.shifts} ca × {fmt(p.salaryPerShift)}/ca</span>
+                                                                    {isAdmin && !isCurrentPeriodLocked && (
+                                                                        <Button
+                                                                            type="text"
+                                                                            size="small"
+                                                                            icon={<EditOutlined />}
+                                                                            style={{ color: '#1890ff', padding: '0 2px', height: 18, lineHeight: '18px' }}
+                                                                            onClick={() => {
+                                                                                let newTotalShifts = p.shifts;
+                                                                                Modal.confirm({
+                                                                                    title: 'Sửa số ca làm việc',
+                                                                                    icon: <ExclamationCircleOutlined style={{ color: '#1890ff' }} />,
+                                                                                    width: 400,
+                                                                                    content: (
+                                                                                        <div style={{ padding: '12px 0' }}>
+                                                                                            <div style={{ background: '#e6f7ff', border: '1px solid #91d5ff', borderRadius: 8, padding: '10px 14px', marginBottom: 14, fontSize: 12, color: '#0050b3' }}>
+                                                                                                Ca tự động (điểm danh): <b>{p.autoShifts} ca</b>
+                                                                                                {p.autoShifts !== p.shifts && (
+                                                                                                    <span style={{ marginLeft: 8, color: '#fa8c16' }}>
+                                                                                                        + {p.shifts - p.autoShifts} ca thủ công
+                                                                                                    </span>
+                                                                                                )}
+                                                                                            </div>
+                                                                                            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Tổng số ca làm việc:</div>
+                                                                                            <InputNumber
+                                                                                                autoFocus
+                                                                                                size="large"
+                                                                                                min={0}
+                                                                                                defaultValue={p.shifts}
+                                                                                                style={{ width: '100%', fontWeight: 700 }}
+                                                                                                onChange={(v) => { newTotalShifts = v ?? 0; }}
+                                                                                                addonAfter="ca"
+                                                                                            />
+                                                                                            <div style={{ fontSize: 12, color: '#888', marginTop: 8 }}>
+                                                                                                Mỗi ca = {fmt(p.salaryPerShift)}đ
+                                                                                            </div>
+                                                                                        </div>
+                                                                                    ),
+                                                                                    okText: 'Xác nhận',
+                                                                                    okType: 'primary',
+                                                                                    cancelText: 'Hủy',
+                                                                                    onOk: () => {
+                                                                                        saveOverride({ extraShifts: newTotalShifts - p.autoShifts });
+                                                                                        setTimeout(() => {
+                                                                                            const updated = payrollData.find((pd: any) => pd.id === p.id);
+                                                                                            if (updated) setPayslipModal(updated);
+                                                                                        }, 100);
+                                                                                    },
+                                                                                });
+                                                                            }}
+                                                                        />
+                                                                    )}
+                                                                </>
+                                                            ) : 'Theo hợp đồng lao động'}
                                                         </span>
                                                     </td>
                                                     <td>{fmt(p.salaryBase)}</td>
@@ -4751,7 +4804,7 @@ export default function Attendance() {
                                             </div>
                                             <div className="ps-summary-adjust-actions">
                                                 <span>{(currentOverride.extraAdjust || 0) > 0 ? '+' : ''}{fmt(currentOverride.extraAdjust || 0)}</span>
-                                                {isAdmin && (
+                                                {isAdmin && !isCurrentPeriodLocked && (
                                                     <Button type="text" size="small" icon={<EditOutlined />}
                                                         onClick={() => {
                                                             let newAdjust = currentOverride.extraAdjust ?? 0;
@@ -4879,7 +4932,7 @@ export default function Attendance() {
                                                 <tr>
                                                     <td>
                                                         <span className="ps-inv-row-label">
-                                                            <span className="ps-inv-icon ps-inv-icon-orange"><TeamOutlined /></span>
+                                                            <span className="ps-inv-icon ps-inv-icon-green"><TeamOutlined /></span>
                                                             Lương năng suất (Đóng gói)
                                                         </span>
                                                     </td>
@@ -4887,7 +4940,7 @@ export default function Attendance() {
                                                         <b>{(p.packTotalUnits || 0).toLocaleString('vi-VN')} SP × {PACKING_UNIT_PRICE}đ</b>
                                                         <span className="ps-inv-text-muted">Tổng số: {(p.packOrderCount || 0).toLocaleString('vi-VN')} đơn hàng</span>
                                                     </td>
-                                                    <td className="text-right">{fmt(p.packIncome || 0)}</td>
+                                                    <td className="text-right ps-inv-text-green">+{fmt(p.packIncome || 0)}</td>
                                                 </tr>
 
                                                 {empBonuses.map((b: any, i: number) => (
@@ -5015,7 +5068,7 @@ export default function Attendance() {
                             {/* Footer actions */}
                             <div style={{ marginTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, position: 'sticky', bottom: 0, background: '#fff', paddingTop: 8, paddingBottom: 4, zIndex: 10, borderTop: '1px solid #f0f0f0' }}>
                                 <div>
-                                    {isAdmin && p.hasOverride && (
+                                    {isAdmin && !isCurrentPeriodLocked && p.hasOverride && (
                                         <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={clearOverride}>
                                             Xóa điều chỉnh
                                         </Button>
@@ -5205,7 +5258,7 @@ export default function Attendance() {
                                                 render: (_: any, record: Employee) => (
                                                     <Space size={4}>
                                                         <Button size="small" type="text" icon={<EditOutlined style={{ color: '#1890ff' }} />} onClick={() => { setEditingEmp(record); empForm.resetFields(); empForm.setFieldsValue({ ...record, username: record.username || '', bankId: record.bankId ?? null, bankAccount: record.bankAccount ?? null, bankAccountName: record.bankAccountName ?? null }); setEmpModalOpen(true); }} />
-                                                        <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => { setEmployees(prev => prev.filter(e => e.id !== record.id)); message.success('Đã xóa!'); }} />
+                                                        <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => { if (checkLocked()) return; setEmployees(prev => prev.filter(e => e.id !== record.id)); message.success('Đã xóa!'); }} />
                                                     </Space>
                                                 )
                                             }
@@ -5387,14 +5440,30 @@ export default function Attendance() {
                 okButtonProps={{ icon: <PlusOutlined />, danger: true, style: { fontWeight: 700 } }}
                 width={520}
             >
-                <div style={{
-                    padding: '10px 14px', borderRadius: 8, marginBottom: 16, marginTop: 8,
-                    background: '#fff1f0', border: '1px solid #ffccc7',
-                    color: '#cf1322', fontWeight: 600, fontSize: 12, textAlign: 'center',
-                }}>
-                    ⚠️ Khoản phạt này sẽ được khấu trừ trực tiếp vào lương nhân viên tháng hiện tại
-                </div>
                 <Form form={fineForm} layout="vertical">
+                    <Form.Item noStyle shouldUpdate={(p, c) => p.date !== c.date}>
+                        {({ getFieldValue }) => {
+                            const d = getFieldValue('date');
+                            const monthLabel = d ? d.format('MM/YYYY') : '...';
+                            return (
+                                <div style={{
+                                    padding: '10px 14px', borderRadius: 8, marginBottom: 16, marginTop: 8,
+                                    background: '#fff1f0', border: '1px solid #ffccc7',
+                                    color: '#cf1322', fontWeight: 600, fontSize: 12, textAlign: 'center',
+                                }}>
+                                    ⚠️ Khoản phạt này sẽ được khấu trừ vào lương tháng <b>{monthLabel}</b>
+                                </div>
+                            );
+                        }}
+                    </Form.Item>
+                    <Form.Item name="date" label="Ngày vi phạm" rules={[{ required: true, message: 'Chọn ngày vi phạm' }]}>
+                        <DatePicker
+                            style={{ width: '100%' }}
+                            size="large"
+                            format="DD/MM/YYYY"
+                            placeholder="Chọn ngày vi phạm"
+                        />
+                    </Form.Item>
                     <Form.Item name="empId" label="Nhân viên bị phạt" rules={[{ required: true, message: 'Vui lòng chọn nhân viên' }]}>
                         <Select placeholder="Chọn nhân viên" size="large">
                             {employees.map(emp => (
