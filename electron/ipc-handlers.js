@@ -8867,12 +8867,19 @@ async function sendGmailWithAttachment({ to, subject, html, fileName, pdfBase64 
 ipcMain.handle('attendance:sendPayslipEmail', async (event, { to, employeeName, period, fileName, pdfBase64 } = {}) => {
     try {
         if (!to || !pdfBase64) throw new Error('Thiếu email nhận hoặc file PDF');
-        const subject = `Phiếu lương ${period || ''} - ${employeeName || ''}`.trim();
+
+        const companyName = 'AIRCLEAN CORP.';
+        const employeeLabel = String(employeeName || '').trim();
+        const rawPeriod = String(period || '').trim();
+        const formattedPeriod = rawPeriod ? `Tháng ${rawPeriod.replace('-', '/')}` : 'Tháng';
+        const subject = `${companyName} - Phiếu Lương ${formattedPeriod} - ${employeeLabel}`.replace(/\s+/g, ' ').trim();
+        const greetingName = employeeLabel ? ` ${employeeLabel}` : '';
         const html = `
-            <div style="font-family:Arial,sans-serif;font-size:14px;color:#111;">
-                <p>Chào bạn,</p>
-                <p>Đính kèm là phiếu lương ${period ? `kỳ <b>${period}</b>` : ''}${employeeName ? ` của <b>${employeeName}</b>` : ''}.</p>
-                <p>Trân trọng,<br/>Hệ thống quản lý nội bộ</p>
+            <div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;color:#111;">
+                <p>Kính gửi anh/chị${greetingName},</p>
+                <p>${companyName} gửi anh/chị phiếu lương kỳ ${formattedPeriod.toLowerCase()} trong file đính kèm.</p>
+                <p>Anh/chị vui lòng kiểm tra thông tin chi tiết. Nếu có thắc mắc hoặc cần đối soát, vui lòng phản hồi lại email này hoặc liên hệ bộ phận phụ trách.</p>
+                <p>Trân trọng,<br/>Bộ phận Nhân sự<br/>DBY Software</p>
             </div>
         `;
         return await sendGmailWithAttachment({ to, subject, html, fileName, pdfBase64 });
@@ -8884,6 +8891,23 @@ ipcMain.handle('attendance:sendPayslipEmail', async (event, { to, employeeName, 
 });
 
 // Kiểm tra + tự khởi động Python service khi vào tab Điểm danh
+ipcMain.handle('attendance:savePayslipPDF', async (event, { fileName, pdfBase64 } = {}) => {
+    try {
+        if (!fileName || !pdfBase64) throw new Error('Thiếu tên file hoặc dữ liệu PDF');
+        const safeFileName = String(fileName)
+            .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
+            .replace(/\s+/g, ' ')
+            .trim() || `phieu-luong-${Date.now()}.pdf`;
+        const downloadsDir = app.getPath('downloads');
+        const targetPath = path.join(downloadsDir, safeFileName.toLowerCase().endsWith('.pdf') ? safeFileName : `${safeFileName}.pdf`);
+        fs.writeFileSync(targetPath, Buffer.from(String(pdfBase64).replace(/^data:application\/pdf;base64,/, ''), 'base64'));
+        return { success: true, data: { filePath: targetPath } };
+    } catch (err) {
+        console.error('❌ attendance:savePayslipPDF error:', err.message);
+        return { success: false, error: err.message || 'Không lưu được file PDF' };
+    }
+});
+
 ipcMain.handle('attendance:status', async () => {
     const exePath = path.join(__dirname, '..', 'python', 'dist', 'attendance_service.exe');
     const scriptPath = path.join(__dirname, '..', 'python', 'attendance_service.py');

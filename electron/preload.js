@@ -273,6 +273,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         deleteProfile: (face_id) => ipcRenderer.invoke('attendance:deleteProfile', { face_id }),
         verifyAll: () => ipcRenderer.invoke('attendance:verifyAll'),
         sendPayslipEmail: (data) => ipcRenderer.invoke('attendance:sendPayslipEmail', data),
+        savePayslipPDF: (data) => ipcRenderer.invoke('attendance:savePayslipPDF', data),
     },
 
     offlineQueue: {

@@ -1,612 +1,291 @@
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Demo — Kiểm Hàng</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #f0f2f5; color: #1a1a2e; font-size: 14px; }
+import React from 'react';
+import { 
+  Printer, 
+  Download, 
+  Search, 
+  CheckCircle2, 
+  AlertCircle, 
+  Clock,
+  Package,
+  Building2,
+  QrCode,
+  ShieldCheck
+} from 'lucide-react';
 
-  /* Layout */
-  .layout { display: flex; min-height: 100vh; }
-  .sidebar { width: 220px; background: #1a1a2e; padding: 0; flex-shrink: 0; }
-  .sidebar-logo { padding: 20px 16px; border-bottom: 1px solid #2d2d4e; }
-  .sidebar-logo .logo-title { color: #fff; font-size: 15px; font-weight: 700; }
-  .sidebar-logo .logo-sub { color: #8888aa; font-size: 11px; margin-top: 2px; }
-  .sidebar-menu { padding: 8px 0; }
-  .menu-group { padding: 16px 16px 4px; color: #555577; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
-  .menu-item { display: flex; align-items: center; gap: 10px; padding: 10px 16px; color: #aaaacc; cursor: pointer; transition: all .15s; font-size: 13px; }
-  .menu-item:hover { background: #252545; color: #fff; }
-  .menu-item.active { background: #e6891a22; color: #e6891a; border-right: 3px solid #e6891a; }
-  .menu-item .icon { font-size: 15px; width: 18px; text-align: center; }
+const App = () => {
+  const employeeData = {
+    name: "NGUYỄN ĐÌNH TOÀN",
+    id: "EMP20260401",
+    position: "Nhân viên chính thức",
+    period: "Tháng 04/2026 (01/04 - 30/04/2026)",
+    issueDate: "02/05/2026",
+    baseSalary: 10000000,
+    packaging: {
+      qty: 49686,
+      unit: "Sản phẩm",
+      rate: 20,
+      amount: 993720,
+      note: "4.252 đơn hàng"
+    },
+    bonuses: [
+      { name: "Thưởng bù đóng gói", detail: "Bù chênh lệch ĐG ngày 16/4", amount: 50000 }
+    ],
+    fines: [
+      { name: "Vi phạm nghiệp vụ VAT", detail: "Không cập nhật hóa đơn VAT", amount: 70000, category: "Nghiệp vụ" },
+      { name: "Đi muộn ca sáng", detail: "Ngày 17/04/2026 (Trễ 6 phút)", amount: 30000, category: "Kỷ luật" },
+      { name: "Đi muộn ca sáng", detail: "Ngày 18/04/2026 (Trễ 6 phút)", amount: 30000, category: "Kỷ luật" },
+      { name: "Đóng gói sai đơn", detail: "Mã phiếu: ...7964952", amount: 30000, category: "Nghiệp vụ" },
+      { name: "Đóng gói sai đơn", detail: "Mã phiếu: ...811341369", amount: 30000, category: "Nghiệp vụ" },
+      { name: "Đi muộn ca chiều", detail: "Ngày 22/04/2026 (Trễ 6 phút)", amount: 30000, category: "Kỷ luật" },
+      { name: "Đóng gói sai đơn", detail: "Mã phiếu: ...289667994", amount: 30000, category: "Nghiệp vụ" },
+      { name: "Vi phạm tồn kho", detail: "Không kiểm tra tồn kho định kỳ", amount: 70000, category: "Nghiệp vụ" },
+      { name: "Đi muộn ca chiều", detail: "Ngày 25/04/2026 (Trễ 6 phút)", amount: 30000, category: "Kỷ luật" },
+      { name: "Đi muộn ca sáng", detail: "Ngày 28/04/2026 (Trễ 6 phút)", amount: 30000, category: "Kỷ luật" },
+      { name: "Thiếu công việc ngày", detail: "Không ghi nhận Task ngày 28/04", amount: 30000, category: "Nghiệp vụ" },
+    ],
+    netPay: 10633720
+  };
 
-  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-  .topbar { background: #fff; padding: 0 24px; height: 56px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #eee; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
-  .topbar-left { display: flex; align-items: center; gap: 12px; }
-  .page-title { font-size: 16px; font-weight: 700; color: #1a1a2e; }
-  .breadcrumb { color: #999; font-size: 12px; }
-  .topbar-right { display: flex; align-items: center; gap: 16px; }
-  .avatar { width: 32px; height: 32px; background: #e6891a; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 13px; }
-  .user-name { font-size: 13px; color: #555; }
+  const totalEarnings = employeeData.baseSalary + employeeData.packaging.amount + employeeData.bonuses.reduce((a, b) => a + b.amount, 0);
+  const totalDeductions = employeeData.fines.reduce((a, b) => a + b.amount, 0);
 
-  .content { flex: 1; padding: 20px 24px; overflow-y: auto; }
+  const formatCurrency = (val) => new Intl.NumberFormat('vi-VN').format(val) + " ₫";
 
-  /* Page header */
-  .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-  .page-header-left { display: flex; align-items: center; gap: 12px; }
-  .page-title-main { font-size: 20px; font-weight: 700; }
-  .date-nav { display: flex; align-items: center; gap: 6px; background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 6px 12px; }
-  .date-nav button { background: none; border: none; cursor: pointer; color: #666; font-size: 16px; padding: 0 2px; transition: color .15s; }
-  .date-nav button:hover { color: #e6891a; }
-  .date-text { font-size: 13px; font-weight: 600; color: #333; min-width: 140px; text-align: center; }
-
-  /* Weekend banner */
-  .weekend-banner { background: linear-gradient(135deg, #e6891a, #f5a623); border-radius: 10px; padding: 12px 18px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; color: #fff; box-shadow: 0 3px 10px rgba(230,137,26,.3); }
-  .weekend-banner .wb-icon { font-size: 22px; }
-  .weekend-banner .wb-title { font-weight: 700; font-size: 15px; }
-  .weekend-banner .wb-sub { font-size: 12px; opacity: .85; margin-top: 2px; }
-  .weekend-banner .wb-badge { margin-left: auto; background: rgba(255,255,255,.25); border-radius: 20px; padding: 4px 14px; font-size: 12px; font-weight: 700; }
-
-  /* Session card */
-  .session-card { background: #fff; border-radius: 12px; padding: 18px 22px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,.06); border: 1px solid #eee; }
-  .session-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
-  .session-card-title { font-size: 13px; font-weight: 700; color: #666; text-transform: uppercase; letter-spacing: .5px; }
-  .status-badge { display: flex; align-items: center; gap: 5px; border-radius: 20px; padding: 4px 12px; font-size: 12px; font-weight: 600; }
-  .status-pending { background: #fff7e6; color: #e6891a; border: 1px solid #ffd591; }
-  .status-active  { background: #e6f7ff; color: #1890ff; border: 1px solid #91d5ff; }
-  .status-done    { background: #f6ffed; color: #52c41a; border: 1px solid #b7eb8f; }
-  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-
-  .session-meta { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
-  .meta-item { display: flex; align-items: center; gap: 7px; }
-  .meta-icon { font-size: 15px; }
-  .meta-label { color: #999; font-size: 12px; }
-  .meta-value { font-weight: 600; color: #222; font-size: 13px; }
-  .meta-link { color: #1890ff; cursor: pointer; font-size: 12px; margin-left: 4px; }
-  .meta-link:hover { text-decoration: underline; }
-  .meta-divider { width: 1px; height: 28px; background: #f0f0f0; }
-
-  .session-stats { display: flex; gap: 16px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #f5f5f5; }
-  .stat-box { flex: 1; text-align: center; background: #fafafa; border-radius: 8px; padding: 10px; border: 1px solid #f0f0f0; }
-  .stat-num { font-size: 22px; font-weight: 800; color: #1a1a2e; }
-  .stat-num.orange { color: #e6891a; }
-  .stat-num.green  { color: #52c41a; }
-  .stat-num.red    { color: #ff4d4f; }
-  .stat-lbl { font-size: 11px; color: #999; margin-top: 2px; }
-
-  /* Check table card */
-  .card { background: #fff; border-radius: 12px; padding: 18px 22px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,.06); border: 1px solid #eee; }
-  .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
-  .card-title { font-size: 14px; font-weight: 700; color: #1a1a2e; display: flex; align-items: center; gap: 8px; }
-  .card-title .ct-icon { font-size: 16px; }
-
-  table { width: 100%; border-collapse: collapse; }
-  thead tr { background: #fafafa; }
-  th { padding: 10px 12px; text-align: left; font-size: 12px; color: #888; font-weight: 600; border-bottom: 1px solid #f0f0f0; white-space: nowrap; }
-  td { padding: 10px 12px; border-bottom: 1px solid #f8f8f8; vertical-align: middle; }
-  tr:last-child td { border-bottom: none; }
-  tr:hover td { background: #fafcff; }
-
-  .sku-tag { font-family: monospace; background: #f0f0f0; border-radius: 5px; padding: 2px 8px; font-size: 12px; color: #555; }
-  .prod-name { font-weight: 500; color: #222; }
-  .prod-cat { font-size: 11px; color: #aaa; margin-top: 1px; }
-
-  .stock-sys { font-weight: 700; font-size: 15px; color: #333; }
-  .stock-input { width: 80px; border: 1.5px solid #e0e0e0; border-radius: 7px; padding: 5px 8px; font-size: 14px; font-weight: 600; text-align: center; color: #1a1a2e; outline: none; transition: border .15s; }
-  .stock-input:focus { border-color: #e6891a; box-shadow: 0 0 0 2px rgba(230,137,26,.15); }
-  .stock-input.has-value { border-color: #b7eb8f; background: #f6ffed; }
-
-  .variance-tag { display: inline-flex; align-items: center; gap: 3px; border-radius: 5px; padding: 3px 10px; font-size: 12px; font-weight: 700; }
-  .var-pos   { background: #f6ffed; color: #52c41a; border: 1px solid #b7eb8f; }
-  .var-neg   { background: #fff1f0; color: #ff4d4f; border: 1px solid #ffa39e; }
-  .var-zero  { background: #f5f5f5; color: #8c8c8c; border: 1px solid #e0e0e0; }
-  .var-empty { background: #f5f5f5; color: #ccc;    border: 1px dashed #ddd; }
-
-  .note-input { width: 100%; border: 1px solid #e8e8e8; border-radius: 6px; padding: 4px 8px; font-size: 12px; color: #555; outline: none; background: #fafafa; transition: border .15s; }
-  .note-input:focus { border-color: #e6891a; background: #fff; }
-
-  .row-done td { background: #fafffc; }
-  .check-circle { font-size: 16px; }
-
-  /* Note + actions */
-  .footer-area { padding: 14px 22px; border-top: 1px solid #f0f0f0; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .note-area { display: flex; align-items: center; gap: 8px; flex: 1; }
-  .note-area label { font-size: 12px; color: #999; white-space: nowrap; }
-  .note-area textarea { flex: 1; border: 1px solid #e0e0e0; border-radius: 8px; padding: 7px 10px; font-size: 13px; color: #333; outline: none; resize: none; height: 36px; font-family: inherit; transition: border .15s; }
-  .note-area textarea:focus { border-color: #e6891a; box-shadow: 0 0 0 2px rgba(230,137,26,.1); }
-
-  .btn { border: none; border-radius: 8px; padding: 8px 18px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all .15s; display: flex; align-items: center; gap: 6px; }
-  .btn-default { background: #fff; border: 1.5px solid #d9d9d9; color: #555; }
-  .btn-default:hover { border-color: #e6891a; color: #e6891a; }
-  .btn-primary { background: #e6891a; color: #fff; box-shadow: 0 2px 6px rgba(230,137,26,.35); }
-  .btn-primary:hover { background: #d17a10; }
-  .btn-success { background: #52c41a; color: #fff; box-shadow: 0 2px 6px rgba(82,196,26,.3); }
-  .btn-success:hover { background: #43a316; }
-  .btn-ghost { background: transparent; border: 1.5px dashed #d9d9d9; color: #999; }
-  .btn-ghost:hover { border-color: #e6891a; color: #e6891a; background: #fff7e6; }
-
-  /* Rotation info */
-  .rotation-card { background: #f0f5ff; border: 1px solid #adc6ff; border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }
-  .rotation-icon { font-size: 20px; }
-  .rotation-text { flex: 1; }
-  .rotation-text .rt-title { font-size: 12px; color: #2f54eb; font-weight: 700; }
-  .rotation-text .rt-chain { font-size: 13px; color: #333; margin-top: 2px; }
-  .rotation-text .rt-chain span { font-weight: 700; }
-  .rotation-text .rt-chain .arrow { color: #2f54eb; margin: 0 6px; }
-
-  /* History */
-  .history-table th { font-size: 11px; }
-  .history-table td { font-size: 12px; }
-  .staff-avatar-sm { width: 22px; height: 22px; border-radius: 50%; background: #e6891a; color: #fff; font-size: 10px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; margin-right: 5px; vertical-align: middle; }
-  .variance-summary { font-size: 11px; }
-  .vs-ok  { color: #52c41a; }
-  .vs-err { color: #ff4d4f; }
-
-  /* Tabs */
-  .tabs { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 2px solid #f0f0f0; }
-  .tab { padding: 10px 18px; font-size: 13px; font-weight: 500; color: #999; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all .15s; }
-  .tab:hover { color: #e6891a; }
-  .tab.active { color: #e6891a; border-bottom-color: #e6891a; font-weight: 700; }
-
-  /* Toggle demo */
-  .demo-toggle { position: fixed; bottom: 20px; right: 20px; background: #1a1a2e; color: #fff; border: none; border-radius: 30px; padding: 10px 18px; font-size: 12px; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.3); z-index: 100; display: flex; align-items: center; gap: 7px; }
-  .demo-toggle:hover { background: #e6891a; }
-
-  /* Progress bar */
-  .progress-wrap { margin-top: 10px; }
-  .progress-bar-bg { background: #f0f0f0; border-radius: 999px; height: 6px; overflow: hidden; }
-  .progress-bar-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #e6891a, #f5c64e); transition: width .5s ease; }
-  .progress-label { display: flex; justify-content: space-between; font-size: 11px; color: #aaa; margin-top: 4px; }
-
-  .empty-state { text-align: center; padding: 40px 20px; color: #bbb; }
-  .empty-state .es-icon { font-size: 40px; margin-bottom: 10px; }
-  .empty-state .es-title { font-size: 15px; color: #888; font-weight: 600; }
-  .empty-state .es-sub { font-size: 12px; color: #bbb; margin-top: 4px; }
-
-  @media (max-width: 768px) {
-    .sidebar { display: none; }
-    .session-stats { gap: 8px; }
-  }
-</style>
-</head>
-<body>
-
-<div class="layout">
-
-  <!-- Sidebar -->
-  <div class="sidebar">
-    <div class="sidebar-logo">
-      <div class="logo-title">⚡ QuanLyBanHang</div>
-      <div class="logo-sub">v1.0.272 · Cửa hàng ABC</div>
-    </div>
-    <div class="sidebar-menu">
-      <div class="menu-group">Bán hàng</div>
-      <div class="menu-item"><span class="icon">🏪</span> Bán hàng (POS)</div>
-      <div class="menu-item"><span class="icon">📋</span> Đơn hàng</div>
-      <div class="menu-group">Kho hàng</div>
-      <div class="menu-item active"><span class="icon">📦</span> Tồn kho</div>
-      <div class="menu-item" style="padding-left:34px; font-size:12px;"><span class="icon">⚖️</span> Cân bằng tồn</div>
-      <div class="menu-item" style="padding-left:34px; font-size:12px; background:#e6891a15; color:#e6891a; border-right:3px solid #e6891a;"><span class="icon">🔍</span> Kiểm hàng</div>
-      <div class="menu-item"><span class="icon">🛒</span> Nhập hàng</div>
-      <div class="menu-group">Quản lý</div>
-      <div class="menu-item"><span class="icon">👥</span> Nhân viên</div>
-      <div class="menu-item"><span class="icon">📊</span> Báo cáo</div>
-      <div class="menu-item"><span class="icon">⚙️</span> Cài đặt</div>
-    </div>
-  </div>
-
-  <!-- Main -->
-  <div class="main">
-    <div class="topbar">
-      <div class="topbar-left">
-        <span class="breadcrumb">Tồn kho /</span>
-        <span class="page-title">Kiểm hàng</span>
-      </div>
-      <div class="topbar-right">
-        <span style="font-size:12px;color:#999;">Thứ 2, 28/04/2026</span>
-        <div style="display:flex;align-items:center;gap:6px;">
-          <div class="avatar">A</div>
-          <span class="user-name">Admin</span>
-        </div>
-      </div>
-    </div>
-
-    <div class="content">
-
-      <!-- Page header -->
-      <div class="page-header">
-        <div class="page-header-left">
-          <span class="page-title-main">🔍 Kiểm hàng</span>
-          <div class="date-nav">
-            <button>‹</button>
-            <span class="date-text" id="dateDisplay">Thứ 2, 28/04/2026</span>
-            <button>›</button>
+  return (
+    <div className="min-h-screen bg-[#F4F7F9] py-10 px-4 font-sans text-slate-800">
+      <div className="max-w-4xl mx-auto">
+        
+        {/* Action Bar */}
+        <div className="flex justify-between items-center mb-6 no-print">
+          <div className="flex items-center gap-2 text-slate-500 hover:text-[#F37021] transition-colors cursor-pointer group">
+            <Search size={18} className="group-hover:scale-110 transition-transform" />
+            <span className="text-sm font-medium">Tra cứu lịch sử phiếu lương</span>
+          </div>
+          <div className="flex gap-3">
+            <button onClick={() => window.print()} className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded text-sm font-semibold hover:bg-slate-50 shadow-sm transition-all">
+              <Printer size={16} /> In phiếu
+            </button>
+            <button className="flex items-center gap-2 px-4 py-2 bg-[#F37021] text-white rounded text-sm font-semibold hover:bg-orange-600 shadow-md transition-all">
+              <Download size={16} /> Tải PDF
+            </button>
           </div>
         </div>
-        <div style="display:flex;gap:8px;">
-          <button class="btn btn-default" onclick="toggleWeekend()">🗓 <span id="toggleLabel">Xem cuối tuần</span></button>
-          <button class="btn btn-primary" onclick="generateSession()">🎲 Tạo phiên kiểm mới</button>
-        </div>
-      </div>
 
-      <!-- Weekend banner (hidden by default) -->
-      <div class="weekend-banner" id="weekendBanner" style="display:none;">
-        <div class="wb-icon">📅</div>
-        <div>
-          <div class="wb-title">Phiên kiểm cuối tuần — Toàn bộ sản phẩm</div>
-          <div class="wb-sub">Thứ 7, 03/05/2026 · Tất cả sản phẩm phải được kiểm tra, bao gồm hàng không phát sinh doanh số</div>
-        </div>
-        <div class="wb-badge">128 sản phẩm</div>
-      </div>
+        {/* Payslip Main */}
+        <div className="bg-white border-t-8 border-[#F37021] shadow-2xl relative overflow-hidden">
+          
+          {/* Header Info */}
+          <div className="p-8 border-b border-slate-100 flex flex-col md:flex-row justify-between gap-8">
+            <div className="space-y-4">
+              <div className="flex items-center gap-3 text-[#0054A5]">
+                <Building2 size={32} strokeWidth={2.5} />
+                <div className="leading-tight">
+                  <h2 className="font-black text-xl tracking-tight uppercase">Smart Logistics System</h2>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Internal Human Resources</p>
+                </div>
+              </div>
+              <div className="text-sm space-y-1">
+                <p><span className="font-bold text-slate-400 uppercase text-[10px]">Đơn vị:</span> DBY Software</p>
+                <p><span className="font-bold text-slate-400 uppercase text-[10px]">Địa chỉ:</span> Ngõ 80 Đại Linh, Trung Văn, Hà Nội</p>
+              </div>
+            </div>
 
-      <!-- Rotation info -->
-      <div class="rotation-card">
-        <div class="rotation-icon">🔄</div>
-        <div class="rotation-text">
-          <div class="rt-title">LUÂN PHIÊN NHÂN VIÊN</div>
-          <div class="rt-chain">
-            Hôm qua: <span>Trần Thị B</span>
-            <span class="arrow">→</span>
-            Hôm nay: <span style="color:#e6891a;">Nguyễn Văn A</span>
-            <span class="arrow">→</span>
-            Ngày mai: <span style="color:#999;">Lê Văn C</span>
-          </div>
-        </div>
-        <button class="btn btn-default" style="font-size:12px;padding:6px 12px;" onclick="showStaffPicker()">✏️ Đổi người</button>
-      </div>
-
-      <!-- Session card -->
-      <div class="session-card" id="sessionCard">
-        <div class="session-card-header">
-          <span class="session-card-title">📋 Phiên kiểm hôm nay</span>
-          <span class="status-badge status-active" id="sessionStatus">
-            <span class="status-dot"></span> Đang kiểm
-          </span>
-        </div>
-
-        <div class="session-meta">
-          <div class="meta-item">
-            <span class="meta-icon">👤</span>
-            <div>
-              <div class="meta-label">Phụ trách</div>
-              <div class="meta-value">Nguyễn Văn A</div>
+            <div className="text-left md:text-right space-y-1">
+              <h1 className="text-3xl font-black text-slate-900 leading-none mb-2 uppercase tracking-tighter">Phiếu Lương</h1>
+              <p className="text-sm text-slate-500 font-medium italic">Kỳ thanh toán: <span className="text-slate-900 not-italic font-bold">{employeeData.period}</span></p>
+              <p className="text-sm text-slate-500 font-medium italic">Ngày kết xuất: <span className="text-slate-900 not-italic">{employeeData.issueDate}</span></p>
             </div>
           </div>
-          <div class="meta-divider"></div>
-          <div class="meta-item">
-            <span class="meta-icon">🕐</span>
-            <div>
-              <div class="meta-label">Bắt đầu</div>
-              <div class="meta-value">09:15 sáng</div>
+
+          {/* Employee Details Box */}
+          <div className="mx-8 mt-8 p-6 bg-[#0054A5]/5 border border-[#0054A5]/10 rounded-lg grid grid-cols-1 md:grid-cols-2 gap-y-4">
+            <div className="flex flex-col">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Họ và tên nhân viên</span>
+              <span className="font-bold text-lg text-[#0054A5]">{employeeData.name}</span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Mã nhân viên</span>
+              <span className="font-bold text-slate-700 font-mono tracking-tight">{employeeData.id}</span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Chức vụ / Vị trí</span>
+              <span className="font-medium text-slate-700">{employeeData.position}</span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Trạng thái tài khoản</span>
+              <span className="inline-flex items-center gap-1.5 font-bold text-emerald-600 text-sm">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                Đang hoạt động
+              </span>
             </div>
           </div>
-          <div class="meta-divider"></div>
-          <div class="meta-item">
-            <span class="meta-icon">🏷️</span>
-            <div>
-              <div class="meta-label">Loại phiên</div>
-              <div class="meta-value">Ngày thường · 5 SP ngẫu nhiên</div>
+
+          {/* New Simplified Table Structure */}
+          <div className="p-8">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-[#0054A5] text-white uppercase text-[11px] tracking-widest">
+                  <th className="px-6 py-4 text-left rounded-tl-md">Danh mục thu nhập / Khấu trừ</th>
+                  <th className="px-6 py-4 text-left">Diễn giải / Chi tiết đối soát</th>
+                  <th className="px-6 py-4 text-right rounded-tr-md">Số tiền (VNĐ)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {/* 1. Base Salary */}
+                <tr className="group hover:bg-slate-50 transition-colors">
+                  <td className="px-6 py-5">
+                    <p className="font-bold text-slate-800 text-xs uppercase tracking-tight">Lương cơ bản</p>
+                  </td>
+                  <td className="px-6 py-5 text-slate-500 italic text-xs">
+                    Theo Hợp đồng lao động chính thức
+                  </td>
+                  <td className="px-6 py-5 text-right font-bold text-slate-900">
+                    {formatCurrency(employeeData.baseSalary)}
+                  </td>
+                </tr>
+
+                {/* 2. Packaging Performance */}
+                <tr className="group hover:bg-slate-50 transition-colors">
+                  <td className="px-6 py-5">
+                    <div className="flex items-center gap-2">
+                      <div className="w-6 h-6 rounded bg-orange-50 flex items-center justify-center text-orange-600">
+                        <Package size={14} />
+                      </div>
+                      <p className="font-bold text-slate-800 text-xs uppercase tracking-tight">Lương năng suất (Đóng gói)</p>
+                    </div>
+                  </td>
+                  <td className="px-6 py-5">
+                    <p className="text-slate-700 font-medium">{employeeData.packaging.qty.toLocaleString()} SP × {employeeData.packaging.rate} ₫</p>
+                    <p className="text-[10px] text-slate-400 italic">Tổng số: {employeeData.packaging.note}</p>
+                  </td>
+                  <td className="px-6 py-5 text-right font-bold text-slate-900">
+                    {formatCurrency(employeeData.packaging.amount)}
+                  </td>
+                </tr>
+
+                {/* 3. Bonuses */}
+                {employeeData.bonuses.map((b, i) => (
+                  <tr key={i} className="group hover:bg-slate-50 transition-colors">
+                    <td className="px-6 py-5">
+                      <div className="flex items-center gap-2">
+                        <div className="w-6 h-6 rounded bg-emerald-50 flex items-center justify-center text-emerald-600">
+                          <CheckCircle2 size={14} />
+                        </div>
+                        <p className="font-bold text-slate-800 text-xs uppercase tracking-tight">{b.name}</p>
+                      </div>
+                    </td>
+                    <td className="px-6 py-5 text-slate-500 italic text-xs">
+                      {b.detail}
+                    </td>
+                    <td className="px-6 py-5 text-right font-bold text-emerald-600">
+                      +{formatCurrency(b.amount)}
+                    </td>
+                  </tr>
+                ))}
+
+                {/* Section Header for Deductions */}
+                <tr className="bg-rose-50/40">
+                  <td colSpan={3} className="px-6 py-3 text-[10px] font-black text-rose-500 uppercase tracking-[0.2em] border-t border-rose-100">Các khoản khấu trừ vi phạm</td>
+                </tr>
+
+                {/* 4. Fines / Deductions */}
+                {employeeData.fines.map((f, i) => (
+                  <tr key={i} className="group hover:bg-rose-50/20 transition-colors">
+                    <td className="px-6 py-4 pl-10">
+                      <div className="flex items-center gap-2">
+                        {f.category === 'Kỷ luật' ? 
+                          <Clock size={12} className="text-rose-400" /> : 
+                          <AlertCircle size={12} className="text-amber-500" />
+                        }
+                        <p className="text-xs font-semibold text-slate-700 uppercase tracking-tight">{f.name}</p>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 text-slate-500 text-xs">
+                      {f.detail}
+                    </td>
+                    <td className="px-6 py-4 text-right font-bold text-rose-500 whitespace-nowrap">
+                      -{formatCurrency(f.amount)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Summary Section */}
+          <div className="p-8 bg-slate-50 flex flex-col md:flex-row justify-between items-start md:items-center gap-8">
+            <div className="flex gap-5 items-center">
+              <div className="p-2 bg-white border border-slate-200 rounded shadow-inner">
+                <QrCode size={70} strokeWidth={1.5} className="text-slate-500" />
+              </div>
+              <div className="max-w-[180px] space-y-1">
+                <h4 className="font-black text-[10px] uppercase tracking-widest text-[#0054A5]">Xác thực điện tử</h4>
+                <p className="text-[10px] text-slate-400 leading-snug italic font-medium">Quét mã QR để đối soát lịch sử đóng gói và chi tiết vi phạm trên DBY Portal.</p>
+              </div>
+            </div>
+
+            <div className="w-full md:w-80 space-y-2">
+              <div className="flex justify-between text-xs font-bold uppercase tracking-tighter">
+                <span className="text-slate-400">Tổng thu nhập (+)</span>
+                <span className="text-slate-900">{formatCurrency(totalEarnings)}</span>
+              </div>
+              <div className="flex justify-between text-xs font-bold uppercase tracking-tighter border-b border-slate-200 pb-3">
+                <span className="text-slate-400">Tổng khấu trừ (-)</span>
+                <span className="text-rose-500">-{formatCurrency(totalDeductions)}</span>
+              </div>
+              <div className="flex justify-between items-center py-2 pt-4">
+                <span className="font-black text-slate-900 uppercase tracking-tighter text-sm">Thực lĩnh cuối kỳ</span>
+                <span className="text-3xl font-black text-[#F37021] drop-shadow-sm">{formatCurrency(employeeData.netPay)}</span>
+              </div>
             </div>
           </div>
-          <div class="meta-divider"></div>
-          <div class="meta-item">
-            <span class="meta-icon">🔍</span>
-            <div>
-              <div class="meta-label">Lọc từ</div>
-              <div class="meta-value">Có doanh số 30 ngày qua</div>
+
+          {/* Signature / Security Footer */}
+          <div className="px-8 py-6 flex flex-col md:flex-row justify-between items-center bg-white border-t border-slate-50 gap-4">
+            <div className="flex items-center gap-2 text-slate-400">
+              <ShieldCheck size={18} className="text-[#0054A5]/40" />
+              <span className="text-[9px] font-bold uppercase tracking-widest">Xác nhận bởi: Bộ phận Tài chính & Nhân sự Smart Logistics</span>
+            </div>
+            
+            <div className="flex items-center gap-4 no-print">
+              <div className="relative group cursor-help">
+                <div className="border border-emerald-500/20 bg-emerald-50/30 rounded px-3 py-1.5 flex items-center gap-2 transition-all group-hover:bg-emerald-50">
+                  <CheckCircle2 size={14} className="text-emerald-500" />
+                  <div className="leading-none">
+                    <p className="text-[9px] font-black text-emerald-600 uppercase">Chứng thực điện tử</p>
+                    <p className="text-[8px] text-slate-400 font-mono tracking-tighter">DBY-SIGN-VERIFIED-2026</p>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
+
+          {/* Subtle Background Elements */}
+          <div className="absolute top-0 right-0 w-32 h-32 bg-[#F37021]/5 rounded-bl-full pointer-events-none" />
+          <div className="absolute bottom-0 left-0 w-24 h-24 bg-[#0054A5]/5 rounded-tr-full pointer-events-none" />
         </div>
 
-        <div class="progress-wrap" style="margin-top:14px;">
-          <div class="progress-bar-bg">
-            <div class="progress-bar-fill" id="progressFill" style="width: 60%"></div>
-          </div>
-          <div class="progress-label">
-            <span id="progressLabel">Đã kiểm 3 / 5 sản phẩm</span>
-            <span id="progressPct">60%</span>
-          </div>
+        {/* Legal Disclaimer */}
+        <div className="mt-8 px-4 text-[10px] text-slate-400 space-y-2 text-center md:text-left">
+          <p className="font-bold uppercase tracking-widest text-slate-500">Ghi chú quan trọng:</p>
+          <p className="italic">1. Phiếu lương này được bảo mật và chỉ dành cho người nhận được nêu tên ở trên. Việc chia sẻ trái phép có thể vi phạm chính sách công ty.</p>
+          <p className="italic">2. Mọi thắc mắc về con số đóng gói hoặc các lỗi vi phạm, vui lòng gửi ticket trên hệ thống HR Portal trước 17:00 ngày 05/05/2026.</p>
         </div>
 
-        <div class="session-stats">
-          <div class="stat-box">
-            <div class="stat-num orange" id="statTotal">5</div>
-            <div class="stat-lbl">Tổng cần kiểm</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-num green" id="statDone">3</div>
-            <div class="stat-lbl">Đã kiểm xong</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-num" id="statPending">2</div>
-            <div class="stat-lbl">Chưa kiểm</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-num red" id="statDiff">1</div>
-            <div class="stat-lbl">Có chênh lệch</div>
-          </div>
-        </div>
       </div>
 
-      <!-- Check list table -->
-      <div class="card" id="checkListCard">
-        <div class="card-header">
-          <div class="card-title">
-            <span class="ct-icon">📦</span>
-            Danh sách kiểm hàng
-          </div>
-          <div style="display:flex;gap:8px;align-items:center;">
-            <span style="font-size:11px;color:#aaa;">* Nhập tồn thực tế vào ô trắng</span>
-            <button class="btn btn-ghost" style="font-size:12px;padding:5px 10px;">📥 Xuất Excel</button>
-          </div>
-        </div>
-
-        <table id="checkTable">
-          <thead>
-            <tr>
-              <th style="width:40px;">#</th>
-              <th>Sản phẩm</th>
-              <th>Danh mục</th>
-              <th style="text-align:center;">Tồn hệ thống</th>
-              <th style="text-align:center;">Tồn thực tế</th>
-              <th style="text-align:center;">Chênh lệch</th>
-              <th>Ghi chú</th>
-              <th style="width:50px;text-align:center;">✓</th>
-            </tr>
-          </thead>
-          <tbody id="checkTableBody">
-          </tbody>
-        </table>
-
-        <div class="footer-area">
-          <div class="note-area">
-            <label>Ghi chú chung:</label>
-            <textarea placeholder="Ghi chú cho phiên kiểm hàng hôm nay..."></textarea>
-          </div>
-          <div style="display:flex;gap:8px;flex-shrink:0;">
-            <button class="btn btn-default" onclick="generateSession()">🔄 Tạo phiên mới</button>
-            <button class="btn btn-success" onclick="completeSession()">✅ Hoàn thành & Lưu</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- History -->
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title"><span class="ct-icon">📜</span> Lịch sử kiểm hàng</div>
-          <div class="tabs" style="margin:0;border:none;">
-            <div class="tab active">7 ngày</div>
-            <div class="tab">30 ngày</div>
-            <div class="tab">Tất cả</div>
-          </div>
-        </div>
-        <table class="history-table">
-          <thead>
-            <tr>
-              <th>Ngày</th>
-              <th>Phụ trách</th>
-              <th style="text-align:center;">Loại phiên</th>
-              <th style="text-align:center;">Số SP</th>
-              <th style="text-align:center;">Chênh lệch</th>
-              <th style="text-align:center;">Đã điều chỉnh</th>
-              <th style="text-align:center;">Trạng thái</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>27/04 · T7</td>
-              <td><div class="staff-avatar-sm">B</div>Trần Thị B</td>
-              <td style="text-align:center;"><span style="background:#fff7e6;color:#e6891a;border:1px solid #ffd591;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700;">Cuối tuần</span></td>
-              <td style="text-align:center;font-weight:700;">128</td>
-              <td style="text-align:center;" class="variance-summary"><span class="vs-err">3 lệch</span></td>
-              <td style="text-align:center;"><span style="color:#52c41a;">✅ Đã điều chỉnh</span></td>
-              <td style="text-align:center;"><span class="status-badge status-done" style="justify-content:center;font-size:11px;">✓ Hoàn thành</span></td>
-              <td><button class="btn btn-default" style="font-size:11px;padding:4px 10px;">Xem</button></td>
-            </tr>
-            <tr>
-              <td>26/04 · T6</td>
-              <td><div class="staff-avatar-sm">A</div>Nguyễn Văn A</td>
-              <td style="text-align:center;"><span style="background:#f0f0f0;color:#666;border:1px solid #e0e0e0;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700;">Ngày thường</span></td>
-              <td style="text-align:center;font-weight:700;">5</td>
-              <td style="text-align:center;" class="variance-summary"><span class="vs-ok">0 lệch</span></td>
-              <td style="text-align:center;"><span style="color:#aaa;">— Không cần</span></td>
-              <td style="text-align:center;"><span class="status-badge status-done" style="justify-content:center;font-size:11px;">✓ Hoàn thành</span></td>
-              <td><button class="btn btn-default" style="font-size:11px;padding:4px 10px;">Xem</button></td>
-            </tr>
-            <tr>
-              <td>25/04 · T5</td>
-              <td><div class="staff-avatar-sm" style="background:#52c41a;">C</div>Lê Văn C</td>
-              <td style="text-align:center;"><span style="background:#f0f0f0;color:#666;border:1px solid #e0e0e0;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700;">Ngày thường</span></td>
-              <td style="text-align:center;font-weight:700;">5</td>
-              <td style="text-align:center;" class="variance-summary"><span class="vs-err">2 lệch</span></td>
-              <td style="text-align:center;"><span style="color:#ff4d4f;">⏳ Chờ điều chỉnh</span></td>
-              <td style="text-align:center;"><span class="status-badge status-done" style="justify-content:center;font-size:11px;">✓ Hoàn thành</span></td>
-              <td><button class="btn btn-default" style="font-size:11px;padding:4px 10px;">Xem</button></td>
-            </tr>
-            <tr>
-              <td>24/04 · T4</td>
-              <td><div class="staff-avatar-sm">B</div>Trần Thị B</td>
-              <td style="text-align:center;"><span style="background:#f0f0f0;color:#666;border:1px solid #e0e0e0;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700;">Ngày thường</span></td>
-              <td style="text-align:center;font-weight:700;">5</td>
-              <td style="text-align:center;" class="variance-summary"><span class="vs-ok">0 lệch</span></td>
-              <td style="text-align:center;"><span style="color:#aaa;">— Không cần</span></td>
-              <td style="text-align:center;"><span class="status-badge status-done" style="justify-content:center;font-size:11px;">✓ Hoàn thành</span></td>
-              <td><button class="btn btn-default" style="font-size:11px;padding:4px 10px;">Xem</button></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-    </div><!-- /content -->
-  </div><!-- /main -->
-</div>
-
-<!-- Modal: staff picker -->
-<div id="staffModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;display:none;align-items:center;justify-content:center;">
-  <div style="background:#fff;border-radius:14px;padding:24px;width:360px;box-shadow:0 10px 40px rgba(0,0,0,.2);">
-    <div style="font-size:16px;font-weight:700;margin-bottom:16px;">👤 Đổi người phụ trách</div>
-    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:18px;">
-      <div onclick="selectStaff(this,'Nguyễn Văn A')" style="padding:12px 14px;border:2px solid #e6891a;border-radius:8px;cursor:pointer;background:#fff7e6;display:flex;align-items:center;gap:10px;">
-        <div class="avatar" style="width:28px;height:28px;font-size:11px;">A</div>
-        <div><div style="font-weight:600;">Nguyễn Văn A</div><div style="font-size:11px;color:#aaa;">Nhân viên chính thức · Đang chọn</div></div>
-        <span style="margin-left:auto;color:#e6891a;">✓</span>
-      </div>
-      <div onclick="selectStaff(this,'Trần Thị B')" style="padding:12px 14px;border:1.5px solid #e0e0e0;border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:10px;">
-        <div class="avatar" style="width:28px;height:28px;font-size:11px;background:#1890ff;">B</div>
-        <div><div style="font-weight:600;">Trần Thị B</div><div style="font-size:11px;color:#aaa;">Nhân viên chính thức</div></div>
-      </div>
-      <div onclick="selectStaff(this,'Lê Văn C')" style="padding:12px 14px;border:1.5px solid #e0e0e0;border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:10px;">
-        <div class="avatar" style="width:28px;height:28px;font-size:11px;background:#52c41a;">C</div>
-        <div><div style="font-weight:600;">Lê Văn C</div><div style="font-size:11px;color:#aaa;">Nhân viên chính thức</div></div>
-      </div>
+      <style>{`
+        @media print {
+          body { background: white !important; }
+          .no-print { display: none !important; }
+          .shadow-2xl { box-shadow: none !important; }
+          .min-h-screen { min-height: 0; padding: 0; }
+          .bg-slate-50, .bg-[#0054A5]/5 { background-color: #fcfcfc !important; }
+          .max-w-4xl { max-width: 100% !important; }
+        }
+      `}</style>
     </div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;">
-      <button class="btn btn-default" onclick="closeModal()">Huỷ</button>
-      <button class="btn btn-primary" onclick="closeModal()">Xác nhận</button>
-    </div>
-  </div>
-</div>
+  );
+};
 
-<!-- Demo toggle button -->
-<button class="demo-toggle" onclick="toggleWeekend()">
-  🗓 <span id="toggleBtnLabel">Xem chế độ Cuối tuần</span>
-</button>
-
-<script>
-  const products = [
-    { sku:'SP-0012', name:'Áo thun basic nam M', cat:'Áo nam', sys: 50 },
-    { sku:'SP-0045', name:'Quần kaki nam L xanh đậm', cat:'Quần nam', sys: 12 },
-    { sku:'SP-0112', name:'Giày sneaker trắng size 42', cat:'Giày dép', sys: 8 },
-    { sku:'SP-0033', name:'Túi đeo chéo nữ đen', cat:'Phụ kiện', sys: 25 },
-    { sku:'SP-0089', name:'Áo polo nam XL trắng', cat:'Áo nam', sys: 37 },
-  ];
-
-  let isWeekend = false;
-  let rowData = products.map(p => ({ ...p, actual: null, note: '' }));
-
-  function renderTable() {
-    const tbody = document.getElementById('checkTableBody');
-    tbody.innerHTML = '';
-    rowData.forEach((item, i) => {
-      const variance = item.actual !== null ? item.actual - item.sys : null;
-      const varTag = variance === null
-        ? `<span class="variance-tag var-empty">—</span>`
-        : variance > 0
-          ? `<span class="variance-tag var-pos">+${variance}</span>`
-          : variance < 0
-            ? `<span class="variance-tag var-neg">${variance}</span>`
-            : `<span class="variance-tag var-zero">0 ✓</span>`;
-      const isDone = item.actual !== null;
-      const checkMark = isDone ? '✅' : '<span style="color:#ddd;">○</span>';
-      tbody.innerHTML += `
-        <tr class="${isDone ? 'row-done' : ''}">
-          <td style="color:#aaa;font-size:12px;font-weight:600;">${i+1}</td>
-          <td>
-            <span class="sku-tag">${item.sku}</span>
-            <div class="prod-name" style="margin-top:3px;">${item.name}</div>
-          </td>
-          <td><span style="font-size:11px;background:#f5f5f5;border-radius:4px;padding:2px 7px;color:#666;">${item.cat}</span></td>
-          <td style="text-align:center;"><span class="stock-sys">${item.sys}</span></td>
-          <td style="text-align:center;">
-            <input type="number" class="stock-input ${isDone ? 'has-value' : ''}"
-              value="${item.actual !== null ? item.actual : ''}"
-              placeholder="—"
-              min="0"
-              oninput="updateActual(${i}, this.value)"
-            >
-          </td>
-          <td style="text-align:center;">${varTag}</td>
-          <td><input class="note-input" placeholder="Ghi chú..." value="${item.note}" oninput="updateNote(${i}, this.value)"></td>
-          <td style="text-align:center;" class="check-circle">${checkMark}</td>
-        </tr>
-      `;
-    });
-    updateStats();
-  }
-
-  function updateActual(i, val) {
-    rowData[i].actual = val === '' ? null : parseInt(val);
-    renderTable();
-  }
-  function updateNote(i, val) { rowData[i].note = val; }
-
-  function updateStats() {
-    const done = rowData.filter(r => r.actual !== null).length;
-    const total = rowData.length;
-    const diffs = rowData.filter(r => r.actual !== null && r.actual !== r.sys).length;
-    document.getElementById('statTotal').textContent = total;
-    document.getElementById('statDone').textContent = done;
-    document.getElementById('statPending').textContent = total - done;
-    document.getElementById('statDiff').textContent = diffs;
-    const pct = Math.round(done / total * 100);
-    document.getElementById('progressFill').style.width = pct + '%';
-    document.getElementById('progressLabel').textContent = `Đã kiểm ${done} / ${total} sản phẩm`;
-    document.getElementById('progressPct').textContent = pct + '%';
-  }
-
-  function generateSession() {
-    const names = ['Áo thun basic nam M','Quần kaki slim fit','Giày sandal nữ size 37','Balo laptop 15.6"','Áo sơ mi trắng L','Quần short nam M','Nón kết đen','Túi xách nữ da PU','Giày thể thao nam 43','Dép tổ ong nữ 38'];
-    const cats  = ['Áo nam','Quần nam','Giày dép','Phụ kiện','Áo nam','Quần nam','Phụ kiện','Túi xách','Giày dép','Dép'];
-    const n = isWeekend ? 10 : 5;
-    rowData = Array.from({length: n}, (_, i) => {
-      const idx = Math.floor(Math.random() * names.length);
-      return { sku: `SP-${String(Math.floor(Math.random()*9000)+1000)}`, name: names[idx], cat: cats[idx], sys: Math.floor(Math.random()*80)+5, actual: null, note: '' };
-    });
-    renderTable();
-    document.getElementById('statTotal').textContent = n;
-    alert(`✅ Đã tạo phiên kiểm mới với ${n} sản phẩm${isWeekend ? ' (cuối tuần - toàn bộ)' : ' ngẫu nhiên'}!\nĐã gán cho: Nguyễn Văn A`);
-  }
-
-  function completeSession() {
-    const done = rowData.filter(r => r.actual !== null).length;
-    const total = rowData.length;
-    if (done < total) {
-      if (!confirm(`Còn ${total - done} sản phẩm chưa kiểm. Vẫn hoàn thành?`)) return;
-    }
-    const diffs = rowData.filter(r => r.actual !== null && r.actual !== r.sys).length;
-    document.getElementById('sessionStatus').innerHTML = '<span class="status-dot"></span> Hoàn thành';
-    document.getElementById('sessionStatus').className = 'status-badge status-done';
-    if (diffs > 0) {
-      alert(`✅ Phiên kiểm đã hoàn thành!\n⚠️ Có ${diffs} sản phẩm lệch tồn.\n→ Bạn có muốn tạo phiếu điều chỉnh tồn không?`);
-    } else {
-      alert('✅ Phiên kiểm đã hoàn thành!\n🎉 Không có chênh lệch tồn kho.');
-    }
-  }
-
-  let isWeekendMode = false;
-  function toggleWeekend() {
-    isWeekendMode = !isWeekendMode;
-    document.getElementById('weekendBanner').style.display = isWeekendMode ? 'flex' : 'none';
-    document.getElementById('dateDisplay').textContent = isWeekendMode ? 'Thứ 7, 03/05/2026' : 'Thứ 2, 28/04/2026';
-    document.getElementById('toggleBtnLabel').textContent = isWeekendMode ? 'Xem chế độ Ngày thường' : 'Xem chế độ Cuối tuần';
-    document.getElementById('toggleLabel').textContent = isWeekendMode ? 'Xem ngày thường' : 'Xem cuối tuần';
-    isWeekend = isWeekendMode;
-  }
-
-  function showStaffPicker() {
-    document.getElementById('staffModal').style.display = 'flex';
-  }
-  function closeModal() {
-    document.getElementById('staffModal').style.display = 'none';
-  }
-  function selectStaff(el, name) {
-    document.querySelectorAll('#staffModal [onclick^="selectStaff"]').forEach(e => {
-      e.style.border = '1.5px solid #e0e0e0';
-      e.style.background = '';
-      e.querySelector('span[style*="margin-left"]')?.remove();
-    });
-    el.style.border = '2px solid #e6891a';
-    el.style.background = '#fff7e6';
-    const tick = document.createElement('span');
-    tick.style.cssText = 'margin-left:auto;color:#e6891a;';
-    tick.textContent = '✓';
-    el.appendChild(tick);
-  }
-
-  // Init
-  renderTable();
-</script>
-</body>
-</html>
+export default App;

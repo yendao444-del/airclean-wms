@@ -107,7 +107,7 @@ function AppContent() {
     const { user, logout } = useAuth();
     const { getAccessibleMenuKeys, hasPermission } = usePermissions();
     const [selectedKey, setSelectedKey] = useState('dashboard');
-    const [collapsed, setCollapsed] = useState(false);
+    const [collapsed, setCollapsed] = useState(true);
 
     // Filter menu items based on user permissions
     const accessibleKeys = getAccessibleMenuKeys();

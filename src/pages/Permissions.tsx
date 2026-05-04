@@ -171,21 +171,28 @@ export default function PermissionsPage() {
     const handleSubmit = async () => {
         try {
             const values = await form.validateFields();
+            const payload = {
+                ...values,
+                email: values.email?.trim() || null,
+            };
+            if (editingUser && !payload.password) {
+                delete payload.password;
+            }
 
             if (editingUser) {
                 // Update
-                await window.electronAPI.users.update(editingUser.id, values);
+                await window.electronAPI.users.update(editingUser.id, payload);
                 await loadUsers();
                 message.success('Đã cập nhật người dùng!');
             } else {
                 // Create
                 const newUser = {
-                    username: values.username,
+                    username: payload.username,
                     fullName: ROLES[values.role as keyof typeof ROLES].label,
-                    email: undefined,
-                    role: values.role,
+                    email: payload.email,
+                    role: payload.role,
                     isActive: true,
-                    password: values.password,
+                    password: payload.password,
                 };
                 await window.electronAPI.users.create(newUser);
                 await loadUsers();
@@ -394,18 +401,26 @@ export default function PermissionsPage() {
                         <Input placeholder="Nhập tên đăng nhập" size="large" />
                     </Form.Item>
 
-                    {!editingUser && (
-                        <Form.Item
-                            label="Mật khẩu"
-                            name="password"
-                            rules={[
-                                { required: true, message: 'Vui lòng nhập mật khẩu!' },
-                                { min: 6, message: 'Mật khẩu phải có ít nhất 6 ký tự!' },
-                            ]}
-                        >
-                            <Input.Password placeholder="Nhập mật khẩu" size="large" />
-                        </Form.Item>
-                    )}
+                    <Form.Item
+                        label="Gmail"
+                        name="email"
+                        rules={[
+                            { type: 'email', message: 'Gmail không đúng định dạng!' },
+                        ]}
+                    >
+                        <Input placeholder="VD: nhanvien@gmail.com" size="large" />
+                    </Form.Item>
+
+                    <Form.Item
+                        label={editingUser ? 'Mật khẩu mới (để trống nếu không đổi)' : 'Mật khẩu'}
+                        name="password"
+                        rules={[
+                            { required: !editingUser, message: 'Vui lòng nhập mật khẩu!' },
+                            { min: 6, message: 'Mật khẩu phải có ít nhất 6 ký tự!' },
+                        ]}
+                    >
+                        <Input.Password placeholder={editingUser ? 'Không nhập nếu giữ mật khẩu cũ' : 'Nhập mật khẩu'} size="large" />
+                    </Form.Item>
 
 
                     <Form.Item

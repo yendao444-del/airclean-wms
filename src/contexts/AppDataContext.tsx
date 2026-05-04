@@ -41,20 +41,48 @@ type AppDataSnapshot = Omit<AppDataContextValue, 'loading' | 'refresh'>;
 const AppDataContext = createContext<AppDataContextValue | null>(null);
 
 let appDataInflight: Promise<AppDataSnapshot> | null = null;
+const APP_DATA_TIMEOUT_MS = 15000;
+
+type ApiListResult<T> = {
+    success: boolean;
+    data?: T[];
+    error?: string;
+};
+
+function timeoutPromise<T>(name: string, promise: Promise<T>, timeoutMs = APP_DATA_TIMEOUT_MS): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`${name} timeout sau ${timeoutMs}ms`)), timeoutMs);
+    });
+
+    return Promise.race([promise, timeout]).finally(() => {
+        if (timeoutId) clearTimeout(timeoutId);
+    });
+}
+
+async function safeListCall<T>(name: string, promise: Promise<ApiListResult<T>>): Promise<ApiListResult<T>> {
+    try {
+        return await timeoutPromise(name, promise);
+    } catch (error) {
+        console.error(`[AppData] ${name} load failed:`, error);
+        return { success: false, data: [], error: error instanceof Error ? error.message : String(error) };
+    }
+}
 
 async function fetchAppDataSnapshot(): Promise<AppDataSnapshot> {
     if (appDataInflight) return appDataInflight;
 
     appDataInflight = (async () => {
         const api = (window as any).electronAPI;
+        if (!api) throw new Error('electronAPI is not available');
         const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
         const untilNow = new Date().toISOString();
         const [pRes, exRes, ecRes, puRes, cbRes] = await Promise.all([
-            api.products.getAll(),
-            api.exportOrders.getAll({ since: since90 }),
-            api.ecommerceExports.getAll({ since: since90, until: untilNow, limit: 2000 }),
-            api.purchases.getAll({ since: since90 }),
-            api.combos.getAll(),
+            safeListCall<Product>('products:getAll', api.products.getAll()),
+            safeListCall<ExportOrder>('exportOrders:getAll', api.exportOrders.getAll({ since: since90 })),
+            safeListCall<EcommerceExport>('ecommerceExports:getAll', api.ecommerceExports.getAll({ since: since90, until: untilNow, limit: 2000 })),
+            safeListCall<Purchase>('purchases:getAll', api.purchases.getAll({ since: since90 })),
+            safeListCall<Combo>('combos:getAll', api.combos.getAll()),
         ]);
 
         const products = pRes.success ? (pRes.data || []) : [];

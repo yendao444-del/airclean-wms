@@ -206,6 +206,21 @@ function createWindow() {
         });
     });
 
+    // Native menu is hidden, so Electron does not wire reload shortcuts for us.
+    // Keep dev reload available from the keyboard even when the React header is focused.
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+        const key = String(input.key || '').toLowerCase();
+        const isReload = key === 'f5' || (input.control && key === 'r');
+        if (!isReload) return;
+
+        event.preventDefault();
+        if (input.shift || key === 'f5') {
+            mainWindow.webContents.reloadIgnoringCache();
+        } else {
+            mainWindow.webContents.reload();
+        }
+    });
+
     // Load React app - auto-detect dev server
     const VITE_DEV_SERVER = 'http://localhost:5173';
     const isDev = !app.isPackaged;
