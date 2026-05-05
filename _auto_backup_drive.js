@@ -4,8 +4,9 @@ const { execSync } = require('child_process');
 const { google } = require('googleapis');
 const { backupDatabase } = require('./_backup_db');
 
-const OAUTH_CLIENT_ID = '470025984975-s63vgvnb1ds58fmagk9iqq0f9ufhkktr.apps.googleusercontent.com';
-const OAUTH_CLIENT_SECRET = '***REDACTED_OAUTH_SECRET***';
+const config = require('./electron/config');
+const OAUTH_CLIENT_ID = config.OAUTH_CLIENT_ID;
+const OAUTH_CLIENT_SECRET = config.OAUTH_CLIENT_SECRET;
 const TOKEN_PATH = path.join(__dirname, 'electron', 'gdrive-token.json');
 const SERVICE_ACCOUNT_PATH = path.join(__dirname, 'electron', 'gdrive-credentials.json');
 

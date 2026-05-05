@@ -1,7 +1,8 @@
 const { PrismaClient } = require('@prisma/client');
 const fs = require('fs');
+const config = require('./electron/config');
 
-process.env.DATABASE_URL = "postgresql://[REDACTED]@supabase/postgres";
+process.env.DATABASE_URL = config.DATABASE_URL;
 
 async function main() {
     const prisma = new PrismaClient();
