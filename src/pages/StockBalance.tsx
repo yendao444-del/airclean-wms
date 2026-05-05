@@ -23,7 +23,8 @@ import {
     Badge,
     Empty,
     Select,
-    Spin
+    Spin,
+    Tooltip,
 } from 'antd';
 import {
     ReloadOutlined,
@@ -33,10 +34,11 @@ import {
     BarcodeOutlined,
     SearchOutlined,
     FileTextOutlined,
+    EditOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as ChartTooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -686,6 +688,30 @@ const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ p
 };
 
 
+type StockAlertLevel = 'all_zero' | 'has_zero' | 'low' | 'approaching' | 'ok';
+
+function getStockAlertLevel(
+    record: ProductRow,
+    variantMinStocks: Record<string, number>,
+    pausedVariants: Record<string, boolean>,
+): StockAlertLevel {
+    const variants = record.variants.filter(v => !pausedVariants[v.sku]);
+    if (variants.length === 0) return 'ok'; // tất cả đang tạm ngừng → không cảnh báo
+    if (variants.every(v => v.systemStock === 0)) return 'all_zero';
+    if (variants.some(v => v.systemStock === 0)) return 'has_zero';
+    let hasLow = false;
+    let hasApproaching = false;
+    for (const v of variants) {
+        const t = variantMinStocks[v.sku] ?? 0;
+        if (t <= 0) continue;
+        if (v.systemStock <= t) { hasLow = true; break; }
+        if (v.systemStock <= t * 1.5) hasApproaching = true;
+    }
+    if (hasLow) return 'low';
+    if (hasApproaching) return 'approaching';
+    return 'ok';
+}
+
 export default function StockBalancePage() {
     const currentUser = useCurrentUser();
     const { user } = useAuth();
@@ -749,6 +775,50 @@ export default function StockBalancePage() {
     const [quickBalanceItem, setQuickBalanceItem] = useState<StockBalanceItem | null>(null);
     const [searchText, setSearchText] = useState('');
     const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+    const [stockFilter, setStockFilter] = useState<'all' | 'need' | 'low' | 'ok'>('all');
+
+    // Ngưỡng nhập per-variant (lưu trong AppConfig)
+    const [variantMinStocks, setVariantMinStocks] = useState<Record<string, number>>({});
+
+    const loadVariantMinStocks = useCallback(async () => {
+        try {
+            const result = await window.electronAPI.appConfig.get('variantMinStocks');
+            if (result.success && result.data) setVariantMinStocks(result.data);
+        } catch {}
+    }, []);
+
+    const saveVariantMinStock = useCallback(async (sku: string, value: number) => {
+        setVariantMinStocks(prev => {
+            const updated = { ...prev, [sku]: value };
+            window.electronAPI.appConfig.set('variantMinStocks', updated).catch(() => {});
+            return updated;
+        });
+    }, []);
+
+    // Tạm ngừng theo dõi per-variant
+    const [pausedVariants, setPausedVariants] = useState<Record<string, boolean>>({});
+
+    const loadPausedVariants = useCallback(async () => {
+        try {
+            const result = await window.electronAPI.appConfig.get('pausedVariants');
+            if (result.success && result.data) setPausedVariants(result.data);
+        } catch {}
+    }, []);
+
+    const savePausedVariant = useCallback((sku: string, paused: boolean) => {
+        setPausedVariants(prev => {
+            const updated = paused
+                ? { ...prev, [sku]: true }
+                : Object.fromEntries(Object.entries(prev).filter(([k]) => k !== sku));
+            window.electronAPI.appConfig.set('pausedVariants', updated).catch(() => {});
+            return updated;
+        });
+    }, []);
+
+    // Inline edit variant-level ngưỡng (trong Chi tiết expanded row)
+    const [editingVariantMinKey, setEditingVariantMinKey] = useState<string | null>(null);
+    const [editingVariantMinValue, setEditingVariantMinValue] = useState<number>(0);
+    const variantMinSavingRef = useRef(false);
 
     // Sales data for sorting
     const [salesMap, setSalesMap] = useState<Map<string, number>>(new Map());
@@ -878,6 +948,8 @@ export default function StockBalancePage() {
         initData();
         loadBalanceRecords();
         loadConversionRates();
+        loadVariantMinStocks();
+        loadPausedVariants();
     }, []);
 
     // Khi context products thay đổi (sau refresh), cập nhật bảng tồn kho
@@ -1422,10 +1494,32 @@ export default function StockBalancePage() {
             },
         },
         {
+            title: (
+                <Tooltip title="Ngưỡng tối thiểu theo từng màu — mở chi tiết để cài đặt">
+                    <span style={{ cursor: 'help', borderBottom: '1px dashed #d9d9d9' }}>Ngưỡng nhập</span>
+                </Tooltip>
+            ),
+            dataIndex: 'minStock',
+            key: 'minStock',
+            width: 120,
+            align: 'center' as const,
+            render: (_: number, record: ProductRow) => {
+                const setCount = record.variants.filter(v => (variantMinStocks[v.sku] ?? 0) > 0).length;
+                const total = record.variants.length;
+                if (setCount === 0) return <span style={{ color: '#bfbfbf', fontSize: 12 }}>— chưa đặt</span>;
+                const allSet = setCount === total;
+                return (
+                    <span style={{ fontSize: 12, fontWeight: 600, color: allSet ? '#389e0d' : '#d46b08' }}>
+                        {allSet ? `✓ ${total} màu` : `${setCount} / ${total} màu`}
+                    </span>
+                );
+            },
+        },
+        {
             title: 'Tồn kho',
             dataIndex: 'totalSystemStock',
             key: 'totalSystemStock',
-            width: 110,
+            width: 120,
             align: 'center',
             render: (stock: number, record: ProductRow) => {
                 if (!isAdmin) {
@@ -1437,31 +1531,57 @@ export default function StockBalancePage() {
                         </div>
                     );
                 }
-                const isUnderMinStock = stock <= record.minStock;
-                return (
+                const level = getAlertLevel(record);
+                const bgMap: Record<StockAlertLevel, string> = {
+                    all_zero:   'linear-gradient(135deg, #820014 0%, #cf1322 100%)',
+                    has_zero:   'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)',
+                    low:        'linear-gradient(135deg, #d46b08 0%, #fa8c16 100%)',
+                    approaching:'linear-gradient(135deg, #d4a017 0%, #fadb14 100%)',
+                    ok:         'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)',
+                };
+                const subLabelMap: Record<StockAlertLevel, React.ReactNode> = {
+                    all_zero:   <div style={{ fontSize: 10, color: '#820014', fontWeight: 700, background: '#fff1f0', padding: '2px 6px', borderRadius: 4, border: '1px solid #ffa39e' }}>HẾT HÀNG</div>,
+                    has_zero:   <div style={{ fontSize: 10, color: '#cf1322', fontWeight: 700, background: '#fff1f0', padding: '2px 6px', borderRadius: 4, border: '1px solid #ffa39e' }}>Hết {record.variants.filter(v => v.systemStock === 0).length} màu</div>,
+                    low:        <div style={{ fontSize: 10, color: '#d46b08', fontWeight: 700, background: '#fff7e6', padding: '2px 6px', borderRadius: 4, border: '1px solid #ffd591' }}>Dưới ngưỡng nhập</div>,
+                    approaching:<div style={{ fontSize: 10, color: '#876800', fontWeight: 600, background: '#fffbe6', padding: '2px 6px', borderRadius: 4, border: '1px solid #ffe58f' }}>Sắp tới ngưỡng</div>,
+                    ok:         null,
+                };
+                const tooltipContent = record.variants.length > 1 ? (
+                    <div style={{ minWidth: 140 }}>
+                        {record.variants.map(v => (
+                            <div key={v.sku} style={{ display: 'flex', justifyContent: 'space-between', gap: 16, padding: '2px 0' }}>
+                                <span style={{ color: '#d9d9d9' }}>{v.color || v.sku}</span>
+                                <span style={{ fontWeight: 700, color: v.systemStock === 0 ? '#ff7875' : ((variantMinStocks[v.sku] ?? 0) > 0 && v.systemStock <= (variantMinStocks[v.sku] ?? 0)) ? '#ffd591' : '#95de64' }}>
+                                    {v.systemStock === 0 ? 'HẾT' : v.systemStock}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                ) : null;
+                const badge = (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
                         <div style={{
-                            background: isUnderMinStock
-                                ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
-                                : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)',
+                            background: bgMap[level],
                             color: '#fff',
                             padding: '6px 12px',
                             borderRadius: 8,
                             fontWeight: 900,
                             fontSize: 16,
-                            display: 'inline-block',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
                             minWidth: 50,
-                            textAlign: 'center',
+                            justifyContent: 'center',
                         }}>
+                            {(level === 'all_zero' || level === 'has_zero') && <span style={{ fontSize: 12 }}>⚠</span>}
                             {stock}
                         </div>
-                        {isUnderMinStock && (
-                            <div style={{ fontSize: 10, color: '#ff4d4f', fontWeight: 600, background: '#fff1f0', padding: '2px 6px', borderRadius: 4, border: '1px solid #ffa39e' }}>
-                                ⚠️ Sắp hết (Min: {record.minStock})
-                            </div>
-                        )}
+                        {subLabelMap[level]}
                     </div>
                 );
+                return tooltipContent
+                    ? <Tooltip title={tooltipContent} placement="left" color="#1f2937">{badge}</Tooltip>
+                    : badge;
             },
         },
     ];
@@ -1557,10 +1677,23 @@ export default function StockBalancePage() {
         finally { setDrawerLogsLoading(false); }
     };
 
-    // Filter products based on search
-    const filteredProductRows = productRows.filter(row => {
+    const handleSaveVariantMinStock = async (sku: string) => {
+        if (variantMinSavingRef.current) return;
+        variantMinSavingRef.current = true;
+        const newValue = editingVariantMinValue;
+        setEditingVariantMinKey(null);
+        if (newValue !== (variantMinStocks[sku] ?? 0)) {
+            await saveVariantMinStock(sku, newValue);
+            message.success(`Ngưỡng ${sku}: ${newValue === 0 ? 'đã xóa' : newValue}`);
+        }
+        setTimeout(() => { variantMinSavingRef.current = false; }, 300);
+    };
+
+    const getAlertLevel = (record: ProductRow) => getStockAlertLevel(record, variantMinStocks, pausedVariants);
+
+    // Base filter: category + search text
+    const baseFilteredRows = productRows.filter(row => {
         if (selectedCategory && row.categoryName !== selectedCategory) return false;
-        
         if (!searchText.trim()) return true;
         const search = searchText.toLowerCase();
         return (
@@ -1571,6 +1704,19 @@ export default function StockBalancePage() {
             )
         );
     });
+
+    const stockFilterCounts = {
+        need: baseFilteredRows.filter(r => { const l = getAlertLevel(r); return l === 'all_zero' || l === 'has_zero' || l === 'low'; }).length,
+        low:  baseFilteredRows.filter(r => getAlertLevel(r) === 'approaching').length,
+        ok:   baseFilteredRows.filter(r => getAlertLevel(r) === 'ok').length,
+    };
+
+    const filteredProductRows = (() => {
+        if (stockFilter === 'all')  return baseFilteredRows;
+        if (stockFilter === 'need') return baseFilteredRows.filter(r => { const l = getAlertLevel(r); return l === 'all_zero' || l === 'has_zero' || l === 'low'; });
+        if (stockFilter === 'low')  return baseFilteredRows.filter(r => getAlertLevel(r) === 'approaching');
+        return baseFilteredRows.filter(r => getAlertLevel(r) === 'ok');
+    })();
 
     // Inject search + button into app header
     useEffect(() => {
@@ -1611,6 +1757,48 @@ export default function StockBalancePage() {
             <div>
 
             <Card>
+                {/* ── Stock filter bar ── */}
+                <div style={{ marginBottom: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {([
+                        { key: 'all',  label: 'Tất cả',       count: baseFilteredRows.length,  color: '#1677ff', bg: '#e6f4ff'  },
+                        { key: 'need', label: '⚠ Cần nhập',   count: stockFilterCounts.need,   color: '#cf1322', bg: '#fff1f0'  },
+                        { key: 'low',  label: '🟡 Sắp hết',   count: stockFilterCounts.low,    color: '#d46b08', bg: '#fff7e6'  },
+                        { key: 'ok',   label: '✓ Bình thường', count: stockFilterCounts.ok,     color: '#389e0d', bg: '#f6ffed'  },
+                    ] as const).map(tab => (
+                        <button
+                            key={tab.key}
+                            onClick={() => setStockFilter(tab.key)}
+                            style={{
+                                border: `1.5px solid ${stockFilter === tab.key ? tab.color : '#d9d9d9'}`,
+                                background: stockFilter === tab.key ? tab.bg : '#fff',
+                                color: stockFilter === tab.key ? tab.color : '#595959',
+                                borderRadius: 6,
+                                padding: '4px 14px',
+                                cursor: 'pointer',
+                                fontWeight: stockFilter === tab.key ? 700 : 400,
+                                fontSize: 13,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 6,
+                                transition: 'all 0.15s',
+                            }}
+                        >
+                            {tab.label}
+                            <span style={{
+                                background: stockFilter === tab.key ? tab.color : '#f0f0f0',
+                                color: stockFilter === tab.key ? '#fff' : '#595959',
+                                borderRadius: 10,
+                                padding: '0 7px',
+                                fontSize: 11,
+                                fontWeight: 700,
+                                minWidth: 20,
+                                textAlign: 'center',
+                            }}>
+                                {tab.count}
+                            </span>
+                        </button>
+                    ))}
+                </div>
                 <Table
                     columns={productColumns}
                     dataSource={filteredProductRows}
@@ -1697,6 +1885,9 @@ export default function StockBalancePage() {
                                                                             <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 80 }}>
                                                                                 📦 Tồn kho
                                                                             </th>
+                                                                            <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 110 }}>
+                                                                                🔔 Ngưỡng nhập
+                                                                            </th>
                                                                         </tr>
                                                                     </thead>
                                                                     <tbody>
@@ -1741,21 +1932,71 @@ export default function StockBalancePage() {
                                                                                             <div style={{ background: '#d9d9d9', color: '#595959', padding: '6px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 14, display: 'inline-block', minWidth: 45 }}>
                                                                                                 ***
                                                                                             </div>
+                                                                                        ) : (() => {
+                                                                                            const vt = variantMinStocks[v.sku] ?? 0;
+                                                                                            const isPaused = !!pausedVariants[v.sku];
+                                                                                            const bg = isPaused
+                                                                                                ? '#d9d9d9'
+                                                                                                : v.systemStock === 0
+                                                                                                    ? 'linear-gradient(135deg, #820014 0%, #cf1322 100%)'
+                                                                                                    : vt > 0 && v.systemStock <= vt
+                                                                                                        ? 'linear-gradient(135deg, #d46b08 0%, #fa8c16 100%)'
+                                                                                                        : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)';
+                                                                                            return (
+                                                                                                <div style={{ background: bg, color: isPaused ? '#8c8c8c' : '#fff', padding: '6px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 14, display: 'inline-block', minWidth: 45 }}>
+                                                                                                    {v.systemStock}
+                                                                                                </div>
+                                                                                            );
+                                                                                        })()}
+                                                                                    </td>
+                                                                                    <td style={{ padding: '10px 8px', textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                                                                                        {pausedVariants[v.sku] ? (
+                                                                                            <Tooltip title="Đang tạm ngừng theo dõi — click để bật lại">
+                                                                                                <div
+                                                                                                    onClick={() => savePausedVariant(v.sku, false)}
+                                                                                                    style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 10px', borderRadius: 5, background: '#f5f5f5', border: '1px solid #d9d9d9', color: '#8c8c8c', fontSize: 11, fontWeight: 600, transition: 'background 0.15s' }}
+                                                                                                    onMouseEnter={e => (e.currentTarget.style.background = '#e8e8e8')}
+                                                                                                    onMouseLeave={e => (e.currentTarget.style.background = '#f5f5f5')}
+                                                                                                >
+                                                                                                    ⏸ Tạm ngừng
+                                                                                                </div>
+                                                                                            </Tooltip>
+                                                                                        ) : editingVariantMinKey === v.sku ? (
+                                                                                            <InputNumber
+                                                                                                autoFocus
+                                                                                                min={0}
+                                                                                                value={editingVariantMinValue}
+                                                                                                onChange={(val) => setEditingVariantMinValue(val ?? 0)}
+                                                                                                onPressEnter={() => handleSaveVariantMinStock(v.sku)}
+                                                                                                onBlur={() => handleSaveVariantMinStock(v.sku)}
+                                                                                                style={{ width: 75 }}
+                                                                                                size="small"
+                                                                                            />
                                                                                         ) : (
-                                                                                            <div style={{
-                                                                                                background: v.systemStock <= record.minStock
-                                                                                                    ? 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)'
-                                                                                                    : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)',
-                                                                                                color: '#fff',
-                                                                                                padding: '6px 10px',
-                                                                                                borderRadius: 6,
-                                                                                                textAlign: 'center',
-                                                                                                fontWeight: 900,
-                                                                                                fontSize: 14,
-                                                                                                display: 'inline-block',
-                                                                                                minWidth: 45,
-                                                                                            }}>
-                                                                                                {v.systemStock}
+                                                                                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                                                                                <div
+                                                                                                    onClick={() => { setEditingVariantMinKey(v.sku); setEditingVariantMinValue(variantMinStocks[v.sku] ?? 0); }}
+                                                                                                    style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 5, transition: 'background 0.15s' }}
+                                                                                                    onMouseEnter={e => (e.currentTarget.style.background = '#f0f0f0')}
+                                                                                                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                                                                                                >
+                                                                                                    {(variantMinStocks[v.sku] ?? 0) > 0 ? (
+                                                                                                        <>
+                                                                                                            <span style={{ fontWeight: 700, color: '#d46b08', fontFamily: 'monospace', fontSize: 13 }}>{variantMinStocks[v.sku]}</span>
+                                                                                                            <EditOutlined style={{ fontSize: 10, color: '#bfbfbf' }} />
+                                                                                                        </>
+                                                                                                    ) : (
+                                                                                                        <span style={{ color: '#bfbfbf', fontSize: 11 }}>— đặt</span>
+                                                                                                    )}
+                                                                                                </div>
+                                                                                                <Tooltip title="Tạm ngừng theo dõi SKU này">
+                                                                                                    <span
+                                                                                                        onClick={() => savePausedVariant(v.sku, true)}
+                                                                                                        style={{ cursor: 'pointer', fontSize: 13, color: '#d9d9d9', padding: '1px 3px', borderRadius: 3, lineHeight: 1, transition: 'color 0.15s' }}
+                                                                                                        onMouseEnter={e => ((e.currentTarget as HTMLElement).style.color = '#8c8c8c')}
+                                                                                                        onMouseLeave={e => ((e.currentTarget as HTMLElement).style.color = '#d9d9d9')}
+                                                                                                    >⏸</span>
+                                                                                                </Tooltip>
                                                                                             </div>
                                                                                         )}
                                                                                     </td>

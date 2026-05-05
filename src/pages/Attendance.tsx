@@ -1821,7 +1821,7 @@ export default function Attendance() {
     const { user } = useAuth();
     const currentUser = useCurrentUser();
     const isAdmin = currentUser === 'admin';
-    const canManageBonuses = isAdmin || user?.role === 'manager';
+    const canManageBonuses = isAdmin;
     const [configModalOpen, setConfigModalOpen] = useState(false);
     const [activeConfigTab, setActiveConfigTab] = useState('rules');
     const [payslipModal, setPayslipModal] = useState<any>(null);
@@ -2666,6 +2666,28 @@ export default function Attendance() {
         overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, payrollOverrides
     ), [overviewFines, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, payrollOverrides]);
 
+    const canViewAllPayroll = isAdmin;
+    const isCurrentUserPayrollRow = useCallback((row: { username?: string; name?: string }) => {
+        if (canViewAllPayroll) return true;
+        const rowUsername = normalizeAttendanceText(row.username || '');
+        const loginUsername = normalizeAttendanceText(user?.username || currentUser || '');
+        const loginFullName = normalizeAttendanceText(user?.fullName || '');
+        const rowName = normalizeAttendanceText(row.name || '');
+
+        return Boolean(
+            (rowUsername && loginUsername && (
+                rowUsername === loginUsername ||
+                rowUsername.endsWith(loginUsername) ||
+                loginUsername.endsWith(rowUsername)
+            )) ||
+            (rowName && loginFullName && rowName === loginFullName)
+        );
+    }, [canViewAllPayroll, currentUser, user?.fullName, user?.username]);
+    const privatePayrollData = useMemo(
+        () => payrollData.filter(isCurrentUserPayrollRow),
+        [payrollData, isCurrentUserPayrollRow]
+    );
+
     // Totals cho Overview
     const totals = useMemo(() => {
         let tSal = 0, tPack = 0, tBonus = 0;
@@ -3093,7 +3115,7 @@ export default function Attendance() {
     const renderOverview = () => (
         <div className="att-table-card">
             <Table
-                dataSource={payrollData.map(d => ({ ...d, key: d.id }))}
+                dataSource={privatePayrollData.map(d => ({ ...d, key: d.id }))}
                 pagination={false}
                 size="middle"
                 scroll={{ x: 1050 }}
@@ -3500,7 +3522,14 @@ export default function Attendance() {
         const auditColorMap: Record<string, string> = { create: 'green', edit: 'blue', delete: 'red' };
         const auditLabelMap: Record<string, string> = { create: 'Thêm', edit: 'Sửa', delete: 'Xóa' };
 
-        const bonusTabsItems = payrollData.map(emp => {
+        const visibleBonusAuditLog = canViewAllPayroll
+            ? bonusAuditLog
+            : bonusAuditLog.filter(log => {
+                const empId = log.after?.empId ?? log.before?.empId;
+                return empId !== undefined && privatePayrollData.some(emp => emp.id === empId);
+            });
+
+        const bonusTabsItems = privatePayrollData.map(emp => {
             const empBonusRows: any[] = [];
             overviewBonuses.filter(b => b.empId === emp.id).forEach((b) => {
                 empBonusRows.push({ key: `bonus-${b.id}`, name: emp.name, source: b.type, sourceColor: 'blue', detail: b.detail, amount: b.amount, isManual: true, bonusRef: b });
@@ -3601,7 +3630,7 @@ export default function Attendance() {
                         borderBottom: '1px solid #bae0ff'
                     }}>
                         <Tabs
-                            defaultActiveKey={payrollData[0] ? String(payrollData[0].id) : "1"}
+                            defaultActiveKey={privatePayrollData[0] ? String(privatePayrollData[0].id) : "1"}
                             items={bonusTabsItems}
                             type="line"
                             tabBarStyle={{ margin: 0, border: 'none' }}
@@ -3609,15 +3638,15 @@ export default function Attendance() {
                         />
                     </div>
                 </Card>
-                {bonusAuditLog.length > 0 && (
+                {visibleBonusAuditLog.length > 0 && (
                     <Card
                         bodyStyle={{ padding: 0 }}
                         style={{ borderTop: '3px solid #faad14' }}
-                        title={<Space><HistoryOutlined style={{ color: '#faad14' }} /><Text strong>Lịch sử chỉnh sửa thưởng</Text><Tag color="gold">{bonusAuditLog.length} thao tác</Tag></Space>}
+                        title={<Space><HistoryOutlined style={{ color: '#faad14' }} /><Text strong>Lịch sử chỉnh sửa thưởng</Text><Tag color="gold">{visibleBonusAuditLog.length} thao tác</Tag></Space>}
                     >
                         <Table
-                            dataSource={[...bonusAuditLog].reverse().map(l => ({ ...l, key: l.id }))}
-                            pagination={bonusAuditLog.length > 5 ? { pageSize: 5, size: 'small' } : false}
+                            dataSource={[...visibleBonusAuditLog].reverse().map(l => ({ ...l, key: l.id }))}
+                            pagination={visibleBonusAuditLog.length > 5 ? { pageSize: 5, size: 'small' } : false}
                             size="small"
                             columns={[
                                 { title: 'Thời gian', dataIndex: 'timestamp', key: 'ts', width: 150, render: (t: string) => <Text type="secondary" style={{ fontSize: 11 }}>{t}</Text> },

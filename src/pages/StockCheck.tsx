@@ -36,8 +36,6 @@ const LS_KEY = 'stock-check-sessions-v2';
 const DB_KEY = 'stockCheckSessionsV2';
 const DAILY_TOP_ROTATION_COUNT = 2;
 const DAILY_RANDOM_COUNT = 4;
-const SATURDAY_TOP_COUNT = 6;
-const SATURDAY_RANDOM_COUNT = 5;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -250,7 +248,7 @@ export default function StockCheck() {
 
     const loadTopSellingProducts = useCallback(async (): Promise<TopSellingProduct[]> => {
         try {
-            const result = await window.electronAPI.products.getTopSelling?.({ limit: SATURDAY_TOP_COUNT });
+            const result = await window.electronAPI.products.getTopSelling?.({ limit: DAILY_TOP_ROTATION_COUNT });
             if (result?.success && result.data) {
                 setTopSellingProducts(result.data);
                 return result.data;
@@ -642,13 +640,6 @@ export default function StockCheck() {
         return [...requiredProducts, ...getRandomProducts(requiredProducts, randomCount)];
     };
 
-    const buildSaturdayProductPool = (rankedProducts: TopSellingProduct[]) => {
-        const topProducts = getTopProducts(rankedProducts, SATURDAY_TOP_COUNT);
-        const randomCount = SATURDAY_RANDOM_COUNT + Math.max(0, SATURDAY_TOP_COUNT - topProducts.length);
-
-        return [...topProducts, ...getRandomProducts(topProducts, randomCount)];
-    };
-
     useEffect(() => {
         if (!sessions.length || !contextProducts.length) return;
         const stockBySku = buildStockBySku(contextProducts);
@@ -715,9 +706,7 @@ export default function StockCheck() {
         const useFullInventory = activeTab === 'full';
         const pool = useFullInventory
             ? [...contextProducts]
-            : weekend
-                ? buildSaturdayProductPool(rankedProducts)
-                : buildDailyProductPool(rankedProducts);
+            : buildDailyProductPool(rankedProducts);
         const items = pool.flatMap((p: any) => expandToVariants(p));
         if (!items.length) { message.error('Không có sản phẩm.'); return; }
         // Giữ người phụ trách đã được gán trước đó (pre-assign), nếu có
@@ -730,7 +719,7 @@ export default function StockCheck() {
             return;
         }
         const sessionId = activeTab === 'full' ? `${todayStr}-full` : todayStr;
-        const sessionType: CheckSession['type'] = activeTab === 'full' ? 'full' : weekend ? 'weekend' : 'daily';
+        const sessionType: CheckSession['type'] = activeTab === 'full' ? 'full' : 'daily';
         const session: CheckSession = {
             id: sessionId, date: todayStr, type: sessionType,
             assignedTo: assignee.username, assignedName: assignee.username,
@@ -1514,7 +1503,7 @@ export default function StockCheck() {
                             )}
                         </div>
 
-                        {weekend && <Tag color="orange">📅 Cuối tuần — toàn bộ SP</Tag>}
+                        {weekend && <Tag color="orange">📅 Thứ 7 — kiểm hàng ngày</Tag>}
                     </div>
                 </div>
 
@@ -2086,9 +2075,7 @@ export default function StockCheck() {
                                         <div style={{ fontSize: 13, marginBottom: 24 }}>
                                             {activeTab === 'full'
                                                 ? 'Kiểm toàn bộ sản phẩm.'
-                                                : weekend
-                                                    ? `Thứ 7: ${SATURDAY_TOP_COUNT} sản phẩm bán chạy + ${SATURDAY_RANDOM_COUNT} sản phẩm ngẫu nhiên.`
-                                                    : `${DAILY_TOP_ROTATION_COUNT + DAILY_RANDOM_COUNT} sản phẩm luân phiên & ngẫu nhiên.`}
+                                                : `${DAILY_TOP_ROTATION_COUNT + DAILY_RANDOM_COUNT} sản phẩm luân phiên & ngẫu nhiên.`}
                                         </div>
                                     </>
                                 ) : (
@@ -2099,9 +2086,7 @@ export default function StockCheck() {
                                         <div style={{ fontSize: 13, marginBottom: 24 }}>
                                             {activeTab === 'full'
                                                 ? 'Phiên này sẽ kiểm toàn bộ sản phẩm.'
-                                                : weekend
-                                                    ? `Thứ 7: ${SATURDAY_TOP_COUNT} sản phẩm bán chạy + ${SATURDAY_RANDOM_COUNT} sản phẩm ngẫu nhiên.`
-                                                    : `Mỗi ngày: 1 trong top ${DAILY_TOP_ROTATION_COUNT} bán chạy luân phiên + ${DAILY_RANDOM_COUNT} sản phẩm ngẫu nhiên.`}
+                                                : `Mỗi ngày: 1 trong top ${DAILY_TOP_ROTATION_COUNT} bán chạy luân phiên + ${DAILY_RANDOM_COUNT} sản phẩm ngẫu nhiên.`}
                                         </div>
                                     </>
                                 )}
