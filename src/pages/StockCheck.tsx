@@ -113,6 +113,15 @@ interface InventoryLogItem {
 
 type ProductTabKey = 'check' | 'ledger' | 'conversion';
 
+const normalizeUserText = (value?: string) =>
+    (value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+
+const isStockCheckAssignee = (user: StaffUser) =>
+    user.isActive !== false &&
+    user.role === 'manager' &&
+    user.username.toLowerCase() !== 'admin' &&
+    normalizeUserText(user.fullName) !== 'nhan vien';
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function loadLocalSessions(): CheckSession[] {
@@ -490,7 +499,7 @@ export default function StockCheck() {
             const res = await window.electronAPI.users.getAll();
             if (res?.success && res?.data) {
                 setStaffList((res.data as StaffUser[])
-                    .filter(u => u.isActive !== false && (u.role === 'manager' || u.role === 'admin' || u.role === 'staff'))
+                    .filter(isStockCheckAssignee)
                     .sort((a, b) => a.username.localeCompare(b.username, 'vi')));
             }
         } catch { /* optional */ }
@@ -580,7 +589,7 @@ export default function StockCheck() {
 
     const assignableManagers = useMemo(() =>
         staffList
-            .filter(s => s.isActive !== false && s.role === 'manager' && s.username.toLowerCase() !== 'admin')
+            .filter(isStockCheckAssignee)
             .sort((a, b) => a.username.localeCompare(b.username, 'vi')),
         [staffList]
     );
@@ -673,7 +682,13 @@ export default function StockCheck() {
         if (!sessionsLoaded || !isToday || activeTab !== 'daily' || !assignableManagers.length) return;
         if (dayjs().day() === 0) return; // Chủ nhật — không kiểm
         const current = sessions;
-        if (current.some(s => s.date === todayStr && s.type !== 'full')) return;
+        const existingDailySession = current.find(s => s.date === todayStr && s.type !== 'full');
+        if (existingDailySession) {
+            const validExistingAssignee = assignableManagers.some(m =>
+                m.username.toLowerCase() === existingDailySession.assignedTo?.toLowerCase()
+            );
+            if (validExistingAssignee) return;
+        }
 
         const previousSession = current
             .filter(s => s.date !== todayStr && assignableManagers.some(m => m.username.toLowerCase() === s.assignedTo?.toLowerCase()))
@@ -682,6 +697,15 @@ export default function StockCheck() {
         const assignee = previousSession
             ? assignableManagers[(assignableManagers.findIndex(m => m.username.toLowerCase() === previousSession.assignedTo?.toLowerCase()) + 1) % assignableManagers.length]
             : assignableManagers[0];
+
+        if (existingDailySession) {
+            persistSessions(current.map(s =>
+                s.id === existingDailySession.id
+                    ? { ...s, assignedTo: assignee.username, assignedName: assignee.username }
+                    : s
+            ));
+            return;
+        }
 
         const preSession: CheckSession = {
             id: todayStr, date: todayStr, type: 'daily',
@@ -1016,6 +1040,10 @@ export default function StockCheck() {
 
     const handleOverrideStaff = () => {
         if (!todaySession || !selectedStaffUsername || isLockedDate) return;
+        if (!assignableManagers.some(s => s.username === selectedStaffUsername)) {
+            message.warning('Chi duoc chon user vai tro Quan ly lam nguoi phu trach kiem hang.');
+            return;
+        }
         persistSessions(sessions.map(s =>
             s.id === todaySessionId ? { ...s, assignedTo: selectedStaffUsername, assignedName: selectedStaffUsername } : s
         ));
@@ -2110,9 +2138,7 @@ export default function StockCheck() {
                 okText="Lưu" cancelText="Hủy" width={360}>
                 <Select showSearch value={selectedStaffUsername} onChange={setSelectedStaffUsername}
                     style={{ width: '100%' }}
-                    options={staffList
-                        .filter(s => (s.role === 'admin' || s.role === 'manager') && s.username !== 'admin')
-                        .map(s => ({ value: s.username, label: s.username }))} />
+                    options={assignableManagers.map(s => ({ value: s.username, label: s.username }))} />
             </Modal>
 
             {/* ── Conversion Modal ── */}

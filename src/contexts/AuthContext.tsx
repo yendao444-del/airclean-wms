@@ -12,7 +12,7 @@ interface User {
 interface AuthContextType {
     user: User | null;
     isAuthenticated: boolean;
-    login: (username: string, password: string, rememberMe?: boolean) => Promise<boolean>;
+    login: (username: string, password: string, rememberMe?: boolean) => Promise<{ success: boolean; error?: string }>;
     logout: () => void;
 }
 
@@ -63,12 +63,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         window.electronAPI.users.logout().catch(() => {});
     };
 
-    const login = async (username: string, password: string): Promise<boolean> => {
+    const login = async (username: string, password: string): Promise<{ success: boolean; error?: string }> => {
         try {
             const result = await window.electronAPI.users.login(username, password);
 
             if (!result.success || !result.data) {
-                return false;
+                return { success: false, error: result.error || 'Tên đăng nhập hoặc mật khẩu không đúng!' };
             }
 
             const foundUser = result.data;
@@ -84,10 +84,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
 
             setUser(userWithoutPassword);
-            return true;
+            return { success: true };
         } catch (error) {
             console.error('Login error:', error);
-            return false;
+            return { success: false, error: 'Đã xảy ra lỗi khi đăng nhập!' };
         }
     };
 

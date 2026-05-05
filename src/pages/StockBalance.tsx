@@ -689,6 +689,7 @@ const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ p
 
 
 type StockAlertLevel = 'all_zero' | 'has_zero' | 'low' | 'approaching' | 'ok';
+const STOCK_APPROACHING_BUFFER_RATIO = 0.1;
 
 function getStockAlertLevel(
     record: ProductRow,
@@ -705,7 +706,7 @@ function getStockAlertLevel(
         const t = variantMinStocks[v.sku] ?? 0;
         if (t <= 0) continue;
         if (v.systemStock <= t) { hasLow = true; break; }
-        if (v.systemStock <= t * 1.5) hasApproaching = true;
+        if (v.systemStock <= Math.ceil(t * (1 + STOCK_APPROACHING_BUFFER_RATIO))) hasApproaching = true;
     }
     if (hasLow) return 'low';
     if (hasApproaching) return 'approaching';

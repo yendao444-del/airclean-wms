@@ -34,6 +34,9 @@ export type Permission =
     | 'combos.delete'
 
     | 'fee-calculator'
+    | 'order-picking'
+    | 'daily-tasks'
+    | 'business-report'
     | 'reports'
     | 'history'
     | 'permissions'
@@ -74,6 +77,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'combos.delete',
 
         'fee-calculator',
+        'order-picking',
+        'daily-tasks',
         'reports',
         'history',
         'settings',
@@ -82,26 +87,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     ],
 
     staff: [
-        'pos',
-        'orders',
-        'products.view',
-        'products.create',
-        'products.update',
-        'purchase.view',
-        'purchase.create',
-        'export.view',
-        'export.create',
-        'returns.view',
-        'returns.create',
-        'combos.view',
-        'combos.create',
-        'einvoice.view',
-        'stock-balance.view',
-        'stock-check.view',
-        'stock-check.create',
-
-        'fee-calculator',
-        'settings',
+        'daily-tasks',
         'attendance',
     ],
 
@@ -113,6 +99,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'refunds.view',
         'stock-balance.view',
         'history',
+        'daily-tasks',
         'settings',
         'attendance',
     ],
@@ -200,10 +187,14 @@ export function getAccessibleMenuKeys(role: Role | undefined): string[] {
             'stock-balance',
             'stock-check',
             'combos',
+            'order-picking',
+            'daily-tasks',
+            'business-report',
             'reports',
             'history',
             'permissions',
             'settings',
+            'attendance',
         ];
     }
 

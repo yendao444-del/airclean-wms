@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Form, Input, Button, Card, Typography, message } from 'antd';
+import { Form, Input, Button, Card, Typography, message, Alert } from 'antd';
 import { UserOutlined, LockOutlined, LoginOutlined } from '@ant-design/icons';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -7,21 +7,27 @@ const { Title, Text } = Typography;
 
 export default function Login() {
     const [loading, setLoading] = useState(false);
+    const [loginError, setLoginError] = useState<string | null>(null);
     const { login } = useAuth();
     const [form] = Form.useForm();
 
     const handleLogin = async (values: { username: string; password: string }) => {
         setLoading(true);
+        setLoginError(null);
         try {
-            const success = await login(values.username, values.password);
+            const result = await login(values.username, values.password);
 
-            if (success) {
+            if (result.success) {
                 message.success('Đăng nhập thành công!');
             } else {
-                message.error('Tên đăng nhập hoặc mật khẩu không đúng!');
+                const errorText = result.error || 'Tên đăng nhập hoặc mật khẩu không đúng!';
+                setLoginError(errorText);
+                message.error(errorText);
             }
         } catch (error) {
-            message.error('Đã xảy ra lỗi!');
+            const errorText = 'Đã xảy ra lỗi khi đăng nhập!';
+            setLoginError(errorText);
+            message.error(errorText);
         } finally {
             setLoading(false);
         }
@@ -105,8 +111,18 @@ export default function Login() {
                     form={form}
                     layout="vertical"
                     onFinish={handleLogin}
+                    onValuesChange={() => setLoginError(null)}
                     size="large"
                 >
+                    {loginError && (
+                        <Alert
+                            type="error"
+                            showIcon
+                            message={loginError}
+                            style={{ marginBottom: 16, borderRadius: 8 }}
+                        />
+                    )}
+
                     <Form.Item
                         name="username"
                         rules={[{ required: true, message: 'Vui lòng nhập tên đăng nhập!' }]}

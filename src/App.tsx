@@ -111,24 +111,30 @@ function AppContent() {
 
     // Filter menu items based on user permissions
     const accessibleKeys = getAccessibleMenuKeys();
+    const canAccessKey = (key: string) => accessibleKeys.includes(key);
+    const navigateTo = (key: string) => {
+        if (canAccessKey(key)) {
+            setSelectedKey(key);
+        }
+    };
 
     // Redirect về trang đầu tiên có quyền khi user không có quyền xem dashboard
     useEffect(() => {
-        if (user && !accessibleKeys.includes('dashboard')) {
+        if (user && !canAccessKey(selectedKey)) {
             const firstAccessible = accessibleKeys[0];
             if (firstAccessible) setSelectedKey(firstAccessible);
         }
-    }, [user]);
+    }, [user, selectedKey, accessibleKeys]);
 
     // Lắng nghe sự kiện navigate từ các component không có state selectedKey
     useEffect(() => {
         const handleNavigate = (e: Event) => {
             const customEvent = e as CustomEvent;
-            if (customEvent.detail) setSelectedKey(customEvent.detail);
+            if (customEvent.detail) navigateTo(customEvent.detail);
         };
         window.addEventListener('navigate', handleNavigate);
         return () => window.removeEventListener('navigate', handleNavigate);
-    }, []);
+    }, [accessibleKeys]);
 
     const createMenuItem = (
         label: React.ReactNode,
@@ -178,14 +184,18 @@ function AppContent() {
         }
 
         // 📋 Đơn hàng - module độc lập
-        items.push(createMenuItem('Đơn hàng', 'orders', <OrderedListOutlined />));
+        if (accessibleKeys.includes('orders')) {
+            items.push(createMenuItem('Đơn hàng', 'orders', <OrderedListOutlined />));
+        }
 
         // Tools submenu
         const toolsChildren: MenuItem[] = [];
         if (accessibleKeys.includes('fee-calculator') && hasPermission('permissions')) {
             toolsChildren.push(createMenuItem('Tính phí sản', 'fee-calculator', <CalculatorOutlined />));
         }
-        toolsChildren.push(createMenuItem('Nhặt hàng', 'order-picking', <ScanOutlined />));
+        if (accessibleKeys.includes('order-picking')) {
+            toolsChildren.push(createMenuItem('Nhặt hàng', 'order-picking', <ScanOutlined />));
+        }
         if (toolsChildren.length > 0) {
             items.push(createMenuItem('Công cụ hỗ trợ', 'tools', <ToolOutlined />, toolsChildren));
         }
@@ -231,7 +241,7 @@ function AppContent() {
         if (accessibleKeys.includes('ecommerce-export')) {
             ecommerceChildren.push(createMenuItem('Xuất hàng TMDT', 'ecommerce-export', <SendOutlined />));
         }
-        if (hasPermission('permissions')) {
+        if (accessibleKeys.includes('einvoice')) {
             ecommerceChildren.push(createMenuItem('Xuất HĐĐT', 'einvoice', <FileTextOutlined />));
         }
         if (ecommerceChildren.length > 0) {
@@ -241,15 +251,19 @@ function AppContent() {
 
 
         // Báo cáo kinh doanh (Admin only)
-        if (hasPermission('permissions')) {
+        if (accessibleKeys.includes('business-report')) {
             items.push(createMenuItem('Báo cáo kinh doanh', 'business-report', <LineChartOutlined />));
         }
 
         // Daily Tasks
-        items.push(createMenuItem('Công việc hàng ngày', 'daily-tasks', <CheckCircleOutlined />));
+        if (accessibleKeys.includes('daily-tasks')) {
+            items.push(createMenuItem('Công việc hàng ngày', 'daily-tasks', <CheckCircleOutlined />));
+        }
 
         // Bảng công (Public)
-        items.push(createMenuItem('Bảng công', 'attendance', <ScheduleOutlined />));
+        if (accessibleKeys.includes('attendance')) {
+            items.push(createMenuItem('Bảng công', 'attendance', <ScheduleOutlined />));
+        }
 
         // Settings
         if (accessibleKeys.includes('settings')) {
@@ -282,10 +296,14 @@ function AppContent() {
     }, []);
 
     const handleMenuClick: MenuProps['onClick'] = (e) => {
-        setSelectedKey(e.key);
+        navigateTo(e.key);
     };
 
     const renderContent = () => {
+        if (!canAccessKey(selectedKey)) {
+            return null;
+        }
+
         switch (selectedKey) {
             case 'dashboard':
                 return <DashboardPage />;
@@ -392,10 +410,10 @@ function AppContent() {
                             { key: 'order-picking', icon: <ScanOutlined style={{ fontSize: 16 }} />, label: 'Nhặt hàng' },
                             { key: 'stock-check', icon: <AuditOutlined style={{ fontSize: 16 }} />, label: 'Kiểm hàng' },
                             { key: 'ecommerce-export', icon: <SendOutlined style={{ fontSize: 15 }} />, label: 'Xuất hàng TMDT' },
-                        ] as const).map(btn => (
+                        ] as const).filter(btn => canAccessKey(btn.key)).map(btn => (
                             <Tooltip key={btn.key} title={btn.label} placement="bottom">
                                 <div
-                                    onClick={() => setSelectedKey(btn.key)}
+                                    onClick={() => navigateTo(btn.key)}
                                     style={{
                                         width: 32, height: 32, borderRadius: '50%',
                                         background: selectedKey === btn.key ? '#e6f4ff' : '#f4f4f5',
@@ -519,7 +537,7 @@ function AppContent() {
                                     {headerExtra}
                                 </div>
                             )}
-                            <HeaderTaskTicker onNavigate={(key) => setSelectedKey(key)} />
+                            <HeaderTaskTicker onNavigate={(key) => navigateTo(key)} />
                         </Header>
 
                         <Content
