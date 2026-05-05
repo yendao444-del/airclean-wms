@@ -76,7 +76,6 @@
       "!**/test/**",
       "!**/tests/**",
       "!**/__tests__/**",
-      ".env"
     ],
     "extraResources": [
       {

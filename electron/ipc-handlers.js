@@ -2964,8 +2964,8 @@ ipcMain.handle('purchases:delete', async (event, id) => {
 // ========================================
 
 // Config riêng cho module HĐ VAT nhập hàng
-const VAT_TELEGRAM_BOT = '***REDACTED_VAT_TELEGRAM_TOKEN***';
-const VAT_TELEGRAM_CHAT = '1397184795';
+const VAT_TELEGRAM_BOT = config.VAT_TELEGRAM_BOT;
+const VAT_TELEGRAM_CHAT = config.VAT_TELEGRAM_CHAT;
 const VAT_DRIVE_FOLDER_NAME = 'LUUTRU-HOADONVAT';
 let vatDriveFolderId = null; // Cache folder ID
 

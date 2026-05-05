@@ -8,8 +8,7 @@ const url = require('url');
 const fs = require('fs');
 const path = require('path');
 
-const CLIENT_ID     = '470025984975-s63vgvnb1ds58fmagk9iqq0f9ufhkktr.apps.googleusercontent.com';
-const CLIENT_SECRET = '***REDACTED_OAUTH_SECRET***';
+const { OAUTH_CLIENT_ID: CLIENT_ID, OAUTH_CLIENT_SECRET: CLIENT_SECRET } = require('./electron/config');
 const REDIRECT_URI  = 'http://localhost:3456/callback';
 const TOKEN_PATH    = path.join(__dirname, 'electron', 'gdrive-token.json');
 

@@ -33,6 +33,10 @@ dev.db
 
 electron/gdrive-credentials.json
 electron/gdrive-token.json
+
+# SQLite databases (không commit dữ liệu thật)
+prisma/*.db
+prisma/*.backup*.db
 python/.build-venv/
 python/.face-build-python.txt
 python/build/
