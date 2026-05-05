@@ -61,6 +61,11 @@ echo.
 
 echo [3/6] Copy code into local release folder for quick verification...
 echo ----------------------------------------
+:: Kill Electron/app neu dang chay (tranh lock file DLL)
+taskkill /F /IM electron.exe >nul 2>&1
+taskkill /F /IM "DBY POS.exe" >nul 2>&1
+timeout /t 2 /nobreak >nul
+
 if not exist "release4\win-unpacked\resources\app" (
     echo [WARN] release4\win-unpacked\resources\app not found. Skip local release sync.
     goto :skip_copy_local
