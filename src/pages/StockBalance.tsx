@@ -718,7 +718,7 @@ export default function StockBalancePage() {
     const isAdmin = user?.role === 'admin';
     
     const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
-    const { products: contextProducts, ecomExports: contextEcomExports } = useAppData();
+    const { products: contextProducts, ecomExports: contextEcomExports, loading: appDataLoading, refresh: refreshAppData } = useAppData();
     const [products, setProducts] = useState<Product[]>([]);
     const [balanceItems, setBalanceItems] = useState<StockBalanceItem[]>([]);
     const [productRows, setProductRows] = useState<ProductRow[]>([]);
@@ -823,6 +823,7 @@ export default function StockBalancePage() {
     // Sales data for sorting
     const [salesMap, setSalesMap] = useState<Map<string, number>>(new Map());
     const productsRef = useRef<any[]>([]); // ref để background task dùng được
+    const fallbackProductsLoadTriedRef = useRef(false);
 
     // Statistics
     const [stats, setStats] = useState({
@@ -956,24 +957,32 @@ export default function StockBalancePage() {
     useEffect(() => {
         if (contextProducts.length > 0) {
             const prods = contextProducts as unknown as Product[];
+            fallbackProductsLoadTriedRef.current = false;
             productsRef.current = prods;
             setProducts(prods);
             generateBalanceItems(prods, salesMap);
+            setLoading(false);
+        } else if (appDataLoading) {
+            setLoading(true);
+        } else {
+            void loadProducts();
         }
-    }, [contextProducts]);
+    }, [contextProducts, appDataLoading]);
 
     const initData = async () => {
         setLoading(true);
         try {
-            // Dùng products từ AppDataContext (đã load lúc app khởi động, không fetch lại)
-            const prods = contextProducts as unknown as Product[];
-            productsRef.current = prods;
-            setProducts(prods);
-            // Hiển thị ngay với salesMap hiện có, load POS sales ngầm
-            generateBalanceItems(prods, salesMap);
-            // Load POS sales data (ecomExports đã có trong context)
-            const sales = await loadSalesData();
-            generateBalanceItems(prods, sales);
+            const prods = await loadProducts();
+            if (prods.length === 0) {
+                if (appDataLoading) refreshAppData();
+                return;
+            }
+
+            // Load sales ngầm để không chặn lần hiển thị tồn kho đầu tiên.
+            void loadSalesData().then((sales) => {
+                const latestProducts = productsRef.current as Product[];
+                if (latestProducts.length > 0) generateBalanceItems(latestProducts, sales);
+            });
         } catch {
             message.error('Lỗi khi tải dữ liệu');
         } finally {
@@ -1019,11 +1028,27 @@ export default function StockBalancePage() {
         }
     };
 
-    const loadProducts = (sales?: Map<string, number>) => {
-        const prods = contextProducts as unknown as Product[];
+    const loadProducts = async (sales?: Map<string, number>): Promise<Product[]> => {
+        let prods = contextProducts as unknown as Product[];
+
+        // Khi mở màn Tồn kho quá sớm sau khi khởi động, AppDataContext có thể chưa kịp nạp.
+        // Fallback trực tiếp giúp màn này tự recover mà không cần chuyển tab qua lại.
+        if (prods.length === 0 && !appDataLoading && !fallbackProductsLoadTriedRef.current) {
+            fallbackProductsLoadTriedRef.current = true;
+            try {
+                const res = await (window as any).electronAPI.products.getAll();
+                if (res?.success && Array.isArray(res.data)) {
+                    prods = res.data as Product[];
+                }
+            } catch (error) {
+                console.error('Error fallback loading products:', error);
+            }
+        }
+
         productsRef.current = prods;
         setProducts(prods);
         generateBalanceItems(prods, sales || salesMap);
+        return prods;
     };
 
     const generateBalanceItems = (productList: Product[], currentSalesMap: Map<string, number>) => {
@@ -1522,15 +1547,6 @@ export default function StockBalancePage() {
             width: 120,
             align: 'center',
             render: (stock: number, record: ProductRow) => {
-                if (!isAdmin) {
-                    return (
-                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-                            <div style={{ background: '#d9d9d9', color: '#595959', padding: '6px 16px', borderRadius: 8, fontWeight: 900, fontSize: 16, display: 'inline-block', minWidth: 50, textAlign: 'center', cursor: 'help' }} title="Chế độ Kiểm kê mù. Bạn lấy sản phẩm vật lý đếm để điền.">
-                                ***
-                            </div>
-                        </div>
-                    );
-                }
                 const level = getAlertLevel(record);
                 const bgMap: Record<StockAlertLevel, string> = {
                     all_zero:   'linear-gradient(135deg, #820014 0%, #cf1322 100%)',
@@ -1758,46 +1774,62 @@ export default function StockBalancePage() {
 
             <Card>
                 {/* ── Stock filter bar ── */}
-                <div style={{ marginBottom: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <style>{`
+                    @keyframes needRestockPulse {
+                        0%, 100% { box-shadow: 0 0 0 0 rgba(207,19,34,0.5); }
+                        60%       { box-shadow: 0 0 0 7px rgba(207,19,34,0); }
+                    }
+                    .need-restock-alert {
+                        animation: needRestockPulse 1.8s ease-in-out infinite;
+                    }
+                `}</style>
+                <div style={{ marginBottom: 14, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                     {([
-                        { key: 'all',  label: 'Tất cả',       count: baseFilteredRows.length,  color: '#1677ff', bg: '#e6f4ff'  },
-                        { key: 'need', label: '⚠ Cần nhập',   count: stockFilterCounts.need,   color: '#cf1322', bg: '#fff1f0'  },
-                        { key: 'low',  label: '🟡 Sắp hết',   count: stockFilterCounts.low,    color: '#d46b08', bg: '#fff7e6'  },
-                        { key: 'ok',   label: '✓ Bình thường', count: stockFilterCounts.ok,     color: '#389e0d', bg: '#f6ffed'  },
-                    ] as const).map(tab => (
-                        <button
-                            key={tab.key}
-                            onClick={() => setStockFilter(tab.key)}
-                            style={{
-                                border: `1.5px solid ${stockFilter === tab.key ? tab.color : '#d9d9d9'}`,
-                                background: stockFilter === tab.key ? tab.bg : '#fff',
-                                color: stockFilter === tab.key ? tab.color : '#595959',
-                                borderRadius: 6,
-                                padding: '4px 14px',
-                                cursor: 'pointer',
-                                fontWeight: stockFilter === tab.key ? 700 : 400,
-                                fontSize: 13,
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: 6,
-                                transition: 'all 0.15s',
-                            }}
-                        >
-                            {tab.label}
-                            <span style={{
-                                background: stockFilter === tab.key ? tab.color : '#f0f0f0',
-                                color: stockFilter === tab.key ? '#fff' : '#595959',
-                                borderRadius: 10,
-                                padding: '0 7px',
-                                fontSize: 11,
-                                fontWeight: 700,
-                                minWidth: 20,
-                                textAlign: 'center',
-                            }}>
-                                {tab.count}
-                            </span>
-                        </button>
-                    ))}
+                        { key: 'all',  label: 'Tất cả',        count: baseFilteredRows.length, color: '#1677ff', bg: '#e6f4ff' },
+                        { key: 'need', label: '⚠ Cần nhập',    count: stockFilterCounts.need,  color: '#cf1322', bg: '#fff1f0' },
+                        { key: 'low',  label: '🟡 Sắp hết',    count: stockFilterCounts.low,   color: '#d46b08', bg: '#fff7e6' },
+                        { key: 'ok',   label: '✓ Bình thường',  count: stockFilterCounts.ok,    color: '#389e0d', bg: '#f6ffed' },
+                    ] as const).map(tab => {
+                        const isNeedAlert = tab.key === 'need' && tab.count > 0;
+                        const isActive = stockFilter === tab.key;
+                        return (
+                            <button
+                                key={tab.key}
+                                onClick={() => setStockFilter(tab.key)}
+                                className={isNeedAlert && !isActive ? 'need-restock-alert' : ''}
+                                style={{
+                                    border: `${isNeedAlert ? 2 : 1.5}px solid ${isActive || isNeedAlert ? tab.color : '#d9d9d9'}`,
+                                    background: isActive
+                                        ? tab.color
+                                        : isNeedAlert ? '#fff1f0' : '#fff',
+                                    color: isActive ? '#fff' : isNeedAlert ? tab.color : '#595959',
+                                    borderRadius: 6,
+                                    padding: isNeedAlert ? '5px 16px' : '4px 14px',
+                                    cursor: 'pointer',
+                                    fontWeight: isActive || isNeedAlert ? 700 : 400,
+                                    fontSize: isNeedAlert ? 14 : 13,
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: 6,
+                                    transition: 'all 0.15s',
+                                }}
+                            >
+                                {tab.label}
+                                <span style={{
+                                    background: isActive ? 'rgba(255,255,255,0.25)' : isNeedAlert ? tab.color : '#f0f0f0',
+                                    color: isActive || isNeedAlert ? '#fff' : '#595959',
+                                    borderRadius: 10,
+                                    padding: '0 7px',
+                                    fontSize: isNeedAlert ? 12 : 11,
+                                    fontWeight: 700,
+                                    minWidth: 20,
+                                    textAlign: 'center',
+                                }}>
+                                    {tab.count}
+                                </span>
+                            </button>
+                        );
+                    })}
                 </div>
                 <Table
                     columns={productColumns}
@@ -1928,11 +1960,7 @@ export default function StockBalancePage() {
                                                                                         </span>
                                                                                     </td>
                                                                                     <td style={{ padding: '10px 8px', textAlign: 'center' }}>
-                                                                                        {!isAdmin ? (
-                                                                                            <div style={{ background: '#d9d9d9', color: '#595959', padding: '6px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 14, display: 'inline-block', minWidth: 45 }}>
-                                                                                                ***
-                                                                                            </div>
-                                                                                        ) : (() => {
+                                                                                        {(() => {
                                                                                             const vt = variantMinStocks[v.sku] ?? 0;
                                                                                             const isPaused = !!pausedVariants[v.sku];
                                                                                             const bg = isPaused
