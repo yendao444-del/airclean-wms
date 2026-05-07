@@ -100,10 +100,25 @@ function getLegacyGoogleTokenPath() {
 
 function ensureGoogleTokenPath() {
     const tokenPath = getGoogleTokenPath();
-    if (fs.existsSync(tokenPath)) return tokenPath;
-
     const legacyPath = getLegacyGoogleTokenPath();
-    if (fs.existsSync(legacyPath)) {
+
+    const appDataExists = fs.existsSync(tokenPath);
+    const legacyExists = fs.existsSync(legacyPath);
+
+    // Nếu token bundle mới hơn token AppData → dùng token bundle (deploy mới)
+    if (appDataExists && legacyExists) {
+        const appDataMtime = fs.statSync(tokenPath).mtimeMs;
+        const legacyMtime = fs.statSync(legacyPath).mtimeMs;
+        if (legacyMtime > appDataMtime) {
+            fs.copyFileSync(legacyPath, tokenPath);
+            console.log('[Drive] Token bundle moi hon AppData - cap nhat token moi.');
+        }
+        return tokenPath;
+    }
+
+    if (appDataExists) return tokenPath;
+
+    if (legacyExists) {
         fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
         fs.copyFileSync(legacyPath, tokenPath);
         console.warn('[Drive] Migrated Google token from app source to userData. Remove legacy token before building:', legacyPath);
