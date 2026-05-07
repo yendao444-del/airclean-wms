@@ -90,9 +90,32 @@ const OAUTH_CLIENT_SECRET = config.OAUTH_CLIENT_SECRET;
 let driveClient = null;
 let driveClientTokenMtime = 0;
 
+function getGoogleTokenPath() {
+    return path.join(app.getPath('userData'), 'gdrive-token.json');
+}
+
+function getLegacyGoogleTokenPath() {
+    return path.join(__dirname, 'gdrive-token.json');
+}
+
+function ensureGoogleTokenPath() {
+    const tokenPath = getGoogleTokenPath();
+    if (fs.existsSync(tokenPath)) return tokenPath;
+
+    const legacyPath = getLegacyGoogleTokenPath();
+    if (fs.existsSync(legacyPath)) {
+        fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
+        fs.copyFileSync(legacyPath, tokenPath);
+        console.warn('[Drive] Migrated Google token from app source to userData. Remove legacy token before building:', legacyPath);
+        return tokenPath;
+    }
+
+    return tokenPath;
+}
+
 function getDriveClient() {
     try {
-        const tokenPath = path.join(__dirname, 'gdrive-token.json');
+        const tokenPath = ensureGoogleTokenPath();
         if (!fs.existsSync(tokenPath)) {
             console.warn('[Drive] Token not found:', tokenPath);
             driveClient = null;
@@ -466,6 +489,8 @@ try {
 // SESSION STORE - Backend role enforcement
 // ========================================
 let currentSession = null; // { id, username, role }
+const REMEMBER_TOKENS_KEY = 'authRememberTokensV1';
+const REMEMBER_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function requireRole(...roles) {
     if (!currentSession) {
@@ -474,6 +499,62 @@ function requireRole(...roles) {
     if (roles.length > 0 && !roles.includes(currentSession.role)) {
         throw new Error(`Không có quyền thực hiện thao tác này (yêu cầu: ${roles.join('/')})`);
     }
+}
+
+function sanitizeUserForClient(user) {
+    if (!user) return null;
+    const { password, ...safeUser } = user;
+    return { ...safeUser, isActive: user.status === 'active' };
+}
+
+function hashRememberToken(token) {
+    return crypto.createHash('sha256').update(String(token || ''), 'utf8').digest('hex');
+}
+
+async function readRememberTokens() {
+    if (!prisma) return [];
+    const config = await prisma.appConfig.findUnique({ where: { key: REMEMBER_TOKENS_KEY } });
+    if (!config) return [];
+    try {
+        const parsed = JSON.parse(config.value);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
+async function writeRememberTokens(tokens) {
+    if (!prisma) return;
+    await prisma.appConfig.upsert({
+        where: { key: REMEMBER_TOKENS_KEY },
+        update: { value: JSON.stringify(tokens) },
+        create: { key: REMEMBER_TOKENS_KEY, value: JSON.stringify(tokens) }
+    });
+}
+
+async function issueRememberToken(userId) {
+    const rawToken = crypto.randomBytes(32).toString('base64url');
+    const now = Date.now();
+    const expiresAt = new Date(now + REMEMBER_TOKEN_TTL_MS).toISOString();
+    const tokenHash = hashRememberToken(rawToken);
+    const tokens = (await readRememberTokens())
+        .filter(t => t && t.expiresAt && new Date(t.expiresAt).getTime() > now && t.userId !== userId);
+    tokens.push({
+        id: crypto.randomUUID(),
+        userId,
+        tokenHash,
+        createdAt: new Date(now).toISOString(),
+        expiresAt
+    });
+    await writeRememberTokens(tokens.slice(-50));
+    return rawToken;
+}
+
+async function revokeRememberToken(rawToken) {
+    if (!rawToken) return;
+    const tokenHash = hashRememberToken(rawToken);
+    const tokens = await readRememberTokens();
+    await writeRememberTokens(tokens.filter(t => t?.tokenHash !== tokenHash));
 }
 
 // ========================================
@@ -629,15 +710,18 @@ ipcMain.handle('products:getTopSelling', async (event, { limit = 10 } = {}) => {
         const pickQty = (item) => Number(item?.quantity ?? item?.qty ?? item?.count ?? item?.soLuong ?? 0) || 0;
         const pickProductId = (item) => item?.productId ?? item?.product_id ?? item?.productID ?? null;
 
+        const since90Days = new Date();
+        since90Days.setDate(since90Days.getDate() - 90);
+
         const [products, combos, posOrders, ecommerceExports, exportOrders] = await Promise.all([
             prisma.product.findMany({ select: { id: true, sku: true, name: true, variants: true, isCombo: true, comboItems: true } }),
             prisma.comboProduct.findMany({ select: { sku: true, items: true } }),
             prisma.order.findMany({
-                where: { source: 'pos', status: 'completed' },
+                where: { source: 'pos', status: 'completed', createdAt: { gte: since90Days } },
                 include: { items: true },
             }),
-            prisma.ecommerceExport.findMany({ where: { status: 'completed' } }),
-            prisma.exportOrder.findMany({ where: { status: 'completed' } }),
+            prisma.ecommerceExport.findMany({ where: { status: 'completed', createdAt: { gte: since90Days } } }),
+            prisma.exportOrder.findMany({ where: { status: 'completed', createdAt: { gte: since90Days } } }),
         ]);
 
         const productById = new Map();
@@ -3107,7 +3191,7 @@ function sendVatTelegramDocument(buffer, fileName, caption) {
 async function sendVatEmail(invoiceData) {
     try {
         const nodemailer = require('nodemailer');
-        const tokenPath = path.join(__dirname, 'gdrive-token.json');
+        const tokenPath = ensureGoogleTokenPath();
         if (!fs.existsSync(tokenPath)) {
             console.warn('⚠️ No OAuth2 token — skip email');
             return { success: false };
@@ -3683,14 +3767,14 @@ ipcMain.handle('database:exportAll', async () => {
             prisma.category.findMany({ orderBy: { id: 'asc' } }),
             prisma.product.findMany({ orderBy: { id: 'asc' } }),
             prisma.supplier.findMany({ orderBy: { id: 'asc' } }),
-            prisma.purchaseOrder.findMany({ orderBy: { id: 'asc' } }),
-            prisma.purchaseItem.findMany({ orderBy: { id: 'asc' } }),
+            prisma.purchaseOrder.findMany({ orderBy: { id: 'desc' }, take: 2000 }),
+            prisma.purchaseItem.findMany({ orderBy: { id: 'desc' }, take: 5000 }),
             prisma.customer.findMany({ orderBy: { id: 'asc' } }),
-            prisma.order.findMany({ orderBy: { id: 'asc' } }),
-            prisma.orderItem.findMany({ orderBy: { id: 'asc' } }),
-            prisma.payment.findMany({ orderBy: { id: 'asc' } }),
+            prisma.order.findMany({ orderBy: { id: 'desc' }, take: 5000 }),
+            prisma.orderItem.findMany({ orderBy: { id: 'desc' }, take: 10000 }),
+            prisma.payment.findMany({ orderBy: { id: 'desc' }, take: 5000 }),
             prisma.user.findMany({ orderBy: { id: 'asc' } }),
-            prisma.expense.findMany({ orderBy: { id: 'asc' } }),
+            prisma.expense.findMany({ orderBy: { id: 'desc' }, take: 2000 }),
             prisma.inventoryLog.findMany({ orderBy: { id: 'desc' }, take: 1000 }),
             prisma.activityLog.findMany({ orderBy: { id: 'desc' }, take: 1000 })
         ]);
@@ -4270,10 +4354,11 @@ ipcMain.handle('users:resetPassword', async (event, { userId, newPassword }) => 
             return { success: false, error: 'Người dùng không tồn tại' };
         }
 
-        // Update password
+        // Hash password before storing
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
         await prisma.user.update({
             where: { id: userId },
-            data: { password: newPassword }
+            data: { password: hashedPassword }
         });
 
         console.log(`✅ Reset password for user: ${user.username}`);
@@ -4425,6 +4510,7 @@ ipcMain.handle('system:listBackups', async () => {
 // Restore từ backup (giải nén ZIP)
 ipcMain.handle('system:restore', async (event, backupPath) => {
     try {
+        requireRole('admin');
         console.log('🔄 Starting restore from:', backupPath);
 
         if (!fs.existsSync(backupPath)) {
@@ -5305,7 +5391,7 @@ function getUpdateHistory() {
 // ========================================
 // AUTO UPDATE HANDLERS
 // ========================================
-require('./update-handlers')(prisma);
+require('./update-handlers')(prisma, { requireRole });
 
 // ========================================
 // ECOMMERCE EXPORTS HANDLERS (XUẤT HÀNG TMDT)
@@ -5785,6 +5871,7 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
 
 ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const startTime = Date.now();
 
@@ -5840,6 +5927,7 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
 // ⚡ Xóa TẤT CẢ đơn TMDT (dùng khi cần reset/cleanup)
 ipcMain.handle('ecommerceExports:deleteAll', async () => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         const count = await prisma.$transaction(async (tx) => {
@@ -5865,6 +5953,7 @@ ipcMain.handle('ecommerceExports:deleteAll', async () => {
 
 ipcMain.handle('ecommerceExports:deleteCancelled', async () => {
     try {
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
 
         const result = await prisma.ecommerceExport.deleteMany({
@@ -6412,6 +6501,7 @@ ipcMain.handle('refunds:delete', async (event, id) => {
 
 ipcMain.handle('refunds:bulkDelete', async (event, ids) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const result = await prisma.refund.deleteMany({
             where: { id: { in: ids } }
@@ -6905,7 +6995,7 @@ ipcMain.handle('users:delete', async (event, id) => {
     }
 });
 
-ipcMain.handle('users:login', async (event, username, password) => {
+ipcMain.handle('users:login', async (event, username, password, rememberMe = false) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const normalizedUsername = typeof username === 'string' ? username.trim() : '';
@@ -6932,20 +7022,22 @@ ipcMain.handle('users:login', async (event, username, password) => {
         if (!passwordValid) {
             return { success: false, error: 'Mật khẩu không đúng' };
         }
-        // Return user without password
-        const { password: _, ...userWithoutPassword } = user;
         // Lưu session phía backend
         currentSession = { id: user.id, username: user.username, role: user.role };
         prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(() => { });
         void logActivity({ module: 'users', action: 'LOGIN', description: `Đăng nhập: ${user.username}`, recordName: user.username, userName: user.username });
-        return { success: true, data: { ...userWithoutPassword, isActive: user.status === 'active' } };
+        const rememberToken = rememberMe && user.role === 'admin'
+            ? await issueRememberToken(user.id)
+            : null;
+        return { success: true, data: sanitizeUserForClient(user), rememberToken };
     } catch (error) {
         console.error('❌ Login error:', error);
         return { success: false, error: error.message };
     }
 });
 
-ipcMain.handle('users:logout', async () => {
+ipcMain.handle('users:logout', async (event, rememberToken) => {
+    await revokeRememberToken(rememberToken).catch(() => { });
     if (currentSession?.id) {
         await prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NULL WHERE id = ${currentSession.id}`.catch(() => { });
     }
@@ -6953,15 +7045,41 @@ ipcMain.handle('users:logout', async () => {
     return { success: true };
 });
 
-// Restore session khi auto-login từ localStorage (không cần password)
-ipcMain.handle('users:restoreSession', async (event, userId) => {
+ipcMain.handle('users:getCurrentSession', async () => {
     try {
         if (!prisma) return { success: false };
-        const user = await prisma.user.findUnique({ where: { id: userId } });
+        if (!currentSession?.id) return { success: false };
+        const user = await prisma.user.findUnique({ where: { id: currentSession.id } });
+        if (!user || user.status !== 'active') {
+            currentSession = null;
+            return { success: false };
+        }
+        currentSession = { id: user.id, username: user.username, role: user.role };
+        return { success: true, data: sanitizeUserForClient(user) };
+    } catch {
+        return { success: false };
+    }
+});
+
+// Restore session khi auto-login từ remember token đã cấp sau login password thành công
+ipcMain.handle('users:restoreSession', async (event, rememberToken) => {
+    try {
+        if (!prisma || typeof rememberToken !== 'string' || rememberToken.length < 32) return { success: false };
+        const now = Date.now();
+        const tokenHash = hashRememberToken(rememberToken);
+        const tokens = await readRememberTokens();
+        const validTokens = tokens.filter(t => t && t.expiresAt && new Date(t.expiresAt).getTime() > now);
+        const record = validTokens.find(t => t.tokenHash === tokenHash);
+        if (!record) {
+            if (validTokens.length !== tokens.length) await writeRememberTokens(validTokens);
+            return { success: false };
+        }
+        if (validTokens.length !== tokens.length) await writeRememberTokens(validTokens);
+        const user = await prisma.user.findUnique({ where: { id: record.userId } });
         if (!user || user.status !== 'active') return { success: false };
         currentSession = { id: user.id, username: user.username, role: user.role };
         prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(() => { });
-        return { success: true };
+        return { success: true, data: sanitizeUserForClient(user) };
     } catch {
         return { success: false };
     }
@@ -8802,7 +8920,7 @@ function toBase64Url(value) {
 }
 
 async function sendGmailWithAttachment({ to, subject, html, fileName, pdfBase64 }) {
-    const tokenPath = path.join(__dirname, 'gdrive-token.json');
+    const tokenPath = ensureGoogleTokenPath();
     if (!fs.existsSync(tokenPath)) {
         return { success: false, reauthRequired: true, error: 'Chưa có token Google. Cần đăng nhập Google trước khi gửi Gmail.' };
     }

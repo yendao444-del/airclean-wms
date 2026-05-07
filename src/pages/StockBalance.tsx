@@ -173,7 +173,7 @@ const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ p
             // Tải log từng SKU song song thay vì load toàn bộ DB về client
             const skusToFetch = [mainSku, ...parentSkus].filter(Boolean);
             const results = await Promise.all(
-                skusToFetch.map(sku => (window as any).electronAPI.inventoryLogs.getBySku({ sku, limit: 500 }))
+                skusToFetch.map(sku => (window as any).electronAPI.inventoryLogs.getBySku({ sku, limit: 200 }))
             );
 
             const allLogs: InventoryLogItem[] = results

@@ -7,7 +7,12 @@ const { backupDatabase } = require('./_backup_db');
 const config = require('./electron/config');
 const OAUTH_CLIENT_ID = config.OAUTH_CLIENT_ID;
 const OAUTH_CLIENT_SECRET = config.OAUTH_CLIENT_SECRET;
-const TOKEN_PATH = path.join(__dirname, 'electron', 'gdrive-token.json');
+const APP_NAME = 'quan-ly-ban-hang-desktop';
+const TOKEN_PATH = process.env.GDRIVE_TOKEN_PATH || path.join(
+    process.env.APPDATA || path.join(process.env.USERPROFILE || __dirname, 'AppData', 'Roaming'),
+    APP_NAME,
+    'gdrive-token.json'
+);
 const SERVICE_ACCOUNT_PATH = path.join(__dirname, 'electron', 'gdrive-credentials.json');
 
 function createDriveCandidates() {
@@ -38,7 +43,7 @@ function createDriveCandidates() {
     }
 
     if (candidates.length === 0) {
-        throw new Error('Khong tim thay Google Drive credentials. Can electron/gdrive-credentials.json hoac electron/gdrive-token.json');
+        throw new Error(`Khong tim thay Google Drive credentials. Can ${SERVICE_ACCOUNT_PATH} hoac ${TOKEN_PATH}`);
     }
 
     return candidates;

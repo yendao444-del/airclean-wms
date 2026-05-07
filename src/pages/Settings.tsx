@@ -99,6 +99,7 @@ const Settings = () => {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [restoringVersion, setRestoringVersion] = useState<string | null>(null);
   const [updateHistory, setUpdateHistory] = useState<UpdateHistoryItem[]>([]);
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   const [loadingSystemInfo, setLoadingSystemInfo] = useState(false);
@@ -231,6 +232,65 @@ const Settings = () => {
       message.error(`Lỗi: ${error.message}`);
       setDownloading(false);
     }
+  };
+
+  const normalizeVersion = (version?: string) => String(version || '').trim().replace(/^v/i, '');
+
+  const handleRestoreVersion = (version: string) => {
+    if (!isAdmin) {
+      message.error('Chỉ admin được khôi phục phiên bản');
+      return;
+    }
+
+    const targetVersion = normalizeVersion(version);
+    if (!targetVersion) {
+      message.error('Phiên bản khôi phục không hợp lệ');
+      return;
+    }
+
+    Modal.confirm({
+      title: `Khôi phục v${targetVersion}?`,
+      icon: <ReloadOutlined style={{ color: '#1677ff' }} />,
+      content: (
+        <div>
+          <p>Ứng dụng sẽ tải release v{targetVersion} từ GitHub, cài đặt và khởi động lại.</p>
+          <Alert
+            message="Dữ liệu bán hàng, kho và cấu hình hiện tại không bị rollback."
+            type="info"
+            showIcon
+            style={{ marginTop: 12 }}
+          />
+        </div>
+      ),
+      okText: `Khôi phục v${targetVersion}`,
+      cancelText: 'Hủy',
+      onOk: async () => {
+        try {
+          setRestoringVersion(targetVersion);
+          message.loading({
+            content: `Đang khôi phục v${targetVersion}... App sẽ tự khởi động lại`,
+            key: 'restore-version',
+            duration: 0
+          });
+
+          const result = await window.electronAPI.update.restoreVersion(targetVersion);
+
+          if (result.success && result.data) {
+            message.success({
+              content: `Đã tải xong v${result.data.version}. Đang khởi động lại...`,
+              key: 'restore-version',
+              duration: 10
+            });
+          } else {
+            message.error({ content: `Lỗi khôi phục: ${result.error}`, key: 'restore-version' });
+            setRestoringVersion(null);
+          }
+        } catch (error: any) {
+          message.error({ content: `Lỗi: ${error.message}`, key: 'restore-version' });
+          setRestoringVersion(null);
+        }
+      }
+    });
   };
 
   const loadBackups = async () => {
@@ -690,6 +750,28 @@ const Settings = () => {
       dataIndex: 'machine',
       key: 'machine',
       render: (m: string) => m || '—',
+    },
+    {
+      title: 'Thao tác',
+      key: 'actions',
+      width: 180,
+      render: (_: any, record: UpdateHistoryItem) => {
+        const targetVersion = normalizeVersion(record.toVersion);
+        const isCurrentVersion = targetVersion === normalizeVersion(currentVersion);
+        const isBusy = downloading || checkingUpdate || restoringVersion !== null;
+
+        return (
+          <Button
+            icon={<ReloadOutlined />}
+            size="small"
+            disabled={!isAdmin || !targetVersion || isCurrentVersion || isBusy}
+            loading={restoringVersion === targetVersion}
+            onClick={() => handleRestoreVersion(targetVersion)}
+          >
+            Khôi phục v{targetVersion}
+          </Button>
+        );
+      },
     },
   ];
 

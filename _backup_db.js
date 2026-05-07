@@ -12,6 +12,7 @@ const path = require('path');
 const prisma = new PrismaClient();
 
 // Thứ tự: cha trước con (để restore theo đúng FK)
+// limit: giới hạn bản ghi cho các bảng lớn (tránh egress Supabase)
 const TABLE_ORDER = [
     { key: 'User',            model: () => prisma.user },
     { key: 'Category',        model: () => prisma.category },
@@ -20,11 +21,11 @@ const TABLE_ORDER = [
     { key: 'AppConfig',       model: () => prisma.appConfig },
     { key: 'ComboProduct',    model: () => prisma.comboProduct },
     { key: 'DailyTask',       model: () => prisma.dailyTask },
-    { key: 'ActivityLog',     model: () => prisma.activityLog },
+    { key: 'ActivityLog',     model: () => prisma.activityLog,    limit: 2000 },
     { key: 'UpdateHistory',   model: () => prisma.updateHistory },
     { key: 'DailyExpense',    model: () => prisma.dailyExpense },
-    { key: 'EcommerceExport', model: () => prisma.ecommerceExport },
-    { key: 'ExportOrder',     model: () => prisma.exportOrder },
+    { key: 'EcommerceExport', model: () => prisma.ecommerceExport, limit: 3000 },
+    { key: 'ExportOrder',     model: () => prisma.exportOrder,    limit: 3000 },
     { key: 'Return',          model: () => prisma['return'] },
     { key: 'Refund',          model: () => prisma.refund },
     { key: 'StockBalance',    model: () => prisma.stockBalance },
@@ -32,10 +33,10 @@ const TABLE_ORDER = [
     { key: 'Product',         model: () => prisma.product },
     { key: 'PurchaseOrder',   model: () => prisma.purchaseOrder },
     { key: 'PurchaseItem',    model: () => prisma.purchaseItem },
-    { key: 'Order',           model: () => prisma.order },
-    { key: 'OrderItem',       model: () => prisma.orderItem },
-    { key: 'Payment',         model: () => prisma.payment },
-    { key: 'InventoryLog',    model: () => prisma.inventoryLog },
+    { key: 'Order',           model: () => prisma.order,          limit: 5000 },
+    { key: 'OrderItem',       model: () => prisma.orderItem,      limit: 10000 },
+    { key: 'Payment',         model: () => prisma.payment,        limit: 5000 },
+    { key: 'InventoryLog',    model: () => prisma.inventoryLog,   limit: 5000 },
     { key: 'Expense',         model: () => prisma.expense },
 ];
 
@@ -58,12 +59,14 @@ async function backupDatabase(outputDir = __dirname) {
     };
 
     let totalRecords = 0;
-    for (const { key, model } of TABLE_ORDER) {
+    for (const { key, model, limit } of TABLE_ORDER) {
         process.stdout.write(`  → ${key.padEnd(18)}`);
-        const data = await model().findMany({ orderBy: { id: 'asc' } });
+        const queryOpts = { orderBy: { id: 'desc' } };
+        if (limit) queryOpts.take = limit;
+        const data = await model().findMany(queryOpts);
         backup.tables[key] = data;
         totalRecords += data.length;
-        console.log(`${data.length} records`);
+        console.log(`${data.length} records${limit ? ` (limited to ${limit})` : ''}`);
     }
 
     fs.writeFileSync(filepath, JSON.stringify(backup, null, 2), 'utf-8');

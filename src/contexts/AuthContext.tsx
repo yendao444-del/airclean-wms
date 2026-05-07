@@ -17,6 +17,7 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const REMEMBER_TOKEN_KEY = 'rememberToken';
 
 export function AuthProvider({ children }: { children: ReactNode }) {
     const [user, setUser] = useState<User | null>(null);
@@ -33,39 +34,49 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     useEffect(() => {
         ensureAdminExists();
 
-        // 1. Check localStorage first (remember me)
-        const rememberedUser = localStorage.getItem('rememberedUser');
-        if (rememberedUser) {
-            try {
-                const parsed = JSON.parse(rememberedUser);
-                setUser(parsed);
-                sessionStorage.setItem('currentUser', rememberedUser);
-                // Sync session lên backend khi auto-login từ localStorage
-                window.electronAPI.users.restoreSession(parsed.id).catch(() => {});
-                console.log('✅ Auto-login từ phiên ghi nhớ:', parsed.username);
-                return;
-            } catch { }
-        }
+        const restoreAuth = async () => {
+            localStorage.removeItem('rememberedUser');
 
-        // 2. Fallback to sessionStorage
-        const sessionUser = sessionStorage.getItem('currentUser');
-        if (sessionUser) {
-            const parsed = JSON.parse(sessionUser);
-            setUser(parsed);
-            window.electronAPI.users.restoreSession(parsed.id).catch(() => {});
-        }
+            const rememberToken = localStorage.getItem(REMEMBER_TOKEN_KEY);
+            if (rememberToken) {
+                const restored: { success: boolean; data?: User } = await window.electronAPI.users
+                    .restoreSession(rememberToken)
+                    .catch(() => ({ success: false }));
+                if (restored.success && restored.data) {
+                    setUser(restored.data);
+                    sessionStorage.setItem('currentUser', JSON.stringify(restored.data));
+                    return;
+                }
+                localStorage.removeItem(REMEMBER_TOKEN_KEY);
+                sessionStorage.removeItem('currentUser');
+            }
+
+            const current: { success: boolean; data?: User } = await window.electronAPI.users
+                .getCurrentSession()
+                .catch(() => ({ success: false }));
+            if (current?.success && current.data) {
+                setUser(current.data);
+                sessionStorage.setItem('currentUser', JSON.stringify(current.data));
+            } else {
+                sessionStorage.removeItem('currentUser');
+            }
+        };
+
+        restoreAuth();
     }, []);
 
     const doLogout = () => {
+        const rememberToken = localStorage.getItem(REMEMBER_TOKEN_KEY);
         sessionStorage.removeItem('currentUser');
         localStorage.removeItem('rememberedUser');
+        localStorage.removeItem(REMEMBER_TOKEN_KEY);
         setUser(null);
-        window.electronAPI.users.logout().catch(() => {});
+        window.electronAPI.users.logout(rememberToken || undefined).catch(() => {});
     };
 
-    const login = async (username: string, password: string): Promise<{ success: boolean; error?: string }> => {
+    const login = async (username: string, password: string, rememberMe = true): Promise<{ success: boolean; error?: string }> => {
         try {
-            const result = await window.electronAPI.users.login(username, password);
+            const result = await window.electronAPI.users.login(username, password, rememberMe);
 
             if (!result.success || !result.data) {
                 return { success: false, error: result.error || 'Tên đăng nhập hoặc mật khẩu không đúng!' };
@@ -76,12 +87,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
             sessionStorage.setItem('currentUser', JSON.stringify(userWithoutPassword));
 
-            // Chỉ admin mới được lưu localStorage (tự động đăng nhập lại)
-            if (userWithoutPassword.role === 'admin') {
-                localStorage.setItem('rememberedUser', JSON.stringify(userWithoutPassword));
+            if (result.rememberToken) {
+                localStorage.setItem(REMEMBER_TOKEN_KEY, result.rememberToken);
             } else {
-                localStorage.removeItem('rememberedUser');
+                localStorage.removeItem(REMEMBER_TOKEN_KEY);
             }
+            localStorage.removeItem('rememberedUser');
 
             setUser(userWithoutPassword);
             return { success: true };

@@ -10,7 +10,12 @@ const path = require('path');
 
 const { OAUTH_CLIENT_ID: CLIENT_ID, OAUTH_CLIENT_SECRET: CLIENT_SECRET } = require('./electron/config');
 const REDIRECT_URI  = 'http://localhost:3456/callback';
-const TOKEN_PATH    = path.join(__dirname, 'electron', 'gdrive-token.json');
+const APP_NAME = 'quan-ly-ban-hang-desktop';
+const TOKEN_PATH = process.env.GDRIVE_TOKEN_PATH || path.join(
+    process.env.APPDATA || path.join(process.env.USERPROFILE || __dirname, 'AppData', 'Roaming'),
+    APP_NAME,
+    'gdrive-token.json'
+);
 
 const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
 
@@ -49,9 +54,9 @@ const server = http.createServer(async (req, res) => {
 
     try {
         const { tokens } = await oauth2Client.getToken(code);
+        fs.mkdirSync(path.dirname(TOKEN_PATH), { recursive: true });
         fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens, null, 2));
         console.log('✅ Token mới đã lưu vào:', TOKEN_PATH);
-        console.log('   access_token:', tokens.access_token?.substring(0, 30) + '...');
         console.log('   refresh_token:', tokens.refresh_token ? '✅ Có' : '⚠️ Không có');
 
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });

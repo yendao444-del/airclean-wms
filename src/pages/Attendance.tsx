@@ -165,6 +165,8 @@ interface FineAuditLog {
     id: string;
     action: 'create' | 'edit' | 'delete';
     timestamp: string;
+    changedBy?: string;
+    changedByName?: string;
     before?: Partial<FineRecord>;
     after?: Partial<FineRecord>;
     note: string;
@@ -1822,6 +1824,10 @@ export default function Attendance() {
     const currentUser = useCurrentUser();
     const isAdmin = currentUser === 'admin';
     const canManageBonuses = isAdmin;
+    const fineAuditActor = useMemo(() => ({
+        username: user?.username || currentUser || 'System',
+        displayName: user?.fullName || user?.username || currentUser || 'System',
+    }), [currentUser, user?.fullName, user?.username]);
     const [configModalOpen, setConfigModalOpen] = useState(false);
     const [activeConfigTab, setActiveConfigTab] = useState('rules');
     const [payslipModal, setPayslipModal] = useState<any>(null);
@@ -2120,6 +2126,16 @@ export default function Attendance() {
     const [extraFines, setExtraFines] = useState<FineRecord[]>([]);
     const [fineAuditLog, setFineAuditLog] = useState<FineAuditLog[]>([]);
     const [fineEmployeeFilter, setFineEmployeeFilter] = useState<number | 'all'>('all');
+    const employeesRef = useRef<Employee[]>([]);
+    const fineAuditActorRef = useRef(fineAuditActor);
+
+    useEffect(() => {
+        employeesRef.current = employees;
+    }, [employees]);
+
+    useEffect(() => {
+        fineAuditActorRef.current = fineAuditActor;
+    }, [fineAuditActor]);
 
     // === State cho danh sách kỳ đã chốt ===
     const [lockedPeriods, setLockedPeriods] = useState<LockedPeriod[]>([]);
@@ -2211,14 +2227,49 @@ export default function Attendance() {
         // Lắng nghe fine mới từ trang Trả hàng
         const handleFineAdded = (e: Event) => {
             const newFine = (e as CustomEvent).detail;
-            if (newFine) setExtraFines(prev => [...prev, newFine]);
+            if (newFine) {
+                setExtraFines(prev => [...prev, newFine]);
+                const now = new Date().toLocaleString('vi-VN');
+                const actor = fineAuditActorRef.current;
+                const employeeName = employeesRef.current.find(emp => emp.id === newFine.empId)?.name || '';
+                setFineAuditLog(prev => [...prev, {
+                    id: 'flog-' + Date.now(),
+                    action: 'create',
+                    timestamp: now,
+                    changedBy: actor.username,
+                    changedByName: actor.displayName,
+                    after: newFine,
+                    note: 'Thêm phạt: ' + employeeName + ' — ' + fmt(newFine.amount || 0) + ' — "' + (newFine.detail || '') + '"',
+                }]);
+            }
         };
         const handleFineRemoved = (e: Event) => {
             const { complaintCode } = (e as CustomEvent).detail || {};
             if (complaintCode) {
-                setExtraFines(prev => prev.filter((f: any) =>
-                    !(f.source === 'returns' && f.detail && f.detail.includes(complaintCode))
-                ));
+                setExtraFines(prev => {
+                    const removedFines = prev.filter((f: any) =>
+                        f.source === 'returns' && f.detail && f.detail.includes(complaintCode)
+                    );
+                    if (removedFines.length > 0) {
+                        const now = new Date().toLocaleString('vi-VN');
+                        const actor = fineAuditActorRef.current;
+                        setFineAuditLog(logPrev => [
+                            ...logPrev,
+                            ...removedFines.map((fine: FineRecord, index: number) => ({
+                                id: 'flog-' + Date.now() + '-' + index,
+                                action: 'delete' as const,
+                                timestamp: now,
+                                changedBy: actor.username,
+                                changedByName: actor.displayName,
+                                before: fine,
+                                note: 'Xóa khoản phạt: ' + (employeesRef.current.find(emp => emp.id === fine.empId)?.name || '') + ' — ' + fmt(fine.amount) + ' — "' + fine.detail + '"',
+                            })),
+                        ]);
+                    }
+                    return prev.filter((f: any) =>
+                        !(f.source === 'returns' && f.detail && f.detail.includes(complaintCode))
+                    );
+                });
             }
         };
         window.addEventListener('attendance:fineAdded', handleFineAdded);
@@ -2921,6 +2972,8 @@ export default function Attendance() {
                 id: 'flog-' + Date.now(),
                 action: 'create',
                 timestamp: now,
+                changedBy: fineAuditActor.username,
+                changedByName: fineAuditActor.displayName,
                 after: newFine,
                 note: 'Thêm phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
             }]);
@@ -2929,7 +2982,7 @@ export default function Attendance() {
             fineForm.resetFields();
             message.success(`Đã thêm phạt ${fmt(values.amount)} cho ${employees.find(e => e.id === values.empId)?.name} (Đã lưu lịch sử)`);
         });
-    }, [fineForm, employees]);
+    }, [fineForm, employees, fineAuditActor]);
 
     // === Xóa Phạt Thủ Công handler ===
     const handleDeleteFine = useCallback((fineIndex: number) => {
@@ -2958,6 +3011,8 @@ export default function Attendance() {
                     id: 'flog-' + Date.now(),
                     action: 'delete',
                     timestamp: now,
+                    changedBy: fineAuditActor.username,
+                    changedByName: fineAuditActor.displayName,
                     before: fine,
                     note: 'Xóa khoản phạt: ' + (employees.find(e => e.id === fine.empId)?.name || '') + ' — ' + fmt(fine.amount) + ' — "' + fine.detail + '"',
                 }]);
@@ -2965,7 +3020,7 @@ export default function Attendance() {
                 message.success('Đã xóa khoản phạt (Đã lưu lịch sử)!');
             },
         });
-    }, [extraFines, employees]);
+    }, [extraFines, employees, fineAuditActor]);
 
     // === Thêm/Sửa Giao dịch Quỹ handler ===
     const handleAddFundTx = useCallback(() => {
@@ -3650,6 +3705,19 @@ export default function Attendance() {
                             size="small"
                             columns={[
                                 { title: 'Thời gian', dataIndex: 'timestamp', key: 'ts', width: 150, render: (t: string) => <Text type="secondary" style={{ fontSize: 11 }}>{t}</Text> },
+                                {
+                                    title: 'Người thay đổi',
+                                    key: 'changedBy',
+                                    width: 150,
+                                    render: (_: unknown, record: FineAuditLog) => (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                            <Text strong style={{ fontSize: 12 }}>{record.changedByName || record.changedBy || 'Chưa ghi nhận'}</Text>
+                                            {record.changedByName && record.changedBy && record.changedByName !== record.changedBy && (
+                                                <Text type="secondary" style={{ fontSize: 11 }}>{record.changedBy}</Text>
+                                            )}
+                                        </div>
+                                    ),
+                                },
                                 { title: 'Thao tác', dataIndex: 'action', key: 'action', width: 70, render: (a: string) => <Tag color={auditColorMap[a]} style={{ fontWeight: 700, fontSize: 10 }}>{auditLabelMap[a]}</Tag> },
                                 { title: 'Nội dung', dataIndex: 'note', key: 'note', render: (n: string) => <Text style={{ fontSize: 12 }}>{n}</Text> },
                                 {

@@ -110,7 +110,7 @@ export default function SystemLogsPage() {
     const loadLogs = async () => {
         setLoading(true);
         try {
-            const result = await window.electronAPI.activityLog.getAll({ limit: 500 });
+            const result = await window.electronAPI.activityLog.getAll({ limit: 200 });
             if (result.success && result.data) setLogs(result.data);
         } catch (error) {
             console.error('Error loading logs:', error);

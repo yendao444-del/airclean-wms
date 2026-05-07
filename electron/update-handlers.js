@@ -3,10 +3,10 @@
 // ========================================
 
 const https = require('https');
-const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { app, ipcMain, shell, BrowserWindow } = require('electron');
 
 /**
@@ -25,13 +25,93 @@ function sendToRenderer(channel, data) {
 
 // Prisma được truyền vào từ ipc-handlers.js
 let prisma = null;
-module.exports = function (prismaInstance) {
+let requireRoleGuard = null;
+module.exports = function (prismaInstance, options = {}) {
     prisma = prismaInstance;
+    requireRoleGuard = typeof options.requireRole === 'function' ? options.requireRole : null;
 };
+
+function requireUpdateAdmin() {
+    if (!requireRoleGuard) {
+        throw new Error('Không thể xác thực quyền admin cho cập nhật');
+    }
+    requireRoleGuard('admin');
+}
 
 // GitHub repository info
 const GITHUB_OWNER = 'yendao444-del';
 const GITHUB_REPO = 'airclean-wms';
+const GITHUB_RELEASE_HOST = 'github.com';
+
+function isTrustedGitHubDownloadUrl(downloadUrl) {
+    try {
+        const parsed = new URL(downloadUrl);
+        return parsed.protocol === 'https:' &&
+            parsed.hostname === GITHUB_RELEASE_HOST &&
+            parsed.pathname.includes(`/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/`);
+    } catch {
+        return false;
+    }
+}
+
+function getTrustedZipAssets(release) {
+    return (release?.assets || []).filter(asset =>
+        asset &&
+        typeof asset.name === 'string' &&
+        asset.name.toLowerCase().endsWith('.zip') &&
+        typeof asset.browser_download_url === 'string' &&
+        isTrustedGitHubDownloadUrl(asset.browser_download_url)
+    );
+}
+
+function pickPreferredZipAsset(release) {
+    const allZips = getTrustedZipAssets(release);
+    const patchZip = allZips.find(a => a.name.toUpperCase().includes('PATCH'));
+    const fullZip = allZips.find(a => a.name.toUpperCase().includes('DBYPOS') || a.name.toUpperCase().includes('DBY'));
+    return patchZip || fullZip || allZips[0] || null;
+}
+
+function findSha256Asset(release, zipAsset) {
+    const candidates = release?.assets || [];
+    const expectedNames = [
+        `${zipAsset.name}.sha256`,
+        `${zipAsset.name}.sha256sum`,
+        `${zipAsset.name}.sha256.txt`,
+        'SHA256SUMS',
+        'sha256sums.txt'
+    ].map(name => name.toLowerCase());
+    return candidates.find(asset =>
+        asset &&
+        typeof asset.name === 'string' &&
+        typeof asset.browser_download_url === 'string' &&
+        isTrustedGitHubDownloadUrl(asset.browser_download_url) &&
+        expectedNames.includes(asset.name.toLowerCase())
+    ) || null;
+}
+
+async function assertTrustedDownloadUrl(downloadUrl) {
+    let parsed;
+    try {
+        parsed = new URL(downloadUrl);
+    } catch {
+        throw new Error('URL cập nhật không hợp lệ');
+    }
+
+    if (parsed.protocol !== 'https:') {
+        throw new Error('URL cập nhật phải dùng HTTPS');
+    }
+    if (parsed.hostname !== GITHUB_RELEASE_HOST) {
+        throw new Error('URL cập nhật phải là GitHub release asset chính thức');
+    }
+
+    const release = await fetchLatestRelease();
+    const assets = getTrustedZipAssets(release);
+    const asset = assets.find(a => a.browser_download_url === downloadUrl);
+    if (!asset) {
+        throw new Error('URL cập nhật không khớp asset ZIP của latest GitHub release');
+    }
+    return { asset, checksumAsset: findSha256Asset(release, asset) };
+}
 
 /**
  * Kiểm tra phiên bản mới nhất từ GitHub Releases
@@ -63,10 +143,8 @@ ipcMain.handle('update:check', async () => {
         console.log(`   Has update: ${hasUpdate}`);
 
         // Lấy thông tin download - ưu tiên PATCH zip (nhỏ ~4MB), fallback FULL zip
-        const allZips = latestRelease.assets.filter(asset => asset.name.endsWith('.zip'));
-        const patchZip = allZips.find(a => a.name.toUpperCase().includes('PATCH'));
-        const fullZip = allZips.find(a => a.name.toUpperCase().includes('DBYPOS') || a.name.toUpperCase().includes('DBY'));
-        const zipAsset = patchZip || fullZip || allZips[0] || null;
+        const allZips = getTrustedZipAssets(latestRelease);
+        const zipAsset = pickPreferredZipAsset(latestRelease);
         console.log(`   Available zips: ${allZips.map(a => a.name).join(', ') || 'NONE'}`);
         console.log(`   Selected zip: ${zipAsset ? zipAsset.name : 'NULL'}`);
 
@@ -159,6 +237,63 @@ function fetchLatestRelease() {
 }
 
 /**
+ * Fetch release theo tag để khôi phục một phiên bản cụ thể từ GitHub.
+ */
+function fetchReleaseByTag(version) {
+    const normalizedVersion = String(version || '').trim().replace(/^v/i, '');
+    if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(normalizedVersion)) {
+        return Promise.reject(new Error('Phiên bản khôi phục không hợp lệ'));
+    }
+
+    return new Promise((resolve, reject) => {
+        const options = {
+            hostname: 'api.github.com',
+            path: `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tags/v${normalizedVersion}`,
+            method: 'GET',
+            headers: {
+                'User-Agent': 'DBYPOS-Desktop-App',
+                'Accept': 'application/vnd.github.v3+json'
+            }
+        };
+
+        const req = https.request(options, (res) => {
+            let data = '';
+
+            res.on('data', (chunk) => {
+                data += chunk;
+            });
+
+            res.on('end', () => {
+                if (res.statusCode === 200) {
+                    try {
+                        resolve(JSON.parse(data));
+                    } catch (err) {
+                        reject(new Error('Invalid JSON response'));
+                    }
+                } else if (res.statusCode === 404) {
+                    reject(new Error(`Không tìm thấy release v${normalizedVersion} trên GitHub`));
+                } else if (res.statusCode === 403) {
+                    reject(new Error('GitHub API bị giới hạn (rate limit). Vui lòng thử lại sau vài phút.'));
+                } else {
+                    reject(new Error(`GitHub API lỗi: ${res.statusCode}`));
+                }
+            });
+        });
+
+        req.on('error', (err) => {
+            reject(new Error(`Lỗi kết nối mạng: ${err.message}`));
+        });
+
+        req.setTimeout(15000, () => {
+            req.destroy();
+            reject(new Error('Hết thời gian kết nối. Kiểm tra mạng internet.'));
+        });
+
+        req.end();
+    });
+}
+
+/**
  * So sánh 2 version strings (semantic versioning)
  * @returns 1 if v1 > v2, -1 if v1 < v2, 0 if equal
  */
@@ -206,14 +341,28 @@ function downloadFile(url, destPath, onProgress) {
                 return;
             }
 
-            const protocol = currentUrl.startsWith('https') ? https : http;
+            let parsedUrl;
+            try {
+                parsedUrl = new URL(currentUrl);
+            } catch {
+                reject(new Error('URL tải cập nhật không hợp lệ'));
+                return;
+            }
+            if (parsedUrl.protocol !== 'https:') {
+                reject(new Error('Không cho phép tải cập nhật qua HTTP'));
+                return;
+            }
 
-            protocol.get(currentUrl, {
+            https.get(parsedUrl, {
                 headers: { 'User-Agent': 'DBYPOS-Desktop-App' }
             }, (res) => {
                 // Handle redirects
                 if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307) {
-                    const redirectUrl = res.headers.location;
+                    if (!res.headers.location) {
+                        reject(new Error('Redirect cập nhật thiếu Location header'));
+                        return;
+                    }
+                    const redirectUrl = new URL(res.headers.location, parsedUrl).toString();
                     console.log(`   ↪ Redirect ${redirectCount + 1}`);
                     makeRequest(redirectUrl, redirectCount + 1);
                     return;
@@ -260,15 +409,62 @@ function downloadFile(url, destPath, onProgress) {
     });
 }
 
+function downloadText(url) {
+    return new Promise((resolve, reject) => {
+        downloadFile(url, path.join(os.tmpdir(), `DBYPOS-checksum-${Date.now()}.txt`), null)
+            .then(filePath => {
+                try {
+                    const content = fs.readFileSync(filePath, 'utf8');
+                    fs.rmSync(filePath, { force: true });
+                    resolve(content);
+                } catch (err) {
+                    reject(err);
+                }
+            })
+            .catch(reject);
+    });
+}
+
+function sha256File(filePath) {
+    return new Promise((resolve, reject) => {
+        const hash = crypto.createHash('sha256');
+        const stream = fs.createReadStream(filePath);
+        stream.on('data', chunk => hash.update(chunk));
+        stream.on('end', () => resolve(hash.digest('hex')));
+        stream.on('error', reject);
+    });
+}
+
+async function verifyChecksumIfAvailable(zipPath, zipAsset, checksumAsset) {
+    if (!checksumAsset) {
+        console.warn('⚠️ Release chưa có SHA256 asset; bỏ qua checksum để giữ tương thích update hiện tại');
+        return;
+    }
+    const checksumText = await downloadText(checksumAsset.browser_download_url);
+    const expected = (checksumText.match(/[a-fA-F0-9]{64}/) || [])[0]?.toLowerCase();
+    if (!expected) {
+        throw new Error('File SHA256 không chứa checksum hợp lệ');
+    }
+    const actual = await sha256File(zipPath);
+    if (actual !== expected) {
+        throw new Error(`Checksum cập nhật không khớp cho ${zipAsset.name}`);
+    }
+    console.log('✅ SHA256 verified:', actual);
+}
+
 /**
  * Download + cài đặt bản cập nhật tự động
  */
-ipcMain.handle('update:download', async (event, downloadUrl) => {
+async function installTrustedUpdate({ downloadUrl, trustedAsset, checksumAsset, operation = 'Cập nhật' }) {
     try {
         console.log('📥 ========================================');
         console.log('📥 BẮT ĐẦU CẬP NHẬT TỰ ĐỘNG');
         console.log('📥 ========================================');
         console.log('   URL:', downloadUrl);
+        if (!trustedAsset) {
+            throw new Error('Thiếu asset cập nhật hợp lệ');
+        }
+        console.log('   Trusted asset:', trustedAsset.name);
 
         sendToRenderer('update:step', { step: 'downloading', message: 'Đang tải bản cập nhật...' });
 
@@ -301,6 +497,7 @@ ipcMain.handle('update:download', async (event, downloadUrl) => {
 
         const zipStats = fs.statSync(zipPath);
         console.log(`✅ Tải xong: ${(zipStats.size / 1024 / 1024).toFixed(1)} MB`);
+        await verifyChecksumIfAvailable(zipPath, trustedAsset, checksumAsset);
         sendToRenderer('update:step', { step: 'extracting', message: 'Đang giải nén...' });
 
         // 3. Giải nén ZIP
@@ -437,7 +634,7 @@ exit
                         fromVersion: packageJson.version,
                         toVersion: newVersion,
                         machine: os.hostname(),
-                        notes: `Cập nhật từ v${packageJson.version} lên v${newVersion}`
+                        notes: `${operation} từ v${packageJson.version} lên v${newVersion}`
                     }
                 });
                 console.log('✅ Đã lưu lịch sử cập nhật vào DB');
@@ -451,7 +648,7 @@ exit
             success: true,
             data: {
                 version: newVersion,
-                message: `Đã cập nhật lên v${newVersion}. Đang khởi động lại...`,
+                message: `Đã ${operation.toLowerCase()} lên v${newVersion}. Đang khởi động lại...`,
                 lockedFiles: copyErrors.length
             }
         };
@@ -474,6 +671,42 @@ exit
     } catch (error) {
         console.error('❌ Lỗi cập nhật tự động:', error);
         console.error('   Stack:', error.stack);
+        return { success: false, error: error.message };
+    }
+}
+
+ipcMain.handle('update:download', async (event, downloadUrl) => {
+    try {
+        const { asset: trustedAsset, checksumAsset } = await assertTrustedDownloadUrl(downloadUrl);
+        return await installTrustedUpdate({
+            downloadUrl,
+            trustedAsset,
+            checksumAsset,
+            operation: 'Cập nhật'
+        });
+    } catch (error) {
+        console.error('❌ Lỗi cập nhật phiên bản:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('update:restoreVersion', async (event, version) => {
+    try {
+        requireUpdateAdmin();
+        const normalizedVersion = String(version || '').trim().replace(/^v/i, '');
+        const release = await fetchReleaseByTag(normalizedVersion);
+        const trustedAsset = pickPreferredZipAsset(release);
+        if (!trustedAsset) {
+            throw new Error(`Release v${normalizedVersion} không có file ZIP`);
+        }
+        return await installTrustedUpdate({
+            downloadUrl: trustedAsset.browser_download_url,
+            trustedAsset,
+            checksumAsset: findSha256Asset(release, trustedAsset),
+            operation: 'Khôi phục'
+        });
+    } catch (error) {
+        console.error('❌ Lỗi khôi phục phiên bản:', error);
         return { success: false, error: error.message };
     }
 });

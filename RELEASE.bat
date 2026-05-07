@@ -136,7 +136,7 @@ call node _auto_backup_drive.js
 if errorlevel 1 (
     echo.
     echo ❌ LOI: Google Drive Backup THAT BAI!
-    echo    Kiem tra: electron\gdrive-credentials.json hoac electron\gdrive-token.json co hop le khong?
+    echo    Kiem tra Google token trong %%APPDATA%%\quan-ly-ban-hang-desktop\gdrive-token.json hoac electron\gdrive-credentials.json co hop le khong?
     set GDRIVE_STATUS=THAT BAI
 ) else (
     echo.

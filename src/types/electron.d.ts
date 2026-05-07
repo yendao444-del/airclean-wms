@@ -235,9 +235,10 @@ export interface ElectronAPI {
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
-        login: (username: string, password: string) => Promise<{ success: boolean; data?: any; error?: string }>;
-        logout: () => Promise<{ success: boolean }>;
-        restoreSession: (userId: number) => Promise<{ success: boolean }>;
+        login: (username: string, password: string, rememberMe?: boolean) => Promise<{ success: boolean; data?: any; rememberToken?: string | null; error?: string }>;
+        logout: (rememberToken?: string) => Promise<{ success: boolean }>;
+        restoreSession: (rememberToken: string) => Promise<{ success: boolean; data?: any }>;
+        getCurrentSession: () => Promise<{ success: boolean; data?: any }>;
         ensureAdmin: () => Promise<{ success: boolean; error?: string }>;
         heartbeat: () => Promise<{ success: boolean }>;
     };
@@ -252,6 +253,7 @@ export interface ElectronAPI {
         getCurrentVersion: () => Promise<{ success: boolean; data?: string; error?: string }>;
         check: () => Promise<{ success: boolean; data?: { currentVersion: string; latestVersion: string; hasUpdate: boolean; releaseNotes: string; publishedAt: string; downloadUrl: string | null; downloadSize: number }; error?: string }>;
         download: (downloadUrl: string) => Promise<{ success: boolean; data?: { version: string }; error?: string }>;
+        restoreVersion: (version: string) => Promise<{ success: boolean; data?: { version: string }; error?: string }>;
         restart: () => Promise<void>;
         getHistory: () => Promise<{ success: boolean; data?: Array<{ id: number; fromVersion: string; toVersion: string; updatedAt: string; machine?: string; notes?: string }>; error?: string }>;
     };
