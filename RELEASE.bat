@@ -75,6 +75,17 @@ mkdir "_full_temp\resources\app\electron"
 mkdir "_full_temp\resources\app\node_modules\@prisma"
 mkdir "_full_temp\resources\app\node_modules\.prisma"
 
+:: Auto-copy Google token truoc khi dong goi (neu chua co trong electron/)
+if not exist "electron\gdrive-token.json" (
+    if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
+        copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
+        echo    [OK] Auto-copy gdrive-token.json tu AppData vao electron/
+    ) else (
+        echo    [!] CANH BAO: Khong co gdrive-token.json - Google Drive upload se THAT BAI tren production!
+        echo        Chay reauth-gdrive.bat truoc khi build.
+    )
+)
+
 xcopy "dist\*"                       "_full_temp\resources\app\dist\"                        /E /I /Y /Q >nul 2>&1
 xcopy "electron\*"                   "_full_temp\resources\app\electron\"                    /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\@prisma\*"       "_full_temp\resources\app\node_modules\@prisma\"        /E /I /Y /Q >nul 2>&1

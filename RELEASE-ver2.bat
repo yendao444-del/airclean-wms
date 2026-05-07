@@ -76,6 +76,15 @@ rmdir /S /Q "release4\win-unpacked\resources\app\dist" 2>nul
 xcopy "dist\*" "release4\win-unpacked\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 
 echo    Copy electron\ ...
+if not exist "electron\gdrive-token.json" (
+    if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
+        copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
+        echo    [OK] Auto-copy gdrive-token.json tu AppData vao electron/
+    ) else (
+        echo    [!] CANH BAO: Khong co gdrive-token.json - Google Drive upload se THAT BAI tren production!
+        echo        Chay reauth-gdrive.bat truoc khi build.
+    )
+)
 rmdir /S /Q "release4\win-unpacked\resources\app\electron" 2>nul
 xcopy "electron\*" "release4\win-unpacked\resources\app\electron\" /E /I /Y /Q >nul 2>&1
 
