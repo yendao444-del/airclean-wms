@@ -71,11 +71,11 @@ mkdir "!PATCH_TEMP!\resources\app\dist"
 mkdir "!PATCH_TEMP!\resources\app\electron"
 mkdir "!PATCH_TEMP!\resources\app\python"
 
-if not exist "electron\gdrive-token.json" (
-    if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
-        copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
-        echo    [OK] Auto-copy gdrive-token.json tu AppData vao electron/
-    ) else (
+if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
+    copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
+    echo    [OK] Auto-copy gdrive-token.json moi nhat tu AppData vao electron/
+) else (
+    if not exist "electron\gdrive-token.json" (
         echo    [!] CANH BAO: Khong co gdrive-token.json - Google Drive upload se THAT BAI tren production!
         echo        Chay reauth-gdrive.bat truoc khi build.
     )
