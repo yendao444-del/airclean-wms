@@ -2334,6 +2334,7 @@ export default function Attendance() {
 
     const [fineModalOpen, setFineModalOpen] = useState(false);
     const [fineForm] = Form.useForm();
+    const [fineTypeDropdownOpen, setFineTypeDropdownOpen] = useState(false);
     const [fundForm] = Form.useForm();
     const [empForm] = Form.useForm();
     const [empModalOpen, setEmpModalOpen] = useState(false);
@@ -2979,6 +2980,7 @@ export default function Attendance() {
             }]);
 
             setFineModalOpen(false);
+            setFineTypeDropdownOpen(false);
             fineForm.resetFields();
             message.success(`Đã thêm phạt ${fmt(values.amount)} cho ${employees.find(e => e.id === values.empId)?.name} (Đã lưu lịch sử)`);
         });
@@ -3809,7 +3811,7 @@ export default function Attendance() {
                             type="primary"
                             danger
                             icon={<PlusOutlined />}
-                            onClick={() => { fineForm.setFieldsValue({ date: overviewDateRange[0] }); setFineModalOpen(true); }}
+                            onClick={() => { fineForm.setFieldsValue({ date: dayjs() }); setFineModalOpen(true); }}
                             style={{ fontWeight: 700 }}
                         >
                             Thêm phạt thủ công
@@ -5530,7 +5532,7 @@ export default function Attendance() {
                     </div>
                 }
                 open={fineModalOpen}
-                onCancel={() => { setFineModalOpen(false); fineForm.resetFields(); }}
+                onCancel={() => { setFineModalOpen(false); setFineTypeDropdownOpen(false); fineForm.resetFields(); }}
                 onOk={handleAddFine}
                 okText="Xác nhận phạt"
                 cancelText="Hủy"
@@ -5571,7 +5573,15 @@ export default function Attendance() {
                         </Select>
                     </Form.Item>
                     <Form.Item name="type" label="Loại lỗi vi phạm" rules={[{ required: true, message: 'Chọn hoặc nhập loại lỗi' }]}>
-                        <Select placeholder="Chọn loại lỗi" size="large" mode="tags" maxCount={1}>
+                        <Select
+                            placeholder="Chọn loại lỗi"
+                            size="large"
+                            mode="tags"
+                            maxCount={1}
+                            open={fineTypeDropdownOpen}
+                            onDropdownVisibleChange={setFineTypeDropdownOpen}
+                            onSelect={() => setFineTypeDropdownOpen(false)}
+                        >
                             <Select.Option value="Đi muộn">Đi muộn</Select.Option>
                             <Select.Option value="Đóng gói sai">Đóng gói sai</Select.Option>
                             <Select.Option value="Vi phạm nội quy">Vi phạm nội quy</Select.Option>
