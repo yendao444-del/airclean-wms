@@ -1549,6 +1549,7 @@ export default function StockBalancePage() {
             align: 'center',
             render: (stock: number, record: ProductRow) => {
                 const level = getAlertLevel(record);
+                const visibleStock = getVisibleStockForRecord(record, stock);
                 const bgMap: Record<StockAlertLevel, string> = {
                     all_zero:   'linear-gradient(135deg, #820014 0%, #cf1322 100%)',
                     has_zero:   'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)',
@@ -1569,7 +1570,7 @@ export default function StockBalancePage() {
                             <div key={v.sku} style={{ display: 'flex', justifyContent: 'space-between', gap: 16, padding: '2px 0' }}>
                                 <span style={{ color: '#d9d9d9' }}>{v.color || v.sku}</span>
                                 <span style={{ fontWeight: 700, color: v.systemStock === 0 ? '#ff7875' : ((variantMinStocks[v.sku] ?? 0) > 0 && v.systemStock <= (variantMinStocks[v.sku] ?? 0)) ? '#ffd591' : '#95de64' }}>
-                                    {v.systemStock === 0 ? 'HẾT' : v.systemStock}
+                                    {canViewVariantStock(v) ? (v.systemStock === 0 ? 'HẾT' : v.systemStock) : '***'}
                                 </span>
                             </div>
                         ))}
@@ -1591,7 +1592,7 @@ export default function StockBalancePage() {
                             justifyContent: 'center',
                         }}>
                             {(level === 'all_zero' || level === 'has_zero') && <span style={{ fontSize: 12 }}>⚠</span>}
-                            {stock}
+                            {visibleStock === null ? '***' : visibleStock}
                         </div>
                         {subLabelMap[level]}
                     </div>
@@ -1734,6 +1735,33 @@ export default function StockBalancePage() {
         if (stockFilter === 'low')  return baseFilteredRows.filter(r => getAlertLevel(r) === 'approaching');
         return baseFilteredRows.filter(r => getAlertLevel(r) === 'ok');
     })();
+    const canViewStockNumbers = isAdmin || stockFilter === 'need' || stockFilter === 'low';
+
+    function isVariantInCurrentStockAlert(variant: StockBalanceItem): boolean {
+        if (pausedVariants[variant.sku]) return false;
+        const threshold = variantMinStocks[variant.sku] ?? 0;
+        if (stockFilter === 'need') {
+            return variant.systemStock === 0 || (threshold > 0 && variant.systemStock <= threshold);
+        }
+        if (stockFilter === 'low') {
+            return threshold > 0
+                && variant.systemStock > threshold
+                && variant.systemStock <= Math.ceil(threshold * (1 + STOCK_APPROACHING_BUFFER_RATIO));
+        }
+        return false;
+    }
+
+    function canViewVariantStock(variant: StockBalanceItem): boolean {
+        return isAdmin || isVariantInCurrentStockAlert(variant);
+    }
+
+    function getVisibleStockForRecord(record: ProductRow, fullStock: number): number | null {
+        if (isAdmin) return fullStock;
+        if (!canViewStockNumbers) return null;
+        const affectedVariants = record.variants.filter(isVariantInCurrentStockAlert);
+        if (affectedVariants.length === 0) return null;
+        return affectedVariants.reduce((sum, variant) => sum + (variant.systemStock || 0), 0);
+    }
 
     // Inject search + button into app header
     useEffect(() => {
@@ -1973,7 +2001,7 @@ export default function StockBalancePage() {
                                                                                                         : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)';
                                                                                             return (
                                                                                                 <div style={{ background: bg, color: isPaused ? '#8c8c8c' : '#fff', padding: '6px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 14, display: 'inline-block', minWidth: 45 }}>
-                                                                                                    {v.systemStock}
+                                                                                                    {canViewVariantStock(v) ? v.systemStock : '***'}
                                                                                                 </div>
                                                                                             );
                                                                                         })()}
@@ -2107,7 +2135,7 @@ export default function StockBalancePage() {
                                                                         {variant.color ? <Tag color="blue">🎨 {variant.color}</Tag> : <span style={{ color: '#bfbfbf' }}>—</span>}
                                                                     </td>
                                                                     <td style={{ padding: '10px 8px', textAlign: 'right', borderBottom: '1px solid #f0f0f0', fontWeight: 700 }}>
-                                                                        {isAdmin ? variant.systemStock : <span style={{ color: '#d9d9d9' }}>***</span>}
+                                                                        {canViewVariantStock(variant) ? variant.systemStock : <span style={{ color: '#d9d9d9' }}>***</span>}
                                                                     </td>
                                                                     {units.map((_, unitIdx) => (
                                                                         <td key={unitIdx} style={{ padding: '6px 4px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>

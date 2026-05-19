@@ -27,7 +27,7 @@ const { Title } = Typography;
 export default function ProductsPage() {
     const currentUser = useCurrentUser();
     const { user } = useAuth();
-    const isManager = user?.role === 'admin' || user?.role === 'manager';
+    const canViewInventoryStock = user?.role === 'admin';
     const [products, setProducts] = useState<Product[]>([]);
     const [categories, setCategories] = useState<Category[]>([]);
     const [loading, setLoading] = useState(false);
@@ -846,7 +846,7 @@ export default function ProductsPage() {
                         ? 'linear-gradient(135deg, #faad14 0%, #ffc53d 100%)'
                         : 'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)';
 
-                if (!isManager) {
+                if (!canViewInventoryStock) {
                     return (
                         <div
                             style={{
@@ -1169,7 +1169,7 @@ export default function ProductsPage() {
                                                                     </span>
                                                                 </td>
                                                                 <td style={{ padding: '10px 8px', textAlign: 'center' }}>
-                                                                    {!isManager ? (
+                                                                    {!canViewInventoryStock ? (
                                                                         <div style={{ background: '#d9d9d9', color: '#595959', padding: '6px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 14, display: 'inline-block', minWidth: 45 }}>
                                                                             ***
                                                                         </div>
@@ -1258,7 +1258,7 @@ export default function ProductsPage() {
                                                                             </span>
                                                                         </td>
                                                                         <td style={{ padding: '10px 8px', textAlign: 'center' }}>
-                                                                            {!isManager ? (
+                                                                            {!canViewInventoryStock ? (
                                                                                 <div style={{ background: '#d9d9d9', color: '#595959', padding: '6px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 14, display: 'inline-block', minWidth: 45 }}>
                                                                                     ***
                                                                                 </div>
@@ -1394,7 +1394,7 @@ export default function ProductsPage() {
                                                                     </strong>
                                                                 </td>
                                                                 <td style={{ padding: '8px', textAlign: 'center' }}>
-                                                                    {!isManager ? (
+                                                                    {!canViewInventoryStock ? (
                                                                         <div style={{ background: '#d9d9d9', color: '#595959', padding: '4px 10px', borderRadius: 6, textAlign: 'center', fontWeight: 900, fontSize: 13, display: 'inline-block', minWidth: 40 }}>
                                                                             ***
                                                                         </div>

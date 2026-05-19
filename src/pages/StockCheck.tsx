@@ -956,7 +956,7 @@ export default function StockCheck() {
                 });
 
                 if (result.adjustedCount > 0) {
-                    message.success(`✅ ${item.sku}: ${item.systemStock} → ${item.actualStock}`);
+                    message.success(isAdmin ? `✅ ${item.sku}: ${item.systemStock} → ${item.actualStock}` : `✅ ${item.sku}: Đã cân bằng`);
                 } else if (result.failedCount > 0) {
                     message.error('Lỗi cân bằng kho!');
                 }
@@ -2030,7 +2030,7 @@ export default function StockCheck() {
                                                 dataIndex: 'systemStock',
                                                 width: 80,
                                                 align: 'right' as const,
-                                                render: (v: number) => <span style={{ color: '#64748b', fontWeight: 600 }}>{v}</span>,
+                                                render: (v: number) => isAdmin ? <span style={{ color: '#64748b', fontWeight: 600 }}>{v}</span> : <span style={{ color: '#cbd5e1', fontWeight: 600 }}>***</span>,
                                             },
                                             {
                                                 title: 'Tồn mới',
@@ -2044,11 +2044,11 @@ export default function StockCheck() {
                                                 dataIndex: 'difference',
                                                 width: 80,
                                                 align: 'right' as const,
-                                                render: (diff: number) => (
+                                                render: (diff: number) => isAdmin ? (
                                                     <b style={{ fontSize: 13, color: diff > 0 ? '#16a34a' : diff < 0 ? '#dc2626' : '#94a3b8' }}>
                                                         {diff > 0 ? `+${diff}` : diff === 0 ? '—' : diff}
                                                     </b>
-                                                ),
+                                                ) : <span style={{ color: '#cbd5e1', fontWeight: 600 }}>***</span>,
                                             },
                                         ]}
                                     />
