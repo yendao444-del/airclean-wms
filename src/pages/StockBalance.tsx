@@ -789,12 +789,16 @@ export default function StockBalancePage() {
     }, []);
 
     const saveVariantMinStock = useCallback(async (sku: string, value: number) => {
+        if (!isAdmin) {
+            message.error('Chỉ admin được sửa ngưỡng nhập.');
+            return;
+        }
         setVariantMinStocks(prev => {
             const updated = { ...prev, [sku]: value };
             window.electronAPI.appConfig.set('variantMinStocks', updated).catch(() => {});
             return updated;
         });
-    }, []);
+    }, [isAdmin]);
 
     // Tạm ngừng theo dõi per-variant
     const [pausedVariants, setPausedVariants] = useState<Record<string, boolean>>({});
@@ -807,6 +811,10 @@ export default function StockBalancePage() {
     }, []);
 
     const savePausedVariant = useCallback((sku: string, paused: boolean) => {
+        if (!isAdmin) {
+            message.error('Chỉ admin được tạm ngừng theo dõi SKU.');
+            return;
+        }
         setPausedVariants(prev => {
             const updated = paused
                 ? { ...prev, [sku]: true }
@@ -814,7 +822,7 @@ export default function StockBalancePage() {
             window.electronAPI.appConfig.set('pausedVariants', updated).catch(() => {});
             return updated;
         });
-    }, []);
+    }, [isAdmin]);
 
     // Inline edit variant-level ngưỡng (trong Chi tiết expanded row)
     const [editingVariantMinKey, setEditingVariantMinKey] = useState<string | null>(null);
@@ -1805,8 +1813,8 @@ export default function StockBalancePage() {
                 {/* ── Stock filter bar ── */}
                 <style>{`
                     @keyframes needRestockPulse {
-                        0%, 100% { box-shadow: 0 0 0 0 rgba(207,19,34,0.5); }
-                        60%       { box-shadow: 0 0 0 7px rgba(207,19,34,0); }
+                        0%, 100% { box-shadow: 0 0 0 0 rgba(207,19,34,0.18); }
+                        60%       { box-shadow: 0 0 0 5px rgba(207,19,34,0); }
                     }
                     .need-restock-alert {
                         animation: needRestockPulse 1.8s ease-in-out infinite;
@@ -1827,16 +1835,16 @@ export default function StockBalancePage() {
                                 onClick={() => setStockFilter(tab.key)}
                                 className={isNeedAlert && !isActive ? 'need-restock-alert' : ''}
                                 style={{
-                                    border: `${isNeedAlert ? 2 : 1.5}px solid ${isActive || isNeedAlert ? tab.color : '#d9d9d9'}`,
+                                    border: `1.5px solid ${isActive ? tab.color : isNeedAlert ? '#f3b7bf' : '#d9d9d9'}`,
                                     background: isActive
                                         ? tab.color
-                                        : isNeedAlert ? '#fff1f0' : '#fff',
-                                    color: isActive ? '#fff' : isNeedAlert ? tab.color : '#595959',
+                                        : isNeedAlert ? '#fff7f7' : '#fff',
+                                    color: isActive ? '#fff' : isNeedAlert ? '#c41d2d' : '#595959',
                                     borderRadius: 6,
-                                    padding: isNeedAlert ? '5px 16px' : '4px 14px',
+                                    padding: '4px 14px',
                                     cursor: 'pointer',
-                                    fontWeight: isActive || isNeedAlert ? 700 : 400,
-                                    fontSize: isNeedAlert ? 14 : 13,
+                                    fontWeight: isActive || isNeedAlert ? 650 : 400,
+                                    fontSize: 13,
                                     display: 'inline-flex',
                                     alignItems: 'center',
                                     gap: 6,
@@ -1845,11 +1853,11 @@ export default function StockBalancePage() {
                             >
                                 {tab.label}
                                 <span style={{
-                                    background: isActive ? 'rgba(255,255,255,0.25)' : isNeedAlert ? tab.color : '#f0f0f0',
-                                    color: isActive || isNeedAlert ? '#fff' : '#595959',
+                                    background: isActive ? 'rgba(255,255,255,0.25)' : isNeedAlert ? '#ffe1e5' : '#f0f0f0',
+                                    color: isActive ? '#fff' : isNeedAlert ? '#c41d2d' : '#595959',
                                     borderRadius: 10,
                                     padding: '0 7px',
-                                    fontSize: isNeedAlert ? 12 : 11,
+                                    fontSize: 11,
                                     fontWeight: 700,
                                     minWidth: 20,
                                     textAlign: 'center',
@@ -2010,15 +2018,15 @@ export default function StockBalancePage() {
                                                                                         {pausedVariants[v.sku] ? (
                                                                                             <Tooltip title="Đang tạm ngừng theo dõi — click để bật lại">
                                                                                                 <div
-                                                                                                    onClick={() => savePausedVariant(v.sku, false)}
-                                                                                                    style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 10px', borderRadius: 5, background: '#f5f5f5', border: '1px solid #d9d9d9', color: '#8c8c8c', fontSize: 11, fontWeight: 600, transition: 'background 0.15s' }}
+                                                                                                    onClick={() => isAdmin && savePausedVariant(v.sku, false)}
+                                                                                                    style={{ cursor: isAdmin ? 'pointer' : 'not-allowed', display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 10px', borderRadius: 5, background: '#f5f5f5', border: '1px solid #d9d9d9', color: '#8c8c8c', fontSize: 11, fontWeight: 600, transition: 'background 0.15s' }}
                                                                                                     onMouseEnter={e => (e.currentTarget.style.background = '#e8e8e8')}
                                                                                                     onMouseLeave={e => (e.currentTarget.style.background = '#f5f5f5')}
                                                                                                 >
                                                                                                     ⏸ Tạm ngừng
                                                                                                 </div>
                                                                                             </Tooltip>
-                                                                                        ) : editingVariantMinKey === v.sku ? (
+                                                                                        ) : isAdmin && editingVariantMinKey === v.sku ? (
                                                                                             <InputNumber
                                                                                                 autoFocus
                                                                                                 min={0}
@@ -2032,15 +2040,19 @@ export default function StockBalancePage() {
                                                                                         ) : (
                                                                                             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                                                                                                 <div
-                                                                                                    onClick={() => { setEditingVariantMinKey(v.sku); setEditingVariantMinValue(variantMinStocks[v.sku] ?? 0); }}
-                                                                                                    style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 5, transition: 'background 0.15s' }}
+                                                                                                    onClick={() => {
+                                                                                                        if (!isAdmin) return;
+                                                                                                        setEditingVariantMinKey(v.sku);
+                                                                                                        setEditingVariantMinValue(variantMinStocks[v.sku] ?? 0);
+                                                                                                    }}
+                                                                                                    style={{ cursor: isAdmin ? 'pointer' : 'default', display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 5, transition: 'background 0.15s' }}
                                                                                                     onMouseEnter={e => (e.currentTarget.style.background = '#f0f0f0')}
                                                                                                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                                                                                                 >
                                                                                                     {(variantMinStocks[v.sku] ?? 0) > 0 ? (
                                                                                                         <>
                                                                                                             <span style={{ fontWeight: 700, color: '#d46b08', fontFamily: 'monospace', fontSize: 13 }}>{variantMinStocks[v.sku]}</span>
-                                                                                                            <EditOutlined style={{ fontSize: 10, color: '#bfbfbf' }} />
+                                                                                                            {isAdmin && <EditOutlined style={{ fontSize: 10, color: '#bfbfbf' }} />}
                                                                                                         </>
                                                                                                     ) : (
                                                                                                         <span style={{ color: '#bfbfbf', fontSize: 11 }}>— đặt</span>

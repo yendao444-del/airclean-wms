@@ -6903,6 +6903,13 @@ ipcMain.handle('appConfig:get', async (event, key) => {
 ipcMain.handle('appConfig:set', async (event, key, value) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
+        const adminOnlyKeys = new Set([
+            'variantMinStocks',
+            'pausedVariants',
+        ]);
+        if (adminOnlyKeys.has(key)) {
+            requireRole('admin');
+        }
         const config = await prisma.appConfig.upsert({
             where: { key },
             update: { value: JSON.stringify(value) },
