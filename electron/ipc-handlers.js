@@ -673,6 +673,222 @@ ipcMain.handle('system:getInfo', async () => {
 });
 
 // ========================================
+// DASHBOARD SUMMARY
+// ========================================
+
+ipcMain.handle('dashboard:getSummary', async (event, params = {}) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+
+        const startedAt = Date.now();
+        const toDate = (value, fallback) => {
+            const d = value ? new Date(value) : fallback;
+            return Number.isNaN(d.getTime()) ? fallback : d;
+        };
+        const now = new Date();
+        const from = toDate(params.from, new Date(now.getFullYear(), now.getMonth(), now.getDate()));
+        const to = toDate(params.to, now);
+        const prevFrom = toDate(params.prevFrom, from);
+        const prevTo = toDate(params.prevTo, to);
+        const chartFrom = toDate(params.chartFrom, from);
+        const chartTo = toDate(params.chartTo, to);
+
+        const parseItems = (value) => {
+            try { return typeof value === 'string' ? JSON.parse(value || '[]') : (value || []); } catch { return []; }
+        };
+        const dateIn = (date, start, end) => date >= start && date <= end;
+        const dayKey = (date) => {
+            const d = new Date(date);
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        };
+        const pickSku = (item) => item?.sku || item?.variantSku || item?.productSku || '';
+        const pickName = (item) => item?.productName || item?.name || item?.product || 'N/A';
+        const pickQty = (item) => Number(item?.quantity ?? item?.qty ?? 0) || 0;
+        const pickPrice = (item) => Number(item?.price ?? item?.unitPrice ?? 0) || 0;
+
+        const [products, exportOrders, ecommerceExports, prevExportSummary, prevEcommerceSummary, chartExportRows, chartEcommerceRows, purchases, recentPurchases] = await Promise.all([
+            prisma.product.findMany({
+                select: { sku: true, stock: true, minStock: true, cost: true, variants: true },
+                where: { status: { not: 'inactive' } },
+            }),
+            prisma.exportOrder.findMany({
+                where: { exportDate: { gte: from, lte: to } },
+                select: { exportDate: true, totalAmount: true, items: true },
+            }),
+            prisma.ecommerceExport.findMany({
+                where: { status: 'completed', ecommerceExportDate: { gte: from, lte: to } },
+                select: { ecommerceExportDate: true, totalAmount: true, items: true },
+            }),
+            prisma.exportOrder.aggregate({
+                where: { exportDate: { gte: prevFrom, lte: prevTo } },
+                _count: { _all: true },
+                _sum: { totalAmount: true },
+            }),
+            prisma.ecommerceExport.aggregate({
+                where: { status: 'completed', ecommerceExportDate: { gte: prevFrom, lte: prevTo } },
+                _count: { _all: true },
+                _sum: { totalAmount: true },
+            }),
+            prisma.$queryRaw`
+                SELECT to_char(date_trunc('day', "exportDate"), 'YYYY-MM-DD') AS day,
+                       COALESCE(SUM("totalAmount"), 0)::float AS revenue
+                FROM "ExportOrder"
+                WHERE "exportDate" >= ${chartFrom} AND "exportDate" <= ${chartTo}
+                GROUP BY 1
+            `,
+            prisma.$queryRaw`
+                SELECT to_char(date_trunc('day', "ecommerceExportDate"), 'YYYY-MM-DD') AS day,
+                       COALESCE(SUM("totalAmount"), 0)::float AS revenue
+                FROM "EcommerceExport"
+                WHERE "status" = 'completed'
+                  AND "ecommerceExportDate" >= ${chartFrom}
+                  AND "ecommerceExportDate" <= ${chartTo}
+                GROUP BY 1
+            `,
+            prisma.purchaseOrder.findMany({
+                where: {
+                    status: { not: 'cancelled' },
+                    createdAt: { gte: from, lte: to },
+                },
+                select: {
+                    id: true,
+                    total: true,
+                    createdAt: true,
+                    receivedAt: true,
+                    supplier: { select: { name: true } },
+                },
+                orderBy: { createdAt: 'desc' },
+            }),
+            prisma.purchaseOrder.findMany({
+                where: { status: { not: 'cancelled' } },
+                select: {
+                    id: true,
+                    total: true,
+                    createdAt: true,
+                    receivedAt: true,
+                    supplier: { select: { name: true } },
+                },
+                orderBy: { createdAt: 'desc' },
+                take: 4,
+            }),
+        ]);
+
+        const costMap = {};
+        let totalStock = 0;
+        let lowStockCount = 0;
+        for (const product of products) {
+            if (product.sku) costMap[product.sku] = product.cost || 0;
+            let productStock = product.stock || 0;
+            let lowStock = productStock <= (product.minStock || 10);
+            const variants = parseItems(product.variants);
+            if (variants.length > 0) {
+                productStock = variants.reduce((sum, v) => sum + (Number(v?.stock) || 0), 0);
+                lowStock = variants.some(v => (Number(v?.stock) || 0) <= (product.minStock || 10));
+                for (const variant of variants) {
+                    if (variant?.sku) {
+                        costMap[variant.sku] = (variant.cost != null && Number(variant.cost) > 0)
+                            ? Number(variant.cost)
+                            : (product.cost || 0);
+                    }
+                }
+            }
+            totalStock += productStock;
+            if (lowStock) lowStockCount += 1;
+        }
+
+        const emptyTotals = () => ({ revenue: 0, count: 0, posRevenue: 0, posCount: 0, ecomRevenue: 0, ecomCount: 0, cogs: 0 });
+        const current = emptyTotals();
+        const previous = emptyTotals();
+        const dailyRevenueByDate = {};
+        const topMap = new Map();
+
+        const addSalesRow = (row, source, date, bucket) => {
+            const amount = Number(row.totalAmount || 0);
+            bucket.revenue += amount;
+            bucket.count += 1;
+            if (source === 'pos') {
+                bucket.posRevenue += amount;
+                bucket.posCount += 1;
+            } else {
+                bucket.ecomRevenue += amount;
+                bucket.ecomCount += 1;
+            }
+            for (const item of parseItems(row.items)) {
+                const sku = pickSku(item);
+                const qty = pickQty(item);
+                const price = pickPrice(item);
+                const cost = costMap[sku] ?? Number(item?.cost || 0);
+                bucket.cogs += cost * qty;
+                if (dateIn(date, from, to)) {
+                    const name = pickName(item);
+                    const existing = topMap.get(name) || { name, qty: 0, revenue: 0 };
+                    existing.qty += qty || 1;
+                    existing.revenue += price * (qty || 1);
+                    topMap.set(name, existing);
+                }
+            }
+        };
+
+        const salesRows = [
+            ...exportOrders.map(row => ({ row, source: 'pos', date: row.exportDate })),
+            ...ecommerceExports.map(row => ({ row, source: 'ecom', date: row.ecommerceExportDate })),
+        ];
+        for (const { row, source, date } of salesRows) {
+            if (dateIn(date, from, to)) addSalesRow(row, source, date, current);
+        }
+        previous.posRevenue = Number(prevExportSummary._sum?.totalAmount || 0);
+        previous.posCount = Number(prevExportSummary._count?._all || 0);
+        previous.ecomRevenue = Number(prevEcommerceSummary._sum?.totalAmount || 0);
+        previous.ecomCount = Number(prevEcommerceSummary._count?._all || 0);
+        previous.revenue = previous.posRevenue + previous.ecomRevenue;
+        previous.count = previous.posCount + previous.ecomCount;
+
+        const chartRows = [...chartExportRows, ...chartEcommerceRows];
+        for (const row of chartRows) {
+            const key = String(row.day || '');
+            if (key) dailyRevenueByDate[key] = (dailyRevenueByDate[key] || 0) + Number(row.revenue || 0);
+        }
+
+        const rangePurchases = purchases.filter(p => dateIn(p.receivedAt || p.createdAt, from, to));
+        const purchaseAmount = rangePurchases.reduce((sum, p) => sum + Number(p.total || 0), 0);
+        const formatPurchase = (p) => ({
+            id: p.id,
+            supplierName: p.supplier?.name || '',
+            totalAmount: p.total || 0,
+            purchaseDate: (p.receivedAt || p.createdAt).toISOString(),
+            createdAt: p.createdAt.toISOString(),
+        });
+
+        const data = {
+            revenue: current.revenue,
+            prevRevenue: previous.revenue,
+            orderCount: current.count,
+            prevOrders: previous.count,
+            posRevenue: current.posRevenue,
+            posCount: current.posCount,
+            ecomRevenue: current.ecomRevenue,
+            ecomCount: current.ecomCount,
+            grossProfit: current.revenue - current.cogs,
+            totalStock,
+            productCount: products.length,
+            lowStockCount,
+            purchaseCount: rangePurchases.length,
+            purchaseAmount,
+            purchases: rangePurchases.slice(0, 4).map(formatPurchase),
+            recentPurchases: recentPurchases.map(formatPurchase),
+            dailyRevenueByDate,
+            topProducts: Array.from(topMap.values()).sort((a, b) => b.qty - a.qty).slice(0, 10),
+        };
+
+        console.log(`[Perf] dashboard:getSummary sales=${salesRows.length} chart=${chartRows.length} products=${products.length} ms=${Date.now() - startedAt}`);
+        return { success: true, data };
+    } catch (error) {
+        console.error('dashboard:getSummary error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// ========================================
 // PRODUCTS
 // ========================================
 

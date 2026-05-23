@@ -113,6 +113,16 @@ export interface ElectronAPI {
         getByRecord: (params: { module: string; recordId: number }) => Promise<{ success: boolean; data?: ActivityLog[]; error?: string }>;
         getStats: () => Promise<{ success: boolean; data?: ActivityLogStats; error?: string }>;
     };
+    dashboard: {
+        getSummary: (filters: {
+            from: string;
+            to: string;
+            prevFrom: string;
+            prevTo: string;
+            chartFrom: string;
+            chartTo: string;
+        }) => Promise<{ success: boolean; data?: any; error?: string }>;
+    };
     purchases: {
         getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;

@@ -35,6 +35,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getByRecord: (params) => ipcRenderer.invoke('activityLog:getByRecord', params),
         getStats: () => ipcRenderer.invoke('activityLog:getStats'),
     },
+    dashboard: {
+        getSummary: (filters) => ipcRenderer.invoke('dashboard:getSummary', filters),
+    },
     purchases: {
         getAll: (filters) => ipcRenderer.invoke('purchases:getAll', filters),
         create: (data) => ipcRenderer.invoke('purchases:create', data),

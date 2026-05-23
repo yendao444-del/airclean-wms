@@ -2640,9 +2640,11 @@ export default function Attendance() {
             if (!isPastStockCheckWorkingDay(date)) continue;
 
             const dateKey = date.format('YYYY-MM-DD');
+            const completedSession = stockCheckSessions.find((s: any) => s.date === dateKey && s.status === 'completed');
+            // Da hoan thanh bat ky phien kiem nao trong ngay (daily hoac full) -> khong phat.
+            if (completedSession) continue;
+
             const session = stockCheckSessions.find((s: any) => s.date === dateKey && s.type !== 'full');
-            // Đã hoàn thành → không phạt
-            if (session?.status === 'completed') continue;
 
             let assignee: typeof employees[number] | undefined;
             if (session) {

@@ -304,6 +304,8 @@ function AppContent() {
             return null;
         }
 
+        const withAppData = (node: ReactNode) => <AppDataProvider>{node}</AppDataProvider>;
+
         switch (selectedKey) {
             case 'dashboard':
                 return <DashboardPage />;
@@ -319,7 +321,7 @@ function AppContent() {
             case 'fee-calculator':
                 return <FeeCalculatorPage />;
             case 'order-picking':
-                return <OrderPickingPage />;
+                return withAppData(<OrderPickingPage />);
             case 'purchase':
                 return <PurchasePage />;
             case 'export':
@@ -327,7 +329,7 @@ function AppContent() {
             case 'returns':
                 return <ReturnsPage />;
             case 'refunds':
-                return <RefundsPage />;
+                return withAppData(<RefundsPage />);
             case 'ecommerce-export':
                 return <EcommerceExportPage />;
             case 'einvoice':
@@ -335,9 +337,9 @@ function AppContent() {
             case 'orders':
                 return <OrdersPage />;
             case 'stock-balance':
-                return <StockBalancePage />;
+                return withAppData(<StockBalancePage />);
             case 'stock-check':
-                return <StockCheckPage />;
+                return withAppData(<StockCheckPage />);
             case 'business-report':
                 return <BusinessReportPage />;
             case 'daily-tasks':
@@ -583,13 +585,11 @@ export default function App() {
         <ErrorBoundary>
             <ForceUpdateGate>
                 <AuthProvider>
-                    <AppDataProvider>
-                        <PageHeaderProvider>
-                            <ErrorBoundary>
-                                <AppContent />
-                            </ErrorBoundary>
-                        </PageHeaderProvider>
-                    </AppDataProvider>
+                    <PageHeaderProvider>
+                        <ErrorBoundary>
+                            <AppContent />
+                        </ErrorBoundary>
+                    </PageHeaderProvider>
                 </AuthProvider>
             </ForceUpdateGate>
         </ErrorBoundary>
