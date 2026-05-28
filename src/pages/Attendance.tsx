@@ -118,8 +118,17 @@ interface FineRecord {
     detail: string;
     amount: number;
     date?: string; // ISO string — ngày tạo phạt
-    source?: 'manual' | 'attendance' | 'returns'; // nguồn tạo phạt
+    source?: string; // nguồn tạo phạt
 }
+
+const getFineOverrideKey = (fine: FineRecord) => [
+    fine.source || 'system',
+    fine.empId,
+    fine.type,
+    fine.detail,
+    fine.date || '',
+    fine.amount,
+].join('|');
 
 interface PurchaseVatTracking {
     id: number;
@@ -2124,8 +2133,15 @@ export default function Attendance() {
 
     // === State cho phạt thủ công ===
     const [extraFines, setExtraFines] = useState<FineRecord[]>([]);
+    const [fineOverrides, setFineOverrides] = useState<Record<string, FineRecord>>({});
     const [fineAuditLog, setFineAuditLog] = useState<FineAuditLog[]>([]);
     const [fineEmployeeFilter, setFineEmployeeFilter] = useState<number | 'all'>('all');
+    const [editingFine, setEditingFine] = useState<{
+        isManual: boolean;
+        manualIndex: number;
+        overrideKey?: string;
+        fine: FineRecord;
+    } | null>(null);
     const employeesRef = useRef<Employee[]>([]);
     const fineAuditActorRef = useRef(fineAuditActor);
 
@@ -2209,6 +2225,7 @@ export default function Attendance() {
                     if (d.extraFundTx) setExtraFundTx(d.extraFundTx);
                     if (d.fundAuditLog) setFundAuditLog(d.fundAuditLog);
                     if (d.extraFines) setExtraFines(d.extraFines);
+                    if (d.fineOverrides) setFineOverrides(d.fineOverrides);
                     if (d.fineAuditLog) setFineAuditLog(d.fineAuditLog);
                     if (d.lockedPeriods) setLockedPeriods(d.lockedPeriods);
                     if (d.payrollOverrides) setPayrollOverrides(d.payrollOverrides);
@@ -2286,15 +2303,15 @@ export default function Attendance() {
     // 2a. Luôn cập nhật ref khi state thay đổi (không debounce, không ghi DB)
     useEffect(() => {
         if (!isDbLoaded || employees.length === 0) return;
-        latestSnapshotRef.current = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog };
-    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded]);
+        latestSnapshotRef.current = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog };
+    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded]);
 
     // 2b. Lưu tự động khi có thay đổi state với Debounce
     useEffect(() => {
         if (!isDbLoaded) return; // Không lưu đè lúc chưa tải xong
         if (employees.length === 0) return; // Chưa có data employees → không ghi đè DB
 
-        const snapshot = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog };
+        const snapshot = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog };
 
         const saveData = async () => {
             try {
@@ -2307,7 +2324,7 @@ export default function Attendance() {
 
         const timer = setTimeout(saveData, 500); // Đợi 500ms thao tác cuối rồi mới save
         return () => clearTimeout(timer);
-    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded]);
+    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded]);
 
     // 2c. Flush save khi component unmount (navigate sang tab khác) để tránh mất data
     useEffect(() => {
@@ -2684,9 +2701,15 @@ export default function Attendance() {
         return fines;
     }, [employees, stockCheckSessions, overviewDateRange]);
 
+    const applyFineOverride = useCallback((fine: FineRecord): FineRecord => {
+        const override = fineOverrides[getFineOverrideKey(fine)];
+        return override ? { ...fine, ...override, source: fine.source } : fine;
+    }, [fineOverrides]);
+
     const allFines = useMemo(
-        () => [...finesData, ...extraFines, ...autoVatOverdueFines, ...autoDeadlineOverdueFines, ...autoDailyReportMissingFines, ...autoStockCheckMissingFines],
-        [extraFines, autoVatOverdueFines, autoDeadlineOverdueFines, autoDailyReportMissingFines, autoStockCheckMissingFines]
+        () => [...finesData, ...extraFines, ...autoVatOverdueFines, ...autoDeadlineOverdueFines, ...autoDailyReportMissingFines, ...autoStockCheckMissingFines]
+            .map(applyFineOverride),
+        [extraFines, autoVatOverdueFines, autoDeadlineOverdueFines, autoDailyReportMissingFines, autoStockCheckMissingFines, applyFineOverride]
     );
 
     // Helper: lọc theo overviewDateRange
@@ -3171,13 +3194,57 @@ export default function Attendance() {
     // ============================================
     // TAB 1: TỔNG QUÁT
     // ============================================
-    const renderOverview = () => (
+    const renderOverview = () => {
+        const totalBaseSalary = privatePayrollData.reduce((sum, item) => sum + (item.salaryBase || 0), 0);
+        const totalPackIncome = privatePayrollData.reduce((sum, item) => sum + (item.packIncome || 0), 0);
+        const totalBonus = privatePayrollData.reduce((sum, item) => sum + (item.totalBonus || 0), 0);
+        const totalFines = privatePayrollData.reduce((sum, item) => sum + (item.myFines || 0), 0);
+        const totalFinalSalary = privatePayrollData.reduce((sum, item) => sum + (item.finalSalary || 0), 0);
+
+        return (
         <div className="att-table-card">
             <Table
                 dataSource={privatePayrollData.map(d => ({ ...d, key: d.id }))}
                 pagination={false}
                 size="middle"
                 scroll={{ x: 1050 }}
+                summary={() => (
+                    <Table.Summary fixed>
+                        <Table.Summary.Row className="att-overview-total-row">
+                            <Table.Summary.Cell index={0} colSpan={2} className="att-overview-total-label-cell">
+                                <span className="att-overview-total-label">
+                                    Tổng cộng
+                                </span>
+                            </Table.Summary.Cell>
+                            <Table.Summary.Cell index={2} align="right" className="att-overview-total-cell">
+                                <span className="att-overview-total-value-base">
+                                    {fmt(totalBaseSalary)}
+                                </span>
+                            </Table.Summary.Cell>
+                            <Table.Summary.Cell index={3} align="right" className="att-overview-total-cell">
+                                <span className="att-overview-total-value-pack">
+                                    + {fmt(totalPackIncome)}
+                                </span>
+                            </Table.Summary.Cell>
+                            <Table.Summary.Cell index={4} align="right" className="att-overview-total-cell">
+                                <span className="att-overview-total-value-bonus">
+                                    + {fmt(totalBonus)}
+                                </span>
+                            </Table.Summary.Cell>
+                            <Table.Summary.Cell index={5} align="right" className="att-overview-total-cell">
+                                <span className="att-overview-total-value-fine">
+                                    {totalFines > 0 ? `- ${fmt(totalFines)}` : fmt(0)}
+                                </span>
+                            </Table.Summary.Cell>
+                            <Table.Summary.Cell index={6} align="right" className="att-overview-total-cell-final">
+                                <span className="att-overview-total-money">
+                                    {fmt(totalFinalSalary)}
+                                </span>
+                            </Table.Summary.Cell>
+                            <Table.Summary.Cell index={7} className="att-overview-total-action-cell" />
+                        </Table.Summary.Row>
+                    </Table.Summary>
+                )}
                 columns={[
                     {
                         title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 200, fixed: 'left' as const,
@@ -3232,7 +3299,8 @@ export default function Attendance() {
                 ]}
             />
         </div>
-    );
+        );
+    };
 
     // ============================================
     // TAB 2: ĐÓNG GÓI (TEAM)
@@ -3409,6 +3477,43 @@ export default function Attendance() {
                                     </div>
                                 ),
                             },
+                            {
+                                title: <Text strong style={{ color: '#722ed1' }}>Tỷ lệ %</Text>,
+                                key: 'percentage',
+                                width: 110,
+                                align: 'center' as const,
+                                render: (_: any, r: any) => {
+                                    const totalPackCount = payrollData.reduce((s, d) => s + (d.packOrderCount || 0), 0);
+                                    const pct = totalPackCount > 0 ? ((r.packOrderCount || 0) / totalPackCount * 100).toFixed(1) : '0.0';
+                                    return (
+                                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                                            <span style={{
+                                                fontSize: r._rank <= 3 && r.packOrderCount > 0 ? 17 : 14,
+                                                fontWeight: 900,
+                                                color: r.packOrderCount > 0 ? '#722ed1' : '#d9d9d9'
+                                            }}>
+                                                {pct}%
+                                            </span>
+                                            {r.packOrderCount > 0 && (
+                                                <div style={{
+                                                    width: 48,
+                                                    height: 4,
+                                                    background: '#f3f4f6',
+                                                    borderRadius: 2,
+                                                    overflow: 'hidden'
+                                                }}>
+                                                    <div style={{
+                                                        width: `${pct}%`,
+                                                        height: '100%',
+                                                        background: 'linear-gradient(to right, #b7eb8f, #722ed1)',
+                                                        borderRadius: 2
+                                                    }} />
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                }
+                            },
                             { title: <Text strong style={{ color: '#00ab56', fontStyle: 'italic' }}>Thu nhập cá nhân</Text>, dataIndex: 'packIncome', key: 'income', align: 'right' as const, render: (v: number, r: any) => <Text strong style={{ color: v > 0 ? '#00ab56' : '#d9d9d9', fontStyle: 'italic', fontSize: r._rank <= 3 && r.packOrderCount > 0 ? 18 : 16 }}>{fmt(v || 0)}</Text> },
                         ]}
                         summary={() => {
@@ -3418,7 +3523,8 @@ export default function Attendance() {
                                 <Table.Summary.Row style={{ background: '#f0fdf4' }}>
                                     <Table.Summary.Cell index={0} colSpan={3}><Text strong style={{ color: '#15803d', fontSize: 12, paddingLeft: 16 }}>TỔNG CỘNG</Text></Table.Summary.Cell>
                                     <Table.Summary.Cell index={3} align="center"><Text strong style={{ color: '#1890ff', fontSize: 18 }}>{totalPackCount} đơn</Text></Table.Summary.Cell>
-                                    <Table.Summary.Cell index={4} align="right"><Text strong style={{ color: '#00ab56', fontSize: 18 }}>{fmt(totalIncome)}</Text></Table.Summary.Cell>
+                                    <Table.Summary.Cell index={4} align="center"><Text strong style={{ color: '#722ed1', fontSize: 16 }}>100.0%</Text></Table.Summary.Cell>
+                                    <Table.Summary.Cell index={5} align="right"><Text strong style={{ color: '#00ab56', fontSize: 18 }}>{fmt(totalIncome)}</Text></Table.Summary.Cell>
                                 </Table.Summary.Row>
                             );
                         }}

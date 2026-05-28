@@ -385,6 +385,89 @@
     white-space: nowrap;
 }
 
+.attendance-module .att-table-card .ant-table-summary > tr.att-overview-total-row > td {
+    background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%) !important;
+    border-top: 3px solid #10b981 !important;
+    border-bottom: none !important;
+    padding: 14px 16px !important;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.02) !important;
+    vertical-align: middle !important;
+}
+
+.attendance-module .att-table-card .ant-table-summary > tr.att-overview-total-row > td:first-child {
+    border-bottom-left-radius: 24px;
+}
+
+.attendance-module .att-table-card .ant-table-summary > tr.att-overview-total-row > td:last-child {
+    border-bottom-right-radius: 24px;
+}
+
+.att-overview-total-label {
+    display: inline-flex;
+    align-items: center;
+    height: 28px;
+    padding: 0 12px;
+    border-radius: 8px;
+    background: #1e293b;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+}
+
+.att-overview-total-value-base {
+    font-size: 13px;
+    font-weight: 800;
+    color: #475569;
+    white-space: nowrap;
+}
+
+.att-overview-total-value-pack {
+    font-size: 14px;
+    font-weight: 800;
+    color: #059669;
+    white-space: nowrap;
+}
+
+.att-overview-total-value-bonus {
+    font-size: 14px;
+    font-weight: 800;
+    color: #059669;
+    white-space: nowrap;
+}
+
+.att-overview-total-value-fine {
+    font-size: 14px;
+    font-weight: 800;
+    color: #dc2626;
+    white-space: nowrap;
+}
+
+.att-overview-total-money {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 140px;
+    height: 34px;
+    padding: 0 16px;
+    border-radius: 999px;
+    background: linear-gradient(135deg, #059669 0%, #10b981 100%) !important;
+    color: #ffffff !important;
+    font-size: 15px;
+    font-weight: 900;
+    letter-spacing: -0.2px;
+    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25) !important;
+    white-space: nowrap;
+    transition: all 0.2s ease;
+}
+
+.att-overview-total-money:hover {
+    transform: translateY(-1px) scale(1.03);
+    box-shadow: 0 6px 16px rgba(16, 185, 129, 0.35) !important;
+}
+
 /* ===== HERO BANNER (Đóng gói) ===== */
 .att-hero-banner {
     background: #10b981;
