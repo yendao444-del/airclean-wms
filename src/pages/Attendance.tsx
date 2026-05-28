@@ -38,6 +38,7 @@ import {
     Spin,
     DatePicker,
     Collapse,
+    Popover,
 } from 'antd';
 import {
     CheckCircleOutlined,
@@ -77,6 +78,28 @@ import {
 
 // Khởi tạo Audio Context toàn cục cho việc phát âm báo Ting
 export let sharedAudioCtx: AudioContext | null = null;
+
+interface LeaveRequest {
+    id: string;
+    empId: number;
+    date: string; // YYYY-MM-DD
+    session: 'morning' | 'afternoon';
+    note?: string;
+    createdAt?: string;
+    createdBy?: string;
+}
+
+interface WorkScheduleRecord {
+    id: string;
+    empId: number;
+    date: string; // YYYY-MM-DD
+    session: 'morning' | 'afternoon';
+    note?: string;
+    createdAt?: string;
+    createdBy?: string;
+}
+
+type LeaveSession = 'morning' | 'afternoon';
 export const playTingSound = () => {
     try {
         if (!sharedAudioCtx) sharedAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -488,6 +511,8 @@ const matchTaskAssigneeToEmployee = (assigneeStr: any, emp: any) => {
 // ===== PAYROLL CALCULATION — Cơ chế: Ai đóng gói hưởng 100% =====
 function calculatePayroll(
     activeFines: FineRecord[],
+    leaveRequests: LeaveRequest[],
+    workSchedules: WorkScheduleRecord[],
     packingData: { level1Units: number; level10Units: number },
     employeesList: Employee[],
     bonusesData: BonusRecord[],
@@ -495,13 +520,17 @@ function calculatePayroll(
     monthNum: number,
     yearNum: number,
     orderLogs: PackingOrderLog[],
-    overrides?: Record<string, PayrollOverride>
+    overrides?: Record<string, PayrollOverride>,
+    attendanceDeductionsReady = true
 ) {
     const STANDARD_WORK_DAYS = 26;
     const HOURS_PER_SHIFT = 4;
     const unitPrice = PACKING_UNIT_PRICE; // 20đ/SP
     const totalPackValue_100 = (packingData.level1Units + packingData.level10Units) * unitPrice;
     const periodKey = `${yearNum}-${String(monthNum).padStart(2, '0')}`;
+    const today = dayjs().startOf('day');
+    const daysInPayrollMonth = dayjs(`${yearNum}-${monthNum}-01`).daysInMonth();
+    const isRestDay = (date: dayjs.Dayjs) => date.day() === 0 || Boolean(isPublicHoliday(date));
 
     return employeesList.map((emp, idx) => {
         let shifts = 0;
@@ -545,6 +574,7 @@ function calculatePayroll(
             });
 
             // Đếm ca: Có ít nhất 1 check-in HOẶC check-out = tính 1 ca
+            const workedSessions = new Set<string>();
             if (empLogs.length > 0) {
                 const dayMap = new Map<string, Set<string>>();
                 empLogs.forEach((l: any) => {
@@ -553,9 +583,15 @@ function calculatePayroll(
                     if (!dayMap.has(logDate)) dayMap.set(logDate, new Set());
                     if (l.checkType) dayMap.get(logDate)!.add(l.checkType);
                 });
-                dayMap.forEach((checkTypes) => {
-                    if (checkTypes.has('morning_in') || checkTypes.has('morning_out')) shifts++;
-                    if (checkTypes.has('afternoon_in') || checkTypes.has('evening_out')) shifts++;
+                dayMap.forEach((checkTypes, logDate) => {
+                    if (checkTypes.has('morning_in') || checkTypes.has('morning_out')) {
+                        shifts++;
+                        workedSessions.add(`${logDate}|morning`);
+                    }
+                    if (checkTypes.has('afternoon_in') || checkTypes.has('evening_out')) {
+                        shifts++;
+                        workedSessions.add(`${logDate}|afternoon`);
+                    }
                 });
             }
 
@@ -567,14 +603,70 @@ function calculatePayroll(
             }
 
             salaryBase = shifts * salaryPerShift;
-            absentDays = Math.max(0, TOTAL_SHIFTS - shifts) / 2;
-            leaveDeduction = 0;
+            const requestedSessions = new Set(
+                leaveRequests
+                    .filter((leave) => leave.empId === emp.id)
+                    .map((leave) => `${leave.date}|${leave.session}`)
+            );
+            let paidScheduledAbsences = 0;
+            let unpaidScheduledAbsences = 0;
+            if (attendanceDeductionsReady) {
+                workSchedules
+                    .filter((schedule) => schedule.empId === emp.id)
+                    .forEach((schedule) => {
+                        const date = dayjs(schedule.date);
+                        if (date.month() + 1 !== monthNum || date.year() !== yearNum) return;
+                        if (isRestDay(date) || !date.isBefore(today, 'day')) return;
+                        const key = `${schedule.date}|${schedule.session}`;
+                        if (workedSessions.has(key)) return;
+                        if (requestedSessions.has(key)) paidScheduledAbsences++;
+                        else unpaidScheduledAbsences++;
+                    });
+            }
+            absentDays = (paidScheduledAbsences + unpaidScheduledAbsences) / 2;
+            leaveDeduction = Math.round(unpaidScheduledAbsences * salaryPerShift);
         } else {
             // ========== NV CHÍNH THỨC: Lương cố định ==========
             shifts = TOTAL_SHIFTS;
-            absentDays = 0;
-            leaveDeduction = 0;
             salaryBase = emp.baseSalary;
+            const empLogs = liveLogs.filter((l: any) => {
+                const matched = findEmployeeForAttendanceLog(l, employeesList);
+                if (matched?.id !== emp.id) return false;
+                const logDate = l.date || (l.timestamp ? l.timestamp.substring(0, 10) : '');
+                if (!logDate) return false;
+                const d = new Date(logDate);
+                return d.getMonth() + 1 === monthNum && d.getFullYear() === yearNum;
+            });
+            const workedSessions = new Set<string>();
+            empLogs.forEach((l: any) => {
+                const logDate = l.date || (l.timestamp ? l.timestamp.substring(0, 10) : '');
+                if (!logDate) return;
+                if (l.checkType === 'morning_in' || l.checkType === 'morning_out') workedSessions.add(`${logDate}|morning`);
+                if (l.checkType === 'afternoon_in' || l.checkType === 'evening_out') workedSessions.add(`${logDate}|afternoon`);
+            });
+            const requestedSessions = new Set(
+                leaveRequests
+                    .filter((leave) => leave.empId === emp.id)
+                    .map((leave) => `${leave.date}|${leave.session}`)
+            );
+            let paidLeaveSessions = 0;
+            let unpaidLeaveSessions = 0;
+            if (attendanceDeductionsReady) {
+                for (let day = 1; day <= daysInPayrollMonth; day++) {
+                    const date = dayjs(`${yearNum}-${monthNum}-${day}`, 'YYYY-M-D');
+                    if (isRestDay(date) || !date.isBefore(today, 'day')) continue;
+                    const dateStr = date.format('YYYY-MM-DD');
+                    (['morning', 'afternoon'] as LeaveSession[]).forEach((session) => {
+                        const key = `${dateStr}|${session}`;
+                        if (workedSessions.has(key)) return;
+                        if (requestedSessions.has(key)) paidLeaveSessions++;
+                        else unpaidLeaveSessions++;
+                    });
+                }
+            }
+            const dailySalary = emp.baseSalary / STANDARD_WORK_DAYS;
+            leaveDeduction = Math.round((paidLeaveSessions * 0.5 * dailySalary) + (unpaidLeaveSessions * 0.5 * dailySalary * 2));
+            absentDays = (paidLeaveSessions + unpaidLeaveSessions) / 2;
         }
 
         const autoShifts = shifts - extraShifts; // Số ca gốc từ điểm danh
@@ -602,7 +694,7 @@ function calculatePayroll(
 
         const mBonus = bonusesData.filter(b => b.empId === emp.id).reduce((sum, b) => sum + b.amount, 0);
         const totalBonus = mBonus;
-        const finalSalary = salaryBase + packIncome + totalBonus - myFines + extraAdjust;
+        const finalSalary = salaryBase + packIncome + totalBonus - myFines - leaveDeduction + extraAdjust;
         return {
             ...emp, shifts, absentDays, salaryBase, packIncome, totalPackValue_100,
             fineShare, mBonus, myFines, totalBonus, finalSalary, leaveDeduction,
@@ -613,6 +705,46 @@ function calculatePayroll(
         };
     });
 }
+
+// ===== NGÀY LỄ QUỐC GIA VIỆT NAM =====
+// Ngày lễ cố định hàng năm (MM-DD)
+const FIXED_HOLIDAYS: string[] = [
+    '01-01', // Tết Dương lịch
+    '04-30', // Giải phóng Miền Nam
+    '05-01', // Quốc tế Lao động
+    '09-02', // Quốc khánh
+];
+
+// Ngày lễ âm lịch/thay đổi theo từng năm (YYYY-MM-DD)
+const VARIABLE_HOLIDAYS: string[] = [
+    // Tết Nguyên Đán 2025
+    '2025-01-28', '2025-01-29', '2025-01-30', '2025-01-31', '2025-02-01', '2025-02-02', '2025-02-03',
+    // Giỗ Tổ Hùng Vương 2025
+    '2025-04-07',
+    // Tết Nguyên Đán 2026
+    '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19', '2026-02-20', '2026-02-21', '2026-02-22',
+    // Giỗ Tổ Hùng Vương 2026
+    '2026-03-27',
+];
+
+const isPublicHoliday = (date: dayjs.Dayjs): string | null => {
+    const mmdd = date.format('MM-DD');
+    const yyyymmdd = date.format('YYYY-MM-DD');
+    if (VARIABLE_HOLIDAYS.includes(yyyymmdd)) {
+        if (yyyymmdd.includes('-01-28') || yyyymmdd.includes('-01-29') || yyyymmdd.includes('-01-30') ||
+            yyyymmdd.includes('-01-31') || yyyymmdd.includes('-02-01') || yyyymmdd.includes('-02-02') ||
+            yyyymmdd.includes('-02-03') || yyyymmdd.includes('-02-16') || yyyymmdd.includes('-02-17') ||
+            yyyymmdd.includes('-02-18') || yyyymmdd.includes('-02-19') || yyyymmdd.includes('-02-20') ||
+            yyyymmdd.includes('-02-21') || yyyymmdd.includes('-02-22')) return 'Tết Nguyên Đán';
+        if (mmdd === '04-07' || mmdd === '03-27') return 'Giỗ Tổ Hùng Vương';
+        return 'Ngày Lễ';
+    }
+    if (mmdd === '01-01') return 'Tết Dương Lịch';
+    if (mmdd === '04-30') return 'Giải phóng Miền Nam';
+    if (mmdd === '05-01') return 'Quốc tế Lao động';
+    if (mmdd === '09-02') return 'Quốc khánh';
+    return null;
+};
 
 // ===== PILL COMPONENT =====
 const ShiftPill = ({ label, status, time, outTime }: { label: string; status: 0 | 1 | 2; time?: string; outTime?: string }) => {
@@ -661,6 +793,316 @@ const SundayRestCell = () => (
         <CoffeeOutlined style={{ marginRight: 3, fontSize: 10 }} /> Nghỉ
     </div>
 );
+
+const HolidayRestCell = ({ label }: { label: string }) => (
+    <Tooltip title={label}>
+        <div style={{
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+            fontSize: 9, fontWeight: 800, textTransform: 'uppercase',
+            color: '#d4380d', letterSpacing: 0.5, padding: '4px 6px',
+            borderRadius: 6, border: '1.5px solid #ffbb96',
+            background: '#fff2e8', minHeight: 44, gap: 2,
+        }}>
+            <span style={{ fontSize: 13 }}>🎌</span>
+            <span>Nghỉ Lễ</span>
+        </div>
+    </Tooltip>
+);
+
+const LeavePill = ({
+    label,
+    request,
+    isDue,
+    onClick,
+}: {
+    label: string;
+    request?: LeaveRequest;
+    isDue: boolean;
+    onClick?: () => void;
+}) => {
+    const status = request ? (isDue ? 'paid' : 'planned') : (isDue ? 'unpaid' : 'empty');
+    const tooltip = request
+        ? `${label}: ${isDue ? 'Nghỉ có phép' : 'Đã xin nghỉ'}${request.note ? ` - ${request.note}` : ''}`
+        : `${label}: ${isDue ? 'Nghỉ không phép' : 'Chưa có trạng thái'}`;
+
+    return (
+        <Tooltip title={tooltip}>
+            <button
+                type="button"
+                className={`att-leave-pill att-leave-pill-${status}`}
+                onClick={onClick}
+                disabled={!onClick}
+            >
+                <span>{label}</span>
+                {(request || isDue) && <span>{request ? (isDue ? 'Có phép' : 'Đã xin') : 'Không phép'}</span>}
+            </button>
+        </Tooltip>
+    );
+};
+
+const WorkSchedulePill = ({
+    label,
+    schedule,
+    request,
+    isDue,
+    onClick,
+}: {
+    label: string;
+    schedule?: WorkScheduleRecord;
+    request?: LeaveRequest;
+    isDue: boolean;
+    onClick?: () => void;
+}) => {
+    const status = !schedule ? 'empty' : (!isDue ? 'planned' : (request ? 'paid' : 'unpaid'));
+    const tooltip = !schedule
+        ? `${label}: Chưa có lịch làm`
+        : request
+            ? `${label}: Đã xếp lịch, nghỉ có phép${request.note ? ` - ${request.note}` : ''}`
+            : `${label}: ${isDue ? 'Đã xếp lịch nhưng không đi làm - không phép' : 'Đã xếp lịch làm'}`;
+
+    return (
+        <Tooltip title={tooltip}>
+            <button
+                type="button"
+                className={`att-leave-pill att-leave-pill-${status}`}
+                onClick={onClick}
+                disabled={!onClick}
+            >
+                <span>{label}</span>
+                {schedule && <span>{!isDue ? 'Đã xếp' : (request ? 'Có phép' : 'Không phép')}</span>}
+            </button>
+        </Tooltip>
+    );
+};
+
+const InlineSchedulePopover = ({
+    emp,
+    date,
+    session,
+    schedule,
+    request,
+    isDue,
+    onSave,
+    children
+}: {
+    emp: any;
+    date: dayjs.Dayjs;
+    session: LeaveSession;
+    schedule?: WorkScheduleRecord;
+    request?: LeaveRequest;
+    isDue: boolean;
+    onSave: (action: 'save' | 'clear' | 'leave', scope: LeaveSession | 'full_day', note: string) => void;
+    children: React.ReactNode;
+}) => {
+    const [open, setOpen] = useState(false);
+    const [note, setNote] = useState(schedule?.note || '');
+
+    useEffect(() => {
+        if (open) {
+            setNote(schedule?.note || '');
+        }
+    }, [open, schedule]);
+
+    const handleAction = (action: 'save' | 'clear' | 'leave', scope: LeaveSession | 'full_day') => {
+        onSave(action, scope, note);
+        setOpen(false);
+    };
+
+    const sessionLabel = session === 'morning' ? 'Ca sáng' : 'Ca chiều';
+
+    const content = (
+        <div style={{ width: 210, padding: '2px 0' }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#1e293b', marginBottom: 8, padding: '0 4px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <CalendarOutlined style={{ color: '#722ed1', fontSize: 13 }} />
+                <span>Xếp ca: {emp.name}</span>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <Button
+                    type="primary"
+                    size="small"
+                    style={{ background: '#722ed1', color: '#fff', border: 'none', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    onClick={() => handleAction('save', session)}
+                >
+                    ⚡ Xếp {sessionLabel}
+                </Button>
+                <Button
+                    size="small"
+                    style={{ background: '#f5f3ff', color: '#722ed1', border: '1px solid #d8b4fe', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    onClick={() => handleAction('save', 'full_day')}
+                >
+                    📅 Xếp cả ngày (Sáng + Chiều)
+                </Button>
+                <Button
+                    size="small"
+                    style={{ background: '#fff1f0', color: '#cf1322', border: '1px solid #ffa39e', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    onClick={() => handleAction('leave', session)}
+                >
+                    🚫 Báo xin nghỉ {sessionLabel}
+                </Button>
+
+                {schedule && (
+                    <Button
+                        size="small"
+                        style={{ background: '#fff0f6', color: '#eb2f96', border: '1px solid #ffadd2', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                        onClick={() => handleAction('clear', session)}
+                    >
+                        ❌ Xóa lịch làm ca này
+                    </Button>
+                )}
+            </div>
+
+            <Divider style={{ margin: '8px 0' }} />
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', padding: '0 4px' }}>Ghi chú (tùy chọn)</div>
+                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    <Input
+                        size="small"
+                        placeholder="Ghi chú..."
+                        value={note}
+                        onChange={(e) => setNote(e.target.value)}
+                        style={{ fontSize: 11, height: 24, borderRadius: 4, flex: 1 }}
+                    />
+                    <Button
+                        type="primary"
+                        size="small"
+                        style={{ background: '#10b981', borderColor: '#10b981', color: '#fff', height: 24, fontSize: 11, fontWeight: 700, borderRadius: 4, padding: '0 8px' }}
+                        onClick={() => handleAction('save', session)}
+                    >
+                        Lưu
+                    </Button>
+                </div>
+            </div>
+        </div>
+    );
+
+    return (
+        <Popover
+            content={content}
+            title={null}
+            trigger="click"
+            open={open}
+            onOpenChange={setOpen}
+            placement="bottomLeft"
+            overlayStyle={{ zIndex: 1050 }}
+        >
+            <div onClick={(e) => e.stopPropagation()}>
+                {children}
+            </div>
+        </Popover>
+    );
+};
+
+const InlineLeavePopover = ({
+    emp,
+    date,
+    session,
+    request,
+    isDue,
+    onSave,
+    children
+}: {
+    emp: any;
+    date: dayjs.Dayjs;
+    session: LeaveSession;
+    request?: LeaveRequest;
+    isDue: boolean;
+    onSave: (action: 'save' | 'clear', scope: LeaveSession | 'full_day', note: string) => void;
+    children: React.ReactNode;
+}) => {
+    const [open, setOpen] = useState(false);
+    const [note, setNote] = useState(request?.note || '');
+
+    useEffect(() => {
+        if (open) {
+            setNote(request?.note || '');
+        }
+    }, [open, request]);
+
+    const handleAction = (action: 'save' | 'clear', scope: LeaveSession | 'full_day') => {
+        onSave(action, scope, note);
+        setOpen(false);
+    };
+
+    const sessionLabel = session === 'morning' ? 'Ca sáng' : 'Ca chiều';
+
+    const content = (
+        <div style={{ width: 210, padding: '2px 0' }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#1e293b', marginBottom: 8, padding: '0 4px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <CalendarOutlined style={{ color: '#1677ff', fontSize: 13 }} />
+                <span>Nghỉ phép: {emp.name}</span>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <Button
+                    type="primary"
+                    size="small"
+                    style={{ background: '#1677ff', color: '#fff', border: 'none', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    onClick={() => handleAction('save', session)}
+                >
+                    🚫 Nghỉ {sessionLabel}
+                </Button>
+                <Button
+                    size="small"
+                    style={{ background: '#e6f4ff', color: '#1677ff', border: '1px solid #91caff', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    onClick={() => handleAction('save', 'full_day')}
+                >
+                    📅 Nghỉ cả ngày (Sáng + Chiều)
+                </Button>
+
+                {request && (
+                    <Button
+                        size="small"
+                        style={{ background: '#fff0f0', color: '#ff4d4f', border: '1px solid #ffccc7', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                        onClick={() => handleAction('clear', session)}
+                    >
+                        ❌ Xóa lịch xin nghỉ
+                    </Button>
+                )}
+            </div>
+
+            <Divider style={{ margin: '8px 0' }} />
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', padding: '0 4px' }}>Lý do xin nghỉ</div>
+                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    <Input
+                        size="small"
+                        placeholder="Lý do..."
+                        value={note}
+                        onChange={(e) => setNote(e.target.value)}
+                        style={{ fontSize: 11, height: 24, borderRadius: 4, flex: 1 }}
+                    />
+                    <Button
+                        type="primary"
+                        size="small"
+                        style={{ background: '#10b981', borderColor: '#10b981', color: '#fff', height: 24, fontSize: 11, fontWeight: 700, borderRadius: 4, padding: '0 8px' }}
+                        onClick={() => handleAction('save', session)}
+                    >
+                        Lưu
+                    </Button>
+                </div>
+            </div>
+        </div>
+    );
+
+    return (
+        <Popover
+            content={content}
+            title={null}
+            trigger="click"
+            open={open}
+            onOpenChange={setOpen}
+            placement="bottomLeft"
+            overlayStyle={{ zIndex: 1050 }}
+        >
+            <div onClick={(e) => e.stopPropagation()}>
+                {children}
+            </div>
+        </Popover>
+    );
+};
 
 // ===============================================
 // ===== FACE ATTENDANCE TAB COMPONENT =====
@@ -1833,6 +2275,7 @@ export default function Attendance() {
     const currentUser = useCurrentUser();
     const isAdmin = currentUser === 'admin';
     const canManageBonuses = isAdmin;
+    const canManageAttendance = isAdmin;
     const fineAuditActor = useMemo(() => ({
         username: user?.username || currentUser || 'System',
         displayName: user?.fullName || user?.username || currentUser || 'System',
@@ -1843,6 +2286,32 @@ export default function Attendance() {
     const [pdfExporting, setPdfExporting] = useState(false);
     const [payslipPdfDetailOpen, setPayslipPdfDetailOpen] = useState(false);
     const [gmailSending, setGmailSending] = useState(false);
+
+    const [leaveRecords, setLeaveRecords] = useState<LeaveRequest[]>(() => {
+        try {
+            const raw = localStorage.getItem('att-leave-records-v1');
+            return raw ? JSON.parse(raw) : [];
+        } catch {
+            return [];
+        }
+    });
+
+    const [workSchedules, setWorkSchedules] = useState<WorkScheduleRecord[]>(() => {
+        try {
+            const raw = localStorage.getItem('att-work-schedules-v1');
+            return raw ? JSON.parse(raw) : [];
+        } catch {
+            return [];
+        }
+    });
+
+    useEffect(() => {
+        localStorage.setItem('att-leave-records-v1', JSON.stringify(leaveRecords));
+    }, [leaveRecords]);
+
+    useEffect(() => {
+        localStorage.setItem('att-work-schedules-v1', JSON.stringify(workSchedules));
+    }, [workSchedules]);
 
     const waitForPaint = () => new Promise<void>(resolve => {
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
@@ -2515,6 +2984,7 @@ export default function Attendance() {
 
     const [liveAttendanceLogs, setLiveAttendanceLogs] = useState<any[]>([]);
     const [overviewAttendanceLogs, setOverviewAttendanceLogs] = useState<any[]>([]);
+    const [overviewAttendanceLogsKey, setOverviewAttendanceLogsKey] = useState('');
     const attendanceMatrixWrapRef = useRef<HTMLDivElement | null>(null);
 
     // === State cho đóng gói + lịch sử ===
@@ -2737,11 +3207,13 @@ export default function Attendance() {
             dayjs(lp.start).isSame(overviewDateRange[0], 'day') &&
             dayjs(lp.end).isSame(overviewDateRange[1], 'day')
         ), [lockedPeriods, overviewDateRange]);
+    const overviewAttendanceExpectedKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
+    const overviewAttendanceReady = overviewAttendanceLogsKey === overviewAttendanceExpectedKey;
 
     const payrollData = useMemo(() => calculatePayroll(
-        overviewFines, overviewWareHousePacking, employees, overviewBonuses,
-        overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, payrollOverrides
-    ), [overviewFines, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, payrollOverrides]);
+        overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses,
+        overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, payrollOverrides, overviewAttendanceReady
+    ), [overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, payrollOverrides, overviewAttendanceReady]);
 
     const canViewAllPayroll = isAdmin;
     const isCurrentUserPayrollRow = useCallback((row: { username?: string; name?: string }) => {
@@ -2792,12 +3264,17 @@ export default function Attendance() {
 
     // Fetch logs cho tháng overview (tab Tổng quát) — tách biệt để không bị mismatch tháng
     const fetchOverviewLogs = async (overviewMonth: number, overviewYear: number) => {
+        const monthStr = `${overviewYear}-${String(overviewMonth).padStart(2, '0')}`;
         try {
             const api = (window as any).electronAPI;
-            if (!api?.attendance) return;
-            const monthStr = `${overviewYear}-${String(overviewMonth).padStart(2, '0')}`;
+            if (!api?.attendance) {
+                setOverviewAttendanceLogs([]);
+                setOverviewAttendanceLogsKey(monthStr);
+                return;
+            }
             const res = await api.attendance.getLogs({ month: monthStr });
-            if (res?.success) setOverviewAttendanceLogs(res.data);
+            setOverviewAttendanceLogs(res?.success ? (res.data || []) : []);
+            setOverviewAttendanceLogsKey(monthStr);
         } catch (err) {
             console.error('Lỗi tải logs overview tháng:', err);
         }
@@ -2815,16 +3292,39 @@ export default function Attendance() {
 
     // Thay thế array mock thành data mix thật sự
     const liveAttendanceMatrix = useMemo(() => {
-        // Tính ngưỡng muộn từ config: giờ bắt đầu + biên độ miễn phạt
         const grace = config.graceMinutes || 0;
         const [amH, amM] = config.morningStart.split(':').map(Number);
-        const amThreshold = amH * 60 + amM + grace; // phút tính từ 00:00
+        const amThreshold = amH * 60 + amM + grace;
         const [pmH, pmM] = config.afternoonStart.split(':').map(Number);
         const pmThreshold = pmH * 60 + pmM + grace;
 
         return employees.map(emp => {
-            const monthData = Array.from({ length: daysInMonth }).map(() => ({ am: 0 as 0 | 1 | 2, pm: 0 as 0 | 1 | 2, amTime: '', pmTime: '', amOutTime: '', pmOutTime: '' }));
-            // Resolve log -> nhân viên bằng nhiều khóa để tránh rớt dữ liệu UI khi faceId/userId cũ không khớp tuyệt đối
+            const monthData = Array.from({ length: daysInMonth }).map((_, i) => {
+                const currentDay = dayjs(`${selectedYear}-${selectedMonth}-${i + 1}`, 'YYYY-M-D');
+                const dateStr = currentDay.format('YYYY-MM-DD');
+
+                // Tìm lịch làm việc (Seasonal)
+                const amSchedule = workSchedules.find(s => s.empId === emp.id && s.date === dateStr && s.session === 'morning');
+                const pmSchedule = workSchedules.find(s => s.empId === emp.id && s.date === dateStr && s.session === 'afternoon');
+
+                // Tìm lịch nghỉ
+                const amLeave = leaveRecords.find(l => l.empId === emp.id && l.date === dateStr && l.session === 'morning');
+                const pmLeave = leaveRecords.find(l => l.empId === emp.id && l.date === dateStr && l.session === 'afternoon');
+
+                return {
+                    am: 0 as 0 | 1 | 2,
+                    pm: 0 as 0 | 1 | 2,
+                    amTime: '',
+                    pmTime: '',
+                    amOutTime: '',
+                    pmOutTime: '',
+                    amLeave,
+                    pmLeave,
+                    amSchedule,
+                    pmSchedule
+                };
+            });
+
             const logs = liveAttendanceLogs.filter(l => {
                 const matchedEmployee = findEmployeeForAttendanceLog(l, employees);
                 return matchedEmployee?.id === emp.id &&
@@ -2833,38 +3333,31 @@ export default function Attendance() {
             });
 
             logs.forEach(log => {
-                const dayIdx = dayjs(log.date).date() - 1; // 0..30
+                const dayIdx = dayjs(log.date).date() - 1;
+                if (dayIdx < 0 || dayIdx >= daysInMonth) return;
                 const logTime = dayjs(log.timestamp);
                 const logMin = logTime.hour() * 60 + logTime.minute();
 
-                // Quy tắc chấm công am/pm
-                // LƯU Ý: Logs từ backend trả về theo thứ tự DESC (mới nhất trước).
-                // Nên morning_out có thể được xử lý TRƯỚC morning_in.
-                // → check-in (morning_in/afternoon_in) LUÔN là nguồn quyết định cuối cùng
-                //   cho trạng thái đúng giờ/muộn, ghi đè bất kỳ giá trị nào trước đó.
                 if (log.checkType === 'morning_in') {
                     monthData[dayIdx].amTime = logTime.format('HH:mm');
-                    monthData[dayIdx].am = logMin > amThreshold ? 2 : 1; // Muộn hoặc đúng giờ
+                    monthData[dayIdx].am = logMin > amThreshold ? 2 : 1;
                 } else if (log.checkType === 'morning_out') {
-                    // Sáng ra — ghi nhận giờ checkout
                     monthData[dayIdx].amOutTime = logTime.format('HH:mm');
-                    // Nếu chưa có check-in nhưng có check-out → vẫn tính là đã đi làm (đúng giờ)
                     if (monthData[dayIdx].am === 0) monthData[dayIdx].am = 1;
                 }
 
                 if (log.checkType === 'afternoon_in') {
                     monthData[dayIdx].pmTime = logTime.format('HH:mm');
-                    monthData[dayIdx].pm = logMin > pmThreshold ? 2 : 1; // Muộn hoặc đúng giờ
+                    monthData[dayIdx].pm = logMin > pmThreshold ? 2 : 1;
                 } else if (log.checkType === 'evening_out') {
-                    // Tối ra — ghi nhận giờ checkout
                     monthData[dayIdx].pmOutTime = logTime.format('HH:mm');
-                    // Nếu chưa có check-in nhưng có check-out → vẫn tính là đã đi làm
                     if (monthData[dayIdx].pm === 0) monthData[dayIdx].pm = 1;
                 }
             });
+
             return monthData;
         });
-    }, [employees, liveAttendanceLogs, daysInMonth, selectedMonth, selectedYear, config]);
+    }, [employees, liveAttendanceLogs, daysInMonth, selectedMonth, selectedYear, config, workSchedules, leaveRecords]);
 
     // Employee attendance stats
     const employeeStats = useMemo(() => {
@@ -2908,6 +3401,10 @@ export default function Attendance() {
     };
 
     // === Thêm/Sửa Thưởng Lẻ handler ===
+    const canEditAttendanceDate = useCallback((date: dayjs.Dayjs) => {
+        return isAdmin || date.isAfter(dayjs(), 'day');
+    }, [isAdmin]);
+
     const handleAddBonus = useCallback(() => {
         if (!canManageBonuses) {
             message.error('Bạn không có quyền thêm/sửa thưởng.');
@@ -3199,6 +3696,7 @@ export default function Attendance() {
         const totalPackIncome = privatePayrollData.reduce((sum, item) => sum + (item.packIncome || 0), 0);
         const totalBonus = privatePayrollData.reduce((sum, item) => sum + (item.totalBonus || 0), 0);
         const totalFines = privatePayrollData.reduce((sum, item) => sum + (item.myFines || 0), 0);
+        const totalLeaveDeduction = privatePayrollData.reduce((sum, item) => sum + (item.leaveDeduction || 0), 0);
         const totalFinalSalary = privatePayrollData.reduce((sum, item) => sum + (item.finalSalary || 0), 0);
 
         return (
@@ -3207,7 +3705,7 @@ export default function Attendance() {
                 dataSource={privatePayrollData.map(d => ({ ...d, key: d.id }))}
                 pagination={false}
                 size="middle"
-                scroll={{ x: 1050 }}
+                scroll={{ x: 1180 }}
                 summary={() => (
                     <Table.Summary fixed>
                         <Table.Summary.Row className="att-overview-total-row">
@@ -3237,11 +3735,16 @@ export default function Attendance() {
                                 </span>
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={6} align="right" className="att-overview-total-cell-final">
+                                <span className="att-overview-total-value-fine">
+                                    {totalLeaveDeduction > 0 ? `- ${fmt(totalLeaveDeduction)}` : fmt(0)}
+                                </span>
+                            </Table.Summary.Cell>
+                            <Table.Summary.Cell index={7} align="right" className="att-overview-total-cell-final">
                                 <span className="att-overview-total-money">
                                     {fmt(totalFinalSalary)}
                                 </span>
                             </Table.Summary.Cell>
-                            <Table.Summary.Cell index={7} className="att-overview-total-action-cell" />
+                            <Table.Summary.Cell index={8} className="att-overview-total-action-cell" />
                         </Table.Summary.Row>
                     </Table.Summary>
                 )}
@@ -3283,6 +3786,14 @@ export default function Attendance() {
                     {
                         title: 'Phạt', dataIndex: 'myFines', key: 'fine', align: 'right' as const, width: 120,
                         render: (v: number) => <span className="att-money-red">{v > 0 ? `- ${fmt(v)}` : `${fmt(0)}`}</span>,
+                    },
+                    {
+                        title: 'Nghỉ', dataIndex: 'leaveDeduction', key: 'leaveDeduction', align: 'right' as const, width: 120,
+                        render: (v: number, r: any) => (
+                            <Tooltip title={r.absentDays > 0 ? `${r.absentDays} ngày/ca nghỉ đã tính` : 'Không có khoản trừ nghỉ'}>
+                                <span className="att-money-red">{v > 0 ? `- ${fmt(v)}` : `${fmt(0)}`}</span>
+                            </Tooltip>
+                        ),
                     },
                     {
                         title: 'Tổng lương', dataIndex: 'finalSalary', key: 'final', align: 'right' as const, width: 150,
@@ -4020,6 +4531,276 @@ export default function Attendance() {
         );
     };
 
+    const saveWorkScheduleInline = useCallback((
+        emp: any,
+        date: dayjs.Dayjs,
+        action: 'save' | 'clear' | 'leave',
+        scope: LeaveSession | 'full_day',
+        note: string = ''
+    ) => {
+        if (!canManageAttendance) return;
+        if (checkLocked()) return;
+        if (!canEditAttendanceDate(date)) {
+            message.warning('Chỉ admin được sửa lịch của hôm nay hoặc ngày đã qua.');
+            return;
+        }
+
+        const dateStr = date.format('YYYY-MM-DD');
+        const sessions: LeaveSession[] = scope === 'full_day' ? ['morning', 'afternoon'] : [scope];
+
+        if (action === 'leave') {
+            setLeaveRecords(prev => {
+                const withoutCurrent = prev.filter(leave => !(leave.empId === emp.id && leave.date === dateStr && sessions.includes(leave.session)));
+                const now = new Date().toISOString();
+                const nextRecords = sessions.map(session => ({
+                    id: `${emp.id}-${dateStr}-${session}`,
+                    empId: emp.id,
+                    date: dateStr,
+                    session,
+                    note,
+                    createdAt: now,
+                    createdBy: currentUser || user?.username || 'System',
+                }));
+                return [...withoutCurrent, ...nextRecords];
+            });
+            message.success('Đã ghi nhận xin nghỉ ca.');
+            return;
+        }
+
+        setWorkSchedules(prev => {
+            const withoutCurrent = prev.filter(schedule => !(schedule.empId === emp.id && schedule.date === dateStr));
+            if (action === 'clear') return withoutCurrent;
+            const now = new Date().toISOString();
+            const nextRecords = sessions.map(session => ({
+                id: `${emp.id}-${dateStr}-${session}`,
+                empId: emp.id,
+                date: dateStr,
+                session,
+                note,
+                createdAt: now,
+                createdBy: currentUser || user?.username || 'System',
+            }));
+            return [...withoutCurrent, ...nextRecords];
+        });
+        message.success(action === 'clear' ? 'Đã xóa lịch làm.' : 'Đã xếp lịch làm việc.');
+    }, [canManageAttendance, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
+
+    const saveLeaveRequestInline = useCallback((
+        emp: any,
+        date: dayjs.Dayjs,
+        action: 'save' | 'clear',
+        scope: LeaveSession | 'full_day',
+        note: string = ''
+    ) => {
+        if (!canManageAttendance) return;
+        if (checkLocked()) return;
+        if (!canEditAttendanceDate(date)) {
+            message.warning('Chỉ admin được sửa lịch của hôm nay hoặc ngày đã qua.');
+            return;
+        }
+
+        const dateStr = date.format('YYYY-MM-DD');
+        const sessions: LeaveSession[] = scope === 'full_day' ? ['morning', 'afternoon'] : [scope];
+
+        setLeaveRecords(prev => {
+            const withoutCurrent = prev.filter(l => !(l.empId === emp.id && l.date === dateStr && sessions.includes(l.session)));
+            if (action === 'clear') return withoutCurrent;
+            const now = new Date().toISOString();
+            const nextRecords = sessions.map(session => ({
+                id: `${emp.id}-${dateStr}-${session}`,
+                empId: emp.id,
+                date: dateStr,
+                session,
+                note,
+                createdAt: now,
+                createdBy: currentUser || user?.username || 'System',
+            }));
+            return [...withoutCurrent, ...nextRecords];
+        });
+        message.success(action === 'clear' ? 'Đã xóa lịch xin nghỉ.' : 'Đã ghi nhận nghỉ phép.');
+    }, [canManageAttendance, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
+
+    const openLeaveRequestModal = useCallback((emp: Employee, date: dayjs.Dayjs, defaultSession: LeaveSession, existingLeave?: LeaveRequest) => {
+        if (!canManageAttendance) return;
+        if (checkLocked()) return;
+        if (!canEditAttendanceDate(date)) {
+            message.warning('Chỉ admin được sửa lịch của hôm nay hoặc ngày đã qua.');
+            return;
+        }
+
+        const dateStr = date.format('YYYY-MM-DD');
+        let selectedAction: 'save' | 'clear' = 'save';
+        let selectedScope: LeaveSession | 'full_day' = defaultSession;
+        let note = existingLeave?.note || '';
+
+        Modal.confirm({
+            title: `Lên lịch xin nghỉ - ${emp.name} (${date.format('DD/MM/YYYY')})`,
+            icon: <CalendarOutlined style={{ color: '#1677ff' }} />,
+            width: 460,
+            content: (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 8 }}>
+                    {existingLeave && (
+                        <div>
+                            <Text strong style={{ display: 'block', marginBottom: 6 }}>Thao tác</Text>
+                            <Select
+                                defaultValue={selectedAction}
+                                style={{ width: '100%' }}
+                                onChange={(value) => { selectedAction = value; }}
+                                options={[
+                                    { value: 'save', label: 'Cập nhật lịch xin nghỉ' },
+                                    { value: 'clear', label: 'Xóa lịch xin nghỉ' },
+                                ]}
+                            />
+                        </div>
+                    )}
+                    <div>
+                        <Text strong style={{ display: 'block', marginBottom: 6 }}>Phạm vi</Text>
+                        <Select
+                            defaultValue={selectedScope}
+                            style={{ width: '100%' }}
+                            onChange={(value) => { selectedScope = value; }}
+                            options={[
+                                { value: 'full_day', label: 'Cả ngày' },
+                                { value: 'morning', label: 'Ca sáng' },
+                                { value: 'afternoon', label: 'Ca chiều' },
+                            ]}
+                        />
+                    </div>
+                    <div>
+                        <Text strong style={{ display: 'block', marginBottom: 6 }}>Ghi chú</Text>
+                        <Input defaultValue={note} placeholder="VD: Báo trước, việc gia đình..." onChange={(event) => { note = event.target.value; }} />
+                    </div>
+                    <div style={{ fontSize: 12, color: '#64748b' }}>
+                        Đến ngày nghỉ, nếu nhân viên không chấm công và đã có lịch xin nghỉ thì hệ thống tính nghỉ có phép. Nếu không có lịch xin nghỉ thì tự tính nghỉ không phép.
+                    </div>
+                </div>
+            ),
+            okText: 'Lưu lịch xin nghỉ',
+            cancelText: 'Hủy',
+            onOk: () => {
+                const sessions: LeaveSession[] = selectedScope === 'full_day' ? ['morning', 'afternoon'] : [selectedScope];
+                setLeaveRecords(prev => {
+                    const withoutCurrent = prev.filter(leave => !(leave.empId === emp.id && leave.date === dateStr && sessions.includes(leave.session)));
+                    if (selectedAction === 'clear') return withoutCurrent;
+                    const now = new Date().toISOString();
+                    const nextRecords = sessions.map(session => ({
+                        id: `${emp.id}-${dateStr}-${session}`,
+                        empId: emp.id,
+                        date: dateStr,
+                        session,
+                        note,
+                        createdAt: now,
+                        createdBy: currentUser || user?.username || 'System',
+                    }));
+                    return [...withoutCurrent, ...nextRecords];
+                });
+                message.success(selectedAction === 'clear' ? 'Đã xóa lịch xin nghỉ.' : 'Đã lưu lịch xin nghỉ.');
+            },
+        });
+    }, [canManageAttendance, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
+
+    const openWorkScheduleModal = useCallback((emp: Employee, date: dayjs.Dayjs, defaultSession: LeaveSession, existingSchedule?: WorkScheduleRecord) => {
+        if (!canManageAttendance) return;
+        if (checkLocked()) return;
+        if (!canEditAttendanceDate(date)) {
+            message.warning('Chỉ admin được sửa lịch của hôm nay hoặc ngày đã qua.');
+            return;
+        }
+        if (emp.type !== 'Seasonal') {
+            message.info('Lịch làm việc theo ca chỉ áp dụng cho nhân viên thời vụ.');
+            return;
+        }
+
+        const dateStr = date.format('YYYY-MM-DD');
+        let selectedAction: 'save' | 'clear' | 'leave' = 'save';
+        let selectedScope: LeaveSession | 'full_day' = defaultSession;
+        let note = existingSchedule?.note || '';
+
+        Modal.confirm({
+            title: `Xếp lịch làm việc - ${emp.name} (${date.format('DD/MM/YYYY')})`,
+            icon: <CalendarOutlined style={{ color: '#722ed1' }} />,
+            width: 460,
+            content: (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 8 }}>
+                    {existingSchedule && (
+                        <div>
+                            <Text strong style={{ display: 'block', marginBottom: 6 }}>Thao tác</Text>
+                            <Select
+                                defaultValue={selectedAction}
+                                style={{ width: '100%' }}
+                                onChange={(value) => { selectedAction = value; }}
+                                options={[
+                                    { value: 'save', label: 'Cập nhật lịch làm' },
+                                    { value: 'leave', label: 'Ghi nhận xin nghỉ ca này' },
+                                    { value: 'clear', label: 'Xóa lịch làm' },
+                                ]}
+                            />
+                        </div>
+                    )}
+                    <div>
+                        <Text strong style={{ display: 'block', marginBottom: 6 }}>Ca làm</Text>
+                        <Select
+                            defaultValue={selectedScope}
+                            style={{ width: '100%' }}
+                            onChange={(value) => { selectedScope = value; }}
+                            options={[
+                                { value: 'full_day', label: 'Cả ngày' },
+                                { value: 'morning', label: 'Ca sáng' },
+                                { value: 'afternoon', label: 'Ca chiều' },
+                            ]}
+                        />
+                    </div>
+                    <div>
+                        <Text strong style={{ display: 'block', marginBottom: 6 }}>Ghi chú</Text>
+                        <Input defaultValue={note} placeholder="VD: Xếp ca bán hàng, phụ kho..." onChange={(event) => { note = event.target.value; }} />
+                    </div>
+                    <div style={{ fontSize: 12, color: '#64748b' }}>
+                        Nếu đã xếp lịch mà không đi làm và không có lịch xin nghỉ, hệ thống sẽ tính không phép.
+                    </div>
+                </div>
+            ),
+            okText: 'Lưu lịch làm',
+            cancelText: 'Hủy',
+            onOk: () => {
+                const sessions: LeaveSession[] = selectedScope === 'full_day' ? ['morning', 'afternoon'] : [selectedScope];
+                if (selectedAction === 'leave') {
+                    setLeaveRecords(prev => {
+                        const withoutCurrent = prev.filter(leave => !(leave.empId === emp.id && leave.date === dateStr && sessions.includes(leave.session)));
+                        const now = new Date().toISOString();
+                        const nextRecords = sessions.map(session => ({
+                            id: `${emp.id}-${dateStr}-${session}`,
+                            empId: emp.id,
+                            date: dateStr,
+                            session,
+                            note,
+                            createdAt: now,
+                            createdBy: currentUser || user?.username || 'System',
+                        }));
+                        return [...withoutCurrent, ...nextRecords];
+                    });
+                    message.success('Đã ghi nhận xin nghỉ cho ca đã xếp.');
+                    return;
+                }
+                setWorkSchedules(prev => {
+                    const withoutCurrent = prev.filter(schedule => !(schedule.empId === emp.id && schedule.date === dateStr));
+                    if (selectedAction === 'clear') return withoutCurrent;
+                    const now = new Date().toISOString();
+                    const nextRecords = sessions.map(session => ({
+                        id: `${emp.id}-${dateStr}-${session}`,
+                        empId: emp.id,
+                        date: dateStr,
+                        session,
+                        note,
+                        createdAt: now,
+                        createdBy: currentUser || user?.username || 'System',
+                    }));
+                    return [...withoutCurrent, ...nextRecords];
+                });
+                message.success(selectedAction === 'clear' ? 'Đã xóa lịch làm.' : 'Đã lưu lịch làm.');
+            },
+        });
+    }, [canManageAttendance, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
+
     // ============================================
     // TAB 5: ĐIỂM DANH & LỊCH SỬ
     // ============================================
@@ -4039,6 +4820,8 @@ export default function Attendance() {
             const currentDay = dayjs(`${selectedYear}-${selectedMonth}-${i + 1}`, 'YYYY-M-D');
             const dayOfWeek = currentDay.day();
             const isSunday = dayOfWeek === 0;
+            const holidayName = isPublicHoliday(currentDay);
+            const isHoliday = !!holidayName;
             const isToday = currentDay.isSame(dayjs(), 'day');
             const titleLabel = dayOfWeek === 0 ? 'CN' : `T${dayOfWeek + 1}`;
 
@@ -4046,10 +4829,11 @@ export default function Attendance() {
                 title: (
                     <div style={{ textAlign: 'center' as const, position: 'relative' }}>
                         {isToday && <div style={{ position: 'absolute', top: -14, left: '50%', transform: 'translateX(-50%)', background: '#1677ff', color: '#fff', fontSize: 8, padding: '0 4px', borderRadius: 4, fontWeight: 700 }}>H.NAY</div>}
-                        <div style={{ fontWeight: 800, fontSize: 11, color: isToday ? '#1677ff' : (isSunday ? '#bfbfbf' : (dayOfWeek === 6 ? '#00ab56' : '#595959')), marginTop: isToday ? 4 : 0 }}>
+                        {isHoliday && !isToday && <div style={{ position: 'absolute', top: -14, left: '50%', transform: 'translateX(-50%)', background: '#fa541c', color: '#fff', fontSize: 7, padding: '0 4px', borderRadius: 4, fontWeight: 700, whiteSpace: 'nowrap' }}>🎌 LỄ</div>}
+                        <div style={{ fontWeight: 800, fontSize: 11, color: isToday ? '#1677ff' : (isHoliday ? '#d4380d' : (isSunday ? '#bfbfbf' : (dayOfWeek === 6 ? '#00ab56' : '#595959'))), marginTop: isToday || isHoliday ? 4 : 0 }}>
                             {currentDay.format('DD/MM')}
                         </div>
-                        <div style={{ fontSize: 8, color: isToday ? '#1677ff' : (isSunday ? '#bfbfbf' : '#8c8c8c'), fontWeight: isToday ? 800 : 600 }}>
+                        <div style={{ fontSize: 8, color: isToday ? '#1677ff' : (isHoliday ? '#fa541c' : (isSunday ? '#bfbfbf' : '#8c8c8c')), fontWeight: isToday ? 800 : 600 }}>
                             {titleLabel}
                         </div>
                     </div>
@@ -4057,16 +4841,110 @@ export default function Attendance() {
                 key: `day-${i}`, align: 'center' as const, width: isToday ? 110 : 100,
                 onHeaderCell: () => ({
                     className: isToday ? 'att-today-col-header' : undefined,
-                    style: { background: isToday ? '#e6f4ff' : (isSunday ? '#fafafa' : undefined), borderLeft: isSunday || isToday ? '2px solid #f0f0f0' : undefined, borderRight: isToday ? '2px solid #f0f0f0' : undefined }
+                    style: { background: isToday ? '#e6f4ff' : (isHoliday ? '#fff2e8' : (isSunday ? '#fafafa' : undefined)), borderLeft: isSunday || isToday || isHoliday ? '2px solid #f0f0f0' : undefined, borderRight: isToday ? '2px solid #f0f0f0' : undefined }
                 }),
-                onCell: () => ({ style: { background: isToday ? '#f0f5ff' : (isSunday ? '#fafafa' : undefined), borderLeft: isSunday || isToday ? '2px solid #f0f0f0' : undefined, borderRight: isToday ? '2px solid #f0f0f0' : undefined } }),
-                render: (_: any, __: any, rowIdx: number) => {
-                    const d = liveAttendanceMatrix[rowIdx]?.[i] || { am: 0, pm: 0, amTime: '', pmTime: '', amOutTime: '', pmOutTime: '' };
+                onCell: () => ({ style: { background: isToday ? '#f0f5ff' : (isHoliday ? '#fff9f7' : (isSunday ? '#fafafa' : undefined)), borderLeft: isSunday || isToday || isHoliday ? '2px solid #f0f0f0' : undefined, borderRight: isToday ? '2px solid #f0f0f0' : undefined } }),
+                render: (_: any, record: any, rowIdx: number) => {
+                    const d = liveAttendanceMatrix[rowIdx]?.[i] || {
+                        am: 0, pm: 0,
+                        amTime: '', pmTime: '',
+                        amOutTime: '', pmOutTime: '',
+                        amLeave: undefined, pmLeave: undefined,
+                        amSchedule: undefined, pmSchedule: undefined
+                    };
+                    if (isHoliday && d.am === 0 && d.pm === 0) return <HolidayRestCell label={holidayName!} />;
                     if (isSunday && d.am === 0 && d.pm === 0) return <SundayRestCell />;
+
+                    const emp = employees.find(e => e.id === record.key) || employees[rowIdx];
+                    if (!emp) return null;
+
+                    const isLeaveDue = currentDay.isBefore(dayjs(), 'day') || currentDay.isSame(dayjs(), 'day');
+                    const canEdit = canManageAttendance && canEditAttendanceDate(currentDay) && !isCurrentPeriodLocked;
+
+                    const renderSessionCell = (
+                        session: LeaveSession,
+                        status: 0 | 1 | 2,
+                        time?: string,
+                        outTime?: string,
+                        schedule?: WorkScheduleRecord,
+                        leave?: LeaveRequest
+                    ) => {
+                        const label = session === 'morning' ? 'Sáng' : 'Chiều';
+
+                        if (emp.type === 'Seasonal') {
+                            if (status > 0) {
+                                return <ShiftPill label={label} status={status} time={time} outTime={outTime} />;
+                            }
+
+                            if (canEdit) {
+                                return (
+                                    <InlineSchedulePopover
+                                        emp={emp}
+                                        date={currentDay}
+                                        session={session}
+                                        schedule={schedule}
+                                        request={leave}
+                                        isDue={isLeaveDue}
+                                        onSave={(action, scope, note) => saveWorkScheduleInline(emp, currentDay, action, scope, note)}
+                                    >
+                                        <WorkSchedulePill
+                                            label={label}
+                                            schedule={schedule}
+                                            request={leave}
+                                            isDue={isLeaveDue}
+                                            onClick={() => {}}
+                                        />
+                                    </InlineSchedulePopover>
+                                );
+                            }
+
+                            return (
+                                <WorkSchedulePill
+                                    label={label}
+                                    schedule={schedule}
+                                    request={leave}
+                                    isDue={isLeaveDue}
+                                />
+                            );
+                        } else {
+                            if (status > 0) {
+                                return <ShiftPill label={label} status={status} time={time} outTime={outTime} />;
+                            }
+
+                            if (canEdit) {
+                                return (
+                                    <InlineLeavePopover
+                                        emp={emp}
+                                        date={currentDay}
+                                        session={session}
+                                        request={leave}
+                                        isDue={isLeaveDue}
+                                        onSave={(action, scope, note) => saveLeaveRequestInline(emp, currentDay, action, scope, note)}
+                                    >
+                                        <LeavePill
+                                            label={label}
+                                            request={leave}
+                                            isDue={isLeaveDue}
+                                            onClick={() => {}}
+                                        />
+                                    </InlineLeavePopover>
+                                );
+                            }
+
+                            return (
+                                <LeavePill
+                                    label={label}
+                                    request={leave}
+                                    isDue={isLeaveDue}
+                                />
+                            );
+                        }
+                    };
+
                     return (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                            <ShiftPill label="Sáng" status={d.am as 0 | 1 | 2} time={d.amTime} outTime={d.amOutTime} />
-                            <ShiftPill label="Chiều" status={d.pm as 0 | 1 | 2} time={d.pmTime} outTime={d.pmOutTime} />
+                            {renderSessionCell('morning', d.am as 0 | 1 | 2, d.amTime, d.amOutTime, d.amSchedule, d.amLeave)}
+                            {renderSessionCell('afternoon', d.pm as 0 | 1 | 2, d.pmTime, d.pmOutTime, d.pmSchedule, d.pmLeave)}
                         </div>
                     );
                 },
@@ -4106,7 +4984,7 @@ export default function Attendance() {
             },
         });
         return columns;
-    }, [employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear]);
+    }, [employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear, openLeaveRequestModal, saveWorkScheduleInline, saveLeaveRequestInline, canManageAttendance, canEditAttendanceDate, isCurrentPeriodLocked, employees]);
 
     useEffect(() => {
         const isCurrentMonth = selectedMonth === dayjs().month() + 1 && selectedYear === dayjs().year();

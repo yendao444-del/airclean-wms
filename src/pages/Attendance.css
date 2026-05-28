@@ -642,6 +642,61 @@
     gap: 4px;
 }
 
+.att-leave-pill {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+    width: 100%;
+    min-height: 21px;
+    padding: 2px 6px;
+    border-radius: 5px;
+    border: 1px solid #e8e8e8;
+    background: #f8fafc;
+    color: #94a3b8;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.2px;
+    line-height: 1.2;
+    text-transform: uppercase;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.att-leave-pill:disabled {
+    cursor: default;
+}
+
+.att-leave-pill:not(:disabled):hover {
+    border-color: #1677ff;
+    color: #1677ff;
+    background: #eff6ff;
+}
+
+.att-leave-pill-paid {
+    border-color: #91caff;
+    background: #e6f4ff;
+    color: #1677ff;
+}
+
+.att-leave-pill-planned {
+    border-color: #c4b5fd;
+    background: #f5f3ff;
+    color: #6d28d9;
+}
+
+.att-leave-pill-unpaid {
+    border-color: #ffa39e;
+    background: #fff1f0;
+    color: #cf1322;
+}
+
+.att-leave-pill-empty {
+    border-style: dashed;
+    background: #ffffff;
+    color: #cbd5e1;
+}
+
 /* Sunday column */
 .attendance-module .ant-table td.att-sunday-col,
 .attendance-module .ant-table th.att-sunday-col {
