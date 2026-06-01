@@ -3292,6 +3292,18 @@ export default function Attendance() {
 
     const daysInMonth = dayjs(`${selectedYear}-${selectedMonth}-01`).daysInMonth();
 
+    const isAttendanceSessionDue = useCallback((date: dayjs.Dayjs, session: LeaveSession) => {
+        const today = dayjs();
+        if (date.isBefore(today, 'day')) return true;
+        if (date.isAfter(today, 'day')) return false;
+
+        const start = session === 'morning' ? config.morningStart : config.afternoonStart;
+        const [hour, minute] = start.split(':').map(Number);
+        const threshold = hour * 60 + minute + (config.graceMinutes || 0);
+        const nowMinutes = today.hour() * 60 + today.minute();
+        return nowMinutes >= threshold;
+    }, [config.morningStart, config.afternoonStart, config.graceMinutes]);
+
     // Thay thế array mock thành data mix thật sự
     const liveAttendanceMatrix = useMemo(() => {
         const grace = config.graceMinutes || 0;
@@ -3367,12 +3379,14 @@ export default function Attendance() {
             let lateCount = 0, absentCount = 0, shiftCount = 0;
             if (liveAttendanceMatrix[idx]) {
                 liveAttendanceMatrix[idx].forEach((d, dayIdx) => {
-                    const isSunday = dayjs(`${selectedYear}-${selectedMonth}-${dayIdx + 1}`).day() === 0;
+                    const currentDay = dayjs(`${selectedYear}-${selectedMonth}-${dayIdx + 1}`, 'YYYY-M-D');
+                    const isSunday = currentDay.day() === 0;
+                    const isHoliday = !!isPublicHoliday(currentDay);
                     if (d.am === 2) lateCount++;
                     if (d.pm === 2) lateCount++;
-                    if (!isSunday) {
-                        if (d.am === 0) absentCount += 0.5;
-                        if (d.pm === 0) absentCount += 0.5;
+                    if (!isSunday && !isHoliday) {
+                        if (d.am === 0 && isAttendanceSessionDue(currentDay, 'morning')) absentCount += 0.5;
+                        if (d.pm === 0 && isAttendanceSessionDue(currentDay, 'afternoon')) absentCount += 0.5;
                     }
                     if (d.am > 0) shiftCount++;
                     if (d.pm > 0) shiftCount++;
@@ -3380,7 +3394,7 @@ export default function Attendance() {
             }
             return { ...emp, lateCount, absentCount, shiftCount };
         });
-    }, [employees, liveAttendanceMatrix, selectedMonth, selectedYear]);
+    }, [employees, liveAttendanceMatrix, selectedMonth, selectedYear, isAttendanceSessionDue]);
 
     // Fund totals
     const fundTotals = useMemo(() => {
@@ -5008,7 +5022,6 @@ export default function Attendance() {
                     const emp = employees.find(e => e.id === record.key) || employees[rowIdx];
                     if (!emp) return null;
 
-                    const isLeaveDue = currentDay.isBefore(dayjs(), 'day') || currentDay.isSame(dayjs(), 'day');
                     const canEdit = canManageAttendance && canEditAttendanceDate(currentDay) && !isCurrentPeriodLocked;
 
                     const renderSessionCell = (
@@ -5020,6 +5033,7 @@ export default function Attendance() {
                         leave?: LeaveRequest
                     ) => {
                         const label = session === 'morning' ? 'Sáng' : 'Chiều';
+                        const isSessionDue = isAttendanceSessionDue(currentDay, session);
 
                         if (emp.type === 'Seasonal') {
                             if (status > 0) {
@@ -5034,14 +5048,14 @@ export default function Attendance() {
                                         session={session}
                                         schedule={schedule}
                                         request={leave}
-                                        isDue={isLeaveDue}
+                                        isDue={isSessionDue}
                                         onSave={(action, scope, note) => saveWorkScheduleInline(emp, currentDay, action, scope, note)}
                                     >
                                         <WorkSchedulePill
                                             label={label}
                                             schedule={schedule}
                                             request={leave}
-                                            isDue={isLeaveDue}
+                                            isDue={isSessionDue}
                                             onClick={() => {}}
                                         />
                                     </InlineSchedulePopover>
@@ -5053,7 +5067,7 @@ export default function Attendance() {
                                     label={label}
                                     schedule={schedule}
                                     request={leave}
-                                    isDue={isLeaveDue}
+                                    isDue={isSessionDue}
                                 />
                             );
                         } else {
@@ -5068,13 +5082,13 @@ export default function Attendance() {
                                         date={currentDay}
                                         session={session}
                                         request={leave}
-                                        isDue={isLeaveDue}
+                                        isDue={isSessionDue}
                                         onSave={(action, scope, note) => saveLeaveRequestInline(emp, currentDay, action, scope, note)}
                                     >
                                         <LeavePill
                                             label={label}
                                             request={leave}
-                                            isDue={isLeaveDue}
+                                            isDue={isSessionDue}
                                             onClick={() => {}}
                                         />
                                     </InlineLeavePopover>
@@ -5085,7 +5099,7 @@ export default function Attendance() {
                                 <LeavePill
                                     label={label}
                                     request={leave}
-                                    isDue={isLeaveDue}
+                                    isDue={isSessionDue}
                                 />
                             );
                         }
@@ -5134,7 +5148,7 @@ export default function Attendance() {
             },
         });
         return columns;
-    }, [employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear, openLeaveRequestModal, saveWorkScheduleInline, saveLeaveRequestInline, canManageAttendance, canEditAttendanceDate, isCurrentPeriodLocked, employees]);
+    }, [employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear, openLeaveRequestModal, saveWorkScheduleInline, saveLeaveRequestInline, canManageAttendance, canEditAttendanceDate, isCurrentPeriodLocked, employees, isAttendanceSessionDue]);
 
     useEffect(() => {
         const isCurrentMonth = selectedMonth === dayjs().month() + 1 && selectedYear === dayjs().year();
