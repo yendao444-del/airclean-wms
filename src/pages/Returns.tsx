@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
     Card,
     Button,
@@ -27,6 +27,30 @@ import dayjs from 'dayjs';
 import * as XLSX from 'xlsx';
 
 const { Title, Text } = Typography;
+
+const normalizeReturnAssignee = (value: string) =>
+    String(value || '').normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+
+const compactReturnAssignee = (value: string) =>
+    normalizeReturnAssignee(value).replace(/[^a-z0-9]/g, '');
+
+const isReturnAssigneeMatch = (packerName: string, employee: any) => {
+    const packerNorm = normalizeReturnAssignee(packerName);
+    const packerCompact = compactReturnAssignee(packerName);
+    const candidates = [employee?.username, employee?.name, employee?.displayName].filter(Boolean).map(String);
+
+    return candidates.some(candidate => {
+        const candidateNorm = normalizeReturnAssignee(candidate);
+        const candidateCompact = compactReturnAssignee(candidate);
+        return candidate === packerName ||
+            candidateNorm === packerNorm ||
+            candidateCompact === packerCompact ||
+            (!!candidateNorm && packerNorm.includes(candidateNorm)) ||
+            (!!packerNorm && candidateNorm.includes(packerNorm)) ||
+            (!!candidateCompact && packerCompact.includes(candidateCompact)) ||
+            (!!packerCompact && candidateCompact.includes(packerCompact));
+    });
+};
 
 interface Return {
     id: number;
@@ -92,6 +116,7 @@ export default function ReturnsPage() {
 
     // ✨ State cho collapse/expand logs
     const [collapsedLogs, setCollapsedLogs] = useState<Record<number, boolean>>({});
+    const syncReturnFinesRef = useRef(false);
 
     useEffect(() => {
         loadReturns();
@@ -152,6 +177,7 @@ export default function ReturnsPage() {
             const result = await window.electronAPI.returns.getAll();
             if (result.success && result.data) {
                 setReturns(result.data);
+                void syncMissingReturnFines(result.data, silent);
             }
         } catch (error) {
             if (!silent) message.error('Lỗi khi tải dữ liệu');
@@ -316,8 +342,8 @@ export default function ReturnsPage() {
         }
     };
 
-    const processReturnFine = async (packerName: string, complaintCode: string) => {
-        if (!packerName) return;
+    const processReturnFine = async (packerName: string, complaintCode: string, fineDate?: string, silent = false) => {
+        if (!packerName || !complaintCode) return false;
         try {
             const electronApi = (window as any).electronAPI;
             const attRes = await electronApi.appConfig.get('attendanceData');
@@ -326,41 +352,129 @@ export default function ReturnsPage() {
                 const config = attData.config || {};
                 const attEmployees = attData.employees || [];
 
-                const norm = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
-                const packerNorm = norm(packerName);
-                const packerEmp = attEmployees.find((e: any) =>
-                    e.username === packerName ||
-                    e.name === packerName ||
-                    (e.username && norm(e.username) === packerNorm) ||
-                    (e.username && packerNorm.includes(norm(e.username)))
-                );
+                const packerEmp = attEmployees.find((e: any) => isReturnAssigneeMatch(packerName, e));
                 if (!packerEmp) {
                     console.warn(`[Returns] Không tìm thấy NV "${packerName}" trong danh sách chấm công.`);
+                    if (silent) return false;
                     message.warning(`⚠️ Không tìm thấy nhân viên "${packerName}" trong danh sách chấm công. Phạt chưa được ghi nhận!`);
-                    return;
+                    return false;
                 }
 
                 const isSeasonal = packerEmp.type === 'Seasonal';
                 const amount = isSeasonal ? (config.wrongOrderFineSeasonal || 0) : (config.wrongOrderFineOfficial || 0);
 
                 if (amount > 0) {
+                    const existingFines = attData.extraFines || [];
+                    const hasExistingFine = existingFines.some((f: any) =>
+                        f.source === 'returns' && f.detail && f.detail.includes(complaintCode)
+                    );
+                    if (hasExistingFine) return false;
+
+                    const fineDateValue = fineDate && dayjs(fineDate).isValid()
+                        ? dayjs(fineDate).toISOString()
+                        : new Date().toISOString();
                     const newFine = {
                         empId: packerEmp.id,
                         type: 'Khác',
                         detail: `Đóng gói sai đơn, phát sinh KH hoàn hàng/khiếu nại (Mã phiếu: ${complaintCode})`,
                         amount: amount,
-                        date: new Date().toISOString(),
+                        date: fineDateValue,
                         source: 'returns'
                     };
 
-                    attData.extraFines = [...(attData.extraFines || []), newFine];
+                    attData.extraFines = [...existingFines, newFine];
                     await electronApi.appConfig.set('attendanceData', attData);
                     window.dispatchEvent(new CustomEvent('attendance:fineAdded', { detail: newFine }));
+                    if (silent) return true;
                     message.warning(`⚠️ Đã tự động ghi nhận mức phạt ${amount.toLocaleString('vi-VN')}đ cho NV ${packerEmp.displayName || packerEmp.name} (Lỗi trả hàng)!`);
+                    return true;
                 }
             }
         } catch (error) {
             console.error('Lỗi tính phạt tự động:', error);
+        }
+        return false;
+    };
+
+    const syncMissingReturnFines = async (rows: Return[], silent = false) => {
+        if (syncReturnFinesRef.current) return;
+        syncReturnFinesRef.current = true;
+
+        try {
+            const candidates = rows.filter(row =>
+                row.status === 'completed' &&
+                row.faultParty !== 'customer' &&
+                !!row.packer &&
+                !!row.complaintCode
+            );
+            if (candidates.length === 0) return;
+
+            const electronApi = (window as any).electronAPI;
+            const attRes = await electronApi.appConfig.get('attendanceData');
+            if (!attRes.success || !attRes.data) return;
+
+            const attData = typeof attRes.data === 'string' ? JSON.parse(attRes.data) : attRes.data;
+            const config = attData.config || {};
+            const attEmployees = attData.employees || [];
+            const existingFines = attData.extraFines || [];
+            const existingReturnCodes = new Set(
+                existingFines
+                    .filter((f: any) => f.source === 'returns' && f.detail)
+                    .map((f: any) => {
+                        const match = String(f.detail).match(/Mã phiếu:\s*([^)]+)/);
+                        return match?.[1]?.trim() || '';
+                    })
+                    .filter(Boolean)
+            );
+
+            const findPackerEmp = (packerName: string) => {
+                return attEmployees.find((e: any) => isReturnAssigneeMatch(packerName, e));
+            };
+
+            const newFines: any[] = [];
+            for (const row of candidates) {
+                if (existingReturnCodes.has(row.complaintCode)) continue;
+
+                const packerEmp = findPackerEmp(row.packer!);
+                if (!packerEmp) {
+                    console.warn(`[Returns] Không tìm thấy NV "${row.packer}" trong danh sách chấm công.`);
+                    continue;
+                }
+
+                const amount = packerEmp.type === 'Seasonal'
+                    ? (config.wrongOrderFineSeasonal || 0)
+                    : (config.wrongOrderFineOfficial || 0);
+                if (amount <= 0) continue;
+
+                const fine = {
+                    empId: packerEmp.id,
+                    type: 'Khác',
+                    detail: `Đóng gói sai đơn, phát sinh KH hoàn hàng/khiếu nại (Mã phiếu: ${row.complaintCode})`,
+                    amount,
+                    date: row.complaintDate && dayjs(row.complaintDate).isValid()
+                        ? dayjs(row.complaintDate).toISOString()
+                        : new Date().toISOString(),
+                    source: 'returns'
+                };
+                newFines.push(fine);
+                existingReturnCodes.add(row.complaintCode);
+            }
+
+            if (newFines.length === 0) return;
+
+            attData.extraFines = [...existingFines, ...newFines];
+            await electronApi.appConfig.set('attendanceData', attData);
+            newFines.forEach(fine => {
+                window.dispatchEvent(new CustomEvent('attendance:fineAdded', { detail: fine }));
+            });
+
+            if (!silent) {
+                message.info(`Đã đồng bộ ${newFines.length} khoản phạt trả hàng vào Bảng công.`);
+            }
+        } catch (error) {
+            console.error('Lỗi đồng bộ phạt trả hàng:', error);
+        } finally {
+            syncReturnFinesRef.current = false;
         }
     };
 

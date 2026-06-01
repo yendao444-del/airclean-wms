@@ -142,6 +142,7 @@ interface FineRecord {
     amount: number;
     date?: string; // ISO string — ngày tạo phạt
     source?: string; // nguồn tạo phạt
+    disabled?: boolean;
 }
 
 const getFineOverrideKey = (fine: FineRecord) => [
@@ -3178,7 +3179,8 @@ export default function Attendance() {
 
     const allFines = useMemo(
         () => [...finesData, ...extraFines, ...autoVatOverdueFines, ...autoDeadlineOverdueFines, ...autoDailyReportMissingFines, ...autoStockCheckMissingFines]
-            .map(applyFineOverride),
+            .map(applyFineOverride)
+            .filter(f => !f.disabled),
         [extraFines, autoVatOverdueFines, autoDeadlineOverdueFines, autoDailyReportMissingFines, autoStockCheckMissingFines, applyFineOverride]
     );
 
@@ -3476,37 +3478,71 @@ export default function Attendance() {
         message.success('Đã xóa (đã lưu lịch sử)');
     }, [employees, canManageBonuses]);
 
-    // === Thêm Phạt Thủ Công handler ===
+    // === Thêm/Sửa Phạt handler ===
     const handleAddFine = useCallback(() => {
         if (checkLocked()) return;
         fineForm.validateFields().then(values => {
             const fineType = Array.isArray(values.type) ? values.type[0] : values.type;
-            const newFine: FineRecord = {
+            const nextFine: FineRecord = {
                 empId: values.empId,
                 type: fineType,
                 detail: values.detail,
                 amount: values.amount,
                 date: values.date ? values.date.toISOString() : new Date().toISOString(),
             };
-            setExtraFines(prev => [...prev, newFine]);
-
             const now = new Date().toLocaleString('vi-VN');
-            setFineAuditLog(prev => [...prev, {
-                id: 'flog-' + Date.now(),
-                action: 'create',
-                timestamp: now,
-                changedBy: fineAuditActor.username,
-                changedByName: fineAuditActor.displayName,
-                after: newFine,
-                note: 'Thêm phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
-            }]);
+
+            if (editingFine) {
+                if (editingFine.isManual) {
+                    setExtraFines(prev => prev.map((fine, index) =>
+                        index === editingFine.manualIndex ? { ...fine, ...nextFine, source: fine.source } : fine
+                    ));
+                } else if (editingFine.overrideKey) {
+                    setFineOverrides(prev => ({
+                        ...prev,
+                        [editingFine.overrideKey!]: {
+                            ...editingFine.fine,
+                            ...nextFine,
+                            source: editingFine.fine.source,
+                            disabled: false,
+                        },
+                    }));
+                }
+
+                setFineAuditLog(prev => [...prev, {
+                    id: 'flog-' + Date.now(),
+                    action: 'edit',
+                    timestamp: now,
+                    changedBy: fineAuditActor.username,
+                    changedByName: fineAuditActor.displayName,
+                    before: editingFine.fine,
+                    after: nextFine,
+                    note: 'Sửa khoản phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
+                }]);
+
+                setEditingFine(null);
+                message.success('Đã cập nhật khoản phạt.');
+            } else {
+                setExtraFines(prev => [...prev, nextFine]);
+
+                setFineAuditLog(prev => [...prev, {
+                    id: 'flog-' + Date.now(),
+                    action: 'create',
+                    timestamp: now,
+                    changedBy: fineAuditActor.username,
+                    changedByName: fineAuditActor.displayName,
+                    after: nextFine,
+                    note: 'Thêm phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
+                }]);
+
+                message.success(`Đã thêm phạt ${fmt(values.amount)} cho ${employees.find(e => e.id === values.empId)?.name} (Đã lưu lịch sử)`);
+            }
 
             setFineModalOpen(false);
             setFineTypeDropdownOpen(false);
             fineForm.resetFields();
-            message.success(`Đã thêm phạt ${fmt(values.amount)} cho ${employees.find(e => e.id === values.empId)?.name} (Đã lưu lịch sử)`);
         });
-    }, [fineForm, employees, fineAuditActor]);
+    }, [fineForm, employees, fineAuditActor, editingFine]);
 
     // === Xóa Phạt Thủ Công handler ===
     const handleDeleteFine = useCallback((fineIndex: number) => {
@@ -3545,6 +3581,76 @@ export default function Attendance() {
             },
         });
     }, [extraFines, employees, fineAuditActor]);
+
+    const handleEditFineRecord = useCallback((record: any) => {
+        if (!isAdmin || checkLocked()) return;
+        const fineDate = record.date && dayjs(record.date).isValid() ? dayjs(record.date) : dayjs();
+        setEditingFine({
+            isManual: !!record.isManual,
+            manualIndex: record.manualIndex ?? -1,
+            overrideKey: record.overrideKey,
+            fine: record,
+        });
+        fineForm.setFieldsValue({
+            date: fineDate,
+            empId: record.empId,
+            type: record.type ? [record.type] : undefined,
+            amount: record.amount,
+            detail: record.detail,
+        });
+        setFineModalOpen(true);
+    }, [fineForm, isAdmin]);
+
+    const handleDeleteFineRecord = useCallback((record: any) => {
+        if (!isAdmin || checkLocked()) return;
+        if (record.isManual) {
+            handleDeleteFine(record.manualIndex);
+            return;
+        }
+
+        if (!record.overrideKey) return;
+        Modal.confirm({
+            title: 'Xác nhận xóa khoản phạt hệ thống',
+            icon: <ExclamationCircleOutlined style={{ color: '#ff4d4f' }} />,
+            content: (
+                <div>
+                    <p>Khoản phạt này được tạo tự động. Khi xóa, hệ thống sẽ ẩn khoản này khỏi Bảng công và lương tháng.</p>
+                    <div style={{ padding: '8px 12px', background: '#fff1f0', borderRadius: 8, border: '1px solid #ffccc7' }}>
+                        <Text strong>{employees.find(e => e.id === record.empId)?.name}</Text>
+                        <div><Text type="secondary">{record.type}: {record.detail} — {fmt(record.amount)}</Text></div>
+                    </div>
+                </div>
+            ),
+            okText: 'Xóa phạt',
+            cancelText: 'Hủy',
+            okType: 'danger' as const,
+            onOk: () => {
+                const disabledFine: FineRecord = {
+                    empId: record.empId,
+                    type: record.type,
+                    detail: record.detail,
+                    amount: record.amount,
+                    date: record.date,
+                    source: record.source,
+                    disabled: true,
+                };
+                setFineOverrides(prev => ({ ...prev, [record.overrideKey]: disabledFine }));
+
+                const now = new Date().toLocaleString('vi-VN');
+                setFineAuditLog(prev => [...prev, {
+                    id: 'flog-' + Date.now(),
+                    action: 'delete',
+                    timestamp: now,
+                    changedBy: fineAuditActor.username,
+                    changedByName: fineAuditActor.displayName,
+                    before: record,
+                    note: 'Xóa khoản phạt hệ thống: ' + (employees.find(e => e.id === record.empId)?.name || '') + ' — ' + fmt(record.amount) + ' — "' + record.detail + '"',
+                }]);
+
+                message.success('Đã xóa khoản phạt hệ thống khỏi Bảng công.');
+            },
+        });
+    }, [employees, fineAuditActor, handleDeleteFine, isAdmin]);
 
     // === Thêm/Sửa Giao dịch Quỹ handler ===
     const handleAddFundTx = useCallback(() => {
@@ -4363,26 +4469,45 @@ export default function Attendance() {
     // ============================================
     const renderFines = () => {
         // Gộp phạt gốc + phạt thủ công, đánh dấu nguồn
+        const systemFineRow = (fine: FineRecord, key: string) => {
+            const overrideKey = getFineOverrideKey(fine);
+            const overridden = applyFineOverride(fine);
+            if (overridden.disabled) return null;
+            return {
+                ...overridden,
+                key,
+                empName: employees.find(e => e.id === overridden.empId)?.name,
+                isManual: false,
+                manualIndex: -1,
+                overrideKey,
+                source: overridden.source,
+            };
+        };
         const combinedFines = [
             ...finesData
                 .filter(f => inOverviewRange(f.date))
-                .map((f, i) => ({ ...f, key: `base-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1 })),
+                .map((f, i) => systemFineRow(f, `base-${i}`))
+                .filter(Boolean),
             ...extraFines
                 .map((f, i) => ({ fine: f, manualIndex: i }))
                 .filter(({ fine }) => inOverviewRange(fine.date))
                 .map(({ fine, manualIndex }) => ({ ...fine, key: `manual-${manualIndex}`, empName: employees.find(e => e.id === fine.empId)?.name, isManual: true, manualIndex, source: fine.source })),
             ...autoVatOverdueFines
                 .filter(f => inOverviewRange(f.date))
-                .map((f, i) => ({ ...f, key: `vat-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
+                .map((f, i) => systemFineRow(f, `vat-${i}`))
+                .filter(Boolean),
             ...autoDeadlineOverdueFines
                 .filter(f => inOverviewRange(f.date))
-                .map((f, i) => ({ ...f, key: `deadline-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
+                .map((f, i) => systemFineRow(f, `deadline-${i}`))
+                .filter(Boolean),
             ...autoDailyReportMissingFines
                 .filter(f => inOverviewRange(f.date))
-                .map((f, i) => ({ ...f, key: `daily-report-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
+                .map((f, i) => systemFineRow(f, `daily-report-${i}`))
+                .filter(Boolean),
             ...autoStockCheckMissingFines
                 .filter(f => inOverviewRange(f.date))
-                .map((f, i) => ({ ...f, key: `stock-check-${i}`, empName: employees.find(e => e.id === f.empId)?.name, isManual: false, manualIndex: -1, source: f.source })),
+                .map((f, i) => systemFineRow(f, `stock-check-${i}`))
+                .filter(Boolean),
         ];
         combinedFines.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
         const fineEmployeeOptions = Array.from(new Map(
@@ -4430,7 +4555,7 @@ export default function Attendance() {
                             type="primary"
                             danger
                             icon={<PlusOutlined />}
-                            onClick={() => { fineForm.setFieldsValue({ date: dayjs() }); setFineModalOpen(true); }}
+                            onClick={() => { setEditingFine(null); fineForm.resetFields(); fineForm.setFieldsValue({ date: dayjs() }); setFineModalOpen(true); }}
                             style={{ fontWeight: 700 }}
                         >
                             Thêm phạt thủ công
@@ -4470,6 +4595,19 @@ export default function Attendance() {
                                 render: (t: string) => <Tag color="error" style={{ fontWeight: 700, fontSize: 10, textTransform: 'uppercase' }}>{t}</Tag>,
                             },
                             {
+                                title: 'Thời gian', dataIndex: 'date', key: 'date', width: 140,
+                                render: (date: string) => {
+                                    const d = date ? dayjs(date) : null;
+                                    if (!d?.isValid()) return <Text type="secondary">-</Text>;
+                                    return (
+                                        <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.25 }}>
+                                            <Text strong style={{ fontSize: 12 }}>{d.format('DD/MM/YYYY')}</Text>
+                                            <Text type="secondary" style={{ fontSize: 11 }}>{d.format('HH:mm')}</Text>
+                                        </div>
+                                    );
+                                },
+                            },
+                            {
                                 title: 'Chi tiết', dataIndex: 'detail', key: 'detail',
                                 render: (d: string) => <Text strong style={{ color: '#595959' }}>{d}</Text>,
                             },
@@ -4478,6 +4616,8 @@ export default function Attendance() {
                                 render: (_: any, record: any) => {
                                     if (record.source === 'attendance')
                                         return <Tag color="blue" style={{ fontWeight: 700, fontSize: 10 }}>ĐIỂM DANH</Tag>;
+                                    if (record.source === 'returns')
+                                        return <Tag color="volcano" style={{ fontWeight: 700, fontSize: 10 }}>TRẢ HÀNG</Tag>;
                                     if (record.isManual)
                                         return <Tag color="orange" style={{ fontWeight: 700, fontSize: 10 }}>THỦ CÔNG</Tag>;
                                     return <Tag style={{ fontWeight: 700, fontSize: 10, color: '#8c8c8c' }}>HỆ THỐNG</Tag>;
@@ -4489,19 +4629,29 @@ export default function Attendance() {
                                 render: (v: number) => <Text strong style={{ color: '#ff4d4f' }}>- {fmt(v)}</Text>,
                             },
                             {
-                                title: '', key: 'actions', width: 60, align: 'center' as const,
+                                title: '', key: 'actions', width: 90, align: 'center' as const,
                                 render: (_: any, record: any) => {
-                                    if (!record.isManual || !isAdmin) return null;
+                                    if (!isAdmin || isCurrentPeriodLocked) return null;
                                     return (
-                                        <Tooltip title="Xóa phạt">
-                                            <Button
-                                                type="text"
-                                                size="small"
-                                                danger
-                                                icon={<DeleteOutlined style={{ fontSize: 14 }} />}
-                                                onClick={() => handleDeleteFine(record.manualIndex)}
-                                            />
-                                        </Tooltip>
+                                        <Space size={2}>
+                                            <Tooltip title="Sửa phạt">
+                                                <Button
+                                                    type="text"
+                                                    size="small"
+                                                    icon={<EditOutlined style={{ fontSize: 14 }} />}
+                                                    onClick={() => handleEditFineRecord(record)}
+                                                />
+                                            </Tooltip>
+                                            <Tooltip title="Xóa phạt">
+                                                <Button
+                                                    type="text"
+                                                    size="small"
+                                                    danger
+                                                    icon={<DeleteOutlined style={{ fontSize: 14 }} />}
+                                                    onClick={() => handleDeleteFineRecord(record)}
+                                                />
+                                            </Tooltip>
+                                        </Space>
                                     );
                                 },
                             },
@@ -6512,15 +6662,15 @@ export default function Attendance() {
                             ⚠️
                         </div>
                         <div>
-                            <div style={{ fontWeight: 800, fontSize: 16, color: '#ff4d4f' }}>Thêm Phạt Thủ Công</div>
-                            <div style={{ fontSize: 12, color: '#8c8c8c', fontWeight: 400 }}>Ghi nhận khoản phạt ngoài hệ thống tự động</div>
+                            <div style={{ fontWeight: 800, fontSize: 16, color: '#ff4d4f' }}>{editingFine ? 'Sửa khoản phạt' : 'Thêm Phạt Thủ Công'}</div>
+                            <div style={{ fontSize: 12, color: '#8c8c8c', fontWeight: 400 }}>{editingFine ? 'Cập nhật khoản phạt đang ghi nhận trong bảng công' : 'Ghi nhận khoản phạt ngoài hệ thống tự động'}</div>
                         </div>
                     </div>
                 }
                 open={fineModalOpen}
-                onCancel={() => { setFineModalOpen(false); setFineTypeDropdownOpen(false); fineForm.resetFields(); }}
+                onCancel={() => { setFineModalOpen(false); setFineTypeDropdownOpen(false); setEditingFine(null); fineForm.resetFields(); }}
                 onOk={handleAddFine}
-                okText="Xác nhận phạt"
+                okText={editingFine ? 'Lưu thay đổi' : 'Xác nhận phạt'}
                 cancelText="Hủy"
                 okButtonProps={{ icon: <PlusOutlined />, danger: true, style: { fontWeight: 700 } }}
                 width={520}
