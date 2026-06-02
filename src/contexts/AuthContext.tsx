@@ -18,6 +18,15 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const REMEMBER_TOKEN_KEY = 'rememberToken';
+const AUTH_LOGIN_DATE_KEY = 'authLoginDate';
+
+const todayKey = () => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+};
 
 export function AuthProvider({ children }: { children: ReactNode }) {
     const [user, setUser] = useState<User | null>(null);
@@ -36,6 +45,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         const restoreAuth = async () => {
             localStorage.removeItem('rememberedUser');
+            const savedLoginDate = localStorage.getItem(AUTH_LOGIN_DATE_KEY);
+            if (savedLoginDate !== todayKey()) {
+                doLogout();
+                return;
+            }
 
             const rememberToken = localStorage.getItem(REMEMBER_TOKEN_KEY);
             if (rememberToken) {
@@ -65,14 +79,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         restoreAuth();
     }, []);
 
-    const doLogout = () => {
+    useEffect(() => {
+        if (!user) return;
+        const timer = window.setInterval(() => {
+            if (localStorage.getItem(AUTH_LOGIN_DATE_KEY) !== todayKey()) {
+                doLogout();
+            }
+        }, 30000);
+
+        return () => window.clearInterval(timer);
+    }, [user]);
+
+    function doLogout() {
         const rememberToken = localStorage.getItem(REMEMBER_TOKEN_KEY);
         sessionStorage.removeItem('currentUser');
         localStorage.removeItem('rememberedUser');
         localStorage.removeItem(REMEMBER_TOKEN_KEY);
+        localStorage.removeItem(AUTH_LOGIN_DATE_KEY);
         setUser(null);
         window.electronAPI.users.logout(rememberToken || undefined).catch(() => {});
-    };
+    }
 
     const login = async (username: string, password: string, rememberMe = true): Promise<{ success: boolean; error?: string }> => {
         try {
@@ -86,6 +112,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             const { password: _, ...userWithoutPassword } = foundUser;
 
             sessionStorage.setItem('currentUser', JSON.stringify(userWithoutPassword));
+            localStorage.setItem(AUTH_LOGIN_DATE_KEY, todayKey());
 
             if (result.rememberToken) {
                 localStorage.setItem(REMEMBER_TOKEN_KEY, result.rememberToken);
