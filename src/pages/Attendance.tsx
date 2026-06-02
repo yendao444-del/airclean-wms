@@ -988,7 +988,10 @@ const InlineSchedulePopover = ({
             placement="bottomLeft"
             overlayStyle={{ zIndex: 1050 }}
         >
-            <div onClick={(e) => e.stopPropagation()}>
+            <div onClick={(e) => {
+                e.stopPropagation();
+                setOpen(true);
+            }}>
                 {children}
             </div>
         </Popover>
@@ -1098,7 +1101,10 @@ const InlineLeavePopover = ({
             placement="bottomLeft"
             overlayStyle={{ zIndex: 1050 }}
         >
-            <div onClick={(e) => e.stopPropagation()}>
+            <div onClick={(e) => {
+                e.stopPropagation();
+                setOpen(true);
+            }}>
                 {children}
             </div>
         </Popover>
@@ -2274,9 +2280,10 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
 export default function Attendance() {
     const { user } = useAuth();
     const currentUser = useCurrentUser();
-    const isAdmin = currentUser === 'admin';
+    const isAdmin = currentUser === 'admin' || user?.role === 'admin';
+    const isManager = user?.role === 'manager';
     const canManageBonuses = isAdmin;
-    const canManageAttendance = isAdmin;
+    const canManageAttendance = isAdmin || isManager;
     const fineAuditActor = useMemo(() => ({
         username: user?.username || currentUser || 'System',
         displayName: user?.fullName || user?.username || currentUser || 'System',
@@ -2469,10 +2476,22 @@ export default function Attendance() {
             message.error('Chưa có API gửi Gmail. Vui lòng khởi động lại app.');
             return;
         }
+        const loadingKey = 'bulk-gmail-data-ready';
+        message.loading({ key: loadingKey, content: 'Đang đồng bộ dữ liệu đóng gói trước khi gửi Gmail...', duration: 0 });
+        let freshPayrollData = payrollData;
+        try {
+            const freshPackingLogs = await loadPackingOrders(overviewDateRange[0].startOf('day').toISOString(), { strict: true });
+            freshPayrollData = buildPayrollDataFromPackingLogs(freshPackingLogs);
+            message.success({ key: loadingKey, content: 'Đã đồng bộ dữ liệu đóng gói đầy đủ.', duration: 2 });
+        } catch (error: any) {
+            message.error({ key: loadingKey, content: error?.message || 'Không tải được dữ liệu đóng gói. Chưa gửi Gmail để tránh thiếu lương đóng gói.', duration: 5 });
+            return;
+        }
+
         const usersRes = await api.users?.getAll?.();
         const users = usersRes?.success && Array.isArray(usersRes.data) ? usersRes.data : [];
 
-        const toSend = payrollData.filter(p => {
+        const toSend = freshPayrollData.filter(p => {
             const normUsername = normalizeAttendanceText(p.username || '');
             const normName = normalizeAttendanceText(p.name || '');
             return users.some((u: any) => {
@@ -2776,6 +2795,32 @@ export default function Attendance() {
         latestSnapshotRef.current = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog };
     }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded]);
 
+    const persistAttendanceSnapshotNow = useCallback(async (patch: Record<string, any>) => {
+        if (!isDbLoaded || employees.length === 0) return;
+        const baseSnapshot = latestSnapshotRef.current || {
+            config,
+            employees,
+            bonusAuditLog,
+            extraBonuses,
+            extraFundTx,
+            fundAuditLog,
+            extraFines,
+            fineOverrides,
+            fineAuditLog,
+            lockedPeriods,
+            payrollOverrides,
+            gmailSentLog,
+        };
+        const snapshot = { ...baseSnapshot, ...patch };
+        latestSnapshotRef.current = snapshot;
+        try {
+            const api = (window as any).electronAPI;
+            await api.appConfig.set('attendanceData', snapshot);
+        } catch (err) {
+            console.error('Lỗi lưu nhanh dữ liệu chấm công vào DB:', err);
+        }
+    }, [isDbLoaded, employees, config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog]);
+
     // 2b. Lưu tự động khi có thay đổi state với Debounce
     useEffect(() => {
         if (!isDbLoaded) return; // Không lưu đè lúc chưa tải xong
@@ -2842,10 +2887,15 @@ export default function Attendance() {
         loadPackingOrders();
     }, []);
 
-    const loadPackingRef = useRef(false);
-    const loadPackingOrders = async (since?: string) => {
-        if (loadPackingRef.current) { console.log('[PACKING] Skipped (already loading)'); return; }
-        loadPackingRef.current = true;
+    const loadPackingPromiseRef = useRef<Promise<PackingOrderLog[]> | null>(null);
+    const [packingOrdersLoading, setPackingOrdersLoading] = useState(false);
+    const loadPackingOrders = async (since?: string, options?: { strict?: boolean }): Promise<PackingOrderLog[]> => {
+        if (loadPackingPromiseRef.current) {
+            console.log('[PACKING] Await existing loading promise');
+            return loadPackingPromiseRef.current;
+        }
+
+        const task = (async () => {
         try {
             const api = (window as any).electronAPI;
             const sinceVal = since || overviewDateRange[0].startOf('day').toISOString();
@@ -2871,6 +2921,9 @@ export default function Attendance() {
                 'Ecom'
             );
             console.log('[PACKING] Ecom done:', ecRes?.data?.length);
+            if (options?.strict && !ecRes.success) {
+                throw new Error('Không tải được dữ liệu đóng gói từ Supabase. Chưa gửi Gmail để tránh thiếu thưởng đóng gói.');
+            }
 
             const getPlatform = (_source: string, customer: string) => {
                 const c = (customer || '').toLowerCase();
@@ -2925,12 +2978,24 @@ export default function Attendance() {
 
             console.log('[PACKING] Done. Ecom:', ecRes.success ? (ecRes.data?.length || 0) : 'FAIL', '| Unified:', unified.length);
 
-            setPackingOrderLogsData(unified.sort((a, b) => dayjs(b.timestamp).unix() - dayjs(a.timestamp).unix()));
+            const sorted = unified.sort((a, b) => dayjs(b.timestamp).unix() - dayjs(a.timestamp).unix());
+            setPackingOrderLogsData(sorted);
+            return sorted;
         } catch (error) {
             console.error('Lỗi tải dữ liệu đơn hàng:', error);
             message.error('Không thể tải dữ liệu đơn đóng gói!');
+            if (options?.strict) throw error;
+            return [];
+        }
+        })();
+
+        loadPackingPromiseRef.current = task;
+        setPackingOrdersLoading(true);
+        try {
+            return await task;
         } finally {
-            loadPackingRef.current = false;
+            loadPackingPromiseRef.current = null;
+            setPackingOrdersLoading(false);
         }
     };
 
@@ -3217,6 +3282,25 @@ export default function Attendance() {
         overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, payrollOverrides, overviewAttendanceReady
     ), [overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, payrollOverrides, overviewAttendanceReady]);
 
+    function buildPayrollDataFromPackingLogs(orderLogs: PackingOrderLog[]) {
+        const freshOverviewPackingLogs = orderLogs.filter(o => inOverviewRange(o.timestamp));
+        const freshTotalUnits = freshOverviewPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items), 0);
+        return calculatePayroll(
+            overviewFines,
+            leaveRecords,
+            workSchedules,
+            { level1Units: freshTotalUnits, level10Units: 0 },
+            employees,
+            overviewBonuses,
+            overviewAttendanceLogs,
+            overviewDateRange[0].month() + 1,
+            overviewDateRange[0].year(),
+            freshOverviewPackingLogs,
+            payrollOverrides,
+            overviewAttendanceReady
+        );
+    }
+
     const canViewAllPayroll = isAdmin;
     const isCurrentUserPayrollRow = useCallback((row: { username?: string; name?: string }) => {
         if (canViewAllPayroll) return true;
@@ -3421,6 +3505,10 @@ export default function Attendance() {
         return isAdmin || date.isAfter(dayjs(), 'day');
     }, [isAdmin]);
 
+    const canManageAttendanceEmployee = useCallback((emp: Employee | any) => {
+        return isAdmin || (isManager && emp?.type === 'Seasonal');
+    }, [isAdmin, isManager]);
+
     const handleAddBonus = useCallback(() => {
         if (!canManageBonuses) {
             message.error('Bạn không có quyền thêm/sửa thưởng.');
@@ -3505,41 +3593,53 @@ export default function Attendance() {
                 date: values.date ? values.date.toISOString() : new Date().toISOString(),
             };
             const now = new Date().toLocaleString('vi-VN');
+            let nextExtraFines = extraFines;
+            let nextFineOverrides = fineOverrides;
+            let nextFineAuditLog = fineAuditLog;
 
             if (editingFine) {
+                let savedFine: FineRecord = nextFine;
                 if (editingFine.isManual) {
-                    setExtraFines(prev => prev.map((fine, index) =>
-                        index === editingFine.manualIndex ? { ...fine, ...nextFine, source: fine.source } : fine
-                    ));
+                    nextExtraFines = extraFines.map((fine, index) => {
+                        if (index !== editingFine.manualIndex) return fine;
+                        savedFine = { ...fine, ...nextFine, source: fine.source };
+                        return savedFine;
+                    });
+                    setExtraFines(nextExtraFines);
                 } else if (editingFine.overrideKey) {
-                    setFineOverrides(prev => ({
-                        ...prev,
-                        [editingFine.overrideKey!]: {
-                            ...editingFine.fine,
-                            ...nextFine,
-                            source: editingFine.fine.source,
-                            disabled: false,
-                        },
-                    }));
+                    savedFine = {
+                        ...editingFine.fine,
+                        ...nextFine,
+                        source: editingFine.fine.source,
+                        disabled: false,
+                    };
+                    nextFineOverrides = {
+                        ...fineOverrides,
+                        [editingFine.overrideKey]: savedFine,
+                    };
+                    setFineOverrides(nextFineOverrides);
                 }
 
-                setFineAuditLog(prev => [...prev, {
+                nextFineAuditLog = [...fineAuditLog, {
                     id: 'flog-' + Date.now(),
                     action: 'edit',
                     timestamp: now,
                     changedBy: fineAuditActor.username,
                     changedByName: fineAuditActor.displayName,
                     before: editingFine.fine,
-                    after: nextFine,
+                    after: savedFine,
                     note: 'Sửa khoản phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
-                }]);
+                }];
+                setFineAuditLog(nextFineAuditLog);
+                void persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineOverrides: nextFineOverrides, fineAuditLog: nextFineAuditLog });
 
                 setEditingFine(null);
                 message.success('Đã cập nhật khoản phạt.');
             } else {
-                setExtraFines(prev => [...prev, nextFine]);
+                nextExtraFines = [...extraFines, nextFine];
+                setExtraFines(nextExtraFines);
 
-                setFineAuditLog(prev => [...prev, {
+                nextFineAuditLog = [...fineAuditLog, {
                     id: 'flog-' + Date.now(),
                     action: 'create',
                     timestamp: now,
@@ -3547,7 +3647,9 @@ export default function Attendance() {
                     changedByName: fineAuditActor.displayName,
                     after: nextFine,
                     note: 'Thêm phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
-                }]);
+                }];
+                setFineAuditLog(nextFineAuditLog);
+                void persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineAuditLog: nextFineAuditLog });
 
                 message.success(`Đã thêm phạt ${fmt(values.amount)} cho ${employees.find(e => e.id === values.empId)?.name} (Đã lưu lịch sử)`);
             }
@@ -3556,7 +3658,7 @@ export default function Attendance() {
             setFineTypeDropdownOpen(false);
             fineForm.resetFields();
         });
-    }, [fineForm, employees, fineAuditActor, editingFine]);
+    }, [fineForm, employees, fineAuditActor, editingFine, extraFines, fineOverrides, fineAuditLog, persistAttendanceSnapshotNow]);
 
     // === Xóa Phạt Thủ Công handler ===
     const handleDeleteFine = useCallback((fineIndex: number) => {
@@ -3578,10 +3680,9 @@ export default function Attendance() {
             cancelText: 'Hủy',
             okType: 'danger' as const,
             onOk: () => {
-                setExtraFines(prev => prev.filter((_, i) => i !== fineIndex));
-
                 const now = new Date().toLocaleString('vi-VN');
-                setFineAuditLog(prev => [...prev, {
+                const nextExtraFines = extraFines.filter((_, i) => i !== fineIndex);
+                const nextFineAuditLog: FineAuditLog[] = [...fineAuditLog, {
                     id: 'flog-' + Date.now(),
                     action: 'delete',
                     timestamp: now,
@@ -3589,12 +3690,15 @@ export default function Attendance() {
                     changedByName: fineAuditActor.displayName,
                     before: fine,
                     note: 'Xóa khoản phạt: ' + (employees.find(e => e.id === fine.empId)?.name || '') + ' — ' + fmt(fine.amount) + ' — "' + fine.detail + '"',
-                }]);
+                }];
+                setExtraFines(nextExtraFines);
+                setFineAuditLog(nextFineAuditLog);
+                void persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineAuditLog: nextFineAuditLog });
 
                 message.success('Đã xóa khoản phạt (Đã lưu lịch sử)!');
             },
         });
-    }, [extraFines, employees, fineAuditActor]);
+    }, [extraFines, fineAuditLog, employees, fineAuditActor, persistAttendanceSnapshotNow]);
 
     const handleEditFineRecord = useCallback((record: any) => {
         if (!isAdmin || checkLocked()) return;
@@ -3648,10 +3752,10 @@ export default function Attendance() {
                     source: record.source,
                     disabled: true,
                 };
-                setFineOverrides(prev => ({ ...prev, [record.overrideKey]: disabledFine }));
 
                 const now = new Date().toLocaleString('vi-VN');
-                setFineAuditLog(prev => [...prev, {
+                const nextFineOverrides = { ...fineOverrides, [record.overrideKey]: disabledFine };
+                const nextFineAuditLog: FineAuditLog[] = [...fineAuditLog, {
                     id: 'flog-' + Date.now(),
                     action: 'delete',
                     timestamp: now,
@@ -3659,12 +3763,15 @@ export default function Attendance() {
                     changedByName: fineAuditActor.displayName,
                     before: record,
                     note: 'Xóa khoản phạt hệ thống: ' + (employees.find(e => e.id === record.empId)?.name || '') + ' — ' + fmt(record.amount) + ' — "' + record.detail + '"',
-                }]);
+                }];
+                setFineOverrides(nextFineOverrides);
+                setFineAuditLog(nextFineAuditLog);
+                void persistAttendanceSnapshotNow({ fineOverrides: nextFineOverrides, fineAuditLog: nextFineAuditLog });
 
                 message.success('Đã xóa khoản phạt hệ thống khỏi Bảng công.');
             },
         });
-    }, [employees, fineAuditActor, handleDeleteFine, isAdmin]);
+    }, [employees, fineAuditActor, fineAuditLog, fineOverrides, handleDeleteFine, isAdmin, persistAttendanceSnapshotNow]);
 
     // === Thêm/Sửa Giao dịch Quỹ handler ===
     const handleAddFundTx = useCallback(() => {
@@ -4702,10 +4809,10 @@ export default function Attendance() {
         scope: LeaveSession | 'full_day',
         note: string = ''
     ) => {
-        if (!canManageAttendance) return;
+        if (!canManageAttendance || !canManageAttendanceEmployee(emp)) return;
         if (checkLocked()) return;
         if (!canEditAttendanceDate(date)) {
-            message.warning('Chỉ admin được sửa lịch của hôm nay hoặc ngày đã qua.');
+            message.warning('Quản lý chỉ được lên lịch cho ngày tương lai. Hôm nay hoặc ngày đã qua chỉ admin được sửa.');
             return;
         }
 
@@ -4747,7 +4854,7 @@ export default function Attendance() {
             return [...withoutCurrent, ...nextRecords];
         });
         message.success(action === 'clear' ? 'Đã xóa lịch làm.' : 'Đã xếp lịch làm việc.');
-    }, [canManageAttendance, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
+    }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
 
     const saveLeaveRequestInline = useCallback((
         emp: any,
@@ -4756,10 +4863,10 @@ export default function Attendance() {
         scope: LeaveSession | 'full_day',
         note: string = ''
     ) => {
-        if (!canManageAttendance) return;
+        if (!canManageAttendance || !canManageAttendanceEmployee(emp)) return;
         if (checkLocked()) return;
         if (!canEditAttendanceDate(date)) {
-            message.warning('Chỉ admin được sửa lịch của hôm nay hoặc ngày đã qua.');
+            message.warning('Quản lý chỉ được lên lịch cho ngày tương lai. Hôm nay hoặc ngày đã qua chỉ admin được sửa.');
             return;
         }
 
@@ -4782,13 +4889,13 @@ export default function Attendance() {
             return [...withoutCurrent, ...nextRecords];
         });
         message.success(action === 'clear' ? 'Đã xóa lịch xin nghỉ.' : 'Đã ghi nhận nghỉ phép.');
-    }, [canManageAttendance, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
+    }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
 
     const openLeaveRequestModal = useCallback((emp: Employee, date: dayjs.Dayjs, defaultSession: LeaveSession, existingLeave?: LeaveRequest) => {
-        if (!canManageAttendance) return;
+        if (!canManageAttendance || !canManageAttendanceEmployee(emp)) return;
         if (checkLocked()) return;
         if (!canEditAttendanceDate(date)) {
-            message.warning('Chỉ admin được sửa lịch của hôm nay hoặc ngày đã qua.');
+            message.warning('Quản lý chỉ được lên lịch cho ngày tương lai. Hôm nay hoặc ngày đã qua chỉ admin được sửa.');
             return;
         }
 
@@ -4861,13 +4968,13 @@ export default function Attendance() {
                 message.success(selectedAction === 'clear' ? 'Đã xóa lịch xin nghỉ.' : 'Đã lưu lịch xin nghỉ.');
             },
         });
-    }, [canManageAttendance, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
+    }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
 
     const openWorkScheduleModal = useCallback((emp: Employee, date: dayjs.Dayjs, defaultSession: LeaveSession, existingSchedule?: WorkScheduleRecord) => {
-        if (!canManageAttendance) return;
+        if (!canManageAttendance || !canManageAttendanceEmployee(emp)) return;
         if (checkLocked()) return;
         if (!canEditAttendanceDate(date)) {
-            message.warning('Chỉ admin được sửa lịch của hôm nay hoặc ngày đã qua.');
+            message.warning('Quản lý chỉ được lên lịch cho ngày tương lai. Hôm nay hoặc ngày đã qua chỉ admin được sửa.');
             return;
         }
         if (emp.type !== 'Seasonal') {
@@ -4963,7 +5070,7 @@ export default function Attendance() {
                 message.success(selectedAction === 'clear' ? 'Đã xóa lịch làm.' : 'Đã lưu lịch làm.');
             },
         });
-    }, [canManageAttendance, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
+    }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
 
     // ============================================
     // TAB 5: ĐIỂM DANH & LỊCH SỬ
@@ -5022,7 +5129,7 @@ export default function Attendance() {
                     const emp = employees.find(e => e.id === record.key) || employees[rowIdx];
                     if (!emp) return null;
 
-                    const canEdit = canManageAttendance && canEditAttendanceDate(currentDay) && !isCurrentPeriodLocked;
+                    const canEdit = canManageAttendance && canManageAttendanceEmployee(emp) && canEditAttendanceDate(currentDay) && !isCurrentPeriodLocked;
 
                     const renderSessionCell = (
                         session: LeaveSession,
@@ -5148,7 +5255,7 @@ export default function Attendance() {
             },
         });
         return columns;
-    }, [employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear, openLeaveRequestModal, saveWorkScheduleInline, saveLeaveRequestInline, canManageAttendance, canEditAttendanceDate, isCurrentPeriodLocked, employees, isAttendanceSessionDue]);
+    }, [employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear, openLeaveRequestModal, saveWorkScheduleInline, saveLeaveRequestInline, canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, isCurrentPeriodLocked, employees, isAttendanceSessionDue]);
 
     useEffect(() => {
         const isCurrentMonth = selectedMonth === dayjs().month() + 1 && selectedYear === dayjs().year();
@@ -5728,6 +5835,8 @@ export default function Attendance() {
                                 size="small"
                                 icon={<SendOutlined />}
                                 onClick={handleBulkSendGmail}
+                                loading={gmailSending || packingOrdersLoading}
+                                disabled={gmailSending || packingOrdersLoading}
                                 style={{ borderRadius: 6, background: '#f6ffed', borderColor: '#b7eb8f', color: '#389e0d' }}
                             />
                         </Tooltip>
