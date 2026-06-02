@@ -136,6 +136,7 @@ interface ShiftStatus {
 }
 
 interface FineRecord {
+    id?: string;
     empId: number;
     type: string;
     detail: string;
@@ -144,6 +145,11 @@ interface FineRecord {
     source?: string; // nguồn tạo phạt
     disabled?: boolean;
 }
+
+const ensureFineId = (fine: FineRecord, index = 0): FineRecord => ({
+    ...fine,
+    id: fine.id || `fine-${fine.source || 'manual'}-${fine.empId}-${fine.date || 'nodate'}-${fine.amount || 0}-${index}`,
+});
 
 const getFineOverrideKey = (fine: FineRecord) => [
     fine.source || 'system',
@@ -215,6 +221,10 @@ interface AttendanceLog {
 interface FundTransaction {
     id: string; // unique ID
     date: string;
+    createdAt?: string;
+    createdBy?: string;
+    updatedAt?: string;
+    updatedBy?: string;
     note: string;
     type: 'in' | 'out';
     amount: number;
@@ -432,6 +442,22 @@ const attendanceMatrix: ShiftStatus[][] = [
 const attendanceLogs: AttendanceLog[] = []; // Xóa mock — dùng liveAttendanceLogs từ DB
 
 const fundTransactions: FundTransaction[] = []; // Xóa mock — giao dịch thực nhập tay
+const FUND_TX_EDIT_WINDOW_MS = 60 * 60 * 1000;
+
+const getFundTxCreatedMs = (tx: FundTransaction) => {
+    if (tx.createdAt) {
+        const createdAt = new Date(tx.createdAt).getTime();
+        if (!Number.isNaN(createdAt)) return createdAt;
+    }
+
+    const idTimestamp = String(tx.id || '').match(/^f(\d{12,})$/)?.[1];
+    if (idTimestamp) {
+        const createdAt = Number(idTimestamp);
+        if (!Number.isNaN(createdAt)) return createdAt;
+    }
+
+    return null;
+};
 
 // ===== HELPERS =====
 const fmt = (v: number) => new Intl.NumberFormat('vi-VN').format(Math.round(v)) + ' đ';
@@ -2284,6 +2310,7 @@ export default function Attendance() {
     const isManager = user?.role === 'manager';
     const canManageBonuses = isAdmin;
     const canManageAttendance = isAdmin || isManager;
+    const canCreateFundTx = isAdmin || isManager;
     const fineAuditActor = useMemo(() => ({
         username: user?.username || currentUser || 'System',
         displayName: user?.fullName || user?.username || currentUser || 'System',
@@ -2611,6 +2638,25 @@ export default function Attendance() {
     const [extraFundTx, setExtraFundTx] = useState<FundTransaction[]>([]);
     const [fundAuditLog, setFundAuditLog] = useState<FundAuditLog[]>([]);
     const [auditDrawerOpen, setAuditDrawerOpen] = useState(false);
+    const currentFundActorKeys = useMemo(() => {
+        return [currentUser, user?.username, user?.fullName]
+            .filter(Boolean)
+            .map(value => normalizeAttendanceText(String(value)));
+    }, [currentUser, user?.fullName, user?.username]);
+    const canEditFundTx = useCallback((tx: FundTransaction) => {
+        const isManualFundTx = extraFundTx.some(item => item.id === tx.id);
+        if (!isManualFundTx) return false;
+        if (isAdmin) return true;
+        if (!canCreateFundTx) return false;
+
+        const createdMs = getFundTxCreatedMs(tx);
+        if (!createdMs) return false;
+        if (Date.now() - createdMs > FUND_TX_EDIT_WINDOW_MS) return false;
+
+        const owner = normalizeAttendanceText(tx.createdBy || tx.person || '');
+        if (!owner) return false;
+        return currentFundActorKeys.includes(owner);
+    }, [canCreateFundTx, currentFundActorKeys, extraFundTx, isAdmin]);
     const [bonusForm] = Form.useForm();
     const bonusKind = Form.useWatch('bonusKind', bonusForm);
     const overtimeHours = Form.useWatch('overtimeHours', bonusForm);
@@ -2713,7 +2759,7 @@ export default function Attendance() {
                     if (d.extraBonuses) setExtraBonuses(d.extraBonuses);
                     if (d.extraFundTx) setExtraFundTx(d.extraFundTx);
                     if (d.fundAuditLog) setFundAuditLog(d.fundAuditLog);
-                    if (d.extraFines) setExtraFines(d.extraFines);
+                    if (d.extraFines) setExtraFines(d.extraFines.map((fine: FineRecord, index: number) => ensureFineId(fine, index)));
                     if (d.fineOverrides) setFineOverrides(d.fineOverrides);
                     if (d.fineAuditLog) setFineAuditLog(d.fineAuditLog);
                     if (d.lockedPeriods) setLockedPeriods(d.lockedPeriods);
@@ -2734,17 +2780,18 @@ export default function Attendance() {
         const handleFineAdded = (e: Event) => {
             const newFine = (e as CustomEvent).detail;
             if (newFine) {
-                setExtraFines(prev => [...prev, newFine]);
+                const fineWithId = ensureFineId(newFine, Date.now());
+                setExtraFines(prev => [...prev, fineWithId]);
                 const now = new Date().toLocaleString('vi-VN');
                 const actor = fineAuditActorRef.current;
-                const employeeName = employeesRef.current.find(emp => emp.id === newFine.empId)?.name || '';
+                const employeeName = employeesRef.current.find(emp => emp.id === fineWithId.empId)?.name || '';
                 setFineAuditLog(prev => [...prev, {
                     id: 'flog-' + Date.now(),
                     action: 'create',
                     timestamp: now,
                     changedBy: actor.username,
                     changedByName: actor.displayName,
-                    after: newFine,
+                    after: fineWithId,
                     note: 'Thêm phạt: ' + employeeName + ' — ' + fmt(newFine.amount || 0) + ' — "' + (newFine.detail || '') + '"',
                 }]);
             }
@@ -2796,7 +2843,7 @@ export default function Attendance() {
     }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded]);
 
     const persistAttendanceSnapshotNow = useCallback(async (patch: Record<string, any>) => {
-        if (!isDbLoaded || employees.length === 0) return;
+        if (!isDbLoaded || employees.length === 0) return false;
         const baseSnapshot = latestSnapshotRef.current || {
             config,
             employees,
@@ -2815,7 +2862,9 @@ export default function Attendance() {
         latestSnapshotRef.current = snapshot;
         try {
             const api = (window as any).electronAPI;
-            await api.appConfig.set('attendanceData', snapshot);
+            const result = await api.appConfig.set('attendanceData', snapshot);
+            if (!result?.success) throw new Error(result?.error || 'Lưu dữ liệu chấm công thất bại');
+            return true;
         } catch (err) {
             console.error('Lỗi lưu nhanh dữ liệu chấm công vào DB:', err);
         }
@@ -3583,9 +3632,10 @@ export default function Attendance() {
     // === Thêm/Sửa Phạt handler ===
     const handleAddFine = useCallback(() => {
         if (checkLocked()) return;
-        fineForm.validateFields().then(values => {
+        fineForm.validateFields().then(async values => {
             const fineType = Array.isArray(values.type) ? values.type[0] : values.type;
             const nextFine: FineRecord = {
+                id: editingFine?.fine?.id || 'fine-manual-' + Date.now(),
                 empId: values.empId,
                 type: fineType,
                 detail: values.detail,
@@ -3601,7 +3651,10 @@ export default function Attendance() {
                 let savedFine: FineRecord = nextFine;
                 if (editingFine.isManual) {
                     nextExtraFines = extraFines.map((fine, index) => {
-                        if (index !== editingFine.manualIndex) return fine;
+                        const sameFine = editingFine.fine.id
+                            ? fine.id === editingFine.fine.id
+                            : index === editingFine.manualIndex;
+                        if (!sameFine) return fine;
                         savedFine = { ...fine, ...nextFine, source: fine.source };
                         return savedFine;
                     });
@@ -3631,7 +3684,11 @@ export default function Attendance() {
                     note: 'Sửa khoản phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
                 }];
                 setFineAuditLog(nextFineAuditLog);
-                void persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineOverrides: nextFineOverrides, fineAuditLog: nextFineAuditLog });
+                const saved = await persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineOverrides: nextFineOverrides, fineAuditLog: nextFineAuditLog });
+                if (!saved) {
+                    message.error('Chưa lưu được khoản phạt vào DB. Vui lòng thử lại trước khi reload app.');
+                    return;
+                }
 
                 setEditingFine(null);
                 message.success('Đã cập nhật khoản phạt.');
@@ -3649,7 +3706,11 @@ export default function Attendance() {
                     note: 'Thêm phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
                 }];
                 setFineAuditLog(nextFineAuditLog);
-                void persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineAuditLog: nextFineAuditLog });
+                const saved = await persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineAuditLog: nextFineAuditLog });
+                if (!saved) {
+                    message.error('Chưa lưu được khoản phạt vào DB. Vui lòng thử lại trước khi reload app.');
+                    return;
+                }
 
                 message.success(`Đã thêm phạt ${fmt(values.amount)} cho ${employees.find(e => e.id === values.empId)?.name} (Đã lưu lịch sử)`);
             }
@@ -3661,9 +3722,13 @@ export default function Attendance() {
     }, [fineForm, employees, fineAuditActor, editingFine, extraFines, fineOverrides, fineAuditLog, persistAttendanceSnapshotNow]);
 
     // === Xóa Phạt Thủ Công handler ===
-    const handleDeleteFine = useCallback((fineIndex: number) => {
+    const handleDeleteFine = useCallback((fineIndex: number, fineId?: string) => {
         if (checkLocked()) return;
-        const fine = extraFines[fineIndex];
+        const fine = fineId ? extraFines.find(item => item.id === fineId) : extraFines[fineIndex];
+        if (!fine) {
+            message.error('Không tìm thấy khoản phạt cần xóa. Vui lòng tải lại bảng công.');
+            return;
+        }
         Modal.confirm({
             title: 'Xác nhận xóa khoản phạt',
             icon: <ExclamationCircleOutlined style={{ color: '#ff4d4f' }} />,
@@ -3679,9 +3744,11 @@ export default function Attendance() {
             okText: 'Xóa phạt',
             cancelText: 'Hủy',
             okType: 'danger' as const,
-            onOk: () => {
+            onOk: async () => {
                 const now = new Date().toLocaleString('vi-VN');
-                const nextExtraFines = extraFines.filter((_, i) => i !== fineIndex);
+                const nextExtraFines = fineId
+                    ? extraFines.filter(item => item.id !== fineId)
+                    : extraFines.filter((_, i) => i !== fineIndex);
                 const nextFineAuditLog: FineAuditLog[] = [...fineAuditLog, {
                     id: 'flog-' + Date.now(),
                     action: 'delete',
@@ -3693,7 +3760,11 @@ export default function Attendance() {
                 }];
                 setExtraFines(nextExtraFines);
                 setFineAuditLog(nextFineAuditLog);
-                void persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineAuditLog: nextFineAuditLog });
+                const saved = await persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineAuditLog: nextFineAuditLog });
+                if (!saved) {
+                    message.error('Chưa lưu được thay đổi phạt vào DB. Vui lòng thử lại trước khi reload app.');
+                    return;
+                }
 
                 message.success('Đã xóa khoản phạt (Đã lưu lịch sử)!');
             },
@@ -3722,7 +3793,7 @@ export default function Attendance() {
     const handleDeleteFineRecord = useCallback((record: any) => {
         if (!isAdmin || checkLocked()) return;
         if (record.isManual) {
-            handleDeleteFine(record.manualIndex);
+            handleDeleteFine(record.manualIndex, record.id);
             return;
         }
 
@@ -3778,6 +3849,15 @@ export default function Attendance() {
         if (checkLocked()) return;
         const activeType = editingFundTx ? editingFundTx.type : fundModalType;
         if (!activeType && !editingFundTx) return;
+        if (editingFundTx) {
+            if (!canEditFundTx(editingFundTx)) {
+                message.warning('Giao dịch này đã quá 1 giờ hoặc không thuộc quyền sửa của bạn. Chỉ admin được phép sửa.');
+                return;
+            }
+        } else if (!canCreateFundTx) {
+            message.warning('Bạn không có quyền thêm giao dịch quỹ.');
+            return;
+        }
         fundForm.validateFields().then(values => {
             const now = new Date();
             const ts = now.toLocaleString('vi-VN');
@@ -3790,6 +3870,8 @@ export default function Attendance() {
                     note: values.note,
                     amount: values.amount,
                     person: values.person,
+                    updatedAt: now.toISOString(),
+                    updatedBy: user?.username || currentUser || 'System',
                 };
                 // Ghi audit log
                 const changes: string[] = [];
@@ -3816,6 +3898,8 @@ export default function Attendance() {
                 const newTx: FundTransaction = {
                     id: newId,
                     date: now.toLocaleDateString('vi-VN'),
+                    createdAt: now.toISOString(),
+                    createdBy: user?.username || currentUser || 'System',
                     note: values.note,
                     type: activeType!,
                     amount: values.amount,
@@ -3833,11 +3917,15 @@ export default function Attendance() {
             }
             fundForm.resetFields();
         });
-    }, [fundForm, fundModalType, editingFundTx]);
+    }, [canCreateFundTx, canEditFundTx, currentUser, editingFundTx, fundForm, fundModalType, user?.username]);
 
     // === Xóa Giao dịch Quỹ (có audit) ===
     const handleDeleteFundTx = useCallback((tx: FundTransaction) => {
         if (checkLocked()) return;
+        if (!canEditFundTx(tx)) {
+            message.warning('Giao dịch này đã quá 1 giờ hoặc không thuộc quyền xóa của bạn. Chỉ admin được phép xóa.');
+            return;
+        }
         Modal.confirm({
             title: 'Xác nhận xóa giao dịch',
             content: (
@@ -3868,15 +3956,19 @@ export default function Attendance() {
                 message.success('Xóa thành công + đã ghi lịch sử!');
             },
         });
-    }, []);
+    }, [canEditFundTx]);
 
     // === Mở modal sửa ===
     const handleEditFundTx = useCallback((tx: FundTransaction) => {
         if (checkLocked()) return;
+        if (!canEditFundTx(tx)) {
+            message.warning('Giao dịch này đã quá 1 giờ hoặc không thuộc quyền sửa của bạn. Chỉ admin được phép sửa.');
+            return;
+        }
         setEditingFundTx(tx);
         fundForm.setFieldsValue({ note: tx.note, amount: tx.amount, person: tx.person });
         setFundModalType(tx.type); // mở modal đúng loại
-    }, [fundForm]);
+    }, [canEditFundTx, fundForm]);
 
 
 
@@ -4612,7 +4704,7 @@ export default function Attendance() {
             ...extraFines
                 .map((f, i) => ({ fine: f, manualIndex: i }))
                 .filter(({ fine }) => inOverviewRange(fine.date))
-                .map(({ fine, manualIndex }) => ({ ...fine, key: `manual-${manualIndex}`, empName: employees.find(e => e.id === fine.empId)?.name, isManual: true, manualIndex, source: fine.source })),
+                .map(({ fine, manualIndex }) => ({ ...fine, key: fine.id || `manual-${manualIndex}`, empName: employees.find(e => e.id === fine.empId)?.name, isManual: true, manualIndex, source: fine.source })),
             ...autoVatOverdueFines
                 .filter(f => inOverviewRange(f.date))
                 .map((f, i) => systemFineRow(f, `vat-${i}`))
@@ -4730,7 +4822,113 @@ export default function Attendance() {
                             },
                             {
                                 title: 'Chi tiết', dataIndex: 'detail', key: 'detail',
-                                render: (d: string) => <Text strong style={{ color: '#595959' }}>{d}</Text>,
+                                render: (d: string, record: any) => {
+                                    // 1. Phạt Trả hàng (Returns)
+                                    if (record.source === 'returns') {
+                                        const match = String(d).match(/Mã phiếu:\s*([^)]+)/);
+                                        const code = match?.[1]?.trim();
+                                        if (code) {
+                                            return (
+                                                <Space size={4}>
+                                                    <Text style={{ color: '#595959', fontWeight: 500 }}>Phát sinh THHT</Text>
+                                                    <Tag color="magenta" style={{ margin: 0, fontWeight: 700, fontFamily: 'monospace', fontSize: 12, border: 'none', background: '#fff0f6', color: '#c41d7f' }}>
+                                                        <Text copyable={{ text: code }} style={{ color: 'inherit', fontSize: 'inherit', fontWeight: 'inherit', fontFamily: 'inherit' }}>
+                                                            {code}
+                                                        </Text>
+                                                    </Tag>
+                                                </Space>
+                                            );
+                                        }
+                                    }
+
+                                    // 2. Phạt Đi muộn (Attendance)
+                                    const lateMatch = String(d).match(/^Đi muộn ca (sáng|chiều) (\d+) phút \(Mức (Nhẹ|TB|Nặng)\)/);
+                                    if (record.source === 'attendance' && lateMatch) {
+                                        const [, ca, minutes, level] = lateMatch;
+                                        const levelColors: Record<string, { bg: string, text: string }> = {
+                                            'Nhẹ': { bg: '#fffbe6', text: '#d48806' },
+                                            'TB': { bg: '#fff7e6', text: '#d46b08' },
+                                            'Nặng': { bg: '#fff1f0', text: '#cf1322' }
+                                        };
+                                        const color = levelColors[level] || { bg: '#f5f5f5', text: '#595959' };
+                                        return (
+                                            <Space size={6}>
+                                                <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ ca {ca} <span style={{ fontWeight: 700, color: '#262626' }}>{minutes} phút</span></Text>
+                                                <Tag style={{ margin: 0, fontWeight: 700, fontSize: 10, border: 'none', background: color.bg, color: color.text }}>
+                                                    MỨC {level.toUpperCase()}
+                                                </Tag>
+                                            </Space>
+                                        );
+                                    }
+
+                                    // 3. Phạt VAT quá hạn (Purchase VAT Overdue)
+                                    if (record.source === 'purchase_vat_overdue' || d.includes('chưa cập nhật HĐ VAT')) {
+                                        const cleanText = d.replace(/\s*quá 3 ngày chưa cập nhật HĐ VAT\s*$/, '');
+                                        const poCode = cleanText.replace(/^Phiếu\s+/, '');
+                                        const parts = poCode.split(/\s*-\s*/);
+                                        const code = parts[0];
+                                        const supplier = parts.slice(1).join(' - ');
+                                        return (
+                                            <Space size={4}>
+                                                <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ HĐ VAT</Text>
+                                                <Tag color="cyan" style={{ margin: 0, fontWeight: 700, fontFamily: 'monospace', fontSize: 11, border: 'none', background: '#e6fffb', color: '#08979c' }}>
+                                                    <Text copyable={{ text: code }} style={{ color: 'inherit', fontSize: 'inherit', fontWeight: 'inherit', fontFamily: 'inherit' }}>
+                                                        {code}
+                                                    </Text>
+                                                </Tag>
+                                                {supplier && <Text type="secondary" style={{ fontSize: 11 }}>({supplier})</Text>}
+                                            </Space>
+                                        );
+                                    }
+
+                                    // 4. Trễ deadline công việc (Daily Task Overdue)
+                                    if (record.source === 'daily_task_overdue' || d.endsWith('quá deadline')) {
+                                        const taskTitle = d.replace(/\s*quá deadline\s*$/, '');
+                                        return (
+                                            <Space size={4}>
+                                                <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ deadline</Text>
+                                                <Tag color="volcano" style={{ margin: 0, fontWeight: 600, fontSize: 11, border: 'none', background: '#fff2e8', color: '#d4380d' }}>
+                                                    {taskTitle}
+                                                </Tag>
+                                            </Space>
+                                        );
+                                    }
+
+                                    // 5. Thiếu công việc hàng ngày (Daily Report Missing)
+                                    if (record.source === 'daily_report_missing' || d.includes('Không ghi nhận Công việc')) {
+                                        const matchDate = d.match(/ngày\s+(\d{2}\/\d{2}\/\d{4})/);
+                                        const missingDate = matchDate?.[1];
+                                        return (
+                                            <Space size={4}>
+                                                <Text style={{ color: '#595959', fontWeight: 500 }}>Thiếu báo cáo ngày</Text>
+                                                {missingDate && (
+                                                    <Tag color="blue" style={{ margin: 0, fontWeight: 700, fontSize: 11, border: 'none', background: '#e6f7ff', color: '#096dd9' }}>
+                                                        {missingDate}
+                                                    </Tag>
+                                                )}
+                                            </Space>
+                                        );
+                                    }
+
+                                    // 6. Thiếu kiểm hàng ngày (Stock Check Missing)
+                                    if (record.source === 'stock_check_missing' || d.includes('Không kiểm hàng')) {
+                                        const matchDate = d.match(/ngày\s+(\d{2}\/\d{2}\/\d{4})/);
+                                        const missingDate = matchDate?.[1];
+                                        return (
+                                            <Space size={4}>
+                                                <Text style={{ color: '#595959', fontWeight: 500 }}>Thiếu kiểm hàng ngày</Text>
+                                                {missingDate && (
+                                                    <Tag color="purple" style={{ margin: 0, fontWeight: 700, fontSize: 11, border: 'none', background: '#f9f0ff', color: '#531dab' }}>
+                                                        {missingDate}
+                                                    </Tag>
+                                                )}
+                                            </Space>
+                                        );
+                                    }
+
+                                    // Mặc định cho các loại phạt nhập tay hoặc khác
+                                    return <Text strong style={{ color: '#595959' }}>{d}</Text>;
+                                },
                             },
                             {
                                 title: 'Nguồn', key: 'source', width: 100, align: 'center' as const,
@@ -5402,7 +5600,7 @@ export default function Attendance() {
                                     Lịch sử{fundAuditLog.length > 0 ? ` (${fundAuditLog.length})` : ''}
                                 </Button>
                             </Tooltip>
-                            {isAdmin && (
+                            {canCreateFundTx && (
                                 <Dropdown menu={{
                                     items: [
                                         { key: 'in', label: <span style={{ color: '#00ab56', fontWeight: 700 }}>💰 Thu vào quỹ</span>, onClick: () => { fundForm.resetFields(); fundForm.setFieldsValue({ person: currentUser || '' }); setEditingFundTx(null); setFundModalType('in'); } },
@@ -5431,15 +5629,15 @@ export default function Attendance() {
                             {
                                 title: '', key: 'actions', width: '10%', align: 'center' as const,
                                 render: (_: any, record: FundTransaction) => {
-                                    const isEditable = extraFundTx.some(t => t.id === record.id);
-                                    if (!isEditable || !isAdmin) return null;
+                                    const isEditable = canEditFundTx(record);
+                                    if (!isEditable) return null;
                                     return (
                                         <Space size={4} style={{ whiteSpace: 'nowrap' }}>
                                             <Tooltip title="Sửa">
                                                 <Button type="text" size="small" icon={<EditOutlined style={{ color: '#1890ff' }} />} onClick={() => handleEditFundTx(record)} />
                                             </Tooltip>
                                             <Tooltip title="Xóa">
-                                                <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => { Modal.confirm({ title: 'Xóa giao dịch?', okText: 'Xóa', okType: 'danger', cancelText: 'Hủy', onOk: () => handleDeleteFundTx(record) }); }} />
+                                                <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteFundTx(record)} />
                                             </Tooltip>
                                         </Space>
                                     );

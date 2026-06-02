@@ -24,9 +24,40 @@ import type { MenuProps } from 'antd';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
 import dayjs from 'dayjs';
+import customParseFormat from 'dayjs/plugin/customParseFormat';
 import * as XLSX from 'xlsx';
 
+dayjs.extend(customParseFormat);
+
 const { Title, Text } = Typography;
+
+const parseReturnDate = (value: any) => {
+    if (!value) return dayjs('');
+    if (dayjs.isDayjs(value)) return value;
+    if (typeof value === 'number') {
+        const excelEpoch = new Date(1899, 11, 30);
+        return dayjs(new Date(excelEpoch.getTime() + value * 86400000));
+    }
+
+    const raw = String(value).trim();
+    const formats = [
+        'YYYY-MM-DD',
+        'YYYY-MM-DD HH:mm:ss',
+        'DD/MM/YYYY',
+        'D/M/YYYY',
+        'DD/MM/YYYY HH:mm',
+        'D/M/YYYY HH:mm',
+        'DD/MM/YYYY HH:mm:ss',
+        'D/M/YYYY HH:mm:ss',
+    ];
+
+    for (const format of formats) {
+        const parsed = dayjs(raw, format, true);
+        if (parsed.isValid()) return parsed;
+    }
+
+    return dayjs(raw);
+};
 
 const normalizeReturnAssignee = (value: string) =>
     String(value || '').normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
@@ -342,7 +373,7 @@ export default function ReturnsPage() {
         }
     };
 
-    const processReturnFine = async (packerName: string, complaintCode: string, fineDate?: string, silent = false) => {
+    const processReturnFine = async (packerName: string, complaintCode: string, fineDate?: any, silent = false) => {
         if (!packerName || !complaintCode) return false;
         try {
             const electronApi = (window as any).electronAPI;
@@ -370,8 +401,9 @@ export default function ReturnsPage() {
                     );
                     if (hasExistingFine) return false;
 
-                    const fineDateValue = fineDate && dayjs(fineDate).isValid()
-                        ? dayjs(fineDate).toISOString()
+                    const parsedFineDate = parseReturnDate(fineDate);
+                    const fineDateValue = parsedFineDate.isValid()
+                        ? parsedFineDate.toISOString()
                         : new Date().toISOString();
                     const newFine = {
                         empId: packerEmp.id,
@@ -451,8 +483,8 @@ export default function ReturnsPage() {
                     type: 'Khác',
                     detail: `Đóng gói sai đơn, phát sinh KH hoàn hàng/khiếu nại (Mã phiếu: ${row.complaintCode})`,
                     amount,
-                    date: row.complaintDate && dayjs(row.complaintDate).isValid()
-                        ? dayjs(row.complaintDate).toISOString()
+                    date: parseReturnDate(row.complaintDate).isValid()
+                        ? parseReturnDate(row.complaintDate).toISOString()
                         : new Date().toISOString(),
                     source: 'returns'
                 };
@@ -589,7 +621,7 @@ export default function ReturnsPage() {
             if (values.status === 'completed' && values.packer && faultParty === 'warehouse') {
                 const isStatusChanged = !editingReturn || editingReturn.status !== 'completed';
                 if (isStatusChanged) {
-                    await processReturnFine(values.packer, values.complaintCode);
+                    await processReturnFine(values.packer, values.complaintCode, values.complaintDate);
                 }
             } else if (faultParty === 'customer') {
                 // Đổi sang "lỗi do khách" → xóa phạt cũ nếu đã từng tạo
@@ -668,7 +700,7 @@ export default function ReturnsPage() {
                     }
 
                     // 🔧 Safe date parsing
-                    let parsedDate = dayjs(complaintDate);
+                    let parsedDate = parseReturnDate(complaintDate);
                     if (!parsedDate.isValid()) {
                         parsedDate = dayjs(); // Fallback to today
                     }
@@ -1014,7 +1046,7 @@ export default function ReturnsPage() {
                                         await processReturnFineRemoval(record.complaintCode);
                                     } else if (value === 'warehouse' && record.faultParty === 'customer' && record.packer) {
                                         // Đổi sang "lỗi do kho" → tạo phạt mới
-                                        await processReturnFine(record.packer, record.complaintCode);
+                                        await processReturnFine(record.packer, record.complaintCode, record.complaintDate);
                                     }
                                 }
                                 message.success('Đã cập nhật!');
@@ -1069,7 +1101,7 @@ export default function ReturnsPage() {
                                             console.log(`[Returns] Bỏ qua ghi phạt - Lỗi do khách hàng (phiếu: ${record.complaintCode})`);
                                         } else {
                                             // 'warehouse' hoặc undefined (mặc định = lỗi kho)
-                                            await processReturnFine(record.packer, record.complaintCode);
+                                            await processReturnFine(record.packer, record.complaintCode, record.complaintDate);
                                         }
                                     } else if (record.status === 'completed' && newStatus !== 'completed' && record.complaintCode) {
                                         await processReturnFineRemoval(record.complaintCode);
