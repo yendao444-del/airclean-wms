@@ -9117,9 +9117,16 @@ function faceServiceFetch(urlPath, options = {}) {
 }
 
 // Xác định loại chấm công theo giờ hiện tại
-function getCheckType() {
-    const h = new Date().getHours();
-    const m = new Date().getMinutes();
+function getLocalDateKey(now = new Date()) {
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
+function getCheckType(now = new Date()) {
+    const h = now.getHours();
+    const m = now.getMinutes();
     const total = h * 60 + m;
 
     // Ca sáng
@@ -9143,6 +9150,50 @@ function getCheckType() {
     if (total < 7 * 60) return 'morning_in';           // Trước 7h → coi như sáng vào sớm
     if (total <= 13 * 60) return 'morning_out';         // 12:30-13:00 (nghỉ trưa) → sáng ra
     return 'evening_out';                               // Sau 20:30 → tối ra
+}
+
+function attendanceDecision(checkType, extra = {}) {
+    return { checkType, ...extra };
+}
+
+async function resolveAttendanceCheckType(faceId, date, now = new Date()) {
+    const baseCheckType = getCheckType(now);
+    if (!baseCheckType) return attendanceDecision(null);
+
+    const total = now.getHours() * 60 + now.getMinutes();
+    const logs = await prisma.attendanceLog.findMany({
+        where: { faceId, date },
+        select: { checkType: true, timestamp: true },
+        orderBy: { timestamp: 'asc' },
+    });
+    const has = (type) => logs.some(log => log.checkType === type);
+
+    // Once a session has check-in, the next valid recognition for that session is checkout.
+    if (baseCheckType === 'morning_in' && has('morning_in')) {
+        if (has('morning_out')) return attendanceDecision('morning_out');
+        if (total < 11 * 60 + 50) {
+            return attendanceDecision(null, {
+                reason: 'not_checkout_time',
+                nextCheckType: 'morning_out',
+                allowedFrom: '11:50',
+            });
+        }
+        return attendanceDecision('morning_out');
+    }
+
+    if (baseCheckType === 'afternoon_in' && has('afternoon_in')) {
+        if (has('evening_out')) return attendanceDecision('evening_out');
+        if (total < 17 * 60 + 30) {
+            return attendanceDecision(null, {
+                reason: 'not_checkout_time',
+                nextCheckType: 'evening_out',
+                allowedFrom: '17:30',
+            });
+        }
+        return attendanceDecision('evening_out');
+    }
+
+    return attendanceDecision(baseCheckType);
 }
 
 function encodeMailHeader(value) {
@@ -9350,14 +9401,25 @@ ipcMain.handle('attendance:recognize', async (event, { image }) => {
         const userName = profile?.userName || result.face_id;
         const userId = profile?.userId || null;
 
-        const checkType = getCheckType();
-        if (!checkType) return { success: false, reason: 'out_of_hours', face_id: result.face_id, userName, ...faceInfo };
+        const now = new Date();
+        const today = getLocalDateKey(now);
+        const checkDecision = await resolveAttendanceCheckType(result.face_id, today, now);
+        const checkType = checkDecision.checkType;
+        if (!checkType) {
+            return {
+                success: false,
+                reason: checkDecision.reason || 'out_of_hours',
+                nextCheckType: checkDecision.nextCheckType,
+                allowedFrom: checkDecision.allowedFrom,
+                face_id: result.face_id,
+                userName,
+                ...faceInfo
+            };
+        }
 
-        // Kiểm tra trùng trong 30 phút
-        const since = new Date(Date.now() - 30 * 60 * 1000);
-        const today = new Date().toISOString().slice(0, 10);
+        // Mỗi loại log chỉ ghi 1 lần/ngày.
         const existing = await prisma.attendanceLog.findFirst({
-            where: { faceId: result.face_id, checkType, date: today, timestamp: { gte: since } }
+            where: { faceId: result.face_id, checkType, date: today }
         });
         if (existing) return { success: false, reason: 'duplicate', face_id: result.face_id, userName, ...faceInfo };
 

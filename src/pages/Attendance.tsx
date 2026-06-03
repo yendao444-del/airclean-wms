@@ -1371,7 +1371,8 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
 
                 const isMatch = result?.success;
                 const isDuplicate = result?.reason === 'duplicate';
-                const color = isMatch ? '#52c41a' : isDuplicate ? '#faad14' : '#1677ff';
+                const isNotCheckoutTime = result?.reason === 'not_checkout_time';
+                const color = isMatch ? '#52c41a' : (isDuplicate || isNotCheckoutTime) ? '#faad14' : '#1677ff';
 
                 // Vẽ hình chữ nhật (cv2.rectangle)
                 ctx.strokeStyle = color;
@@ -1386,7 +1387,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                 if (name) {
                     const label = isMatch
                         ? `${name} (${Math.round((result.confidence || 0) * 100)}%)`
-                        : isDuplicate ? `${name} - Đã chấm công` : name;
+                        : isDuplicate ? `${name} - Đã chấm công` : isNotCheckoutTime ? `${name} - Chưa tới giờ ra ca` : name;
                     ctx.font = 'bold 18px Arial';
                     const textW = ctx.measureText(label).width + 12;
                     ctx.fillStyle = color;
@@ -1596,6 +1597,32 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                         return;
                     }
                     // Nếu vẫn là người đó và vẫn duplicate, thì chỉ tracking khung vàng realtime, KHÔNG thông báo âm thanh nữa
+                } else if (res.reason === 'not_checkout_time') {
+                    const waitResult = {
+                        reason: 'not_checkout_time',
+                        userName: res.userName,
+                        allowedFrom: res.allowedFrom,
+                        nextCheckType: res.nextCheckType,
+                        face_box: box
+                    };
+                    const isSameWait = lastResultRef.current?.reason === 'not_checkout_time' && lastResultRef.current?.userName === res.userName;
+                    setLastResult(waitResult);
+                    lastResultRef.current = waitResult;
+
+                    if (!isSameWait) {
+                        try {
+                            const msg = new SpeechSynthesisUtterance(`Chưa tới giờ ra ca, vui lòng chấm lại sau ${res.allowedFrom || ''}`);
+                            msg.lang = 'vi-VN';
+                            window.speechSynthesis.speak(msg);
+                        } catch (e) { }
+
+                        setTimeout(() => {
+                            if (isRecognizingRef.current) {
+                                recognizeTimerRef.current = setTimeout(doRecognize, 120) as unknown as ReturnType<typeof setInterval>;
+                            }
+                        }, 2000);
+                        return;
+                    }
                 } else if (res.reason === 'out_of_hours') {
                     const oohResult = { reason: 'out_of_hours', userName: res.userName, face_box: box };
                     setLastResult(oohResult);
@@ -2054,7 +2081,15 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                         )}
                         {lastResult?.reason === 'duplicate' && (
                             <div style={{ marginTop: 12, padding: '10px 16px', background: '#fff7e6', borderRadius: 8, border: '1px solid #ffd591', textAlign: 'center' }}>
-                                <Text style={{ color: '#d46b08', fontWeight: 700 }}>Đã chấm công rồi (cooldown 30 phút)</Text>
+                                <Text style={{ color: '#d46b08', fontWeight: 700 }}>Đã chấm công rồi</Text>
+                            </div>
+                        )}
+                        {lastResult?.reason === 'not_checkout_time' && (
+                            <div style={{ marginTop: 12, padding: '10px 16px', background: '#fff7e6', borderRadius: 8, border: '1px solid #ffd591', textAlign: 'center' }}>
+                                <Text style={{ color: '#d46b08', fontWeight: 700 }}>
+                                    {lastResult.userName ? `${lastResult.userName} - Chưa tới giờ ra ca` : 'Chưa tới giờ ra ca'}
+                                    {lastResult.allowedFrom ? ` (${lastResult.allowedFrom})` : ''}
+                                </Text>
                             </div>
                         )}
                         {lastResult?.reason === 'out_of_hours' && (
