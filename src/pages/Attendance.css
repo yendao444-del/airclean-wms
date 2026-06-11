@@ -691,6 +691,12 @@
     color: #cf1322;
 }
 
+.att-leave-pill-exempt {
+    border-color: #67e8f9;
+    background: #ecfeff;
+    color: #0891b2;
+}
+
 .att-leave-pill-empty {
     border-style: dashed;
     background: #ffffff;

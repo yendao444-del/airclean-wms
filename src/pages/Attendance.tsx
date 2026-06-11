@@ -84,6 +84,7 @@ interface LeaveRequest {
     empId: number;
     date: string; // YYYY-MM-DD
     session: 'morning' | 'afternoon';
+    exempt?: boolean;
     note?: string;
     createdAt?: string;
     createdBy?: string;
@@ -632,7 +633,12 @@ function calculatePayroll(
             salaryBase = shifts * salaryPerShift;
             const requestedSessions = new Set(
                 leaveRequests
-                    .filter((leave) => leave.empId === emp.id)
+                    .filter((leave) => leave.empId === emp.id && !leave.exempt)
+                    .map((leave) => `${leave.date}|${leave.session}`)
+            );
+            const exemptSessions = new Set(
+                leaveRequests
+                    .filter((leave) => leave.empId === emp.id && leave.exempt)
                     .map((leave) => `${leave.date}|${leave.session}`)
             );
             let paidScheduledAbsences = 0;
@@ -646,6 +652,7 @@ function calculatePayroll(
                         if (isRestDay(date) || !date.isBefore(today, 'day')) return;
                         const key = `${schedule.date}|${schedule.session}`;
                         if (workedSessions.has(key)) return;
+                        if (exemptSessions.has(key)) return;
                         if (requestedSessions.has(key)) paidScheduledAbsences++;
                         else unpaidScheduledAbsences++;
                     });
@@ -673,7 +680,12 @@ function calculatePayroll(
             });
             const requestedSessions = new Set(
                 leaveRequests
-                    .filter((leave) => leave.empId === emp.id)
+                    .filter((leave) => leave.empId === emp.id && !leave.exempt)
+                    .map((leave) => `${leave.date}|${leave.session}`)
+            );
+            const exemptSessions = new Set(
+                leaveRequests
+                    .filter((leave) => leave.empId === emp.id && leave.exempt)
                     .map((leave) => `${leave.date}|${leave.session}`)
             );
             let paidLeaveSessions = 0;
@@ -686,6 +698,7 @@ function calculatePayroll(
                     (['morning', 'afternoon'] as LeaveSession[]).forEach((session) => {
                         const key = `${dateStr}|${session}`;
                         if (workedSessions.has(key)) return;
+                        if (exemptSessions.has(key)) return;
                         if (requestedSessions.has(key)) paidLeaveSessions++;
                         else unpaidLeaveSessions++;
                     });
@@ -847,9 +860,9 @@ const LeavePill = ({
     isDue: boolean;
     onClick?: () => void;
 }) => {
-    const status = request ? (isDue ? 'paid' : 'planned') : (isDue ? 'unpaid' : 'empty');
+    const status = request?.exempt ? 'exempt' : (request ? (isDue ? 'paid' : 'planned') : (isDue ? 'unpaid' : 'empty'));
     const tooltip = request
-        ? `${label}: ${isDue ? 'Nghỉ có phép' : 'Đã xin nghỉ'}${request.note ? ` - ${request.note}` : ''}`
+        ? `${label}: ${request.exempt ? 'Miễn trừ' : (isDue ? 'Nghỉ có phép' : 'Đã xin nghỉ')}${request.note ? ` - ${request.note}` : ''}`
         : `${label}: ${isDue ? 'Nghỉ không phép' : 'Chưa có trạng thái'}`;
 
     return (
@@ -861,7 +874,7 @@ const LeavePill = ({
                 disabled={!onClick}
             >
                 <span>{label}</span>
-                {(request || isDue) && <span>{request ? (isDue ? 'Có phép' : 'Đã xin') : 'Không phép'}</span>}
+                {(request || isDue) && <span>{request ? (request.exempt ? 'Miễn trừ' : (isDue ? 'Có phép' : 'Đã xin')) : 'Không phép'}</span>}
             </button>
         </Tooltip>
     );
@@ -880,11 +893,11 @@ const WorkSchedulePill = ({
     isDue: boolean;
     onClick?: () => void;
 }) => {
-    const status = !schedule ? 'empty' : (!isDue ? 'planned' : (request ? 'paid' : 'unpaid'));
+    const status = !schedule ? 'empty' : (request?.exempt ? 'exempt' : (!isDue ? 'planned' : (request ? 'paid' : 'unpaid')));
     const tooltip = !schedule
         ? `${label}: Chưa có lịch làm`
         : request
-            ? `${label}: Đã xếp lịch, nghỉ có phép${request.note ? ` - ${request.note}` : ''}`
+            ? `${label}: ${request.exempt ? 'Đã xếp lịch, miễn trừ' : 'Đã xếp lịch, nghỉ có phép'}${request.note ? ` - ${request.note}` : ''}`
             : `${label}: ${isDue ? 'Đã xếp lịch nhưng không đi làm - không phép' : 'Đã xếp lịch làm'}`;
 
     return (
@@ -896,7 +909,7 @@ const WorkSchedulePill = ({
                 disabled={!onClick}
             >
                 <span>{label}</span>
-                {schedule && <span>{!isDue ? 'Đã xếp' : (request ? 'Có phép' : 'Không phép')}</span>}
+                {schedule && <span>{request?.exempt ? 'Miễn trừ' : (!isDue ? 'Đã xếp' : (request ? 'Có phép' : 'Không phép'))}</span>}
             </button>
         </Tooltip>
     );
@@ -918,7 +931,7 @@ const InlineSchedulePopover = ({
     schedule?: WorkScheduleRecord;
     request?: LeaveRequest;
     isDue: boolean;
-    onSave: (action: 'save' | 'clear' | 'leave', scope: LeaveSession | 'full_day', note: string) => void;
+    onSave: (action: 'save' | 'clear' | 'leave' | 'exempt', scope: LeaveSession | 'full_day', note: string) => void;
     children: React.ReactNode;
 }) => {
     const [open, setOpen] = useState(false);
@@ -930,7 +943,7 @@ const InlineSchedulePopover = ({
         }
     }, [open, schedule]);
 
-    const handleAction = (action: 'save' | 'clear' | 'leave', scope: LeaveSession | 'full_day') => {
+    const handleAction = (action: 'save' | 'clear' | 'leave' | 'exempt', scope: LeaveSession | 'full_day') => {
         onSave(action, scope, note);
         setOpen(false);
     };
@@ -966,6 +979,13 @@ const InlineSchedulePopover = ({
                     onClick={() => handleAction('leave', session)}
                 >
                     🚫 Báo xin nghỉ {sessionLabel}
+                </Button>
+                <Button
+                    size="small"
+                    style={{ background: '#ecfeff', color: '#0891b2', border: '1px solid #67e8f9', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    onClick={() => handleAction('exempt', session)}
+                >
+                    Miễn trừ {sessionLabel}
                 </Button>
 
                 {schedule && (
@@ -1038,7 +1058,7 @@ const InlineLeavePopover = ({
     session: LeaveSession;
     request?: LeaveRequest;
     isDue: boolean;
-    onSave: (action: 'save' | 'clear', scope: LeaveSession | 'full_day', note: string) => void;
+    onSave: (action: 'save' | 'clear' | 'exempt', scope: LeaveSession | 'full_day', note: string) => void;
     children: React.ReactNode;
 }) => {
     const [open, setOpen] = useState(false);
@@ -1050,7 +1070,7 @@ const InlineLeavePopover = ({
         }
     }, [open, request]);
 
-    const handleAction = (action: 'save' | 'clear', scope: LeaveSession | 'full_day') => {
+    const handleAction = (action: 'save' | 'clear' | 'exempt', scope: LeaveSession | 'full_day') => {
         onSave(action, scope, note);
         setOpen(false);
     };
@@ -1079,6 +1099,20 @@ const InlineLeavePopover = ({
                     onClick={() => handleAction('save', 'full_day')}
                 >
                     📅 Nghỉ cả ngày (Sáng + Chiều)
+                </Button>
+                <Button
+                    size="small"
+                    style={{ background: '#ecfeff', color: '#0891b2', border: '1px solid #67e8f9', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    onClick={() => handleAction('exempt', session)}
+                >
+                    Miễn trừ {sessionLabel}
+                </Button>
+                <Button
+                    size="small"
+                    style={{ background: '#f0fdfa', color: '#0f766e', border: '1px solid #5eead4', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    onClick={() => handleAction('exempt', 'full_day')}
+                >
+                    Miễn trừ cả ngày
                 </Button>
 
                 {request && (
@@ -5038,7 +5072,7 @@ export default function Attendance() {
     const saveWorkScheduleInline = useCallback((
         emp: any,
         date: dayjs.Dayjs,
-        action: 'save' | 'clear' | 'leave',
+        action: 'save' | 'clear' | 'leave' | 'exempt',
         scope: LeaveSession | 'full_day',
         note: string = ''
     ) => {
@@ -5052,7 +5086,7 @@ export default function Attendance() {
         const dateStr = date.format('YYYY-MM-DD');
         const sessions: LeaveSession[] = scope === 'full_day' ? ['morning', 'afternoon'] : [scope];
 
-        if (action === 'leave') {
+        if (action === 'leave' || action === 'exempt') {
             setLeaveRecords(prev => {
                 const withoutCurrent = prev.filter(leave => !(leave.empId === emp.id && leave.date === dateStr && sessions.includes(leave.session)));
                 const now = new Date().toISOString();
@@ -5061,13 +5095,14 @@ export default function Attendance() {
                     empId: emp.id,
                     date: dateStr,
                     session,
+                    exempt: action === 'exempt',
                     note,
                     createdAt: now,
                     createdBy: currentUser || user?.username || 'System',
                 }));
                 return [...withoutCurrent, ...nextRecords];
             });
-            message.success('Đã ghi nhận xin nghỉ ca.');
+            message.success(action === 'exempt' ? 'Đã ghi nhận miễn trừ ca.' : 'Đã ghi nhận xin nghỉ ca.');
             return;
         }
 
@@ -5092,7 +5127,7 @@ export default function Attendance() {
     const saveLeaveRequestInline = useCallback((
         emp: any,
         date: dayjs.Dayjs,
-        action: 'save' | 'clear',
+        action: 'save' | 'clear' | 'exempt',
         scope: LeaveSession | 'full_day',
         note: string = ''
     ) => {
@@ -5115,13 +5150,14 @@ export default function Attendance() {
                 empId: emp.id,
                 date: dateStr,
                 session,
+                exempt: action === 'exempt',
                 note,
                 createdAt: now,
                 createdBy: currentUser || user?.username || 'System',
             }));
             return [...withoutCurrent, ...nextRecords];
         });
-        message.success(action === 'clear' ? 'Đã xóa lịch xin nghỉ.' : 'Đã ghi nhận nghỉ phép.');
+        message.success(action === 'clear' ? 'Đã xóa lịch xin nghỉ.' : (action === 'exempt' ? 'Đã ghi nhận miễn trừ.' : 'Đã ghi nhận nghỉ phép.'));
     }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
 
     const openLeaveRequestModal = useCallback((emp: Employee, date: dayjs.Dayjs, defaultSession: LeaveSession, existingLeave?: LeaveRequest) => {
@@ -6121,7 +6157,7 @@ export default function Attendance() {
                     const positiveAdjust = Math.max(p.extraAdjust || 0, 0);
                     const negativeAdjust = Math.max(-(p.extraAdjust || 0), 0);
                     const totalEarnings = p.salaryBase + p.packIncome + (p.totalBonus || 0) + positiveAdjust;
-                    const totalDeductions = (p.myFines || 0) + negativeAdjust;
+                    const totalDeductions = (p.myFines || 0) + (p.leaveDeduction || 0) + negativeAdjust;
                     const issueDate = dayjs().format('DD/MM/YYYY');
                     const periodLabel = `Tháng ${overviewDateRange[0].format('MM/YYYY')} (${overviewDateRange[0].format('DD/MM')} - ${overviewDateRange[1].format('DD/MM/YYYY')})`;
 
@@ -6383,6 +6419,15 @@ export default function Attendance() {
                                                         <td className="ps-summary-red">- {fmt(p.myFines || 0)}</td>
                                                     </tr>
                                                 )}
+                                                {(p.leaveDeduction || 0) > 0 && (
+                                                    <tr>
+                                                        <td>
+                                                            <span className="ps-summary-row-label ps-summary-red">Khấu trừ nghỉ</span>
+                                                            <span className="ps-summary-row-note">{p.absentDays || 0} ngày/ca nghỉ đã tính</span>
+                                                        </td>
+                                                        <td className="ps-summary-red">- {fmt(p.leaveDeduction || 0)}</td>
+                                                    </tr>
+                                                )}
                                             </tbody>
                                         </table>
                                     </div>
@@ -6451,6 +6496,7 @@ export default function Attendance() {
                                                 {fmt(p.salaryBase)} + {fmt(p.packIncome || 0)}
                                                 {(p.totalBonus || 0) > 0 ? ` + ${fmt(p.totalBonus || 0)}` : ''}
                                                 {(p.myFines || 0) > 0 ? ` - ${fmt(p.myFines || 0)}` : ''}
+                                                {(p.leaveDeduction || 0) > 0 ? ` - ${fmt(p.leaveDeduction || 0)}` : ''}
                                                 {!!p.extraAdjust ? ` ${p.extraAdjust > 0 ? '+' : '-'} ${fmt(Math.abs(p.extraAdjust))}` : ''}
                                             </div>
                                         </div>
@@ -6588,6 +6634,14 @@ export default function Attendance() {
                                                             <td className="text-right ps-inv-text-red">-{fmt(p.myFines)}</td>
                                                         </tr>
                                                     )
+                                                )}
+
+                                                {(p.leaveDeduction || 0) > 0 && (
+                                                    <tr>
+                                                        <td><span className="ps-inv-row-label ps-inv-fine-label"><span className="ps-inv-fine-dot"><WarningOutlined /></span>Khấu trừ nghỉ</span></td>
+                                                        <td className="ps-inv-note">{p.absentDays || 0} ngày/ca nghỉ đã tính</td>
+                                                        <td className="text-right ps-inv-text-red">-{fmt(p.leaveDeduction || 0)}</td>
+                                                    </tr>
                                                 )}
 
                                                 {p.extraAdjust !== 0 && p.extraAdjust != null && (
