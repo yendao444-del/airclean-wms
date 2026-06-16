@@ -1829,7 +1829,7 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
 
         // Bọc toàn bộ vào 1 Transaction duy nhất
         // 🔒 StockMutex: serialize stock operations — tránh race condition
-        const response = await withStockLock(() => prisma.$transaction(async (tx) => {
+        const response = await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
             // 🎁 CHECK IF SKU IS A COMBO
             const combo = await tx.comboProduct.findUnique({
                 where: { sku }
@@ -1862,7 +1862,7 @@ ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = fa
                 return { success: false, skipped: true, error: `SKU "${sku}" không tìm thấy trong kho` };
             }
             return { success: true, data: result };
-        }));
+        }, { timeout: 30000, maxWait: 10000 }));
         if (response?.success) {
             emitStockChanged({
                 sku,
@@ -2192,7 +2192,7 @@ ipcMain.handle('posOrder:create', async (event, data) => {
         const paymentStatus = paidAmount >= total ? 'paid' : paidAmount > 0 ? 'partial' : 'unpaid';
 
         // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
-        const order = await withStockLock(() => prisma.$transaction(async (tx) => {
+        const order = await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
             // Create Order
             const newOrder = await tx.order.create({
                 data: {
@@ -2249,12 +2249,12 @@ ipcMain.handle('posOrder:create', async (event, data) => {
                         createdBy: createdByUserId
                     });
                 } catch (stockErr) {
-                    throw new Error(`Kho lá»—i SKU ${item.sku}: ${stockErr.message}`);
+                    throw new Error(`Lỗi kho SKU ${item.sku}: ${stockErr.message}`);
                 }
             }
 
             return newOrder;
-        }));
+        }, { timeout: 30000, maxWait: 10000 }));
 
         // 5. Activity Log
         try {
@@ -2405,7 +2405,7 @@ ipcMain.handle('posOrder:update', async (event, { id, note, discount, items, pay
 
 
         // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
-        await withStockLock(() => prisma.$transaction(async (tx) => {
+        await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
             // 1. Hoàn lại kho theo items cũ
             for (const oldItem of oldOrder.items) {
                 await updateProductStockInTx(tx, oldItem.sku, oldItem.quantity, {
@@ -2480,7 +2480,7 @@ ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
         if (order.status === 'cancelled') return { success: true };
 
         // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
-        await withStockLock(() => prisma.$transaction(async (tx) => {
+        await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
             // Hoàn kho — dùng deductItemOrCombo để xử lý cả combo SKU
             const logCtx = {
                 type: 'adjustment',
@@ -2498,7 +2498,7 @@ ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
 
             // Xóa payment liên quan nếu cần thiết hoặc đánh dấu hủy (tạm comment delete payment)
             // await tx.payment.deleteMany({ where: { orderId: id } });
-        }));
+        }, { timeout: 30000, maxWait: 10000 }));
 
         void logActivity({ module: 'sales', action: 'DELETE', description: `Hủy đơn POS #${order.orderNumber}`, userName: userName || 'System' });
         return { success: true };
