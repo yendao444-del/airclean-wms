@@ -68,31 +68,38 @@ interface PackerEmployee {
     username: string;
 }
 
-// Tên cột SKU phổ biến trong file Shopee export
-const SHOPEE_SKU_COLUMN_NAMES = [
-    'SKU sản phẩm', 'SKU Sản Phẩm', 'Seller SKU', 'Mã SKU',
-    'SKU', 'Mã hàng', 'Mã Hàng', 'Model',
-];
+function normalizeHeaderText(value: any): string {
+    return String(value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .trim();
+}
+
+function findMatchingHeader(headers: string[], candidates: string[]): string {
+    const normalizedCandidates = candidates.map(normalizeHeaderText);
+    return headers.find(header => normalizedCandidates.includes(normalizeHeaderText(header))) || '';
+}
+
+function getRowValue(row: any, candidates: string[]): any {
+    if (!row || typeof row !== 'object') return undefined;
+    const matchedHeader = findMatchingHeader(Object.keys(row), candidates);
+    return matchedHeader ? row[matchedHeader] : undefined;
+}
 
 /**
  * Tìm tên cột chứa SKU trong file Shopee.
- * Ưu tiên: cell T1 → fallback qua các tên cột phổ biến trong jsonData.
+ * Chỉ dùng cell U1 vì Shopee đặt SKU phân loại hàng ở cột U.
  */
 function getShopeeSkuHeader(worksheet: any, jsonData: any[]): string {
-    // Thử ô T1 trước (cách cũ)
-    const skuCell = worksheet['T1'];
-    const cellHeader = skuCell ? (skuCell.v || skuCell.w || '') : '';
-    if (cellHeader && jsonData.length > 0 && cellHeader in (jsonData[0] as any)) {
-        return cellHeader;
+    const ref = 'U1';
+    const fixedSkuCell = worksheet[ref];
+    const fixedSkuHeader = fixedSkuCell ? (fixedSkuCell.v || fixedSkuCell.w || '') : '';
+    if (fixedSkuHeader && jsonData.length > 0 && fixedSkuHeader in (jsonData[0] as any)) {
+        return fixedSkuHeader;
     }
-    // Fallback: tìm tên cột khớp trong row đầu tiên
-    if (jsonData.length > 0) {
-        const firstRow = jsonData[0] as any;
-        for (const candidate of SHOPEE_SKU_COLUMN_NAMES) {
-            if (candidate in firstRow) return candidate;
-        }
-    }
-    return cellHeader; // trả về gì có (dù sai) để giữ behavior cũ
+
+    return '';
 }
 
 export default function EcommerceExportPage() {
@@ -1375,7 +1382,10 @@ Thời gian: ${currentTime}`;
                 // 🔍 Phát hiện nguồn dữ liệu (TikTok vs Shopee)
                 const firstRow: any = jsonData[0] || {};
                 const isTikTok = 'Order ID' in firstRow || 'Cancelled Time' in firstRow;
-                const isShopee = 'Mã đơn hàng' in firstRow || 'Đơn Vị Vận Chuyển' in firstRow;
+                const isShopee = !!(
+                    getRowValue(firstRow, ['Mã đơn hàng']) !== undefined ||
+                    getRowValue(firstRow, ['Đơn Vị Vận Chuyển', 'Đơn vị vận chuyển']) !== undefined
+                );
 
                 console.log('🔍 Detected source:', { isTikTok, isShopee });
 
@@ -1387,9 +1397,13 @@ Thời gian: ${currentTime}`;
                 // Group by Order ID to combine items from same order
                 const orderMap = new Map<string, any[]>();
 
-                // 📊 Shopee: tìm tên cột SKU (ô T1 → fallback tên cột phổ biến)
+                // Shopee: column U is the only source of truth for SKU.
                 const shopeeSkuHeader = isShopee ? getShopeeSkuHeader(worksheet, jsonData) : '';
                 if (isShopee) console.log('🔑 Shopee SKU header detected:', shopeeSkuHeader || '(KHÔNG TÌM THẤY)');
+                if (isShopee && !shopeeSkuHeader) {
+                    message.error('File Shopee thiếu cột U: SKU phân loại hàng. Không import để tránh trừ sai tồn.');
+                    return;
+                }
 
                 if (isTikTok) {
                     // ===== XỬ LÝ TIKTOK =====
@@ -1465,21 +1479,33 @@ Thời gian: ${currentTime}`;
                     }
 
                     jsonData.forEach((row: any) => {
-                        const orderId = row['Mã đơn hàng'] || '';
-                        const productName = row['Tên sản phẩm'] || row['Tên Sản Phẩm'] || '';
-                        const variation = row['Tên phân loại hàng'] || row['Phân loại hàng'] || '';
+                        const orderId = getRowValue(row, ['Mã đơn hàng']) || '';
+                        const productName = getRowValue(row, ['Tên sản phẩm', 'Tên Sản Phẩm']) || '';
+                        const variation = getRowValue(row, ['Tên phân loại hàng', 'Phân loại hàng']) || '';
                         const sku = row[shopeeSkuHeader] || '';
-                        const quantity = parseInt(row['Số lượng'] || '1');
-                        const cancelledTime = row['Ngày gửi hàng'] || row['Thời gian tạo đơn hàng'] || row['Ngày đặt hàng'] || '';
-                        const shippingProvider = row['Đơn Vị Vận Chuyển'] || '';
-                        const trackingId = row['Mã vận đơn'] || '';
-                        const ecommerceExportReason = row['Trạng Thái Đơn Hàng'] || 'Hủy đơn Shopee';
-                        const rawAmount = row['Tổng số tiền Người mua thanh toán'] ?? row['Tổng giá trị đơn hàng (VND)'] ?? row['Tổng giá bán (sản phẩm)'] ?? row['Tổng đơn hàng'] ?? row['Thành tiền'] ?? row['Tổng cộng'] ?? 0;
+                        const quantity = parseInt(getRowValue(row, ['Số lượng', 'Quantity', 'Qty']) || '1');
+                        const cancelledTime = getRowValue(row, ['Ngày gửi hàng', 'Ngày gửi hàng', 'Thời gian tạo đơn hàng', 'Ngày đặt hàng']) || '';
+                        const shippingProvider = getRowValue(row, ['Đơn Vị Vận Chuyển', 'Đơn vị vận chuyển']) || '';
+                        const trackingId = getRowValue(row, ['Mã vận đơn', 'Mã vận chuyển', 'Số vận đơn']) || '';
+                        const ecommerceExportReason = getRowValue(row, ['Trạng Thái Đơn Hàng', 'Trạng thái đơn hàng']) || 'Hủy đơn Shopee';
+                        const rawAmount = getRowValue(row, [
+                            'Tổng số tiền Người mua thanh toán',
+                            'Tổng số tiền người mua thanh toán',
+                            'Tổng giá trị đơn hàng (VND)',
+                            'Tổng giá bán (sản phẩm)',
+                            'Tổng đơn hàng',
+                            'Thành tiền',
+                            'Tổng cộng'
+                        ]) ?? 0;
                         const totalAmount = typeof rawAmount === 'number' ? rawAmount : parseFloat(String(rawAmount).replace(/,/g, '')) || 0;
                         const unitPrice = quantity > 0 ? totalAmount / quantity : totalAmount;
 
                         if (!orderId || !productName) {
                             console.warn('⚠️ Skip row: missing Mã đơn hàng or Tên sản phẩm', row);
+                            return;
+                        }
+                        if (!sku) {
+                            console.warn('⚠️ Skip Shopee row: missing column U SKU', row);
                             return;
                         }
 
@@ -1673,7 +1699,10 @@ Thời gian: ${currentTime}`;
                     // Detect source
                     const firstRow: any = jsonData[0] || {};
                     const isTikTok = 'Order ID' in firstRow || 'Cancelled Time' in firstRow;
-                    const isShopee = 'Mã đơn hàng' in firstRow || 'Đơn Vị Vận Chuyển' in firstRow;
+                    const isShopee = !!(
+                        getRowValue(firstRow, ['Mã đơn hàng']) !== undefined ||
+                        getRowValue(firstRow, ['Đơn Vị Vận Chuyển', 'Đơn vị vận chuyển']) !== undefined
+                    );
 
                     if (!isTikTok && !isShopee) {
                         console.warn(`⚠️ Skip file ${fileData.name}: không đúng định dạng`);
@@ -1685,16 +1714,21 @@ Thời gian: ${currentTime}`;
                     if (!allOrderIdsBySource.has(fileSource)) allOrderIdsBySource.set(fileSource, new Set());
                     const sourceOrderIds = allOrderIdsBySource.get(fileSource)!;
                     jsonData.forEach((row: any) => {
-                        const oid = isTikTok ? (row['Order ID'] || '') : (row['Mã đơn hàng'] || '');
+                        const oid = isTikTok ? (row['Order ID'] || '') : (getRowValue(row, ['Mã đơn hàng']) || '');
                         if (oid) sourceOrderIds.add(oid);
                     });
 
                     // Process same as handleImportExcel
                     const orderMap = new Map<string, any[]>();
 
-                    // 📊 Shopee: tìm tên cột SKU (ô T1 → fallback tên cột phổ biến)
+                    // Shopee: column U is the only source of truth for SKU.
                     const shopeeSkuHeader = isShopee ? getShopeeSkuHeader(worksheet, jsonData) : '';
                     if (isShopee) console.log('🔑 [Folder] Shopee SKU header detected:', shopeeSkuHeader || '(KHÔNG TÌM THẤY)');
+                    if (isShopee && !shopeeSkuHeader) {
+                        console.warn(`⚠️ Skip file ${fileData.name}: thiếu cột U SKU phân loại hàng`);
+                        message.warning(`Bỏ qua ${fileData.name}: thiếu cột U SKU phân loại hàng`);
+                        continue;
+                    }
 
                     if (isTikTok) {
                         jsonData.forEach((row: any) => {
@@ -1747,20 +1781,32 @@ Thời gian: ${currentTime}`;
                         });
                     } else if (isShopee) {
                         jsonData.forEach((row: any) => {
-                            const orderId = row['Mã đơn hàng'] || '';
-                            const productName = row['Tên sản phẩm'] || row['Tên Sản Phẩm'] || '';
-                            const variation = row['Tên phân loại hàng'] || row['Phân loại hàng'] || '';
+                            const orderId = getRowValue(row, ['Mã đơn hàng']) || '';
+                            const productName = getRowValue(row, ['Tên sản phẩm', 'Tên Sản Phẩm']) || '';
+                            const variation = getRowValue(row, ['Tên phân loại hàng', 'Phân loại hàng']) || '';
                             const sku = row[shopeeSkuHeader] || '';
-                            const quantity = parseInt(row['Số lượng'] || '1');
-                            const cancelledTime = row['Ngày gửi hàng'] || row['Thời gian tạo đơn hàng'] || row['Ngày đặt hàng'] || '';
-                            const shippingProvider = row['Đơn Vị Vận Chuyển'] || '';
-                            const trackingId = row['Mã vận đơn'] || '';
-                            const ecommerceExportReason = row['Trạng Thái Đơn Hàng'] || 'Hủy đơn Shopee';
-                            const rawAmount2 = row['Tổng số tiền Người mua thanh toán'] ?? row['Tổng giá trị đơn hàng (VND)'] ?? row['Tổng giá bán (sản phẩm)'] ?? row['Tổng đơn hàng'] ?? row['Thành tiền'] ?? row['Tổng cộng'] ?? 0;
+                            const quantity = parseInt(getRowValue(row, ['Số lượng', 'Quantity', 'Qty']) || '1');
+                            const cancelledTime = getRowValue(row, ['Ngày gửi hàng', 'Ngày gửi hàng', 'Thời gian tạo đơn hàng', 'Ngày đặt hàng']) || '';
+                            const shippingProvider = getRowValue(row, ['Đơn Vị Vận Chuyển', 'Đơn vị vận chuyển']) || '';
+                            const trackingId = getRowValue(row, ['Mã vận đơn', 'Mã vận chuyển', 'Số vận đơn']) || '';
+                            const ecommerceExportReason = getRowValue(row, ['Trạng Thái Đơn Hàng', 'Trạng thái đơn hàng']) || 'Hủy đơn Shopee';
+                            const rawAmount2 = getRowValue(row, [
+                                'Tổng số tiền Người mua thanh toán',
+                                'Tổng số tiền người mua thanh toán',
+                                'Tổng giá trị đơn hàng (VND)',
+                                'Tổng giá bán (sản phẩm)',
+                                'Tổng đơn hàng',
+                                'Thành tiền',
+                                'Tổng cộng'
+                            ]) ?? 0;
                             const totalAmount = typeof rawAmount2 === 'number' ? rawAmount2 : parseFloat(String(rawAmount2).replace(/,/g, '')) || 0;
                             const unitPrice2 = quantity > 0 ? totalAmount / quantity : totalAmount;
 
                             if (!orderId || !productName) {
+                                return;
+                            }
+                            if (!sku) {
+                                console.warn('⚠️ Skip Shopee row: missing column U SKU', row);
                                 return;
                             }
 

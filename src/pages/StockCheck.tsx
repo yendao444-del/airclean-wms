@@ -254,6 +254,7 @@ export default function StockCheck() {
     const isPast = currentDate.isBefore(dayjs(), 'day');
     const isFuture = currentDate.isAfter(dayjs(), 'day');
     const isLockedDate = isPast || isFuture;
+    const canRevealSystemStock = isLockedDate;
 
     const loadTopSellingProducts = useCallback(async (): Promise<TopSellingProduct[]> => {
         try {
@@ -882,12 +883,13 @@ export default function StockCheck() {
                 }
             }
 
-            if (adjustedItems.length > 0) {
+            const completedItems = [...adjustedItems, ...matchedItems];
+            if (completedItems.length > 0) {
                 try {
                     const historyResult = await window.electronAPI.stockBalance.create({
                         date: dayjs().format('YYYY-MM-DD HH:mm:ss'),
                         adjustedBy: currentUser || 'StockCheck',
-                        items: adjustedItems,
+                        items: completedItems,
                         notes: options.historyNotes,
                     });
                     if (!historyResult?.success) historySaved = false;
@@ -921,7 +923,14 @@ export default function StockCheck() {
         }
         if (item.actualStock === null) { message.warning('Chưa nhập số tồn thực tế!'); return; }
         if (item.difference === 0) {
-            markBalancedItems([item]);
+            const result = await executeBalanceItems([item], {
+                referencePrefix: 'CBL',
+                historyNotes: item.note ? `Kiểm hàng: ${item.note}` : `Kiểm hàng: ${item.productName}`,
+                logPrefix: 'Kiểm hàng',
+            });
+            if (!result.historySaved) {
+                message.warning('Đã đánh dấu khớp nhưng lỗi lưu lịch sử cân bằng.');
+            }
             message.success(`${item.sku} đã khớp ✓`);
             return;
         }
@@ -935,7 +944,7 @@ export default function StockCheck() {
             content: (
                 <div style={{ fontSize: 13 }}>
                     <p><Tag color="cyan">{item.sku}</Tag> {item.productName} {item.color && <Tag color="blue">{item.color}</Tag>}</p>
-                    {isAdmin
+                    {canRevealSystemStock
                         ? <p style={{ color: item.difference > 0 ? '#52c41a' : '#ff4d4f', fontWeight: 700 }}>
                             HT: {item.systemStock} → TT: {item.actualStock} &nbsp;
                             ({item.difference > 0 ? '+' : ''}{item.difference})
@@ -956,7 +965,7 @@ export default function StockCheck() {
                 });
 
                 if (result.adjustedCount > 0) {
-                    message.success(isAdmin ? `✅ ${item.sku}: ${item.systemStock} → ${item.actualStock}` : `✅ ${item.sku}: Đã cân bằng`);
+                    message.success(canRevealSystemStock ? `✅ ${item.sku}: ${item.systemStock} → ${item.actualStock}` : `✅ ${item.sku}: Đã cân bằng`);
                 } else if (result.failedCount > 0) {
                     message.error('Lỗi cân bằng kho!');
                 }
@@ -1841,7 +1850,7 @@ export default function StockCheck() {
                                                                                 : <span style={{ color: '#ccc' }}>—</span>}
                                                                         </td>
                                                                         <td style={{ ...S.td, textAlign: 'right', fontWeight: 700 }}>
-                                                                            {isAdmin ? item.systemStock : <span style={{ color: '#d9d9d9' }}>***</span>}
+                                                                            {canRevealSystemStock ? item.systemStock : <span style={{ color: '#d9d9d9' }}>***</span>}
                                                                         </td>
                                                                         {/* Cột đơn vị quy đổi */}
                                                                         {Array.from({ length: maxUnitsCount }).map((_, unitIdx) => (
@@ -2030,7 +2039,7 @@ export default function StockCheck() {
                                                 dataIndex: 'systemStock',
                                                 width: 80,
                                                 align: 'right' as const,
-                                                render: (v: number) => isAdmin ? <span style={{ color: '#64748b', fontWeight: 600 }}>{v}</span> : <span style={{ color: '#cbd5e1', fontWeight: 600 }}>***</span>,
+                                                render: (v: number) => canRevealSystemStock ? <span style={{ color: '#64748b', fontWeight: 600 }}>{v}</span> : <span style={{ color: '#cbd5e1', fontWeight: 600 }}>***</span>,
                                             },
                                             {
                                                 title: 'Tồn mới',
@@ -2044,7 +2053,7 @@ export default function StockCheck() {
                                                 dataIndex: 'difference',
                                                 width: 80,
                                                 align: 'right' as const,
-                                                render: (diff: number) => isAdmin ? (
+                                                render: (diff: number) => canRevealSystemStock ? (
                                                     <b style={{ fontSize: 13, color: diff > 0 ? '#16a34a' : diff < 0 ? '#dc2626' : '#94a3b8' }}>
                                                         {diff > 0 ? `+${diff}` : diff === 0 ? '—' : diff}
                                                     </b>

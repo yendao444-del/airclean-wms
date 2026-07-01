@@ -338,27 +338,65 @@ const TIKTOK_MAPPING: ColumnMapping = {
  * - Cột AI (index 34) có mã vận đơn → TikTok
  * - Cột G (index 6) có mã vận đơn → Shopee
  */
+function normalizeHeaderText(value: any): string {
+    return String(value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/đ/g, 'd')
+        .trim();
+}
+
+function findHeaderIndex(headers: string[], candidates: string[]): number {
+    return headers.findIndex(header => candidates.includes(normalizeHeaderText(header)));
+}
+
+function buildShopeeMapping(headers: string[]): ColumnMapping {
+    const enhanced = { ...SHOPEE_MAPPING };
+    const tracking = findHeaderIndex(headers, ['ma van don', 'ma van chuyen', 'so van don', 'tracking']);
+    const productName = findHeaderIndex(headers, ['ten san pham', 'product name']);
+    const sku = findHeaderIndex(headers, ['sku phan loai hang', 'ma phan loai hang', 'sku']);
+    const variantName = findHeaderIndex(headers, ['ten phan loai hang', 'phan loai hang', 'variation', 'variant']);
+    const quantity = findHeaderIndex(headers, ['so luong', 'quantity', 'qty']);
+
+    if (tracking >= 0) enhanced.tracking = tracking;
+    if (productName >= 0) enhanced.productName = productName;
+    if (sku >= 0) enhanced.sku = sku;
+    if (variantName >= 0) enhanced.variantName = variantName;
+    if (quantity >= 0) enhanced.quantity = quantity;
+
+    return enhanced;
+}
+
 function detectColumnMapping(fileName: string, rows: any[][]): ColumnMapping {
     const headerRow = rows[0] || [];
-    const headers = headerRow.map((h: any) => String(h || '').toLowerCase().trim());
+    const headers = headerRow.map((h: any) => String(h || '').trim());
+    const normalizedHeaders = headers.map(normalizeHeaderText);
     const sampleRows = rows.slice(1, 6); // Lấy 5 dòng dữ liệu đầu để kiểm tra
 
-    const trackingKeywords = ['mã vận đơn', 'tracking', 'mã vận chuyển', 'tracking id', 'số vận đơn'];
+    const trackingKeywords = ['ma van don', 'tracking', 'ma van chuyen', 'tracking id', 'so van don'];
     const isTrackingHeader = (header: string) =>
         header.length > 0 && trackingKeywords.some(kw => header.includes(kw));
+
+    const shopeeTrackingCol = findHeaderIndex(headers, ['ma van don', 'ma van chuyen', 'so van don']);
+    const shopeeSkuCol = findHeaderIndex(headers, ['sku phan loai hang', 'ma phan loai hang']);
+    if (shopeeTrackingCol >= 0 && shopeeSkuCol >= 0) {
+        console.log(`📊 [${fileName}] → Shopee (tracking header tại cột ${shopeeTrackingCol})`);
+        return buildShopeeMapping(headers);
+    }
 
     // === 1. Kiểm tra HEADER tại vị trí cột cụ thể ===
 
     // Cột AI (index 34) có header tracking → TikTok
-    if (headers.length > 34 && isTrackingHeader(headers[34])) {
+    if (normalizedHeaders.length > 34 && isTrackingHeader(normalizedHeaders[34])) {
         console.log(`📊 [${fileName}] → TikTok (tracking header tại cột AI)`);
-        return buildTikTokMapping(headers);
+        return buildTikTokMapping(normalizedHeaders);
     }
 
     // Cột G (index 6) có header tracking → Shopee
-    if (headers.length > 6 && isTrackingHeader(headers[6])) {
+    if (normalizedHeaders.length > 6 && isTrackingHeader(normalizedHeaders[6])) {
         console.log(`📊 [${fileName}] → Shopee (tracking header tại cột G)`);
-        return { ...SHOPEE_MAPPING };
+        return buildShopeeMapping(headers);
     }
 
     // === 2. Kiểm tra DỮ LIỆU thực tế tại các cột ===
@@ -375,7 +413,7 @@ function detectColumnMapping(fileName: string, rows: any[][]): ColumnMapping {
         );
         if (looksLikeTracking) {
             console.log(`📊 [${fileName}] → TikTok (tracking data tại cột AI, mẫu: ${colAISamples[0]})`);
-            return buildTikTokMapping(headers);
+            return buildTikTokMapping(normalizedHeaders);
         }
     }
 
@@ -391,13 +429,13 @@ function detectColumnMapping(fileName: string, rows: any[][]): ColumnMapping {
         );
         if (looksLikeShopeeTracking) {
             console.log(`📊 [${fileName}] → Shopee (tracking data tại cột G, mẫu: ${colGSamples[0]})`);
-            return { ...SHOPEE_MAPPING };
+            return buildShopeeMapping(headers);
         }
     }
 
     // === 3. Default fallback → Shopee ===
     console.log(`📊 [${fileName}] → Shopee (default fallback)`);
-    return { ...SHOPEE_MAPPING };
+    return buildShopeeMapping(headers);
 }
 
 /** Build TikTok mapping với auto-detect các cột productName, variantName từ header */
@@ -405,13 +443,13 @@ function buildTikTokMapping(headers: string[]): ColumnMapping {
     const enhanced = { ...TIKTOK_MAPPING };
     for (let i = 0; i < headers.length; i++) {
         const h = headers[i];
-        if (enhanced.productName === -1 && (h.includes('tên sản phẩm') || h.includes('product name'))) {
+        if (enhanced.productName === -1 && (h.includes('ten san pham') || h.includes('product name'))) {
             enhanced.productName = i;
         }
-        if (enhanced.variantName === -1 && (h.includes('phân loại') || h.includes('variant') || h.includes('variation'))) {
+        if (enhanced.variantName === -1 && (h.includes('phan loai') || h.includes('variant') || h.includes('variation'))) {
             enhanced.variantName = i;
         }
-        if (enhanced.quantity === -1 && (h.includes('số lượng') || h.includes('quantity') || h === 'qty')) {
+        if (enhanced.quantity === -1 && (h.includes('so luong') || h.includes('quantity') || h === 'qty')) {
             enhanced.quantity = i;
         }
     }

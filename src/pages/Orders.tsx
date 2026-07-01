@@ -130,11 +130,9 @@ export default function OrdersPage() {
         const api = (window as any).electronAPI;
         const since = getSince();
         const until = getUntil();
-        const ecommerceLimit = getEcommerceFetchLimit();
-
         const accumulated: UnifiedOrder[] = silent ? [..._ordersCache] : [];
         const seenIds = new Set(accumulated.map(o => o.id));
-        let pending = 4;
+        let pending = 3;
 
         const flush = (newItems: UnifiedOrder[]) => {
             let changed = false;
@@ -222,28 +220,6 @@ export default function OrdersPage() {
             flush(items);
         }).catch(() => flush([]));
 
-        api.ecommerceExports.getAll({ since, until, limit: ecommerceLimit }).then((ecomRes: any) => {
-            const items: UnifiedOrder[] = [];
-            if (ecomRes.success && ecomRes.data) {
-                for (const ec of ecomRes.data) {
-                    if (ec.status !== 'completed') continue;
-                    items.push({
-                        id: `TMDT-EX-${ec.id}`, originalId: ec.id, source: 'tmdt',
-                        sourceLabel: ec.customerName?.toLowerCase().includes('tiktok') ? 'TikTok' : ec.customerName?.toLowerCase().includes('shopee') ? 'Shopee' : 'TMDT',
-                        orderNumber: ec.orderNumber || ec.ecommerceExportCode || `#TMDT-${ec.id}`,
-                        customer: ec.customerName || 'Sàn TMDT',
-                        items: typeof ec.items === 'string' ? ec.items : JSON.stringify(ec.items || []),
-                        totalAmount: ec.totalAmount || 0, status: ec.status,
-                        date: ec.updatedAt || ec.ecommerceExportDate || ec.createdAt || '',
-                        tracking: ec.notes?.match(/Tracking: ([^|]+)/)?.[1]?.trim(),
-                        shipping: ec.notes?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
-                        notes: ec.notes || '',
-                        createdBy: (typeof ec.pickedBy === 'string' && ec.pickedBy) ? ec.pickedBy : (ec.createdBy || ''),
-                    });
-                }
-            }
-            flush(items);
-        }).catch(() => flush([]));
     };
     // === Date range logic ===
     const [rangeStart, rangeEnd] = useMemo((): [Dayjs, Dayjs] => {
@@ -295,11 +271,10 @@ export default function OrdersPage() {
             try {
                 const api = (window as any).electronAPI;
                 const s = kw.trim();
-                const [posRes, exRes, mktRes, ecomRes] = await Promise.all([
+                const [posRes, exRes, mktRes] = await Promise.all([
                     api.posOrder.getAll({ search: s }),
                     api.exportOrders.getAll({ search: s }),
                     api.marketplaceOrders.getAll({ search: s }),
-                    api.ecommerceExports.getAll({ search: s }),
                 ]);
                 const unified: UnifiedOrder[] = [];
                 if (posRes.success) posRes.data?.forEach((o: any) => unified.push({
@@ -355,22 +330,6 @@ export default function OrdersPage() {
                     shipping: o.note?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
                     notes: o.note || '',
                     createdBy: o.userName || '',
-                }));
-                if (ecomRes.success) ecomRes.data?.forEach((o: any) => unified.push({
-                    id: `TMDT-EX-${o.id}`,
-                    originalId: o.id,
-                    source: 'tmdt',
-                    sourceLabel: o.customerName?.toLowerCase().includes('tiktok') ? 'TikTok' : o.customerName?.toLowerCase().includes('shopee') ? 'Shopee' : 'TMDT',
-                    orderNumber: o.orderNumber || o.ecommerceExportCode || `#TMDT-${o.id}`,
-                    customer: o.customerName || 'Sàn TMDT',
-                    items: typeof o.items === 'string' ? o.items : JSON.stringify(o.items || []),
-                    totalAmount: o.totalAmount || 0,
-                    status: o.status,
-                    date: o.updatedAt || o.ecommerceExportDate || o.createdAt || '',
-                    tracking: o.notes?.match(/Tracking: ([^|]+)/)?.[1]?.trim(),
-                    shipping: o.notes?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
-                    notes: o.notes || '',
-                    createdBy: (typeof o.pickedBy === 'string' && o.pickedBy) ? o.pickedBy : (o.createdBy || ''),
                 }));
                 unified.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
                 setSearchResults(unified);
@@ -574,11 +533,13 @@ export default function OrdersPage() {
     const handleDelete = async (record: UnifiedOrder) => {
         try {
             const api = (window as any).electronAPI;
-            console.log('[DELETE] Calling posOrder.delete, id=', record.originalId, 'type=', typeof record.originalId);
-            const result = await api.posOrder.delete({ id: record.originalId, userName: 'Admin' });
+            console.log('[DELETE] Calling delete, id=', record.originalId, 'source=', record.source, 'type=', typeof record.originalId);
+            const result = record.source === 'tmdt'
+                ? await api.marketplaceOrders.delete({ id: record.originalId, userName: 'Admin' })
+                : await api.posOrder.delete({ id: record.originalId, userName: 'Admin' });
             console.log('[DELETE] Result:', result);
             if (result.success) {
-                message.success('✅ Đã xóa đơn hàng và hoàn kho!');
+                message.success(record.source === 'tmdt' ? '✅ Đã xóa đơn TMDT và hoàn kho!' : '✅ Đã xóa đơn hàng và hoàn kho!');
                 loadAllOrders();
             } else {
                 message.error(`Lỗi: ${result.error || 'Không rõ'}`);
@@ -609,7 +570,7 @@ export default function OrdersPage() {
             content: (
                 <div>
                     <p>Bao gồm: {parts.join(', ')}</p>
-                    <p style={{ color: '#ff4d4f', fontWeight: 600 }}>Đơn POS sẽ được hoàn kho. Không thể khôi phục!</p>
+                    <p style={{ color: '#ff4d4f', fontWeight: 600 }}>Đơn POS/TMDT sẽ được hoàn kho. Không thể khôi phục!</p>
                 </div>
             ),
             okText: `Xóa ${toDelete.length} đơn`,
@@ -634,9 +595,13 @@ export default function OrdersPage() {
                         if (res.success) successCount++; else errorCount++;
                     } catch { errorCount++; }
                 }
-                // Xóa TMDT (bulk)
                 if (tmdtOrders.length > 0) {
-                    message.warning('Bo qua xoa don TMDT tu man Don hang de tranh xoa nham.');
+                    for (const o of tmdtOrders) {
+                        try {
+                            const res = await api.marketplaceOrders.delete({ id: o.originalId, userName: 'Admin' });
+                            if (res.success) successCount++; else errorCount++;
+                        } catch { errorCount++; }
+                    }
                 }
 
                 if (successCount > 0) message.success(`✅ Đã xóa ${successCount} đơn hàng!`);
@@ -746,12 +711,12 @@ export default function OrdersPage() {
         {
             title: '', key: 'actions', width: 40, fixed: 'right' as const,
             render: (_: any, record: UnifiedOrder) => {
-                if (record.source !== 'pos') return null;
-                const menuItems: any[] = [
-                    { key: 'edit', label: 'Sửa đơn', icon: <EditOutlined />, onClick: () => openEdit(record) },
-                ];
+                if (record.source !== 'pos' && record.source !== 'tmdt') return null;
+                const menuItems: any[] = record.source === 'pos'
+                    ? [{ key: 'edit', label: 'Sửa đơn', icon: <EditOutlined />, onClick: () => openEdit(record) }]
+                    : [];
                 if (isAdmin) {
-                    menuItems.push({ type: 'divider' });
+                    if (menuItems.length > 0) menuItems.push({ type: 'divider' });
                     menuItems.push({
                         key: 'delete', label: 'Xóa đơn', icon: <DeleteOutlined />, danger: true,
                         onClick: () => modal.confirm({

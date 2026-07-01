@@ -186,6 +186,7 @@ export interface ElectronAPI {
     };
     marketplaceOrders: {
         getAll: (filters?: { since?: string; search?: string; limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        delete: (data: { id: number; userName?: string }) => Promise<{ success: boolean; error?: string }>;
     };
     exportOrders: {
         getAll: (filters?: { since?: string; search?: string; limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;

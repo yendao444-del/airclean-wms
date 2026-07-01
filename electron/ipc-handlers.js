@@ -1246,6 +1246,18 @@ function normalizeStr(value) {
     return String(value).trim();
 }
 
+function normalizeHeaderKey(value) {
+    return normalizeSearchText(value).replace(/[^a-z0-9]+/g, '');
+}
+
+function getPickupRowValue(row, candidates) {
+    if (!row || typeof row !== 'object') return '';
+    const keys = Object.keys(row);
+    const normalizedCandidates = candidates.map(normalizeHeaderKey);
+    const key = keys.find(k => normalizedCandidates.includes(normalizeHeaderKey(k)));
+    return key ? row[key] : '';
+}
+
 function extractTrackingNumbers(folderPath) {
     const combined = [];
     const files = fs.readdirSync(folderPath).filter(f => {
@@ -1268,28 +1280,32 @@ function extractTrackingNumbers(folderPath) {
         const sheetName = workbook.SheetNames[0];
         const sheet = workbook.Sheets[sheetName];
         const jsonData = XLSX.utils.sheet_to_json(sheet);
+        const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
 
         if (jsonData.length === 0) continue;
 
         // 🔍 Phát hiện nguồn (TikTok vs Shopee)
         const firstRow = jsonData[0] || {};
-        const isTikTok = 'Order ID' in firstRow || 'Tracking ID' in firstRow;
-        const isShopee = 'Mã đơn hàng' in firstRow || 'Mã vận đơn' in firstRow;
+        const isTikTok = getPickupRowValue(firstRow, ['Order ID', 'Tracking ID']) !== '';
+        const firstRawRow = rawRows[0] || [];
+        const isShopee = normalizeHeaderKey(firstRawRow[0]) === 'madonhang'
+            && normalizeHeaderKey(firstRawRow[7]) === 'mavandon'
+            && normalizeHeaderKey(firstRawRow[20]) === 'skuphanloaihang';
 
         console.log(`[Pickup] Processing ${file}: TikTok=${isTikTok}, Shopee=${isShopee}`);
 
         if (isTikTok) {
             // ===== PARSE TIKTOK =====
             jsonData.forEach((row) => {
-                const trackingId = normalizeStr(row['Tracking ID'] || '');
-                const orderId = normalizeStr(row['Order ID'] || '');
-                const productName = normalizeStr(row['Product Name'] || '');
-                const variation = normalizeStr(row['Variation'] || '');
-                const sku = normalizeStr(row['SKU'] || row['Sku'] || '');
-                const quantity = parseInt(row['Quantity'] || row['Quantity of return'] || '1');
-                const shippingProvider = normalizeStr(row['Shipping Provider Name'] || '');
-                const orderRefundAmount = parseFloat(row['Order Refund Amount'] || row['Total Amount'] || '0');
-                const unitPrice = parseFloat(row['SKU Unit Original Price'] || row['Product Price'] || '0');
+                const trackingId = normalizeStr(getPickupRowValue(row, ['Tracking ID', 'Tracking Number']));
+                const orderId = normalizeStr(getPickupRowValue(row, ['Order ID']));
+                const productName = normalizeStr(getPickupRowValue(row, ['Product Name']));
+                const variation = normalizeStr(getPickupRowValue(row, ['Variation']));
+                const sku = normalizeStr(getPickupRowValue(row, ['SKU', 'Sku']));
+                const quantity = parseInt(getPickupRowValue(row, ['Quantity', 'Quantity of return']) || '1');
+                const shippingProvider = normalizeStr(getPickupRowValue(row, ['Shipping Provider Name']));
+                const orderRefundAmount = parseFloat(getPickupRowValue(row, ['Order Refund Amount', 'Total Amount']) || '0');
+                const unitPrice = parseFloat(getPickupRowValue(row, ['SKU Unit Original Price', 'Product Price']) || '0');
 
                 if (!trackingId || HEADER_FILTER_REGEX.test(trackingId)) return;
 
@@ -1300,6 +1316,7 @@ function extractTrackingNumbers(folderPath) {
                     file,
                     items: JSON.stringify([{
                         sku: sku,
+                        variantSku: sku,
                         productName: productName,
                         color: variation || '',
                         quantity: quantity,
@@ -1313,18 +1330,23 @@ function extractTrackingNumbers(folderPath) {
             });
         } else if (isShopee) {
             // ===== PARSE SHOPEE =====
-            jsonData.forEach((row) => {
-                const trackingId = normalizeStr(row['Mã vận đơn'] || '');
-                const orderId = normalizeStr(row['Mã đơn hàng'] || '');
-                const productName = normalizeStr(row['Tên sản phẩm'] || row['Tên Sản Phẩm'] || '');
-                const variation = normalizeStr(row['Tên phân loại hàng'] || row['Phân loại hàng'] || '');
-                const sku = normalizeStr(row['Mã phân loại hàng'] || row['SKU phân loại hàng'] || '');
-                const quantity = parseInt(row['Số lượng'] || '1');
-                const shippingProvider = normalizeStr(row['Đơn Vị Vận Chuyển'] || '');
-                const totalAmount = parseFloat(row['Tổng giá bán (sản phẩm)'] || row['Tổng cộng'] || '0');
-                const unitPrice = parseFloat(row['Giá gốc'] || row['Đơn giá'] || '0');
+            // Shopee: column U is the only source of truth for SKU phan loai hang.
+            rawRows.slice(1).forEach((row) => {
+                const trackingId = normalizeStr(row[7] || '');       // H - Ma van don
+                const orderId = normalizeStr(row[0] || '');          // A - Ma don hang
+                const productName = normalizeStr(row[16] || '');     // Q - Ten san pham
+                const sku = normalizeStr(row[20] || '');             // U - SKU phan loai hang
+                const variation = normalizeStr(row[21] || '');       // V - Ten phan loai hang
+                const quantity = parseInt(row[27] || '1');           // AB - So luong
+                const shippingProvider = normalizeStr(row[8] || ''); // I - Don vi van chuyen
+                const totalAmount = parseFloat(row[29] || row[30] || '0');
+                const unitPrice = parseFloat(row[26] || row[22] || '0');
 
                 if (!trackingId || HEADER_FILTER_REGEX.test(trackingId)) return;
+                if (!sku) {
+                    console.warn(`[Pickup] Skip Shopee row without column U SKU: order=${orderId}, tracking=${trackingId}`);
+                    return;
+                }
 
                 combined.push({
                     trackingNumber: trackingId,
@@ -1333,6 +1355,7 @@ function extractTrackingNumbers(folderPath) {
                     file,
                     items: JSON.stringify([{
                         sku: sku,
+                        variantSku: sku,
                         productName: productName,
                         color: variation || '',
                         quantity: quantity,
@@ -1422,7 +1445,7 @@ ipcMain.handle('pickup:loadData', async (event, folderPath) => {
         pickupTrackingData = data;
         pickupHistory = loadPickupLog(pickupLogFile);
 
-        const shopeeCount = data.filter(d => d.source === 'G').length;
+        const shopeeCount = data.filter(d => d.source === 'Shopee').length;
         const tiktokCount = data.filter(d => d.source.includes('TikTok')).length;
 
         console.log(`[Pickup] Loaded ${data.length} tracking numbers from ${fileCount} files`);
@@ -1523,7 +1546,7 @@ ipcMain.handle('pickup:getHistory', async (event, limit = 10) => {
 // Lấy thống kê
 ipcMain.handle('pickup:getStats', async () => {
     try {
-        const shopeeCount = pickupTrackingData.filter(d => d.source === 'G').length;
+        const shopeeCount = pickupTrackingData.filter(d => d.source === 'Shopee').length;
         const tiktokCount = pickupTrackingData.filter(d => d.source.includes('TikTok')).length;
 
         return {
@@ -5785,6 +5808,12 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
                 }
             }
 
+            const resolvedItems = await resolveTmdtItemsSkus(tx, data.items);
+            if (isCompleted) {
+                assertTmdtItemsHaveSku(resolvedItems, data.orderNumber || data.ecommerceExportCode);
+                await assertTmdtItemsSkusExist(tx, resolvedItems, data.orderNumber || data.ecommerceExportCode);
+            }
+
             const newRecord = await tx.ecommerceExport.create({
                 data: {
                     customerName: data.customerName,
@@ -5792,7 +5821,7 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
                     orderNumber: data.orderNumber || null,
                     ecommerceExportReason: data.ecommerceExportReason || null,
                     ecommerceExportDate: new Date(data.ecommerceExportDate),
-                    items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
+                    items: JSON.stringify(resolvedItems),
                     totalAmount: data.totalAmount || 0,
                     notes: data.notes || null,
                     status: data.status || 'processing',
@@ -5802,8 +5831,7 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
             });
 
             if (isCompleted) {
-                const itemsList = typeof data.items === 'string' ? JSON.parse(data.items) : data.items;
-                for (const item of itemsList) {
+                for (const item of resolvedItems) {
                     if (item.variantSku) {
                         await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
                             type: 'ecom_sale',
@@ -5889,6 +5917,64 @@ function normalizeMarketplaceSource(name) {
     if (value.includes('shopee')) return 'shopee';
     if (value.includes('lazada')) return 'lazada';
     return 'tmdt';
+}
+
+function normalizeSearchText(value) {
+    return String(value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/đ/g, 'd')
+        .replace(/Đ/g, 'D')
+        .toLowerCase()
+        .trim();
+}
+
+async function resolveTmdtItemSku(tx, item) {
+    const incomingSku = item?.variantSku || item?.sku || '';
+    return incomingSku ? String(incomingSku).trim() : '';
+}
+
+async function resolveTmdtItemsSkus(tx, rawItems) {
+    const items = typeof rawItems === 'string' ? JSON.parse(rawItems || '[]') : (rawItems || []);
+    const resolved = [];
+    for (const item of items) {
+        const variantSku = await resolveTmdtItemSku(tx, item);
+        if (!variantSku) {
+            console.warn(`[TMDT] Không resolve được SKU cho item: ${item?.productName || ''} / ${item?.color || ''}`);
+        }
+        resolved.push({ ...item, variantSku: variantSku || '' });
+    }
+    return resolved;
+}
+
+function assertTmdtItemsHaveSku(items, refCode) {
+    const missing = (items || []).filter(item => !item?.variantSku);
+    if (missing.length > 0) {
+        const first = missing[0] || {};
+        throw new Error(`Không resolve được SKU TMDT cho ${refCode || 'đơn'}: ${first.productName || ''} / ${first.color || ''}`);
+    }
+}
+
+async function assertTmdtItemsSkusExist(tx, items, refCode) {
+    for (const item of items || []) {
+        const sku = item?.variantSku || '';
+        if (!sku) continue;
+        const combo = await tx.comboProduct.findUnique({ where: { sku }, select: { sku: true } });
+        if (combo) continue;
+        const directProduct = await tx.product.findUnique({ where: { sku }, select: { sku: true } }).catch(() => null);
+        if (directProduct) continue;
+        const variantProduct = await tx.product.findFirst({
+            where: { variants: { contains: sku } },
+            select: { variants: true }
+        });
+        if (variantProduct) {
+            try {
+                const variants = JSON.parse(variantProduct.variants || '[]');
+                if (variants.some(v => v?.sku === sku)) continue;
+            } catch { }
+        }
+        throw new Error(`SKU TMDT không tồn tại trong kho cho ${refCode || 'đơn'}: ${sku}`);
+    }
 }
 
 async function ensureMarketplaceOrderInTx(tx, record, actorName) {
@@ -5998,6 +6084,12 @@ async function execEcommerceExportUpdate(id, data) {
             }
         }
 
+        const resolvedItems = data.items ? await resolveTmdtItemsSkus(tx, data.items) : null;
+        if (data.status === 'completed' && resolvedItems) {
+            assertTmdtItemsHaveSku(resolvedItems, data.orderNumber || data.ecommerceExportCode || oldRecord.orderNumber || oldRecord.ecommerceExportCode);
+            await assertTmdtItemsSkusExist(tx, resolvedItems, data.orderNumber || data.ecommerceExportCode || oldRecord.orderNumber || oldRecord.ecommerceExportCode);
+        }
+
         const newRecord = await tx.ecommerceExport.update({
             where: { id },
             data: {
@@ -6006,7 +6098,7 @@ async function execEcommerceExportUpdate(id, data) {
                 orderNumber: data.orderNumber || null,
                 ecommerceExportReason: data.ecommerceExportReason || null,
                 ecommerceExportDate: data.ecommerceExportDate ? new Date(data.ecommerceExportDate) : undefined,
-                items: data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : undefined,
+                items: resolvedItems ? JSON.stringify(resolvedItems) : undefined,
                 totalAmount: data.totalAmount,
                 notes: data.notes || null,
                 status: data.status,
@@ -6016,10 +6108,10 @@ async function execEcommerceExportUpdate(id, data) {
         });
 
         const oldItemsStrFinal = oldRecord.items || '[]';
-        const newItemsStrFinal = data.items ? (typeof data.items === 'string' ? data.items : JSON.stringify(data.items)) : oldItemsStrFinal;
+        const newItemsStrFinal = resolvedItems ? JSON.stringify(resolvedItems) : oldItemsStrFinal;
         const skipDeduct = oldRecord.status === 'completed' && data.status === 'completed' && oldItemsStrFinal === newItemsStrFinal;
         if (data.status === 'completed' && !skipDeduct) {
-            const newItems = typeof newItemsStrFinal === 'string' ? JSON.parse(newItemsStrFinal) : newItemsStrFinal;
+            const newItems = JSON.parse(newItemsStrFinal);
             for (const item of newItems) {
                 if (item.variantSku) {
                     await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
@@ -6078,7 +6170,7 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
                 const items = JSON.parse(doc.items || '[]');
                 for (const item of items) {
                     if (item.variantSku) {
-                        await updateProductStockInTx(tx, item.variantSku, item.quantity, {
+                        await deductItemOrCombo(tx, item.variantSku, item.quantity, {
                             type: 'adjustment',
                             referenceType: 'TMDT_CANCEL',
                             reference: doc.orderNumber || doc.ecommerceExportCode || 'Xóa thủ công',
@@ -6272,13 +6364,23 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
         // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         const result = await withStockLock(() => prisma.$transaction(async (tx) => {
             // 🚀 Bước 1: Batch INSERT tất cả đơn cùng lúc (1 SQL statement)
-            const createData = dedupedRecords.map(data => ({
+            const normalizedRecords = [];
+            for (const data of dedupedRecords) {
+                const resolvedItems = await resolveTmdtItemsSkus(tx, data.items);
+                if (data.status === 'completed') {
+                    assertTmdtItemsHaveSku(resolvedItems, data.orderNumber || data.ecommerceExportCode);
+                    await assertTmdtItemsSkusExist(tx, resolvedItems, data.orderNumber || data.ecommerceExportCode);
+                }
+                normalizedRecords.push({ ...data, items: JSON.stringify(resolvedItems) });
+            }
+
+            const createData = normalizedRecords.map(data => ({
                 customerName: data.customerName,
                 ecommerceExportCode: data.ecommerceExportCode || null,
                 orderNumber: data.orderNumber || null,
                 ecommerceExportReason: data.ecommerceExportReason || null,
                 ecommerceExportDate: (data.ecommerceExportDate && !isNaN(new Date(data.ecommerceExportDate).getTime())) ? new Date(data.ecommerceExportDate) : new Date(),
-                items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
+                items: data.items,
                 totalAmount: data.totalAmount || 0,
                 notes: data.notes || null,
                 status: data.status || 'processing',
@@ -6288,12 +6390,12 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
             await tx.ecommerceExport.createMany({ data: createData });
 
             // 🚀 Bước 2: Gom tất cả SKU cần trừ kho → batch update
-            const completedRecords = dedupedRecords.filter(d => d.status === 'completed');
+            const completedRecords = normalizedRecords.filter(d => d.status === 'completed');
             if (completedRecords.length > 0) {
                 const skuCache = await buildSkuCache(tx);
                 const skuChanges = [];
                 for (const data of completedRecords) {
-                    const itemsList = typeof data.items === 'string' ? JSON.parse(data.items) : data.items;
+                    const itemsList = JSON.parse(data.items || '[]');
                     for (const item of itemsList) {
                         if (item.variantSku) {
                             skuChanges.push({ sku: item.variantSku, quantity: -item.quantity });
@@ -6398,6 +6500,79 @@ ipcMain.handle('marketplaceOrders:getAll', async (event, { since, search, limit 
 // ========================================
 // EXPORT ORDERS HANDLERS (XUẤT HÀNG POS)
 // ========================================
+
+ipcMain.handle('marketplaceOrders:delete', async (event, { id, userName }) => {
+    try {
+        requireRole('admin');
+        if (!prisma) throw new Error('Prisma not available');
+
+        const order = await prisma.order.findUnique({
+            where: { id },
+            include: { items: true }
+        });
+        if (!order) throw new Error('Không tìm thấy đơn hàng.');
+        if (!['shopee', 'tiktok', 'lazada', 'tmdt'].includes(String(order.source || '').toLowerCase())) {
+            throw new Error('Đây không phải đơn TMDT.');
+        }
+
+        await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
+            const linkedExport = await tx.ecommerceExport.findFirst({
+                where: {
+                    OR: [
+                        { orderNumber: order.orderNumber },
+                        { ecommerceExportCode: order.orderNumber }
+                    ]
+                }
+            });
+
+            if (linkedExport && linkedExport.status === 'completed') {
+                const exportItems = JSON.parse(linkedExport.items || '[]');
+                for (const item of exportItems) {
+                    if (item.variantSku) {
+                        await deductItemOrCombo(tx, item.variantSku, item.quantity, {
+                            type: 'adjustment',
+                            referenceType: 'TMDT_CANCEL',
+                            reference: linkedExport.orderNumber || linkedExport.ecommerceExportCode || order.orderNumber,
+                            note: `Hoàn tồn do xóa đơn TMDT ${order.orderNumber} từ màn Đơn hàng`,
+                            createdBy: userName || 'System'
+                        }, { allowMissing: true });
+                    }
+                }
+            } else if (order.status === 'completed') {
+                for (const item of order.items) {
+                    if (item.sku) {
+                        await deductItemOrCombo(tx, item.sku, item.quantity, {
+                            type: 'adjustment',
+                            referenceType: 'TMDT_CANCEL',
+                            reference: order.orderNumber,
+                            note: `Hoàn tồn do xóa đơn TMDT ${order.orderNumber} từ màn Đơn hàng`,
+                            createdBy: userName || 'System'
+                        }, { allowMissing: true });
+                    }
+                }
+            }
+
+            if (linkedExport) {
+                await tx.ecommerceExport.delete({ where: { id: linkedExport.id } });
+            }
+
+            await tx.payment.deleteMany({ where: { orderId: order.id } });
+            await tx.orderItem.deleteMany({ where: { orderId: order.id } });
+            await tx.order.delete({ where: { id: order.id } });
+        }, { timeout: 30000, maxWait: 10000 }));
+
+        void logActivity({
+            module: 'sales',
+            action: 'DELETE',
+            description: `Xóa đơn TMDT #${order.orderNumber} từ màn Đơn hàng`,
+            userName: userName || 'System'
+        });
+        return { success: true };
+    } catch (error) {
+        console.error('marketplaceOrders:delete error:', error);
+        return { success: false, error: error.message };
+    }
+});
 
 ipcMain.handle('exportOrders:getAll', async (event, { since, search, limit } = {}) => {
     try {

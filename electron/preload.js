@@ -123,6 +123,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     marketplaceOrders: {
         getAll: (args) => ipcRenderer.invoke('marketplaceOrders:getAll', args),
+        delete: (data) => ipcRenderer.invoke('marketplaceOrders:delete', data),
     },
 
     // Export Orders (XUẤT HÀNG POS)
