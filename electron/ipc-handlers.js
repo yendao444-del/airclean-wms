@@ -9383,6 +9383,15 @@ function toBase64Url(value) {
         .replace(/=+$/g, '');
 }
 
+function isGoogleReauthError(err) {
+    const parts = [
+        err?.message,
+        err?.response?.data?.error,
+        err?.response?.data?.error_description,
+    ].filter(Boolean).map(value => String(value).toLowerCase());
+    return parts.some(value => value.includes('invalid_grant') || value.includes('token has been expired or revoked'));
+}
+
 async function sendGmailWithAttachment({ to, subject, html, fileName, pdfBase64 }) {
     const tokenPath = ensureGoogleTokenPath();
     if (!fs.existsSync(tokenPath)) {
@@ -9438,10 +9447,22 @@ async function sendGmailWithAttachment({ to, subject, html, fileName, pdfBase64 
     ].join('\r\n');
 
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-    const sent = await gmail.users.messages.send({
-        userId: 'me',
-        requestBody: { raw: toBase64Url(message) },
-    });
+    let sent;
+    try {
+        sent = await gmail.users.messages.send({
+            userId: 'me',
+            requestBody: { raw: toBase64Url(message) },
+        });
+    } catch (err) {
+        if (isGoogleReauthError(err)) {
+            return {
+                success: false,
+                reauthRequired: true,
+                error: 'Token Google da het han hoac bi thu hoi. Vui long chay reauth-gdrive.bat de dang nhap Google lai roi gui lai Gmail.',
+            };
+        }
+        throw err;
+    }
 
     return { success: true, data: { id: sent.data.id } };
 }

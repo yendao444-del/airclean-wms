@@ -161,6 +161,49 @@ const getFineOverrideKey = (fine: FineRecord) => [
     fine.amount,
 ].join('|');
 
+const getReturnFineCode = (detail?: string) => {
+    const match = String(detail || '').match(/Mã phiếu:\s*([^)]+)/i);
+    return match?.[1]?.trim() || '';
+};
+
+const normalizeReturnFineDates = async (api: any, extraFines: FineRecord[]) => {
+    const returnCodes = Array.from(new Set(
+        (extraFines || [])
+            .filter(fine => fine.source === 'returns')
+            .map(fine => getReturnFineCode(fine.detail))
+            .filter(Boolean)
+    ));
+    if (returnCodes.length === 0 || !api?.returns?.getAll) {
+        return { fines: extraFines || [], changed: false };
+    }
+
+    const returnsRes = await api.returns.getAll();
+    if (!returnsRes?.success || !Array.isArray(returnsRes.data)) {
+        return { fines: extraFines || [], changed: false };
+    }
+
+    const returnDateByCode = new Map<string, string>();
+    returnsRes.data.forEach((row: any) => {
+        const code = String(row.complaintCode || row.returnCode || '').trim();
+        const date = row.complaintDate || row.returnDate;
+        if (code && date && dayjs(date).isValid()) {
+            returnDateByCode.set(code, dayjs(date).toISOString());
+        }
+    });
+
+    let changed = false;
+    const fines = (extraFines || []).map((fine) => {
+        if (fine.source !== 'returns') return fine;
+        const code = getReturnFineCode(fine.detail);
+        const fixedDate = returnDateByCode.get(code);
+        if (!fixedDate || fine.date === fixedDate) return fine;
+        changed = true;
+        return { ...fine, date: fixedDate };
+    });
+
+    return { fines, changed };
+};
+
 interface PurchaseVatTracking {
     id: number;
     poNumber?: string;
@@ -2656,6 +2699,15 @@ export default function Attendance() {
                         const { pdf, fileName, period } = pdfResult;
                         const pdfBase64 = pdf.output('datauristring').split(',')[1];
                         const res = await api.attendance.sendPayslipEmail({ to: recipientEmail, employeeName: p.name, period, fileName, pdfBase64 });
+                        if (res?.reauthRequired) {
+                            const authError = res.error || 'Can dang nhap Google lai';
+                            results.push({ name: p.name, success: false, error: authError });
+                            for (let j = i + 1; j < toSend.length; j++) {
+                                results.push({ name: toSend[j].name, success: false, error: 'Chua gui - can dang nhap Google lai' });
+                            }
+                            message.warning(authError);
+                            break;
+                        }
                         if (res?.success) {
                             results.push({ name: p.name, success: true });
                             setGmailSentLog(prev => ({ ...prev, [`${p.id}_${periodKey}`]: new Date().toISOString() }));
@@ -2828,7 +2880,13 @@ export default function Attendance() {
                     if (d.extraBonuses) setExtraBonuses(d.extraBonuses);
                     if (d.extraFundTx) setExtraFundTx(d.extraFundTx);
                     if (d.fundAuditLog) setFundAuditLog(d.fundAuditLog);
-                    if (d.extraFines) setExtraFines(d.extraFines.map((fine: FineRecord, index: number) => ensureFineId(fine, index)));
+                    if (d.extraFines) {
+                        const normalized = await normalizeReturnFineDates(api, d.extraFines);
+                        setExtraFines(normalized.fines.map((fine: FineRecord, index: number) => ensureFineId(fine, index)));
+                        if (normalized.changed) {
+                            await api.appConfig.set('attendanceData', { ...d, extraFines: normalized.fines });
+                        }
+                    }
                     if (d.fineOverrides) setFineOverrides(d.fineOverrides);
                     if (d.fineAuditLog) setFineAuditLog(d.fineAuditLog);
                     if (d.lockedPeriods) setLockedPeriods(d.lockedPeriods);
