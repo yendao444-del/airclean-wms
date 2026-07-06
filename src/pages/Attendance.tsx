@@ -936,7 +936,14 @@ const WorkSchedulePill = ({
     isDue: boolean;
     onClick?: () => void;
 }) => {
-    const status = !schedule ? 'empty' : (request?.exempt ? 'exempt' : (!isDue ? 'planned' : (request ? 'paid' : 'unpaid')));
+    const status = request?.exempt
+        ? 'exempt'
+        : request
+            ? (isDue ? 'paid' : 'planned')
+            : (!schedule ? 'empty' : (!isDue ? 'planned' : 'unpaid'));
+    const unscheduledRequestLabel = !schedule && request
+        ? (request.exempt ? 'Mien tru' : (isDue ? 'Co phep' : 'Da xin'))
+        : '';
     const tooltip = !schedule
         ? `${label}: Chưa có lịch làm`
         : request
@@ -952,6 +959,7 @@ const WorkSchedulePill = ({
                 disabled={!onClick}
             >
                 <span>{label}</span>
+                {unscheduledRequestLabel && <span>{unscheduledRequestLabel}</span>}
                 {schedule && <span>{request?.exempt ? 'Miễn trừ' : (!isDue ? 'Đã xếp' : (request ? 'Có phép' : 'Không phép'))}</span>}
             </button>
         </Tooltip>
@@ -1077,9 +1085,11 @@ const InlineSchedulePopover = ({
             placement="bottomLeft"
             overlayStyle={{ zIndex: 1050 }}
         >
-            <div onClick={(e) => {
+            <div onClickCapture={(e) => {
                 e.stopPropagation();
                 setOpen(true);
+            }} onClick={(e) => {
+                e.stopPropagation();
             }}>
                 {children}
             </div>
@@ -1204,9 +1214,11 @@ const InlineLeavePopover = ({
             placement="bottomLeft"
             overlayStyle={{ zIndex: 1050 }}
         >
-            <div onClick={(e) => {
+            <div onClickCapture={(e) => {
                 e.stopPropagation();
                 setOpen(true);
+            }} onClick={(e) => {
+                e.stopPropagation();
             }}>
                 {children}
             </div>
