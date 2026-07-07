@@ -161,6 +161,65 @@ const getFineOverrideKey = (fine: FineRecord) => [
     fine.amount,
 ].join('|');
 
+const getFineContentKey = (fine: Partial<FineRecord> | undefined) => {
+    if (!fine) return '';
+    return [
+        fine.source || 'manual',
+        fine.empId || '',
+        fine.type || '',
+        fine.detail || '',
+        fine.date || '',
+        fine.amount || 0,
+    ].join('|');
+};
+
+const getFineRecordKey = (fine: Partial<FineRecord> | undefined) => {
+    if (!fine) return '';
+    return fine.id || getFineContentKey(fine);
+};
+
+const getFineRecordKeys = (fine: Partial<FineRecord> | undefined) => {
+    if (!fine) return [];
+    return [fine.id || '', getFineContentKey(fine)].filter(Boolean);
+};
+
+const getDeletedFineKeys = (logs: any[] = []) => new Set(
+    logs
+        .filter(log => log?.action === 'delete' && log?.before)
+        .flatMap(log => getFineRecordKeys(log.before))
+        .filter(Boolean)
+);
+
+const mergeFinesWithDeletes = (dbFines: FineRecord[] = [], snapshotFines: FineRecord[] = [], auditLogs: any[] = []) => {
+    const deletedKeys = getDeletedFineKeys(auditLogs);
+    const merged = new Map<string, FineRecord>();
+
+    dbFines.forEach((fine, index) => {
+        const fineWithId = ensureFineId(fine, index);
+        const key = getFineRecordKey(fine);
+        const deleted = getFineRecordKeys(fineWithId).some(item => deletedKeys.has(item));
+        if (key && !deleted) merged.set(key, fineWithId);
+    });
+
+    snapshotFines.forEach((fine, index) => {
+        const fineWithId = ensureFineId(fine, index);
+        const key = getFineRecordKey(fine);
+        const deleted = getFineRecordKeys(fineWithId).some(item => deletedKeys.has(item));
+        if (key && !deleted) merged.set(key, fineWithId);
+    });
+
+    return Array.from(merged.values());
+};
+
+const mergeAuditLogs = (dbLogs: any[] = [], snapshotLogs: any[] = []) => {
+    const merged = new Map<string, any>();
+    [...dbLogs, ...snapshotLogs].forEach((log, index) => {
+        const key = log?.id || `${log?.timestamp || ''}|${log?.action || ''}|${log?.note || ''}|${index}`;
+        merged.set(key, log);
+    });
+    return Array.from(merged.values());
+};
+
 const getReturnFineCode = (detail?: string) => {
     const match = String(detail || '').match(/Mã phiếu:\s*([^)]+)/i);
     return match?.[1]?.trim() || '';
@@ -2839,6 +2898,7 @@ export default function Attendance() {
     const [dailyTaskTracking, setDailyTaskTracking] = useState<any[]>([]);
     const [dailyTaskHistory, setDailyTaskHistory] = useState<any[]>([]);
     const [stockCheckSessions, setStockCheckSessions] = useState<any[]>([]);
+    const [stockBalanceRecords, setStockBalanceRecords] = useState<any[]>([]);
 
     const [isDbLoaded, setIsDbLoaded] = useState(false);
     const [systemUsernames, setSystemUsernames] = useState<string[]>([]);
@@ -2981,6 +3041,32 @@ export default function Attendance() {
         latestSnapshotRef.current = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog };
     }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded]);
 
+    const mergeAttendanceSnapshotWithDb = useCallback(async (snapshot: Record<string, any>) => {
+        const api = (window as any).electronAPI;
+        try {
+            const latest = await api.appConfig.get('attendanceData');
+            const dbData = latest?.success && latest.data ? latest.data : {};
+            const mergedFineAuditLog = mergeAuditLogs(dbData.fineAuditLog || [], snapshot.fineAuditLog || []);
+            return {
+                ...dbData,
+                ...snapshot,
+                extraFines: mergeFinesWithDeletes(dbData.extraFines || [], snapshot.extraFines || [], mergedFineAuditLog),
+                fineOverrides: { ...(dbData.fineOverrides || {}), ...(snapshot.fineOverrides || {}) },
+                fineAuditLog: mergedFineAuditLog,
+            };
+        } catch {
+            return snapshot;
+        }
+    }, []);
+
+    const saveAttendanceSnapshot = useCallback(async (snapshot: Record<string, any>) => {
+        const api = (window as any).electronAPI;
+        const mergedSnapshot = await mergeAttendanceSnapshotWithDb(snapshot);
+        const result = await api.appConfig.set('attendanceData', mergedSnapshot);
+        if (result?.success) latestSnapshotRef.current = mergedSnapshot;
+        return result;
+    }, [mergeAttendanceSnapshotWithDb]);
+
     const persistAttendanceSnapshotNow = useCallback(async (patch: Record<string, any>) => {
         if (!isDbLoaded || employees.length === 0) return false;
         const baseSnapshot = latestSnapshotRef.current || {
@@ -3000,14 +3086,13 @@ export default function Attendance() {
         const snapshot = { ...baseSnapshot, ...patch };
         latestSnapshotRef.current = snapshot;
         try {
-            const api = (window as any).electronAPI;
-            const result = await api.appConfig.set('attendanceData', snapshot);
+            const result = await saveAttendanceSnapshot(snapshot);
             if (!result?.success) throw new Error(result?.error || 'Lưu dữ liệu chấm công thất bại');
             return true;
         } catch (err) {
             console.error('Lỗi lưu nhanh dữ liệu chấm công vào DB:', err);
         }
-    }, [isDbLoaded, employees, config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog]);
+    }, [isDbLoaded, employees, config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, saveAttendanceSnapshot]);
 
     // 2b. Lưu tự động khi có thay đổi state với Debounce
     useEffect(() => {
@@ -3018,8 +3103,7 @@ export default function Attendance() {
 
         const saveData = async () => {
             try {
-                const api = (window as any).electronAPI;
-                await api.appConfig.set('attendanceData', snapshot);
+                await saveAttendanceSnapshot(snapshot);
             } catch (err) {
                 console.error('Lỗi lưu dữ liệu chấm công vào DB:', err);
             }
@@ -3027,30 +3111,28 @@ export default function Attendance() {
 
         const timer = setTimeout(saveData, 500); // Đợi 500ms thao tác cuối rồi mới save
         return () => clearTimeout(timer);
-    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded]);
+    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded, saveAttendanceSnapshot]);
 
     // 2c. Flush save khi component unmount (navigate sang tab khác) để tránh mất data
     useEffect(() => {
         return () => {
             if (latestSnapshotRef.current) {
-                (window as any).electronAPI?.appConfig
-                    .set('attendanceData', latestSnapshotRef.current)
+                saveAttendanceSnapshot(latestSnapshotRef.current as Record<string, any>)
                     .catch(console.error);
             }
         };
-    }, []);
+    }, [saveAttendanceSnapshot]);
 
     // Flush save ngay lập tức khi reload hoặc đóng app
     useEffect(() => {
         const handleBeforeUnload = () => {
             if (latestSnapshotRef.current) {
-                const api = (window as any).electronAPI;
-                try { api.appConfig.set('attendanceData', latestSnapshotRef.current); } catch { }
+                try { void saveAttendanceSnapshot(latestSnapshotRef.current as Record<string, any>); } catch { }
             }
         };
         window.addEventListener('beforeunload', handleBeforeUnload);
         return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-    }, []);
+    }, [saveAttendanceSnapshot]);
 
     const [fineModalOpen, setFineModalOpen] = useState(false);
     const [fineForm] = Form.useForm();
@@ -3218,6 +3300,16 @@ export default function Attendance() {
                 setDailyTaskHistory(historyResult.data);
             }
             try {
+                const balanceResult = await api.stockBalance?.getAll?.({ limit: 500 });
+                if (balanceResult?.success && Array.isArray(balanceResult.data)) {
+                    setStockBalanceRecords(balanceResult.data);
+                } else {
+                    setStockBalanceRecords([]);
+                }
+            } catch {
+                setStockBalanceRecords([]);
+            }
+            try {
                 const stockCheckResult = await api.appConfig.get('stockCheckSessionsV2');
                 if (stockCheckResult?.success && Array.isArray(stockCheckResult.data)) {
                     setStockCheckSessions(stockCheckResult.data);
@@ -3381,9 +3473,21 @@ export default function Attendance() {
             if (!isPastStockCheckWorkingDay(date)) continue;
 
             const dateKey = date.format('YYYY-MM-DD');
-            const completedSession = stockCheckSessions.find((s: any) => s.date === dateKey && s.status === 'completed');
-            // Da hoan thanh bat ky phien kiem nao trong ngay (daily hoac full) -> khong phat.
-            if (completedSession) continue;
+            const hasStockCheckSessionEvidence = stockCheckSessions.some((s: any) => {
+                if (s.date !== dateKey) return false;
+                const items = Array.isArray(s.items) ? s.items : [];
+                return s.status === 'completed'
+                    || Boolean(s.completedAt)
+                    || items.some((item: any) => item?.balanced || item?.actualStock !== null && item?.actualStock !== undefined);
+            });
+            const hasStockBalanceEvidence = stockBalanceRecords.some((record: any) => {
+                const recordDate = dayjs(record?.date || record?.createdAt);
+                return recordDate.isValid()
+                    && recordDate.isSame(date, 'day')
+                    && normalizeAttendanceText(record?.notes || '').includes('kiem hang');
+            });
+            // Da co bang chung kiem/can bang kho trong ngay (session hoac StockBalance) -> khong phat.
+            if (hasStockCheckSessionEvidence || hasStockBalanceEvidence) continue;
 
             const session = stockCheckSessions.find((s: any) => s.date === dateKey && s.type !== 'full');
 
@@ -3423,7 +3527,7 @@ export default function Attendance() {
         }
 
         return fines;
-    }, [employees, stockCheckSessions, overviewDateRange]);
+    }, [employees, stockCheckSessions, stockBalanceRecords, overviewDateRange]);
 
     const applyFineOverride = useCallback((fine: FineRecord): FineRecord => {
         const override = fineOverrides[getFineOverrideKey(fine)];
