@@ -73,6 +73,7 @@ function normalizeHeaderText(value: any): string {
         .normalize('NFD')
         .replace(/[\u0300-\u036f]/g, '')
         .toLowerCase()
+        .replace(/\u0111/g, 'd')
         .trim();
 }
 
@@ -89,10 +90,10 @@ function getRowValue(row: any, candidates: string[]): any {
 
 /**
  * Tìm tên cột chứa SKU trong file Shopee.
- * Chỉ dùng cell U1 vì Shopee đặt SKU phân loại hàng ở cột U.
+ * Chỉ dùng cell T1 vì Shopee đặt SKU phân loại hàng ở cột T.
  */
 function getShopeeSkuHeader(worksheet: any, jsonData: any[]): string {
-    const ref = 'U1';
+    const ref = 'T1';
     const fixedSkuCell = worksheet[ref];
     const fixedSkuHeader = fixedSkuCell ? (fixedSkuCell.v || fixedSkuCell.w || '') : '';
     if (fixedSkuHeader && jsonData.length > 0 && fixedSkuHeader in (jsonData[0] as any)) {
@@ -1397,11 +1398,11 @@ Thời gian: ${currentTime}`;
                 // Group by Order ID to combine items from same order
                 const orderMap = new Map<string, any[]>();
 
-                // Shopee: column U is the only source of truth for SKU.
+                // Shopee: column T is the only source of truth for SKU.
                 const shopeeSkuHeader = isShopee ? getShopeeSkuHeader(worksheet, jsonData) : '';
                 if (isShopee) console.log('🔑 Shopee SKU header detected:', shopeeSkuHeader || '(KHÔNG TÌM THẤY)');
                 if (isShopee && !shopeeSkuHeader) {
-                    message.error('File Shopee thiếu cột U: SKU phân loại hàng. Không import để tránh trừ sai tồn.');
+                    message.error('File Shopee thiếu cột T: SKU phân loại hàng. Không import để tránh trừ sai tồn.');
                     return;
                 }
 
@@ -1505,7 +1506,7 @@ Thời gian: ${currentTime}`;
                             return;
                         }
                         if (!sku) {
-                            console.warn('⚠️ Skip Shopee row: missing column U SKU', row);
+                            console.warn('⚠️ Skip Shopee row: missing column T SKU', row);
                             return;
                         }
 
@@ -1721,12 +1722,12 @@ Thời gian: ${currentTime}`;
                     // Process same as handleImportExcel
                     const orderMap = new Map<string, any[]>();
 
-                    // Shopee: column U is the only source of truth for SKU.
+                    // Shopee: column T is the only source of truth for SKU.
                     const shopeeSkuHeader = isShopee ? getShopeeSkuHeader(worksheet, jsonData) : '';
                     if (isShopee) console.log('🔑 [Folder] Shopee SKU header detected:', shopeeSkuHeader || '(KHÔNG TÌM THẤY)');
                     if (isShopee && !shopeeSkuHeader) {
-                        console.warn(`⚠️ Skip file ${fileData.name}: thiếu cột U SKU phân loại hàng`);
-                        message.warning(`Bỏ qua ${fileData.name}: thiếu cột U SKU phân loại hàng`);
+                        console.warn(`⚠️ Skip file ${fileData.name}: thiếu cột T SKU phân loại hàng`);
+                        message.warning(`Bỏ qua ${fileData.name}: thiếu cột T SKU phân loại hàng`);
                         continue;
                     }
 
@@ -1806,7 +1807,7 @@ Thời gian: ${currentTime}`;
                                 return;
                             }
                             if (!sku) {
-                                console.warn('⚠️ Skip Shopee row: missing column U SKU', row);
+                                console.warn('⚠️ Skip Shopee row: missing column T SKU', row);
                                 return;
                             }
 

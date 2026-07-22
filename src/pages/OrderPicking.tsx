@@ -343,7 +343,7 @@ function normalizeHeaderText(value: any): string {
         .normalize('NFD')
         .replace(/[\u0300-\u036f]/g, '')
         .toLowerCase()
-        .replace(/đ/g, 'd')
+        .replace(/\u0111/g, 'd')
         .trim();
 }
 
@@ -355,13 +355,11 @@ function buildShopeeMapping(headers: string[]): ColumnMapping {
     const enhanced = { ...SHOPEE_MAPPING };
     const tracking = findHeaderIndex(headers, ['ma van don', 'ma van chuyen', 'so van don', 'tracking']);
     const productName = findHeaderIndex(headers, ['ten san pham', 'product name']);
-    const sku = findHeaderIndex(headers, ['sku phan loai hang', 'ma phan loai hang', 'sku']);
     const variantName = findHeaderIndex(headers, ['ten phan loai hang', 'phan loai hang', 'variation', 'variant']);
     const quantity = findHeaderIndex(headers, ['so luong', 'quantity', 'qty']);
 
     if (tracking >= 0) enhanced.tracking = tracking;
     if (productName >= 0) enhanced.productName = productName;
-    if (sku >= 0) enhanced.sku = sku;
     if (variantName >= 0) enhanced.variantName = variantName;
     if (quantity >= 0) enhanced.quantity = quantity;
 
