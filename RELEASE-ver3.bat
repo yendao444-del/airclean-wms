@@ -71,6 +71,9 @@ if exist "!PATCH_TEMP!" rmdir /S /Q "!PATCH_TEMP!"
 mkdir "!PATCH_TEMP!\resources\app\dist"
 mkdir "!PATCH_TEMP!\resources\app\electron"
 mkdir "!PATCH_TEMP!\resources\app\python"
+mkdir "!PATCH_TEMP!\resources\app\node_modules\@supabase"
+mkdir "!PATCH_TEMP!\resources\app\node_modules\iceberg-js"
+mkdir "!PATCH_TEMP!\resources\app\node_modules\tslib"
 
 if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
     copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
@@ -83,6 +86,9 @@ if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
 )
 xcopy "dist\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 xcopy "electron\*" "!PATCH_TEMP!\resources\app\electron\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\@supabase\*" "!PATCH_TEMP!\resources\app\node_modules\@supabase\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\iceberg-js\*" "!PATCH_TEMP!\resources\app\node_modules\iceberg-js\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\tslib\*" "!PATCH_TEMP!\resources\app\node_modules\tslib\" /E /I /Y /Q >nul 2>&1
 copy /Y "python\attendance_service.py" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
 copy /Y "python\requirements.txt" "!PATCH_TEMP!\resources\app\python\" >nul 2>&1
 copy /Y "package.json" "!PATCH_TEMP!\resources\app\package.json" >nul 2>&1

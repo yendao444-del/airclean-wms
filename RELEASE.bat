@@ -62,6 +62,9 @@ for /f "tokens=*" %%r in ('dir /s /b "%LOCALAPPDATA%\\electron-builder\\Cache\\w
     "%%r" "release4\\win-unpacked\\DBY POS.exe" --set-icon "public\\app_icon.ico" >nul 2>&1
 )
 xcopy "node_modules\.prisma\*" "release4\win-unpacked\resources\app\node_modules\.prisma\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\@supabase\*" "release4\win-unpacked\resources\app\node_modules\@supabase\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\iceberg-js\*" "release4\win-unpacked\resources\app\node_modules\iceberg-js\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\tslib\*" "release4\win-unpacked\resources\app\node_modules\tslib\" /E /I /Y /Q >nul 2>&1
 echo ✅ Xong!
 echo.
 
@@ -75,6 +78,9 @@ mkdir "_full_temp\resources\app\dist"
 mkdir "_full_temp\resources\app\electron"
 mkdir "_full_temp\resources\app\node_modules\@prisma"
 mkdir "_full_temp\resources\app\node_modules\.prisma"
+mkdir "_full_temp\resources\app\node_modules\@supabase"
+mkdir "_full_temp\resources\app\node_modules\iceberg-js"
+mkdir "_full_temp\resources\app\node_modules\tslib"
 
 :: Auto-copy Google token truoc khi dong goi (neu chua co trong electron/)
 if not exist "electron\gdrive-token.json" (
@@ -91,6 +97,9 @@ xcopy "dist\*"                       "_full_temp\resources\app\dist\"           
 xcopy "electron\*"                   "_full_temp\resources\app\electron\"                    /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\@prisma\*"       "_full_temp\resources\app\node_modules\@prisma\"        /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\.prisma\*"       "_full_temp\resources\app\node_modules\.prisma\"        /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\@supabase\*"      "_full_temp\resources\app\node_modules\@supabase\"       /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\iceberg-js\*"     "_full_temp\resources\app\node_modules\iceberg-js\"      /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\tslib\*"          "_full_temp\resources\app\node_modules\tslib\"           /E /I /Y /Q >nul 2>&1
 :: Pack EXE nhận diện khuôn mặt — máy khách không cần cài Python
 if exist "python\dist\attendance_service.exe" (
     mkdir "_full_temp\resources\app\python\dist" >nul 2>&1
