@@ -1,10 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type ReactNode } from 'react';
 import {
     Card,
     Button,
+    Checkbox,
     Tag,
     Avatar,
-    Checkbox,
     Space,
     Tooltip,
     Badge,
@@ -14,11 +14,13 @@ import {
     Modal,
     Form,
     Input,
+    InputNumber,
     message,
     DatePicker,
     Select,
     Radio,
-    Alert
+    Alert,
+    Upload
 } from 'antd';
 const { TextArea } = Input;
 const { Option } = Select;
@@ -28,10 +30,19 @@ import {
     FireFilled,
     ThunderboltFilled,
     CheckCircleFilled,
+    CheckCircleOutlined,
     WarningOutlined,
     UserOutlined,
     EditOutlined,
-    DeleteOutlined
+    DeleteOutlined,
+    CalendarOutlined,
+    FileTextOutlined,
+    UploadOutlined,
+    LinkOutlined,
+    PictureOutlined,
+    EyeOutlined,
+    SafetyCertificateOutlined,
+    MoreOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useAuth } from '../contexts/AuthContext';
@@ -77,7 +88,99 @@ interface Task {
     description?: string;
     note?: string;
     type?: 'daily' | 'assignment';
+    attachments?: unknown;
+    evidencePenaltyRecorded?: boolean;
 }
+
+interface EvidenceMeta {
+    required?: boolean;
+    method?: 'link' | 'image' | 'both';
+    status?: 'pending' | 'submitted' | 'approved' | 'rejected';
+    penaltyAmount?: number;
+    submittedAt?: string;
+    submittedBy?: string;
+    submittedUrl?: string;
+    submittedImage?: { name: string; mimeType: string; storagePath: string; hash: string };
+    reviewedAt?: string;
+    reviewedBy?: string;
+}
+
+const parseAttachments = (attachments?: unknown): Record<string, any> => {
+    if (!attachments) return {};
+    if (typeof attachments === 'string') {
+        try {
+            const parsed = JSON.parse(attachments);
+            return Array.isArray(parsed) ? { files: parsed } : parsed || {};
+        } catch {
+            return {};
+        }
+    }
+    return Array.isArray(attachments) ? { files: attachments } : attachments as Record<string, any>;
+};
+
+const getEvidence = (task: Task): EvidenceMeta => parseAttachments(task.attachments).evidence || {};
+
+const DEFAULT_EVIDENCE_PENALTY = 30000;
+const EVIDENCE_DEADLINE_OPTIONS = Array.from({ length: 24 * 12 }, (_, index) => {
+    const hour = Math.floor(index / 12);
+    const minute = (index % 12) * 5;
+    const value = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    return { value, label: value };
+});
+
+const normalizePenaltyAmount = (value: unknown): number => {
+    const raw = typeof value === 'string' ? value.replace(/[^\d]/g, '') : value;
+    const amount = Number(raw);
+    return Number.isFinite(amount) && amount >= 0 ? Math.round(amount) : DEFAULT_EVIDENCE_PENALTY;
+};
+
+const formatPenaltyAmount = (value: string | number | undefined): string => {
+    if (value === undefined || value === null || value === '') return '';
+    return new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 0 }).format(normalizePenaltyAmount(value));
+};
+
+const normalizeEvidenceUrl = (value: string): string | null => {
+    try {
+        const url = new URL(value.trim());
+        if (!['http:', 'https:'].includes(url.protocol)) return null;
+        url.hash = '';
+        return url.toString();
+    } catch {
+        return null;
+    }
+};
+
+const MAX_EVIDENCE_IMAGE_BYTES = 200 * 1024;
+
+const compressEvidenceImage = async (file: File): Promise<File> => {
+    const sourceUrl = URL.createObjectURL(file);
+    try {
+        const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const element = new Image();
+            element.onload = () => resolve(element);
+            element.onerror = () => reject(new Error('Không thể đọc ảnh.'));
+            element.src = sourceUrl;
+        });
+        let width = Math.min(image.naturalWidth, 1600);
+        let height = Math.round(image.naturalHeight * (width / image.naturalWidth));
+
+        for (let quality = 0.82; quality >= 0.35; quality -= 0.08) {
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            canvas.getContext('2d')?.drawImage(image, 0, 0, width, height);
+            const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/webp', quality));
+            if (blob && (blob.size <= MAX_EVIDENCE_IMAGE_BYTES || quality <= 0.35)) {
+                return new File([blob], `${file.name.replace(/\.[^.]+$/, '')}.webp`, { type: 'image/webp' });
+            }
+            width = Math.max(640, Math.round(width * 0.82));
+            height = Math.max(480, Math.round(height * 0.82));
+        }
+        throw new Error('Không thể nén ảnh xuống 200 KB. Hãy chọn ảnh khác.');
+    } finally {
+        URL.revokeObjectURL(sourceUrl);
+    }
+};
 
 // Default categories (dùng khi DB chưa có dữ liệu)
 
@@ -114,6 +217,7 @@ const DailyTasks = () => {
     const [editingTask, setEditingTask] = useState<Task | null>(null);
     const [taskModalVisible, setTaskModalVisible] = useState(false);
     const [taskForm] = Form.useForm();
+    const [assigneeFixed, setAssigneeFixed] = useState(false);
     const [loading, setLoading] = useState(false);
 
     // Quick note state for assignment cards
@@ -177,6 +281,7 @@ const DailyTasks = () => {
 
     // History state
     const [activeTab, setActiveTab] = useState<'tasks' | 'assignments' | 'history'>('tasks');
+    const [boardFilter, setBoardFilter] = useState<'all' | 'action' | 'evidence' | 'overdue'>('all');
     const [history, setHistory] = useState<any[]>([]);
 
     // === ASSIGNMENT TASKS ===
@@ -225,11 +330,20 @@ const DailyTasks = () => {
     const loadTasks = async () => {
         try {
             setLoading(true);
-            const result = await window.electronAPI.dailyTasks.list({});
+            const [result, penaltiesResult] = await Promise.all([
+                window.electronAPI.dailyTasks.list({}),
+                window.electronAPI.dailyTasks.listEvidencePenalties(),
+            ]);
             if (result.success && result.data) {
+                const penaltyKeys = new Set(
+                    (penaltiesResult?.success && Array.isArray(penaltiesResult.data) ? penaltiesResult.data : [])
+                        .map((penalty: any) => `${penalty.taskId}:${penalty.dueAt}`)
+                );
                 setTasks(result.data.map((t: any) => ({
                     ...t,
+                    evidencePenaltyRecorded: penaltyKeys.has(`${t.id}:${new Date(t.dueDate).toISOString()}`),
                     tags: t.tags ? JSON.parse(t.tags) : [],
+                    attachments: parseAttachments(t.attachments),
                     dueTime: dayjs(t.dueDate).format('HH:mm'),
                     dueDate: dayjs(t.dueDate).format('YYYY-MM-DD'),
                     type: t.type || 'daily'
@@ -675,6 +789,11 @@ const DailyTasks = () => {
         const task = tasks.find(t => t.id === taskId);
         if (!task) return;
 
+        if (task.status === 'pending' && getEvidence(task).required) {
+            handleSubmitEvidence(task);
+            return;
+        }
+
         const isCompleting = task.status === 'pending';
 
         // Nếu đang hoàn thành, yêu cầu chọn người xác nhận
@@ -706,8 +825,6 @@ const DailyTasks = () => {
                                     style={{ width: '100%' }}
                                     size="large"
                                     virtual={false}
-                                    dropdownStyle={{ zIndex: 2100 }}
-                                    getPopupContainer={(trigger) => trigger.parentNode as HTMLElement}
                                     onChange={(value) => { selectedAssignee = value; }}
                                 >
                                     {assigneeList.map((name, index) => {
@@ -740,8 +857,6 @@ const DailyTasks = () => {
                                 style={{ width: '100%' }}
                                 size="large"
                                 virtual={false}
-                                dropdownStyle={{ zIndex: 2100 }}
-                                getPopupContainer={(trigger) => trigger.parentNode as HTMLElement}
                                 onChange={(value) => { selectedVerifier = value; }}
                                 defaultValue={task.verifier || undefined}
                             >
@@ -774,45 +889,39 @@ const DailyTasks = () => {
                         return Promise.reject();
                     }
                     // Validate assignee nếu chưa có
-                    if (needAssignee && !selectedAssignee) {
+                    if (needAssignee && isAdmin && !selectedAssignee) {
                         message.error('⚠️ Vui lòng chọn người thực hiện!');
                         return Promise.reject();
                     }
 
                     try {
-                        const finalAssignee = selectedAssignee || task.assignee;
-                        // Update status, verifier, and assignee
-                        setTasks(prev => prev.map(t =>
-                            t.id === taskId
-                                ? { ...t, status: 'completed', verifier: selectedVerifier, assignee: finalAssignee }
-                                : t
-                        ));
+                        const result = await window.electronAPI.dailyTasks.completeRegularTask(taskId, {
+                            verifier: selectedVerifier,
+                            assignee: selectedAssignee || task.assignee,
+                        });
+                        if (!result.success || !result.data) throw new Error(result.error || 'Không thể xác nhận công việc.');
+                        const finalAssignee = result.data.assignee;
+                        const finalVerifier = result.data.verifier;
+                        setTasks(prev => prev.map(t => t.id === taskId ? { ...t, ...result.data, attachments: parseAttachments(result.data.attachments) } : t));
 
                         // Add to history
-                        await addToHistory({ ...task, assignee: finalAssignee, verifier: selectedVerifier }, 'completed');
+                        await addToHistory({ ...task, assignee: finalAssignee, verifier: finalVerifier }, 'completed');
 
                         // Show success message
                         message.success({
-                            content: `✅ Đã xác nhận hoàn thành! (Thực hiện: ${finalAssignee}, Xác nhận: ${selectedVerifier})`,
+                            content: `✅ Đã xác nhận hoàn thành! (Thực hiện: ${finalAssignee}, Xác nhận: ${finalVerifier})`,
                             duration: 3
                         });
-
-                        // Update backend if API exists
-                        try {
-                            await window.electronAPI.dailyTasks.update(taskId, {
-                                status: 'completed',
-                                verifier: selectedVerifier,
-                                assignee: finalAssignee
-                            });
-                        } catch (err) {
-                            console.log('Backend update skipped:', err);
-                        }
                     } catch (error: any) {
                         message.error('Lỗi: ' + (error.message || 'Unknown error'));
                     }
                 }
             });
         } else {
+            if (!isAdmin) {
+                message.warning('Chỉ admin mới có thể mở lại công việc đã xác nhận.');
+                return;
+            }
             // Hủy hoàn thành - không cần người xác nhận
             Modal.confirm({
                 title: '⚠️ Hủy hoàn thành?',
@@ -928,6 +1037,7 @@ const DailyTasks = () => {
     // Add task
     const handleAddTask = (categoryKey?: string) => {
         setEditingTask(null);
+        setAssigneeFixed(false);
         taskForm.resetFields();
 
         // ⚡ Set data TRƯỚC
@@ -935,6 +1045,11 @@ const DailyTasks = () => {
             priority: 'normal',
             category: categoryKey || categories[0]?.key || 'Sàn TMDT',
             status: 'pending',
+            evidenceRequired: false,
+            evidenceMethod: 'link',
+            assigneeFixed: false,
+            penaltyAmount: DEFAULT_EVIDENCE_PENALTY,
+            evidenceDeadlineTime: '19:00',
             dueDate: dayjs().hour(20).minute(0).second(0) // Default 20:00 hôm nay
         });
 
@@ -945,10 +1060,16 @@ const DailyTasks = () => {
     // Edit task
     const handleEditTask = (task: Task) => {
         setEditingTask(task);
+        setAssigneeFixed(Boolean(task.assignee));
         taskForm.setFieldsValue({
             ...task,
-            dueDate: dayjs(task.dueTime, 'HH:mm'),
-            tags: task.tags ? task.tags.join(', ') : ''
+            dueDate: dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm'),
+            tags: task.tags ? task.tags.join(', ') : '',
+            evidenceRequired: getEvidence(task).required || false,
+            evidenceMethod: getEvidence(task).method || 'link',
+            assigneeFixed: Boolean(task.assignee),
+            penaltyAmount: normalizePenaltyAmount(getEvidence(task).penaltyAmount),
+            evidenceDeadlineTime: task.dueTime,
         });
         setTaskModalVisible(true);
     };
@@ -1017,8 +1138,6 @@ const DailyTasks = () => {
                         style={{ width: '100%' }}
                         size="large"
                         virtual={false}
-                        dropdownStyle={{ zIndex: 2100 }}
-                        getPopupContainer={(trigger) => trigger.parentNode as HTMLElement}
                         onChange={(value) => { selectedPerson = value; }}
                     >
                         {assigneeList.map((name, index) => {
@@ -1060,18 +1179,47 @@ const DailyTasks = () => {
         try {
             const values = await taskForm.validateFields();
 
+            const existingAttachments = editingTask ? parseAttachments(editingTask.attachments) : {};
+            const existingEvidence = editingTask ? getEvidence(editingTask) : {};
+            // Only administrators decide how a task is completed and whether a penalty applies.
+            const requiresEvidence = isAdmin ? Boolean(values.evidenceRequired) : Boolean(existingEvidence.required);
+            if (requiresEvidence && (!values.assigneeFixed || !values.assignee)) {
+                message.error('Công việc yêu cầu bằng chứng phải cố định người thực hiện để hệ thống phạt đúng người.');
+                return;
+            }
+            let dueAt = dayjs(values.dueDate);
+            if (requiresEvidence && values.evidenceDeadlineTime) {
+                const [hour, minute] = String(values.evidenceDeadlineTime).split(':').map(Number);
+                dueAt = dueAt.hour(hour).minute(minute).second(0).millisecond(0);
+            }
             const taskData = {
                 title: values.title,
                 description: values.description || '',
                 category: values.category,
-                assignee: values.assignee || '',
+                assignee: values.assigneeFixed ? values.assignee || '' : '',
                 verifier: values.verifier || '',
                 area: values.area || '',
-                dueDate: values.dueDate.toISOString(),
+                dueDate: dueAt.toISOString(),
                 priority: values.priority,
                 status: values.status || 'pending',
                 tags: values.tags ? JSON.stringify(values.tags.split(',').map((t: string) => t.trim()).filter(Boolean)) : null,
-                note: values.note || ''
+                note: values.note || '',
+                attachments: {
+                    ...existingAttachments,
+                    assignment: {
+                        ...(existingAttachments.assignment || {}),
+                        fixedAssignee: Boolean(values.assigneeFixed),
+                    },
+                    evidence: requiresEvidence ? {
+                        ...existingEvidence,
+                        required: true,
+                        method: isAdmin ? values.evidenceMethod || 'link' : existingEvidence.method || 'link',
+                        status: existingEvidence.status || 'pending',
+                        penaltyAmount: isAdmin
+                            ? normalizePenaltyAmount(values.penaltyAmount)
+                            : normalizePenaltyAmount(existingEvidence.penaltyAmount),
+                    } : undefined,
+                }
             };
 
             let result;
@@ -1177,8 +1325,172 @@ const DailyTasks = () => {
     const isOverdue = (task: Task) => {
         if (task.status === 'completed') return false;
         const [hour, minute] = task.dueTime.split(':').map(Number);
-        const dueTime = dayjs().hour(hour).minute(minute);
+        const dueTime = dayjs(task.dueDate).hour(hour).minute(minute).second(0).millisecond(0);
         return dayjs().isAfter(dueTime);
+    };
+
+    const CompletionButton = ({ task, size = 22 }: { task: Task; size?: number }) => {
+        const isCompleted = task.status === 'completed';
+
+        return (
+            <button
+                type="button"
+                className="daily-task-completion-button"
+                aria-label={isCompleted ? `Mở lại công việc ${task.title}` : `Xác nhận hoàn thành công việc ${task.title}`}
+                title={isCompleted ? 'Mở lại công việc' : 'Xác nhận hoàn thành'}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    handleToggleComplete(task.id);
+                }}
+            >
+                {isCompleted
+                    ? <CheckCircleFilled style={{ fontSize: size, color: '#52c41a' }} />
+                    : <CheckCircleOutlined style={{ fontSize: size, color: '#64748b' }} />}
+            </button>
+        );
+    };
+
+    const updateEvidence = async (task: Task, evidence: EvidenceMeta) => {
+        const attachments = { ...parseAttachments(task.attachments), evidence };
+        const result = await window.electronAPI.dailyTasks.update(task.id, { attachments });
+        if (!result.success) throw new Error(result.error || 'Không thể cập nhật bằng chứng');
+        await loadTasks();
+    };
+
+    /* const handleSubmitEvidence = (task: Task) => {
+        let submittedUrl = getEvidence(task).submittedUrl || '';
+        Modal.confirm({
+            title: 'Nộp bằng chứng',
+            icon: <UploadOutlined style={{ color: '#16a34a' }} />,
+            content: (
+                <div>
+                    <p style={{ marginBottom: 12, color: '#475569' }}>
+                        <strong>{task.title}</strong>
+                    </p>
+                    <Input
+                        type="url"
+                        defaultValue={submittedUrl}
+                        placeholder="Dán link TikTok, Drive hoặc bằng chứng công việc"
+                        onChange={(event) => { submittedUrl = event.target.value; }}
+                    />
+                </div>
+            ),
+            okText: 'Gửi bằng chứng',
+            cancelText: 'Hủy',
+            onOk: async () => {
+                const normalizedUrl = normalizeEvidenceUrl(submittedUrl);
+                if (!normalizedUrl) {
+                    message.warning('Bằng chứng phải là link http:// hoặc https:// hợp lệ.');
+                    return Promise.reject();
+                }
+                const duplicateTask = tasks.find(other =>
+                    other.id !== task.id && normalizeEvidenceUrl(getEvidence(other).submittedUrl || '') === normalizedUrl
+                );
+                if (duplicateTask) {
+                    message.warning(`Link này đã được dùng cho công việc "${duplicateTask.title}".`);
+                    return Promise.reject();
+                }
+                try {
+                    const evidence = {
+                        ...getEvidence(task),
+                        status: 'submitted' as const,
+                        submittedUrl: normalizedUrl,
+                        submittedAt: new Date().toISOString(),
+                        submittedBy: user?.fullName || user?.username || 'Nhân viên',
+                    };
+                    const result = await window.electronAPI.dailyTasks.update(task.id, {
+                        attachments: { ...parseAttachments(task.attachments), evidence },
+                        status: 'completed',
+                    });
+                    if (!result.success) throw new Error(result.error || 'Không thể lưu bằng chứng');
+                    await loadTasks();
+                    message.success('Đã nộp bằng chứng và hoàn thành công việc.');
+                } catch (error: any) {
+                    message.error(error.message || 'Không thể gửi bằng chứng.');
+                }
+            }
+        });
+    }; */
+
+    const handleSubmitEvidence = (task: Task) => {
+        const currentEvidence = getEvidence(task);
+        const method = currentEvidence.method || 'link';
+        const needsLink = method === 'link' || method === 'both';
+        const needsImage = method === 'image' || method === 'both';
+        let submittedUrl = currentEvidence.submittedUrl || '';
+        let selectedImage: File | null = null;
+
+        Modal.confirm({
+            title: 'Nộp bằng chứng',
+            icon: <UploadOutlined style={{ color: '#16a34a' }} />,
+            content: (
+                <div>
+                    <p style={{ marginBottom: 12, color: '#475569' }}><strong>{task.title}</strong></p>
+                    {needsLink && <Input type="url" defaultValue={submittedUrl} placeholder="Dán link bằng chứng hợp lệ" onChange={(event) => { submittedUrl = event.target.value; }} />}
+                    {needsImage && <div style={{ marginTop: needsLink ? 12 : 0 }}>
+                        <Upload accept="image/png,image/jpeg,image/webp" maxCount={1} beforeUpload={(file) => {
+                            selectedImage = file as unknown as File;
+                            return false;
+                        }}>
+                            <Button icon={<UploadOutlined />}>Chọn ảnh từ máy</Button>
+                        </Upload>
+                        <div style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>Chấp nhận JPG, PNG, WebP; tối đa 1 MB trước khi nén.</div>
+                    </div>}
+                </div>
+            ),
+            okText: 'Gửi bằng chứng', cancelText: 'Hủy',
+            onOk: async () => {
+                const normalizedUrl = needsLink ? normalizeEvidenceUrl(submittedUrl) : undefined;
+                if (needsLink && !normalizedUrl) {
+                    message.warning('Vui lòng nhập link http:// hoặc https:// hợp lệ.');
+                    return Promise.reject();
+                }
+                if (needsImage && !selectedImage) {
+                    message.warning('Vui lòng chọn ảnh bằng chứng từ máy.');
+                    return Promise.reject();
+                }
+                if (selectedImage && (selectedImage.size > 1024 * 1024 || !['image/jpeg', 'image/png', 'image/webp'].includes(selectedImage.type))) {
+                    message.warning('Ảnh phải là JPG, PNG hoặc WebP và không vượt quá 1 MB trước khi nén.');
+                    return Promise.reject();
+                }
+                try {
+                    let image: { name: string; mimeType: string; data: string } | undefined;
+                    if (selectedImage) {
+                        const compressedImage = await compressEvidenceImage(selectedImage);
+                        if (compressedImage.size > MAX_EVIDENCE_IMAGE_BYTES) throw new Error('Ảnh sau nén vượt quá 200 KB.');
+                        const data = await new Promise<string>((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(String(reader.result));
+                            reader.onerror = () => reject(new Error('Không thể đọc ảnh.'));
+                            reader.readAsDataURL(compressedImage);
+                        });
+                        image = { name: compressedImage.name, mimeType: compressedImage.type, data };
+                    }
+                    const result = await window.electronAPI.dailyTasks.submitEvidence({
+                        taskId: task.id,
+                        submittedUrl: normalizedUrl,
+                        image,
+                    });
+                    if (!result.success) throw new Error(result.error || 'Không thể lưu bằng chứng');
+                    await loadTasks();
+                    message.success('Đã nộp bằng chứng và hoàn thành công việc.');
+                } catch (error: any) { message.error(error.message || 'Không thể gửi bằng chứng.'); }
+            }
+        });
+    };
+
+    const handleReviewEvidence = async (task: Task, approved: boolean) => {
+        try {
+            await updateEvidence(task, {
+                ...getEvidence(task),
+                status: approved ? 'approved' : 'rejected',
+                reviewedAt: new Date().toISOString(),
+                reviewedBy: user?.fullName || user?.username || 'Quản lý',
+            });
+            message.success(approved ? 'Đã duyệt bằng chứng.' : 'Đã từ chối bằng chứng.');
+        } catch (error: any) {
+            message.error(error.message || 'Không thể duyệt bằng chứng.');
+        }
     };
 
     // Task Card - GRADIENT STYLE
@@ -1223,15 +1535,9 @@ const DailyTasks = () => {
 
                 {/* Main Content */}
                 <div style={{ display: 'flex', gap: 12, alignItems: 'start' }}>
-                    {/* Checkbox */}
-                    <Checkbox
-                        checked={task.status === 'completed'}
-                        onChange={() => handleToggleComplete(task.id)}
-                        style={{
-                            transform: 'scale(1.3)',
-                            marginTop: 2
-                        }}
-                    />
+                    <div style={{ marginTop: 1 }}>
+                        <CompletionButton task={task} size={22} />
+                    </div>
 
                     {/* Content */}
                     <div style={{ flex: 1 }}>
@@ -1569,6 +1875,173 @@ const DailyTasks = () => {
     const completedTasks = dailyTasks.filter(t => t.status === 'completed').length;
     const overdueTasks = dailyTasks.filter(t => isOverdue(t)).length;
     const urgentTasks = dailyTasks.filter(t => t.priority === 'urgent' && t.status !== 'completed').length;
+    const evidenceTasks = dailyTasks.filter(task => getEvidence(task).required && task.status !== 'completed');
+    const evidenceToSubmit = evidenceTasks.filter(task => {
+        const evidence = getEvidence(task);
+        return evidence.status !== 'submitted' && !isOverdue(task);
+    });
+    const reviewTasks = evidenceTasks.filter(task => getEvidence(task).status === 'submitted' || isOverdue(task));
+
+    const taskMatchesBoardFilter = (task: Task, lane: 'today' | 'evidence' | 'review') => {
+        if (boardFilter === 'all') return true;
+        if (boardFilter === 'action') return lane === 'today' && task.status !== 'completed';
+        if (boardFilter === 'evidence') return lane === 'evidence';
+        return lane === 'review';
+    };
+
+    const openEvidence = async (task: Task) => {
+        const evidence = getEvidence(task);
+        let imageUrl = '';
+        if (evidence.submittedImage?.storagePath) {
+            const result = await window.electronAPI.dailyTasks.getEvidenceImageUrl(task.id);
+            if (!result.success || !result.data?.url) {
+                message.error(result.error || 'Không thể tải ảnh bằng chứng.');
+                return;
+            }
+            imageUrl = result.data.url;
+        }
+        Modal.info({
+            title: 'Bằng chứng công việc',
+            content: evidence.submittedUrl || imageUrl ? (
+                <div>
+                    <p style={{ marginBottom: 8 }}><strong>{task.title}</strong></p>
+                    {evidence.submittedUrl && <a href={evidence.submittedUrl} target="_blank" rel="noreferrer">{evidence.submittedUrl}</a>}
+                    {imageUrl && <img src={imageUrl} alt="Bằng chứng" style={{ display: 'block', maxWidth: '100%', maxHeight: 420, marginTop: evidence.submittedUrl ? 12 : 0, borderRadius: 8 }} />}
+                    {evidence.submittedAt && <p style={{ marginTop: 12, color: '#64748b' }}>Đã nộp lúc {dayjs(evidence.submittedAt).format('DD/MM/YYYY HH:mm')}</p>}
+                </div>
+            ) : 'Nhân viên chưa nộp bằng chứng.',
+            okText: 'Đóng',
+        });
+    };
+
+    const OperationalTaskCard = ({ task, lane }: { task: Task; lane: 'today' | 'evidence' | 'review' }) => {
+        const evidence = getEvidence(task);
+        const overdue = isOverdue(task);
+        const isEvidenceTask = evidence.required;
+        const evidenceMethod = evidence.method || 'both';
+        const evidenceMethodMeta = evidenceMethod === 'link'
+            ? { label: 'Link', icon: <LinkOutlined />, color: '#2563eb' }
+            : evidenceMethod === 'image'
+                ? { label: 'Ảnh tải lên', icon: <PictureOutlined />, color: '#7c3aed' }
+                : { label: 'Link + ảnh', icon: <UploadOutlined />, color: '#0f766e' };
+        /*
+        const statusText = evidence.status === 'submitted' ? 'Chờ duyệt' : overdue ? `Quá hạn ${formatTimeDiff(Math.abs(dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm').diff(dayjs(), 'minute')))}` : `Hạn ${task.dueTime}`;
+        */
+        const overdueMinutes = Math.abs(dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm').diff(dayjs(), 'minute'));
+        const statusText = evidence.status === 'submitted'
+            ? 'Chờ duyệt'
+            : overdue
+                ? `Quá hạn ${formatTimeDiff(overdueMinutes)}`
+                : `Hạn ${task.dueTime}`;
+        const penalty = formatPenaltyAmount(evidence.penaltyAmount);
+        const penaltyGraceRemaining = Math.max(0, 20 - overdueMinutes);
+        const evidencePenaltyText = lane === 'review'
+            ? (penaltyGraceRemaining > 0
+                ? `Ân hạn còn ${penaltyGraceRemaining} phút để bổ sung`
+                : task.evidencePenaltyRecorded
+                    ? `Đã ghi nhận phạt ${penalty}đ`
+                    : 'Đang ghi nhận phạt...')
+            : `Phạt ${penalty}đ nếu không nộp sau 20 phút`;
+        const categoryName = String(task.category || '').toLowerCase();
+        const categoryColor = categoryName.includes('vệ sinh')
+            ? '#059669'
+            : categoryName.includes('sàn') || categoryName.includes('tmđt')
+                ? '#2563eb'
+                : categoryName.includes('bán hàng')
+                    ? '#7c3aed'
+                    : categoryName.includes('báo cáo')
+                        ? '#0891b2'
+                        : '#64748b';
+
+        return (
+            <div style={{
+                background: '#fff',
+                border: `1px solid ${lane === 'review' ? '#fecaca' : '#dbe3ec'}`,
+                borderLeft: `4px solid ${lane === 'review' ? '#ef4444' : isEvidenceTask ? '#f59e0b' : '#dbe3ec'}`,
+                borderRadius: 8,
+                padding: '14px 16px',
+                marginBottom: 10,
+                boxShadow: '0 1px 3px rgba(15, 23, 42, 0.06)',
+            }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                    <div style={{ marginTop: 2 }}>
+                        <CompletionButton task={task} size={20} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
+                            <div style={{ fontWeight: 700, fontSize: 16, lineHeight: 1.45, textDecoration: task.status === 'completed' ? 'line-through' : 'none', color: '#172033' }}>
+                                {task.title}
+                            </div>
+                            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                                <Tag style={{ margin: 0, whiteSpace: 'nowrap', color: '#fff', background: categoryColor, borderColor: categoryColor }}>{task.category}</Tag>
+                                {isEvidenceTask && <Tag icon={<UploadOutlined />} style={{ margin: 0, whiteSpace: 'nowrap', color: '#fff', background: '#ee4d2d', borderColor: '#ee4d2d', fontWeight: 600 }}>Cần bằng chứng</Tag>}
+                                {isEvidenceTask && <Tag icon={evidenceMethodMeta.icon} style={{ margin: 0, whiteSpace: 'nowrap', color: '#fff', background: evidenceMethodMeta.color, borderColor: evidenceMethodMeta.color }}>{evidenceMethodMeta.label}</Tag>}
+                            </div>
+                        </div>
+                        {task.description && <div style={{ color: '#64748b', fontSize: 13, marginTop: 9, lineHeight: 1.55 }}>{task.description}</div>}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: task.assignee ? '#475569' : '#94a3b8', fontSize: 13, marginTop: 10 }}>
+                            <UserOutlined />
+                            <span>{task.assignee ? `Người thực hiện: ${task.assignee}` : 'Chưa cố định người thực hiện'}</span>
+                        </div>
+                        {task.area && <div style={{ color: '#64748b', fontSize: 12, marginTop: 8 }}>{task.area}</div>}
+                        {isEvidenceTask ? (
+                            <>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', marginTop: 11, fontSize: 13 }}>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: lane === 'review' || overdue ? '#dc2626' : evidence.status === 'submitted' ? '#d97706' : '#475569', fontWeight: 600 }}>
+                                    <ClockCircleOutlined /> {statusText}
+                                    </span>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: lane === 'review' ? '#dc2626' : '#9a5b13' }}>
+                                    <WarningOutlined /> {evidencePenaltyText}
+                                    </span>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, flexWrap: 'wrap', marginTop: 11, paddingTop: 10, borderTop: '1px solid #f1f5f9' }}>
+                                    {evidence.status === 'submitted' && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
+                                    {lane === 'evidence' && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Nộp bằng chứng</Button>}
+                                    {lane === 'review' && evidence.status !== 'submitted' && <Button size="small" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)}>Nộp bổ sung</Button>}
+                                    {lane === 'review' && evidence.status === 'submitted' && isAdmin && <Button size="small" type="primary" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Duyệt</Button>}
+                                    {lane === 'review' && isAdmin && <Button size="small" danger onClick={() => handleReviewEvidence(task, false)}>Từ chối</Button>}
+                                    {isAdmin && <Button type="text" icon={<EditOutlined />} onClick={() => handleEditTask(task)} aria-label="Sửa công việc" />}
+                                    {isAdmin && <Button type="text" danger icon={<DeleteOutlined />} onClick={() => handleDeleteTask(task.id)} aria-label="Xóa công việc" />}
+                                </div>
+                            </>
+                        ) : (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 14, color: '#64748b', fontSize: 13 }}>
+                                <span><ClockCircleOutlined /> {task.dueTime}</span>
+                                {isAdmin && <Space size={2}><Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditTask(task)} /><Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteTask(task.id)} /></Space>}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    const OperationalColumn = ({ title, count, color, icon, tasks: laneTasks, lane }: { title: string; count: number; color: string; icon: ReactNode; tasks: Task[]; lane: 'today' | 'evidence' | 'review' }) => {
+        if (count < 0) return null;
+        const sortByDeadline = (left: Task, right: Task) =>
+            dayjs(`${left.dueDate} ${left.dueTime}`).valueOf() - dayjs(`${right.dueDate} ${right.dueTime}`).valueOf();
+        const filteredTasks = laneTasks.filter(task => taskMatchesBoardFilter(task, lane));
+        const visibleTasks = [
+            ...filteredTasks.filter(task => getEvidence(task).required).sort(sortByDeadline),
+            ...filteredTasks.filter(task => !getEvidence(task).required).sort(sortByDeadline),
+        ];
+
+        return <section style={{ background: '#fff', border: '1px solid #dbe3ec', borderRadius: 10, padding: 16, minWidth: 320, flex: 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+                <span style={{ width: 38, height: 38, display: 'grid', placeItems: 'center', borderRadius: 6, background: color, color: '#fff', fontSize: 20 }}>{icon}</span>
+                <h2 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: '#1e293b', flex: 1 }}>{title}</h2>
+                <Badge count={count} style={{ backgroundColor: `${color}22`, color, boxShadow: 'none', fontWeight: 700 }} />
+                <Tooltip title="Tùy chọn cột"><Button type="text" icon={<MoreOutlined />} /></Tooltip>
+            </div>
+            <div style={{ minHeight: 430 }}>
+                {visibleTasks.map(task => <OperationalTaskCard key={task.id} task={task} lane={lane} />)}
+                {visibleTasks.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không có công việc" style={{ paddingTop: 80 }} />}
+            </div>
+            <div style={{ textAlign: 'center', color: '#64748b', border: '1px solid #dbe3ec', borderRadius: 6, padding: '8px 12px', fontSize: 13 }}>
+                {count} công việc
+            </div>
+        </section>;
+    };
 
     return (
         <div style={{ padding: 24, backgroundColor: '#f0f2f5', minHeight: '100vh' }}>
@@ -1646,7 +2119,7 @@ const DailyTasks = () => {
                         </div>
                     </Space>
 
-                    <Button
+                    {isAdmin && <Button
                         type="primary"
                         size="large"
                         icon={<PlusOutlined />}
@@ -1660,7 +2133,7 @@ const DailyTasks = () => {
                         }}
                     >
                         Thêm công việc
-                    </Button>
+                    </Button>}
                 </div>
             </Card>
 
@@ -1959,7 +2432,7 @@ const DailyTasks = () => {
             )}
 
             {/* Tasks View */}
-            {activeTab === 'tasks' && (
+            {false && activeTab === 'tasks' && (
                 <>
                     {/* Kanban Board - SCROLL NGANG - TỐI ĐA 3 CỘT */}
                     <div style={{
@@ -2037,6 +2510,54 @@ const DailyTasks = () => {
                 </>
             )}
 
+            {activeTab === 'tasks' && (
+                <>
+                    <div style={{
+                        display: 'flex', gap: 6, padding: 8, marginBottom: 18, background: '#fff',
+                        border: '1px solid #dbe3ec', borderRadius: 8, overflowX: 'auto'
+                    }}>
+                        {[
+                            ['all', 'Tất cả'],
+                            ['action', 'Cần xử lý'],
+                            ['evidence', 'Cần bằng chứng'],
+                            ['overdue', 'Quá hạn'],
+                        ].map(([key, label]) => (
+                            <Button key={key} type="text" onClick={() => setBoardFilter(key as typeof boardFilter)} style={{
+                                height: 40, padding: '0 20px', borderRadius: 4, fontWeight: 650,
+                                color: boardFilter === key ? '#15803d' : '#475569',
+                                borderBottom: boardFilter === key ? '2px solid #16a34a' : '2px solid transparent',
+                            }}>{label}</Button>
+                        ))}
+                    </div>
+                    <div style={{ display: 'flex', gap: 16, overflowX: 'auto', paddingBottom: 16 }}>
+                        <OperationalColumn
+                            title="VIỆC HÔM NAY"
+                            count={dailyTasks.filter(task => !isOverdue(task)).length}
+                            color="#1677ff"
+                            icon={<FileTextOutlined />}
+                            tasks={dailyTasks.filter(task => !isOverdue(task))}
+                            lane="today"
+                        />
+                        <OperationalColumn
+                            title="CẦN NỘP BẰNG CHỨNG"
+                            count={-1}
+                            color="#f59e0b"
+                            icon={<UploadOutlined />}
+                            tasks={evidenceToSubmit}
+                            lane="evidence"
+                        />
+                        <OperationalColumn
+                            title="QUÁ HẠN / CẦN DUYỆT"
+                            count={dailyTasks.filter(task => isOverdue(task)).length}
+                            color="#dc2626"
+                            icon={<WarningOutlined />}
+                            tasks={dailyTasks.filter(task => isOverdue(task))}
+                            lane="review"
+                        />
+                    </div>
+                </>
+            )}
+
             {/* History Calendar View */}
             {activeTab === 'history' && (
                 <HistoryCalendar tasks={tasks} history={history} />
@@ -2078,6 +2599,41 @@ const DailyTasks = () => {
                     >
                         <Input placeholder="VD: Sàn TMDT" />
                     </Form.Item>
+
+                    {false && <><div style={{
+                        border: '1px solid #fed7aa',
+                        background: '#fff7ed',
+                        borderRadius: 8,
+                        padding: '12px 14px',
+                        marginBottom: 16,
+                    }}>
+                        <Form.Item name="evidenceRequired" noStyle>
+                            <Radio.Group disabled={!isAdmin} optionType="button" buttonStyle="solid">
+                                <Radio.Button value={false}>Việc thường</Radio.Button>
+                                <Radio.Button value={true}>Yêu cầu bằng chứng</Radio.Button>
+                            </Radio.Group>
+                        </Form.Item>
+                        <span style={{ marginLeft: 10, fontWeight: 600, color: '#9a3412' }}>
+                            Yêu cầu nộp bằng chứng trước khi xác nhận hoàn thành
+                        </span>
+                        {!isAdmin && <div style={{ marginTop: 6, fontSize: 12, color: '#9a3412' }}>Chỉ admin được thay đổi loại hoàn thành và mức phạt.</div>}
+                        <Form.Item noStyle shouldUpdate={(prev, current) => prev.evidenceRequired !== current.evidenceRequired}>
+                            {({ getFieldValue }) => getFieldValue('evidenceRequired') ? (
+                                <Form.Item name="penaltyAmount" label="Mức phạt khi trễ / không nộp (đ)" style={{ margin: '12px 0 0' }}>
+                                    <InputNumber
+                                        min={0}
+                                        precision={0}
+                                        controls={false}
+                                        suffix="đ"
+                                        disabled={!isAdmin}
+                                        style={{ width: '100%' }}
+                                        formatter={formatPenaltyAmount}
+                                        parser={(value) => String(value || '').replace(/[^\d]/g, '')}
+                                    />
+                                </Form.Item>
+                            ) : null}
+                        </Form.Item>
+                    </div></>}
 
                     {/* Hidden fields - auto-generated */}
                     <Form.Item name="icon" hidden>
@@ -2151,6 +2707,53 @@ const DailyTasks = () => {
                     </Form.Item>
 
                     {/* Người thực hiện - TÙY CHỌN (có thể nhận việc sau) */}
+                    <Form.Item
+                        name="evidenceRequired"
+                        label={<span style={{ fontSize: 14, fontWeight: 700 }}>Cách xác nhận hoàn thành</span>}
+                        rules={[{ required: true }]}
+                    >
+                        <Select
+                            size="large"
+                            disabled={!isAdmin}
+                            options={[
+                                { value: false, label: 'Việc thường - cần người xác nhận' },
+                                { value: true, label: 'Yêu cầu bằng chứng' },
+                            ]}
+                        />
+                    </Form.Item>
+                    {!isAdmin && <div style={{ marginTop: -12, marginBottom: 16, fontSize: 12, color: '#64748b' }}>Chỉ admin được đổi loại hoàn thành.</div>}
+                    <Form.Item noStyle shouldUpdate={(prev, current) => prev.evidenceRequired !== current.evidenceRequired}>
+                        {({ getFieldValue }) => getFieldValue('evidenceRequired') ? (
+                            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.25fr) minmax(104px, 0.75fr) minmax(120px, 0.9fr)', gap: 10, padding: 12, marginBottom: 16, border: '1px solid #fed7aa', borderRadius: 8, background: '#fffaf5' }}>
+                                <Form.Item name="evidenceMethod" label="Bằng chứng" style={{ marginBottom: 0 }}>
+                                    <Select size="middle" disabled={!isAdmin} options={[
+                                        { value: 'link', label: 'Chỉ link' },
+                                        { value: 'image', label: 'Chỉ ảnh' },
+                                        { value: 'both', label: 'Link và ảnh' },
+                                    ]} />
+                                </Form.Item>
+                                <Form.Item name="evidenceDeadlineTime" label="Hạn chót" rules={[{ required: true, message: 'Chọn giờ hạn chót.' }]} style={{ marginBottom: 0 }}>
+                                    <Select size="middle" disabled={!isAdmin} showSearch optionFilterProp="label" options={EVIDENCE_DEADLINE_OPTIONS} />
+                                </Form.Item>
+                                <Form.Item name="penaltyAmount" label="Phạt (đ)" style={{ marginBottom: 0 }}>
+                                    <InputNumber min={0} precision={0} controls={false} suffix="đ" disabled={!isAdmin} style={{ width: '100%' }} formatter={formatPenaltyAmount} parser={(value) => String(value || '').replace(/[^\d]/g, '')} />
+                                </Form.Item>
+                                <div style={{ gridColumn: '1 / -1', fontSize: 12, color: '#c2410c' }}>Ân hạn thêm 20 phút sau giờ hạn trước khi ghi nhận phạt.</div>
+                            </div>
+                        ) : null}
+                    </Form.Item>
+
+                    <Form.Item name="assigneeFixed" valuePropName="checked" style={{ marginBottom: 8 }}>
+                        <Checkbox onChange={(event) => {
+                            setAssigneeFixed(event.target.checked);
+                            if (!event.target.checked) taskForm.setFieldsValue({ assignee: '' });
+                        }}>
+                            Cố định người thực hiện
+                        </Checkbox>
+                    </Form.Item>
+                    <div style={{ marginBottom: 10, fontSize: 12, color: '#64748b' }}>
+                        {assigneeFixed ? 'Chỉ người được chọn có thể thực hiện công việc này.' : 'Để trống: nhân viên phù hợp có thể nhận việc sau.'}
+                    </div>
                     <Form.Item
                         name="assignee"
                         label={<span style={{ fontSize: 14, fontWeight: 600 }}>👤 Người thực hiện <span style={{ fontSize: 12, fontWeight: 400, color: '#999' }}>(có thể để trống — nhận việc sau)</span></span>}
@@ -2331,7 +2934,7 @@ const DailyTasks = () => {
                             <div><strong>ℹ️ Thông tin tự động:</strong></div>
                             <div style={{ marginTop: 4 }}>
                                 • 📋 Mức ưu tiên: <strong>Bình thường</strong><br />
-                                • ⏰ Thời hạn: <strong>20:00 hôm nay</strong><br />
+                                • ⏰ Thời hạn: <strong>{taskForm.getFieldValue('evidenceRequired') ? 'Theo hạn chót bằng chứng' : '20:00 hôm nay'}</strong><br />
                                 • 📂 Danh mục: <strong>{taskForm.getFieldValue('category') || 'Tự động'}</strong>
                             </div>
                         </div>
@@ -2375,10 +2978,41 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
 
     const getHistoryForDate = (date: dayjs.Dayjs) => {
         const dateStr = date.format('YYYY-MM-DD');
-        return history.filter(h => {
+        const entriesOnDate = history.filter(h => {
             if (!h.timestamp) return false;
             return dayjs(h.timestamp).format('YYYY-MM-DD') === dateStr;
         });
+
+        // Older data may contain both the confirmation event and the next-day
+        // reset event for one completion. Keep the user confirmation only.
+        const preferredCompletion = new Map<string, any>();
+        entriesOnDate.forEach(entry => {
+            if (entry.action !== 'completed' && entry.action !== 'daily_reset') return;
+
+            const taskKey = entry.taskId ? String(entry.taskId) : String(entry.taskTitle || '').trim().toLowerCase();
+            if (!taskKey) return;
+
+            const existing = preferredCompletion.get(taskKey);
+            if (!existing || (existing.action === 'daily_reset' && entry.action === 'completed')) {
+                preferredCompletion.set(taskKey, entry);
+            }
+        });
+
+        return entriesOnDate.filter(entry => {
+            if (entry.action !== 'completed' && entry.action !== 'daily_reset') return true;
+            const taskKey = entry.taskId ? String(entry.taskId) : String(entry.taskTitle || '').trim().toLowerCase();
+            return taskKey ? preferredCompletion.get(taskKey) === entry : true;
+        });
+    };
+
+    const getHistoryDescription = (entry: any) => {
+        if (entry.action === 'completed' || entry.action === 'daily_reset') {
+            return `✅ Đã hoàn thành: "${entry.taskTitle}"`;
+        }
+        if (entry.action === 'pending') {
+            return `↩️ Đã mở lại: "${entry.taskTitle}"`;
+        }
+        return entry.description;
     };
 
     // Tạo danh sách ngày trong tháng
@@ -3155,7 +3789,7 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                                                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
                                                             <div style={{ flex: 1 }}>
                                                                 <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6, color: '#2c3e50' }}>
-                                                                    {h.description}
+                                                                    {getHistoryDescription(h)}
                                                                 </div>
                                                                 <Space size={8} wrap>
                                                                     <span style={{ fontSize: 12, color: '#666', fontWeight: 500 }}>

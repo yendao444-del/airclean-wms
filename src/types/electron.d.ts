@@ -162,6 +162,11 @@ export interface ElectronAPI {
         create: (taskData: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, updates: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         updateStatus: (id: number, status: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+        uploadEvidenceImage: (payload: { taskId: number; mimeType: string; data: string; hash: string }) => Promise<{ success: boolean; data?: { storagePath: string }; error?: string }>;
+        submitEvidence: (payload: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        completeRegularTask: (taskId: number, payload: { verifier: string; assignee?: string }) => Promise<{ success: boolean; data?: any; error?: string }>;
+        getEvidenceImageUrl: (taskId: number) => Promise<{ success: boolean; data?: { url: string }; error?: string }>;
+        listEvidencePenalties: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         getStats: (filters?: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         resetDaily: () => Promise<{ success: boolean; data?: { reset: boolean; resetCount: number; message: string }; error?: string }>;

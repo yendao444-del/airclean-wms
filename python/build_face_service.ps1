@@ -22,9 +22,11 @@ function Resolve-BuildPython {
         $configPython = (Get-Content $ConfigPath -TotalCount 1).Trim()
         if ($configPython) {
             if (-not (Test-Path $configPython)) {
-                throw "Configured build Python does not exist: $configPython"
+                Write-Warning "Configured build Python does not exist and will be ignored: $configPython"
             }
-            return (Resolve-Path $configPython).Path
+            else {
+                return (Resolve-Path $configPython).Path
+            }
         }
     }
 

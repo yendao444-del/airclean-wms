@@ -92,6 +92,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
         create: (taskData) => ipcRenderer.invoke('dailyTasks:create', taskData),
         update: (id, updates) => ipcRenderer.invoke('dailyTasks:update', id, updates),
         updateStatus: (id, status) => ipcRenderer.invoke('dailyTasks:updateStatus', id, status),
+        uploadEvidenceImage: (payload) => ipcRenderer.invoke('dailyTasks:uploadEvidenceImage', payload),
+        submitEvidence: (payload) => ipcRenderer.invoke('dailyTasks:submitEvidence', payload),
+        completeRegularTask: (taskId, payload) => ipcRenderer.invoke('dailyTasks:completeRegularTask', taskId, payload),
+        getEvidenceImageUrl: (taskId) => ipcRenderer.invoke('dailyTasks:getEvidenceImageUrl', taskId),
+        listEvidencePenalties: () => ipcRenderer.invoke('dailyTasks:listEvidencePenalties'),
         delete: (id) => ipcRenderer.invoke('dailyTasks:delete', id),
         getStats: (filters) => ipcRenderer.invoke('dailyTasks:stats', filters),
         resetDaily: () => ipcRenderer.invoke('dailyTasks:resetDaily'),
@@ -326,6 +331,21 @@ window.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // rc-trigger may briefly paint a new portal at (0, 0) before its first
+    // alignment pass. Prime the expected position on mousedown so that frame
+    // is never visible, then let the normal alignment/fallback refine it.
+    function primePopupPosition() {
+        if (!triggerSnapshot) return;
+
+        dynamicStyle.textContent = `${POPUP_SEL} {
+  top: ${Math.round(triggerSnapshot.bottom + 4)}px !important;
+  left: ${Math.round(triggerSnapshot.left)}px !important;
+  right: auto !important;
+  bottom: auto !important;
+  z-index: 99999 !important;
+}`;
+    }
+
     // Fix popup bị off-screen bằng CSS rule
     function fixPopup(popup) {
         if (!triggerSnapshot) return;
@@ -386,7 +406,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
             // On-screen → OK, skip
             if (rect.left > -100 && rect.top > -100 &&
-                rect.left < winW + 100 && rect.top < winH + 100) return;
+                rect.right < winW + 100 && rect.bottom < winH + 100) return;
 
             // Off-screen → fix nó
             console.log('[preload-fix] Off-screen popup detected at:',
@@ -450,6 +470,9 @@ window.addEventListener('DOMContentLoaded', () => {
                 };
                 console.log('[preload-fix] Trigger at:', Math.round(r.left), Math.round(r.top),
                     Math.round(r.width) + 'x' + Math.round(r.height));
+
+                // Prevent the first portal frame from flashing at the top-left.
+                primePopupPosition();
 
                 // Schedule initial fix attempts
                 [0, 16, 50, 100, 200].forEach(d =>

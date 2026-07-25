@@ -629,9 +629,12 @@ const matchPacker = (packerStr: any, emp: any) => {
 
 const matchTaskAssigneeToEmployee = (assigneeStr: any, emp: any) => {
     if (!assigneeStr || typeof assigneeStr !== 'string') return false;
-    const assignee = normalizeAttendanceText(assigneeStr);
-    const username = normalizeAttendanceText(emp.username || '');
-    const name = normalizeAttendanceText(emp.name || '');
+    // Tasks may store a login username ("nguyenvankhanh") while the attendance
+    // record uses a display name ("Nguyen Van Khanh"). Compare compact keys too.
+    const toPersonKey = (value: any) => normalizeAttendanceText(String(value || '')).replace(/[^a-z0-9]/g, '');
+    const assignee = toPersonKey(assigneeStr);
+    const username = toPersonKey(emp.username || '');
+    const name = toPersonKey(emp.name || '');
     return !!(
         (username && (assignee === username || assignee.includes(username) || username.includes(assignee))) ||
         (name && (assignee === name || assignee.includes(name) || name.includes(assignee)))
@@ -2896,12 +2899,14 @@ export default function Attendance() {
     } | null>(null);
     const [purchaseVatTracking, setPurchaseVatTracking] = useState<PurchaseVatTracking[]>([]);
     const [dailyTaskTracking, setDailyTaskTracking] = useState<any[]>([]);
+    const [evidencePenaltyRecords, setEvidencePenaltyRecords] = useState<any[]>([]);
     const [dailyTaskHistory, setDailyTaskHistory] = useState<any[]>([]);
     const [stockCheckSessions, setStockCheckSessions] = useState<any[]>([]);
     const [stockBalanceRecords, setStockBalanceRecords] = useState<any[]>([]);
 
     const [isDbLoaded, setIsDbLoaded] = useState(false);
     const [systemUsernames, setSystemUsernames] = useState<string[]>([]);
+    const [systemUsers, setSystemUsers] = useState<any[]>([]);
 
     // 1. Tải dữ liệu từ DB lúc mở component
     useEffect(() => {
@@ -2914,6 +2919,7 @@ export default function Attendance() {
                 try {
                     const usersRes = await api.users.getAll();
                     if (usersRes.success && usersRes.data) {
+                        setSystemUsers(usersRes.data);
                         sysUsernames = usersRes.data
                             .map((u: any) => u.username)
                             .filter((u: string) => u && u.toLowerCase() !== 'admin');
@@ -3289,9 +3295,10 @@ export default function Attendance() {
     const loadDailyTaskTracking = async () => {
         try {
             const api = (window as any).electronAPI;
-            const [result, historyResult] = await Promise.all([
+            const [result, historyResult, penaltyResult] = await Promise.all([
                 api.dailyTasks.list({}),
                 api.appConfig.get('dailyTasksHistory'),
+                api.dailyTasks.listEvidencePenalties(),
             ]);
             if (result?.success && Array.isArray(result.data)) {
                 setDailyTaskTracking(result.data);
@@ -3299,6 +3306,7 @@ export default function Attendance() {
             if (historyResult?.success && Array.isArray(historyResult.data)) {
                 setDailyTaskHistory(historyResult.data);
             }
+            setEvidencePenaltyRecords(penaltyResult?.success && Array.isArray(penaltyResult.data) ? penaltyResult.data : []);
             try {
                 const balanceResult = await api.stockBalance?.getAll?.({ limit: 500 });
                 if (balanceResult?.success && Array.isArray(balanceResult.data)) {
@@ -3353,6 +3361,8 @@ export default function Attendance() {
         loadPackingOrders(overviewDateRange[0].startOf('day').toISOString());
         loadPurchaseVatTracking(overviewDateRange[0].subtract(7, 'day').startOf('day').toISOString());
         loadDailyTaskTracking();
+        const taskTrackingTimer = window.setInterval(loadDailyTaskTracking, 60 * 1000);
+        return () => window.clearInterval(taskTrackingTimer);
     }, [overviewDateRange]);
 
     // Gộp finesData gốc + extraFines
@@ -3419,15 +3429,47 @@ export default function Attendance() {
         });
     }, [employees, dailyTaskTracking, overviewDateRange]);
 
+    const autoEvidenceOverdueFines = useMemo(() => {
+        const officialEmployees = employees.filter(emp => emp.type === 'Official');
+        return evidencePenaltyRecords.flatMap((penalty: any) => {
+            const penaltyAt = dayjs(penalty.penaltyAt);
+            if (!penaltyAt.isValid() || !inOverviewRange(penaltyAt.toISOString())) return [];
+            // assignee of a fixed task is the username selected from Settings > Administration.
+            // Resolve that account first, then map its full name to the attendance employee record.
+            const taskUsername = normalizeAttendanceText(penalty.assignee);
+            const account = systemUsers.find((item: any) =>
+                normalizeAttendanceText(item?.username) === taskUsername
+            );
+            const employee = officialEmployees.find(emp =>
+                normalizeAttendanceText(emp.username) === taskUsername
+                || (account && matchTaskAssigneeToEmployee(account.fullName, emp))
+            );
+            if (!employee) return [];
+            return [{
+                id: penalty.id,
+                empId: employee.id,
+                type: penalty.type || 'Không nộp bằng chứng đúng hạn',
+                detail: penalty.detail || 'Quá hạn nộp bằng chứng',
+                amount: Number(penalty.amount) || 0,
+                date: penaltyAt.toISOString(),
+                source: 'daily_task_evidence_overdue' as any,
+            }];
+        });
+    }, [employees, evidencePenaltyRecords, overviewDateRange, systemUsers]);
+
     const autoDailyReportMissingFines = useMemo(() => {
         const officialEmployees = employees.filter(emp => emp.type === 'Official');
         if (officialEmployees.length === 0) return [] as FineRecord[];
 
-        const historyDates = new Set(
-            dailyTaskHistory
-                .map((h: any) => h?.timestamp ? dayjs(h.timestamp).format('YYYY-MM-DD') : '')
-                .filter(Boolean)
-        );
+        const historyDatesByEmployee = new Map<number, Set<string>>();
+        dailyTaskHistory.forEach((entry: any) => {
+            if (!entry?.timestamp || !entry?.assignee) return;
+            const employee = officialEmployees.find(emp => matchTaskAssigneeToEmployee(entry.assignee, emp));
+            if (!employee) return;
+            const dateKey = dayjs(entry.timestamp).format('YYYY-MM-DD');
+            if (!historyDatesByEmployee.has(employee.id)) historyDatesByEmployee.set(employee.id, new Set());
+            historyDatesByEmployee.get(employee.id)?.add(dateKey);
+        });
 
         const endLimit = dayjs().subtract(1, 'day').endOf('day');
         const rangeStart = overviewDateRange[0].startOf('day');
@@ -3442,9 +3484,8 @@ export default function Attendance() {
             if (!isPastDailyReportWorkingDay(date)) continue;
 
             const dateKey = date.format('YYYY-MM-DD');
-            if (historyDates.has(dateKey)) continue;
-
             officialEmployees.forEach(emp => {
+                if (historyDatesByEmployee.get(emp.id)?.has(dateKey)) return;
                 fines.push({
                     empId: emp.id,
                     type: 'Thiếu công việc hằng ngày',
@@ -3535,10 +3576,10 @@ export default function Attendance() {
     }, [fineOverrides]);
 
     const allFines = useMemo(
-        () => [...finesData, ...extraFines, ...autoVatOverdueFines, ...autoDeadlineOverdueFines, ...autoDailyReportMissingFines, ...autoStockCheckMissingFines]
+        () => [...finesData, ...extraFines, ...autoVatOverdueFines, ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoDailyReportMissingFines, ...autoStockCheckMissingFines]
             .map(applyFineOverride)
             .filter(f => !f.disabled),
-        [extraFines, autoVatOverdueFines, autoDeadlineOverdueFines, autoDailyReportMissingFines, autoStockCheckMissingFines, applyFineOverride]
+        [extraFines, autoVatOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoDailyReportMissingFines, autoStockCheckMissingFines, applyFineOverride]
     );
 
     // Helper: lọc theo overviewDateRange
@@ -4955,6 +4996,10 @@ export default function Attendance() {
             ...autoDeadlineOverdueFines
                 .filter(f => inOverviewRange(f.date))
                 .map((f, i) => systemFineRow(f, `deadline-${i}`))
+                .filter(Boolean),
+            ...autoEvidenceOverdueFines
+                .filter(f => inOverviewRange(f.date))
+                .map((f, i) => systemFineRow(f, `evidence-${i}`))
                 .filter(Boolean),
             ...autoDailyReportMissingFines
                 .filter(f => inOverviewRange(f.date))

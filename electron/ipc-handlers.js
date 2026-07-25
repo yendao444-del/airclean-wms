@@ -1,5 +1,6 @@
 const { ipcMain, dialog, shell, app } = require('electron');
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 // ✅ PRODUCTION CONFIG - Không cần .env nữa
 const config = require('./config');
@@ -9,14 +10,24 @@ const offlineQueue = require('./offline-queue');
 try { offlineQueue.init(app.getPath('userData')); } catch (e) { console.error('[OfflineQueue] Init failed:', e.message); }
 
 // Set environment variables từ config
-process.env.DATABASE_URL = config.DATABASE_URL;
-process.env.DIRECT_URL = config.DIRECT_URL;
+const databaseUrl = process.env.DATABASE_URL || config.DATABASE_URL;
+const directDatabaseUrl = process.env.DIRECT_URL || config.DIRECT_URL || databaseUrl;
+process.env.DATABASE_URL = databaseUrl;
+process.env.DIRECT_URL = directDatabaseUrl;
 
 const { PrismaClient } = require('@prisma/client');
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
+
+const evidenceStorage = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+        auth: { autoRefreshToken: false, persistSession: false }
+    })
+    : null;
+const EVIDENCE_BUCKET = process.env.SUPABASE_EVIDENCE_BUCKET || 'daily-task-evidence';
 
 // ========================================
 // 🔒 STOCK MUTEX — Serialize stock operations
@@ -432,7 +443,7 @@ function getPrismaDirectTx() {
         console.time('âš¡ lazy-init prismaDirectTx');
         prismaDirectTx = new PrismaClient({
             log: ['error', 'warn'],
-            datasources: { db: { url: config.DIRECT_URL } }
+            datasources: { db: { url: directDatabaseUrl } }
         });
         prismaDirectTx.$connect()
             .then(() => console.log('✅ Connected Prisma Direct (for transactions)'))
@@ -453,7 +464,7 @@ try {
         log: ['error', 'warn'],
         datasources: {
             db: {
-                url: config.DATABASE_URL
+                url: databaseUrl
             }
         }
     });
@@ -4957,9 +4968,298 @@ ipcMain.handle('system:deleteBackup', async (event, backupPath) => {
 // DAILY TASKS HANDLERS
 // ========================================
 
+const EVIDENCE_GRACE_MINUTES = 20;
+const TASK_PENALTY_KEY_PREFIX = 'dailyTaskEvidencePenalty:';
+
+function parseTaskAttachments(attachments) {
+    if (!attachments) return {};
+    try {
+        const parsed = typeof attachments === 'string' ? JSON.parse(attachments) : attachments;
+        return Array.isArray(parsed) ? { files: parsed } : parsed || {};
+    } catch {
+        return {};
+    }
+}
+
+function normalizeActorName(value) {
+    return String(value || '').trim().toLocaleLowerCase('vi-VN');
+}
+
+async function getCurrentActor() {
+    requireRole();
+    const user = await prisma.user.findUnique({ where: { id: currentSession.id } });
+    if (!user || user.status !== 'active') throw new Error('Phiên đăng nhập không hợp lệ.');
+    return { id: user.id, username: user.username, fullName: user.fullName || user.username, role: user.role };
+}
+
+function isFixedAssignee(attachments) {
+    return Boolean(attachments?.assignment?.fixedAssignee);
+}
+
+function actorOwnsTask(actor, task) {
+    const assignee = normalizeActorName(task.assignee);
+    return assignee && [actor.username, actor.fullName].some(name => normalizeActorName(name) === assignee);
+}
+
+function isValidEvidenceImage(buffer, mimeType) {
+    if (mimeType === 'image/jpeg') return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    if (mimeType === 'image/png') return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    if (mimeType === 'image/webp') return buffer.length >= 12 && buffer.subarray(0, 4).toString() === 'RIFF' && buffer.subarray(8, 12).toString() === 'WEBP';
+    return false;
+}
+
+function getEvidenceUrlFingerprint(value) {
+    const url = new URL(String(value));
+    url.hash = '';
+    const host = url.hostname.toLowerCase();
+    const driveId = host.endsWith('drive.google.com')
+        ? (url.pathname.match(/\/d\/([^/]+)/)?.[1] || url.searchParams.get('id'))
+        : null;
+    if (driveId) return `drive:${driveId}`;
+
+    // Evidence links are normally posts, files, or product pages. Ignore query
+    // strings so tracking parameters cannot make the same proof appear unique.
+    const pathname = url.pathname.replace(/\/+$/, '') || '/';
+    return `${url.protocol}//${host}${pathname}`;
+}
+
+async function createEvidencePenaltyIfDue(task, now = new Date()) {
+    const attachments = parseTaskAttachments(task.attachments);
+    const evidence = attachments.evidence || {};
+    if (!evidence.required || task.status === 'completed') return null;
+    if (!task.assignee || !isFixedAssignee(attachments)) return null;
+
+    const dueAt = new Date(task.dueDate);
+    const penaltyAt = new Date(dueAt.getTime() + EVIDENCE_GRACE_MINUTES * 60 * 1000);
+    if (now < penaltyAt) return null;
+    const submittedAt = evidence.submittedAt ? new Date(evidence.submittedAt) : null;
+    // Compatibility with tasks submitted by older clients that left the task
+    // pending: proof submitted within the grace period must not be fined.
+    if (submittedAt && !Number.isNaN(submittedAt.getTime()) && submittedAt <= penaltyAt) return null;
+
+    const dueKey = dueAt.toISOString();
+    const key = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}`;
+    const penalty = {
+        id: key,
+        taskId: task.id,
+        assignee: task.assignee,
+        amount: Number(evidence.penaltyAmount) || 30000,
+        dueAt: dueAt.toISOString(),
+        penaltyAt: penaltyAt.toISOString(),
+        type: 'Không nộp bằng chứng đúng hạn',
+        detail: `${task.title} - quá hạn ${EVIDENCE_GRACE_MINUTES} phút chưa nộp bằng chứng`,
+        source: 'daily_task_evidence_overdue',
+    };
+    try {
+        await prisma.appConfig.create({ data: { key, value: JSON.stringify(penalty) } });
+        void logActivity({ module: 'daily_tasks', action: 'PENALTY', recordId: task.id, recordName: task.title, description: `Tự động phạt ${task.assignee}: ${penalty.amount}đ vì chưa nộp bằng chứng sau ${EVIDENCE_GRACE_MINUTES} phút`, severity: 'WARNING' });
+        return penalty;
+    } catch (error) {
+        if (error.code === 'P2002') return null;
+        throw error;
+    }
+}
+
+async function reconcileEvidencePenalties() {
+    const tasks = await prisma.dailyTask.findMany({ where: { status: { not: 'completed' } } });
+    const created = [];
+    for (const task of tasks) {
+        const penalty = await createEvidencePenaltyIfDue(task);
+        if (penalty) created.push(penalty);
+    }
+    return created;
+}
+
+async function cleanupExpiredEvidenceImages() {
+    if (!evidenceStorage) return;
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const tasks = await prisma.dailyTask.findMany({ where: { attachments: { not: null } } });
+    for (const task of tasks) {
+        const attachments = parseTaskAttachments(task.attachments);
+        const evidence = attachments?.evidence;
+        const submittedAt = evidence?.submittedAt ? new Date(evidence.submittedAt).getTime() : NaN;
+        if (!evidence?.submittedImage?.storagePath || !Number.isFinite(submittedAt) || submittedAt > cutoff) continue;
+
+        await evidenceStorage.storage.from(EVIDENCE_BUCKET).remove([evidence.submittedImage.storagePath]).catch(() => {});
+        // Keep the SHA-256 registry after removing the file. The image itself
+        // expires after seven days, but its fingerprint must remain to prevent
+        // the same proof from being uploaded again later.
+        evidence.submittedImage = undefined;
+        evidence.imageExpiredAt = new Date().toISOString();
+        await prisma.dailyTask.update({ where: { id: task.id }, data: { attachments: JSON.stringify(attachments) } });
+    }
+}
+
+// The desktop process stays alive while the app is open, so reconcile every
+// minute. Opening either Daily Tasks or Attendance also performs a catch-up.
+setTimeout(() => void reconcileEvidencePenalties().catch(error => console.error('Evidence penalty startup scan error:', error)), 30 * 1000);
+setInterval(() => void reconcileEvidencePenalties().catch(error => console.error('Evidence penalty scan error:', error)), 60 * 1000);
+setTimeout(() => void cleanupExpiredEvidenceImages().catch(error => console.error('Evidence cleanup startup error:', error)), 45 * 1000);
+setInterval(() => void cleanupExpiredEvidenceImages().catch(error => console.error('Evidence cleanup error:', error)), 24 * 60 * 60 * 1000);
+
 // Get all tasks with filters
+ipcMain.handle('dailyTasks:uploadEvidenceImage', async (_event, payload) => {
+    try {
+        requireRole('admin');
+        if (!evidenceStorage) throw new Error('Supabase Storage chưa được cấu hình.');
+        const { taskId, mimeType, data, hash } = payload || {};
+        if (!taskId || !mimeType || !data || !hash) throw new Error('Dữ liệu ảnh bằng chứng không hợp lệ.');
+        const base64 = String(data).replace(/^data:[^;]+;base64,/, '');
+        const buffer = Buffer.from(base64, 'base64');
+        if (buffer.length > 200 * 1024) throw new Error('Ảnh sau nén không được vượt quá 200 KB.');
+        const extension = mimeType === 'image/png' ? 'png' : mimeType === 'image/webp' ? 'webp' : 'jpg';
+        const storagePath = `daily-tasks/${taskId}/${new Date().toISOString().slice(0, 10)}/${hash}.${extension}`;
+        const { error } = await evidenceStorage.storage.from(EVIDENCE_BUCKET).upload(storagePath, buffer, {
+            contentType: mimeType, upsert: false,
+        });
+        if (error) throw error;
+        return { success: true, data: { storagePath } };
+    } catch (error) {
+        console.error('Evidence image upload error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
+    let uploadedPath = null;
+    let imageRegistryKey = null;
+    try {
+        if (!evidenceStorage) throw new Error('Supabase Storage chưa được cấu hình.');
+        const actor = await getCurrentActor();
+        const task = await prisma.dailyTask.findUnique({ where: { id: Number(payload?.taskId) } });
+        if (!task || task.status === 'completed') throw new Error('Công việc không còn ở trạng thái chờ nộp bằng chứng.');
+        const attachments = task.attachments ? JSON.parse(task.attachments) : {};
+        const required = attachments?.evidence?.required;
+        const method = attachments?.evidence?.method || 'link';
+        if (!required) throw new Error('Công việc này không yêu cầu bằng chứng.');
+        if (!task.assignee || !isFixedAssignee(attachments)) throw new Error('Công việc cần bằng chứng phải được giao cố định cho một nhân viên trước khi nộp.');
+        if (actor.role !== 'admin' && !actorOwnsTask(actor, task)) throw new Error('Bạn chỉ có thể nộp bằng chứng cho công việc được giao cho mình.');
+        const needsLink = method === 'link' || method === 'both';
+        const needsImage = method === 'image' || method === 'both';
+        let normalizedUrl = null;
+        if (needsLink) {
+            try {
+                const url = new URL(String(payload?.submittedUrl || '').trim());
+                if (!['http:', 'https:'].includes(url.protocol)) throw new Error();
+                url.hash = ''; normalizedUrl = url.toString();
+            } catch { throw new Error('Link bằng chứng không hợp lệ.'); }
+            const evidenceFingerprint = getEvidenceUrlFingerprint(normalizedUrl);
+            const existingTasks = await prisma.dailyTask.findMany({ where: { attachments: { not: null } } });
+            const duplicate = existingTasks.find(other => {
+                if (other.id === task.id) return false;
+                const otherUrl = parseTaskAttachments(other.attachments)?.evidence?.submittedUrl;
+                try { return otherUrl && getEvidenceUrlFingerprint(otherUrl) === evidenceFingerprint; } catch { return false; }
+            });
+            if (duplicate) throw new Error(`Link này đã được dùng cho công việc "${duplicate.title}".`);
+        }
+        let submittedImage = null;
+        if (needsImage) {
+            const image = payload?.image;
+            if (!image?.data || !['image/jpeg', 'image/png', 'image/webp'].includes(image.mimeType)) throw new Error('Ảnh bằng chứng không hợp lệ.');
+            const buffer = Buffer.from(String(image.data).replace(/^data:[^;]+;base64,/, ''), 'base64');
+            if (!buffer.length || buffer.length > 200 * 1024) throw new Error('Ảnh sau nén phải không vượt quá 200 KB.');
+            if (!isValidEvidenceImage(buffer, image.mimeType)) throw new Error('Dữ liệu tải lên không phải ảnh hợp lệ.');
+            const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+            const registryKey = `dailyEvidenceHash:${hash}`;
+            imageRegistryKey = registryKey;
+            try {
+                await prisma.appConfig.create({ data: { key: registryKey, value: JSON.stringify({ taskId: task.id, createdAt: new Date().toISOString() }) } });
+            } catch (error) {
+                if (error.code === 'P2002') throw new Error('Ảnh này đã được dùng làm bằng chứng cho công việc khác.');
+                throw error;
+            }
+            const ext = image.mimeType === 'image/png' ? 'png' : image.mimeType === 'image/webp' ? 'webp' : 'jpg';
+            uploadedPath = `daily-tasks/${task.id}/${new Date().toISOString().slice(0, 10)}/${hash}.${ext}`;
+            const { error } = await evidenceStorage.storage.from(EVIDENCE_BUCKET).upload(uploadedPath, buffer, { contentType: image.mimeType, upsert: false });
+            if (error) throw error;
+            submittedImage = { name: image.name || `evidence.${ext}`, mimeType: image.mimeType, storagePath: uploadedPath, hash };
+        }
+        // Reconcile once more immediately before completion. This closes the
+        // gap where the desktop app was offline when the 20-minute grace ended.
+        await createEvidencePenaltyIfDue(task);
+        const evidence = { ...attachments.evidence, status: 'submitted', submittedUrl: normalizedUrl, submittedImage, submittedAt: new Date().toISOString(), submittedBy: actor.fullName };
+        await prisma.dailyTask.update({ where: { id: task.id }, data: { attachments: JSON.stringify({ ...attachments, evidence }), status: 'completed', completedAt: new Date() } });
+        return { success: true, data: { evidence } };
+    } catch (error) {
+        if (uploadedPath) await evidenceStorage?.storage.from(EVIDENCE_BUCKET).remove([uploadedPath]).catch(() => {});
+        if (imageRegistryKey) await prisma.appConfig.delete({ where: { key: imageRegistryKey } }).catch(() => {});
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('dailyTasks:completeRegularTask', async (_event, taskId, payload = {}) => {
+    try {
+        const actor = await getCurrentActor();
+        const task = await prisma.dailyTask.findUnique({ where: { id: Number(taskId) } });
+        if (!task || task.status === 'completed') throw new Error('Công việc không còn ở trạng thái chờ hoàn thành.');
+        const attachments = parseTaskAttachments(task.attachments);
+        if (attachments?.evidence?.required) throw new Error('Công việc này phải nộp bằng chứng, không thể tick hoàn thành trực tiếp.');
+        if (isFixedAssignee(attachments) && !actorOwnsTask(actor, task) && actor.role !== 'admin') {
+            throw new Error('Bạn chỉ có thể hoàn thành công việc được giao cố định cho mình.');
+        }
+        if (task.assignee && !actorOwnsTask(actor, task) && actor.role !== 'admin') {
+            throw new Error('Công việc này đã được người khác nhận.');
+        }
+
+        const verifierName = String(payload.verifier || '').trim();
+        const activeUsers = await prisma.user.findMany({ where: { status: 'active' } });
+        const verifier = activeUsers.find(user => {
+            const key = normalizeActorName(verifierName);
+            return key && (normalizeActorName(user.username) === key || normalizeActorName(user.fullName) === key);
+        });
+        if (!verifier || !['admin', 'manager'].includes(verifier.role)) throw new Error('Người xác nhận phải là tài khoản quản lý hoặc admin đang hoạt động.');
+        if (verifier.id === actor.id) throw new Error('Người thực hiện không thể tự xác nhận công việc của mình.');
+
+        const assignee = actor.role === 'admin' && payload.assignee ? String(payload.assignee) : (task.assignee || actor.fullName);
+        const updated = await prisma.dailyTask.update({
+            where: { id: task.id },
+            data: { status: 'completed', completedAt: new Date(), assignee, verifier: verifier.fullName || verifier.username },
+        });
+        return { success: true, data: updated };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('dailyTasks:getEvidenceImageUrl', async (_event, taskId) => {
+    try {
+        const actor = await getCurrentActor();
+        if (!evidenceStorage) throw new Error('Supabase Storage chưa được cấu hình.');
+        const task = await prisma.dailyTask.findUnique({ where: { id: Number(taskId) } });
+        if (!task) throw new Error('Không tìm thấy công việc.');
+        if (actor.role !== 'admin' && !actorOwnsTask(actor, task)) throw new Error('Bạn không có quyền xem bằng chứng này.');
+        const attachments = task?.attachments ? JSON.parse(task.attachments) : {};
+        const storagePath = attachments?.evidence?.submittedImage?.storagePath;
+        if (!storagePath) throw new Error('Không tìm thấy ảnh bằng chứng.');
+        const { data, error } = await evidenceStorage.storage.from(EVIDENCE_BUCKET).createSignedUrl(storagePath, 300);
+        if (error) throw error;
+        return { success: true, data: { url: data.signedUrl } };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('dailyTasks:listEvidencePenalties', async () => {
+    try {
+        requireRole();
+        await reconcileEvidencePenalties();
+        const rows = await prisma.appConfig.findMany({ where: { key: { startsWith: TASK_PENALTY_KEY_PREFIX } } });
+        return {
+            success: true,
+            data: rows.map(row => {
+                try { return JSON.parse(row.value); } catch { return null; }
+            }).filter(Boolean),
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
 ipcMain.handle('dailyTasks:list', async (event, filters = {}) => {
     try {
+        requireRole();
+        await reconcileEvidencePenalties();
+        void cleanupExpiredEvidenceImages().catch(error => console.error('Evidence cleanup error:', error));
         const { status, assignee, startDate, endDate, priority } = filters;
 
         const where = {};
@@ -5000,6 +5300,11 @@ ipcMain.handle('dailyTasks:list', async (event, filters = {}) => {
 // Create new task
 ipcMain.handle('dailyTasks:create', async (event, taskData) => {
     try {
+        requireRole('admin');
+        const attachments = parseTaskAttachments(taskData.attachments);
+        if (attachments?.evidence?.required && (!taskData.assignee || !isFixedAssignee(attachments))) {
+            throw new Error('Công việc yêu cầu bằng chứng phải có người thực hiện cố định.');
+        }
         const task = await prisma.dailyTask.create({
             data: {
                 ...taskData,
@@ -5020,7 +5325,17 @@ ipcMain.handle('dailyTasks:create', async (event, taskData) => {
 // Update task
 ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
     try {
+        requireRole('admin');
         const updateData = { ...updates };
+        const existingTask = await prisma.dailyTask.findUnique({ where: { id: Number(id) } });
+        if (!existingTask) throw new Error('KhÃ´ng tÃ¬m tháº¥y cÃ´ng viá»‡c.');
+        const attachments = updates.attachments !== undefined
+            ? parseTaskAttachments(updates.attachments)
+            : parseTaskAttachments(existingTask.attachments);
+        const assignee = updates.assignee !== undefined ? updates.assignee : existingTask.assignee;
+        if (attachments?.evidence?.required && (!assignee || !isFixedAssignee(attachments))) {
+            throw new Error('Công việc yêu cầu bằng chứng phải có người thực hiện cố định.');
+        }
 
         if (updates.dueDate) {
             updateData.dueDate = new Date(updates.dueDate);
@@ -5057,6 +5372,7 @@ ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
 // Update task status
 ipcMain.handle('dailyTasks:updateStatus', async (event, id, status) => {
     try {
+        requireRole('admin');
         const updateData = { status };
 
         // Auto set completedAt when status is completed
@@ -5081,9 +5397,13 @@ ipcMain.handle('dailyTasks:updateStatus', async (event, id, status) => {
 // Delete task
 ipcMain.handle('dailyTasks:delete', async (event, id) => {
     try {
-        await prisma.dailyTask.delete({
-            where: { id }
-        });
+        requireRole('admin');
+        const taskId = Number(id);
+        await prisma.$transaction([
+            // System fines are derived from this task; manual fines are not affected.
+            prisma.appConfig.deleteMany({ where: { key: { startsWith: `${TASK_PENALTY_KEY_PREFIX}${taskId}:` } } }),
+            prisma.dailyTask.delete({ where: { id: taskId } }),
+        ]);
 
         void logActivity({ module: 'system', action: 'DELETE', description: `Xóa công việc #${id}` });
         return { success: true };
@@ -5096,6 +5416,7 @@ ipcMain.handle('dailyTasks:delete', async (event, id) => {
 // Get statistics
 ipcMain.handle('dailyTasks:stats', async (event, filters = {}) => {
     try {
+        requireRole();
         const { assignee, startDate, endDate } = filters;
 
         const where = {};
@@ -5188,17 +5509,34 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
             });
             const existingHistory = historyConfig ? JSON.parse(historyConfig.value) : [];
 
-            // Thêm entry cho mỗi task đã hoàn thành
-            const newEntries = completedTasks.map(task => ({
-                taskId: task.id,
-                taskTitle: task.title,
-                category: task.category,
-                assignee: task.assignee,
-                verifier: task.verifier || '',
-                action: 'daily_reset',
-                timestamp: task.completedAt ? task.completedAt.toISOString() : lastResetDate || now.toISOString(),
-                description: `✅ Đã hoàn thành: "${task.title}" (tự động reset sang ngày ${today})`
-            }));
+            const getHistoryDateKey = (value) => {
+                const date = new Date(value);
+                if (Number.isNaN(date.getTime())) return '';
+                return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+            };
+            const completionKeys = new Set(
+                existingHistory
+                    .filter(entry => entry.action === 'completed' || entry.action === 'daily_reset')
+                    .map(entry => `${entry.taskId || entry.taskTitle}:${getHistoryDateKey(entry.timestamp)}`)
+            );
+
+            // Only add a reset entry when the original confirmation was not saved.
+            const newEntries = completedTasks.flatMap(task => {
+                const timestamp = task.completedAt ? task.completedAt.toISOString() : lastResetDate || now.toISOString();
+                const completionKey = `${task.id}:${getHistoryDateKey(timestamp)}`;
+                if (completionKeys.has(completionKey)) return [];
+
+                return [{
+                    taskId: task.id,
+                    taskTitle: task.title,
+                    category: task.category,
+                    assignee: task.assignee,
+                    verifier: task.verifier || '',
+                    action: 'daily_reset',
+                    timestamp,
+                    description: `✅ Đã hoàn thành: "${task.title}" (tự động reset sang ngày ${today})`
+                }];
+            });
 
             const updatedHistory = [...newEntries, ...existingHistory].slice(0, 500); // Giữ tối đa 500 entries
 
@@ -5214,21 +5552,12 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
                 data: {
                     status: 'pending',
                     completedAt: null,
-                    verifier: '',
-                    assignee: ''  // Xóa người thực hiện → ai rảnh nhận việc lại mỗi ngày
+                    verifier: ''
                 }
             });
 
             console.log(`✅ [DAILY RESET] Ngày ${today}: Reset ${completedTasks.length} tasks completed → pending`);
         }
-
-        // Reset assignee của TẤT CẢ daily tasks sang ngày mới (ai rảnh nhận việc lại)
-        // Bàn giao (assignment) KHÔNG reset assignee
-        const resetAssigneeResult = await prisma.dailyTask.updateMany({
-            where: { type: 'daily' },
-            data: { assignee: '', verifier: '' }
-        });
-        console.log(`✅ [DAILY RESET] Đã xóa assignee của ${resetAssigneeResult.count} daily tasks`);
 
         // Cập nhật dueDate của chỉ DAILY tasks sang ngày hôm nay (giữ nguyên giờ)
         // Fix bug: task vẫn mang dueDate cũ → calendar hiển thị sai ngày hoàn thành
@@ -5240,7 +5569,12 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
             newDueDate.setHours(oldDueDate.getHours(), oldDueDate.getMinutes(), 0, 0);
             await prisma.dailyTask.update({
                 where: { id: task.id },
-                data: { dueDate: newDueDate }
+                data: {
+                    dueDate: newDueDate,
+                    verifier: '',
+                    // Người cố định phải còn nguyên để phạt/nộp bằng chứng đúng người.
+                    assignee: isFixedAssignee(parseTaskAttachments(task.attachments)) ? task.assignee : '',
+                }
             });
         }
         console.log(`✅ [DAILY RESET] Đã cập nhật dueDate của ${allTasks.length} tasks sang ngày ${today}`);
