@@ -175,6 +175,10 @@ export default function GlobalTaskAlerts() {
             onAction: () => {
                 window.sessionStorage.setItem('dailyTasks.openTab', 'assignments');
                 window.dispatchEvent(new CustomEvent('navigate', { detail: 'daily-tasks' }));
+                // Covers both cases: Daily Tasks is already mounted, or it mounts after navigation.
+                window.setTimeout(() => {
+                    window.dispatchEvent(new CustomEvent('daily-tasks:open-assignments'));
+                }, 120);
             },
         });
     }, [addAlertPopup, user?.username]);

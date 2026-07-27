@@ -402,13 +402,10 @@ const DailyTasks = () => {
         window.addEventListener('daily-tasks:open-assignments', openAssignments);
         return () => window.removeEventListener('daily-tasks:open-assignments', openAssignments);
     }, []);
-    const [showTaskActionGuide, setShowTaskActionGuide] = useState(
-        () => window.localStorage.getItem('dailyTasks.actionGuideDismissed') !== '1'
-    );
+    const [showTaskActionGuide, setShowTaskActionGuide] = useState(false);
     const hasShownRowActionHintRef = useRef(false);
 
     const dismissTaskActionGuide = () => {
-        window.localStorage.setItem('dailyTasks.actionGuideDismissed', '1');
         setShowTaskActionGuide(false);
     };
 
@@ -418,7 +415,7 @@ const DailyTasks = () => {
         if (hasShownRowActionHintRef.current) return;
 
         hasShownRowActionHintRef.current = true;
-        message.info('Dùng nút hành động ở cuối dòng để xử lý công việc.');
+        setShowTaskActionGuide(true);
     };
 
     // === ASSIGNMENT TASKS ===
