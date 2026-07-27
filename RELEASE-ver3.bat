@@ -46,7 +46,18 @@ if errorlevel 1 (
 echo [OK] package.json updated to v!NEW_VERSION!
 echo.
 
-echo [2/4] Build Vite...
+echo [2/5] Regenerate Prisma Client...
+echo ----------------------------------------
+call node_modules\.bin\prisma generate
+if errorlevel 1 (
+    echo [ERROR] Prisma generate failed.
+    pause
+    exit /b 1
+)
+echo [OK] Prisma Client regenerated.
+echo.
+
+echo [3/5] Build Vite...
 echo ----------------------------------------
 call npx vite build
 if errorlevel 1 (
@@ -58,7 +69,7 @@ if errorlevel 1 (
 echo [OK] Vite build completed.
 echo.
 
-echo [3/4] Create patch zip...
+echo [4/5] Create patch zip...
 echo ----------------------------------------
 set PROJECT_DIR=%CD%
 set PATCH_ZIP=DBYPOS-PATCH-v!NEW_VERSION!.zip
@@ -72,6 +83,8 @@ mkdir "!PATCH_TEMP!\resources\app\dist"
 mkdir "!PATCH_TEMP!\resources\app\electron"
 mkdir "!PATCH_TEMP!\resources\app\python"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\@supabase"
+mkdir "!PATCH_TEMP!\resources\app\node_modules\@prisma"
+mkdir "!PATCH_TEMP!\resources\app\node_modules\.prisma"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\iceberg-js"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\tslib"
 
@@ -86,6 +99,8 @@ if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
 )
 xcopy "dist\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 xcopy "electron\*" "!PATCH_TEMP!\resources\app\electron\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\@prisma\*" "!PATCH_TEMP!\resources\app\node_modules\@prisma\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\.prisma\*" "!PATCH_TEMP!\resources\app\node_modules\.prisma\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\@supabase\*" "!PATCH_TEMP!\resources\app\node_modules\@supabase\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\iceberg-js\*" "!PATCH_TEMP!\resources\app\node_modules\iceberg-js\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\tslib\*" "!PATCH_TEMP!\resources\app\node_modules\tslib\" /E /I /Y /Q >nul 2>&1
@@ -118,7 +133,7 @@ for %%F in ("!PATCH_ZIP_PATH!") do (
 echo [OK] Created !PATCH_ZIP! (~!FILE_SIZE_MB! MB)
 echo.
 
-echo [4/4] Git and GitHub release...
+echo [5/5] Git and GitHub release...
 echo ----------------------------------------
 git add -A
 git commit -m "v!NEW_VERSION! - !NOTES!"
