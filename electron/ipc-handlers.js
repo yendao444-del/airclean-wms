@@ -22,13 +22,49 @@ const http = require('http');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
-const evidenceStorage = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
-    ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+function getEvidenceStorageConfigPath() {
+    return path.join(app.getPath('userData'), 'supabase-storage.json');
+}
+
+function loadEvidenceStorageConfig() {
+    const fallback = {
+        url: process.env.SUPABASE_URL || config.SUPABASE_URL || '',
+        serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || config.SUPABASE_SERVICE_ROLE_KEY || '',
+        bucket: process.env.SUPABASE_EVIDENCE_BUCKET || config.SUPABASE_EVIDENCE_BUCKET || 'daily-task-evidence',
+    };
+    const configPath = getEvidenceStorageConfigPath();
+    try {
+        if (!fs.existsSync(configPath)) {
+            fs.writeFileSync(configPath, JSON.stringify({
+                supabaseUrl: '',
+                serviceRoleKey: '',
+                bucket: 'daily-task-evidence',
+            }, null, 2), 'utf8');
+        }
+        const saved = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        return {
+            url: String(saved.supabaseUrl || fallback.url || '').trim(),
+            serviceRoleKey: String(saved.serviceRoleKey || fallback.serviceRoleKey || '').trim(),
+            bucket: String(saved.bucket || fallback.bucket || 'daily-task-evidence').trim(),
+        };
+    } catch (error) {
+        console.warn('Unable to read Supabase Storage configuration:', error.message);
+        return fallback;
+    }
+}
+
+const evidenceStorageConfig = loadEvidenceStorageConfig();
+const evidenceStorage = evidenceStorageConfig.url && evidenceStorageConfig.serviceRoleKey
+    ? createClient(evidenceStorageConfig.url, evidenceStorageConfig.serviceRoleKey, {
         auth: { autoRefreshToken: false, persistSession: false }
     })
     : null;
-const EVIDENCE_BUCKET = process.env.SUPABASE_EVIDENCE_BUCKET || 'daily-task-evidence';
+const EVIDENCE_BUCKET = evidenceStorageConfig.bucket || 'daily-task-evidence';
 const MAX_EVIDENCE_STORAGE_BYTES = 900 * 1024;
+
+function getEvidenceStorageUnavailableMessage() {
+    return `Supabase Storage chưa được cấu hình. Mở file ${getEvidenceStorageConfigPath()} và điền Supabase URL cùng Service Role Key.`;
+}
 
 // ========================================
 // 🔒 STOCK MUTEX — Serialize stock operations
@@ -5362,7 +5398,7 @@ setInterval(() => void cleanupExpiredEvidenceImages().catch(error => console.err
 ipcMain.handle('dailyTasks:uploadEvidenceImage', async (_event, payload) => {
     try {
         requireRole('admin');
-        if (!evidenceStorage) throw new Error('Supabase Storage chưa được cấu hình.');
+        if (!evidenceStorage) throw new Error(getEvidenceStorageUnavailableMessage());
         const { taskId, mimeType, data, hash } = payload || {};
         if (!taskId || !mimeType || !data || !hash) throw new Error('Dữ liệu ảnh bằng chứng không hợp lệ.');
         const base64 = String(data).replace(/^data:[^;]+;base64,/, '');
@@ -5385,7 +5421,7 @@ ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
     const uploadedPaths = [];
     const imageRegistryKeys = [];
     try {
-        if (!evidenceStorage) throw new Error('Supabase Storage chưa được cấu hình.');
+        if (!evidenceStorage) throw new Error(getEvidenceStorageUnavailableMessage());
         const actor = await getCurrentActor();
         const task = await prisma.dailyTask.findUnique({ where: { id: Number(payload?.taskId) } });
         if (!task || task.status === 'completed') throw new Error('Công việc không còn ở trạng thái chờ nộp bằng chứng.');
@@ -5559,7 +5595,7 @@ ipcMain.handle('dailyTasks:completeRegularTask', async (_event, taskId, payload 
 ipcMain.handle('dailyTasks:getEvidenceImageUrl', async (_event, taskId, requestedPath = '') => {
     try {
         const actor = await getCurrentActor();
-        if (!evidenceStorage) throw new Error('Supabase Storage chưa được cấu hình.');
+        if (!evidenceStorage) throw new Error(getEvidenceStorageUnavailableMessage());
         const task = await prisma.dailyTask.findUnique({ where: { id: Number(taskId) } });
         if (!task) throw new Error('Không tìm thấy công việc.');
         if (actor.role !== 'admin' && !actorOwnsTask(actor, task)) throw new Error('Bạn không có quyền xem bằng chứng này.');
