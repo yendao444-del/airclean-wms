@@ -285,7 +285,11 @@ export default function EcommerceExportPage() {
             const usersRes = await window.electronAPI.users.getAll();
             if (usersRes.success && usersRes.data) {
                 // Lọc bỏ tài khoản admin mặc định (vì không phải là người đóng gói)
-                const validUsers = usersRes.data.filter((u: any) => u.username !== 'admin');
+                const validUsers = usersRes.data.filter((u: any) =>
+                    u.username !== 'admin' &&
+                    u.isActive !== false &&
+                    u.operationalAssignee !== false
+                );
                 setPackerEmployees(validUsers.map((u: any) => ({
                     id: u.id,
                     name: u.fullName || u.username,

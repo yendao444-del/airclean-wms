@@ -515,7 +515,7 @@ function AppContent() {
                     </Sider>
 
                     <Layout style={{ marginLeft: collapsed ? 80 : 260, transition: 'all 0.2s' }}>
-                        <Header
+                        {selectedKey !== 'daily-tasks' && <Header
                             style={{
                                 padding: '0 24px',
                                 background: '#fff',
@@ -540,7 +540,7 @@ function AppContent() {
                                 </div>
                             )}
                             <HeaderTaskTicker onNavigate={(key) => navigateTo(key)} />
-                        </Header>
+                        </Header>}
 
                         <Content
                             style={{

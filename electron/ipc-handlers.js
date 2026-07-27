@@ -2725,7 +2725,7 @@ function generateVatIdFromFile(fileName = '', fileSize = 0) {
 }
 
 // Get all purchases
-ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
+ipcMain.handle('purchases:getAll', async (event, { since, limit } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         const vatGroups = await getPurchaseVatGroups();
@@ -2769,7 +2769,9 @@ ipcMain.handle('purchases:getAll', async (event, { since } = {}) => {
                 }
             },
             orderBy: { createdAt: 'desc' },
-            take: 100 // ⚡ Giảm từ 300 → 100 phiếu gần nhất
+            // Payroll needs all purchases in its requested period; normal screens
+            // keep their existing 100-row cap unless they opt into a larger limit.
+            take: Number.isFinite(Number(limit)) ? Number(limit) : (since ? undefined : 100)
         });
 
         const purchaseMap = new Map(purchases.map(p => [p.id, p]));
@@ -4969,7 +4971,15 @@ ipcMain.handle('system:deleteBackup', async (event, backupPath) => {
 // ========================================
 
 const EVIDENCE_GRACE_MINUTES = 20;
+const MAX_EVIDENCE_IMAGES = 5;
 const TASK_PENALTY_KEY_PREFIX = 'dailyTaskEvidencePenalty:';
+const DAILY_TASK_REST_DAY_HOLIDAYS = new Set(['01-01', '04-30', '05-01', '09-02']);
+
+function isDailyTaskPenaltyRestDay(date) {
+    const localDate = new Date(date);
+    const monthDay = `${String(localDate.getMonth() + 1).padStart(2, '0')}-${String(localDate.getDate()).padStart(2, '0')}`;
+    return localDate.getDay() === 0 || DAILY_TASK_REST_DAY_HOLIDAYS.has(monthDay);
+}
 
 function parseTaskAttachments(attachments) {
     if (!attachments) return {};
@@ -4978,6 +4988,23 @@ function parseTaskAttachments(attachments) {
         return Array.isArray(parsed) ? { files: parsed } : parsed || {};
     } catch {
         return {};
+    }
+}
+
+async function appendDailyTaskHistory(entry) {
+    try {
+        const historyConfig = await prisma.appConfig.findUnique({ where: { key: 'dailyTasksHistory' } });
+        const history = historyConfig ? JSON.parse(historyConfig.value) : [];
+        const updatedHistory = [entry, ...history].slice(0, 500);
+
+        await prisma.appConfig.upsert({
+            where: { key: 'dailyTasksHistory' },
+            update: { value: JSON.stringify(updatedHistory) },
+            create: { key: 'dailyTasksHistory', value: JSON.stringify(updatedHistory) },
+        });
+    } catch (error) {
+        // Evidence remains valid even if its audit entry cannot be written.
+        console.error('Unable to write daily task history:', error.message);
     }
 }
 
@@ -4993,12 +5020,142 @@ async function getCurrentActor() {
 }
 
 function isFixedAssignee(attachments) {
-    return Boolean(attachments?.assignment?.fixedAssignee);
+    return Boolean(
+        attachments?.assignment?.fixedAssignee
+        || getDailyRotation(attachments).length
+    );
+}
+
+function getDailyRotation(attachments) {
+    // weeklyRotation is retained as a read-only fallback for tasks created
+    // before the rotation cadence changed from weekly to daily.
+    const assignees = attachments?.assignment?.dailyRotation?.assignees
+        || attachments?.assignment?.weeklyRotation?.assignees;
+    return Array.isArray(assignees)
+        ? [...new Set(assignees.map(name => String(name || '').trim()).filter(Boolean))]
+        : [];
+}
+
+function getLocalDateKey(date = new Date()) {
+    const localDate = new Date(date);
+    localDate.setHours(0, 0, 0, 0);
+    return `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, '0')}-${String(localDate.getDate()).padStart(2, '0')}`;
+}
+
+function getDailyRotationAssignee(attachments, date = new Date()) {
+    const assignees = getDailyRotation(attachments);
+    if (assignees.length === 0) return '';
+
+    const configuredAnchor = attachments?.assignment?.dailyRotation?.anchorDate
+        || attachments?.assignment?.weeklyRotation?.anchorDate;
+    const anchorDate = /^\d{4}-\d{2}-\d{2}$/.test(String(configuredAnchor || ''))
+        ? new Date(`${configuredAnchor}T00:00:00`)
+        : new Date(`${getLocalDateKey(date)}T00:00:00`);
+    const currentDate = new Date(`${getLocalDateKey(date)}T00:00:00`);
+    const daysSinceAnchor = Math.floor((currentDate.getTime() - anchorDate.getTime()) / (24 * 60 * 60 * 1000));
+    const index = ((daysSinceAnchor % assignees.length) + assignees.length) % assignees.length;
+    return assignees[index];
+}
+
+function clearEvidenceSubmission(attachments) {
+    const evidence = attachments?.evidence;
+    if (!evidence?.required) return attachments;
+
+    const {
+        submittedAt,
+        submittedBy,
+        submittedUrl,
+        submittedImage,
+        submittedImages,
+        reviewedAt,
+        reviewedBy,
+        ...evidenceConfig
+    } = evidence;
+    return {
+        ...attachments,
+        evidence: { ...evidenceConfig, status: 'pending' },
+    };
+}
+
+function getSubmittedEvidenceImages(evidence) {
+    if (Array.isArray(evidence?.submittedImages) && evidence.submittedImages.length > 0) {
+        return evidence.submittedImages.filter(image => image?.storagePath);
+    }
+    return evidence?.submittedImage?.storagePath ? [evidence.submittedImage] : [];
+}
+
+// Keep a self-contained proof snapshot in the audit trail before daily reset
+// clears the active task for the next assignee.
+function getEvidenceHistoryPayload(evidence) {
+    if (!evidence?.required) return null;
+    return {
+        submittedAt: evidence.submittedAt || null,
+        submittedBy: evidence.submittedBy || '',
+        submittedImages: getSubmittedEvidenceImages(evidence),
+        status: evidence.status || 'pending',
+        reviewedAt: evidence.reviewedAt || null,
+        reviewedBy: evidence.reviewedBy || '',
+    };
 }
 
 function actorOwnsTask(actor, task) {
+    const attachments = parseTaskAttachments(task.attachments);
+    const recipients = Array.isArray(attachments?.assignment?.assignees)
+        ? attachments.assignment.assignees.map(name => normalizeActorName(name)).filter(Boolean)
+        : [];
+    const actorNames = [actor.username, actor.fullName].map(normalizeActorName).filter(Boolean);
+    if (recipients.some(recipient => actorNames.includes(recipient))) return true;
     const assignee = normalizeActorName(task.assignee);
-    return assignee && [actor.username, actor.fullName].some(name => normalizeActorName(name) === assignee);
+    return assignee && actorNames.includes(assignee);
+}
+
+async function assertOperationalTaskAssignee(username) {
+    const normalizedUsername = String(username || '').trim();
+    if (!normalizedUsername) return;
+
+    const user = await prisma.user.findUnique({ where: { username: normalizedUsername } });
+    if (!user || user.status !== 'active') {
+        throw new Error('Người được giao phải là tài khoản đang hoạt động.');
+    }
+    if (!isOperationalAssignee(user)) {
+        throw new Error('Tài khoản này đã bị loại khỏi phân công vận hành.');
+    }
+}
+
+async function assertDailyRotationAssignees(attachments) {
+    const assignees = getDailyRotation(attachments);
+    if (assignees.length < 2) {
+        throw new Error('Luân phiên theo ngày cần chọn ít nhất 2 nhân viên chính thức.');
+    }
+
+    const attendanceConfig = await prisma.appConfig.findUnique({ where: { key: 'attendanceData' } });
+    const attendanceData = attendanceConfig ? JSON.parse(attendanceConfig.value) : {};
+    const officialUsernames = new Set(
+        (Array.isArray(attendanceData.employees) ? attendanceData.employees : [])
+            .filter(employee => employee?.type === 'Official')
+            .map(employee => String(employee.username || '').trim())
+            .filter(Boolean)
+    );
+
+    for (const username of assignees) {
+        if (!officialUsernames.has(username)) {
+            throw new Error(`"${username}" không phải nhân viên chính thức, không thể đưa vào lịch luân phiên.`);
+        }
+        await assertOperationalTaskAssignee(username);
+    }
+}
+
+async function validateEvidenceAssignment(attachments, assignee) {
+    if (!attachments?.evidence?.required) return;
+    const rotationAssignees = getDailyRotation(attachments);
+    if (rotationAssignees.length > 0) {
+        await assertDailyRotationAssignees(attachments);
+        return;
+    }
+    if (!assignee || !isFixedAssignee(attachments)) {
+        throw new Error('Công việc yêu cầu bằng chứng phải có người thực hiện cố định hoặc lịch luân phiên.');
+    }
+    await assertOperationalTaskAssignee(assignee);
 }
 
 function isValidEvidenceImage(buffer, mimeType) {
@@ -5008,21 +5165,6 @@ function isValidEvidenceImage(buffer, mimeType) {
     return false;
 }
 
-function getEvidenceUrlFingerprint(value) {
-    const url = new URL(String(value));
-    url.hash = '';
-    const host = url.hostname.toLowerCase();
-    const driveId = host.endsWith('drive.google.com')
-        ? (url.pathname.match(/\/d\/([^/]+)/)?.[1] || url.searchParams.get('id'))
-        : null;
-    if (driveId) return `drive:${driveId}`;
-
-    // Evidence links are normally posts, files, or product pages. Ignore query
-    // strings so tracking parameters cannot make the same proof appear unique.
-    const pathname = url.pathname.replace(/\/+$/, '') || '/';
-    return `${url.protocol}//${host}${pathname}`;
-}
-
 async function createEvidencePenaltyIfDue(task, now = new Date()) {
     const attachments = parseTaskAttachments(task.attachments);
     const evidence = attachments.evidence || {};
@@ -5030,12 +5172,13 @@ async function createEvidencePenaltyIfDue(task, now = new Date()) {
     if (!task.assignee || !isFixedAssignee(attachments)) return null;
 
     const dueAt = new Date(task.dueDate);
+    if (Number.isNaN(dueAt.getTime()) || isDailyTaskPenaltyRestDay(dueAt)) return null;
     const penaltyAt = new Date(dueAt.getTime() + EVIDENCE_GRACE_MINUTES * 60 * 1000);
     if (now < penaltyAt) return null;
     const submittedAt = evidence.submittedAt ? new Date(evidence.submittedAt) : null;
     // Compatibility with tasks submitted by older clients that left the task
     // pending: proof submitted within the grace period must not be fined.
-    if (submittedAt && !Number.isNaN(submittedAt.getTime()) && submittedAt <= penaltyAt) return null;
+    if (submittedAt && !Number.isNaN(submittedAt.getTime()) && submittedAt <= penaltyAt && evidence.status !== 'rejected') return null;
 
     const dueKey = dueAt.toISOString();
     const key = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}`;
@@ -5078,13 +5221,15 @@ async function cleanupExpiredEvidenceImages() {
         const attachments = parseTaskAttachments(task.attachments);
         const evidence = attachments?.evidence;
         const submittedAt = evidence?.submittedAt ? new Date(evidence.submittedAt).getTime() : NaN;
-        if (!evidence?.submittedImage?.storagePath || !Number.isFinite(submittedAt) || submittedAt > cutoff) continue;
+        const submittedImages = getSubmittedEvidenceImages(evidence);
+        if (submittedImages.length === 0 || !Number.isFinite(submittedAt) || submittedAt > cutoff) continue;
 
-        await evidenceStorage.storage.from(EVIDENCE_BUCKET).remove([evidence.submittedImage.storagePath]).catch(() => {});
+        await evidenceStorage.storage.from(EVIDENCE_BUCKET).remove(submittedImages.map(image => image.storagePath)).catch(() => {});
         // Keep the SHA-256 registry after removing the file. The image itself
         // expires after seven days, but its fingerprint must remain to prevent
         // the same proof from being uploaded again later.
         evidence.submittedImage = undefined;
+        evidence.submittedImages = undefined;
         evidence.imageExpiredAt = new Date().toISOString();
         await prisma.dailyTask.update({ where: { id: task.id }, data: { attachments: JSON.stringify(attachments) } });
     }
@@ -5121,8 +5266,8 @@ ipcMain.handle('dailyTasks:uploadEvidenceImage', async (_event, payload) => {
 });
 
 ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
-    let uploadedPath = null;
-    let imageRegistryKey = null;
+    const uploadedPaths = [];
+    const imageRegistryKeys = [];
     try {
         if (!evidenceStorage) throw new Error('Supabase Storage chưa được cấu hình.');
         const actor = await getCurrentActor();
@@ -5130,59 +5275,122 @@ ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
         if (!task || task.status === 'completed') throw new Error('Công việc không còn ở trạng thái chờ nộp bằng chứng.');
         const attachments = task.attachments ? JSON.parse(task.attachments) : {};
         const required = attachments?.evidence?.required;
-        const method = attachments?.evidence?.method || 'link';
         if (!required) throw new Error('Công việc này không yêu cầu bằng chứng.');
         if (!task.assignee || !isFixedAssignee(attachments)) throw new Error('Công việc cần bằng chứng phải được giao cố định cho một nhân viên trước khi nộp.');
         if (actor.role !== 'admin' && !actorOwnsTask(actor, task)) throw new Error('Bạn chỉ có thể nộp bằng chứng cho công việc được giao cho mình.');
-        const needsLink = method === 'link' || method === 'both';
-        const needsImage = method === 'image' || method === 'both';
-        let normalizedUrl = null;
-        if (needsLink) {
-            try {
-                const url = new URL(String(payload?.submittedUrl || '').trim());
-                if (!['http:', 'https:'].includes(url.protocol)) throw new Error();
-                url.hash = ''; normalizedUrl = url.toString();
-            } catch { throw new Error('Link bằng chứng không hợp lệ.'); }
-            const evidenceFingerprint = getEvidenceUrlFingerprint(normalizedUrl);
-            const existingTasks = await prisma.dailyTask.findMany({ where: { attachments: { not: null } } });
-            const duplicate = existingTasks.find(other => {
-                if (other.id === task.id) return false;
-                const otherUrl = parseTaskAttachments(other.attachments)?.evidence?.submittedUrl;
-                try { return otherUrl && getEvidenceUrlFingerprint(otherUrl) === evidenceFingerprint; } catch { return false; }
-            });
-            if (duplicate) throw new Error(`Link này đã được dùng cho công việc "${duplicate.title}".`);
+
+        const images = Array.isArray(payload?.images)
+            ? payload.images
+            : payload?.image ? [payload.image] : [];
+        if (images.length === 0) throw new Error('Vui lòng chọn ít nhất một ảnh bằng chứng.');
+        if (images.length > MAX_EVIDENCE_IMAGES) {
+            throw new Error(`Chỉ được nộp tối đa ${MAX_EVIDENCE_IMAGES} ảnh bằng chứng.`);
         }
-        let submittedImage = null;
-        if (needsImage) {
-            const image = payload?.image;
+
+        const submittedImages = [];
+        for (const image of images) {
             if (!image?.data || !['image/jpeg', 'image/png', 'image/webp'].includes(image.mimeType)) throw new Error('Ảnh bằng chứng không hợp lệ.');
             const buffer = Buffer.from(String(image.data).replace(/^data:[^;]+;base64,/, ''), 'base64');
             if (!buffer.length || buffer.length > 200 * 1024) throw new Error('Ảnh sau nén phải không vượt quá 200 KB.');
             if (!isValidEvidenceImage(buffer, image.mimeType)) throw new Error('Dữ liệu tải lên không phải ảnh hợp lệ.');
             const hash = crypto.createHash('sha256').update(buffer).digest('hex');
             const registryKey = `dailyEvidenceHash:${hash}`;
-            imageRegistryKey = registryKey;
             try {
                 await prisma.appConfig.create({ data: { key: registryKey, value: JSON.stringify({ taskId: task.id, createdAt: new Date().toISOString() }) } });
+                imageRegistryKeys.push(registryKey);
             } catch (error) {
                 if (error.code === 'P2002') throw new Error('Ảnh này đã được dùng làm bằng chứng cho công việc khác.');
                 throw error;
             }
             const ext = image.mimeType === 'image/png' ? 'png' : image.mimeType === 'image/webp' ? 'webp' : 'jpg';
-            uploadedPath = `daily-tasks/${task.id}/${new Date().toISOString().slice(0, 10)}/${hash}.${ext}`;
+            const uploadedPath = `daily-tasks/${task.id}/${new Date().toISOString().slice(0, 10)}/${hash}.${ext}`;
+            uploadedPaths.push(uploadedPath);
             const { error } = await evidenceStorage.storage.from(EVIDENCE_BUCKET).upload(uploadedPath, buffer, { contentType: image.mimeType, upsert: false });
             if (error) throw error;
-            submittedImage = { name: image.name || `evidence.${ext}`, mimeType: image.mimeType, storagePath: uploadedPath, hash };
+            submittedImages.push({ name: image.name || `evidence.${ext}`, mimeType: image.mimeType, storagePath: uploadedPath, hash });
         }
+
         // Reconcile once more immediately before completion. This closes the
         // gap where the desktop app was offline when the 20-minute grace ended.
         await createEvidencePenaltyIfDue(task);
-        const evidence = { ...attachments.evidence, status: 'submitted', submittedUrl: normalizedUrl, submittedImage, submittedAt: new Date().toISOString(), submittedBy: actor.fullName };
-        await prisma.dailyTask.update({ where: { id: task.id }, data: { attachments: JSON.stringify({ ...attachments, evidence }), status: 'completed', completedAt: new Date() } });
+        const evidence = {
+            ...attachments.evidence,
+            method: 'image',
+            status: 'submitted',
+            submittedUrl: undefined,
+            submittedImage: undefined,
+            submittedImages,
+            submittedAt: new Date().toISOString(),
+            submittedBy: actor.fullName,
+        };
+        await prisma.dailyTask.update({
+            where: { id: task.id },
+            data: { attachments: JSON.stringify({ ...attachments, evidence }), status: 'pending', completedAt: null }
+        });
+        await appendDailyTaskHistory({
+            taskId: task.id,
+            taskTitle: task.title,
+            category: task.category,
+            assignee: actor.fullName,
+            verifier: '',
+            action: 'evidence_submitted',
+            timestamp: evidence.submittedAt,
+            evidence: getEvidenceHistoryPayload(evidence),
+            description: `Đã nộp bằng chứng cho công việc: "${task.title}"`,
+        });
         return { success: true, data: { evidence } };
     } catch (error) {
-        if (uploadedPath) await evidenceStorage?.storage.from(EVIDENCE_BUCKET).remove([uploadedPath]).catch(() => {});
-        if (imageRegistryKey) await prisma.appConfig.delete({ where: { key: imageRegistryKey } }).catch(() => {});
+        if (uploadedPaths.length > 0) {
+            await evidenceStorage?.storage.from(EVIDENCE_BUCKET).remove(uploadedPaths).catch(() => {});
+        }
+        await Promise.all(imageRegistryKeys.map(key => prisma.appConfig.delete({ where: { key } }).catch(() => {})));
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('dailyTasks:reviewEvidence', async (_event, taskId, approved) => {
+    try {
+        const actor = await getCurrentActor();
+        if (!['admin', 'manager'].includes(actor.role)) throw new Error('Chỉ quản lý hoặc admin được duyệt bằng chứng.');
+
+        const task = await prisma.dailyTask.findUnique({ where: { id: Number(taskId) } });
+        if (!task) throw new Error('Không tìm thấy công việc.');
+        const attachments = parseTaskAttachments(task.attachments);
+        const evidence = attachments.evidence || {};
+        if (!evidence.required || evidence.status !== 'submitted') throw new Error('Công việc không có bằng chứng chờ duyệt.');
+
+        const reviewedAt = new Date().toISOString();
+        const reviewedEvidence = {
+            ...evidence,
+            status: approved ? 'approved' : 'rejected',
+            reviewedAt,
+            reviewedBy: actor.fullName,
+        };
+        const updatedTask = await prisma.dailyTask.update({
+            where: { id: task.id },
+            data: {
+                attachments: JSON.stringify({ ...attachments, evidence: reviewedEvidence }),
+                status: approved ? 'completed' : 'pending',
+                completedAt: approved ? new Date() : null,
+                verifier: approved ? actor.fullName : '',
+            }
+        });
+
+        let penalty = null;
+        if (!approved) penalty = await createEvidencePenaltyIfDue(updatedTask);
+        await appendDailyTaskHistory({
+            taskId: task.id,
+            taskTitle: task.title,
+            category: task.category,
+            assignee: task.assignee,
+            verifier: actor.fullName,
+            action: approved ? 'evidence_approved' : 'evidence_rejected',
+            timestamp: reviewedAt,
+            evidence: getEvidenceHistoryPayload(reviewedEvidence),
+            description: approved ? `Đã duyệt bằng chứng: "${task.title}"` : `Đã từ chối bằng chứng: "${task.title}"`,
+        });
+        return { success: true, data: { task: updatedTask, penalty } };
+    } catch (error) {
         return { success: false, error: error.message };
     }
 });
@@ -5208,6 +5416,7 @@ ipcMain.handle('dailyTasks:completeRegularTask', async (_event, taskId, payload 
             return key && (normalizeActorName(user.username) === key || normalizeActorName(user.fullName) === key);
         });
         if (!verifier || !['admin', 'manager'].includes(verifier.role)) throw new Error('Người xác nhận phải là tài khoản quản lý hoặc admin đang hoạt động.');
+        if (!isOperationalAssignee(verifier)) throw new Error('Tài khoản người xác nhận đã bị loại khỏi phân công vận hành.');
         if (verifier.id === actor.id) throw new Error('Người thực hiện không thể tự xác nhận công việc của mình.');
 
         const assignee = actor.role === 'admin' && payload.assignee ? String(payload.assignee) : (task.assignee || actor.fullName);
@@ -5215,13 +5424,23 @@ ipcMain.handle('dailyTasks:completeRegularTask', async (_event, taskId, payload 
             where: { id: task.id },
             data: { status: 'completed', completedAt: new Date(), assignee, verifier: verifier.fullName || verifier.username },
         });
+        await appendDailyTaskHistory({
+            taskId: task.id,
+            taskTitle: task.title,
+            category: task.category,
+            assignee: updated.assignee,
+            verifier: updated.verifier || '',
+            action: 'completed',
+            timestamp: updated.completedAt?.toISOString() || new Date().toISOString(),
+            description: `Completed task: "${task.title}"`,
+        });
         return { success: true, data: updated };
     } catch (error) {
         return { success: false, error: error.message };
     }
 });
 
-ipcMain.handle('dailyTasks:getEvidenceImageUrl', async (_event, taskId) => {
+ipcMain.handle('dailyTasks:getEvidenceImageUrl', async (_event, taskId, requestedPath = '') => {
     try {
         const actor = await getCurrentActor();
         if (!evidenceStorage) throw new Error('Supabase Storage chưa được cấu hình.');
@@ -5229,7 +5448,16 @@ ipcMain.handle('dailyTasks:getEvidenceImageUrl', async (_event, taskId) => {
         if (!task) throw new Error('Không tìm thấy công việc.');
         if (actor.role !== 'admin' && !actorOwnsTask(actor, task)) throw new Error('Bạn không có quyền xem bằng chứng này.');
         const attachments = task?.attachments ? JSON.parse(task.attachments) : {};
-        const storagePath = attachments?.evidence?.submittedImage?.storagePath;
+        const activePaths = getSubmittedEvidenceImages(attachments?.evidence).map(image => image.storagePath);
+        let storagePath = requestedPath || activePaths[0] || '';
+        if (requestedPath && !activePaths.includes(requestedPath)) {
+            const historyConfig = await prisma.appConfig.findUnique({ where: { key: 'dailyTasksHistory' } });
+            const history = historyConfig ? JSON.parse(historyConfig.value) : [];
+            const archivedEvidence = history.find(entry => Number(entry?.taskId) === task.id
+                && getSubmittedEvidenceImages(entry?.evidence).some(image => image.storagePath === requestedPath));
+            if (!archivedEvidence) throw new Error('Archived evidence was not found.');
+            storagePath = requestedPath;
+        }
         if (!storagePath) throw new Error('Không tìm thấy ảnh bằng chứng.');
         const { data, error } = await evidenceStorage.storage.from(EVIDENCE_BUCKET).createSignedUrl(storagePath, 300);
         if (error) throw error;
@@ -5244,11 +5472,15 @@ ipcMain.handle('dailyTasks:listEvidencePenalties', async () => {
         requireRole();
         await reconcileEvidencePenalties();
         const rows = await prisma.appConfig.findMany({ where: { key: { startsWith: TASK_PENALTY_KEY_PREFIX } } });
+        const penalties = rows.map(row => {
+            try { return JSON.parse(row.value); } catch { return null; }
+        }).filter(Boolean);
         return {
             success: true,
-            data: rows.map(row => {
-                try { return JSON.parse(row.value); } catch { return null; }
-            }).filter(Boolean),
+            // Invalid legacy rows may predate the rest-day rule. Never expose a
+            // system fine whose task deadline falls on Sunday or a fixed holiday.
+            data: penalties.filter(penalty => !penalty?.dueAt
+                || !isDailyTaskPenaltyRestDay(new Date(penalty.dueAt))),
         };
     } catch (error) {
         return { success: false, error: error.message };
@@ -5302,9 +5534,11 @@ ipcMain.handle('dailyTasks:create', async (event, taskData) => {
     try {
         requireRole('admin');
         const attachments = parseTaskAttachments(taskData.attachments);
-        if (attachments?.evidence?.required && (!taskData.assignee || !isFixedAssignee(attachments))) {
-            throw new Error('Công việc yêu cầu bằng chứng phải có người thực hiện cố định.');
-        }
+        const rotationAssignee = getDailyRotationAssignee(attachments);
+        if (rotationAssignee) taskData = { ...taskData, assignee: rotationAssignee };
+        await assertOperationalTaskAssignee(taskData.assignee);
+        await validateEvidenceAssignment(attachments, taskData.assignee);
+        if (rotationAssignee) await assertDailyRotationAssignees(attachments);
         const task = await prisma.dailyTask.create({
             data: {
                 ...taskData,
@@ -5322,20 +5556,77 @@ ipcMain.handle('dailyTasks:create', async (event, taskData) => {
     }
 });
 
+// Create a handover for multiple recipients atomically. A failed recipient
+// validation must never leave a partially-created handover behind.
+ipcMain.handle('dailyTasks:createAssignments', async (event, taskData, assignees) => {
+    try {
+        requireRole('admin');
+        const recipients = [...new Set((Array.isArray(assignees) ? assignees : [])
+            .map(name => String(name || '').trim())
+            .filter(Boolean))];
+        if (recipients.length === 0) throw new Error('Chọn ít nhất một người nhận.');
+
+        const attachments = parseTaskAttachments(taskData.attachments);
+        for (const recipient of recipients) {
+            await assertOperationalTaskAssignee(recipient);
+            await validateEvidenceAssignment(attachments, recipient);
+        }
+
+        const groupId = `assignment-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        const groupAttachments = {
+            ...attachments,
+            assignment: {
+                ...(attachments.assignment || {}),
+                groupId,
+                assignees: recipients,
+            },
+        };
+        const dueDate = new Date(taskData.dueDate);
+        const task = await prisma.dailyTask.create({
+            data: {
+                ...taskData,
+                assignee: recipients[0],
+                dueDate,
+                tags: taskData.tags ? JSON.stringify(taskData.tags) : null,
+                attachments: JSON.stringify(groupAttachments),
+            }
+        });
+
+        void logActivity({ module: 'system', action: 'CREATE', description: `Tạo bàn giao "${taskData.title}" cho ${recipients.length} người`, recordName: taskData.title, userName: recipients.join(', ') });
+        return { success: true, data: task };
+    } catch (error) {
+        console.error('Error creating assignment group:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 // Update task
 ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
     try {
-        requireRole('admin');
+        const actor = await getCurrentActor();
         const updateData = { ...updates };
         const existingTask = await prisma.dailyTask.findUnique({ where: { id: Number(id) } });
         if (!existingTask) throw new Error('KhÃ´ng tÃ¬m tháº¥y cÃ´ng viá»‡c.');
+        const existingAttachments = parseTaskAttachments(existingTask.attachments);
+        const canCompleteSharedAssignment = existingTask.type === 'assignment'
+            && updates.status === 'completed'
+            && actorOwnsTask(actor, existingTask);
+        if (actor.role !== 'admin' && !canCompleteSharedAssignment) {
+            throw new Error('Chỉ admin được cập nhật công việc này.');
+        }
         const attachments = updates.attachments !== undefined
             ? parseTaskAttachments(updates.attachments)
-            : parseTaskAttachments(existingTask.attachments);
-        const assignee = updates.assignee !== undefined ? updates.assignee : existingTask.assignee;
-        if (attachments?.evidence?.required && (!assignee || !isFixedAssignee(attachments))) {
-            throw new Error('Công việc yêu cầu bằng chứng phải có người thực hiện cố định.');
+            : existingAttachments;
+        const rotationAssignee = getDailyRotationAssignee(attachments);
+        if (rotationAssignee) {
+            updates = { ...updates, assignee: rotationAssignee };
+            updateData.assignee = rotationAssignee;
         }
+        const assignee = updates.assignee !== undefined ? updates.assignee : existingTask.assignee;
+        if (updates.assignee !== undefined) await assertOperationalTaskAssignee(assignee);
+        await validateEvidenceAssignment(attachments, assignee);
+
+        if (rotationAssignee) await assertDailyRotationAssignees(attachments);
 
         if (updates.dueDate) {
             updateData.dueDate = new Date(updates.dueDate);
@@ -5349,6 +5640,10 @@ ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
             updateData.attachments = JSON.stringify(updates.attachments);
         }
 
+        if (updates.status === 'pending' && existingTask.status === 'completed' && attachments?.evidence?.required) {
+            updateData.attachments = JSON.stringify(clearEvidenceSubmission(attachments));
+        }
+
         // Auto set completedAt khi status thay đổi
         if (updates.status === 'completed' && !updates.completedAt) {
             updateData.completedAt = new Date();
@@ -5356,10 +5651,29 @@ ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
             updateData.completedAt = null;
         }
 
+        if (updates.status === 'completed' && attachments?.evidence?.required && attachments.evidence.status !== 'approved') {
+            throw new Error('Công việc yêu cầu bằng chứng chỉ được hoàn thành sau khi bằng chứng được duyệt.');
+        }
+
         const task = await prisma.dailyTask.update({
             where: { id },
             data: updateData
         });
+
+        if ((existingTask.type === 'daily' || existingTask.type === 'assignment') && updates.status && updates.status !== existingTask.status) {
+            await appendDailyTaskHistory({
+                taskId: task.id,
+                taskTitle: task.title,
+                category: task.category,
+                assignee: task.assignee,
+                verifier: task.verifier || '',
+                action: updates.status === 'completed' ? 'completed' : 'pending',
+                timestamp: new Date().toISOString(),
+                description: updates.status === 'completed'
+                    ? `Đã hoàn thành ${existingTask.type === 'assignment' ? 'bàn giao' : 'công việc'}: "${task.title}"`
+                    : `Đã mở lại ${existingTask.type === 'assignment' ? 'bàn giao' : 'công việc'}: "${task.title}"`,
+            });
+        }
 
         void logActivity({ module: 'system', action: 'UPDATE', description: `Cập nhật công việc #${id}`, recordId: id });
         return { success: true, data: task };
@@ -5373,7 +5687,16 @@ ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
 ipcMain.handle('dailyTasks:updateStatus', async (event, id, status) => {
     try {
         requireRole('admin');
+        const existingTask = await prisma.dailyTask.findUnique({ where: { id: Number(id) } });
+        if (!existingTask) throw new Error('Không tìm thấy công việc.');
+        const attachments = parseTaskAttachments(existingTask.attachments);
+        if (status === 'completed' && attachments?.evidence?.required && attachments.evidence.status !== 'approved') {
+            throw new Error('Công việc yêu cầu bằng chứng chỉ được hoàn thành sau khi bằng chứng được duyệt.');
+        }
         const updateData = { status };
+        if (status === 'pending' && existingTask.status === 'completed' && attachments?.evidence?.required) {
+            updateData.attachments = JSON.stringify(clearEvidenceSubmission(attachments));
+        }
 
         // Auto set completedAt when status is completed
         if (status === 'completed') {
@@ -5386,6 +5709,21 @@ ipcMain.handle('dailyTasks:updateStatus', async (event, id, status) => {
             where: { id },
             data: updateData
         });
+
+        if (task.type === 'daily' && status !== existingTask.status) {
+            await appendDailyTaskHistory({
+                taskId: task.id,
+                taskTitle: task.title,
+                category: task.category,
+                assignee: task.assignee,
+                verifier: task.verifier || '',
+                action: status === 'completed' ? 'completed' : 'pending',
+                timestamp: new Date().toISOString(),
+                description: status === 'completed'
+                    ? `Đã hoàn thành công việc: "${task.title}"`
+                    : `Đã mở lại công việc: "${task.title}"`,
+            });
+        }
 
         return { success: true, data: task };
     } catch (error) {
@@ -5497,9 +5835,27 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
 
         // Lấy danh sách task HÀNG NGÀY đã completed để lưu history trước khi reset
         // Bàn giao (type: 'assignment') KHÔNG reset - chỉ reset daily tasks
-        const completedTasks = await prisma.dailyTask.findMany({
-            where: { status: 'completed', type: 'daily' }
-        });
+        // The activity feed only records interacted tasks. Capture all daily
+        // tasks before reset so historical totals include unfinished work.
+        const dailyTasksBeforeReset = await prisma.dailyTask.findMany({ where: { type: 'daily' } });
+        const snapshotDate = lastResetDate || today;
+        const snapshotsConfig = await prisma.appConfig.findUnique({ where: { key: 'dailyTasksSnapshots' } });
+        const snapshots = snapshotsConfig ? JSON.parse(snapshotsConfig.value) : {};
+        if (!snapshots[snapshotDate]) {
+            snapshots[snapshotDate] = {
+                capturedAt: now.toISOString(),
+                tasks: dailyTasksBeforeReset,
+            };
+            const snapshotDates = Object.keys(snapshots).sort().reverse();
+            snapshotDates.slice(90).forEach(date => delete snapshots[date]);
+            await prisma.appConfig.upsert({
+                where: { key: 'dailyTasksSnapshots' },
+                update: { value: JSON.stringify(snapshots) },
+                create: { key: 'dailyTasksSnapshots', value: JSON.stringify(snapshots) },
+            });
+        }
+
+        const completedTasks = dailyTasksBeforeReset.filter(task => task.status === 'completed');
 
         // Lưu vào history trước khi reset
         if (completedTasks.length > 0) {
@@ -5567,13 +5923,18 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
             const oldDueDate = new Date(task.dueDate);
             const newDueDate = new Date(now);
             newDueDate.setHours(oldDueDate.getHours(), oldDueDate.getMinutes(), 0, 0);
+            const attachments = parseTaskAttachments(task.attachments);
+            const rotationAssignee = getDailyRotationAssignee(attachments, now);
             await prisma.dailyTask.update({
                 where: { id: task.id },
                 data: {
                     dueDate: newDueDate,
                     verifier: '',
                     // Người cố định phải còn nguyên để phạt/nộp bằng chứng đúng người.
-                    assignee: isFixedAssignee(parseTaskAttachments(task.attachments)) ? task.assignee : '',
+                    assignee: rotationAssignee || (isFixedAssignee(attachments) ? task.assignee : ''),
+                    attachments: attachments?.evidence?.required
+                        ? JSON.stringify(clearEvidenceSubmission(attachments))
+                        : task.attachments,
                 }
             });
         }
@@ -7455,6 +7816,7 @@ async function getProductInfoBySku(sku) {
 // Lấy tất cả inventory logs (có filter + phân trang)
 ipcMain.handle('inventoryLogs:getAll', async (event, filters = {}) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         const where = {};
@@ -7508,6 +7870,7 @@ ipcMain.handle('inventoryLogs:getAll', async (event, filters = {}) => {
 // Lấy log theo SKU (thẻ kho 1 sản phẩm)
 ipcMain.handle('inventoryLogs:getBySku', async (event, { sku, limit = 100 }) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         const logs = await prisma.inventoryLog.findMany({
@@ -7535,6 +7898,7 @@ ipcMain.handle('inventoryLogs:getBySku', async (event, { sku, limit = 100 }) => 
 // Lấy chi tiết chứng từ gốc từ inventory log (click Mã CT)
 ipcMain.handle('inventoryLogs:getRefDetail', async (event, { referenceType, reference }) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         if (!reference) return { success: false, error: 'Không có mã chứng từ' };
 
@@ -7631,6 +7995,7 @@ ipcMain.handle('appConfig:set', async (event, key, value) => {
         const adminOnlyKeys = new Set([
             'variantMinStocks',
             'pausedVariants',
+            'dailyTasksHistory',
         ]);
         if (adminOnlyKeys.has(key)) {
             requireRole('admin');
@@ -7652,11 +8017,36 @@ ipcMain.handle('appConfig:set', async (event, key, value) => {
 // USERS HANDLERS (NGƯỜI DÙNG / PHÂN QUYỀN)
 // ========================================
 
+const OPERATIONAL_ASSIGNMENT_EXCLUSION = 'exclude_operational_assignment';
+
+function parseUserPermissions(value) {
+    try {
+        const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+        return Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string') : [];
+    } catch {
+        return [];
+    }
+}
+
+function isOperationalAssignee(user) {
+    return !parseUserPermissions(user?.permissions).includes(OPERATIONAL_ASSIGNMENT_EXCLUSION);
+}
+
+function updateOperationalAssignmentPermission(value, operationalAssignee) {
+    const permissions = new Set(parseUserPermissions(value));
+    if (operationalAssignee === false) {
+        permissions.add(OPERATIONAL_ASSIGNMENT_EXCLUSION);
+    } else {
+        permissions.delete(OPERATIONAL_ASSIGNMENT_EXCLUSION);
+    }
+    return JSON.stringify([...permissions]);
+}
+
 ipcMain.handle('users:getAll', async () => {
     try {
         if (!prisma) throw new Error('Prisma not available');
         // Dùng raw SQL để luôn lấy được lastActiveAt kể cả khi Prisma client cũ chưa generate lại
-        const users = await prisma.$queryRaw`SELECT id, username, "fullName", email, role, status, "createdAt", "lastActiveAt" FROM "User" ORDER BY id ASC`;
+        const users = await prisma.$queryRaw`SELECT id, username, "fullName", email, role, status, permissions, "createdAt", "lastActiveAt" FROM "User" ORDER BY id ASC`;
         const formatted = users.map(u => ({
             id: u.id,
             username: u.username,
@@ -7664,6 +8054,7 @@ ipcMain.handle('users:getAll', async () => {
             email: u.email,
             role: u.role,
             isActive: u.status === 'active',
+            operationalAssignee: isOperationalAssignee(u),
             createdAt: new Date(u.createdAt).toISOString(),
             lastActiveAt: u.lastActiveAt ? new Date(u.lastActiveAt).toISOString() : null,
         }));
@@ -7687,7 +8078,10 @@ ipcMain.handle('users:create', async (event, data) => {
                 fullName: data.fullName,
                 email: data.email || null,
                 role: data.role || 'staff',
-                status: data.isActive !== false ? 'active' : 'inactive'
+                status: data.isActive !== false ? 'active' : 'inactive',
+                permissions: data.operationalAssignee === false
+                    ? updateOperationalAssignmentPermission(null, false)
+                    : null,
             }
         });
         console.log(`✅ Created user: ${user.username}`);
@@ -7714,6 +8108,17 @@ ipcMain.handle('users:update', async (event, id, data) => {
         // 🔒 SECURITY: Hash password mới nếu đổi mật khẩu
         if (data.password !== undefined) updateData.password = await bcrypt.hash(data.password, 10);
         if (data.isActive !== undefined) updateData.status = data.isActive ? 'active' : 'inactive';
+        if (data.operationalAssignee !== undefined) {
+            const existingUser = await prisma.user.findUnique({
+                where: { id },
+                select: { permissions: true },
+            });
+            if (!existingUser) throw new Error('User not found');
+            updateData.permissions = updateOperationalAssignmentPermission(
+                existingUser.permissions,
+                data.operationalAssignee
+            );
+        }
 
         const user = await prisma.user.update({
             where: { id },

@@ -160,12 +160,14 @@ export interface ElectronAPI {
     dailyTasks: {
         list: (filters?: any) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (taskData: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        createAssignments: (taskData: any, assignees: string[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         update: (id: number, updates: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         updateStatus: (id: number, status: string) => Promise<{ success: boolean; data?: any; error?: string }>;
         uploadEvidenceImage: (payload: { taskId: number; mimeType: string; data: string; hash: string }) => Promise<{ success: boolean; data?: { storagePath: string }; error?: string }>;
         submitEvidence: (payload: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        reviewEvidence: (taskId: number, approved: boolean) => Promise<{ success: boolean; data?: any; error?: string }>;
         completeRegularTask: (taskId: number, payload: { verifier: string; assignee?: string }) => Promise<{ success: boolean; data?: any; error?: string }>;
-        getEvidenceImageUrl: (taskId: number) => Promise<{ success: boolean; data?: { url: string }; error?: string }>;
+        getEvidenceImageUrl: (taskId: number, storagePath?: string) => Promise<{ success: boolean; data?: { url: string }; error?: string }>;
         listEvidencePenalties: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         getStats: (filters?: any) => Promise<{ success: boolean; data?: any; error?: string }>;

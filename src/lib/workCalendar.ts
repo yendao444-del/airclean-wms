@@ -8,7 +8,6 @@ export const FIXED_VIETNAM_HOLIDAYS: Record<string, string> = {
     '09-02': 'Quoc khanh',
 };
 
-export const DAILY_REPORT_MISSING_FINE_OFFICIAL = 30000;
 export const DAILY_REPORT_POLICY_START_DATE = '2026-04-28';
 
 export const STOCK_CHECK_MISSING_FINE = 50000;

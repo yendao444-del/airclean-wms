@@ -93,6 +93,7 @@ interface StaffUser {
     fullName: string;
     role: 'admin' | 'manager' | 'staff' | 'viewer';
     isActive: boolean;
+    operationalAssignee?: boolean;
 }
 
 interface InventoryLogItem {
@@ -118,6 +119,7 @@ const normalizeUserText = (value?: string) =>
 
 const isStockCheckAssignee = (user: StaffUser) =>
     user.isActive !== false &&
+    user.operationalAssignee !== false &&
     user.role === 'manager' &&
     user.username.toLowerCase() !== 'admin' &&
     normalizeUserText(user.fullName) !== 'nhan vien';
@@ -311,8 +313,8 @@ export default function StockCheck() {
     const handleProductTabChange = useCallback((group: ProductGroup, key: string) => {
         const tabKey = key as ProductTabKey;
         setProductTabs(prev => ({ ...prev, [group.productName]: tabKey }));
-        if (tabKey === 'ledger') loadGroupLedger(group);
-    }, [loadGroupLedger]);
+        if (tabKey === 'ledger' && isAdmin) loadGroupLedger(group);
+    }, [isAdmin, loadGroupLedger]);
 
     const toggleLedgerRefDetail = useCallback(async (log: InventoryLogItem) => {
         if (!log.reference || !log.referenceType) return;
@@ -1702,7 +1704,7 @@ export default function StockCheck() {
                                                     style={{ marginBottom: 0 }}
                                                     items={[
                                                         { key: 'check', label: '⚖️ Kiểm hàng' },
-                                                        { key: 'ledger', label: '📋 Thẻ kho' },
+                                                        ...(isAdmin ? [{ key: 'ledger', label: '📋 Thẻ kho' }] : []),
                                                     ]}
                                                 />
                                                 <Tooltip title="Cấu hình quy đổi đơn vị" placement="left">
@@ -1946,7 +1948,7 @@ export default function StockCheck() {
                                                     </table>
                                                 </div>
                                             )}
-                                            {(productTabs[group.productName] || 'check') === 'ledger' && renderLedgerTab(group)}
+                                            {isAdmin && (productTabs[group.productName] || 'check') === 'ledger' && renderLedgerTab(group)}
                                         </div>
                                     )}
                                 </div>
@@ -1967,6 +1969,11 @@ export default function StockCheck() {
                                     systemStock: item.systemStock,
                                     actualStock: item.actualStock,
                                     difference: item.difference,
+                                    reason: item.note?.trim() || (
+                                        record.items.length === 1
+                                            ? record.notes?.replace(/^Kiểm hàng:\s*/, '').trim()
+                                            : ''
+                                    ),
                                 }))
                             );
                             return (
@@ -2058,6 +2065,18 @@ export default function StockCheck() {
                                                         {diff > 0 ? `+${diff}` : diff === 0 ? '—' : diff}
                                                     </b>
                                                 ) : <span style={{ color: '#cbd5e1', fontWeight: 600 }}>***</span>,
+                                            },
+                                            {
+                                                title: 'Ghi chú / lý do chênh lệch',
+                                                dataIndex: 'reason',
+                                                width: 240,
+                                                render: (reason: string, row: { difference: number }) => {
+                                                    if (row.difference === 0) return <span style={{ color: '#cbd5e1' }}>—</span>;
+                                                    if (!reason) {
+                                                        return <Tag color="default" style={{ margin: 0 }}>Dữ liệu cũ chưa có lý do</Tag>;
+                                                    }
+                                                    return <span style={{ color: '#92400e', fontSize: 12 }}>{reason}</span>;
+                                                },
                                             },
                                         ]}
                                     />

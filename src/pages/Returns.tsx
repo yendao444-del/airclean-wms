@@ -162,7 +162,11 @@ export default function ReturnsPage() {
             const api = (window as any).electronAPI;
             const res = await api.users.getAll();
             if (res.success && res.data) {
-                setEmployees(res.data.filter((u: any) => u.username !== 'admin'));
+                setEmployees(res.data.filter((u: any) =>
+                    u.username !== 'admin' &&
+                    u.isActive !== false &&
+                    u.operationalAssignee !== false
+                ));
             }
         } catch (error) {
             console.error('Error fetching employees:', error);

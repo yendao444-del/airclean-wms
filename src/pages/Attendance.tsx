@@ -5,8 +5,6 @@ import { PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer, Legend 
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
 import {
-    DAILY_REPORT_MISSING_FINE_OFFICIAL,
-    isPastDailyReportWorkingDay,
     STOCK_CHECK_MISSING_FINE,
     STOCK_CHECK_POLICY_START_DATE,
     isPastStockCheckWorkingDay,
@@ -267,6 +265,7 @@ interface PurchaseVatTracking {
     id: number;
     poNumber?: string;
     supplierName?: string;
+    createdBy?: string;
     createdAt?: string;
     purchaseDate?: string;
     vatInvoiceStatus?: string;
@@ -569,9 +568,35 @@ const fmt = (v: number) => new Intl.NumberFormat('vi-VN').format(Math.round(v)) 
 // SKU format: {prefix}-{code} e.g. "20-5DUNI-TRANG" → prefix 20 = 20 sản phẩm
 // Combo 20 gói x1 = 20 SP × 20đ = 400đ
 // CB- (combo mix) SKU: parse prefix tương tự hoặc tính từ combo components
-const VAT_OVERDUE_FINE_TOTAL = 50000;
+const VAT_OVERDUE_FINE_AMOUNT = 30000;
 const DEADLINE_OVERDUE_FINE_OFFICIAL = 50000;
-const VAT_OVERDUE_POLICY_START = dayjs().startOf('day');
+const getAssignmentDeadlineFineAmount = (task: any): number => {
+    try {
+        const attachments = typeof task?.attachments === 'string'
+            ? JSON.parse(task.attachments)
+            : (task?.attachments || {});
+        const amount = Number(attachments?.assignment?.deadlinePenaltyAmount);
+        return Number.isFinite(amount) && amount >= 0 ? amount : DEADLINE_OVERDUE_FINE_OFFICIAL;
+    } catch {
+        return DEADLINE_OVERDUE_FINE_OFFICIAL;
+    }
+};
+const getAssignmentDeadlineRecipients = (task: any): string[] => {
+    try {
+        const attachments = typeof task?.attachments === 'string'
+            ? JSON.parse(task.attachments)
+            : (task?.attachments || {});
+        const recipients = attachments?.assignment?.assignees;
+        if (Array.isArray(recipients) && recipients.length > 0) {
+            return [...new Set(recipients.map(name => String(name || '').trim()).filter(Boolean))];
+        }
+    } catch {
+        // Older assignments have no recipient array and use the original assignee.
+    }
+    return task?.assignee ? [String(task.assignee)] : [];
+};
+// The VAT deadline policy applies prospectively from this rollout date.
+const VAT_OVERDUE_POLICY_START = dayjs('2026-07-26').startOf('day');
 
 function calcPacksFromItems(items: PackingOrderItem[]): number {
     let totalPacks = 0;
@@ -2900,7 +2925,6 @@ export default function Attendance() {
     const [purchaseVatTracking, setPurchaseVatTracking] = useState<PurchaseVatTracking[]>([]);
     const [dailyTaskTracking, setDailyTaskTracking] = useState<any[]>([]);
     const [evidencePenaltyRecords, setEvidencePenaltyRecords] = useState<any[]>([]);
-    const [dailyTaskHistory, setDailyTaskHistory] = useState<any[]>([]);
     const [stockCheckSessions, setStockCheckSessions] = useState<any[]>([]);
     const [stockBalanceRecords, setStockBalanceRecords] = useState<any[]>([]);
 
@@ -2921,8 +2945,13 @@ export default function Attendance() {
                     if (usersRes.success && usersRes.data) {
                         setSystemUsers(usersRes.data);
                         sysUsernames = usersRes.data
-                            .map((u: any) => u.username)
-                            .filter((u: string) => u && u.toLowerCase() !== 'admin');
+                            .filter((u: any) =>
+                                u?.username &&
+                                u.username.toLowerCase() !== 'admin' &&
+                                u.isActive !== false &&
+                                u.operationalAssignee !== false
+                            )
+                            .map((u: any) => u.username);
                         setSystemUsernames(sysUsernames);
                     }
                 } catch (_) { }
@@ -3281,7 +3310,7 @@ export default function Attendance() {
         loadPurchasesRef.current = true;
         try {
             const api = (window as any).electronAPI;
-            const result = await api.purchases.getAll({ since });
+            const result = await api.purchases.getAll({ since, limit: 10000 });
             if (result?.success && Array.isArray(result.data)) {
                 setPurchaseVatTracking(result.data);
             }
@@ -3295,16 +3324,12 @@ export default function Attendance() {
     const loadDailyTaskTracking = async () => {
         try {
             const api = (window as any).electronAPI;
-            const [result, historyResult, penaltyResult] = await Promise.all([
+            const [result, penaltyResult] = await Promise.all([
                 api.dailyTasks.list({}),
-                api.appConfig.get('dailyTasksHistory'),
                 api.dailyTasks.listEvidencePenalties(),
             ]);
             if (result?.success && Array.isArray(result.data)) {
                 setDailyTaskTracking(result.data);
-            }
-            if (historyResult?.success && Array.isArray(historyResult.data)) {
-                setDailyTaskHistory(historyResult.data);
             }
             setEvidencePenaltyRecords(penaltyResult?.success && Array.isArray(penaltyResult.data) ? penaltyResult.data : []);
             try {
@@ -3367,15 +3392,6 @@ export default function Attendance() {
 
     // Gộp finesData gốc + extraFines
     const autoVatOverdueFines = useMemo(() => {
-        const officialEmployees = [...employees]
-            .filter(emp => emp.type === 'Official')
-            .sort((a, b) => a.id - b.id);
-
-        if (officialEmployees.length === 0) return [] as FineRecord[];
-
-        const baseShare = Math.floor(VAT_OVERDUE_FINE_TOTAL / officialEmployees.length);
-        const remainder = VAT_OVERDUE_FINE_TOTAL % officialEmployees.length;
-
         return purchaseVatTracking.flatMap((purchase) => {
             const vatStatus = String(purchase.vatInvoiceStatus || 'pending').toLowerCase();
             if (['uploaded', 'verified', 'thht', 'no_vat'].includes(vatStatus)) return [];
@@ -3388,18 +3404,23 @@ export default function Attendance() {
             if (!purchaseAt.isValid()) return [];
             if (purchaseAt.isBefore(VAT_OVERDUE_POLICY_START)) return [];
 
-            const penaltyDate = purchaseAt.add(3, 'day');
+            const penaltyDate = purchaseAt.add(5, 'day');
             if (!penaltyDate.isBefore(dayjs())) return [];
             if (!inOverviewRange(penaltyDate.toISOString())) return [];
 
-            return officialEmployees.map((emp, idx) => ({
-                empId: emp.id,
+            const creatorKey = normalizeAttendanceText(purchase.createdBy || '');
+            const creator = employees.find(emp => normalizeAttendanceText(emp.username) === creatorKey)
+                || employees.find(emp => matchTaskAssigneeToEmployee(purchase.createdBy, emp));
+            if (!creator) return [];
+
+            return [{
+                empId: creator.id,
                 type: 'VAT quá hạn nhập hàng',
-                detail: `Phiếu ${purchase.poNumber || `#${purchase.id}`}${purchase.supplierName ? ` - ${purchase.supplierName}` : ''} quá 3 ngày chưa cập nhật HĐ VAT`,
-                amount: baseShare + (idx < remainder ? 1 : 0),
+                detail: `Phiếu ${purchase.poNumber || `#${purchase.id}`}${purchase.supplierName ? ` - ${purchase.supplierName}` : ''} quá 5 ngày chưa cập nhật HĐ VAT`,
+                amount: VAT_OVERDUE_FINE_AMOUNT,
                 date: penaltyDate.toISOString(),
                 source: 'purchase_vat_overdue' as any,
-            }));
+            }];
         });
     }, [employees, purchaseVatTracking, overviewDateRange]);
 
@@ -3415,17 +3436,22 @@ export default function Attendance() {
             if (!deadline.isBefore(dayjs())) return [];
             if (!inOverviewRange(deadline.toISOString())) return [];
 
-            const assigneeEmp = officialEmployees.find(emp => matchTaskAssigneeToEmployee(task.assignee, emp));
-            if (!assigneeEmp) return [];
+            const responsibleEmployees = getAssignmentDeadlineRecipients(task)
+                .map(recipient => officialEmployees.find(emp => matchTaskAssigneeToEmployee(recipient, emp)))
+                .filter((employee): employee is Employee => Boolean(employee));
+            if (responsibleEmployees.length === 0) return [];
 
-            return [{
-                empId: assigneeEmp.id,
+            const totalFine = getAssignmentDeadlineFineAmount(task);
+            const baseFine = Math.floor(totalFine / responsibleEmployees.length);
+            const remainder = totalFine % responsibleEmployees.length;
+            return responsibleEmployees.map((employee, index) => ({
+                empId: employee.id,
                 type: 'Trễ deadline công việc',
-                detail: `${task.title || 'Công việc bàn giao'} quá deadline`,
-                amount: DEADLINE_OVERDUE_FINE_OFFICIAL,
+                detail: `${task.title || 'Công việc bàn giao'} quá deadline (chia ${responsibleEmployees.length} người)`,
+                amount: baseFine + (index < remainder ? 1 : 0),
                 date: deadline.toISOString(),
                 source: 'daily_task_overdue' as any,
-            }];
+            }));
         });
     }, [employees, dailyTaskTracking, overviewDateRange]);
 
@@ -3456,49 +3482,6 @@ export default function Attendance() {
             }];
         });
     }, [employees, evidencePenaltyRecords, overviewDateRange, systemUsers]);
-
-    const autoDailyReportMissingFines = useMemo(() => {
-        const officialEmployees = employees.filter(emp => emp.type === 'Official');
-        if (officialEmployees.length === 0) return [] as FineRecord[];
-
-        const historyDatesByEmployee = new Map<number, Set<string>>();
-        dailyTaskHistory.forEach((entry: any) => {
-            if (!entry?.timestamp || !entry?.assignee) return;
-            const employee = officialEmployees.find(emp => matchTaskAssigneeToEmployee(entry.assignee, emp));
-            if (!employee) return;
-            const dateKey = dayjs(entry.timestamp).format('YYYY-MM-DD');
-            if (!historyDatesByEmployee.has(employee.id)) historyDatesByEmployee.set(employee.id, new Set());
-            historyDatesByEmployee.get(employee.id)?.add(dateKey);
-        });
-
-        const endLimit = dayjs().subtract(1, 'day').endOf('day');
-        const rangeStart = overviewDateRange[0].startOf('day');
-        const rangeEnd = overviewDateRange[1].isBefore(endLimit)
-            ? overviewDateRange[1].endOf('day')
-            : endLimit;
-
-        if (rangeEnd.isBefore(rangeStart, 'day')) return [] as FineRecord[];
-
-        const fines: FineRecord[] = [];
-        for (let date = rangeStart; date.isBefore(rangeEnd) || date.isSame(rangeEnd, 'day'); date = date.add(1, 'day')) {
-            if (!isPastDailyReportWorkingDay(date)) continue;
-
-            const dateKey = date.format('YYYY-MM-DD');
-            officialEmployees.forEach(emp => {
-                if (historyDatesByEmployee.get(emp.id)?.has(dateKey)) return;
-                fines.push({
-                    empId: emp.id,
-                    type: 'Thiếu công việc hằng ngày',
-                    detail: `Không ghi nhận Công việc hàng ngày ngày ${date.format('DD/MM/YYYY')}`,
-                    amount: DAILY_REPORT_MISSING_FINE_OFFICIAL,
-                    date: date.hour(20).minute(0).second(0).millisecond(0).toISOString(),
-                    source: 'daily_report_missing' as any,
-                });
-            });
-        }
-
-        return fines;
-    }, [employees, dailyTaskHistory, overviewDateRange]);
 
     const autoStockCheckMissingFines = useMemo(() => {
         const endLimit = dayjs().subtract(1, 'day').endOf('day');
@@ -3576,10 +3559,10 @@ export default function Attendance() {
     }, [fineOverrides]);
 
     const allFines = useMemo(
-        () => [...finesData, ...extraFines, ...autoVatOverdueFines, ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoDailyReportMissingFines, ...autoStockCheckMissingFines]
+        () => [...finesData, ...extraFines, ...autoVatOverdueFines, ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoStockCheckMissingFines]
             .map(applyFineOverride)
             .filter(f => !f.disabled),
-        [extraFines, autoVatOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoDailyReportMissingFines, autoStockCheckMissingFines, applyFineOverride]
+        [extraFines, autoVatOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoStockCheckMissingFines, applyFineOverride]
     );
 
     // Helper: lọc theo overviewDateRange
@@ -5001,10 +4984,6 @@ export default function Attendance() {
                 .filter(f => inOverviewRange(f.date))
                 .map((f, i) => systemFineRow(f, `evidence-${i}`))
                 .filter(Boolean),
-            ...autoDailyReportMissingFines
-                .filter(f => inOverviewRange(f.date))
-                .map((f, i) => systemFineRow(f, `daily-report-${i}`))
-                .filter(Boolean),
             ...autoStockCheckMissingFines
                 .filter(f => inOverviewRange(f.date))
                 .map((f, i) => systemFineRow(f, `stock-check-${i}`))
@@ -5151,7 +5130,7 @@ export default function Attendance() {
 
                                     // 3. Phạt VAT quá hạn (Purchase VAT Overdue)
                                     if (record.source === 'purchase_vat_overdue' || d.includes('chưa cập nhật HĐ VAT')) {
-                                        const cleanText = d.replace(/\s*quá 3 ngày chưa cập nhật HĐ VAT\s*$/, '');
+                                        const cleanText = d.replace(/\s*quá 5 ngày chưa cập nhật HĐ VAT\s*$/, '');
                                         const poCode = cleanText.replace(/^Phiếu\s+/, '');
                                         const parts = poCode.split(/\s*-\s*/);
                                         const code = parts[0];

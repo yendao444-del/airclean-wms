@@ -26,6 +26,7 @@ interface User {
     email?: string;
     role: 'admin' | 'manager' | 'staff' | 'viewer';
     isActive: boolean;
+    operationalAssignee?: boolean;
     createdAt: string;
     lastActiveAt?: string | null;
 }
@@ -121,6 +122,7 @@ export default function PermissionsPage() {
         form.resetFields();
         form.setFieldsValue({
             role: 'staff',
+            operationalAssignee: true,
         });
         setModalVisible(true);
     };
@@ -133,6 +135,7 @@ export default function PermissionsPage() {
             email: user.email,
             role: user.role,
             isActive: user.isActive,
+            operationalAssignee: user.operationalAssignee !== false,
         });
         setModalVisible(true);
     };
@@ -192,6 +195,7 @@ export default function PermissionsPage() {
                     email: payload.email,
                     role: payload.role,
                     isActive: true,
+                    operationalAssignee: payload.operationalAssignee,
                     password: payload.password,
                 };
                 await window.electronAPI.users.create(newUser);
@@ -440,6 +444,12 @@ export default function PermissionsPage() {
                         </Select>
                     </Form.Item>
 
+                    <Form.Item name="operationalAssignee" valuePropName="checked" style={{ marginBottom: 4 }}>
+                        <Switch checkedChildren="Phân công" unCheckedChildren="Không phân công" />
+                    </Form.Item>
+                    <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
+                        Tham gia phân công vận hành: đóng gói TMĐT và kiểm hàng.
+                    </Text>
 
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
                         <Button onClick={() => setModalVisible(false)}>

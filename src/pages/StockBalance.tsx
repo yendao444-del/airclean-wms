@@ -25,6 +25,7 @@ import {
     Select,
     Spin,
     Tooltip,
+    DatePicker,
 } from 'antd';
 import {
     ReloadOutlined,
@@ -770,6 +771,8 @@ export default function StockBalancePage() {
     const [drawerLogs, setDrawerLogs] = useState<InventoryLogItem[]>([]);
     const [drawerLogsLoading, setDrawerLogsLoading] = useState(false);
     const [ledgerSkuFilter, setLedgerSkuFilter] = useState<string>('all');
+    const [ledgerDate, setLedgerDate] = useState(() => dayjs());
+    const [activeLedgerRow, setActiveLedgerRow] = useState<ProductRow | null>(null);
 
 
     // Quick balance state
@@ -1684,23 +1687,30 @@ export default function StockBalancePage() {
     ];
 
     // === LOAD LOGS KHI MỞ ROW ===
-    const loadProductLogs = async (row: ProductRow) => {
-        setDrawerTab('overview');
+    const loadProductLogs = async (row: ProductRow, selectedDate = ledgerDate, resetTab = true) => {
+        if (resetTab) setDrawerTab('overview');
         setDrawerLogs([]);
         setLedgerSkuFilter('all');
+        setActiveLedgerRow(row);
         setDrawerLogsLoading(true);
         try {
             const allLogs: InventoryLogItem[] = [];
             const skus = row.variants.map(v => v.sku);
-            const todayStart = dayjs().startOf('day').toISOString();
+            const startDate = selectedDate.startOf('day').toISOString();
+            const endDate = selectedDate.endOf('day').toISOString();
             await Promise.all(skus.map(async (sku) => {
-                const r = await (window as any).electronAPI.inventoryLogs.getAll({ sku, startDate: todayStart });
+                const r = await (window as any).electronAPI.inventoryLogs.getAll({ sku, startDate, endDate });
                 if (r.success && r.data) allLogs.push(...r.data);
             }));
             allLogs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
             setDrawerLogs(allLogs);
         } catch { }
         finally { setDrawerLogsLoading(false); }
+    };
+
+    const changeLedgerDate = (date: dayjs.Dayjs) => {
+        setLedgerDate(date);
+        if (activeLedgerRow) void loadProductLogs(activeLedgerRow, date, false);
     };
 
     const handleSaveVariantMinStock = async (sku: string) => {
@@ -1892,7 +1902,7 @@ export default function StockBalancePage() {
                             } else {
                                 lastExpandTime.current = { key: record.key, time: now };
                                 setExpandedRowKeys([record.key]);
-                                loadProductLogs(record);
+                                if (isAdmin) loadProductLogs(record);
                             }
                         },
                         style: { cursor: 'pointer' },
@@ -2225,6 +2235,36 @@ export default function StockBalancePage() {
                                 label: '📋 Thẻ kho',
                                 children: (
                                     <div style={{ padding: "12px 0" }}>
+                                        <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                            <span style={{ fontSize: 13, color: '#595959', whiteSpace: 'nowrap' }}>Xem ngày:</span>
+                                            <Button
+                                                size="small"
+                                                type={ledgerDate.isSame(dayjs(), 'day') ? 'primary' : 'default'}
+                                                onClick={() => changeLedgerDate(dayjs())}
+                                            >
+                                                Hôm nay
+                                            </Button>
+                                            <Button
+                                                size="small"
+                                                type={ledgerDate.isSame(dayjs().subtract(1, 'day'), 'day') ? 'primary' : 'default'}
+                                                onClick={() => changeLedgerDate(dayjs().subtract(1, 'day'))}
+                                            >
+                                                Hôm qua
+                                            </Button>
+                                            <DatePicker
+                                                value={ledgerDate}
+                                                format="DD/MM/YYYY"
+                                                allowClear={false}
+                                                disabledDate={(date) => date.isAfter(dayjs(), 'day')}
+                                                onChange={(date) => date && changeLedgerDate(date)}
+                                            />
+                                            <Button
+                                                size="small"
+                                                icon={<ReloadOutlined />}
+                                                onClick={() => activeLedgerRow && void loadProductLogs(activeLedgerRow, ledgerDate, false)}
+                                                title="Tải lại thẻ kho"
+                                            />
+                                        </div>
                                         {/* Lọc SKU */}
                                         {drawerLogs.length > 0 && (
                                             <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -2253,11 +2293,11 @@ export default function StockBalancePage() {
                                                     const todayExport = Math.max(0, tonDau - tonCuoi);
                                                     return todayExport > 0 ? (
                                                         <Tag color="volcano" style={{ fontWeight: 700, fontSize: 13, padding: '2px 10px', borderRadius: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
-                                                            📤 Xuất hôm nay: <span style={{ fontSize: 15, fontWeight: 900 }}>{todayExport}</span>
+                                                            📤 Xuất ngày {ledgerDate.format('DD/MM')}: <span style={{ fontSize: 15, fontWeight: 900 }}>{todayExport}</span>
                                                         </Tag>
                                                     ) : (
                                                         <Tag color="default" style={{ fontSize: 12, padding: '2px 8px', borderRadius: 6 }}>
-                                                            📤 Xuất hôm nay: 0
+                                                            📤 Xuất ngày {ledgerDate.format('DD/MM')}: 0
                                                         </Tag>
                                                     );
                                                 })()}
@@ -2400,7 +2440,7 @@ export default function StockBalancePage() {
                                     </div>
                                 ),
                             },
-                        ]}
+                        ].filter(item => item.key !== 'ledger' || isAdmin)}
                                     />
                                 </div>
                             );

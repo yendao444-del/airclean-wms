@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type ReactNode } from 'react';
+import { useState, useEffect, useCallback, useDeferredValue, useRef, type ReactNode } from 'react';
 import {
     Card,
     Button,
@@ -39,16 +39,18 @@ import {
     FileTextOutlined,
     UploadOutlined,
     LinkOutlined,
+    SearchOutlined,
     PictureOutlined,
     EyeOutlined,
     SafetyCertificateOutlined,
-    MoreOutlined
+    MoreOutlined,
+    FlagOutlined,
+    MessageOutlined,
+    SendOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useAuth } from '../contexts/AuthContext';
 import {
-    DAILY_REPORT_MISSING_FINE_OFFICIAL,
-    DAILY_REPORT_POLICY_START_DATE,
     getFixedVietnamHolidayName,
     isDailyReportRestDay,
     isPastDailyReportWorkingDay,
@@ -92,6 +94,13 @@ interface Task {
     evidencePenaltyRecorded?: boolean;
 }
 
+interface EvidenceImage {
+    name: string;
+    mimeType: string;
+    storagePath: string;
+    hash: string;
+}
+
 interface EvidenceMeta {
     required?: boolean;
     method?: 'link' | 'image' | 'both';
@@ -100,7 +109,8 @@ interface EvidenceMeta {
     submittedAt?: string;
     submittedBy?: string;
     submittedUrl?: string;
-    submittedImage?: { name: string; mimeType: string; storagePath: string; hash: string };
+    submittedImage?: EvidenceImage;
+    submittedImages?: EvidenceImage[];
     reviewedAt?: string;
     reviewedBy?: string;
 }
@@ -121,6 +131,17 @@ const parseAttachments = (attachments?: unknown): Record<string, any> => {
 const getEvidence = (task: Task): EvidenceMeta => parseAttachments(task.attachments).evidence || {};
 
 const DEFAULT_EVIDENCE_PENALTY = 30000;
+const DEADLINE_OVERDUE_FINE_OFFICIAL = 50000;
+const getAssignmentDeadlinePenalty = (task: Task): number => {
+    const value = Number(parseAttachments(task.attachments).assignment?.deadlinePenaltyAmount);
+    return Number.isFinite(value) && value >= 0 ? value : DEADLINE_OVERDUE_FINE_OFFICIAL;
+};
+const getAssignmentRecipients = (task: Task): string[] => {
+    const recipients = parseAttachments(task.attachments).assignment?.assignees;
+    return Array.isArray(recipients) && recipients.length > 0
+        ? [...new Set(recipients.map((name: unknown) => String(name || '').trim()).filter(Boolean))]
+        : [task.assignee].filter(Boolean);
+};
 const EVIDENCE_DEADLINE_OPTIONS = Array.from({ length: 24 * 12 }, (_, index) => {
     const hour = Math.floor(index / 12);
     const minute = (index % 12) * 5;
@@ -139,18 +160,10 @@ const formatPenaltyAmount = (value: string | number | undefined): string => {
     return new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 0 }).format(normalizePenaltyAmount(value));
 };
 
-const normalizeEvidenceUrl = (value: string): string | null => {
-    try {
-        const url = new URL(value.trim());
-        if (!['http:', 'https:'].includes(url.protocol)) return null;
-        url.hash = '';
-        return url.toString();
-    } catch {
-        return null;
-    }
-};
+const getDailyRotationAnchor = () => dayjs().format('YYYY-MM-DD');
 
 const MAX_EVIDENCE_IMAGE_BYTES = 200 * 1024;
+const MAX_EVIDENCE_IMAGES = 5;
 
 const compressEvidenceImage = async (file: File): Promise<File> => {
     const sourceUrl = URL.createObjectURL(file);
@@ -217,7 +230,7 @@ const DailyTasks = () => {
     const [editingTask, setEditingTask] = useState<Task | null>(null);
     const [taskModalVisible, setTaskModalVisible] = useState(false);
     const [taskForm] = Form.useForm();
-    const [assigneeFixed, setAssigneeFixed] = useState(false);
+    const [assignmentMode, setAssignmentMode] = useState<'open' | 'fixed' | 'daily'>('open');
     const [loading, setLoading] = useState(false);
 
     // Quick note state for assignment cards
@@ -226,6 +239,7 @@ const DailyTasks = () => {
 
     // Assignee management
     const [assigneeList, setAssigneeList] = useState<string[]>([]);
+    const [rotationAssigneeList, setRotationAssigneeList] = useState<string[]>([]);
     const [newAssigneeName, setNewAssigneeName] = useState('');
     const [showAddAssignee, setShowAddAssignee] = useState(false);
 
@@ -237,14 +251,28 @@ const DailyTasks = () => {
                 const usersResult = await window.electronAPI.users.getAll();
                 if (usersResult.success && usersResult.data) {
                     const usernames = usersResult.data
-                        .filter((u: any) => u?.username && u.username !== 'admin' && u.isActive !== false)
+                        .filter((u: any) =>
+                            u?.username &&
+                            u.username !== 'admin' &&
+                            u.isActive !== false &&
+                            u.operationalAssignee !== false
+                        )
                         .map((u: any) => String(u.username).trim())
                         .filter(Boolean)
                         .sort((a: string, b: string) => a.localeCompare(b, 'vi'));
                     setAssigneeList(usernames);
+                    const attendanceResult = await window.electronAPI.appConfig.get('attendanceData');
+                    const officialUsernames = Array.isArray(attendanceResult.data?.employees)
+                        ? attendanceResult.data.employees
+                            .filter((employee: any) => employee?.type === 'Official')
+                            .map((employee: any) => String(employee.username || '').trim())
+                            .filter(Boolean)
+                        : [];
+                    setRotationAssigneeList(officialUsernames.filter((username: string) => usernames.includes(username)));
                 } else {
                     const defaults = ['Khánh', 'Toàn', 'Phượng'];
                     setAssigneeList([]);
+                    setRotationAssigneeList([]);
                     
                 }
 
@@ -266,7 +294,12 @@ const DailyTasks = () => {
         const usersResult = await window.electronAPI.users.getAll();
         if (usersResult.success && usersResult.data) {
             const usernames = usersResult.data
-                .filter((u: any) => u?.username && u.username !== 'admin' && u.isActive !== false)
+                .filter((u: any) =>
+                    u?.username &&
+                    u.username !== 'admin' &&
+                    u.isActive !== false &&
+                    u.operationalAssignee !== false
+                )
                 .map((u: any) => String(u.username).trim())
                 .filter(Boolean)
                 .sort((a: string, b: string) => a.localeCompare(b, 'vi'));
@@ -280,15 +313,36 @@ const DailyTasks = () => {
     };
 
     // History state
-    const [activeTab, setActiveTab] = useState<'tasks' | 'assignments' | 'history'>('tasks');
+    const [activeTab, setActiveTab] = useState<'tasks' | 'triage' | 'assignments' | 'history'>('triage');
     const [boardFilter, setBoardFilter] = useState<'all' | 'action' | 'evidence' | 'overdue'>('all');
+    const [deadlineViewFilter, setDeadlineViewFilter] = useState<'pending' | 'completed' | 'all'>('pending');
+    const [handoverSearch, setHandoverSearch] = useState('');
+    const [handoverStatusFilter, setHandoverStatusFilter] = useState<'pending' | 'overdue' | 'warning' | 'completed'>('pending');
     const [history, setHistory] = useState<any[]>([]);
+    const [historySnapshots, setHistorySnapshots] = useState<Record<string, { tasks?: any[] }>>({});
+    const [selectedWorkDate, setSelectedWorkDate] = useState(dayjs());
 
     // === ASSIGNMENT TASKS ===
     const [assignmentModalVisible, setAssignmentModalVisible] = useState(false);
     const [editingAssignment, setEditingAssignment] = useState<Task | null>(null);
     const [assignmentForm] = Form.useForm();
+    const [assignmentNoteExpanded, setAssignmentNoteExpanded] = useState(false);
+    const [selectedAssignmentAssignees, setSelectedAssignmentAssignees] = useState<string[]>([]);
+    const [isSavingAssignment, setIsSavingAssignment] = useState(false);
+    const assignmentSaveInFlightRef = useRef(false);
     const [, forceUpdate] = useState(0); // for countdown re-render
+    const updateAssignmentAssignees = (nextAssignees: string[]) => {
+        setSelectedAssignmentAssignees(nextAssignees);
+        assignmentForm.setFieldsValue({ assignees: nextAssignees });
+        forceUpdate(value => value + 1);
+    };
+    const toggleAssignmentAssignee = (name: string) => {
+        updateAssignmentAssignees(
+            selectedAssignmentAssignees.includes(name)
+                ? selectedAssignmentAssignees.filter((item: string) => item !== name)
+                : [...selectedAssignmentAssignees, name]
+        );
+    };
     const [alertPopups, setAlertPopups] = useState<AlertPopupItem[]>([]);
 
     const addAlertPopup = useCallback((item: Omit<AlertPopupItem, 'id'>) => {
@@ -593,67 +647,145 @@ const DailyTasks = () => {
     // Assignment task handlers
     const handleAddAssignment = () => {
         setEditingAssignment(null);
+        setAssignmentNoteExpanded(false);
+        setSelectedAssignmentAssignees([]);
         assignmentForm.resetFields();
         assignmentForm.setFieldsValue({
             priority: 'normal',
-            deadline: dayjs().add(2, 'hour'),
+            deadline: dayjs().hour(19).minute(0).second(0).millisecond(0),
+            deadlinePenaltyAmount: DEADLINE_OVERDUE_FINE_OFFICIAL,
+            evidenceRequired: false,
+            evidencePenaltyAmount: DEFAULT_EVIDENCE_PENALTY,
+            assignees: [],
         });
         setAssignmentModalVisible(true);
     };
 
     const handleEditAssignment = (task: Task) => {
         setEditingAssignment(task);
+        setAssignmentNoteExpanded(Boolean(task.note));
+        const assignmentRecipients = parseAttachments(task.attachments).assignment?.assignees;
+        setSelectedAssignmentAssignees(Array.isArray(assignmentRecipients) && assignmentRecipients.length > 0
+            ? assignmentRecipients
+            : [task.assignee].filter(Boolean));
         assignmentForm.setFieldsValue({
             title: task.title,
             description: task.description,
             assignee: task.assignee,
             priority: task.priority,
             deadline: dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm'),
+            deadlinePenaltyAmount: getAssignmentDeadlinePenalty(task),
+            evidenceRequired: getEvidence(task).required || false,
+            evidencePenaltyAmount: normalizePenaltyAmount(getEvidence(task).penaltyAmount),
             note: task.note || '',
         });
         setAssignmentModalVisible(true);
     };
 
     const handleSaveAssignment = async () => {
+        if (assignmentSaveInFlightRef.current) return;
+        assignmentSaveInFlightRef.current = true;
+        setIsSavingAssignment(true);
         try {
             const values = await assignmentForm.validateFields();
+            const assignees = Array.from(new Set(editingAssignment
+                ? [values.assignee]
+                : selectedAssignmentAssignees));
+            if (assignees.length === 0) {
+                message.error('Chọn ít nhất một người thực hiện.');
+                return;
+            }
+            const invalidAssignees = assignees.filter((assignee: string) => !assigneeList.includes(assignee));
+            if (invalidAssignees.length > 0) {
+                message.error(`Người nhận không hợp lệ hoặc chưa active: ${invalidAssignees.join(', ')}`);
+                return;
+            }
+            const existingAttachments = editingAssignment ? parseAttachments(editingAssignment.attachments) : {};
+            const existingEvidence = existingAttachments.evidence || {};
             const taskData: any = {
                 title: values.title,
                 description: values.description || '',
-                assignee: values.assignee,
                 priority: values.priority,
                 dueDate: values.deadline.toISOString(),
                 type: 'assignment',
                 category: 'Bàn giao',
                 note: values.note || '',
+                attachments: {
+                    ...existingAttachments,
+                    assignment: {
+                        ...existingAttachments.assignment,
+                        fixedAssignee: true,
+                        deadlinePenaltyAmount: normalizePenaltyAmount(values.deadlinePenaltyAmount),
+                    },
+                    evidence: values.evidenceRequired ? {
+                        ...existingEvidence,
+                        required: true,
+                        method: 'image',
+                        status: existingEvidence.status || 'pending',
+                        penaltyAmount: normalizePenaltyAmount(values.evidencePenaltyAmount),
+                    } : undefined,
+                },
             };
-            // Khi tạo mới: set pending. Khi edit: giữ nguyên status hiện tại
-            if (!editingAssignment) {
-                taskData.status = 'pending';
-            }
 
             let result;
             if (editingAssignment) {
-                result = await window.electronAPI.dailyTasks.update(editingAssignment.id, taskData);
-                message.success('Đã cập nhật!');
+                result = await window.electronAPI.dailyTasks.update(editingAssignment.id, { ...taskData, assignee: assignees[0] });
+                if (result.success) message.success('Đã cập nhật!');
             } else {
-                result = await window.electronAPI.dailyTasks.create(taskData);
-                message.success('Đã tạo công việc bàn giao!');
+                const createAssignments = window.electronAPI.dailyTasks.createAssignments;
+                if (typeof createAssignments === 'function') {
+                    result = await createAssignments({ ...taskData, status: 'pending' }, assignees);
+                } else {
+                    // The Electron preload updates only after an app restart. Keep the
+                    // current window usable while preserving all-or-nothing creation.
+                    const groupId = `assignment-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+                    const groupedTaskData = {
+                        ...taskData,
+                        status: 'pending',
+                        attachments: {
+                            ...taskData.attachments,
+                            assignment: {
+                                ...taskData.attachments.assignment,
+                                groupId,
+                                assignees,
+                            },
+                        },
+                    };
+                    result = await window.electronAPI.dailyTasks.create({
+                        ...groupedTaskData,
+                        assignee: assignees[0],
+                    });
+                }
+                if (result.success) message.success(`Đã giao việc cho ${assignees.length} người.`);
             }
-            if (result.success) {
-                setAssignmentModalVisible(false);
-                assignmentForm.resetFields();
-                setEditingAssignment(null);
-                loadTasks();
-            }
+            if (!result.success) throw new Error(result.error || 'Không thể lưu bàn giao.');
+            setAssignmentModalVisible(false);
+            assignmentForm.resetFields();
+            setEditingAssignment(null);
+            setSelectedAssignmentAssignees([]);
+            loadTasks();
         } catch (error: any) {
             message.error('Lỗi: ' + (error.message || ''));
+        } finally {
+            assignmentSaveInFlightRef.current = false;
+            setIsSavingAssignment(false);
         }
     };
 
     const handleCompleteAssignment = async (taskId: number) => {
         try {
-            await window.electronAPI.dailyTasks.update(taskId, { status: 'completed' });
+            const task = tasks.find(item => item.id === taskId);
+            const evidence = task ? getEvidence(task) : {};
+            if (task && evidence.required && evidence.status !== 'approved') {
+                if (evidence.status === 'submitted') {
+                    message.info('Bằng chứng đã nộp, đang chờ quản lý duyệt.');
+                } else {
+                    handleSubmitEvidence(task);
+                }
+                return;
+            }
+            const result = await window.electronAPI.dailyTasks.update(taskId, { status: 'completed' });
+            if (!result.success) throw new Error(result.error || 'Không thể hoàn thành bàn giao.');
             message.success('✅ Đã hoàn thành!');
             window.dispatchEvent(new CustomEvent('task-changed'));
             loadTasks();
@@ -748,15 +880,24 @@ const DailyTasks = () => {
 
     // Filter tasks by type
     const dailyTasks = tasks.filter(t => !t.type || t.type === 'daily');
-    const assignmentTasks = tasks.filter(t => t.type === 'assignment');
+    const assignmentTasks = tasks.filter(t => t.type === 'assignment').filter((task, index, all) => {
+        const groupId = parseAttachments(task.attachments).assignment?.groupId;
+        return !groupId || all.findIndex(item => parseAttachments(item.attachments).assignment?.groupId === groupId) === index;
+    });
     const pendingAssignments = assignmentTasks.filter(t => t.status !== 'completed');
     const overdueAssignments = assignmentTasks.filter(t => getDeadlineStatus(t).status === 'overdue');
 
     const loadHistory = async () => {
         try {
-            const result = await window.electronAPI.appConfig.get('dailyTasksHistory');
-            if (result.success && result.data) {
-                setHistory(result.data);
+            const [historyResult, snapshotsResult] = await Promise.all([
+                window.electronAPI.appConfig.get('dailyTasksHistory'),
+                window.electronAPI.appConfig.get('dailyTasksSnapshots'),
+            ]);
+            if (historyResult.success && historyResult.data) {
+                setHistory(historyResult.data);
+            }
+            if (snapshotsResult.success && snapshotsResult.data) {
+                setHistorySnapshots(snapshotsResult.data);
             }
         } catch (error) {
             console.error('Error loading history:', error);
@@ -904,9 +1045,6 @@ const DailyTasks = () => {
                         const finalVerifier = result.data.verifier;
                         setTasks(prev => prev.map(t => t.id === taskId ? { ...t, ...result.data, attachments: parseAttachments(result.data.attachments) } : t));
 
-                        // Add to history
-                        await addToHistory({ ...task, assignee: finalAssignee, verifier: finalVerifier }, 'completed');
-
                         // Show success message
                         message.success({
                             content: `✅ Đã xác nhận hoàn thành! (Thực hiện: ${finalAssignee}, Xác nhận: ${finalVerifier})`,
@@ -951,21 +1089,15 @@ const DailyTasks = () => {
                                 : t
                         ));
 
-                        // Add to history
-                        await addToHistory(task, 'pending');
-
-                        // Show success message
+                        // The backend persists the audit event before reporting success.
                         message.success({
                             content: '⚠️ Đã hủy hoàn thành!',
                             duration: 2
                         });
 
-                        // Update backend if API exists
-                        try {
-                            await window.electronAPI.dailyTasks.update(taskId, { status: 'pending' });
-                        } catch (err) {
-                            console.log('Backend update skipped:', err);
-                        }
+                        const result = await window.electronAPI.dailyTasks.update(taskId, { status: 'pending' });
+                        if (!result.success) throw new Error(result.error || 'Không thể mở lại công việc.');
+                        await loadHistory();
                     } catch (error: any) {
                         message.error('Lỗi: ' + (error.message || 'Unknown error'));
                     }
@@ -1037,7 +1169,7 @@ const DailyTasks = () => {
     // Add task
     const handleAddTask = (categoryKey?: string) => {
         setEditingTask(null);
-        setAssigneeFixed(false);
+        setAssignmentMode('open');
         taskForm.resetFields();
 
         // ⚡ Set data TRƯỚC
@@ -1046,8 +1178,8 @@ const DailyTasks = () => {
             category: categoryKey || categories[0]?.key || 'Sàn TMDT',
             status: 'pending',
             evidenceRequired: false,
-            evidenceMethod: 'link',
-            assigneeFixed: false,
+            assignmentMode: 'open',
+            rotationAssignees: [],
             penaltyAmount: DEFAULT_EVIDENCE_PENALTY,
             evidenceDeadlineTime: '19:00',
             dueDate: dayjs().hour(20).minute(0).second(0) // Default 20:00 hôm nay
@@ -1060,14 +1192,21 @@ const DailyTasks = () => {
     // Edit task
     const handleEditTask = (task: Task) => {
         setEditingTask(task);
-        setAssigneeFixed(Boolean(task.assignee));
+        const assignment = parseAttachments(task.attachments).assignment || {};
+        const rotationAssignees = Array.isArray(assignment.dailyRotation?.assignees)
+            ? assignment.dailyRotation.assignees
+            : Array.isArray(assignment.weeklyRotation?.assignees)
+                ? assignment.weeklyRotation.assignees
+            : [];
+        const mode = rotationAssignees.length > 0 ? 'daily' : task.assignee ? 'fixed' : 'open';
+        setAssignmentMode(mode);
         taskForm.setFieldsValue({
             ...task,
             dueDate: dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm'),
             tags: task.tags ? task.tags.join(', ') : '',
             evidenceRequired: getEvidence(task).required || false,
-            evidenceMethod: getEvidence(task).method || 'link',
-            assigneeFixed: Boolean(task.assignee),
+            assignmentMode: mode,
+            rotationAssignees,
             penaltyAmount: normalizePenaltyAmount(getEvidence(task).penaltyAmount),
             evidenceDeadlineTime: task.dueTime,
         });
@@ -1181,9 +1320,15 @@ const DailyTasks = () => {
 
             const existingAttachments = editingTask ? parseAttachments(editingTask.attachments) : {};
             const existingEvidence = editingTask ? getEvidence(editingTask) : {};
+            const existingAssignment = existingAttachments.assignment || {};
             // Only administrators decide how a task is completed and whether a penalty applies.
             const requiresEvidence = isAdmin ? Boolean(values.evidenceRequired) : Boolean(existingEvidence.required);
-            if (requiresEvidence && (!values.assigneeFixed || !values.assignee)) {
+            const selectedAssignmentMode = values.assignmentMode || 'open';
+            const rotationAssignees = Array.isArray(values.rotationAssignees) ? values.rotationAssignees : [];
+            const hasEvidenceAssignee = selectedAssignmentMode === 'daily'
+                ? rotationAssignees.length >= 2
+                : selectedAssignmentMode === 'fixed' && Boolean(values.assignee);
+            if (requiresEvidence && !hasEvidenceAssignee) {
                 message.error('Công việc yêu cầu bằng chứng phải cố định người thực hiện để hệ thống phạt đúng người.');
                 return;
             }
@@ -1196,7 +1341,9 @@ const DailyTasks = () => {
                 title: values.title,
                 description: values.description || '',
                 category: values.category,
-                assignee: values.assigneeFixed ? values.assignee || '' : '',
+                assignee: selectedAssignmentMode === 'fixed'
+                    ? values.assignee || ''
+                    : selectedAssignmentMode === 'daily' ? rotationAssignees[0] || '' : '',
                 verifier: values.verifier || '',
                 area: values.area || '',
                 dueDate: dueAt.toISOString(),
@@ -1207,13 +1354,19 @@ const DailyTasks = () => {
                 attachments: {
                     ...existingAttachments,
                     assignment: {
-                        ...(existingAttachments.assignment || {}),
-                        fixedAssignee: Boolean(values.assigneeFixed),
+                        ...existingAssignment,
+                        fixedAssignee: selectedAssignmentMode === 'fixed',
+                        dailyRotation: selectedAssignmentMode === 'daily' ? {
+                            assignees: rotationAssignees,
+                            anchorDate: existingAssignment.dailyRotation?.anchorDate || getDailyRotationAnchor(),
+                        } : undefined,
+                        weeklyRotation: undefined,
                     },
                     evidence: requiresEvidence ? {
                         ...existingEvidence,
                         required: true,
-                        method: isAdmin ? values.evidenceMethod || 'link' : existingEvidence.method || 'link',
+                        method: 'image',
+                        submittedUrl: undefined,
                         status: existingEvidence.status || 'pending',
                         penaltyAmount: isAdmin
                             ? normalizePenaltyAmount(values.penaltyAmount)
@@ -1350,75 +1503,8 @@ const DailyTasks = () => {
         );
     };
 
-    const updateEvidence = async (task: Task, evidence: EvidenceMeta) => {
-        const attachments = { ...parseAttachments(task.attachments), evidence };
-        const result = await window.electronAPI.dailyTasks.update(task.id, { attachments });
-        if (!result.success) throw new Error(result.error || 'Không thể cập nhật bằng chứng');
-        await loadTasks();
-    };
-
-    /* const handleSubmitEvidence = (task: Task) => {
-        let submittedUrl = getEvidence(task).submittedUrl || '';
-        Modal.confirm({
-            title: 'Nộp bằng chứng',
-            icon: <UploadOutlined style={{ color: '#16a34a' }} />,
-            content: (
-                <div>
-                    <p style={{ marginBottom: 12, color: '#475569' }}>
-                        <strong>{task.title}</strong>
-                    </p>
-                    <Input
-                        type="url"
-                        defaultValue={submittedUrl}
-                        placeholder="Dán link TikTok, Drive hoặc bằng chứng công việc"
-                        onChange={(event) => { submittedUrl = event.target.value; }}
-                    />
-                </div>
-            ),
-            okText: 'Gửi bằng chứng',
-            cancelText: 'Hủy',
-            onOk: async () => {
-                const normalizedUrl = normalizeEvidenceUrl(submittedUrl);
-                if (!normalizedUrl) {
-                    message.warning('Bằng chứng phải là link http:// hoặc https:// hợp lệ.');
-                    return Promise.reject();
-                }
-                const duplicateTask = tasks.find(other =>
-                    other.id !== task.id && normalizeEvidenceUrl(getEvidence(other).submittedUrl || '') === normalizedUrl
-                );
-                if (duplicateTask) {
-                    message.warning(`Link này đã được dùng cho công việc "${duplicateTask.title}".`);
-                    return Promise.reject();
-                }
-                try {
-                    const evidence = {
-                        ...getEvidence(task),
-                        status: 'submitted' as const,
-                        submittedUrl: normalizedUrl,
-                        submittedAt: new Date().toISOString(),
-                        submittedBy: user?.fullName || user?.username || 'Nhân viên',
-                    };
-                    const result = await window.electronAPI.dailyTasks.update(task.id, {
-                        attachments: { ...parseAttachments(task.attachments), evidence },
-                        status: 'completed',
-                    });
-                    if (!result.success) throw new Error(result.error || 'Không thể lưu bằng chứng');
-                    await loadTasks();
-                    message.success('Đã nộp bằng chứng và hoàn thành công việc.');
-                } catch (error: any) {
-                    message.error(error.message || 'Không thể gửi bằng chứng.');
-                }
-            }
-        });
-    }; */
-
     const handleSubmitEvidence = (task: Task) => {
-        const currentEvidence = getEvidence(task);
-        const method = currentEvidence.method || 'link';
-        const needsLink = method === 'link' || method === 'both';
-        const needsImage = method === 'image' || method === 'both';
-        let submittedUrl = currentEvidence.submittedUrl || '';
-        let selectedImage: File | null = null;
+        let selectedImages: File[] = [];
 
         Modal.confirm({
             title: 'Nộp bằng chứng',
@@ -1426,54 +1512,66 @@ const DailyTasks = () => {
             content: (
                 <div>
                     <p style={{ marginBottom: 12, color: '#475569' }}><strong>{task.title}</strong></p>
-                    {needsLink && <Input type="url" defaultValue={submittedUrl} placeholder="Dán link bằng chứng hợp lệ" onChange={(event) => { submittedUrl = event.target.value; }} />}
-                    {needsImage && <div style={{ marginTop: needsLink ? 12 : 0 }}>
-                        <Upload accept="image/png,image/jpeg,image/webp" maxCount={1} beforeUpload={(file) => {
-                            selectedImage = file as unknown as File;
-                            return false;
-                        }}>
+                    <div>
+                        <Upload
+                            accept="image/png,image/jpeg,image/webp"
+                            multiple
+                            maxCount={MAX_EVIDENCE_IMAGES}
+                            beforeUpload={(file) => {
+                                if (selectedImages.length >= MAX_EVIDENCE_IMAGES) {
+                                    message.warning(`Chỉ được chọn tối đa ${MAX_EVIDENCE_IMAGES} ảnh.`);
+                                    return Upload.LIST_IGNORE;
+                                }
+                                selectedImages = [...selectedImages, file as unknown as File];
+                                return false;
+                            }}
+                            onRemove={(file) => {
+                                selectedImages = selectedImages.filter(image => (image as any).uid !== file.uid);
+                                return true;
+                            }}
+                        >
                             <Button icon={<UploadOutlined />}>Chọn ảnh từ máy</Button>
                         </Upload>
-                        <div style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>Chấp nhận JPG, PNG, WebP; tối đa 1 MB trước khi nén.</div>
-                    </div>}
+                        <div style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>
+                            Tối đa {MAX_EVIDENCE_IMAGES} ảnh JPG, PNG hoặc WebP; mỗi ảnh không quá 1 MB trước khi nén.
+                        </div>
+                    </div>
                 </div>
             ),
             okText: 'Gửi bằng chứng', cancelText: 'Hủy',
             onOk: async () => {
-                const normalizedUrl = needsLink ? normalizeEvidenceUrl(submittedUrl) : undefined;
-                if (needsLink && !normalizedUrl) {
-                    message.warning('Vui lòng nhập link http:// hoặc https:// hợp lệ.');
-                    return Promise.reject();
-                }
-                if (needsImage && !selectedImage) {
+                if (selectedImages.length === 0) {
                     message.warning('Vui lòng chọn ảnh bằng chứng từ máy.');
                     return Promise.reject();
                 }
-                if (selectedImage && (selectedImage.size > 1024 * 1024 || !['image/jpeg', 'image/png', 'image/webp'].includes(selectedImage.type))) {
-                    message.warning('Ảnh phải là JPG, PNG hoặc WebP và không vượt quá 1 MB trước khi nén.');
+                const invalidImage = selectedImages.find(image =>
+                    image.size > 1024 * 1024 || !['image/jpeg', 'image/png', 'image/webp'].includes(image.type)
+                );
+                if (invalidImage) {
+                    message.warning(`Ảnh "${invalidImage.name}" phải là JPG, PNG hoặc WebP và không vượt quá 1 MB.`);
                     return Promise.reject();
                 }
                 try {
-                    let image: { name: string; mimeType: string; data: string } | undefined;
-                    if (selectedImage) {
+                    const images = await Promise.all(selectedImages.map(async selectedImage => {
                         const compressedImage = await compressEvidenceImage(selectedImage);
-                        if (compressedImage.size > MAX_EVIDENCE_IMAGE_BYTES) throw new Error('Ảnh sau nén vượt quá 200 KB.');
+                        if (compressedImage.size > MAX_EVIDENCE_IMAGE_BYTES) {
+                            throw new Error(`Ảnh "${selectedImage.name}" sau nén vượt quá 200 KB.`);
+                        }
                         const data = await new Promise<string>((resolve, reject) => {
                             const reader = new FileReader();
                             reader.onload = () => resolve(String(reader.result));
                             reader.onerror = () => reject(new Error('Không thể đọc ảnh.'));
                             reader.readAsDataURL(compressedImage);
                         });
-                        image = { name: compressedImage.name, mimeType: compressedImage.type, data };
-                    }
+                        return { name: compressedImage.name, mimeType: compressedImage.type, data };
+                    }));
                     const result = await window.electronAPI.dailyTasks.submitEvidence({
                         taskId: task.id,
-                        submittedUrl: normalizedUrl,
-                        image,
+                        images,
                     });
                     if (!result.success) throw new Error(result.error || 'Không thể lưu bằng chứng');
                     await loadTasks();
-                    message.success('Đã nộp bằng chứng và hoàn thành công việc.');
+                    message.success('Đã nộp bằng chứng, đang chờ duyệt.');
                 } catch (error: any) { message.error(error.message || 'Không thể gửi bằng chứng.'); }
             }
         });
@@ -1481,12 +1579,9 @@ const DailyTasks = () => {
 
     const handleReviewEvidence = async (task: Task, approved: boolean) => {
         try {
-            await updateEvidence(task, {
-                ...getEvidence(task),
-                status: approved ? 'approved' : 'rejected',
-                reviewedAt: new Date().toISOString(),
-                reviewedBy: user?.fullName || user?.username || 'Quản lý',
-            });
+            const result = await window.electronAPI.dailyTasks.reviewEvidence(task.id, approved);
+            if (!result.success) throw new Error(result.error || 'Không thể duyệt bằng chứng.');
+            await Promise.all([loadTasks(), loadHistory()]);
             message.success(approved ? 'Đã duyệt bằng chứng.' : 'Đã từ chối bằng chứng.');
         } catch (error: any) {
             message.error(error.message || 'Không thể duyệt bằng chứng.');
@@ -1889,24 +1984,37 @@ const DailyTasks = () => {
         return lane === 'review';
     };
 
-    const openEvidence = async (task: Task) => {
-        const evidence = getEvidence(task);
-        let imageUrl = '';
-        if (evidence.submittedImage?.storagePath) {
-            const result = await window.electronAPI.dailyTasks.getEvidenceImageUrl(task.id);
-            if (!result.success || !result.data?.url) {
-                message.error(result.error || 'Không thể tải ảnh bằng chứng.');
-                return;
-            }
-            imageUrl = result.data.url;
+    const openEvidence = async (task: Task, evidenceOverride?: EvidenceMeta) => {
+        const evidence = evidenceOverride || getEvidence(task);
+        const submittedImages = evidence.submittedImages?.length
+            ? evidence.submittedImages
+            : evidence.submittedImage ? [evidence.submittedImage] : [];
+        const imageResults = await Promise.all(submittedImages.map(async image => {
+            const result = await window.electronAPI.dailyTasks.getEvidenceImageUrl(task.id, image.storagePath);
+            return result.success && result.data?.url ? { ...image, url: result.data.url } : null;
+        }));
+        const availableImages = imageResults.filter((image): image is EvidenceImage & { url: string } => Boolean(image));
+        if (submittedImages.length > 0 && availableImages.length === 0) {
+            message.error('Không thể tải ảnh bằng chứng.');
+            return;
         }
         Modal.info({
             title: 'Bằng chứng công việc',
-            content: evidence.submittedUrl || imageUrl ? (
+            width: 720,
+            content: availableImages.length > 0 ? (
                 <div>
                     <p style={{ marginBottom: 8 }}><strong>{task.title}</strong></p>
-                    {evidence.submittedUrl && <a href={evidence.submittedUrl} target="_blank" rel="noreferrer">{evidence.submittedUrl}</a>}
-                    {imageUrl && <img src={imageUrl} alt="Bằng chứng" style={{ display: 'block', maxWidth: '100%', maxHeight: 420, marginTop: evidence.submittedUrl ? 12 : 0, borderRadius: 8 }} />}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                        {availableImages.map((image, index) => (
+                            <a key={image.storagePath} href={image.url} target="_blank" rel="noreferrer" title={image.name}>
+                                <img
+                                    src={image.url}
+                                    alt={`Bằng chứng ${index + 1}`}
+                                    style={{ display: 'block', width: '100%', height: 220, objectFit: 'contain', borderRadius: 8, background: '#f8fafc' }}
+                                />
+                            </a>
+                        ))}
+                    </div>
                     {evidence.submittedAt && <p style={{ marginTop: 12, color: '#64748b' }}>Đã nộp lúc {dayjs(evidence.submittedAt).format('DD/MM/YYYY HH:mm')}</p>}
                 </div>
             ) : 'Nhân viên chưa nộp bằng chứng.',
@@ -1918,12 +2026,7 @@ const DailyTasks = () => {
         const evidence = getEvidence(task);
         const overdue = isOverdue(task);
         const isEvidenceTask = evidence.required;
-        const evidenceMethod = evidence.method || 'both';
-        const evidenceMethodMeta = evidenceMethod === 'link'
-            ? { label: 'Link', icon: <LinkOutlined />, color: '#2563eb' }
-            : evidenceMethod === 'image'
-                ? { label: 'Ảnh tải lên', icon: <PictureOutlined />, color: '#7c3aed' }
-                : { label: 'Link + ảnh', icon: <UploadOutlined />, color: '#0f766e' };
+        const evidenceMethodMeta = { label: 'Ảnh tải lên', icon: <PictureOutlined />, color: '#7c3aed' };
         /*
         const statusText = evidence.status === 'submitted' ? 'Chờ duyệt' : overdue ? `Quá hạn ${formatTimeDiff(Math.abs(dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm').diff(dayjs(), 'minute')))}` : `Hạn ${task.dueTime}`;
         */
@@ -2016,7 +2119,128 @@ const DailyTasks = () => {
         );
     };
 
-    const OperationalColumn = ({ title, count, color, icon, tasks: laneTasks, lane }: { title: string; count: number; color: string; icon: ReactNode; tasks: Task[]; lane: 'today' | 'evidence' | 'review' }) => {
+    const HandoverTaskCard = ({ task }: { task: Task }) => {
+        const deadline = getDeadlineStatus(task);
+        const notes = parseNotes(task.note);
+        const completed = task.status === 'completed';
+        const canComplete = isAdmin || user?.username === task.assignee;
+        const latestNote = notes.length > 0 ? notes[notes.length - 1] : null;
+        const stateColor = completed ? '#16a34a' : deadline.status === 'overdue' ? '#ef4444' : deadline.status === 'warning' ? '#d97706' : '#7c3aed';
+        const stateBg = completed ? '#ecfdf5' : deadline.status === 'overdue' ? '#fff1f2' : deadline.status === 'warning' ? '#fffbeb' : '#f5f3ff';
+        const stateBorder = completed ? '#bbf7d0' : deadline.status === 'overdue' ? '#fecdd3' : deadline.status === 'warning' ? '#fde68a' : '#ddd6fe';
+        const stateLabel = completed ? 'Đã hoàn thành' : deadline.label;
+
+        return (
+            <div style={{
+                background: '#fff',
+                border: `1px solid ${stateBorder}`,
+                borderLeft: `4px solid ${stateColor}`,
+                borderRadius: 8,
+                padding: 14,
+                marginTop: 10,
+                boxShadow: '0 1px 2px rgba(15, 23, 42, 0.05)',
+            }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                    <span style={{
+                        width: 30,
+                        height: 30,
+                        borderRadius: 8,
+                        display: 'grid',
+                        placeItems: 'center',
+                        flexShrink: 0,
+                        color: stateColor,
+                        background: stateBg,
+                        border: `1px solid ${stateBorder}`,
+                    }}>
+                        <CheckCircleOutlined />
+                    </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{
+                                    fontSize: 15,
+                                    fontWeight: 750,
+                                    lineHeight: 1.35,
+                                    color: completed ? '#64748b' : '#0f172a',
+                                    textDecoration: completed ? 'line-through' : 'none',
+                                }}>
+                                    {task.title}
+                                </div>
+                                {task.description && <div style={{ color: '#64748b', fontSize: 13, marginTop: 5, lineHeight: 1.45 }}>{task.description}</div>}
+                            </div>
+                            <Tag style={{
+                                margin: 0,
+                                color: stateColor,
+                                background: stateBg,
+                                borderColor: stateBorder,
+                                fontWeight: 700,
+                                borderRadius: 999,
+                                paddingInline: 10,
+                                whiteSpace: 'nowrap',
+                            }}>
+                                {stateLabel}
+                            </Tag>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginTop: 10, fontSize: 13 }}>
+                            <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 6,
+                                color: '#334155',
+                                background: '#f8fafc',
+                                border: '1px solid #e2e8f0',
+                                borderRadius: 999,
+                                padding: '3px 9px',
+                            }}>
+                                <UserOutlined style={{ fontSize: 12 }} /> {task.assignee || 'Chưa phân công'}
+                            </span>
+                            <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 6,
+                                color: completed ? '#64748b' : stateColor,
+                                background: stateBg,
+                                border: `1px solid ${stateBorder}`,
+                                borderRadius: 999,
+                                padding: '3px 9px',
+                                fontWeight: 650,
+                            }}>
+                                <ClockCircleOutlined style={{ fontSize: 12 }} /> {deadline.label}
+                            </span>
+                        </div>
+                        <div style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            gap: 12,
+                            marginTop: 12,
+                            paddingTop: 10,
+                            borderTop: '1px solid #eef2f7',
+                        }}>
+                            <div style={{
+                                minWidth: 0,
+                                color: latestNote ? '#475569' : '#94a3b8',
+                                fontSize: 12,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                            }}>
+                                {latestNote ? `Ghi chú: ${latestNote.note}` : 'Chưa có ghi chú'}
+                            </div>
+                            <Space size={2} style={{ flexShrink: 0 }}>
+                                {!completed && canComplete && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} style={{ background: '#16a34a', borderColor: '#16a34a', borderRadius: 6, fontWeight: 650 }}>Hoàn thành</Button>}
+                                <Button size="small" type="text" onClick={() => handleNoteAssignment(task)} style={{ fontWeight: 600 }}>Ghi chú</Button>
+                                {isAdmin && <Tooltip title="Sửa bàn giao"><Button size="small" type="text" icon={<EditOutlined />} onClick={() => handleEditAssignment(task)} aria-label="Sửa bàn giao" /></Tooltip>}
+                                {isAdmin && <Tooltip title="Xóa bàn giao"><Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => handleDeleteAssignment(task.id)} aria-label="Xóa bàn giao" /></Tooltip>}
+                            </Space>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    const OperationalColumn = ({ title, count, color, icon, tasks: laneTasks, lane, handoverTasks = [] }: { title: string; count: number; color: string; icon: ReactNode; tasks: Task[]; lane: 'today' | 'evidence' | 'review'; handoverTasks?: Task[] }) => {
         if (count < 0) return null;
         const sortByDeadline = (left: Task, right: Task) =>
             dayjs(`${left.dueDate} ${left.dueTime}`).valueOf() - dayjs(`${right.dueDate} ${right.dueTime}`).valueOf();
@@ -2025,90 +2249,408 @@ const DailyTasks = () => {
             ...filteredTasks.filter(task => getEvidence(task).required).sort(sortByDeadline),
             ...filteredTasks.filter(task => !getEvidence(task).required).sort(sortByDeadline),
         ];
+        const visibleHandovers = handoverTasks
+            .filter(task => {
+                const deadline = getDeadlineStatus(task);
+                if (boardFilter === 'all') return true;
+                if (boardFilter === 'action') return task.status !== 'completed' && deadline.status !== 'overdue';
+                return boardFilter === 'overdue' && deadline.status === 'overdue';
+            })
+            .sort(sortByDeadline);
+        const isHandoverColumn = handoverTasks.length > 0 && laneTasks.length === 0;
+
+        if (isHandoverColumn) {
+            const getStateMeta = (task: Task) => {
+                const deadline = getDeadlineStatus(task);
+                if (task.status === 'completed') {
+                    return { key: 'completed', label: 'Đã hoàn thành', color: '#16a34a', bg: '#ecfdf5', border: '#bbf7d0' };
+                }
+                if (deadline.status === 'overdue') {
+                    return { key: 'overdue', label: deadline.label, color: '#ef4444', bg: '#fff1f2', border: '#fecdd3' };
+                }
+                if (deadline.status === 'warning') {
+                    return { key: 'warning', label: deadline.label, color: '#d97706', bg: '#fffbeb', border: '#fde68a' };
+                }
+                return { key: 'normal', label: deadline.label, color: '#64748b', bg: '#f8fafc', border: '#e2e8f0' };
+            };
+            const normalizedSearch = handoverSearch.trim().toLowerCase();
+            const handoverRows = handoverTasks
+                .filter(task => {
+                    const meta = getStateMeta(task);
+                    if (handoverStatusFilter === 'pending' && task.status === 'completed') return false;
+                    if (handoverStatusFilter !== 'pending' && meta.key !== handoverStatusFilter) return false;
+                    if (!normalizedSearch) return true;
+                    return [task.title, task.description, task.assignee, task.note]
+                        .filter(Boolean)
+                        .some(value => String(value).toLowerCase().includes(normalizedSearch));
+                })
+                .sort(sortByDeadline);
+            const statusCounts = handoverTasks.reduce((acc, task) => {
+                const meta = getStateMeta(task);
+                acc[meta.key] = (acc[meta.key] || 0) + 1;
+                return acc;
+            }, {} as Record<string, number>);
+            const pendingHandoverCount = handoverTasks.filter(task => task.status !== 'completed').length;
+
+            return <section style={{ background: '#fff', border: '1px solid #dbe3ec', borderRadius: 10, padding: 16, minWidth: 760, flex: 1, boxShadow: '0 1px 3px rgba(15, 23, 42, 0.04)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 }}>
+                    <span style={{ width: 40, height: 40, display: 'grid', placeItems: 'center', borderRadius: 8, background: '#f5f3ff', color, fontSize: 20, border: '1px solid #ddd6fe' }}>{icon}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: '#0f172a' }}>{title}</h2>
+                        <div style={{ color: '#64748b', fontSize: 13, marginTop: 2 }}>Danh sách bàn giao</div>
+                    </div>
+                    <Input
+                        allowClear
+                        prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
+                        placeholder="Tìm kiếm công việc bàn giao..."
+                        value={handoverSearch}
+                        onChange={event => setHandoverSearch(event.target.value)}
+                        style={{ width: 320, borderRadius: 6 }}
+                    />
+                    <Select
+                        value={handoverStatusFilter}
+                        onChange={value => setHandoverStatusFilter(value)}
+                        style={{ width: 170 }}
+                        options={[
+                            { value: 'pending', label: `Công việc chờ (${pendingHandoverCount})` },
+                            { value: 'overdue', label: `Quá hạn (${statusCounts.overdue || 0})` },
+                            { value: 'warning', label: `Sắp đến hạn (${statusCounts.warning || 0})` },
+                            { value: 'completed', label: `Đã hoàn thành (${statusCounts.completed || 0})` },
+                        ]}
+                    />
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+                    {[
+                        ['pending', 'Công việc chờ', pendingHandoverCount],
+                        ['overdue', 'Quá hạn', statusCounts.overdue || 0],
+                        ['warning', 'Sắp đến hạn', statusCounts.warning || 0],
+                        ['completed', 'Đã hoàn thành', statusCounts.completed || 0],
+                    ].map(([key, label, itemCount]) => (
+                        <Button
+                            key={String(key)}
+                            size="small"
+                            onClick={() => setHandoverStatusFilter(key as typeof handoverStatusFilter)}
+                            style={{
+                                height: 32,
+                                borderRadius: 6,
+                                fontWeight: 700,
+                                color: handoverStatusFilter === key ? '#059669' : '#475569',
+                                borderColor: handoverStatusFilter === key ? '#86efac' : '#dbe3ec',
+                                background: handoverStatusFilter === key ? '#ecfdf5' : '#fff',
+                            }}
+                        >
+                            {label} <Badge count={itemCount as number} style={{ marginLeft: 6, backgroundColor: '#f1f5f9', color: '#475569', boxShadow: 'none' }} />
+                        </Button>
+                    ))}
+                </div>
+
+                <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, overflow: 'hidden', background: '#fff' }}>
+                    <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'minmax(280px, 1.35fr) minmax(130px, 0.55fr) minmax(160px, 0.7fr) minmax(220px, 1fr) minmax(140px, 0.55fr)',
+                        gap: 12,
+                        alignItems: 'center',
+                        padding: '11px 14px',
+                        background: '#f8fafc',
+                        color: '#475569',
+                        fontSize: 12,
+                        fontWeight: 800,
+                        textTransform: 'uppercase',
+                        letterSpacing: 0.3,
+                    }}>
+                        <div>Công việc bàn giao</div>
+                        <div>Người phụ trách</div>
+                        <div>Hạn hoàn thành</div>
+                        <div>Ghi chú mới nhất</div>
+                        <div style={{ textAlign: 'right' }}>Thao tác</div>
+                    </div>
+                    {handoverRows.map(task => {
+                        const meta = getStateMeta(task);
+                        const notes = parseNotes(task.note);
+                        const latestNote = notes.length > 0 ? notes[notes.length - 1] : null;
+                        const completed = task.status === 'completed';
+                        const canComplete = isAdmin || user?.username === task.assignee;
+                        return (
+                            <div key={task.id} style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'minmax(280px, 1.35fr) minmax(130px, 0.55fr) minmax(160px, 0.7fr) minmax(220px, 1fr) minmax(140px, 0.55fr)',
+                                gap: 12,
+                                alignItems: 'center',
+                                minHeight: 66,
+                                padding: '12px 14px',
+                                borderTop: '1px solid #eef2f7',
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+                                    <span style={{ width: 4, alignSelf: 'stretch', minHeight: 36, borderRadius: 999, background: meta.color }} />
+                                    <span style={{ color: meta.color, fontSize: 17, display: 'inline-flex' }}>
+                                        {completed ? <CheckCircleFilled /> : <CheckCircleOutlined />}
+                                    </span>
+                                    <div style={{ minWidth: 0 }}>
+                                        <div style={{ color: completed ? '#64748b' : '#0f172a', fontWeight: 750, fontSize: 14, lineHeight: 1.35, textDecoration: completed ? 'line-through' : 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {task.title}
+                                        </div>
+                                        {task.description && <div style={{ color: '#94a3b8', fontSize: 12, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.description}</div>}
+                                    </div>
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                                    <Avatar size={24} style={{ flexShrink: 0, backgroundColor: getAvatarColor(task.assignee || '?'), fontSize: 11, fontWeight: 700 }}>
+                                        {(task.assignee || '?').slice(0, 1).toUpperCase()}
+                                    </Avatar>
+                                    <span style={{ color: '#334155', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.assignee || 'Chưa phân công'}</span>
+                                </div>
+                                <div>
+                                    <div style={{ color: '#334155', fontSize: 13, fontWeight: 650 }}>
+                                        {dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm').format('DD/MM/YYYY HH:mm')}
+                                    </div>
+                                    <Tag style={{ marginTop: 4, color: meta.color, background: meta.bg, borderColor: meta.border, borderRadius: 999, fontSize: 12, fontWeight: 700 }}>
+                                        {meta.label}
+                                    </Tag>
+                                </div>
+                                <div style={{ color: latestNote ? '#475569' : '#94a3b8', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {latestNote ? latestNote.note : '-'}
+                                </div>
+                                <Space size={4} style={{ justifyContent: 'flex-end', width: '100%' }}>
+                                    <Button size="small" onClick={() => handleNoteAssignment(task)} style={{ borderRadius: 6, fontWeight: 600 }}>
+                                        Ghi chú
+                                    </Button>
+                                    {!completed && canComplete && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} style={{ background: '#16a34a', borderColor: '#16a34a', borderRadius: 6 }} />}
+                                    {isAdmin && <Tooltip title="Sửa bàn giao"><Button size="small" type="text" icon={<EditOutlined />} onClick={() => handleEditAssignment(task)} aria-label="Sửa bàn giao" /></Tooltip>}
+                                    {isAdmin && <Tooltip title="Xóa bàn giao"><Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => handleDeleteAssignment(task.id)} aria-label="Xóa bàn giao" /></Tooltip>}
+                                </Space>
+                            </div>
+                        );
+                    })}
+                    {handoverRows.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không có công việc bàn giao" style={{ padding: 56 }} />}
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: '#64748b', fontSize: 13, marginTop: 12 }}>
+                    <span>Hiển thị {handoverRows.length} / {handoverTasks.length} công việc</span>
+                    <span style={{ color: '#059669', fontWeight: 700 }}>{pendingAssignments.length} đang chờ hoàn thành</span>
+                </div>
+            </section>;
+        }
 
         return <section style={{ background: '#fff', border: '1px solid #dbe3ec', borderRadius: 10, padding: 16, minWidth: 320, flex: 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-                <span style={{ width: 38, height: 38, display: 'grid', placeItems: 'center', borderRadius: 6, background: color, color: '#fff', fontSize: 20 }}>{icon}</span>
+                <span style={{ width: 38, height: 38, display: 'grid', placeItems: 'center', borderRadius: 6, background: isHandoverColumn ? '#f5f3ff' : color, color: isHandoverColumn ? color : '#fff', fontSize: 20, border: isHandoverColumn ? '1px solid #ddd6fe' : 'none' }}>{icon}</span>
                 <h2 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: '#1e293b', flex: 1 }}>{title}</h2>
                 <Badge count={count} style={{ backgroundColor: `${color}22`, color, boxShadow: 'none', fontWeight: 700 }} />
                 <Tooltip title="Tùy chọn cột"><Button type="text" icon={<MoreOutlined />} /></Tooltip>
             </div>
             <div style={{ minHeight: 430 }}>
                 {visibleTasks.map(task => <OperationalTaskCard key={task.id} task={task} lane={lane} />)}
-                {visibleTasks.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không có công việc" style={{ paddingTop: 80 }} />}
+                {visibleHandovers.length > 0 && <div style={{ marginTop: visibleTasks.length ? 16 : 0, paddingTop: visibleTasks.length ? 12 : 0, borderTop: visibleTasks.length ? '1px solid #e2e8f0' : 'none' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 6 }}>
+                        <div style={{ color: '#475569', fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.3 }}>Danh sách bàn giao</div>
+                        <div style={{ color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 999, padding: '2px 9px', fontSize: 12, fontWeight: 750 }}>{visibleHandovers.length} việc</div>
+                    </div>
+                    {visibleHandovers.map(task => <HandoverTaskCard key={task.id} task={task} />)}
+                </div>}
+                {visibleTasks.length === 0 && visibleHandovers.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không có công việc" style={{ paddingTop: 80 }} />}
             </div>
-            <div style={{ textAlign: 'center', color: '#64748b', border: '1px solid #dbe3ec', borderRadius: 6, padding: '8px 12px', fontSize: 13 }}>
-                {count} công việc
+            <div style={{ textAlign: 'center', color: isHandoverColumn ? '#6d28d9' : '#64748b', background: isHandoverColumn ? '#faf5ff' : '#fff', border: `1px solid ${isHandoverColumn ? '#ede9fe' : '#dbe3ec'}`, borderRadius: 6, padding: '8px 12px', fontSize: 13, fontWeight: isHandoverColumn ? 650 : 400 }}>
+                {handoverTasks.length > 0 ? handoverTasks.length : count} công việc
             </div>
         </section>;
     };
 
+    const PriorityWorkspace = ({ scope }: { scope: 'all' | 'daily' | 'deadline' }) => {
+        const selectedDateKey = selectedWorkDate.format('YYYY-MM-DD');
+        const isCurrentWorkDate = selectedWorkDate.isSame(dayjs(), 'day');
+        const snapshotTasks = historySnapshots[selectedDateKey]?.tasks;
+        const selectedDailyTasks = isCurrentWorkDate
+            ? dailyTasks
+            : Array.isArray(snapshotTasks)
+                ? snapshotTasks.map((task: any) => ({
+                    ...task,
+                    type: task.type || 'daily',
+                    priority: task.priority || 'normal',
+                    dueTime: task.dueTime || dayjs(task.dueDate).format('HH:mm'),
+                    dueDate: task.dueDate || selectedDateKey,
+                    tags: Array.isArray(task.tags) ? task.tags : [],
+                    attachments: parseAttachments(task.attachments),
+                } as Task))
+                : [];
+        const selectedAssignments = isCurrentWorkDate
+            ? assignmentTasks
+            : assignmentTasks.filter(task => dayjs(task.dueDate).format('YYYY-MM-DD') === selectedDateKey);
+        const completedDeadlineCount = selectedAssignments.filter(task => task.status === 'completed').length;
+        const visibleDeadlineTasks = deadlineViewFilter === 'all'
+            ? selectedAssignments
+            : selectedAssignments.filter(task => deadlineViewFilter === 'completed' ? task.status === 'completed' : task.status !== 'completed');
+        const sourceTasks = scope === 'daily' ? selectedDailyTasks : scope === 'deadline' ? visibleDeadlineTasks : [...selectedDailyTasks, ...selectedAssignments];
+        const pendingTasks = sourceTasks.filter(task => task.status !== 'completed');
+        const completedDeadlineTasks = scope === 'deadline' ? sourceTasks.filter(task => task.status === 'completed') : [];
+        const isTaskOverdue = (task: Task) => !isCurrentWorkDate ? false : task.type === 'assignment' ? getDeadlineStatus(task).status === 'overdue' : isOverdue(task);
+        const evidenceSoon = (task: Task) => task.type !== 'assignment' && getEvidence(task).required && !isTaskOverdue(task);
+        const groups = [
+            { key: 'overdue', label: 'Quá hạn', color: '#dc2626', tasks: pendingTasks.filter(isTaskOverdue) },
+            { key: 'evidence', label: 'Bằng chứng sắp đến hạn', color: '#d97706', tasks: pendingTasks.filter(evidenceSoon) },
+            { key: 'normal', label: 'Bình thường', color: '#64748b', tasks: pendingTasks.filter(task => !isTaskOverdue(task) && !evidenceSoon(task)) },
+            ...(completedDeadlineTasks.length > 0 ? [{ key: 'completed', label: 'Đã hoàn thành', color: '#16a34a', tasks: completedDeadlineTasks }] : []),
+        ].filter(group => group.tasks.length > 0);
+        const attentionTasks = [...pendingTasks.filter(isTaskOverdue), ...reviewTasks].slice(0, 6);
+
+        const renderRow = (task: Task, color: string) => {
+            const evidence = getEvidence(task);
+            const isAssignment = task.type === 'assignment';
+            const canCompleteAssignment = isAssignment && task.status !== 'completed' && (isAdmin || getAssignmentRecipients(task).includes(user?.username || ''));
+            const deadlineText = isAssignment
+                ? getDeadlineStatus(task).label
+                : isTaskOverdue(task) ? 'Quá hạn' : `Hạn ${task.dueTime}`;
+            const sourceLabel = isAssignment ? 'Việc có hạn' : 'Hàng ngày';
+            return <div key={`${task.type}-${task.id}`} style={{ display: 'grid', gridTemplateColumns: 'minmax(230px, 1.3fr) 116px minmax(145px, .75fr) minmax(190px, .95fr) minmax(140px, .65fr)', gap: 12, alignItems: 'center', minHeight: 72, padding: '10px 14px', borderTop: '1px solid #eef2f7', borderLeft: `3px solid ${color}` }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                    {isAssignment && canCompleteAssignment
+                        ? <Button
+                            type="text"
+                            size="small"
+                            icon={<CheckCircleOutlined />}
+                            onClick={() => handleCompleteAssignment(task.id)}
+                            aria-label="Hoàn thành bàn giao"
+                            style={{ color, width: 26, height: 26, padding: 0 }}
+                        />
+                        : isAssignment
+                            ? <CheckCircleOutlined style={{ color, fontSize: 17 }} />
+                            : <CompletionButton task={task} size={18} />}
+                    <div style={{ minWidth: 0 }}>
+                        <div style={{ color: '#172033', fontWeight: 750, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.title}</div>
+                        <div style={{ marginTop: 4, color: '#64748b', fontSize: 12, display: 'flex', gap: 6, alignItems: 'center' }}><UserOutlined /> {isAssignment ? getAssignmentRecipients(task).join(', ') : (task.assignee || 'Chưa phân công')}</div>
+                    </div>
+                </div>
+                <Tag style={{ width: 'fit-content', margin: 0, color: isAssignment ? '#2563eb' : '#15803d', background: isAssignment ? '#eff6ff' : '#ecfdf5', borderColor: isAssignment ? '#bfdbfe' : '#bbf7d0', fontWeight: 700 }}>{sourceLabel}</Tag>
+                <div style={{ color: color === '#dc2626' ? '#dc2626' : '#475569', fontSize: 13, fontWeight: 650 }}><ClockCircleOutlined /> {deadlineText}</div>
+                <div style={{ fontSize: 13, color: evidence.required ? '#c2410c' : '#64748b' }}>
+                    {evidence.required
+                        ? <><UploadOutlined /> Cần bằng chứng {evidence.penaltyAmount ? `· Phạt ${formatPenaltyAmount(evidence.penaltyAmount)}đ` : ''}</>
+                        : isAssignment
+                            ? <><WarningOutlined /> Phạt trễ deadline {formatPenaltyAmount(getAssignmentDeadlinePenalty(task))}đ</>
+                            : 'Không bắt buộc bằng chứng'}
+                </div>
+                {isAssignment ? (
+                    <Space size={2} style={{ justifyContent: 'flex-end' }}>
+                        {evidence.required && evidence.status !== 'submitted' && evidence.status !== 'approved' && <Tooltip title="Nộp bằng chứng"><Button type="text" size="small" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} /></Tooltip>}
+                        {evidence.required && (evidence.status === 'submitted' || evidence.status === 'approved') && <Tooltip title="Xem bằng chứng"><Button type="text" size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)} /></Tooltip>}
+                        {evidence.required && evidence.status === 'submitted' && isAdmin && <Tooltip title="Duyệt bằng chứng"><Button type="text" size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ color: '#16a34a' }} /></Tooltip>}
+                        <Button size="small" onClick={() => handleNoteAssignment(task)} style={{ borderRadius: 6 }}>Ghi chú</Button>
+                        {canCompleteAssignment && <Tooltip title="Hoàn thành"><Button type="text" size="small" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} /></Tooltip>}
+                        {isAdmin && <Tooltip title="Sửa"><Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditAssignment(task)} /></Tooltip>}
+                        {isAdmin && <Tooltip title="Xóa"><Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteAssignment(task.id)} /></Tooltip>}
+                    </Space>
+                ) : (
+                    <Space size={2} style={{ justifyContent: 'flex-end' }}>
+                        {isAdmin && <Tooltip title="Sửa"><Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditTask(task)} /></Tooltip>}
+                        {isAdmin && <Tooltip title="Xóa"><Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteTask(task.id)} /></Tooltip>}
+                    </Space>
+                )}
+            </div>;
+        };
+
+        return <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 370px', gap: 16, alignItems: 'start' }}>
+            <section style={{ background: '#fff', border: '1px solid #dbe3ec', borderRadius: 8, overflow: 'hidden' }}>
+                <div style={{ padding: '16px 18px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+                    <div><h2 style={{ margin: 0, color: '#172033', fontSize: 18, fontWeight: 800 }}>{scope === 'all' ? (isCurrentWorkDate ? 'Cần xử lý hôm nay' : `Công việc ngày ${selectedWorkDate.format('DD/MM/YYYY')}`) : scope === 'daily' ? 'Hàng ngày' : 'Việc có hạn'}</h2><span style={{ color: '#64748b', fontSize: 13 }}>{scope === 'deadline' && deadlineViewFilter === 'completed' ? `${completedDeadlineCount} công việc đã hoàn thành` : `${pendingTasks.length} công việc đang mở`}</span></div>
+                    {scope === 'deadline' ? (
+                        <Space size={6} wrap>
+                            <Button size="small" type={deadlineViewFilter === 'pending' ? 'primary' : 'default'} onClick={() => setDeadlineViewFilter('pending')} style={{ borderRadius: 6 }}>Đang mở ({selectedAssignments.length - completedDeadlineCount})</Button>
+                            <Button size="small" type={deadlineViewFilter === 'completed' ? 'primary' : 'default'} onClick={() => setDeadlineViewFilter('completed')} style={{ borderRadius: 6 }}>Đã hoàn thành ({completedDeadlineCount})</Button>
+                            <Button size="small" type={deadlineViewFilter === 'all' ? 'primary' : 'default'} onClick={() => setDeadlineViewFilter('all')} style={{ borderRadius: 6 }}>Tất cả ({selectedAssignments.length})</Button>
+                        </Space>
+                    ) : <Button type="text" style={{ color: '#475569', fontWeight: 600 }}>Sắp xếp: ưu tiên</Button>}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(230px, 1.3fr) 116px minmax(145px, .75fr) minmax(190px, .95fr) minmax(140px, .65fr)', gap: 12, padding: '10px 14px', background: '#f8fafc', color: '#64748b', fontSize: 11, fontWeight: 800, textTransform: 'uppercase' }}><span>Công việc</span><span>Nguồn</span><span>Hạn</span><span>Bằng chứng / phạt</span><span style={{ textAlign: 'right' }}>Thao tác</span></div>
+                {groups.map(group => <div key={group.key}><div style={{ padding: '9px 14px', background: group.key === 'overdue' ? '#fef2f2' : group.key === 'evidence' ? '#fff7ed' : '#f8fafc', color: group.color, fontSize: 13, fontWeight: 800 }}>{group.label} ({group.tasks.length})</div>{group.tasks.map(task => renderRow(task, group.color))}</div>)}
+                {groups.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={isCurrentWorkDate ? 'Không có công việc cần xử lý' : 'Chưa có dữ liệu công việc cho ngày này'} style={{ padding: 60 }} />}
+            </section>
+            <aside style={{ background: '#fff', border: '1px solid #dbe3ec', borderRadius: 8, overflow: 'hidden' }}>
+                <div style={{ padding: '16px 18px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between' }}><h2 style={{ margin: 0, fontSize: 17, color: '#172033' }}><WarningOutlined style={{ color: '#dc2626' }} /> Quá hạn / cần duyệt</h2><Badge count={attentionTasks.length} style={{ background: '#fee2e2', color: '#dc2626', boxShadow: 'none' }} /></div>
+                {attentionTasks.length > 0 ? attentionTasks.map(task => {
+                    const evidence = getEvidence(task);
+                    const canViewEvidence = evidence.status === 'submitted' || Boolean(evidence.submittedUrl || evidence.submittedImage?.storagePath);
+                    return <div key={`attention-${task.type}-${task.id}`} style={{ padding: '14px 16px', borderBottom: '1px solid #eef2f7' }}>
+                        <div style={{ fontWeight: 750, color: '#172033' }}>{task.title}</div>
+                        <div style={{ marginTop: 6, color: '#dc2626', fontSize: 13 }}><ClockCircleOutlined /> {task.type === 'assignment' ? getDeadlineStatus(task).label : isTaskOverdue(task) ? 'Quá hạn' : 'Chờ duyệt bằng chứng'}</div>
+                        <div style={{ marginTop: 6, color: '#64748b', fontSize: 12 }}><UserOutlined /> {task.assignee || 'Chưa phân công'}</div>
+                        {canViewEvidence && <div style={{ display: 'flex', gap: 6, marginTop: 11, flexWrap: 'wrap' }}>
+                            <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>
+                            {isAdmin && <Button size="small" type="primary" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Duyệt</Button>}
+                            {isAdmin && <Button size="small" danger onClick={() => handleReviewEvidence(task, false)}>Từ chối</Button>}
+                        </div>}
+                    </div>;
+                }) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không có việc quá hạn" style={{ padding: 60 }} />}
+            </aside>
+        </div>;
+    };
+
     return (
         <div style={{ padding: 24, backgroundColor: '#f0f2f5', minHeight: '100vh' }}>
-            <Alert
+            {false && <Alert
                 type="warning"
                 showIcon
                 style={{ marginBottom: 12, borderRadius: 10, padding: '8px 14px' }}
                 description={
                     <span>
-                        Nếu một ngày làm việc không có bất kỳ lịch sử xử lý công việc hằng ngày nào, hệ thống sẽ tự động phạt{' '}
-                        <strong>{DAILY_REPORT_MISSING_FINE_OFFICIAL.toLocaleString('vi-VN')}đ / nhân viên chính thức</strong>
-                        {' '}trong Bảng công. Áp dụng từ ngày{' '}
-                        <strong>{dayjs(DAILY_REPORT_POLICY_START_DATE).format('DD/MM/YYYY')}</strong>.
+                        Mỗi công việc yêu cầu bằng chứng có <strong>mức phạt riêng</strong> hiển thị trên thẻ.
+                        {' '}Nhân viên bỏ công việc nào sẽ bị ghi đúng khoản phạt của công việc đó trong Bảng công.
                         {' '}Chủ nhật và ngày lễ không tính.
                     </span>
                 }
-            />
+            />}
 
             {/* Header Stats */}
             <Card style={{
-                marginBottom: 24,
-                borderRadius: 12,
-                boxShadow: '0 2px 8px rgba(0,0,0,0.06)'
-            }}>
+                marginBottom: 12,
+                borderRadius: 8,
+                boxShadow: 'none',
+                border: '1px solid #e2e8f0'
+            }} styles={{ body: { padding: '14px 18px' } }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
-                        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 'bold' }}>
-                            📋 Công việc hàng ngày
-                        </h1>
-                        <p style={{ margin: '8px 0 0', color: '#666', fontSize: 14 }}>
-                            {dayjs().format('dddd, DD/MM/YYYY')}
-                        </p>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
+                        <h1 style={{ margin: 0, color: '#172033', fontSize: 22, fontWeight: 800 }}>Công việc hàng ngày</h1>
+                        <DatePicker
+                            value={selectedWorkDate}
+                            onChange={(value) => value && setSelectedWorkDate(value)}
+                            allowClear={false}
+                            format="dddd, DD/MM/YYYY"
+                            suffixIcon={<CalendarOutlined />}
+                            style={{ height: 36, width: 190, borderRadius: 6, color: '#334155', fontWeight: 600 }}
+                        />
                     </div>
 
-                    <Space size={24}>
+                    <Space size={18}>
                         <div style={{ textAlign: 'center' }}>
-                            <div style={{ fontSize: 32, fontWeight: 'bold', color: '#52c41a' }}>
+                            <div style={{ fontSize: 22, fontWeight: 'bold', color: '#16a34a' }}>
                                 {completedTasks}
                             </div>
                             <div style={{ fontSize: 12, color: '#999', marginTop: 2 }}>Hoàn thành</div>
                         </div>
 
-                        <Divider type="vertical" style={{ height: 50 }} />
+                        <Divider type="vertical" style={{ height: 34 }} />
 
                         <div style={{ textAlign: 'center' }}>
-                            <div style={{ fontSize: 32, fontWeight: 'bold', color: '#ff4d4f' }}>
+                            <div style={{ fontSize: 22, fontWeight: 'bold', color: '#dc2626' }}>
                                 {overdueTasks}
                             </div>
                             <div style={{ fontSize: 12, color: '#999', marginTop: 2 }}>Quá hạn</div>
                         </div>
 
-                        <Divider type="vertical" style={{ height: 50 }} />
+                        <Divider type="vertical" style={{ height: 34 }} />
 
                         <div style={{ textAlign: 'center' }}>
-                            <div style={{ fontSize: 32, fontWeight: 'bold', color: '#fa8c16' }}>
-                                🔥 {urgentTasks}
+                            <div style={{ fontSize: 22, fontWeight: 'bold', color: '#d97706' }}>
+                                {urgentTasks}
                             </div>
                             <div style={{ fontSize: 12, color: '#999', marginTop: 2 }}>Khẩn cấp</div>
                         </div>
 
-                        <Divider type="vertical" style={{ height: 50 }} />
+                        <Divider type="vertical" style={{ height: 34 }} />
 
                         <div style={{ textAlign: 'center' }}>
                             <Progress
                                 type="circle"
                                 percent={Math.round((completedTasks / totalTasks) * 100)}
-                                width={60}
+                                width={42}
                                 strokeWidth={8}
                                 strokeColor={{
                                     '0%': '#108ee9',
@@ -2123,31 +2665,36 @@ const DailyTasks = () => {
                         type="primary"
                         size="large"
                         icon={<PlusOutlined />}
-                        onClick={() => handleAddTask()}
+                        onClick={activeTab === 'assignments' ? handleAddAssignment : () => handleAddTask()}
                         style={{
-                            height: 44,
+                            height: 40,
                             fontSize: 15,
                             fontWeight: 'bold',
-                            borderRadius: 10,
-                            boxShadow: '0 4px 12px rgba(24, 144, 255, 0.3)'
+                            borderRadius: 6,
+                            boxShadow: 'none'
                         }}
                     >
-                        Thêm công việc
+                        {activeTab === 'assignments' ? 'Giao việc mới' : 'Thêm công việc'}
                     </Button>}
                 </div>
             </Card>
 
             {/* Tab Switcher */}
-            <div style={{ marginBottom: 24 }}>
+            <div style={{ marginBottom: 16 }}>
                 <Radio.Group
                     value={activeTab}
-                    onChange={(e) => setActiveTab(e.target.value)}
+                    onChange={(e) => {
+                        const nextTab = e.target.value as typeof activeTab;
+                        setActiveTab(nextTab);
+                        if (nextTab === 'assignments') setBoardFilter('all');
+                    }}
                     size="large"
                     style={{
                         background: '#fff',
                         padding: 8,
-                        borderRadius: 12,
-                        boxShadow: '0 2px 8px rgba(0,0,0,0.06)'
+                        borderRadius: 0,
+                        boxShadow: 'none',
+                        border: '1px solid #e2e8f0'
                     }}
                 >
                     <Radio.Button
@@ -2162,12 +2709,18 @@ const DailyTasks = () => {
                             borderRadius: 8
                         }}
                     >
-                        📋 Công việc ({dailyTasks.filter(t => t.status !== 'completed').length})
+                        Hàng ngày ({dailyTasks.filter(t => t.status !== 'completed').length})
+                    </Radio.Button>
+                    <Radio.Button
+                        value="triage"
+                        style={{ height: 44, lineHeight: '44px', paddingLeft: 24, paddingRight: 24, fontSize: 15, fontWeight: 600, borderRadius: 8, marginLeft: 8 }}
+                    >
+                        Cần xử lý <Badge count={dailyTasks.filter(task => task.status !== 'completed' && (isOverdue(task) || getEvidence(task).required)).length + pendingAssignments.length} offset={[8, -4]} />
                     </Radio.Button>
                     <Radio.Button
                         value="assignments"
                         style={{
-                            height: 44,
+                            height: 40,
                             lineHeight: '44px',
                             paddingLeft: 24,
                             paddingRight: 24,
@@ -2177,7 +2730,7 @@ const DailyTasks = () => {
                             marginLeft: 8
                         }}
                     >
-                        📌 Bàn giao {overdueAssignments.length > 0 ? <Badge count={overdueAssignments.length} offset={[8, -4]} /> : `(${pendingAssignments.length})`}
+                        Việc có hạn {pendingAssignments.length > 0 && <Badge count={pendingAssignments.length} offset={[8, -4]} />}
                     </Radio.Button>
                     <Radio.Button
                         value="history"
@@ -2198,7 +2751,7 @@ const DailyTasks = () => {
             </div>
 
             {/* === ASSIGNMENT TAB === */}
-            {activeTab === 'assignments' && (
+            {false && (
                 <div>
                     {/* Header */}
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -2383,51 +2936,6 @@ const DailyTasks = () => {
                         </div>
                     )}
 
-                    {/* Assignment Modal */}
-                    <Modal
-                        title={editingAssignment ? '✏️ Sửa công việc bàn giao' : '📌 Giao việc mới'}
-                        open={assignmentModalVisible}
-                        onOk={handleSaveAssignment}
-                        onCancel={() => { setAssignmentModalVisible(false); assignmentForm.resetFields(); }}
-                        okText={editingAssignment ? 'Cập nhật' : 'Giao việc'}
-                        cancelText="Hủy"
-                        width={520}
-                    >
-                        <Form form={assignmentForm} layout="vertical" size="large">
-                            <Form.Item name="title" label="Tên công việc" rules={[{ required: true, message: 'Nhập tên công việc!' }]}>
-                                <Input placeholder="VD: Lắp camera cho kho A" />
-                            </Form.Item>
-                            <Form.Item name="description" label="Mô tả chi tiết">
-                                <TextArea rows={3} placeholder="Chi tiết công việc cần làm..." />
-                            </Form.Item>
-                            <div style={{ display: 'flex', gap: 16 }}>
-                                <Form.Item name="assignee" label="Giao cho" rules={[{ required: true, message: 'Chọn người!' }]} style={{ flex: 1 }}>
-                                    <Select placeholder="Chọn nhân viên">
-                                        {assigneeList.map(name => (
-                                            <Option key={name} value={name}>
-                                                <Avatar size="small" style={{ backgroundColor: getAvatarColor(name), marginRight: 8 }}>{name[0]}</Avatar>
-                                                {name}
-                                            </Option>
-                                        ))}
-                                    </Select>
-                                </Form.Item>
-                                <Form.Item name="priority" label="Mức ưu tiên" style={{ flex: 1 }}>
-                                    <Select>
-                                        <Option value="low">💤 Thấp</Option>
-                                        <Option value="normal">📋 Bình thường</Option>
-                                        <Option value="high">⚡ Cao</Option>
-                                        <Option value="urgent">🔥 Khẩn cấp</Option>
-                                    </Select>
-                                </Form.Item>
-                            </div>
-                            <Form.Item name="deadline" label="⏰ Thời hạn hoàn thành" rules={[{ required: true, message: 'Chọn deadline!' }]}>
-                                <DatePicker showTime format="DD/MM/YYYY HH:mm" style={{ width: '100%' }} placeholder="Chọn ngày giờ deadline" />
-                            </Form.Item>
-                            <Form.Item name="note" label="📝 Ghi chú">
-                                <TextArea rows={2} placeholder="Ghi chú thêm (tùy chọn)..." />
-                            </Form.Item>
-                        </Form>
-                    </Modal>
                 </div>
             )}
 
@@ -2510,7 +3018,7 @@ const DailyTasks = () => {
                 </>
             )}
 
-            {activeTab === 'tasks' && (
+            {false && activeTab === 'tasks' && (
                 <>
                     <div style={{
                         display: 'flex', gap: 6, padding: 8, marginBottom: 18, background: '#fff',
@@ -2548,20 +3056,201 @@ const DailyTasks = () => {
                         />
                         <OperationalColumn
                             title="QUÁ HẠN / CẦN DUYỆT"
-                            count={dailyTasks.filter(task => isOverdue(task)).length}
+                            count={reviewTasks.length}
                             color="#dc2626"
                             icon={<WarningOutlined />}
-                            tasks={dailyTasks.filter(task => isOverdue(task))}
+                            tasks={reviewTasks}
                             lane="review"
                         />
                     </div>
                 </>
             )}
 
+            {false && activeTab === 'assignments' && (
+                <div style={{ display: 'flex', gap: 16, paddingBottom: 16 }}>
+                    <OperationalColumn
+                        title="BÀN GIAO"
+                        count={pendingAssignments.length}
+                        color="#7c3aed"
+                        icon={<FileTextOutlined />}
+                        tasks={[]}
+                        lane="today"
+                        handoverTasks={assignmentTasks}
+                    />
+                </div>
+            )}
+
+            {activeTab === 'tasks' && <PriorityWorkspace scope="daily" />}
+            {activeTab === 'triage' && <PriorityWorkspace scope="all" />}
+            {activeTab === 'assignments' && <PriorityWorkspace scope="deadline" />}
+
             {/* History Calendar View */}
             {activeTab === 'history' && (
-                <HistoryCalendar tasks={tasks} history={history} />
+                <HistoryListView
+                    selectedDate={selectedWorkDate}
+                    tasks={tasks}
+                    history={history}
+                    snapshots={historySnapshots}
+                    onOpenEvidence={openEvidence}
+                />
             )}
+
+            <Modal
+                title={<div style={{ display: 'flex', flexDirection: 'column', gap: 3, padding: '2px 0' }}><span style={{ fontSize: 20, fontWeight: 750, color: '#172033' }}>{editingAssignment ? 'Sửa bàn giao' : 'Giao việc mới'}</span><span style={{ fontSize: 13, fontWeight: 400, color: '#64748b' }}>{editingAssignment ? 'Cập nhật nội dung và thời hạn công việc.' : 'Tạo và phân công công việc cho nhân viên thực hiện.'}</span></div>}
+                open={assignmentModalVisible}
+                onOk={handleSaveAssignment}
+                onCancel={() => { setAssignmentModalVisible(false); assignmentForm.resetFields(); setAssignmentNoteExpanded(false); setSelectedAssignmentAssignees([]); }}
+                confirmLoading={isSavingAssignment}
+                okText={editingAssignment ? 'Cập nhật' : 'Giao việc'}
+                cancelText="Hủy"
+                okButtonProps={{ icon: <SendOutlined />, style: { borderRadius: 7, height: 40, padding: '0 18px', fontWeight: 700 } }}
+                cancelButtonProps={{ style: { borderRadius: 7, height: 40, padding: '0 18px' } }}
+                width={680}
+                styles={{ body: { paddingTop: 20 }, footer: { marginTop: 22 } }}
+            >
+                <Form form={assignmentForm} layout="vertical" size="middle">
+                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.35fr) minmax(150px, 0.8fr) minmax(150px, 0.8fr)', gap: 14, alignItems: 'start' }}>
+                        <Form.Item name="title" label="Tên công việc" rules={[{ required: true, message: 'Nhập tên công việc.' }]}>
+                            <Input placeholder="Ví dụ: Lắp camera cho kho A" style={{ height: 42, borderRadius: 7 }} />
+                        </Form.Item>
+                        <Form.Item name="priority" label={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}><FlagOutlined /> Mức ưu tiên</span>} style={{ marginBottom: 18 }}>
+                            <Select style={{ height: 42 }}>
+                                <Option value="low">Thấp</Option>
+                                <Option value="normal">Bình thường</Option>
+                                <Option value="high">Cao</Option>
+                                <Option value="urgent">Khẩn cấp</Option>
+                            </Select>
+                        </Form.Item>
+                        <Form.Item name="deadlinePenaltyAmount" label={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><WarningOutlined style={{ color: '#d97706' }} /> Phạt quá hạn</span>} rules={[{ required: true, message: 'Nhập mức phạt.' }]} style={{ marginBottom: 18 }}>
+                            <InputNumber min={0} precision={0} controls={false} suffix="đ" style={{ width: '100%', height: 42 }} formatter={formatPenaltyAmount} parser={(value) => String(value || '').replace(/[^\d]/g, '')} />
+                        </Form.Item>
+                    </div>
+                    <div style={{ marginTop: -10, marginBottom: 14, color: '#8a5a12', fontSize: 12, lineHeight: 1.45 }}>
+                        <WarningOutlined /> Áp dụng khi quá hạn chưa hoàn thành và được ghi vào Bảng công.
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, padding: '10px 12px', border: '1px solid #dbe3ec', borderRadius: 7, background: '#f8fafc' }}>
+                        <Form.Item name="evidenceRequired" valuePropName="checked" style={{ margin: 0 }}>
+                            <Checkbox>Yêu cầu bằng chứng ảnh trước khi hoàn thành</Checkbox>
+                        </Form.Item>
+                        <Form.Item noStyle shouldUpdate={(previous, current) => previous.evidenceRequired !== current.evidenceRequired}>
+                            {({ getFieldValue }) => getFieldValue('evidenceRequired') ? (
+                                <Form.Item name="evidencePenaltyAmount" label="Phạt không nộp (đ)" style={{ margin: 0, marginLeft: 'auto', width: 185 }}>
+                                    <InputNumber min={0} precision={0} controls={false} suffix="đ" style={{ width: '100%' }} formatter={formatPenaltyAmount} parser={(value) => String(value || '').replace(/[^\d]/g, '')} />
+                                </Form.Item>
+                            ) : null}
+                        </Form.Item>
+                    </div>
+                    <Form.Item name="description" label="Mô tả chi tiết">
+                        <TextArea rows={3} placeholder="Chi tiết công việc cần làm..." style={{ borderRadius: 7, resize: 'vertical' }} />
+                    </Form.Item>
+                    <div style={{ borderTop: '1px solid #e2e8f0', borderBottom: '1px solid #e2e8f0', margin: '18px 0', padding: '16px 0 14px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 15, fontWeight: 700, color: '#172033' }}><UserOutlined /> Người nhận <span style={{ color: '#ef4444' }}>*</span></span>
+                            {!editingAssignment && <span style={{ fontSize: 12, color: '#64748b' }}>{selectedAssignmentAssignees.length > 0 ? `${selectedAssignmentAssignees.length} người được giao` : 'Mỗi người nhận một công việc độc lập.'}</span>}
+                        </div>
+                        {editingAssignment ? (
+                            <>
+                                <Form.Item name="assignee" hidden rules={[{ required: true, message: 'Chọn người thực hiện.' }]}><Input /></Form.Item>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, minHeight: 34, alignItems: 'center' }}>
+                                    {selectedAssignmentAssignees.map((name: string) => (
+                                        <Tag key={name} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 32, margin: 0, borderRadius: 7, color: '#065f46', background: '#ecfdf5', borderColor: '#bbf7d0', fontSize: 13, fontWeight: 650 }}>
+                                            <Avatar size={20} style={{ backgroundColor: getAvatarColor(name), fontSize: 10 }}>{name.slice(0, 1).toUpperCase()}</Avatar>{name}
+                                        </Tag>
+                                    ))}
+                                </div>
+                                <div style={{ marginTop: 8, color: '#64748b', fontSize: 12 }}>Danh sách người nhận được tạo cùng một lần giao. Muốn đổi người nhận, tạo lại bàn giao để giữ lịch sử và khoản phạt rõ ràng.</div>
+                            </>
+                        ) : (
+                            <Form.Item style={{ marginBottom: 0 }}>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 8 }}>
+                                        {assigneeList.map(name => {
+                                            const selected = selectedAssignmentAssignees.includes(name);
+                                            return (
+                                                <div
+                                                    key={name}
+                                                    role="checkbox"
+                                                    aria-checked={selected}
+                                                    tabIndex={0}
+                                                    onClick={() => toggleAssignmentAssignee(name)}
+                                                    onKeyDown={(event) => {
+                                                        if (event.key === 'Enter' || event.key === ' ') {
+                                                            event.preventDefault();
+                                                            toggleAssignmentAssignee(name);
+                                                        }
+                                                    }}
+                                                    style={{
+                                                        height: 42,
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        gap: 9,
+                                                        padding: '0 10px',
+                                                        borderRadius: 7,
+                                                        border: `1px solid ${selected ? '#22c55e' : '#dbe3ec'}`,
+                                                        background: selected ? '#ecfdf5' : '#fff',
+                                                        color: '#172033',
+                                                        cursor: 'pointer',
+                                                        textAlign: 'left',
+                                                    }}
+                                                >
+                                                    <span
+                                                        aria-hidden="true"
+                                                        style={{
+                                                            width: 18,
+                                                            height: 18,
+                                                            borderRadius: '50%',
+                                                            display: 'inline-flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'center',
+                                                            flexShrink: 0,
+                                                            border: selected ? '1px solid #16a34a' : '1px solid #cbd5e1',
+                                                            background: selected ? '#16a34a' : '#fff',
+                                                            color: '#fff',
+                                                            fontSize: 11,
+                                                            fontWeight: 800,
+                                                        }}
+                                                    >
+                                                        {selected ? '✓' : ''}
+                                                    </span>
+                                                    <Avatar size={26} style={{ backgroundColor: getAvatarColor(name), fontSize: 11 }}>{name.slice(0, 1).toUpperCase()}</Avatar>
+                                                    <span style={{ fontWeight: 650, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                    {selectedAssignmentAssignees.length > 0 ? (
+                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                                            {selectedAssignmentAssignees.map((name: string) => (
+                                                <Tag
+                                                    key={name}
+                                                    closable
+                                                    onClose={() => updateAssignmentAssignees(selectedAssignmentAssignees.filter((item: string) => item !== name))}
+                                                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 30, margin: 0, borderRadius: 7, color: '#065f46', background: '#ecfdf5', borderColor: '#bbf7d0', fontSize: 13, fontWeight: 650 }}
+                                                >
+                                                    {name}
+                                                </Tag>
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <span style={{ color: '#94a3b8', fontSize: 13 }}>Chưa chọn người nhận</span>
+                                    )}
+                                </div>
+                            </Form.Item>
+                        )}
+                    </div>
+                    <Form.Item name="deadline" label={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}><CalendarOutlined /> Thời hạn hoàn thành</span>} rules={[{ required: true, message: 'Chọn thời hạn.' }]}>
+                        <DatePicker showTime format="DD/MM/YYYY HH:mm" style={{ width: 320, maxWidth: '100%', height: 42, borderRadius: 7 }} placeholder="Chọn ngày giờ hoàn thành" />
+                    </Form.Item>
+                    <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 13 }}>
+                        <Button type="text" icon={<MessageOutlined />} onClick={() => setAssignmentNoteExpanded(value => !value)} style={{ padding: 0, color: '#475569', fontWeight: 600 }}>
+                            Ghi chú (tùy chọn)
+                        </Button>
+                        {assignmentNoteExpanded && <Form.Item name="note" style={{ margin: '12px 0 0' }}>
+                            <TextArea rows={2} placeholder="Thông tin bổ sung cho người nhận..." style={{ borderRadius: 7, resize: 'vertical' }} />
+                        </Form.Item>}
+                    </div>
+                </Form>
+            </Modal>
 
             {/* Category Modal */}
             <Modal
@@ -2724,36 +3413,65 @@ const DailyTasks = () => {
                     {!isAdmin && <div style={{ marginTop: -12, marginBottom: 16, fontSize: 12, color: '#64748b' }}>Chỉ admin được đổi loại hoàn thành.</div>}
                     <Form.Item noStyle shouldUpdate={(prev, current) => prev.evidenceRequired !== current.evidenceRequired}>
                         {({ getFieldValue }) => getFieldValue('evidenceRequired') ? (
-                            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.25fr) minmax(104px, 0.75fr) minmax(120px, 0.9fr)', gap: 10, padding: 12, marginBottom: 16, border: '1px solid #fed7aa', borderRadius: 8, background: '#fffaf5' }}>
-                                <Form.Item name="evidenceMethod" label="Bằng chứng" style={{ marginBottom: 0 }}>
-                                    <Select size="middle" disabled={!isAdmin} options={[
-                                        { value: 'link', label: 'Chỉ link' },
-                                        { value: 'image', label: 'Chỉ ảnh' },
-                                        { value: 'both', label: 'Link và ảnh' },
-                                    ]} />
-                                </Form.Item>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(104px, 0.75fr) minmax(120px, 0.9fr)', gap: 10, padding: 12, marginBottom: 16, border: '1px solid #fed7aa', borderRadius: 8, background: '#fffaf5' }}>
                                 <Form.Item name="evidenceDeadlineTime" label="Hạn chót" rules={[{ required: true, message: 'Chọn giờ hạn chót.' }]} style={{ marginBottom: 0 }}>
                                     <Select size="middle" disabled={!isAdmin} showSearch optionFilterProp="label" options={EVIDENCE_DEADLINE_OPTIONS} />
                                 </Form.Item>
                                 <Form.Item name="penaltyAmount" label="Phạt (đ)" style={{ marginBottom: 0 }}>
                                     <InputNumber min={0} precision={0} controls={false} suffix="đ" disabled={!isAdmin} style={{ width: '100%' }} formatter={formatPenaltyAmount} parser={(value) => String(value || '').replace(/[^\d]/g, '')} />
                                 </Form.Item>
-                                <div style={{ gridColumn: '1 / -1', fontSize: 12, color: '#c2410c' }}>Ân hạn thêm 20 phút sau giờ hạn trước khi ghi nhận phạt.</div>
+                                <div style={{ gridColumn: '1 / -1', fontSize: 12, color: '#c2410c' }}>Bằng chứng bằng ảnh, tối đa {MAX_EVIDENCE_IMAGES} ảnh mỗi lần nộp. Ân hạn thêm 20 phút sau giờ hạn trước khi ghi nhận phạt.</div>
                             </div>
                         ) : null}
                     </Form.Item>
 
-                    <Form.Item name="assigneeFixed" valuePropName="checked" style={{ marginBottom: 8 }}>
+                    <Form.Item name="assigneeFixed" valuePropName="checked" style={{ display: 'none' }}>
                         <Checkbox onChange={(event) => {
-                            setAssigneeFixed(event.target.checked);
+                            const nextMode = event.target.checked ? 'fixed' : 'open';
+                            setAssignmentMode(nextMode);
+                            taskForm.setFieldsValue({ assignmentMode: nextMode });
                             if (!event.target.checked) taskForm.setFieldsValue({ assignee: '' });
                         }}>
                             Cố định người thực hiện
                         </Checkbox>
                     </Form.Item>
                     <div style={{ marginBottom: 10, fontSize: 12, color: '#64748b' }}>
-                        {assigneeFixed ? 'Chỉ người được chọn có thể thực hiện công việc này.' : 'Để trống: nhân viên phù hợp có thể nhận việc sau.'}
+                        {assignmentMode === 'fixed' ? 'Chỉ người được chọn có thể thực hiện công việc này.' : 'Chọn luân phiên để tự đổi người mỗi ngày, hoặc để trống để nhân viên phù hợp nhận việc sau.'}
                     </div>
+                    <Form.Item name="assignmentMode" style={{ marginBottom: 10 }}>
+                        <Radio.Group
+                            onChange={(event) => {
+                                const mode = event.target.value as 'open' | 'fixed' | 'daily';
+                                setAssignmentMode(mode);
+                                if (mode !== 'fixed') taskForm.setFieldsValue({ assignee: '' });
+                            }}
+                            style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}
+                        >
+                            <Radio value="open">Ai phù hợp nhận việc</Radio>
+                            <Radio value="fixed">Cố định một người</Radio>
+                            <Radio value="daily">Luân phiên theo ngày</Radio>
+                        </Radio.Group>
+                    </Form.Item>
+                    {assignmentMode === 'daily' && (
+                        <div style={{ marginBottom: 16, padding: 12, border: '1px solid #bfdbfe', borderRadius: 8, background: '#f0f9ff' }}>
+                            <Form.Item
+                                name="rotationAssignees"
+                                label={<span style={{ fontSize: 14, fontWeight: 600 }}>Người luân phiên <span style={{ color: '#ff4d4f' }}>*</span></span>}
+                                rules={[{ required: true, type: 'array', min: 2, message: 'Chọn ít nhất 2 nhân viên chính thức.' }]}
+                                style={{ marginBottom: 8 }}
+                            >
+                                <Select
+                                    mode="multiple"
+                                    placeholder="Chọn theo thứ tự: hôm nay, ngày mai..."
+                                    options={rotationAssigneeList.map(username => ({ value: username, label: username }))}
+                                />
+                            </Form.Item>
+                            <div style={{ fontSize: 12, color: '#1d4ed8', lineHeight: 1.55 }}>
+                                Người đầu tiên làm hôm nay; hệ thống tự đổi người vào mỗi ngày mới. Danh sách chỉ gồm nhân viên chính thức.
+                            </div>
+                        </div>
+                    )}
+                    {assignmentMode !== 'daily' && <>
                     <Form.Item
                         name="assignee"
                         label={<span style={{ fontSize: 14, fontWeight: 600 }}>👤 Người thực hiện <span style={{ fontSize: 12, fontWeight: 400, color: '#999' }}>(có thể để trống — nhận việc sau)</span></span>}
@@ -2907,6 +3625,7 @@ const DailyTasks = () => {
                             </div>
                         </div>
                     )}
+                    </>}
 
                     {/* Hidden fields - auto-generated */}
                     <Form.Item name="category" hidden>
@@ -2948,8 +3667,257 @@ const DailyTasks = () => {
     );
 };
 
-// 📅 HISTORY CALENDAR COMPONENT - PREMIUM STYLE 
-const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) => {
+type HistoryListStatus = 'completed' | 'pending' | 'submitted' | 'reopened';
+
+const HistoryListView = ({
+    selectedDate,
+    tasks,
+    history,
+    snapshots,
+    onOpenEvidence,
+}: {
+    selectedDate: dayjs.Dayjs;
+    tasks: Task[];
+    history: any[];
+    snapshots: Record<string, { tasks?: any[] }>;
+    onOpenEvidence: (task: Task, evidence?: EvidenceMeta) => void;
+}) => {
+    const [statusFilter, setStatusFilter] = useState<'all' | 'completed' | 'pending' | 'submitted'>('all');
+    const [searchText, setSearchText] = useState('');
+    const deferredSearch = useDeferredValue(searchText.trim().toLocaleLowerCase('vi-VN'));
+    const dateKey = selectedDate.format('YYYY-MM-DD');
+    const isToday = selectedDate.isSame(dayjs(), 'day');
+
+    const normalizeTask = (task: any): Task => ({
+        ...task,
+        id: Number(task.id),
+        title: task.title || 'Công việc không tên',
+        category: task.category || '',
+        assignee: task.assignee || '',
+        verifier: task.verifier || '',
+        priority: task.priority || 'normal',
+        status: task.status || 'pending',
+        dueTime: task.dueTime || (task.dueDate ? dayjs(task.dueDate).format('HH:mm') : ''),
+        dueDate: task.dueDate ? dayjs(task.dueDate).format('YYYY-MM-DD') : dateKey,
+        tags: Array.isArray(task.tags) ? task.tags : [],
+        attachments: parseAttachments(task.attachments),
+        type: task.type || 'daily',
+    });
+
+    const snapshotTasks = snapshots[dateKey]?.tasks;
+    const dailySource = isToday
+        ? tasks.filter(task => !task.type || task.type === 'daily')
+        : Array.isArray(snapshotTasks) ? snapshotTasks.map(normalizeTask) : [];
+    const assignments = tasks
+        .filter(task => task.type === 'assignment' && dayjs(task.dueDate).format('YYYY-MM-DD') === dateKey)
+        .map(normalizeTask);
+    const taskSource = [...dailySource.map(normalizeTask), ...assignments];
+    const dateHistory = history
+        .filter(entry => entry.timestamp && dayjs(entry.timestamp).format('YYYY-MM-DD') === dateKey)
+        .sort((left, right) => dayjs(left.timestamp).valueOf() - dayjs(right.timestamp).valueOf());
+
+    const taskKey = (value: { taskId?: number; id?: number; taskTitle?: string; title?: string }) => {
+        const id = value.taskId ?? value.id;
+        return id ? `id:${id}` : `title:${String(value.taskTitle || value.title || '').trim().toLocaleLowerCase('vi-VN')}`;
+    };
+    const eventsByTask = new Map<string, any[]>();
+    dateHistory.forEach(entry => {
+        const key = taskKey(entry);
+        eventsByTask.set(key, [...(eventsByTask.get(key) || []), entry]);
+    });
+    const tasksByKey = new Map(taskSource.map(task => [taskKey(task), task]));
+    const allKeys = new Set([...tasksByKey.keys(), ...eventsByTask.keys()]);
+
+    const rows = Array.from(allKeys).map((key, index) => {
+        const task = tasksByKey.get(key);
+        const events = eventsByTask.get(key) || [];
+        const latestEvent = events[events.length - 1];
+        const evidenceEvent = [...events].reverse().find(entry => entry.evidence);
+        const taskEvidence = task ? getEvidence(task) : {};
+        const evidence: EvidenceMeta = evidenceEvent?.evidence || taskEvidence;
+        const latestAction = latestEvent?.action || '';
+        let status: HistoryListStatus = 'pending';
+        if (latestAction === 'pending' || latestAction === 'evidence_rejected') {
+            status = 'reopened';
+        } else if (latestAction === 'evidence_submitted' || evidence.status === 'submitted') {
+            status = 'submitted';
+        } else if (
+            task?.status === 'completed'
+            || ['completed', 'daily_reset', 'evidence_approved'].includes(latestAction)
+            || evidence.status === 'approved'
+        ) {
+            status = 'completed';
+        }
+
+        const id = Number(task?.id || latestEvent?.taskId || -(index + 1));
+        const title = task?.title || latestEvent?.taskTitle || 'Công việc không tên';
+        const time = latestEvent?.timestamp
+            ? dayjs(latestEvent.timestamp).format('HH:mm')
+            : task?.dueTime || '--:--';
+        const evidenceImages = evidence.submittedImages?.length
+            ? evidence.submittedImages
+            : evidence.submittedImage ? [evidence.submittedImage] : [];
+        const canViewEvidence = id > 0 && evidenceImages.length > 0;
+        const rowTask: Task = task || {
+            id,
+            title,
+            category: latestEvent?.category || '',
+            assignee: latestEvent?.assignee || '',
+            verifier: latestEvent?.verifier || '',
+            priority: 'normal',
+            dueTime: '',
+            dueDate: dateKey,
+            status: status === 'completed' ? 'completed' : 'pending',
+            type: 'daily',
+        };
+
+        return {
+            key,
+            task: rowTask,
+            title,
+            category: task?.category || latestEvent?.category || 'Hàng ngày',
+            assignee: latestEvent?.assignee || task?.assignee || 'Chưa phân công',
+            verifier: latestEvent?.verifier || task?.verifier || 'Chưa xác nhận',
+            time,
+            status,
+            evidence,
+            canViewEvidence,
+            sortValue: latestEvent?.timestamp
+                ? dayjs(latestEvent.timestamp).valueOf()
+                : dayjs(`${dateKey} ${task?.dueTime || '23:59'}`, 'YYYY-MM-DD HH:mm').valueOf(),
+        };
+    }).sort((left, right) => left.sortValue - right.sortValue);
+
+    const counts = {
+        total: rows.length,
+        completed: rows.filter(row => row.status === 'completed').length,
+        submitted: rows.filter(row => row.status === 'submitted').length,
+        pending: rows.filter(row => row.status === 'pending' || row.status === 'reopened').length,
+    };
+    const visibleRows = rows.filter(row => {
+        const matchesStatus = statusFilter === 'all'
+            || row.status === statusFilter
+            || (statusFilter === 'pending' && row.status === 'reopened');
+        if (!matchesStatus) return false;
+        if (!deferredSearch) return true;
+        return [row.title, row.category, row.assignee, row.verifier]
+            .some(value => String(value).toLocaleLowerCase('vi-VN').includes(deferredSearch));
+    });
+
+    const statusMeta: Record<HistoryListStatus, { label: string; className: string }> = {
+        completed: { label: 'Hoàn thành', className: 'is-completed' },
+        pending: { label: 'Chưa làm', className: 'is-pending' },
+        submitted: { label: 'Chờ duyệt', className: 'is-submitted' },
+        reopened: { label: 'Đã mở lại', className: 'is-reopened' },
+    };
+    const initials = (name: string) => name
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(-2)
+        .map(part => part[0])
+        .join('')
+        .toUpperCase();
+
+    return (
+        <section className="history-list-view">
+            <header className="history-list-summary">
+                <div>
+                    <div className="history-list-eyebrow">Lịch sử công việc</div>
+                    <h2>Ngày {selectedDate.format('DD/MM/YYYY')}</h2>
+                    <p>{selectedDate.format('dddd')} · Dữ liệu tổng hợp theo trạng thái cuối cùng của từng công việc</p>
+                </div>
+                <div className="history-list-metrics" aria-label="Thống kê lịch sử">
+                    <div><span>Tổng</span><strong>{counts.total}</strong></div>
+                    <div><span>Hoàn thành</span><strong className="metric-success">{counts.completed}</strong></div>
+                    <div><span>Chưa hoàn thành</span><strong className="metric-danger">{counts.pending + counts.submitted}</strong></div>
+                </div>
+            </header>
+
+            <div className="history-list-panel">
+                <div className="history-list-toolbar">
+                    <Radio.Group
+                        value={statusFilter}
+                        onChange={event => setStatusFilter(event.target.value)}
+                        className="history-status-filter"
+                    >
+                        <Radio.Button value="all">Tất cả <span>{counts.total}</span></Radio.Button>
+                        <Radio.Button value="completed">Hoàn thành <span>{counts.completed}</span></Radio.Button>
+                        <Radio.Button value="pending">Chưa làm <span>{counts.pending}</span></Radio.Button>
+                        <Radio.Button value="submitted">Chờ duyệt <span>{counts.submitted}</span></Radio.Button>
+                    </Radio.Group>
+                    <Input
+                        allowClear
+                        value={searchText}
+                        onChange={event => setSearchText(event.target.value)}
+                        prefix={<SearchOutlined />}
+                        placeholder="Tìm công việc, người thực hiện..."
+                        className="history-list-search"
+                    />
+                </div>
+
+                <div className="history-list-table-wrap">
+                    <div className="history-list-table">
+                        <div className="history-list-row history-list-head">
+                            <span>Thời gian</span>
+                            <span>Công việc</span>
+                            <span>Danh mục</span>
+                            <span>Người thực hiện</span>
+                            <span>Người xác nhận</span>
+                            <span>Trạng thái</span>
+                            <span>Bằng chứng</span>
+                        </div>
+                        {visibleRows.map(row => {
+                            const meta = statusMeta[row.status];
+                            return (
+                                <div className="history-list-row" key={row.key}>
+                                    <time>{row.time}</time>
+                                    <div className="history-task-title" title={row.title}>{row.title}</div>
+                                    <div className="history-category">{row.category}</div>
+                                    <div className="history-person">
+                                        <Avatar size={30}>{initials(row.assignee)}</Avatar>
+                                        <span>{row.assignee}</span>
+                                    </div>
+                                    <div className="history-person">
+                                        <Avatar size={30}>{initials(row.verifier)}</Avatar>
+                                        <span>{row.verifier}</span>
+                                    </div>
+                                    <div><span className={`history-status ${meta.className}`}>{meta.label}</span></div>
+                                    <div>
+                                        {row.canViewEvidence ? (
+                                            <Button
+                                                type="link"
+                                                size="small"
+                                                icon={<EyeOutlined />}
+                                                onClick={() => onOpenEvidence(row.task, row.evidence)}
+                                                className="history-evidence-link"
+                                            >
+                                                Xem bằng chứng
+                                            </Button>
+                                        ) : <span className="history-no-evidence">Không có</span>}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+
+                {visibleRows.length === 0 && (
+                    <Empty
+                        image={Empty.PRESENTED_IMAGE_SIMPLE}
+                        description={rows.length === 0 ? 'Chưa có dữ liệu công việc trong ngày này' : 'Không có kết quả phù hợp'}
+                        className="history-list-empty"
+                    />
+                )}
+                <footer className="history-list-footer">
+                    Hiển thị {visibleRows.length} / {rows.length} công việc
+                </footer>
+            </div>
+        </section>
+    );
+};
+
+// Legacy calendar implementation is retained temporarily for data compatibility.
+const HistoryCalendar = ({ tasks, history, snapshots, onOpenEvidence }: { tasks: Task[], history: any[], snapshots: Record<string, { tasks?: any[] }>, onOpenEvidence: (task: Task, evidence?: EvidenceMeta) => void }) => {
     const [selectedDate, setSelectedDate] = useState<string | null>(null);
     const [currentMonth, setCurrentMonth] = useState(dayjs());
     const [hoveredDate, setHoveredDate] = useState<string | null>(null);
@@ -2958,17 +3926,47 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
     const getAllTasksForDate = (date: dayjs.Dayjs) => {
         const dateStr = date.format('YYYY-MM-DD');
         const isToday = date.isSame(dayjs(), 'day');
-        return tasks.filter(task => {
-            // Daily tasks: hiển ở ngày hôm nay (vì lặp hàng ngày)
-            if (!task.type || task.type === 'daily') {
-                return isToday;
-            }
-            // Assignment tasks: so sánh theo dueDate thực tế
-            if (task.dueDate) {
-                return task.dueDate === dateStr;
-            }
-            return false;
+        const normalizeSnapshotTask = (task: any): Task => ({
+            ...task,
+            tags: Array.isArray(task.tags) ? task.tags : (() => {
+                try { return task.tags ? JSON.parse(task.tags) : []; } catch { return []; }
+            })(),
+            attachments: parseAttachments(task.attachments),
+            dueTime: task.dueTime || dayjs(task.dueDate).format('HH:mm'),
+            dueDate: dayjs(task.dueDate).format('YYYY-MM-DD'),
+            type: task.type || 'daily',
         });
+        const assignmentsOnDate = tasks.filter(task => task.type === 'assignment' && task.dueDate === dateStr);
+        const snapshotTasks = snapshots[dateStr]?.tasks;
+
+        if (Array.isArray(snapshotTasks)) {
+            return [...snapshotTasks.map(normalizeSnapshotTask), ...assignmentsOnDate];
+        }
+        if (isToday) {
+            return tasks.filter(task => (!task.type || task.type === 'daily') || task.dueDate === dateStr);
+        }
+
+        // Snapshots did not exist for old dates. Infer final status from the
+        // activity records so their summary is still meaningful.
+        const latestActivities = new Map<string, any>();
+        history
+            .filter(entry => entry.timestamp && dayjs(entry.timestamp).format('YYYY-MM-DD') === dateStr && entry.taskId)
+            .sort((left, right) => dayjs(left.timestamp).valueOf() - dayjs(right.timestamp).valueOf())
+            .forEach(entry => latestActivities.set(String(entry.taskId), entry));
+        const inferredTasks = Array.from(latestActivities.values()).map((entry, index): Task => ({
+            id: Number(entry.taskId) || -(index + 1),
+            title: entry.taskTitle || 'Công việc không tên',
+            category: entry.category || '',
+            assignee: entry.assignee || '',
+            verifier: entry.verifier || '',
+            priority: 'normal',
+            dueTime: '',
+            dueDate: dateStr,
+            status: entry.action === 'completed' || entry.action === 'daily_reset' || entry.action === 'evidence_submitted' ? 'completed' : 'pending',
+            tags: [],
+            type: 'daily',
+        }));
+        return [...inferredTasks, ...assignmentsOnDate];
     };
 
     // Lấy chỉ công việc ĐÃ HOÀN THÀNH (để highlight calendar)
@@ -2998,11 +3996,31 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
             }
         });
 
-        return entriesOnDate.filter(entry => {
+        const activityEntries = entriesOnDate.filter(entry => {
             if (entry.action !== 'completed' && entry.action !== 'daily_reset') return true;
             const taskKey = entry.taskId ? String(entry.taskId) : String(entry.taskTitle || '').trim().toLowerCase();
             return taskKey ? preferredCompletion.get(taskKey) === entry : true;
         });
+
+        // Surface proof submitted before the evidence audit event existed.
+        const evidenceEntries = tasks.flatMap(task => {
+            const evidence = getEvidence(task);
+            if (!evidence.required || !evidence.submittedAt || dayjs(evidence.submittedAt).format('YYYY-MM-DD') !== dateStr) return [];
+            if (activityEntries.some(entry => entry.action === 'evidence_submitted' && entry.taskId === task.id)) return [];
+
+            return [{
+                taskId: task.id,
+                taskTitle: task.title,
+                assignee: evidence.submittedBy || task.assignee,
+                verifier: '',
+                action: 'evidence_submitted',
+                timestamp: evidence.submittedAt,
+                evidenceTask: task,
+            }];
+        });
+
+        return [...activityEntries, ...evidenceEntries]
+            .sort((left, right) => dayjs(right.timestamp).valueOf() - dayjs(left.timestamp).valueOf());
     };
 
     const getHistoryDescription = (entry: any) => {
@@ -3011,6 +4029,9 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
         }
         if (entry.action === 'pending') {
             return `↩️ Đã mở lại: "${entry.taskTitle}"`;
+        }
+        if (entry.action === 'evidence_submitted') {
+            return `📎 Đã nộp bằng chứng: "${entry.taskTitle}"`;
         }
         return entry.description;
     };
@@ -3806,6 +4827,26 @@ const HistoryCalendar = ({ tasks, history }: { tasks: Task[], history: any[] }) 
                                                                                 ✅ Xác nhận: {h.verifier}
                                                                             </span>
                                                                         </>
+                                                                    )}
+                                                                    {(h.action === 'evidence_submitted' || h.action === 'evidence_approved') && (h.evidenceTask || h.evidence) && (
+                                                                        <Button
+                                                                            size="small"
+                                                                            icon={<EyeOutlined />}
+                                                                            onClick={(event) => {
+                                                                                event.stopPropagation();
+                                                                                onOpenEvidence(h.evidenceTask || {
+                                                                                    id: Number(h.taskId),
+                                                                                    title: h.taskTitle || 'Công việc',
+                                                                                    category: h.category || '',
+                                                                                    assignee: h.assignee || '',
+                                                                                    priority: 'normal',
+                                                                                    dueTime: '',
+                                                                                    status: 'pending',
+                                                                                }, h.evidence);
+                                                                            }}
+                                                                        >
+                                                                            Xem bằng chứng
+                                                                        </Button>
                                                                     )}
                                                                 </Space>
                                                             </div>
