@@ -252,6 +252,9 @@ export interface ElectronAPI {
         getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        updateProfile: (data: { fullName: string; avatar?: string | null }) => Promise<{ success: boolean; data?: any; error?: string }>;
+        changePassword: (data: { userId: number; oldPassword: string; newPassword: string }) => Promise<{ success: boolean; error?: string }>;
+        resetPassword: (data: { userId: number; newPassword: string }) => Promise<{ success: boolean; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         login: (username: string, password: string, rememberMe?: boolean) => Promise<{ success: boolean; data?: any; rememberToken?: string | null; error?: string }>;
         logout: (rememberToken?: string) => Promise<{ success: boolean }>;

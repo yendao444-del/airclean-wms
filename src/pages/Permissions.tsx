@@ -220,15 +220,19 @@ export default function PermissionsPage() {
         try {
             const values = await passwordForm.validateFields();
 
-            // Update password via API
-            await window.electronAPI.users.update(changingPasswordUser!.id, { password: values.newPassword });
+            const result = await window.electronAPI.users.resetPassword({
+                userId: changingPasswordUser!.id,
+                newPassword: values.newPassword,
+            });
+            if (!result.success) throw new Error(result.error || 'Không thể đặt lại mật khẩu.');
             await loadUsers();
 
-            message.success('Đã đổi mật khẩu thành công!');
+            message.success('Đã đặt mật khẩu tạm. Người dùng sẽ phải đổi mật khẩu khi đăng nhập.');
             setPasswordModalVisible(false);
             passwordForm.resetFields();
         } catch (error) {
             console.error('Password submit error:', error);
+            message.error(error instanceof Error ? error.message : 'Không thể đặt lại mật khẩu.');
         }
     };
 
@@ -416,11 +420,12 @@ export default function PermissionsPage() {
                     </Form.Item>
 
                     <Form.Item
-                        label={editingUser ? 'Mật khẩu mới (để trống nếu không đổi)' : 'Mật khẩu'}
+                        label={editingUser ? 'Mật khẩu tạm mới (để trống nếu không đổi)' : 'Mật khẩu tạm'}
                         name="password"
                         rules={[
                             { required: !editingUser, message: 'Vui lòng nhập mật khẩu!' },
-                            { min: 6, message: 'Mật khẩu phải có ít nhất 6 ký tự!' },
+                            { min: 8, message: 'Mật khẩu phải có ít nhất 8 ký tự!' },
+                            { pattern: /(?=.*[A-Za-z])(?=.*\d)/, message: 'Mật khẩu phải gồm chữ và số!' },
                         ]}
                     >
                         <Input.Password placeholder={editingUser ? 'Không nhập nếu giữ mật khẩu cũ' : 'Nhập mật khẩu'} size="large" />
@@ -464,7 +469,7 @@ export default function PermissionsPage() {
 
             {/* Password Change Modal */}
             <Modal
-                title={<><KeyOutlined style={{ color: '#52c41a', marginRight: 8 }} /> Đổi mật khẩu</>}
+                title={<><KeyOutlined style={{ color: '#52c41a', marginRight: 8 }} /> Đặt lại mật khẩu</>}
                 open={passwordModalVisible}
                 onCancel={() => setPasswordModalVisible(false)}
                 footer={null}
@@ -477,14 +482,17 @@ export default function PermissionsPage() {
                         <br />
                         <Text strong>Họ tên: </Text>
                         <Text>{changingPasswordUser?.fullName}</Text>
+                        <br />
+                        <Text type="warning">Mật khẩu này là tạm thời. Người dùng sẽ phải đổi ngay sau khi đăng nhập.</Text>
                     </div>
 
                     <Form.Item
-                        label="Mật khẩu mới"
+                        label="Mật khẩu tạm mới"
                         name="newPassword"
                         rules={[
                             { required: true, message: 'Vui lòng nhập mật khẩu mới!' },
-                            { min: 6, message: 'Mật khẩu phải có ít nhất 6 ký tự!' },
+                            { min: 8, message: 'Mật khẩu phải có ít nhất 8 ký tự!' },
+                            { pattern: /(?=.*[A-Za-z])(?=.*\d)/, message: 'Mật khẩu phải gồm chữ và số!' },
                         ]}
                     >
                         <Input.Password placeholder="Nhập mật khẩu mới" size="large" />
@@ -514,7 +522,7 @@ export default function PermissionsPage() {
                             Hủy
                         </Button>
                         <Button type="primary" htmlType="submit" size="large" icon={<KeyOutlined />}>
-                            Đổi mật khẩu
+                            Đặt mật khẩu tạm
                         </Button>
                     </div>
                 </Form>

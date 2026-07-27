@@ -517,6 +517,55 @@ try {
 let currentSession = null; // { id, username, role }
 const REMEMBER_TOKENS_KEY = 'authRememberTokensV1';
 const REMEMBER_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const PASSWORD_ROTATION_MS = 7 * 24 * 60 * 60 * 1000;
+const PASSWORD_CHANGE_ALLOWED_CHANNELS = new Set([
+    'users:changePassword',
+    'users:updateProfile',
+    'users:getCurrentSession',
+    'users:logout',
+]);
+const LOGIN_MAX_FAILURES = 5;
+const LOGIN_LOCK_MS = 15 * 60 * 1000;
+
+const ipcHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, listener) => ipcHandle(channel, async (...args) => {
+    if (currentSession?.mustChangePassword && !PASSWORD_CHANGE_ALLOWED_CHANNELS.has(channel)) {
+        throw new Error('Bạn cần đổi mật khẩu trước khi tiếp tục sử dụng hệ thống.');
+    }
+    return listener(...args);
+});
+
+function isPasswordRotationRequired(user) {
+    const passwordChangedAt = user?.passwordChangedAt ? new Date(user.passwordChangedAt) : null;
+    return Boolean(user?.forcePasswordChange)
+        || (user?.role !== 'admin' && (!passwordChangedAt || Date.now() - passwordChangedAt.getTime() >= PASSWORD_ROTATION_MS));
+}
+
+function assertStrongPassword(password) {
+    const value = String(password || '');
+    if (value.length < 8 || value.length > 72 || !/[A-Za-z]/.test(value) || !/\d/.test(value)) {
+        throw new Error('Mật khẩu cần tối thiểu 8 ký tự, gồm chữ và số.');
+    }
+    return value;
+}
+
+async function recordFailedLogin(user) {
+    if (!user || !prisma) return;
+    const expiredLock = user.loginLockedUntil && new Date(user.loginLockedUntil).getTime() <= Date.now();
+    const attempts = (expiredLock ? 0 : Number(user.loginFailedAttempts || 0)) + 1;
+    await prisma.user.update({
+        where: { id: user.id },
+        data: {
+            loginFailedAttempts: attempts,
+            loginLockedUntil: attempts >= LOGIN_MAX_FAILURES ? new Date(Date.now() + LOGIN_LOCK_MS) : null,
+        },
+    });
+}
+
+async function revokeRememberTokensForUser(userId) {
+    const tokens = await readRememberTokens();
+    await writeRememberTokens(tokens.filter(token => token?.userId !== userId));
+}
 
 function requireRole(...roles) {
     if (!currentSession) {
@@ -530,7 +579,8 @@ function requireRole(...roles) {
 function sanitizeUserForClient(user) {
     if (!user) return null;
     const { password, ...safeUser } = user;
-    return { ...safeUser, isActive: user.status === 'active' };
+    const mustChangePassword = isPasswordRotationRequired(user);
+    return { ...safeUser, isActive: user.status === 'active', mustChangePassword };
 }
 
 function hashRememberToken(token) {
@@ -4573,10 +4623,44 @@ ipcMain.handle('database:importAll', async () => {
 // USER PASSWORD MANAGEMENT
 // ========================================
 
+ipcMain.handle('users:updateProfile', async (event, data = {}) => {
+    try {
+        requireRole();
+        if (!prisma || !currentSession?.id) throw new Error('Phiên đăng nhập không hợp lệ.');
+
+        const fullName = String(data.fullName || '').trim();
+        const avatar = data.avatar === null || data.avatar === undefined ? data.avatar : String(data.avatar);
+        if (fullName.length < 2 || fullName.length > 80) throw new Error('Họ tên phải có từ 2 đến 80 ký tự.');
+        if (data.email !== undefined) throw new Error('Email chỉ được quản trị viên cập nhật trong phần Quản trị.');
+        if (avatar && (!/^data:image\/(jpeg|png|webp);base64,/.test(avatar) || Buffer.byteLength(avatar, 'utf8') > 220 * 1024)) {
+            throw new Error('Ảnh đại diện phải là JPG, PNG hoặc WebP và không quá 160 KB sau khi nén.');
+        }
+
+        const user = await prisma.user.update({
+            where: { id: currentSession.id },
+            data: {
+                fullName,
+                ...(avatar !== undefined ? { avatar: avatar || null } : {}),
+            },
+        });
+        void logActivity({ module: 'users', action: 'UPDATE', description: `Cập nhật hồ sơ: ${user.username}`, recordName: user.username, userName: user.username });
+        return { success: true, data: sanitizeUserForClient(user) };
+    } catch (error) {
+        console.error('Update profile error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 // Change password (user changes their own password)
 ipcMain.handle('users:changePassword', async (event, { userId, oldPassword, newPassword }) => {
     try {
+        requireRole();
         if (!prisma) throw new Error('Prisma not available');
+        if (!currentSession?.id || Number(userId) !== currentSession.id) {
+            return { success: false, error: 'Chỉ được đổi mật khẩu của chính bạn.' };
+        }
+
+        const passwordText = assertStrongPassword(newPassword);
 
         const user = await prisma.user.findUnique({ where: { id: userId } });
         if (!user) {
@@ -4593,13 +4677,21 @@ ipcMain.handle('users:changePassword', async (event, { userId, oldPassword, newP
         if (!passwordValid) {
             return { success: false, error: 'Mật khẩu hiện tại không đúng' };
         }
+        const isSamePassword = user.password?.startsWith('$2')
+            ? await bcrypt.compare(passwordText, user.password)
+            : user.password === passwordText;
+        if (isSamePassword) {
+            return { success: false, error: 'Mật khẩu mới phải khác mật khẩu hiện tại.' };
+        }
 
         // Hash new password before storing
-        const hashedNew = await bcrypt.hash(newPassword, 10);
+        const hashedNew = await bcrypt.hash(passwordText, 10);
         await prisma.user.update({
             where: { id: userId },
-            data: { password: hashedNew }
+            data: { password: hashedNew, passwordChangedAt: new Date(), forcePasswordChange: false }
         });
+        await revokeRememberTokensForUser(user.id);
+        currentSession.mustChangePassword = false;
 
         console.log(`✅ Changed password for user: ${user.username}`);
         void logActivity({ module: 'users', action: 'UPDATE', description: `Đổi mật khẩu: ${user.username}`, recordName: user.username, userName: user.username });
@@ -4621,14 +4713,17 @@ ipcMain.handle('users:resetPassword', async (event, { userId, newPassword }) => 
             return { success: false, error: 'Người dùng không tồn tại' };
         }
 
-        // Hash password before storing
-        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        const passwordText = assertStrongPassword(newPassword);
+        // Mật khẩu do admin cấp là tạm thời: bắt buộc đổi ngay ở lần đăng nhập tiếp theo.
+        const hashedPassword = await bcrypt.hash(passwordText, 10);
         await prisma.user.update({
             where: { id: userId },
-            data: { password: hashedPassword }
+            data: { password: hashedPassword, passwordChangedAt: new Date(0), forcePasswordChange: true }
         });
+        await revokeRememberTokensForUser(user.id);
 
         console.log(`✅ Reset password for user: ${user.username}`);
+        void logActivity({ module: 'users', action: 'UPDATE', description: `Đặt lại mật khẩu tạm: ${user.username}`, recordName: user.username, userName: currentSession?.username || 'admin' });
         return { success: true };
     } catch (error) {
         console.error('❌ Reset password error:', error);
@@ -8064,19 +8159,23 @@ function updateOperationalAssignmentPermission(value, operationalAssignee) {
 
 ipcMain.handle('users:getAll', async () => {
     try {
+        requireRole();
         if (!prisma) throw new Error('Prisma not available');
+        const isAdmin = currentSession?.role === 'admin';
         // Dùng raw SQL để luôn lấy được lastActiveAt kể cả khi Prisma client cũ chưa generate lại
         const users = await prisma.$queryRaw`SELECT id, username, "fullName", email, role, status, permissions, "createdAt", "lastActiveAt" FROM "User" ORDER BY id ASC`;
         const formatted = users.map(u => ({
             id: u.id,
             username: u.username,
             fullName: u.fullName,
-            email: u.email,
             role: u.role,
             isActive: u.status === 'active',
             operationalAssignee: isOperationalAssignee(u),
-            createdAt: new Date(u.createdAt).toISOString(),
-            lastActiveAt: u.lastActiveAt ? new Date(u.lastActiveAt).toISOString() : null,
+            ...(isAdmin ? {
+                email: u.email,
+                createdAt: new Date(u.createdAt).toISOString(),
+                lastActiveAt: u.lastActiveAt ? new Date(u.lastActiveAt).toISOString() : null,
+            } : {}),
         }));
         return { success: true, data: formatted };
     } catch (error) {
@@ -8089,8 +8188,8 @@ ipcMain.handle('users:create', async (event, data) => {
     try {
         requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
-        // 🔒 SECURITY: Hash password trước khi lưu
-        const hashedPassword = await bcrypt.hash(data.password, 10);
+        // 🔒 SECURITY: Mật khẩu mới do admin cấp là mật khẩu tạm.
+        const hashedPassword = await bcrypt.hash(assertStrongPassword(data.password), 10);
         const user = await prisma.user.create({
             data: {
                 username: data.username,
@@ -8102,6 +8201,8 @@ ipcMain.handle('users:create', async (event, data) => {
                 permissions: data.operationalAssignee === false
                     ? updateOperationalAssignmentPermission(null, false)
                     : null,
+                passwordChangedAt: new Date(0),
+                forcePasswordChange: true,
             }
         });
         console.log(`✅ Created user: ${user.username}`);
@@ -8126,7 +8227,11 @@ ipcMain.handle('users:update', async (event, id, data) => {
         if (data.email !== undefined) updateData.email = data.email;
         if (data.role !== undefined) updateData.role = data.role;
         // 🔒 SECURITY: Hash password mới nếu đổi mật khẩu
-        if (data.password !== undefined) updateData.password = await bcrypt.hash(data.password, 10);
+        if (data.password !== undefined) {
+            updateData.password = await bcrypt.hash(assertStrongPassword(data.password), 10);
+            updateData.passwordChangedAt = new Date(0);
+            updateData.forcePasswordChange = true;
+        }
         if (data.isActive !== undefined) updateData.status = data.isActive ? 'active' : 'inactive';
         if (data.operationalAssignee !== undefined) {
             const existingUser = await prisma.user.findUnique({
@@ -8144,6 +8249,7 @@ ipcMain.handle('users:update', async (event, id, data) => {
             where: { id },
             data: updateData
         });
+        if (data.password !== undefined) await revokeRememberTokensForUser(user.id);
         console.log(`✅ Updated user: ${user.username}`);
         void logActivity({ module: 'users', action: 'UPDATE', description: `Cập nhật người dùng "${user.username}"`, recordName: user.username });
         return { success: true, data: { ...user, isActive: user.status === 'active' } };
@@ -8175,7 +8281,11 @@ ipcMain.handle('users:login', async (event, username, password, rememberMe = fal
             where: { username: normalizedUsername }
         });
         if (!user || user.status !== 'active') {
-            return { success: false, error: 'Tài khoản không tồn tại hoặc đã bị vô hiệu hóa' };
+            return { success: false, error: 'Tên đăng nhập hoặc mật khẩu không đúng.' };
+        }
+        if (user.loginLockedUntil && new Date(user.loginLockedUntil).getTime() > Date.now()) {
+            const remainingMinutes = Math.ceil((new Date(user.loginLockedUntil).getTime() - Date.now()) / 60000);
+            return { success: false, error: `Đăng nhập tạm khóa. Thử lại sau ${remainingMinutes} phút.` };
         }
         // 🔒 SECURITY: So sánh bằng bcrypt
         const isHashed = typeof user.password === 'string' && user.password.startsWith('$2');
@@ -8187,15 +8297,20 @@ ipcMain.handle('users:login', async (event, username, password, rememberMe = fal
             passwordValid = (user.password === password);
             if (passwordValid) {
                 const hashed = await bcrypt.hash(password, 10);
-                await prisma.user.update({ where: { id: user.id }, data: { password: hashed } });
+                await prisma.user.update({ where: { id: user.id }, data: { password: hashed, passwordChangedAt: new Date(), forcePasswordChange: false } });
                 console.log(`🔒 Auto-upgraded password for user: ${user.username}`);
             }
         }
         if (!passwordValid) {
-            return { success: false, error: 'Mật khẩu không đúng' };
+            await recordFailedLogin(user);
+            return { success: false, error: 'Tên đăng nhập hoặc mật khẩu không đúng.' };
         }
+        await prisma.user.update({
+            where: { id: user.id },
+            data: { loginFailedAttempts: 0, loginLockedUntil: null },
+        });
         // Lưu session phía backend
-        currentSession = { id: user.id, username: user.username, role: user.role };
+        currentSession = { id: user.id, username: user.username, role: user.role, mustChangePassword: isPasswordRotationRequired(user) };
         prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(() => { });
         void logActivity({ module: 'users', action: 'LOGIN', description: `Đăng nhập: ${user.username}`, recordName: user.username, userName: user.username });
         const rememberToken = rememberMe && user.role === 'admin'
@@ -8226,7 +8341,7 @@ ipcMain.handle('users:getCurrentSession', async () => {
             currentSession = null;
             return { success: false };
         }
-        currentSession = { id: user.id, username: user.username, role: user.role };
+        currentSession = { id: user.id, username: user.username, role: user.role, mustChangePassword: isPasswordRotationRequired(user) };
         return { success: true, data: sanitizeUserForClient(user) };
     } catch {
         return { success: false };
@@ -8249,7 +8364,7 @@ ipcMain.handle('users:restoreSession', async (event, rememberToken) => {
         if (validTokens.length !== tokens.length) await writeRememberTokens(validTokens);
         const user = await prisma.user.findUnique({ where: { id: record.userId } });
         if (!user || user.status !== 'active') return { success: false };
-        currentSession = { id: user.id, username: user.username, role: user.role };
+        currentSession = { id: user.id, username: user.username, role: user.role, mustChangePassword: isPasswordRotationRequired(user) };
         prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(() => { });
         return { success: true, data: sanitizeUserForClient(user) };
     } catch {
@@ -8269,28 +8384,14 @@ ipcMain.handle('users:heartbeat', async () => {
 
 ipcMain.handle('users:ensureAdmin', async () => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
-        // Check if any active admin exists
         const adminCount = await prisma.user.count({
             where: { role: 'admin', status: 'active' }
         });
-        if (adminCount === 0) {
-            // Create default admin
-            await prisma.user.upsert({
-                where: { username: 'admin' },
-                update: { status: 'active', role: 'admin' },
-                create: {
-                    username: 'admin',
-                    password: await bcrypt.hash('admin', 10),
-                    fullName: 'Quản trị viên',
-                    email: 'admin@example.com',
-                    role: 'admin',
-                    status: 'active'
-                }
-            });
-            console.log('✅ Ensured default admin exists');
-        }
-        return { success: true };
+        return adminCount > 0
+            ? { success: true }
+            : { success: false, error: 'Không còn tài khoản quản trị viên đang hoạt động.' };
     } catch (error) {
         console.error('❌ Ensure admin error:', error);
         return { success: false, error: error.message };

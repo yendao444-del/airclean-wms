@@ -325,6 +325,11 @@ model User {
   fullName    String
   email       String?
   phone       String?
+  avatar      String?
+  passwordChangedAt DateTime @default(now())
+  forcePasswordChange Boolean @default(false)
+  loginFailedAttempts Int @default(0)
+  loginLockedUntil DateTime?
   
   role        String   @default("staff") // admin, manager, staff
   permissions String?  // JSON array of permissions

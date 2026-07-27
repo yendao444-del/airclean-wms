@@ -1,5 +1,5 @@
 import { useState, useEffect, lazy, Suspense, Component, ErrorInfo, ReactNode } from 'react';
-import { Layout, Menu, Button, Typography, ConfigProvider, Space, Dropdown, Tooltip } from 'antd';
+import { Layout, Menu, Button, Typography, ConfigProvider, Space, Dropdown, Tooltip, Avatar } from 'antd';
 import AntAppProvider from './components/AntAppProvider';
 import {
     DashboardOutlined,
@@ -66,6 +66,7 @@ const OrdersPage = lazy(() => import('./pages/Orders'));
 const BusinessReportPage = lazy(() => import('./pages/BusinessReport'));
 const AttendancePage = lazy(() => import('./pages/Attendance'));
 const StockCheckPage = lazy(() => import('./pages/StockCheck'));
+const MyProfilePage = lazy(() => import('./pages/MyProfile'));
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -108,23 +109,33 @@ function AppContent() {
     const { getAccessibleMenuKeys, hasPermission } = usePermissions();
     const [selectedKey, setSelectedKey] = useState('dashboard');
     const [collapsed, setCollapsed] = useState(true);
+    const roleLabel = user?.role === 'admin' ? 'Quản trị viên' : user?.role === 'manager' ? 'Quản lý' : 'Nhân viên';
+    const profileLabel = user?.fullName?.trim().toLocaleLowerCase('vi-VN') === roleLabel.toLocaleLowerCase('vi-VN')
+        ? user.username
+        : (user?.fullName || user?.username || 'Tài khoản');
 
     // Filter menu items based on user permissions
     const accessibleKeys = getAccessibleMenuKeys();
     const canAccessKey = (key: string) => accessibleKeys.includes(key);
     const navigateTo = (key: string) => {
-        if (canAccessKey(key)) {
+        if (key === 'my-profile' || canAccessKey(key)) {
             setSelectedKey(key);
         }
     };
 
     // Redirect về trang đầu tiên có quyền khi user không có quyền xem dashboard
     useEffect(() => {
-        if (user && !canAccessKey(selectedKey)) {
+        if (user && selectedKey !== 'my-profile' && !canAccessKey(selectedKey)) {
             const firstAccessible = accessibleKeys[0];
             if (firstAccessible) setSelectedKey(firstAccessible);
         }
     }, [user, selectedKey, accessibleKeys]);
+
+    useEffect(() => {
+        if (user?.mustChangePassword && user.role !== 'admin' && selectedKey !== 'my-profile') {
+            setSelectedKey('my-profile');
+        }
+    }, [selectedKey, user?.mustChangePassword, user?.role]);
 
     // Lắng nghe sự kiện navigate từ các component không có state selectedKey
     useEffect(() => {
@@ -166,6 +177,7 @@ function AppContent() {
             }
             return undefined;
         };
+        if (key === 'my-profile') return 'Hồ sơ của tôi';
         return findLabel(menuItems) || 'AIRCLEAN WMS';
     };
 
@@ -300,7 +312,7 @@ function AppContent() {
     };
 
     const renderContent = () => {
-        if (!canAccessKey(selectedKey)) {
+        if (selectedKey !== 'my-profile' && !canAccessKey(selectedKey)) {
             return null;
         }
 
@@ -344,6 +356,8 @@ function AppContent() {
                 return <BusinessReportPage />;
             case 'daily-tasks':
                 return <DailyTasksPage />;
+            case 'my-profile':
+                return <MyProfilePage />;
             case 'attendance':
                 return <AttendancePage />;
 
@@ -439,13 +453,17 @@ function AppContent() {
                             menu={{
                                 items: [
                                     {
-                                        key: 'role',
-                                        label: user?.role === 'admin' ? '👑 Quản trị viên' :
-                                            user?.role === 'manager' ? '📊 Quản lý' :
-                                                user?.role === 'staff' ? '👤 Nhân viên' : '👁️ Chỉ xem',
+                                        key: 'identity',
+                                        label: <div style={{ minWidth: 160, padding: '2px 0' }}><div style={{ fontWeight: 700 }}>{profileLabel}</div><div style={{ color: '#64748b', fontSize: 12 }}>{roleLabel}</div></div>,
                                         disabled: true,
                                     },
                                     { type: 'divider' },
+                                    {
+                                        key: 'my-profile',
+                                        label: 'Hồ sơ của tôi',
+                                        icon: <UserOutlined />,
+                                        onClick: () => navigateTo('my-profile'),
+                                    },
                                     {
                                         key: 'logout',
                                         label: 'Đăng xuất',
@@ -461,19 +479,9 @@ function AppContent() {
                                 onMouseEnter={e => (e.currentTarget.style.boxShadow = '0 0 0 3px #e5e7eb')}
                                 onMouseLeave={e => (e.currentTarget.style.boxShadow = 'none')}
                             >
-                                <div style={{
-                                    width: 32, height: 32, borderRadius: '50%',
-                                    background: user?.role === 'admin'
-                                        ? 'linear-gradient(135deg, #f59e0b, #fbbf24)'
-                                        : user?.role === 'manager'
-                                            ? 'linear-gradient(135deg, #3b82f6, #60a5fa)'
-                                            : 'linear-gradient(135deg, #00ab56, #00d66c)',
-                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                    color: '#fff', fontWeight: 800, fontSize: 14,
-                                    boxShadow: '0 2px 8px rgba(0,0,0,0.18)',
-                                }}>
+                                <Avatar size={32} src={user?.avatar || undefined} style={{ background: user?.role === 'admin' ? '#f59e0b' : user?.role === 'manager' ? '#3b82f6' : '#00ab56', color: '#fff', fontWeight: 800, boxShadow: '0 2px 8px rgba(0,0,0,0.18)' }}>
                                     {user?.role === 'admin' ? '👑' : (user?.username || 'U')[0].toUpperCase()}
-                                </div>
+                                </Avatar>
                                 {/* Online dot */}
                                 <div style={{
                                     position: 'absolute', bottom: 0, right: 0,

@@ -5,6 +5,9 @@ interface User {
     username: string;
     fullName: string;
     email?: string;
+    avatar?: string | null;
+    passwordChangedAt?: string;
+    mustChangePassword?: boolean;
     role: 'admin' | 'manager' | 'staff' | 'viewer';
     isActive: boolean;
 }
@@ -14,6 +17,7 @@ interface AuthContextType {
     isAuthenticated: boolean;
     login: (username: string, password: string, rememberMe?: boolean) => Promise<{ success: boolean; error?: string }>;
     logout: () => void;
+    updateCurrentUser: (user: User) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -130,13 +134,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     const logout = () => doLogout();
+    const updateCurrentUser = (nextUser: User) => {
+        sessionStorage.setItem('currentUser', JSON.stringify(nextUser));
+        setUser(nextUser);
+    };
 
     return (
         <AuthContext.Provider value={{
             user,
             isAuthenticated: !!user,
             login,
-            logout
+            logout,
+            updateCurrentUser,
         }}>
             {children}
         </AuthContext.Provider>
