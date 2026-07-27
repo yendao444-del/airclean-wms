@@ -28,6 +28,7 @@ const evidenceStorage = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE
     })
     : null;
 const EVIDENCE_BUCKET = process.env.SUPABASE_EVIDENCE_BUCKET || 'daily-task-evidence';
+const MAX_EVIDENCE_STORAGE_BYTES = 900 * 1024;
 
 // ========================================
 // 🔒 STOCK MUTEX — Serialize stock operations
@@ -5366,7 +5367,7 @@ ipcMain.handle('dailyTasks:uploadEvidenceImage', async (_event, payload) => {
         if (!taskId || !mimeType || !data || !hash) throw new Error('Dữ liệu ảnh bằng chứng không hợp lệ.');
         const base64 = String(data).replace(/^data:[^;]+;base64,/, '');
         const buffer = Buffer.from(base64, 'base64');
-        if (buffer.length > 200 * 1024) throw new Error('Ảnh sau nén không được vượt quá 200 KB.');
+        if (buffer.length > MAX_EVIDENCE_STORAGE_BYTES) throw new Error('Ảnh sau nén không được vượt quá 1 MB.');
         const extension = mimeType === 'image/png' ? 'png' : mimeType === 'image/webp' ? 'webp' : 'jpg';
         const storagePath = `daily-tasks/${taskId}/${new Date().toISOString().slice(0, 10)}/${hash}.${extension}`;
         const { error } = await evidenceStorage.storage.from(EVIDENCE_BUCKET).upload(storagePath, buffer, {
@@ -5406,7 +5407,7 @@ ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
         for (const image of images) {
             if (!image?.data || !['image/jpeg', 'image/png', 'image/webp'].includes(image.mimeType)) throw new Error('Ảnh bằng chứng không hợp lệ.');
             const buffer = Buffer.from(String(image.data).replace(/^data:[^;]+;base64,/, ''), 'base64');
-            if (!buffer.length || buffer.length > 200 * 1024) throw new Error('Ảnh sau nén phải không vượt quá 200 KB.');
+            if (!buffer.length || buffer.length > MAX_EVIDENCE_STORAGE_BYTES) throw new Error('Ảnh sau nén phải không vượt quá 1 MB.');
             if (!isValidEvidenceImage(buffer, image.mimeType)) throw new Error('Dữ liệu tải lên không phải ảnh hợp lệ.');
             const hash = crypto.createHash('sha256').update(buffer).digest('hex');
             const registryKey = `dailyEvidenceHash:${hash}`;

@@ -224,8 +224,18 @@ const formatPenaltyAmount = (value: string | number | undefined): string => {
 
 const getDailyRotationAnchor = () => dayjs().format('YYYY-MM-DD');
 
-const MAX_EVIDENCE_IMAGE_BYTES = 200 * 1024;
+const MAX_EVIDENCE_IMAGE_BYTES = 900 * 1024;
+const MAX_EVIDENCE_SOURCE_BYTES = 25 * 1024 * 1024;
 const MAX_EVIDENCE_IMAGES = 5;
+
+const getEvidenceImageMimeType = (file: File): string | null => {
+    if (['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return file.type;
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
+    if (extension === 'png') return 'image/png';
+    if (extension === 'webp') return 'image/webp';
+    return null;
+};
 
 const compressEvidenceImage = async (file: File): Promise<File> => {
     const sourceUrl = URL.createObjectURL(file);
@@ -236,22 +246,26 @@ const compressEvidenceImage = async (file: File): Promise<File> => {
             element.onerror = () => reject(new Error('Không thể đọc ảnh.'));
             element.src = sourceUrl;
         });
-        let width = Math.min(image.naturalWidth, 1600);
+        let width = Math.min(image.naturalWidth, 1920);
         let height = Math.round(image.naturalHeight * (width / image.naturalWidth));
 
-        for (let quality = 0.82; quality >= 0.35; quality -= 0.08) {
-            const canvas = document.createElement('canvas');
-            canvas.width = width;
-            canvas.height = height;
-            canvas.getContext('2d')?.drawImage(image, 0, 0, width, height);
-            const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/webp', quality));
-            if (blob && (blob.size <= MAX_EVIDENCE_IMAGE_BYTES || quality <= 0.35)) {
-                return new File([blob], `${file.name.replace(/\.[^.]+$/, '')}.webp`, { type: 'image/webp' });
+        while (width >= 480 && height >= 360) {
+            for (const quality of [0.82, 0.72, 0.62, 0.52, 0.42]) {
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                const context = canvas.getContext('2d');
+                if (!context) throw new Error('Không thể xử lý ảnh trên thiết bị này.');
+                context.drawImage(image, 0, 0, width, height);
+                const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/webp', quality));
+                if (blob && blob.size <= MAX_EVIDENCE_IMAGE_BYTES) {
+                    return new File([blob], `${file.name.replace(/\.[^.]+$/, '')}.webp`, { type: 'image/webp' });
+                }
             }
-            width = Math.max(640, Math.round(width * 0.82));
-            height = Math.max(480, Math.round(height * 0.82));
+            width = Math.round(width * 0.75);
+            height = Math.round(height * 0.75);
         }
-        throw new Error('Không thể nén ảnh xuống 200 KB. Hãy chọn ảnh khác.');
+        throw new Error('Không thể nén ảnh xuống dưới 1 MB. Hãy chọn ảnh rõ nét hơn hoặc cắt bớt ảnh.');
     } finally {
         URL.revokeObjectURL(sourceUrl);
     }
@@ -1636,7 +1650,7 @@ const DailyTasks = () => {
                             <Button icon={<UploadOutlined />}>Chọn ảnh từ máy</Button>
                         </Upload>
                         <div style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>
-                            Tối đa {MAX_EVIDENCE_IMAGES} ảnh JPG, PNG hoặc WebP; mỗi ảnh không quá 1 MB trước khi nén.
+                            Tối đa {MAX_EVIDENCE_IMAGES} ảnh JPG, PNG hoặc WebP. Ảnh gốc tối đa 25 MB và sẽ tự nén dưới 1 MB trước khi tải lên.
                         </div>
                     </div>
                 </div>
@@ -1647,18 +1661,20 @@ const DailyTasks = () => {
                     message.warning('Vui lòng chọn ảnh bằng chứng từ máy.');
                     return Promise.reject();
                 }
-                const invalidImage = selectedImages.find(image =>
-                    image.size > 1024 * 1024 || !['image/jpeg', 'image/png', 'image/webp'].includes(image.type)
-                );
+                const invalidImage = selectedImages.find(image => !getEvidenceImageMimeType(image) || image.size > MAX_EVIDENCE_SOURCE_BYTES);
                 if (invalidImage) {
-                    message.warning(`Ảnh "${invalidImage.name}" phải là JPG, PNG hoặc WebP và không vượt quá 1 MB.`);
+                    message.warning(`Ảnh "${invalidImage.name}" phải là JPG, PNG hoặc WebP và không vượt quá 25 MB.`);
                     return Promise.reject();
                 }
                 try {
-                    const images = await Promise.all(selectedImages.map(async selectedImage => {
+                    const sourceBytes = selectedImages.reduce((total, image) => total + image.size, 0);
+                    const images = [];
+                    for (let index = 0; index < selectedImages.length; index += 1) {
+                        const selectedImage = selectedImages[index];
+                        message.loading({ key: 'evidence-upload', content: `Đang nén ảnh ${index + 1}/${selectedImages.length}...`, duration: 0 });
                         const compressedImage = await compressEvidenceImage(selectedImage);
                         if (compressedImage.size > MAX_EVIDENCE_IMAGE_BYTES) {
-                            throw new Error(`Ảnh "${selectedImage.name}" sau nén vượt quá 200 KB.`);
+                            throw new Error(`Ảnh "${selectedImage.name}" sau nén vượt quá 1 MB.`);
                         }
                         const data = await new Promise<string>((resolve, reject) => {
                             const reader = new FileReader();
@@ -1666,16 +1682,25 @@ const DailyTasks = () => {
                             reader.onerror = () => reject(new Error('Không thể đọc ảnh.'));
                             reader.readAsDataURL(compressedImage);
                         });
-                        return { name: compressedImage.name, mimeType: compressedImage.type, data };
-                    }));
+                        images.push({ name: compressedImage.name, mimeType: compressedImage.type, data, size: compressedImage.size });
+                    }
+                    message.loading({ key: 'evidence-upload', content: 'Đang tải bằng chứng lên hệ thống...', duration: 0 });
                     const result = await window.electronAPI.dailyTasks.submitEvidence({
                         taskId: task.id,
-                        images,
+                        images: images.map(({ name, mimeType, data }) => ({ name, mimeType, data })),
                     });
                     if (!result.success) throw new Error(result.error || 'Không thể lưu bằng chứng');
                     await loadTasks();
-                    message.success('Đã nộp bằng chứng, đang chờ duyệt.');
-                } catch (error: any) { message.error(error.message || 'Không thể gửi bằng chứng.'); }
+                    const uploadedBytes = images.reduce((total, image) => total + image.size, 0);
+                    message.success({
+                        key: 'evidence-upload',
+                        content: `Đã nộp ${images.length} ảnh (${(sourceBytes / 1024 / 1024).toFixed(1)} MB → ${(uploadedBytes / 1024).toFixed(0)} KB), đang chờ duyệt.`,
+                        duration: 5,
+                    });
+                } catch (error: any) {
+                    message.error({ key: 'evidence-upload', content: error.message || 'Không thể gửi bằng chứng.', duration: 5 });
+                    return Promise.reject(error);
+                }
             }
         });
     };
