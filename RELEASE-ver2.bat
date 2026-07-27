@@ -37,7 +37,7 @@ echo Bump version: v!CURRENT_VERSION! -^> v!NEW_VERSION!
 echo.
 
 if not "!NEW_VERSION!"=="!CURRENT_VERSION!" (
-    echo [1/6] Update package.json...
+    echo [1/7] Update package.json...
     node scripts\release-version.cjs set !NEW_VERSION! >nul
     if errorlevel 1 (
         echo [ERROR] package.json update failed.
@@ -48,7 +48,22 @@ if not "!NEW_VERSION!"=="!CURRENT_VERSION!" (
     echo.
 )
 
-echo [2/6] Build Vite...
+echo [2/7] Regenerate Prisma Client...
+echo ----------------------------------------
+:: Prisma engine can be locked by Electron while the app is running.
+taskkill /F /IM electron.exe >nul 2>&1
+taskkill /F /IM "DBY POS.exe" >nul 2>&1
+timeout /t 2 /nobreak >nul
+call node_modules\.bin\prisma generate
+if errorlevel 1 (
+    echo [ERROR] Prisma generate failed.
+    pause
+    exit /b 1
+)
+echo [OK] Prisma Client regenerated.
+echo.
+
+echo [3/7] Build Vite...
 echo ----------------------------------------
 call npx vite build
 if errorlevel 1 (
@@ -60,7 +75,7 @@ if errorlevel 1 (
 echo [OK] Vite build completed.
 echo.
 
-echo [3/6] Copy code into local release folder for quick verification...
+echo [4/7] Copy code into local release folder for quick verification...
 echo ----------------------------------------
 :: Kill Electron/app neu dang chay (tranh lock file DLL)
 taskkill /F /IM electron.exe >nul 2>&1
@@ -89,13 +104,19 @@ if not exist "electron\gdrive-token.json" (
 rmdir /S /Q "release4\win-unpacked\resources\app\electron" 2>nul
 xcopy "electron\*" "release4\win-unpacked\resources\app\electron\" /E /I /Y /Q >nul 2>&1
 
+echo    Copy Prisma Client...
+rmdir /S /Q "release4\win-unpacked\resources\app\node_modules\@prisma" 2>nul
+rmdir /S /Q "release4\win-unpacked\resources\app\node_modules\.prisma" 2>nul
+xcopy "node_modules\@prisma\*" "release4\win-unpacked\resources\app\node_modules\@prisma\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\.prisma\*" "release4\win-unpacked\resources\app\node_modules\.prisma\" /E /I /Y /Q >nul 2>&1
+
 copy /Y "package.json" "release4\win-unpacked\resources\app\package.json" >nul 2>&1
 echo [OK] Local release folder synced.
 
 :skip_copy_local
 echo.
 
-echo [4/6] Build Python Face Service EXE...
+echo [5/7] Build Python Face Service EXE...
 echo ----------------------------------------
 call "python\build_face_service.bat"
 if errorlevel 1 (
@@ -107,7 +128,7 @@ if errorlevel 1 (
 echo [OK] Face service EXE build completed.
 echo.
 
-echo [5/6] Create patch zip...
+echo [6/7] Create patch zip...
 echo ----------------------------------------
 set PROJECT_DIR=%CD%
 set PATCH_ZIP=DBYPOS-PATCH-v!NEW_VERSION!.zip
@@ -120,12 +141,16 @@ if exist "!PATCH_TEMP!" rmdir /S /Q "!PATCH_TEMP!"
 mkdir "!PATCH_TEMP!\resources\app\dist"
 mkdir "!PATCH_TEMP!\resources\app\electron"
 mkdir "!PATCH_TEMP!\resources\app\python"
+mkdir "!PATCH_TEMP!\resources\app\node_modules\@prisma"
+mkdir "!PATCH_TEMP!\resources\app\node_modules\.prisma"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\@supabase"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\iceberg-js"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\tslib"
 
 xcopy "dist\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 xcopy "electron\*" "!PATCH_TEMP!\resources\app\electron\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\@prisma\*" "!PATCH_TEMP!\resources\app\node_modules\@prisma\" /E /I /Y /Q >nul 2>&1
+xcopy "node_modules\.prisma\*" "!PATCH_TEMP!\resources\app\node_modules\.prisma\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\@supabase\*" "!PATCH_TEMP!\resources\app\node_modules\@supabase\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\iceberg-js\*" "!PATCH_TEMP!\resources\app\node_modules\iceberg-js\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\tslib\*" "!PATCH_TEMP!\resources\app\node_modules\tslib\" /E /I /Y /Q >nul 2>&1
@@ -169,7 +194,7 @@ for %%F in ("!PATCH_ZIP_PATH!") do (
 echo [OK] Created !PATCH_ZIP! (~!FILE_SIZE_MB! MB)
 echo.
 
-echo [6/6] Git and GitHub release...
+echo [7/7] Git and GitHub release...
 echo ----------------------------------------
 git add -A
 git commit -m "v!NEW_VERSION! - !NOTES!"
