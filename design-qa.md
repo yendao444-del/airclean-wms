@@ -51,3 +51,29 @@ visual evidence without a rendered screenshot.
 ## Final Result
 
 final result: blocked
+
+---
+
+## Daily Task Action Buttons - 27/07/2026
+
+- Source visual truth: `C:\Users\Admin\.codex\generated_images\019f1b4e-a4ba-7c63-816d-6db280efd125\call_9BnXdM5SSd4qJPF5G2m9dZWW.png`
+- Implementation screenshot: `C:\Users\Admin\AppData\Local\Temp\daily-task-action-qa.png`
+- Viewport: 1920 x 1080
+
+### Comparison
+
+- Replaced the ambiguous leading icon-only action with a non-interactive status indicator.
+- Added explicit trailing `Hoàn thành`, `Nộp bằng chứng`, and `Xem bằng chứng` actions.
+- Added a dismissible first-use guide and a one-time hint when users click non-action row content.
+- Kept edit, delete, note, review, and evidence workflows separate from the primary action.
+- Header and row columns share the same responsive grid, so action labels stay aligned.
+
+### Interaction Checks
+
+- Evidence-required task opened the existing multi-image evidence modal from the new button.
+- Clicking row content does not complete or submit a task.
+- TypeScript and Vite production build passed.
+
+### Final Result
+
+final result: pass

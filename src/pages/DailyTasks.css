@@ -213,6 +213,143 @@
     border-radius: 50%;
 }
 
+.daily-task-action-guide {
+    min-height: 42px;
+    padding: 8px 14px;
+    border-bottom: 1px solid #dbeafe;
+    background: #eff6ff;
+    color: #334155;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12px;
+}
+
+.daily-task-action-guide>span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.daily-task-action-guide .anticon {
+    color: #2563eb;
+}
+
+.daily-task-action-guide .ant-btn {
+    color: #1d4ed8;
+    font-weight: 700;
+    flex: 0 0 auto;
+}
+
+.daily-task-list-header,
+.daily-task-list-row {
+    display: grid;
+    grid-template-columns: minmax(250px, 1.3fr) 105px 180px minmax(200px, .9fr) 310px;
+    gap: 12px;
+}
+
+.daily-task-list-header {
+    padding: 10px 14px;
+    background: #f8fafc;
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+}
+
+.daily-task-list-row {
+    align-items: center;
+    min-height: 72px;
+    padding: 10px 14px;
+    border-top: 1px solid #eef2f7;
+    border-left: 3px solid var(--task-row-accent, #64748b);
+    transition: background-color 140ms ease;
+}
+
+.daily-task-list-row:hover {
+    background: #fafcff;
+}
+
+.daily-task-status-indicator {
+    width: 28px;
+    height: 28px;
+    border: 1px solid #dbe3ec;
+    border-radius: 50%;
+    background: #fff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    font-size: 18px;
+}
+
+.daily-task-row-actions {
+    justify-content: flex-end;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+.daily-task-evidence-summary {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+}
+
+.daily-task-primary-action.ant-btn-primary {
+    min-width: 108px;
+    border-color: #15803d;
+    background: #15803d;
+    border-radius: 7px;
+    font-weight: 700;
+    box-shadow: none;
+}
+
+.daily-task-primary-action.ant-btn-primary:hover,
+.daily-task-primary-action.ant-btn-primary:focus-visible {
+    border-color: #166534;
+    background: #166534;
+}
+
+.assignment-deadline-picker {
+    width: min(100%, 430px);
+    display: grid;
+    grid-template-columns: minmax(190px, 1fr) 150px;
+    gap: 10px;
+}
+
+.assignment-deadline-picker label {
+    display: grid;
+    gap: 5px;
+}
+
+.assignment-deadline-picker label>span {
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.assignment-deadline-picker .ant-picker {
+    width: 100%;
+    height: 42px;
+    border-radius: 7px;
+}
+
+@media (max-width: 1280px) {
+    .daily-task-list-header,
+    .daily-task-list-row {
+        grid-template-columns: minmax(220px, 1.2fr) 90px 150px minmax(180px, .8fr) 300px;
+    }
+}
+
+@media (max-width: 640px) {
+    .assignment-deadline-picker {
+        grid-template-columns: 1fr;
+    }
+}
+
 /* ========================================
    AVATAR EFFECTS
    ======================================== */

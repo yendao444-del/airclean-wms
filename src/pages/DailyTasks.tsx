@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useDeferredValue, useRef, type ReactNode } from 'react';
+import { useState, useEffect, useCallback, useDeferredValue, useRef, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
 import {
     Card,
     Button,
@@ -17,6 +17,7 @@ import {
     InputNumber,
     message,
     DatePicker,
+    TimePicker,
     Select,
     Radio,
     Alert,
@@ -57,6 +58,67 @@ import {
 } from '../lib/workCalendar';
 import './DailyTasks.css';
 import AlertPopup, { AlertPopupItem } from '../components/AlertPopup';
+
+const AssignmentDeadlinePicker = ({
+    value,
+    onChange,
+}: {
+    value?: dayjs.Dayjs;
+    onChange?: (value: dayjs.Dayjs) => void;
+}) => {
+    const currentValue = value?.isValid() ? value : dayjs().hour(19).minute(0).second(0).millisecond(0);
+
+    const handleDateChange = (date: dayjs.Dayjs | null) => {
+        if (!date) return;
+        onChange?.(
+            date
+                .hour(currentValue.hour())
+                .minute(currentValue.minute())
+                .second(0)
+                .millisecond(0)
+        );
+    };
+
+    const handleTimeChange = (time: dayjs.Dayjs | null) => {
+        if (!time) return;
+        onChange?.(
+            currentValue
+                .hour(time.hour())
+                .minute(time.minute())
+                .second(0)
+                .millisecond(0)
+        );
+    };
+
+    return (
+        <div className="assignment-deadline-picker">
+            <label>
+                <span>Ngày hoàn thành</span>
+                <DatePicker
+                    value={currentValue}
+                    format="DD/MM/YYYY"
+                    allowClear={false}
+                    inputReadOnly
+                    onChange={handleDateChange}
+                    placeholder="Chọn ngày"
+                />
+            </label>
+            <label>
+                <span>Giờ hoàn thành</span>
+                <TimePicker
+                    value={currentValue}
+                    format="HH:mm"
+                    allowClear={false}
+                    inputReadOnly
+                    needConfirm={false}
+                    minuteStep={1}
+                    onChange={handleTimeChange}
+                    placeholder="Chọn giờ"
+                />
+            </label>
+        </div>
+    );
+};
 
 
 interface ProcessLog {
@@ -221,6 +283,15 @@ const GRADIENT_PRESETS = [
 const DailyTasks = () => {
     const { user } = useAuth();
     const isAdmin = user?.role === 'admin';
+    const canReviewEvidence = user?.role === 'admin' || user?.role === 'manager';
+    const isAssignmentRecipient = useCallback((task: Task) => {
+        const currentUserNames = [user?.username, user?.fullName]
+            .map(name => String(name || '').trim().toLowerCase())
+            .filter(Boolean);
+        return getAssignmentRecipients(task).some(assignee =>
+            currentUserNames.includes(String(assignee || '').trim().toLowerCase())
+        );
+    }, [user?.fullName, user?.username]);
     const [tasks, setTasks] = useState<Task[]>([]);
     const [categories, setCategories] = useState(CATEGORIES);
     const [editingCategory, setEditingCategory] = useState<any>(null);
@@ -321,6 +392,34 @@ const DailyTasks = () => {
     const [history, setHistory] = useState<any[]>([]);
     const [historySnapshots, setHistorySnapshots] = useState<Record<string, { tasks?: any[] }>>({});
     const [selectedWorkDate, setSelectedWorkDate] = useState(dayjs());
+
+    useEffect(() => {
+        const openAssignments = () => setActiveTab('assignments');
+        if (window.sessionStorage.getItem('dailyTasks.openTab') === 'assignments') {
+            window.sessionStorage.removeItem('dailyTasks.openTab');
+            openAssignments();
+        }
+        window.addEventListener('daily-tasks:open-assignments', openAssignments);
+        return () => window.removeEventListener('daily-tasks:open-assignments', openAssignments);
+    }, []);
+    const [showTaskActionGuide, setShowTaskActionGuide] = useState(
+        () => window.localStorage.getItem('dailyTasks.actionGuideDismissed') !== '1'
+    );
+    const hasShownRowActionHintRef = useRef(false);
+
+    const dismissTaskActionGuide = () => {
+        window.localStorage.setItem('dailyTasks.actionGuideDismissed', '1');
+        setShowTaskActionGuide(false);
+    };
+
+    const handleTaskRowClick = (event: MouseEvent<HTMLDivElement>) => {
+        const target = event.target as HTMLElement;
+        if (target.closest('button, a, input, textarea, .ant-select, .ant-dropdown')) return;
+        if (hasShownRowActionHintRef.current) return;
+
+        hasShownRowActionHintRef.current = true;
+        message.info('Dùng nút hành động ở cuối dòng để xử lý công việc.');
+    };
 
     // === ASSIGNMENT TASKS ===
     const [assignmentModalVisible, setAssignmentModalVisible] = useState(false);
@@ -529,7 +628,9 @@ const DailyTasks = () => {
         const interval = setInterval(() => {
             forceUpdate(v => v + 1);
 
-            const pendingAssignments = tasks.filter(t => t.type === 'assignment' && t.status !== 'completed');
+            const pendingAssignments = tasks.filter(task =>
+                task.type === 'assignment' && task.status !== 'completed' && isAssignmentRecipient(task)
+            );
             const now = dayjs();
 
             pendingAssignments.forEach(task => {
@@ -619,7 +720,7 @@ const DailyTasks = () => {
             });
         }, 30000);
         return () => clearInterval(interval);
-    }, [tasks, acknowledgedTasks, addAlertPopup]);
+    }, [tasks, acknowledgedTasks, addAlertPopup, isAssignmentRecipient]);
 
     // === CONTINUOUS ALARM: còi hú + beep liên tục mỗi 5 giây khi ≤ 10 phút ===
     useEffect(() => {
@@ -627,6 +728,7 @@ const DailyTasks = () => {
             const now = dayjs();
             const urgentTasks = tasks.filter(t => {
                 if (t.type !== 'assignment' || t.status === 'completed') return false;
+                if (!isAssignmentRecipient(t)) return false;
                 if (acknowledgedTasks.has(t.id)) return false;
                 const deadline = dayjs(`${t.dueDate} ${t.dueTime}`, 'YYYY-MM-DD HH:mm');
                 const diff = deadline.diff(now, 'minute');
@@ -635,7 +737,7 @@ const DailyTasks = () => {
             if (urgentTasks.length > 0) playUrgentBeeps(5);
         }, 5000);
         return () => clearInterval(alarmInterval);
-    }, [tasks, acknowledgedTasks]);
+    }, [tasks, acknowledgedTasks, isAssignmentRecipient]);
 
     // Request notification permission on mount
     useEffect(() => {
@@ -880,9 +982,11 @@ const DailyTasks = () => {
 
     // Filter tasks by type
     const dailyTasks = tasks.filter(t => !t.type || t.type === 'daily');
-    const assignmentTasks = tasks.filter(t => t.type === 'assignment').filter((task, index, all) => {
+    const assignmentTasks = tasks.filter(t => t.type === 'assignment').filter((task, _index, all) => {
         const groupId = parseAttachments(task.attachments).assignment?.groupId;
-        return !groupId || all.findIndex(item => parseAttachments(item.attachments).assignment?.groupId === groupId) === index;
+        if (!groupId) return true;
+        const groupedTasks = all.filter(item => parseAttachments(item.attachments).assignment?.groupId === groupId);
+        return (groupedTasks.find(item => item.status !== 'completed') || groupedTasks[0]) === task;
     });
     const pendingAssignments = assignmentTasks.filter(t => t.status !== 'completed');
     const overdueAssignments = assignmentTasks.filter(t => getDeadlineStatus(t).status === 'overdue');
@@ -1249,7 +1353,8 @@ const DailyTasks = () => {
         // Nếu có claimerName (từ dropdown) → dùng luôn
         if (claimerName) {
             try {
-                await window.electronAPI.dailyTasks.update(taskId, { assignee: claimerName });
+                const result = await window.electronAPI.dailyTasks.update(taskId, { assignee: claimerName });
+                if (!result.success) throw new Error(result.error || 'Không thể nhận việc.');
                 message.success(`✅ ${claimerName} đã nhận việc: "${task.title}"`);
                 loadTasks();
             } catch (e: any) {
@@ -1303,7 +1408,8 @@ const DailyTasks = () => {
                     return Promise.reject();
                 }
                 try {
-                    await window.electronAPI.dailyTasks.update(taskId, { assignee: selectedPerson });
+                    const result = await window.electronAPI.dailyTasks.update(taskId, { assignee: selectedPerson });
+                    if (!result.success) throw new Error(result.error || 'Không thể nhận việc.');
                     message.success(`✅ ${selectedPerson} đã nhận việc: "${task.title}"`);
                     loadTasks();
                 } catch (e: any) {
@@ -2101,8 +2207,8 @@ const DailyTasks = () => {
                                     {evidence.status === 'submitted' && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
                                     {lane === 'evidence' && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Nộp bằng chứng</Button>}
                                     {lane === 'review' && evidence.status !== 'submitted' && <Button size="small" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)}>Nộp bổ sung</Button>}
-                                    {lane === 'review' && evidence.status === 'submitted' && isAdmin && <Button size="small" type="primary" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Duyệt</Button>}
-                                    {lane === 'review' && isAdmin && <Button size="small" danger onClick={() => handleReviewEvidence(task, false)}>Từ chối</Button>}
+                                    {lane === 'review' && evidence.status === 'submitted' && canReviewEvidence && <Button size="small" type="primary" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Duyệt</Button>}
+                                    {lane === 'review' && evidence.status === 'submitted' && canReviewEvidence && <Button size="small" danger onClick={() => handleReviewEvidence(task, false)}>Từ chối</Button>}
                                     {isAdmin && <Button type="text" icon={<EditOutlined />} onClick={() => handleEditTask(task)} aria-label="Sửa công việc" />}
                                     {isAdmin && <Button type="text" danger icon={<DeleteOutlined />} onClick={() => handleDeleteTask(task.id)} aria-label="Xóa công việc" />}
                                 </div>
@@ -2123,7 +2229,7 @@ const DailyTasks = () => {
         const deadline = getDeadlineStatus(task);
         const notes = parseNotes(task.note);
         const completed = task.status === 'completed';
-        const canComplete = isAdmin || user?.username === task.assignee;
+        const canComplete = isAdmin || isAssignmentRecipient(task);
         const latestNote = notes.length > 0 ? notes[notes.length - 1] : null;
         const stateColor = completed ? '#16a34a' : deadline.status === 'overdue' ? '#ef4444' : deadline.status === 'warning' ? '#d97706' : '#7c3aed';
         const stateBg = completed ? '#ecfdf5' : deadline.status === 'overdue' ? '#fff1f2' : deadline.status === 'warning' ? '#fffbeb' : '#f5f3ff';
@@ -2192,7 +2298,7 @@ const DailyTasks = () => {
                                 borderRadius: 999,
                                 padding: '3px 9px',
                             }}>
-                                <UserOutlined style={{ fontSize: 12 }} /> {task.assignee || 'Chưa phân công'}
+                                <UserOutlined style={{ fontSize: 12 }} /> {getAssignmentRecipients(task).join(', ') || 'Chưa phân công'}
                             </span>
                             <span style={{
                                 display: 'inline-flex',
@@ -2370,7 +2476,7 @@ const DailyTasks = () => {
                         const notes = parseNotes(task.note);
                         const latestNote = notes.length > 0 ? notes[notes.length - 1] : null;
                         const completed = task.status === 'completed';
-                        const canComplete = isAdmin || user?.username === task.assignee;
+                        const canComplete = isAdmin || isAssignmentRecipient(task);
                         return (
                             <div key={task.id} style={{
                                 display: 'grid',
@@ -2495,25 +2601,27 @@ const DailyTasks = () => {
         const renderRow = (task: Task, color: string) => {
             const evidence = getEvidence(task);
             const isAssignment = task.type === 'assignment';
-            const canCompleteAssignment = isAssignment && task.status !== 'completed' && (isAdmin || getAssignmentRecipients(task).includes(user?.username || ''));
+            const canCompleteAssignment = isAssignment && task.status !== 'completed' && (isAdmin || isAssignmentRecipient(task));
+            const canSubmitAssignmentEvidence = isAssignment && (isAdmin || isAssignmentRecipient(task));
+            const canCompleteDailyTask = !isAssignment && task.status !== 'completed';
             const deadlineText = isAssignment
                 ? getDeadlineStatus(task).label
                 : isTaskOverdue(task) ? 'Quá hạn' : `Hạn ${task.dueTime}`;
-            const sourceLabel = isAssignment ? 'Việc có hạn' : 'Hàng ngày';
-            return <div key={`${task.type}-${task.id}`} style={{ display: 'grid', gridTemplateColumns: 'minmax(230px, 1.3fr) 116px minmax(145px, .75fr) minmax(190px, .95fr) minmax(140px, .65fr)', gap: 12, alignItems: 'center', minHeight: 72, padding: '10px 14px', borderTop: '1px solid #eef2f7', borderLeft: `3px solid ${color}` }}>
+            const sourceLabel = isAssignment ? 'Bàn giao' : 'Hàng ngày';
+            const needsEvidence = evidence.required && evidence.status !== 'submitted' && evidence.status !== 'approved';
+            const hasEvidence = evidence.required && (evidence.status === 'submitted' || evidence.status === 'approved');
+            return <div
+                key={`${task.type}-${task.id}`}
+                className="daily-task-list-row"
+                onClick={handleTaskRowClick}
+                style={{ '--task-row-accent': color } as CSSProperties}
+            >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-                    {isAssignment && canCompleteAssignment
-                        ? <Button
-                            type="text"
-                            size="small"
-                            icon={<CheckCircleOutlined />}
-                            onClick={() => handleCompleteAssignment(task.id)}
-                            aria-label="Hoàn thành bàn giao"
-                            style={{ color, width: 26, height: 26, padding: 0 }}
-                        />
-                        : isAssignment
-                            ? <CheckCircleOutlined style={{ color, fontSize: 17 }} />
-                            : <CompletionButton task={task} size={18} />}
+                    <span className="daily-task-status-indicator" aria-hidden="true">
+                        {task.status === 'completed'
+                            ? <CheckCircleFilled style={{ color: '#16a34a' }} />
+                            : <CheckCircleOutlined style={{ color }} />}
+                    </span>
                     <div style={{ minWidth: 0 }}>
                         <div style={{ color: '#172033', fontWeight: 750, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.title}</div>
                         <div style={{ marginTop: 4, color: '#64748b', fontSize: 12, display: 'flex', gap: 6, alignItems: 'center' }}><UserOutlined /> {isAssignment ? getAssignmentRecipients(task).join(', ') : (task.assignee || 'Chưa phân công')}</div>
@@ -2521,7 +2629,7 @@ const DailyTasks = () => {
                 </div>
                 <Tag style={{ width: 'fit-content', margin: 0, color: isAssignment ? '#2563eb' : '#15803d', background: isAssignment ? '#eff6ff' : '#ecfdf5', borderColor: isAssignment ? '#bfdbfe' : '#bbf7d0', fontWeight: 700 }}>{sourceLabel}</Tag>
                 <div style={{ color: color === '#dc2626' ? '#dc2626' : '#475569', fontSize: 13, fontWeight: 650 }}><ClockCircleOutlined /> {deadlineText}</div>
-                <div style={{ fontSize: 13, color: evidence.required ? '#c2410c' : '#64748b' }}>
+                <div className="daily-task-evidence-summary" style={{ color: evidence.required ? '#c2410c' : '#64748b' }}>
                     {evidence.required
                         ? <><UploadOutlined /> Cần bằng chứng {evidence.penaltyAmount ? `· Phạt ${formatPenaltyAmount(evidence.penaltyAmount)}đ` : ''}</>
                         : isAssignment
@@ -2529,17 +2637,20 @@ const DailyTasks = () => {
                             : 'Không bắt buộc bằng chứng'}
                 </div>
                 {isAssignment ? (
-                    <Space size={2} style={{ justifyContent: 'flex-end' }}>
-                        {evidence.required && evidence.status !== 'submitted' && evidence.status !== 'approved' && <Tooltip title="Nộp bằng chứng"><Button type="text" size="small" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} /></Tooltip>}
-                        {evidence.required && (evidence.status === 'submitted' || evidence.status === 'approved') && <Tooltip title="Xem bằng chứng"><Button type="text" size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)} /></Tooltip>}
-                        {evidence.required && evidence.status === 'submitted' && isAdmin && <Tooltip title="Duyệt bằng chứng"><Button type="text" size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ color: '#16a34a' }} /></Tooltip>}
+                    <Space size={6} className="daily-task-row-actions">
+                        {needsEvidence && canSubmitAssignmentEvidence && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp bằng chứng</Button>}
+                        {hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
+                        {evidence.required && evidence.status === 'submitted' && canReviewEvidence && <Tooltip title="Duyệt bằng chứng"><Button type="text" size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ color: '#16a34a' }} /></Tooltip>}
                         <Button size="small" onClick={() => handleNoteAssignment(task)} style={{ borderRadius: 6 }}>Ghi chú</Button>
-                        {canCompleteAssignment && <Tooltip title="Hoàn thành"><Button type="text" size="small" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} /></Tooltip>}
+                        {canCompleteAssignment && !needsEvidence && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} className="daily-task-primary-action">Hoàn thành</Button>}
                         {isAdmin && <Tooltip title="Sửa"><Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditAssignment(task)} /></Tooltip>}
                         {isAdmin && <Tooltip title="Xóa"><Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteAssignment(task.id)} /></Tooltip>}
                     </Space>
                 ) : (
-                    <Space size={2} style={{ justifyContent: 'flex-end' }}>
+                    <Space size={6} className="daily-task-row-actions">
+                        {canCompleteDailyTask && needsEvidence && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp bằng chứng</Button>}
+                        {canCompleteDailyTask && hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
+                        {canCompleteDailyTask && !evidence.required && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleToggleComplete(task.id)} className="daily-task-primary-action">Hoàn thành</Button>}
                         {isAdmin && <Tooltip title="Sửa"><Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditTask(task)} /></Tooltip>}
                         {isAdmin && <Tooltip title="Xóa"><Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteTask(task.id)} /></Tooltip>}
                     </Space>
@@ -2550,7 +2661,7 @@ const DailyTasks = () => {
         return <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 370px', gap: 16, alignItems: 'start' }}>
             <section style={{ background: '#fff', border: '1px solid #dbe3ec', borderRadius: 8, overflow: 'hidden' }}>
                 <div style={{ padding: '16px 18px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
-                    <div><h2 style={{ margin: 0, color: '#172033', fontSize: 18, fontWeight: 800 }}>{scope === 'all' ? (isCurrentWorkDate ? 'Cần xử lý hôm nay' : `Công việc ngày ${selectedWorkDate.format('DD/MM/YYYY')}`) : scope === 'daily' ? 'Hàng ngày' : 'Việc có hạn'}</h2><span style={{ color: '#64748b', fontSize: 13 }}>{scope === 'deadline' && deadlineViewFilter === 'completed' ? `${completedDeadlineCount} công việc đã hoàn thành` : `${pendingTasks.length} công việc đang mở`}</span></div>
+                    <div><h2 style={{ margin: 0, color: '#172033', fontSize: 18, fontWeight: 800 }}>{scope === 'all' ? (isCurrentWorkDate ? 'Cần xử lý hôm nay' : `Công việc ngày ${selectedWorkDate.format('DD/MM/YYYY')}`) : scope === 'daily' ? 'Hàng ngày' : 'Bàn giao'}</h2><span style={{ color: '#64748b', fontSize: 13 }}>{scope === 'deadline' && deadlineViewFilter === 'completed' ? `${completedDeadlineCount} công việc đã hoàn thành` : `${pendingTasks.length} công việc đang mở`}</span></div>
                     {scope === 'deadline' ? (
                         <Space size={6} wrap>
                             <Button size="small" type={deadlineViewFilter === 'pending' ? 'primary' : 'default'} onClick={() => setDeadlineViewFilter('pending')} style={{ borderRadius: 6 }}>Đang mở ({selectedAssignments.length - completedDeadlineCount})</Button>
@@ -2559,7 +2670,13 @@ const DailyTasks = () => {
                         </Space>
                     ) : <Button type="text" style={{ color: '#475569', fontWeight: 600 }}>Sắp xếp: ưu tiên</Button>}
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(230px, 1.3fr) 116px minmax(145px, .75fr) minmax(190px, .95fr) minmax(140px, .65fr)', gap: 12, padding: '10px 14px', background: '#f8fafc', color: '#64748b', fontSize: 11, fontWeight: 800, textTransform: 'uppercase' }}><span>Công việc</span><span>Nguồn</span><span>Hạn</span><span>Bằng chứng / phạt</span><span style={{ textAlign: 'right' }}>Thao tác</span></div>
+                {showTaskActionGuide && pendingTasks.length > 0 && (
+                    <div className="daily-task-action-guide" role="status">
+                        <span><CheckCircleOutlined /> Chọn <strong>Hoàn thành</strong> hoặc <strong>Nộp bằng chứng</strong> ở cuối dòng. Bấm vào nội dung công việc sẽ không tự xác nhận.</span>
+                        <Button type="text" size="small" onClick={dismissTaskActionGuide}>Đã hiểu</Button>
+                    </div>
+                )}
+                <div className="daily-task-list-header"><span>Công việc</span><span>Nguồn</span><span>Hạn</span><span>Bằng chứng / phạt</span><span style={{ textAlign: 'right' }}>Thao tác</span></div>
                 {groups.map(group => <div key={group.key}><div style={{ padding: '9px 14px', background: group.key === 'overdue' ? '#fef2f2' : group.key === 'evidence' ? '#fff7ed' : '#f8fafc', color: group.color, fontSize: 13, fontWeight: 800 }}>{group.label} ({group.tasks.length})</div>{group.tasks.map(task => renderRow(task, group.color))}</div>)}
                 {groups.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={isCurrentWorkDate ? 'Không có công việc cần xử lý' : 'Chưa có dữ liệu công việc cho ngày này'} style={{ padding: 60 }} />}
             </section>
@@ -2574,8 +2691,8 @@ const DailyTasks = () => {
                         <div style={{ marginTop: 6, color: '#64748b', fontSize: 12 }}><UserOutlined /> {task.assignee || 'Chưa phân công'}</div>
                         {canViewEvidence && <div style={{ display: 'flex', gap: 6, marginTop: 11, flexWrap: 'wrap' }}>
                             <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>
-                            {isAdmin && <Button size="small" type="primary" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Duyệt</Button>}
-                            {isAdmin && <Button size="small" danger onClick={() => handleReviewEvidence(task, false)}>Từ chối</Button>}
+                            {evidence.status === 'submitted' && canReviewEvidence && <Button size="small" type="primary" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ background: '#16a34a', borderColor: '#16a34a' }}>Duyệt</Button>}
+                            {evidence.status === 'submitted' && canReviewEvidence && <Button size="small" danger onClick={() => handleReviewEvidence(task, false)}>Từ chối</Button>}
                         </div>}
                     </div>;
                 }) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Không có việc quá hạn" style={{ padding: 60 }} />}
@@ -2712,12 +2829,6 @@ const DailyTasks = () => {
                         Hàng ngày ({dailyTasks.filter(t => t.status !== 'completed').length})
                     </Radio.Button>
                     <Radio.Button
-                        value="triage"
-                        style={{ height: 44, lineHeight: '44px', paddingLeft: 24, paddingRight: 24, fontSize: 15, fontWeight: 600, borderRadius: 8, marginLeft: 8 }}
-                    >
-                        Cần xử lý <Badge count={dailyTasks.filter(task => task.status !== 'completed' && (isOverdue(task) || getEvidence(task).required)).length + pendingAssignments.length} offset={[8, -4]} />
-                    </Radio.Button>
-                    <Radio.Button
                         value="assignments"
                         style={{
                             height: 40,
@@ -2730,7 +2841,13 @@ const DailyTasks = () => {
                             marginLeft: 8
                         }}
                     >
-                        Việc có hạn {pendingAssignments.length > 0 && <Badge count={pendingAssignments.length} offset={[8, -4]} />}
+                        Bàn giao {pendingAssignments.length > 0 && <Badge count={pendingAssignments.length} offset={[8, -4]} />}
+                    </Radio.Button>
+                    <Radio.Button
+                        value="triage"
+                        style={{ height: 44, lineHeight: '44px', paddingLeft: 24, paddingRight: 24, fontSize: 15, fontWeight: 600, borderRadius: 8, marginLeft: 8 }}
+                    >
+                        Cần xử lý <Badge count={dailyTasks.filter(task => task.status !== 'completed' && (isOverdue(task) || getEvidence(task).required)).length + pendingAssignments.length} offset={[8, -4]} />
                     </Radio.Button>
                     <Radio.Button
                         value="history"
@@ -3239,7 +3356,7 @@ const DailyTasks = () => {
                         )}
                     </div>
                     <Form.Item name="deadline" label={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}><CalendarOutlined /> Thời hạn hoàn thành</span>} rules={[{ required: true, message: 'Chọn thời hạn.' }]}>
-                        <DatePicker showTime format="DD/MM/YYYY HH:mm" style={{ width: 320, maxWidth: '100%', height: 42, borderRadius: 7 }} placeholder="Chọn ngày giờ hoàn thành" />
+                        <AssignmentDeadlinePicker />
                     </Form.Item>
                     <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 13 }}>
                         <Button type="text" icon={<MessageOutlined />} onClick={() => setAssignmentNoteExpanded(value => !value)} style={{ padding: 0, color: '#475569', fontWeight: 600 }}>

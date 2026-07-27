@@ -5036,6 +5036,14 @@ function getDailyRotation(attachments) {
         : [];
 }
 
+function getTaskRecipients(task, attachments = parseTaskAttachments(task?.attachments)) {
+    const assignees = attachments?.assignment?.assignees;
+    if (Array.isArray(assignees) && assignees.length > 0) {
+        return [...new Set(assignees.map(name => String(name || '').trim()).filter(Boolean))];
+    }
+    return task?.assignee ? [String(task.assignee).trim()] : [];
+}
+
 function getLocalDateKey(date = new Date()) {
     const localDate = new Date(date);
     localDate.setHours(0, 0, 0, 0);
@@ -5181,34 +5189,46 @@ async function createEvidencePenaltyIfDue(task, now = new Date()) {
     if (submittedAt && !Number.isNaN(submittedAt.getTime()) && submittedAt <= penaltyAt && evidence.status !== 'rejected') return null;
 
     const dueKey = dueAt.toISOString();
-    const key = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}`;
-    const penalty = {
-        id: key,
-        taskId: task.id,
-        assignee: task.assignee,
-        amount: Number(evidence.penaltyAmount) || 30000,
-        dueAt: dueAt.toISOString(),
-        penaltyAt: penaltyAt.toISOString(),
-        type: 'Không nộp bằng chứng đúng hạn',
-        detail: `${task.title} - quá hạn ${EVIDENCE_GRACE_MINUTES} phút chưa nộp bằng chứng`,
-        source: 'daily_task_evidence_overdue',
-    };
-    try {
-        await prisma.appConfig.create({ data: { key, value: JSON.stringify(penalty) } });
-        void logActivity({ module: 'daily_tasks', action: 'PENALTY', recordId: task.id, recordName: task.title, description: `Tự động phạt ${task.assignee}: ${penalty.amount}đ vì chưa nộp bằng chứng sau ${EVIDENCE_GRACE_MINUTES} phút`, severity: 'WARNING' });
-        return penalty;
-    } catch (error) {
-        if (error.code === 'P2002') return null;
-        throw error;
+    const recipients = getTaskRecipients(task, attachments);
+    if (recipients.length === 0) return [];
+    const totalFine = Number(evidence.penaltyAmount) || 30000;
+    const baseFine = Math.floor(totalFine / recipients.length);
+    const remainder = totalFine % recipients.length;
+    const created = [];
+    // Migrate the old single-recipient record before writing split penalties.
+    const legacyKey = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}`;
+    await prisma.appConfig.deleteMany({ where: { key: legacyKey } });
+
+    for (const [index, assignee] of recipients.entries()) {
+        const key = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:${assignee}`;
+        const penalty = {
+            id: key,
+            taskId: task.id,
+            assignee,
+            amount: baseFine + (index < remainder ? 1 : 0),
+            dueAt: dueAt.toISOString(),
+            penaltyAt: penaltyAt.toISOString(),
+            type: 'Không nộp bằng chứng đúng hạn',
+            detail: `${task.title} - quá hạn ${EVIDENCE_GRACE_MINUTES} phút chưa nộp bằng chứng (chia ${recipients.length} người)`,
+            source: 'daily_task_evidence_overdue',
+        };
+        try {
+            await prisma.appConfig.create({ data: { key, value: JSON.stringify(penalty) } });
+            created.push(penalty);
+            void logActivity({ module: 'daily_tasks', action: 'PENALTY', recordId: task.id, recordName: task.title, description: `Tự động phạt ${assignee}: ${penalty.amount}đ vì chưa nộp bằng chứng sau ${EVIDENCE_GRACE_MINUTES} phút`, severity: 'WARNING' });
+        } catch (error) {
+            if (error.code !== 'P2002') throw error;
+        }
     }
+    return created;
 }
 
 async function reconcileEvidencePenalties() {
     const tasks = await prisma.dailyTask.findMany({ where: { status: { not: 'completed' } } });
     const created = [];
     for (const task of tasks) {
-        const penalty = await createEvidencePenaltyIfDue(task);
-        if (penalty) created.push(penalty);
+        const penalties = await createEvidencePenaltyIfDue(task);
+        if (Array.isArray(penalties)) created.push(...penalties);
     }
     return created;
 }

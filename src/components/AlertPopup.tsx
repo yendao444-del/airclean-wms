@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { CheckOutlined, CloseOutlined } from '@ant-design/icons';
 
-export type AlertLevel = 'overdue' | 'urgent' | 'warning' | 'info';
+export type AlertLevel = 'overdue' | 'urgent' | 'warning' | 'info' | 'assignment';
 
 export interface AlertPopupItem {
     id: string;
@@ -12,6 +12,8 @@ export interface AlertPopupItem {
     timeNum: string | number;
     timeUnit: string;
     autoDismiss?: number; // ms, 0 = không tự đóng
+    actionLabel?: string;
+    onAction?: () => void;
 }
 
 interface AlertPopupProps {
@@ -63,6 +65,17 @@ const LEVEL_CONFIG = {
         countBg: '#e6f7ff',
         countBorder: '#91d5ff',
         btnColor: '#1890ff',
+    },
+    assignment: {
+        icon: '📌',
+        headerTitle: 'BÀN GIAO MỚI',
+        headerSub: 'Bạn vừa được giao công việc mới',
+        headerBg: 'linear-gradient(135deg, #075985 0%, #0284c7 100%)',
+        flash: false,
+        countColor: '#0369a1',
+        countBg: '#f0f9ff',
+        countBorder: '#7dd3fc',
+        btnColor: '#0284c7',
     },
 };
 
@@ -166,7 +179,10 @@ function PopupCard({ popup, onDismiss }: { popup: AlertPopupItem; onDismiss: () 
                 {/* Actions */}
                 <div style={{ display: 'flex', gap: 8 }}>
                     <button
-                        onClick={onDismiss}
+                        onClick={() => {
+                            popup.onAction?.();
+                            onDismiss();
+                        }}
                         style={{
                             flex: 1, border: 'none', borderRadius: 7,
                             padding: '8px', fontSize: 13, fontWeight: 600,
@@ -175,7 +191,7 @@ function PopupCard({ popup, onDismiss }: { popup: AlertPopupItem; onDismiss: () 
                             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
                         }}
                     >
-                        <CheckOutlined /> Đã biết
+                        <CheckOutlined /> {popup.actionLabel || 'Đã biết'}
                     </button>
                     <button
                         onClick={onDismiss}

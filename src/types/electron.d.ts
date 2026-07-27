@@ -160,7 +160,7 @@ export interface ElectronAPI {
     dailyTasks: {
         list: (filters?: any) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (taskData: any) => Promise<{ success: boolean; data?: any; error?: string }>;
-        createAssignments: (taskData: any, assignees: string[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        createAssignments: (taskData: any, assignees: string[]) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, updates: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         updateStatus: (id: number, status: string) => Promise<{ success: boolean; data?: any; error?: string }>;
         uploadEvidenceImage: (payload: { taskId: number; mimeType: string; data: string; hash: string }) => Promise<{ success: boolean; data?: { storagePath: string }; error?: string }>;

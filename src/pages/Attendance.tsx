@@ -3430,6 +3430,12 @@ export default function Attendance() {
         return dailyTaskTracking.flatMap((task: any) => {
             if (!task || task.type !== 'assignment' || task.status === 'completed') return [];
             if (!task.assignee || !task.dueDate) return [];
+            try {
+                const attachments = typeof task.attachments === 'string' ? JSON.parse(task.attachments) : (task.attachments || {});
+                if (attachments?.evidence?.required) return [];
+            } catch {
+                // Malformed legacy metadata falls back to the deadline policy.
+            }
 
             const deadline = dayjs(task.dueDate);
             if (!deadline.isValid()) return [];

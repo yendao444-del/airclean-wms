@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import dayjs from 'dayjs';
 import AlertPopup, { AlertPopupItem } from './AlertPopup';
+import { useAuth } from '../contexts/AuthContext';
 
 /**
  * GlobalTaskAlerts - Component chạy TOÀN CỤC ở App.tsx
@@ -97,9 +98,11 @@ interface TaskForAlert {
     dueTime: string;
     status: string;
     type?: string;
+    attachments?: unknown;
 }
 
 export default function GlobalTaskAlerts() {
+    const { user } = useAuth();
     const [tasks, setTasks] = useState<TaskForAlert[]>([]);
     const [alertPopups, setAlertPopups] = useState<AlertPopupItem[]>([]);
     const [acknowledgedTasks, setAcknowledgedTasks] = useState<Set<number>>(() => new Set());
@@ -118,13 +121,71 @@ export default function GlobalTaskAlerts() {
         setAlertPopups(prev => prev.filter(p => p.id !== id));
     }, []);
 
+    const isCurrentUserRecipient = useCallback((task: any) => {
+        const currentNames = [user?.username, user?.fullName]
+            .map(name => String(name || '').trim().toLocaleLowerCase('vi-VN'))
+            .filter(Boolean);
+        if (currentNames.length === 0) return false;
+
+        let attachments: Record<string, any> = {};
+        try {
+            attachments = typeof task.attachments === 'string'
+                ? JSON.parse(task.attachments || '{}')
+                : (task.attachments || {});
+        } catch {
+            attachments = {};
+        }
+        const recipients = Array.isArray(attachments?.assignment?.assignees)
+            ? attachments.assignment.assignees
+            : [task.assignee];
+        return recipients.some((recipient: unknown) =>
+            currentNames.includes(String(recipient || '').trim().toLocaleLowerCase('vi-VN'))
+        );
+    }, [user?.fullName, user?.username]);
+
+    const notifyNewAssignments = useCallback((assignments: TaskForAlert[]) => {
+        const username = String(user?.username || '').trim().toLocaleLowerCase('vi-VN');
+        if (!username || assignments.length === 0) return;
+
+        const storageKey = `dailyTasks.assignmentNotified.${username}`;
+        let notifiedIds = new Set<string>();
+        try {
+            const stored = JSON.parse(window.localStorage.getItem(storageKey) || '[]');
+            if (Array.isArray(stored)) notifiedIds = new Set(stored.map(String));
+        } catch { }
+
+        const newAssignments = assignments.filter(task => !notifiedIds.has(String(task.id)));
+        if (newAssignments.length === 0) return;
+
+        newAssignments.forEach(task => notifiedIds.add(String(task.id)));
+        window.localStorage.setItem(storageKey, JSON.stringify([...notifiedIds].slice(-500)));
+
+        const nearestDeadline = [...newAssignments]
+            .sort((a, b) => `${a.dueDate} ${a.dueTime}`.localeCompare(`${b.dueDate} ${b.dueTime}`))[0];
+        addAlertPopup({
+            level: 'assignment',
+            taskName: newAssignments.length === 1
+                ? newAssignments[0].title
+                : `Bạn có ${newAssignments.length} bàn giao mới`,
+            assignee: user?.username || '',
+            deadline: nearestDeadline ? `${nearestDeadline.dueDate} ${nearestDeadline.dueTime}` : '',
+            timeNum: newAssignments.length,
+            timeUnit: newAssignments.length === 1 ? 'bàn giao mới' : 'bàn giao mới',
+            actionLabel: 'Xem bàn giao',
+            onAction: () => {
+                window.sessionStorage.setItem('dailyTasks.openTab', 'assignments');
+                window.dispatchEvent(new CustomEvent('navigate', { detail: 'daily-tasks' }));
+            },
+        });
+    }, [addAlertPopup, user?.username]);
+
     // === Load tasks từ DB ===
     const loadTasks = useCallback(async () => {
         try {
             const result = await (window as any).electronAPI.dailyTasks.list({});
             if (result.success && result.data) {
                 const assignmentTasks = result.data
-                    .filter((t: any) => (t.type === 'assignment') && t.status !== 'completed')
+                    .filter((t: any) => (t.type === 'assignment') && t.status !== 'completed' && isCurrentUserRecipient(t))
                     .map((t: any) => ({
                         id: t.id,
                         title: t.title,
@@ -133,13 +194,15 @@ export default function GlobalTaskAlerts() {
                         dueTime: dayjs(t.dueDate).format('HH:mm'),
                         status: t.status,
                         type: t.type,
+                        attachments: t.attachments,
                     }));
                 setTasks(assignmentTasks);
+                notifyNewAssignments(assignmentTasks);
             }
         } catch (err) {
             console.log('[GlobalAlerts] Load tasks error:', err);
         }
-    }, []);
+    }, [isCurrentUserRecipient, notifyNewAssignments]);
 
     // ⚡ Delay 15s lần đầu (Dashboard đã load tasks), sau đó poll mỗi 2 phút
     useEffect(() => {
