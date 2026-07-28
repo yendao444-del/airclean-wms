@@ -298,6 +298,30 @@
     font-size: 13px;
 }
 
+.daily-task-evidence-escalation {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    line-height: 1.3;
+}
+
+.daily-task-evidence-penalty {
+    color: #dc2626;
+    font-weight: 700;
+}
+
+.daily-task-evidence-next {
+    width: fit-content;
+    color: #9a5b13;
+    font-size: 12px;
+    font-weight: 650;
+    white-space: nowrap;
+    cursor: help;
+}
+
 .daily-task-primary-action.ant-btn-primary {
     min-width: 108px;
     border-color: #15803d;

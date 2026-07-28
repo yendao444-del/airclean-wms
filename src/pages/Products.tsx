@@ -549,13 +549,23 @@ export default function ProductsPage() {
                 isCombo: isCombo,
                 comboItems: isCombo && comboItems.length > 0 ? JSON.stringify(comboItems) : null,
             };
+            // Managers may maintain basic catalog information, but must never
+            // submit hidden inventory fields back to the backend unchanged.
+            const updatePayload = canViewInventoryStock
+                ? payload
+                : {
+                    name: payload.name,
+                    categoryId: payload.categoryId,
+                    price: payload.price,
+                    unit: payload.unit,
+                };
 
             if (editingProduct) {
-                const result = await window.electronAPI.products.update(editingProduct.id, payload);
+                const result = await window.electronAPI.products.update(editingProduct.id, updatePayload);
                 if (result.success) {
                     // Đồng bộ giá vốn combo số lượng trong bảng combos
                     const comboUpdates: Promise<any>[] = [];
-                    validVariants.forEach(v => {
+                    if (canViewInventoryStock) validVariants.forEach(v => {
                         if (Array.isArray(v.combos)) {
                             v.combos.forEach((c: any) => {
                                 if (c.id) {

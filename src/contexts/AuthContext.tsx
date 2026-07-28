@@ -86,6 +86,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     function doLogout() {
         const rememberToken = localStorage.getItem(REMEMBER_TOKEN_KEY);
         sessionStorage.removeItem('currentUser');
+        // Never leave an admin stock-check snapshot on a shared workstation.
+        localStorage.removeItem('stock-check-sessions-v2');
         localStorage.removeItem('rememberedUser');
         localStorage.removeItem(REMEMBER_TOKEN_KEY);
         localStorage.removeItem(AUTH_LOGIN_DATE_KEY);
@@ -95,6 +97,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const login = async (username: string, password: string, rememberMe = true): Promise<{ success: boolean; error?: string }> => {
         try {
+            // Clear the prior user's cache before the next session is created.
+            localStorage.removeItem('stock-check-sessions-v2');
             const result = await window.electronAPI.users.login(username, password, rememberMe);
 
             if (!result.success || !result.data) {

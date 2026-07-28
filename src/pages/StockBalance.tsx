@@ -965,8 +965,13 @@ export default function StockBalancePage() {
         loadPausedVariants();
     }, []);
 
-    // Khi context products thay đổi (sau refresh), cập nhật bảng tồn kho
+    // Admin receives the full catalog. Managers must only ever work from the
+    // alert DTO returned by getForStockAlerts; the shared catalog is sanitized.
     useEffect(() => {
+        if (!isAdmin) {
+            void loadProducts();
+            return;
+        }
         if (contextProducts.length > 0) {
             const prods = contextProducts as unknown as Product[];
             fallbackProductsLoadTriedRef.current = false;
@@ -979,7 +984,7 @@ export default function StockBalancePage() {
         } else {
             void loadProducts();
         }
-    }, [contextProducts, appDataLoading]);
+    }, [isAdmin, contextProducts, appDataLoading]);
 
     const initData = async () => {
         setLoading(true);
@@ -1041,14 +1046,23 @@ export default function StockBalancePage() {
     };
 
     const loadProducts = async (sales?: Map<string, number>): Promise<Product[]> => {
-        let prods = contextProducts as unknown as Product[];
+        let prods = isAdmin ? contextProducts as unknown as Product[] : [];
+
+        try {
+            const res = await (window as any).electronAPI.products.getForStockAlerts?.();
+            if (res?.success && Array.isArray(res.data)) {
+                prods = res.data as Product[];
+            }
+        } catch (error) {
+            console.error('Error loading stock alert products:', error);
+        }
 
         // Khi mở màn Tồn kho quá sớm sau khi khởi động, AppDataContext có thể chưa kịp nạp.
         // Fallback trực tiếp giúp màn này tự recover mà không cần chuyển tab qua lại.
-        if (prods.length === 0 && !appDataLoading && !fallbackProductsLoadTriedRef.current) {
+        if (isAdmin && prods.length === 0 && !appDataLoading && !fallbackProductsLoadTriedRef.current) {
             fallbackProductsLoadTriedRef.current = true;
             try {
-                const res = await (window as any).electronAPI.products.getAll();
+                const res = await ((window as any).electronAPI.products.getForStockAlerts?.() || (window as any).electronAPI.products.getAll());
                 if (res?.success && Array.isArray(res.data)) {
                     prods = res.data as Product[];
                 }
@@ -1245,7 +1259,7 @@ export default function StockBalancePage() {
             onOk: async () => {
                 setLoading(true);
                 try {
-                    await window.electronAPI.products.updateStock({
+                    await window.electronAPI.stockBalance.adjustStock({
                         sku: item.sku,
                         quantity: Math.abs(item.difference),
                         isAdd: item.difference > 0,
@@ -1308,7 +1322,7 @@ export default function StockBalancePage() {
 
                     for (const item of itemsToAdjust) {
                         try {
-                            await window.electronAPI.products.updateStock({
+                            await window.electronAPI.stockBalance.adjustStock({
                                 sku: item.sku,
                                 quantity: Math.abs(item.difference),
                                 isAdd: item.difference > 0,
@@ -1412,7 +1426,7 @@ export default function StockBalancePage() {
                 onOk: async () => {
                     setLoading(true);
                     try {
-                        await window.electronAPI.products.updateStock({
+                        await window.electronAPI.stockBalance.adjustStock({
                             sku: quickBalanceItem.sku,
                             quantity: Math.abs(difference),
                             isAdd: difference > 0,

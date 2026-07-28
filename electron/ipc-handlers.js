@@ -10,8 +10,11 @@ const offlineQueue = require('./offline-queue');
 try { offlineQueue.init(app.getPath('userData')); } catch (e) { console.error('[OfflineQueue] Init failed:', e.message); }
 
 // Set environment variables từ config
-const databaseUrl = process.env.DATABASE_URL || config.DATABASE_URL;
-const directDatabaseUrl = process.env.DIRECT_URL || config.DIRECT_URL || databaseUrl;
+const isPostgresUrl = (value) => typeof value === 'string' && /^postgres(?:ql)?:\/\//i.test(value.trim());
+// A shell or another local project can leave DATABASE_URL/DIRECT_URL behind.
+// Never pass a non-PostgreSQL value to Prisma; use the packaged fallback instead.
+const databaseUrl = isPostgresUrl(process.env.DATABASE_URL) ? process.env.DATABASE_URL : config.DATABASE_URL;
+const directDatabaseUrl = isPostgresUrl(process.env.DIRECT_URL) ? process.env.DIRECT_URL : (config.DIRECT_URL || databaseUrl);
 process.env.DATABASE_URL = databaseUrl;
 process.env.DIRECT_URL = directDatabaseUrl;
 
@@ -775,6 +778,7 @@ ipcMain.handle('system:getInfo', async () => {
 
 ipcMain.handle('dashboard:getSummary', async (event, params = {}) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         const startedAt = Date.now();
@@ -989,45 +993,140 @@ ipcMain.handle('dashboard:getSummary', async (event, params = {}) => {
 // PRODUCTS
 // ========================================
 
+function parseJsonArray(value) {
+    try {
+        const parsed = typeof value === 'string' ? JSON.parse(value || '[]') : (value || []);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
+function isAdminSession() {
+    return currentSession?.role === 'admin';
+}
+
+function getProductTotalStock(product) {
+    const variants = parseJsonArray(product?.variants);
+    if (variants.length > 0) return variants.reduce((sum, variant) => sum + Number(variant?.stock || 0), 0);
+    return Number(product?.stock || 0);
+}
+
+function stripStockFromVariants(variants) {
+    if (!variants) return variants;
+    return JSON.stringify(parseJsonArray(variants).map(variant => {
+        const { stock, cost, minStock, maxStock, ...safeVariant } = variant || {};
+        return { ...safeVariant, available: Number(stock || 0) > 0 };
+    }));
+}
+
+function sanitizeProductForNonAdmin(product) {
+    if (!product) return product;
+    const { stock, minStock, maxStock, cost, variants, ...safeProduct } = product;
+    return { ...safeProduct, variants: stripStockFromVariants(variants), available: getProductTotalStock(product) > 0 };
+}
+
+function productNeedsStockAlert(product) {
+    const minStock = Number(product?.minStock ?? 0);
+    const variants = parseJsonArray(product?.variants);
+    if (variants.length > 0) return variants.some(variant => Number(variant?.stock || 0) <= minStock);
+    return Number(product?.stock || 0) <= minStock;
+}
+
+function stockAlertProductForNonAdmin(product) {
+    const minStock = Number(product?.minStock ?? 0);
+    const { cost, maxStock, variants, stock, ...safeProduct } = product;
+    const variantList = parseJsonArray(variants);
+    if (variantList.length > 0) {
+        const allowedVariants = variantList
+            .filter(variant => Number(variant?.stock || 0) <= minStock)
+            .map(variant => {
+                const { cost: variantCost, maxStock: variantMaxStock, ...safeVariant } = variant || {};
+                return safeVariant;
+            });
+        return { ...safeProduct, variants: JSON.stringify(allowedVariants) };
+    }
+    return { ...safeProduct, stock };
+}
+
+function productSelectForCatalog() {
+    return {
+        id: true,
+        name: true,
+        sku: true,
+        unit: true,
+        variants: true,
+        cost: true,
+        price: true,
+        stock: true,
+        minStock: true,
+        maxStock: true,
+        status: true,
+        barcode: true,
+        description: true,
+        categoryId: true,
+        createdAt: true,
+        updatedAt: true,
+        category: { select: { id: true, name: true } }
+    };
+}
+
 ipcMain.handle('products:getAll', async () => {
     try {
         if (!prisma) {
             throw new Error('Database chưa được khởi tạo. Vui lòng khởi động lại ứng dụng.');
         }
 
-        const products = await prisma.product.findMany({
-            select: {
-                id: true,
-                name: true,
-                sku: true,
-                unit: true,
-                variants: true,
-                cost: true,
-                price: true,
-                stock: true,
-                minStock: true,
-                maxStock: true,
-                status: true,
-                barcode: true,
-                description: true,
-                categoryId: true,
-                createdAt: true,
-                updatedAt: true,
-                category: { select: { id: true, name: true } }
-            },
-            orderBy: { createdAt: 'desc' }
-        });
+        const products = await prisma.product.findMany({ select: productSelectForCatalog(), orderBy: { createdAt: 'desc' } });
 
-        console.log(`✅ Loaded ${products.length} products from Supabase`);
-        return { success: true, data: products };
+        console.log(`✅ Loaded ${products.length} products from Supabase (${isAdminSession() ? 'admin/full' : 'sanitized'})`);
+        return { success: true, data: isAdminSession() ? products : products.map(sanitizeProductForNonAdmin) };
     } catch (error) {
         console.error('❌ Error loading products:', error.message);
         return { success: false, error: error.message };
     }
 });
 
+ipcMain.handle('products:getForAdmin', async () => {
+    try {
+        requireRole('admin');
+        if (!prisma) throw new Error('Prisma not available');
+        const products = await prisma.product.findMany({ select: productSelectForCatalog(), orderBy: { createdAt: 'desc' } });
+        return { success: true, data: products };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('products:getCatalogForSale', async () => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const products = await prisma.product.findMany({
+            select: productSelectForCatalog(),
+            where: { status: 'active' },
+            orderBy: { createdAt: 'desc' }
+        });
+        return { success: true, data: isAdminSession() ? products : products.map(sanitizeProductForNonAdmin) };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('products:getForStockAlerts', async () => {
+    try {
+        requireRole('admin', 'manager');
+        if (!prisma) throw new Error('Prisma not available');
+        const products = await prisma.product.findMany({ select: productSelectForCatalog(), orderBy: { createdAt: 'desc' } });
+        const alertProducts = products.filter(productNeedsStockAlert);
+        return { success: true, data: isAdminSession() ? alertProducts : alertProducts.map(stockAlertProductForNonAdmin) };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
 ipcMain.handle('products:getTopSelling', async (event, { limit = 10 } = {}) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         const parseItems = (value) => {
@@ -1126,7 +1225,7 @@ ipcMain.handle('products:getById', async (event, id) => {
             where: { id },
             include: { category: true }
         });
-        return { success: true, data: product };
+        return { success: true, data: isAdminSession() ? product : sanitizeProductForNonAdmin(product) };
     } catch (error) {
         return { success: false, error: error.message };
     }
@@ -1138,6 +1237,15 @@ ipcMain.handle('products:create', async (event, data) => {
         console.log('📝 Create product called with:', JSON.stringify(data, null, 2));
         if (!prisma) throw new Error('Prisma not available');
 
+        const isAdmin = isAdminSession();
+        const requestedStock = Number(data?.stock || 0);
+        const rawVariants = data?.variants ? parseJsonArray(data.variants) : [];
+        if (!isAdmin && (requestedStock !== 0 || rawVariants.some(variant => Number(variant?.stock || 0) !== 0))) {
+            throw new Error('Only an admin can create a SKU with initial inventory. Use a purchase receipt for stock intake.');
+        }
+        const safeVariants = !isAdmin && rawVariants.length
+            ? JSON.stringify(rawVariants.map(({ stock, ...variant }) => ({ ...variant, stock: 0 })))
+            : (data.variants || null);
         const product = await prisma.product.create({
             data: {
                 sku: data.sku,
@@ -1146,17 +1254,17 @@ ipcMain.handle('products:create', async (event, data) => {
                 categoryId: data.categoryId,
                 price: data.price !== undefined ? data.price : 0,
                 cost: data.cost !== undefined ? data.cost : 0,
-                stock: data.stock || 0,
-                minStock: data.minStock || 10,
+                stock: isAdmin ? requestedStock : 0,
+                minStock: isAdmin ? (data.minStock || 10) : 0,
                 unit: data.unit || 'Cái',
                 status: data.status || 'active',
-                variants: data.variants || null
+                variants: safeVariants
             },
             include: { category: true }
         });
         console.log(`✅ Created product: ${product.name} (ID: ${product.id})`);
         void logActivity({ module: 'products', action: 'CREATE', description: `Tạo sản phẩm "${product.name}" (SKU: ${product.sku})`, recordId: product.id, recordName: product.name, userName: data.userName || 'Admin' });
-        return { success: true, data: product };
+        return { success: true, data: isAdminSession() ? product : sanitizeProductForNonAdmin(product) };
     } catch (error) {
         console.error('❌ Create product ERROR:', error.code, error.message);
 
@@ -1180,9 +1288,12 @@ ipcMain.handle('products:update', async (event, id, data) => {
     try {
         requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
-        const product = await prisma.product.update({
-            where: { id },
-            data: {
+        const isAdmin = isAdminSession();
+        if (!isAdmin && ['stock', 'minStock', 'variants'].some(field => Object.prototype.hasOwnProperty.call(data || {}, field))) {
+            throw new Error('Managers cannot change inventory, stock thresholds, or variant inventory.');
+        }
+        const updateData = isAdmin
+            ? {
                 ...(data.sku && { sku: data.sku }),
                 ...(data.barcode && { barcode: data.barcode }),
                 ...(data.name && { name: data.name }),
@@ -1194,12 +1305,21 @@ ipcMain.handle('products:update', async (event, id, data) => {
                 ...(data.unit && { unit: data.unit }),
                 ...(data.status && { status: data.status }),
                 ...(data.variants !== undefined && { variants: data.variants })
-            },
+            }
+            : {
+                ...(data.name && { name: data.name }),
+                ...(data.categoryId && { categoryId: data.categoryId }),
+                ...(data.price !== undefined && { price: data.price }),
+                ...(data.unit && { unit: data.unit })
+            };
+        const product = await prisma.product.update({
+            where: { id },
+            data: updateData,
             include: { category: true }
         });
         console.log(`✅ Updated product: ${product.name}`);
         void logActivity({ module: 'products', action: 'UPDATE', description: `Cập nhật sản phẩm "${product.name}"`, recordId: product.id, recordName: product.name, changes: data, userName: data.userName || 'Admin' });
-        return { success: true, data: product };
+        return { success: true, data: isAdminSession() ? product : sanitizeProductForNonAdmin(product) };
     } catch (error) {
         console.error('❌ Update product error:', error.code, error.message);
 
@@ -1936,65 +2056,152 @@ function emitStockChanged(payload = {}) {
     }
 }
 
-ipcMain.handle('products:updateStock', async (event, { sku, quantity, isAdd = false, logContext = null, allowMissing = false }) => {
-    try {
-        requireRole('admin', 'manager', 'staff');
-        console.log(`📦 Update stock: SKU=${sku}, Qty=${quantity}, Add=${isAdd}`);
+function validateStockMutationPayload(data, allowedReferenceTypes) {
+    const sku = String(data?.sku || '').trim();
+    const quantity = Number(data?.quantity);
+    const logContext = data?.logContext || {};
+    const referenceType = String(logContext.referenceType || '').trim().toUpperCase();
+    const reference = String(logContext.reference || '').trim();
+    const note = String(logContext.note || '').trim();
 
-        if (!prisma) {
-            throw new Error('Database chưa được khởi tạo.');
+    if (!sku) throw new Error('Thiếu SKU cần cập nhật.');
+    if (!Number.isFinite(quantity) || quantity <= 0) throw new Error('Số lượng cập nhật phải lớn hơn 0.');
+    if (!allowedReferenceTypes.includes(referenceType)) {
+        throw new Error(`Loại chứng từ "${referenceType || 'trống'}" không được phép trên API này.`);
+    }
+    if (!reference) throw new Error('Thiếu mã chứng từ tham chiếu.');
+    if (!note) throw new Error('Bắt buộc nhập lý do cập nhật tồn kho.');
+    if (!currentSession?.username) throw new Error('Phiên đăng nhập không hợp lệ.');
+
+    return {
+        sku,
+        quantity,
+        isAdd: Boolean(data?.isAdd),
+        allowMissing: Boolean(data?.allowMissing),
+        logContext: {
+            ...logContext,
+            referenceType,
+            reference,
+            note,
+            createdBy: currentSession.username,
+        },
+    };
+}
+
+async function performStockUpdate({ sku, quantity, isAdd = false, logContext, allowMissing = false }) {
+    if (!prisma) throw new Error('Database chưa được khởi tạo.');
+    const delta = isAdd ? quantity : -quantity;
+
+    const response = await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
+        const combo = await tx.comboProduct.findUnique({ where: { sku } });
+        if (combo) {
+            const items = JSON.parse(combo.items || '[]');
+            const updateResults = [];
+            for (const item of items) {
+                const componentQty = Number(item.quantity || 0) * quantity;
+                const componentDelta = isAdd ? componentQty : -componentQty;
+                updateResults.push(await updateProductStockInTx(
+                    tx,
+                    item.sku,
+                    componentDelta,
+                    logContext,
+                    { allowMissing }
+                ));
+            }
+            return { success: true, isCombo: true, deductResults: updateResults };
         }
 
-        const delta = isAdd ? quantity : -quantity;
+        const result = await updateProductStockInTx(tx, sku, delta, logContext, { allowMissing });
+        if (result === false) {
+            return { success: false, skipped: true, error: `SKU "${sku}" không tìm thấy trong kho` };
+        }
+        return { success: true, data: result };
+    }, { timeout: 30000, maxWait: 10000 }));
 
-        // Bọc toàn bộ vào 1 Transaction duy nhất
-        // 🔒 StockMutex: serialize stock operations — tránh race condition
-        const response = await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
-            // 🎁 CHECK IF SKU IS A COMBO
-            const combo = await tx.comboProduct.findUnique({
-                where: { sku }
-            });
+    if (response?.success) {
+        emitStockChanged({
+            sku,
+            quantity,
+            isAdd,
+            referenceType: logContext.referenceType,
+            reference: logContext.reference,
+        });
+    }
+    return response;
+}
 
-            if (combo) {
-                // ⭐ THIS IS A COMBO - Update stock for components
-                const action = isAdd ? 'Adding' : 'Deducting';
-                console.log(`🎁 Detected COMBO (${action}): ${combo.name}`);
-                const items = JSON.parse(combo.items || '[]');
+async function handleDedicatedStockMutation(data, roles, referenceTypes) {
+    requireRole(...roles);
+    return performStockUpdate(validateStockMutationPayload(data, referenceTypes));
+}
 
-                const updateResults = [];
-                for (const item of items) {
-                    const componentQty = item.quantity * quantity; // Qty per combo × combos sold
-                    const componentDelta = isAdd ? componentQty : -componentQty;
-                    console.log(`  → ${action} ${componentQty} ${isAdd ? 'to' : 'from'} ${item.sku}`);
-
-                    const updateResult = await updateProductStockInTx(tx, item.sku, componentDelta, logContext, { allowMissing });
-                    updateResults.push(updateResult);
-                }
-
-                console.log(`✅ Combo ${sku}: ${action} ${quantity} combo(s)`);
-                return { success: true, isCombo: true, deductResults: updateResults };
-            }
-
-            // Regular product/variant stock update
-            const result = await updateProductStockInTx(tx, sku, delta, logContext, { allowMissing });
-            if (result === false) {
-                // allowMissing=true và không tìm thấy SKU
-                return { success: false, skipped: true, error: `SKU "${sku}" không tìm thấy trong kho` };
-            }
-            return { success: true, data: result };
-        }, { timeout: 30000, maxWait: 10000 }));
+// Compatibility endpoint: direct/manual adjustment is admin-only.
+ipcMain.handle('products:updateStock', async (event, data) => {
+    try {
+        requireRole('admin');
+        const payload = validateStockMutationPayload(data, ['MANUAL_ADJUST']);
+        const response = await performStockUpdate(payload);
         if (response?.success) {
-            emitStockChanged({
-                sku,
-                quantity,
-                isAdd,
-                referenceType: logContext?.referenceType || null,
-                reference: logContext?.reference || null,
+            void logActivity({
+                module: 'inventory',
+                action: 'MANUAL_ADJUST',
+                description: `ĐIỀU CHỈNH TỒN TRỰC TIẾP ${payload.sku}: ${payload.isAdd ? '+' : '-'}${payload.quantity}. ${payload.logContext.note}`,
+                recordName: payload.logContext.reference,
+                userName: currentSession.username,
+                severity: 'WARNING',
             });
         }
         return response;
     } catch (error) {
-        console.error('❌ Update stock error:', error);
+        console.error('❌ Manual stock adjustment rejected:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('inventory:manualAdjust', async (event, data) => {
+    try {
+        requireRole('admin');
+        const payload = validateStockMutationPayload(data, ['MANUAL_ADJUST']);
+        const response = await performStockUpdate(payload);
+        if (response?.success) {
+            void logActivity({
+                module: 'inventory',
+                action: 'MANUAL_ADJUST',
+                description: `ĐIỀU CHỈNH TỒN TRỰC TIẾP ${payload.sku}: ${payload.isAdd ? '+' : '-'}${payload.quantity}. ${payload.logContext.note}`,
+                recordName: payload.logContext.reference,
+                userName: currentSession.username,
+                severity: 'WARNING',
+            });
+        }
+        return response;
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('exportOrders:adjustStock', async (event, data) => {
+    try {
+        // Export/refund screens are administrative workflows. Do not expose a
+        // generic stock mutation API to operational roles: a forged reference
+        // would otherwise be indistinguishable from a real document.
+        return await handleDedicatedStockMutation(data, ['admin'], ['XUAT']);
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('refunds:adjustStock', async (event, data) => {
+    try {
+        return await handleDedicatedStockMutation(data, ['admin'], ['HOAN']);
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('stockBalance:adjustStock', async (event, data) => {
+    try {
+        return await handleDedicatedStockMutation(data, ['admin'], ['CAN_BANG']);
+    } catch (error) {
         return { success: false, error: error.message };
     }
 });
@@ -2157,6 +2364,13 @@ async function updateProductStockInTx(tx, sku, quantity, logContext, options = {
     if (!logContext || !logContext.type || !logContext.referenceType || !logContext.reference) {
         throw new Error(`[Inventory Error] Thiếu logContext cho SKU: ${sku}. Không thể cập nhật kho mà không có lý do.`);
     }
+    if (!String(logContext.note || '').trim()) {
+        throw new Error(`[Inventory Error] Thiếu ghi chú cho SKU: ${sku}.`);
+    }
+    const mutationActor = logContext.createdBy ?? currentSession?.id ?? currentSession?.username;
+    if (mutationActor === null || mutationActor === undefined || mutationActor === '') {
+        throw new Error(`[Inventory Error] Không xác định được người cập nhật SKU: ${sku}.`);
+    }
 
     let product = await tx.product.findUnique({ where: { sku } });
     let isVariant = false;
@@ -2219,13 +2433,19 @@ async function updateProductStockInTx(tx, sku, quantity, logContext, options = {
 
     // Tạo bản ghi Thẻ kho NẰM TRONG TRANSACTION
     let createdById = null;
-    if (logContext.createdBy) {
-        if (typeof logContext.createdBy === 'string') {
-            const user = await tx.user.findUnique({ where: { username: logContext.createdBy } });
-            createdById = user ? user.id : null;
-        } else if (typeof logContext.createdBy === 'number') {
-            createdById = logContext.createdBy;
+    if (mutationActor) {
+        if (typeof mutationActor === 'string') {
+            const user = await tx.user.findFirst({
+                where: { OR: [{ username: mutationActor }, { fullName: mutationActor }] },
+                select: { id: true },
+            });
+            createdById = user?.id ?? currentSession?.id ?? null;
+        } else if (typeof mutationActor === 'number') {
+            createdById = mutationActor;
         }
+    }
+    if (!createdById) {
+        throw new Error(`[Inventory Error] Không ánh xạ được người cập nhật SKU: ${sku}.`);
     }
 
     await tx.inventoryLog.create({
@@ -2253,6 +2473,38 @@ async function updateProductStockInTx(tx, sku, quantity, logContext, options = {
 // ========================================
 
 // Tạo đơn hàng POS (thanh toán)
+async function getSkuCostForOrder(db, sku) {
+    const product = await db.product.findUnique({ where: { sku }, select: { cost: true, variants: true } });
+    if (product) return Number(product.cost || 0);
+
+    const candidates = await db.product.findMany({
+        where: { variants: { contains: sku } },
+        select: { cost: true, variants: true }
+    });
+    for (const candidate of candidates) {
+        for (const variant of parseJsonArray(candidate.variants)) {
+            if (variant?.sku === sku) return Number(variant.cost ?? candidate.cost ?? 0) || 0;
+        }
+    }
+    return 0;
+}
+
+async function getSkuStockForOrder(db, sku) {
+    const product = await db.product.findUnique({ where: { sku }, select: { stock: true, variants: true } });
+    if (product) return Number(product.stock || 0);
+
+    const candidates = await db.product.findMany({
+        where: { variants: { contains: sku } },
+        select: { variants: true }
+    });
+    for (const candidate of candidates) {
+        for (const variant of parseJsonArray(candidate.variants)) {
+            if (variant?.sku === sku) return Number(variant.stock || 0);
+        }
+    }
+    return 0;
+}
+
 ipcMain.handle('posOrder:create', async (event, data) => {
     try {
         if (!prisma) throw new Error('Database chưa được khởi tạo.');
@@ -2281,7 +2533,11 @@ ipcMain.handle('posOrder:create', async (event, data) => {
         const orderNumber = `${prefix}${String(nextNum).padStart(3, '0')}`;
 
         // 2. Calculate totals
-        const items = data.items || [];
+        const rawItems = data.items || [];
+        const items = await Promise.all(rawItems.map(async (item) => ({
+            ...item,
+            cost: await getSkuCostForOrder(prisma, item.sku),
+        })));
         const subtotal = items.reduce((sum, item) => sum + (item.price * item.qty), 0);
         const totalCost = items.reduce((sum, item) => sum + (item.cost * item.qty), 0);
         const discount = data.discount || 0;
@@ -2361,6 +2617,10 @@ ipcMain.handle('posOrder:create', async (event, data) => {
             // 4. Deduct stock and log inside transaction (atomic)
             for (const item of items) {
                 try {
+                    const availableStock = await getSkuStockForOrder(tx, item.sku);
+                    if (availableStock < Number(item.qty || 0)) {
+                        throw new Error('Không đủ hàng trong kho');
+                    }
                     await updateProductStockInTx(tx, item.sku, -item.qty, {
                         type: 'pos_sale',
                         referenceType: 'POS',
@@ -2409,6 +2669,7 @@ ipcMain.handle('posOrder:create', async (event, data) => {
 // Lấy danh sách đơn hàng POS
 ipcMain.handle('posOrder:getAll', async (event, filters = {}) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Database chưa được khởi tạo.');
 
         const where = { source: 'pos' };
@@ -2635,6 +2896,7 @@ ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
 // Get all activity logs with filters
 ipcMain.handle('activityLog:getAll', async (event, filters = {}) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         const { module, action, startDate, endDate, limit = 100 } = filters;
@@ -2664,6 +2926,7 @@ ipcMain.handle('activityLog:getAll', async (event, filters = {}) => {
 // Create activity log
 ipcMain.handle('activityLog:create', async (event, data) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         const log = await prisma.activityLog.create({
@@ -2693,6 +2956,7 @@ ipcMain.handle('activityLog:create', async (event, data) => {
 // Get logs for specific record
 ipcMain.handle('activityLog:getByRecord', async (event, { module, recordId }) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         const logs = await prisma.activityLog.findMany({
@@ -2713,6 +2977,7 @@ ipcMain.handle('activityLog:getByRecord', async (event, { module, recordId }) =>
 // Get stats
 ipcMain.handle('activityLog:getStats', async () => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         const [total, byModule, byAction, recent] = await Promise.all([
@@ -2813,6 +3078,7 @@ function generateVatIdFromFile(fileName = '', fileSize = 0) {
 // Get all purchases
 ipcMain.handle('purchases:getAll', async (event, { since, limit } = {}) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const vatGroups = await getPurchaseVatGroups();
         const vatFileMeta = await getPurchaseVatFileMeta();
@@ -4111,6 +4377,7 @@ ipcMain.handle('suppliers:delete', async (event, id) => {
 // Export all database to Excel
 ipcMain.handle('database:exportAll', async () => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         console.log('📤 Starting database export...');
@@ -4776,6 +5043,7 @@ const AdmZip = require('adm-zip');
 // Backup toàn bộ folder desktop thành ZIP
 ipcMain.handle('system:backup', async () => {
     try {
+        requireRole('admin');
         console.log('🔄 Starting FULL system backup (including node_modules)...');
 
         // Sử dụng thư mục backup mặc định
@@ -4876,6 +5144,7 @@ ipcMain.handle('system:backup', async () => {
 // Lấy danh sách backups
 ipcMain.handle('system:listBackups', async () => {
     try {
+        requireRole('admin');
         const backupDir = path.join(__dirname, '..', '..', 'Backups');
 
         if (!fs.existsSync(backupDir)) {
@@ -4950,6 +5219,7 @@ ipcMain.handle('system:restore', async (event, backupPath) => {
 // Inspect/Preview backup - Xem thông tin chi tiết
 ipcMain.handle('system:inspectBackup', async (event, backupPath) => {
     try {
+        requireRole('admin');
         console.log('🔍 Inspecting backup:', backupPath);
 
         if (!fs.existsSync(backupPath)) {
@@ -5046,6 +5316,7 @@ ipcMain.handle('system:inspectBackup', async (event, backupPath) => {
 // Browse và chọn file backup để restore
 ipcMain.handle('system:browseAndRestore', async () => {
     try {
+        requireRole('admin');
         console.log('📂 Opening file browser for backup selection...');
 
         // Cho user chọn file ZIP
@@ -5083,6 +5354,7 @@ ipcMain.handle('system:browseAndRestore', async () => {
 // Xóa backup
 ipcMain.handle('system:deleteBackup', async (event, backupPath) => {
     try {
+        requireRole('admin');
         if (!fs.existsSync(backupPath)) {
             return { success: false, error: 'File backup không tồn tại!' };
         }
@@ -5104,6 +5376,8 @@ ipcMain.handle('system:deleteBackup', async (event, backupPath) => {
 const EVIDENCE_GRACE_MINUTES = 20;
 const MAX_EVIDENCE_IMAGES = 5;
 const TASK_PENALTY_KEY_PREFIX = 'dailyTaskEvidencePenalty:';
+const ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX = 'assignmentEvidencePenalty:';
+const ASSIGNMENT_EVIDENCE_ESCALATION_HOUR = 7;
 const DAILY_TASK_REST_DAY_HOLIDAYS = new Set(['01-01', '04-30', '05-01', '09-02']);
 
 function isDailyTaskPenaltyRestDay(date) {
@@ -5308,6 +5582,7 @@ async function createEvidencePenaltyIfDue(task, now = new Date()) {
     const attachments = parseTaskAttachments(task.attachments);
     const evidence = attachments.evidence || {};
     if (!evidence.required || task.status === 'completed') return null;
+    if (task.type === 'assignment') return createAssignmentEvidencePenaltyIfDue(task, now);
     if (!task.assignee || !isFixedAssignee(attachments)) return null;
 
     const dueAt = new Date(task.dueDate);
@@ -5344,11 +5619,117 @@ async function createEvidencePenaltyIfDue(task, now = new Date()) {
             source: 'daily_task_evidence_overdue',
         };
         try {
-            await prisma.appConfig.create({ data: { key, value: JSON.stringify(penalty) } });
+            // Several desktop clients may reconcile at the same minute. Let the
+            // database accept the first writer and silently ignore the rest.
+            const write = await prisma.appConfig.createMany({
+                data: { key, value: JSON.stringify(penalty) },
+                skipDuplicates: true,
+            });
+            if (write.count === 0) continue;
             created.push(penalty);
             void logActivity({ module: 'daily_tasks', action: 'PENALTY', recordId: task.id, recordName: task.title, description: `Tự động phạt ${assignee}: ${penalty.amount}đ vì chưa nộp bằng chứng sau ${EVIDENCE_GRACE_MINUTES} phút`, severity: 'WARNING' });
         } catch (error) {
-            if (error.code !== 'P2002') throw error;
+            throw error;
+        }
+    }
+    return created;
+}
+
+function getAssignmentEvidencePenaltyAmount(attachments, evidence) {
+    const assignmentAmount = Number(
+        attachments?.assignment?.evidencePenaltyAmount
+        ?? attachments?.assignment?.deadlinePenaltyAmount
+    );
+    if (Number.isFinite(assignmentAmount) && assignmentAmount >= 0) return assignmentAmount;
+
+    const evidenceAmount = Number(evidence?.penaltyAmount);
+    return Number.isFinite(evidenceAmount) && evidenceAmount >= 0 ? evidenceAmount : 30000;
+}
+
+function getAssignmentEvidencePenaltyCheckpoints(dueAt, now) {
+    const firstPenaltyAt = new Date(dueAt.getTime() + EVIDENCE_GRACE_MINUTES * 60 * 1000);
+    if (now < firstPenaltyAt) return [];
+
+    const checkpoints = [{ cycle: 1, multiplier: 1, penaltyAt: firstPenaltyAt }];
+    const nextPenaltyAt = new Date(dueAt);
+    nextPenaltyAt.setHours(0, 0, 0, 0);
+    nextPenaltyAt.setDate(nextPenaltyAt.getDate() + 1);
+    nextPenaltyAt.setHours(ASSIGNMENT_EVIDENCE_ESCALATION_HOUR, 0, 0, 0);
+
+    for (let cycle = 2; nextPenaltyAt <= now; cycle += 1) {
+        checkpoints.push({ cycle, multiplier: cycle, penaltyAt: new Date(nextPenaltyAt) });
+        nextPenaltyAt.setDate(nextPenaltyAt.getDate() + 1);
+    }
+    return checkpoints;
+}
+
+async function createAssignmentEvidencePenaltyIfDue(task, now = new Date()) {
+    const attachments = parseTaskAttachments(task.attachments);
+    const evidence = attachments.evidence || {};
+    if (task.type !== 'assignment' || !evidence.required || task.status === 'completed') return null;
+
+    // Once proof has been submitted, it stops the escalation. An admin can
+    // still review or reject it, but no additional missed-submission fines run.
+    if (evidence.submittedAt && evidence.status !== 'rejected') return [];
+
+    const dueAt = new Date(task.dueDate);
+    if (Number.isNaN(dueAt.getTime())) return null;
+    const recipients = getTaskRecipients(task, attachments);
+    if (recipients.length === 0) return [];
+
+    const checkpoints = getAssignmentEvidencePenaltyCheckpoints(dueAt, now);
+    if (checkpoints.length === 0) return [];
+
+    const dueKey = dueAt.toISOString();
+    const totalFine = getAssignmentEvidencePenaltyAmount(attachments, evidence);
+    const created = [];
+
+    for (const checkpoint of checkpoints) {
+        const totalForCycle = totalFine * checkpoint.multiplier;
+        const baseFine = Math.floor(totalForCycle / recipients.length);
+        const remainder = totalForCycle % recipients.length;
+
+        for (const [index, assignee] of recipients.entries()) {
+            // The old single-penalty policy used this key. Treat it as cycle 1
+            // so existing fines are retained without creating a duplicate.
+            const legacyKey = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:${assignee}`;
+            if (checkpoint.cycle === 1) {
+                const legacyPenalty = await prisma.appConfig.findUnique({ where: { key: legacyKey } });
+                if (legacyPenalty) continue;
+            }
+
+            const key = `${ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:${checkpoint.cycle}:${assignee}`;
+            const penalty = {
+                id: key,
+                taskId: task.id,
+                assignee,
+                amount: baseFine + (index < remainder ? 1 : 0),
+                dueAt: dueKey,
+                penaltyAt: checkpoint.penaltyAt.toISOString(),
+                cycle: checkpoint.cycle,
+                multiplier: checkpoint.multiplier,
+                type: 'Không nộp bằng chứng bàn giao',
+                detail: `${task.title} - lần ${checkpoint.cycle}: chưa nộp bằng chứng, phạt x${checkpoint.multiplier} (chia ${recipients.length} người)`,
+                source: 'assignment_evidence_overdue',
+            };
+            try {
+                const write = await prisma.appConfig.createMany({
+                    data: { key, value: JSON.stringify(penalty) },
+                    skipDuplicates: true,
+                });
+                if (write.count === 0) continue;
+                created.push(penalty);
+                void logActivity({
+                    module: 'daily_tasks',
+                    action: 'PENALTY',
+                    recordId: task.id,
+                    recordName: task.title,
+                    description: `Phạt bàn giao lần ${checkpoint.cycle} ${assignee}: ${penalty.amount}đ vì chưa nộp bằng chứng`,
+                    severity: 'WARNING',
+                });
+            } catch (error) {
+                throw error;
+            }
         }
     }
     return created;
@@ -5464,19 +5845,26 @@ ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
         // Reconcile once more immediately before completion. This closes the
         // gap where the desktop app was offline when the 20-minute grace ended.
         await createEvidencePenaltyIfDue(task);
+        const autoCompleteDailyTask = task.type !== 'assignment';
+        const submittedAt = new Date().toISOString();
         const evidence = {
             ...attachments.evidence,
             method: 'image',
-            status: 'submitted',
+            status: autoCompleteDailyTask ? 'approved' : 'submitted',
             submittedUrl: undefined,
             submittedImage: undefined,
             submittedImages,
-            submittedAt: new Date().toISOString(),
+            submittedAt,
             submittedBy: actor.fullName,
+            ...(autoCompleteDailyTask ? { reviewedAt: submittedAt, reviewedBy: 'Hệ thống' } : {}),
         };
         await prisma.dailyTask.update({
             where: { id: task.id },
-            data: { attachments: JSON.stringify({ ...attachments, evidence }), status: 'pending', completedAt: null }
+            data: {
+                attachments: JSON.stringify({ ...attachments, evidence }),
+                status: autoCompleteDailyTask ? 'completed' : 'pending',
+                completedAt: autoCompleteDailyTask ? new Date() : null,
+            }
         });
         await appendDailyTaskHistory({
             taskId: task.id,
@@ -5484,12 +5872,12 @@ ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
             category: task.category,
             assignee: actor.fullName,
             verifier: '',
-            action: 'evidence_submitted',
+            action: autoCompleteDailyTask ? 'evidence_approved' : 'evidence_submitted',
             timestamp: evidence.submittedAt,
             evidence: getEvidenceHistoryPayload(evidence),
             description: `Đã nộp bằng chứng cho công việc: "${task.title}"`,
         });
-        return { success: true, data: { evidence } };
+        return { success: true, data: { evidence, autoCompleted: autoCompleteDailyTask } };
     } catch (error) {
         if (uploadedPaths.length > 0) {
             await evidenceStorage?.storage.from(EVIDENCE_BUCKET).remove(uploadedPaths).catch(() => {});
@@ -5622,7 +6010,14 @@ ipcMain.handle('dailyTasks:listEvidencePenalties', async () => {
     try {
         requireRole();
         await reconcileEvidencePenalties();
-        const rows = await prisma.appConfig.findMany({ where: { key: { startsWith: TASK_PENALTY_KEY_PREFIX } } });
+        const rows = await prisma.appConfig.findMany({
+            where: {
+                OR: [
+                    { key: { startsWith: TASK_PENALTY_KEY_PREFIX } },
+                    { key: { startsWith: ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX } },
+                ],
+            },
+        });
         const penalties = rows.map(row => {
             try { return JSON.parse(row.value); } catch { return null; }
         }).filter(Boolean);
@@ -5630,7 +6025,8 @@ ipcMain.handle('dailyTasks:listEvidencePenalties', async () => {
             success: true,
             // Invalid legacy rows may predate the rest-day rule. Never expose a
             // system fine whose task deadline falls on Sunday or a fixed holiday.
-            data: penalties.filter(penalty => !penalty?.dueAt
+            data: penalties.filter(penalty => penalty?.source === 'assignment_evidence_overdue'
+                || !penalty?.dueAt
                 || !isDailyTaskPenaltyRestDay(new Date(penalty.dueAt))),
         };
     } catch (error) {
@@ -6179,6 +6575,63 @@ try { ipcMain.removeHandler('combos:create'); } catch (e) { }
 try { ipcMain.removeHandler('combos:update'); } catch (e) { }
 try { ipcMain.removeHandler('combos:delete'); } catch (e) { }
 
+// Keep the server-side policy aligned with the configured Combo capabilities.
+// Renderer guards are useful for UX only; these checks are authoritative.
+const COMBO_ACCESS = Object.freeze({
+    create: ['admin', 'manager'],
+    update: ['admin', 'manager'],
+    delete: ['admin', 'manager'],
+});
+
+function requireComboAccess(action) {
+    const roles = COMBO_ACCESS[action];
+    if (!roles) throw new Error('Unsupported combo action.');
+    requireRole(...roles);
+}
+
+function parseComboItems(value) {
+    const items = typeof value === 'string' ? JSON.parse(value) : value;
+    if (!Array.isArray(items) || items.length === 0) throw new Error('A combo must contain at least one component.');
+    if (items.length > 100) throw new Error('A combo cannot contain more than 100 components.');
+    return items;
+}
+
+async function validateComboItems(rawItems) {
+    const items = parseComboItems(rawItems);
+    const productIds = [...new Set(items.map(item => Number(item?.productId)).filter(Number.isInteger))];
+    const products = productIds.length
+        ? await prisma.product.findMany({ where: { id: { in: productIds } }, select: { id: true, sku: true, name: true, cost: true, variants: true, status: true } })
+        : [];
+    const productById = new Map(products.map(product => [product.id, product]));
+    const seenSkus = new Set();
+    let calculatedCost = 0;
+
+    const canonicalItems = items.map((item) => {
+        const product = productById.get(Number(item?.productId));
+        const quantity = Number(item?.quantity);
+        if (!product || product.status !== 'active') throw new Error('A combo component is missing or inactive.');
+        if (!Number.isInteger(quantity) || quantity <= 0 || quantity > 100000) throw new Error('Component quantity must be a positive integer.');
+
+        const variantIndex = item?.variantIndex;
+        let sku = product.sku;
+        let unitCost = Number(product.cost || 0);
+        if (variantIndex !== undefined && variantIndex !== null && variantIndex !== '') {
+            const index = Number(variantIndex);
+            let variants;
+            try { variants = JSON.parse(product.variants || '[]'); } catch { throw new Error(`Invalid variants for product ${product.id}.`); }
+            const variant = Number.isInteger(index) ? variants[index] : null;
+            if (!variant?.sku) throw new Error(`Invalid variant for product ${product.id}.`);
+            sku = String(variant.sku);
+            unitCost = Number(variant.cost ?? product.cost ?? 0);
+        }
+        if (!sku || seenSkus.has(sku)) throw new Error('A combo cannot contain a duplicate component SKU.');
+        seenSkus.add(sku);
+        calculatedCost += unitCost * quantity;
+        return { productId: product.id, variantIndex: variantIndex === undefined || variantIndex === null || variantIndex === '' ? null : Number(variantIndex), sku, quantity };
+    });
+    return { items: canonicalItems, cost: calculatedCost };
+}
+
 ipcMain.handle('combos:getAll', async () => {
     try {
         if (!prisma) return { success: true, data: [] };
@@ -6210,7 +6663,13 @@ ipcMain.handle('combos:getAll', async () => {
             });
             return { ...combo, stock: availableStock === Infinity ? 0 : availableStock, cost: calculatedCost };
         });
-        return { success: true, data: combosWithStock };
+        const data = isAdminSession()
+            ? combosWithStock
+            : combosWithStock.map(({ stock, cost, ...combo }) => ({
+                ...combo,
+                available: Number(stock || 0) > 0,
+            }));
+        return { success: true, data };
     } catch (error) {
         console.error('Error getting combos:', error);
         return { success: false, error: error.message };
@@ -6219,14 +6678,21 @@ ipcMain.handle('combos:getAll', async () => {
 
 ipcMain.handle('combos:create', async (event, data) => {
     try {
+        requireComboAccess('create');
         if (!prisma) throw new Error('Database not initialized');
-        const comboData = { name: data.name, items: JSON.stringify(data.items), price: data.price, cost: data.cost, status: 'active' };
-        const combo = await prisma.comboProduct.upsert({
-            where: { sku: data.sku },
-            create: { sku: data.sku, ...comboData },
-            update: comboData,
-        });
+        const sku = String(data?.sku || '').trim();
+        const name = String(data?.name || '').trim();
+        const price = Number(data?.price);
+        if (!sku || !name || !Number.isFinite(price) || price < 0) throw new Error('Invalid combo details.');
+        const validated = await validateComboItems(data?.items);
+        const comboData = { name, items: JSON.stringify(validated.items), price, cost: validated.cost, status: 'active' };
+        const combo = await prisma.comboProduct.create({ data: { sku, ...comboData } });
         void logActivity({ module: 'products', action: 'CREATE', description: `Tạo combo "${combo.name}" (SKU: ${combo.sku})`, recordName: combo.name });
+        void logActivity({
+            module: 'combos', action: 'CREATE', recordId: combo.id, recordName: combo.name,
+            description: `Created combo ${combo.sku}. Reason: ${String(data?.reason || 'not provided').trim() || 'not provided'}`,
+            changes: { before: null, after: combo, actor: currentSession.username }, severity: 'WARNING',
+        });
         return { success: true, data: combo };
     } catch (error) {
         console.error('Error creating combo:', error);
@@ -6236,12 +6702,29 @@ ipcMain.handle('combos:create', async (event, data) => {
 
 ipcMain.handle('combos:update', async (event, id, data) => {
     try {
+        requireComboAccess('update');
         if (!prisma) throw new Error('Database not initialized');
-        const updateData = { sku: data.sku, name: data.name, price: data.price, cost: data.cost };
-        if (data.items !== undefined) updateData.items = JSON.stringify(data.items);
+        const comboId = Number(id);
+        if (!Number.isInteger(comboId)) throw new Error('Invalid combo id.');
+        const before = await prisma.comboProduct.findUnique({ where: { id: comboId } });
+        if (!before) throw new Error('Combo not found.');
+        const sku = String(data?.sku ?? before.sku).trim();
+        const name = String(data?.name ?? before.name).trim();
+        const price = data?.price === undefined ? before.price : Number(data.price);
+        if (!sku || !name || !Number.isFinite(price) || price < 0) throw new Error('Invalid combo details.');
+        const validated = data?.items === undefined ? null : await validateComboItems(data.items);
+        const updateData = {
+            sku, name, price,
+            ...(validated ? { items: JSON.stringify(validated.items), cost: validated.cost } : {}),
+        };
         const combo = await prisma.comboProduct.update({
-            where: { id: parseInt(id) },
+            where: { id: comboId },
             data: updateData,
+        });
+        void logActivity({
+            module: 'combos', action: 'UPDATE', recordId: combo.id, recordName: combo.name,
+            description: `Updated combo ${combo.sku}. Reason: ${String(data?.reason || 'not provided').trim() || 'not provided'}`,
+            changes: { before, after: combo, actor: currentSession.username }, severity: 'WARNING',
         });
         void logActivity({ module: 'products', action: 'UPDATE', description: `Cập nhật combo "${combo.name}"`, recordName: combo.name });
         return { success: true, data: combo };
@@ -6253,8 +6736,18 @@ ipcMain.handle('combos:update', async (event, id, data) => {
 
 ipcMain.handle('combos:delete', async (event, id) => {
     try {
+        requireComboAccess('delete');
         if (!prisma) throw new Error('Database not initialized');
-        await prisma.comboProduct.delete({ where: { id: parseInt(id) } });
+        const comboId = Number(id);
+        if (!Number.isInteger(comboId)) throw new Error('Invalid combo id.');
+        const before = await prisma.comboProduct.findUnique({ where: { id: comboId } });
+        if (!before) throw new Error('Combo not found.');
+        await prisma.comboProduct.delete({ where: { id: comboId } });
+        void logActivity({
+            module: 'combos', action: 'DELETE', recordId: comboId, recordName: before.name,
+            description: `Deleted combo ${before.sku}. Reason: not provided`,
+            changes: { before, after: null, actor: currentSession.username }, severity: 'WARNING',
+        });
         void logActivity({ module: 'products', action: 'DELETE', description: `Xóa combo #${id}` });
         return { success: true };
     } catch (error) {
@@ -6554,6 +7047,7 @@ require('./update-handlers')(prisma, { requireRole });
 
 ipcMain.handle('ecommerceExports:getAll', async (event, { since, sinceField, until, limit, search, statusIn, statusNotIn, skip } = {}) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const startedAt = Date.now();
         const field = sinceField || 'ecommerceExportDate';
@@ -7477,6 +7971,7 @@ ipcMain.handle('marketplaceOrders:delete', async (event, { id, userName }) => {
 
 ipcMain.handle('exportOrders:getAll', async (event, { since, search, limit } = {}) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const trimmedSearch = search ? String(search).trim() : '';
         const syntheticIdMatch = trimmedSearch.match(/^#?(?:XH|EX)-(\d+)$/i);
@@ -7507,6 +8002,7 @@ ipcMain.handle('exportOrders:getAll', async (event, { since, search, limit } = {
 
 ipcMain.handle('exportOrders:create', async (event, data) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const record = await prisma.exportOrder.create({
             data: {
@@ -7530,6 +8026,7 @@ ipcMain.handle('exportOrders:create', async (event, data) => {
 
 ipcMain.handle('exportOrders:update', async (event, id, data) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const record = await prisma.exportOrder.update({
             where: { id },
@@ -7553,6 +8050,7 @@ ipcMain.handle('exportOrders:update', async (event, id, data) => {
 
 ipcMain.handle('exportOrders:delete', async (event, id) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         await prisma.exportOrder.delete({ where: { id } });
         console.log(`✅ Deleted export order #${id}`);
@@ -7570,6 +8068,7 @@ ipcMain.handle('exportOrders:delete', async (event, id) => {
 
 ipcMain.handle('returns:getAll', async (event, { since } = {}) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const returns = await prisma.return.findMany({
             where: since ? { createdAt: { gte: new Date(since) } } : undefined,
@@ -7715,6 +8214,7 @@ ipcMain.handle('returns:bulkCreate', async (event, records) => {
 
 ipcMain.handle('refunds:getAll', async (event, { since, limit } = {}) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const refunds = await prisma.refund.findMany({
             where: since ? { createdAt: { gte: new Date(since) } } : undefined,
@@ -7734,6 +8234,7 @@ ipcMain.handle('refunds:getAll', async (event, { since, limit } = {}) => {
 
 ipcMain.handle('refunds:create', async (event, data) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         // 🔧 Safe date parsing
         let refundDate = new Date(data.refundDate);
@@ -7766,6 +8267,7 @@ ipcMain.handle('refunds:create', async (event, data) => {
 
 ipcMain.handle('refunds:update', async (event, id, data) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         // 🔧 FIX: Chỉ update các field được gửi lên, KHÔNG overwrite field không có
         const updateData = {};
@@ -7795,6 +8297,7 @@ ipcMain.handle('refunds:update', async (event, id, data) => {
 
 ipcMain.handle('refunds:delete', async (event, id) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         await prisma.refund.delete({ where: { id } });
         console.log(`✅ Deleted refund #${id}`);
@@ -7824,6 +8327,7 @@ ipcMain.handle('refunds:bulkDelete', async (event, ids) => {
 
 ipcMain.handle('refunds:bulkCreate', async (event, records) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         console.log(`📦 refunds:bulkCreate called with ${records.length} records`);
         const created = [];
@@ -7878,6 +8382,7 @@ ipcMain.handle('refunds:bulkCreate', async (event, records) => {
 
 ipcMain.handle('stockBalance:getAll', async (event, { limit } = {}) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const records = await prisma.stockBalance.findMany({
             orderBy: { createdAt: 'desc' },
@@ -7897,17 +8402,20 @@ ipcMain.handle('stockBalance:getAll', async (event, { limit } = {}) => {
 
 ipcMain.handle('stockBalance:create', async (event, data) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const record = await prisma.stockBalance.create({
             data: {
                 date: new Date(data.date),
-                adjustedBy: currentSession?.username || data.adjustedBy || 'System',
+                // This endpoint is admin-only. The renderer must never choose
+                // the actor recorded in an inventory audit trail.
+                adjustedBy: currentSession.username,
                 items: typeof data.items === 'string' ? data.items : JSON.stringify(data.items),
                 notes: data.notes || null
             }
         });
         console.log(`✅ Created stock balance record #${record.id}`);
-        const effectiveUser = currentSession?.username || data.adjustedBy || 'System';
+        const effectiveUser = currentSession.username;
         void logActivity({ module: 'products', action: 'UPDATE', description: `Cân bằng kho - ${effectiveUser}`, recordName: effectiveUser, userName: effectiveUser });
         return { success: true, data: record };
     } catch (error) {
@@ -8165,6 +8673,7 @@ ipcMain.handle('inventoryLogs:getRefDetail', async (event, { referenceType, refe
 // Tạo inventory log thủ công (điều chỉnh / cân bằng kho)
 ipcMain.handle('inventoryLogs:create', async (event, data) => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const log = await createInventoryLog(data);
         return { success: true, data: log };
@@ -8179,8 +8688,46 @@ ipcMain.handle('inventoryLogs:create', async (event, data) => {
 // APP CONFIG HANDLERS (CẤU HÌNH ỨNG DỤNG)
 // ========================================
 
+// This is a security boundary. New configuration keys are private until they
+// are deliberately added here; never make an unknown key renderer-readable.
+const CONFIG_ACCESS = Object.freeze({
+    stockCheckSessionsV2: { read: ['admin'], write: ['admin'], sensitive: true },
+    variantMinStocks: { read: ['admin'], write: ['admin'], sensitive: true },
+    pausedVariants: { read: ['admin'], write: ['admin'], sensitive: true },
+    stockConversionRates: { read: ['admin', 'manager'], write: ['admin'], sensitive: true },
+    attendanceData: { read: ['admin'], write: ['admin'], sensitive: true },
+    dailyTasksHistory: { read: ['admin'], write: ['admin'], sensitive: true },
+    dailyTasksSnapshots: { read: ['admin'], write: ['admin'], sensitive: true },
+    telegramApiToken: { read: ['admin'], write: ['admin'], sensitive: true },
+    telegramChatId: { read: ['admin'], write: ['admin'], sensitive: true },
+    pickupWatchFolder: { read: ['admin'], write: ['admin'], sensitive: true },
+    statusList: { read: ['admin', 'manager'], write: ['admin', 'manager'] },
+    activePacker: { read: ['admin', 'manager'], write: ['admin', 'manager'] },
+    telegramOrderCounter: { read: ['admin', 'manager'], write: ['admin', 'manager'] },
+    telegramOrderCounterDate: { read: ['admin', 'manager'], write: ['admin', 'manager'] },
+    dailyTasksCategories: { read: ['admin', 'manager'], write: ['admin', 'manager'] },
+    calculator_inputs_v2: { read: ['admin', 'manager'], write: ['admin', 'manager'] },
+    shopee_fees_v3: { read: ['admin', 'manager'], write: ['admin', 'manager'] },
+    tiktok_fees_v3: { read: ['admin', 'manager'], write: ['admin', 'manager'] },
+    pnlConfig: { read: ['admin', 'manager'], write: ['admin', 'manager'] },
+});
+
+function requireConfigAccess(key, operation) {
+    if (typeof key !== 'string' || !key.trim()) throw new Error('Invalid configuration key.');
+    requireRole();
+    const policy = CONFIG_ACCESS[key];
+    if (!policy || !policy[operation]?.includes(currentSession.role)) {
+        throw new Error(`Not authorized to ${operation} configuration key "${key}".`);
+    }
+    return policy;
+}
+
 ipcMain.handle('appConfig:get', async (event, key) => {
     try {
+        requireConfigAccess(key, 'read');
+        if (key === 'stockCheckSessionsV2' && currentSession?.role !== 'admin') {
+            throw new Error('Dữ liệu phiên kiểm chỉ được truy cập qua API kiểm hàng.');
+        }
         if (!prisma) throw new Error('Prisma not available');
         const config = await prisma.appConfig.findUnique({
             where: { key }
@@ -8197,6 +8744,10 @@ ipcMain.handle('appConfig:get', async (event, key) => {
 
 ipcMain.handle('appConfig:set', async (event, key, value) => {
     try {
+        const policy = requireConfigAccess(key, 'write');
+        if (key === 'stockCheckSessionsV2' && currentSession?.role !== 'admin') {
+            throw new Error('Dữ liệu phiên kiểm chỉ được cập nhật qua API kiểm hàng.');
+        }
         if (!prisma) throw new Error('Prisma not available');
         const adminOnlyKeys = new Set([
             'variantMinStocks',
@@ -8211,6 +8762,15 @@ ipcMain.handle('appConfig:set', async (event, key, value) => {
             update: { value: JSON.stringify(value) },
             create: { key, value: JSON.stringify(value) }
         });
+        if (policy.sensitive) {
+            await logActivity({
+                module: 'app_config',
+                action: 'UPDATE_SENSITIVE_CONFIG',
+                description: `Updated sensitive configuration: ${key}`,
+                recordName: key,
+                severity: 'WARNING',
+            });
+        }
         console.log(`✅ Set config "${key}"`);
         return { success: true, data: config };
     } catch (error) {
@@ -8219,9 +8779,503 @@ ipcMain.handle('appConfig:set', async (event, key, value) => {
     }
 });
 
+function sanitizeStockCheckSessions(sessions, isAdmin) {
+    if (isAdmin) return sessions;
+    return sessions.map(session => ({
+        ...session,
+        items: (session.items || []).map(({ systemStock, difference, ...item }) => item),
+    }));
+}
+
+async function readStockCheckSessions() {
+    const record = await prisma.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
+    try { return record ? JSON.parse(record.value || '[]') : []; } catch { return []; }
+}
+
+function getStockCheckTodayKey() {
+    return getLocalDateKey(new Date());
+}
+
+function normalizeStockCheckUsername(value) {
+    return String(value || '').trim().toLocaleLowerCase('vi-VN');
+}
+
+function isStockCheckAssignee(session) {
+    return normalizeStockCheckUsername(session?.assignedTo) === normalizeStockCheckUsername(currentSession?.username);
+}
+
+function sanitizeStockCheckItem(item, isAdmin) {
+    if (isAdmin) return item;
+    const { systemStock, difference, ...safeItem } = item;
+    return safeItem;
+}
+
+function sanitizeStockCheckSession(session, isAdmin) {
+    return { ...session, items: (session.items || []).map(item => sanitizeStockCheckItem(item, isAdmin)) };
+}
+
+function getStockCheckSessionOrThrow(sessions, sessionId, allowCompleted = false) {
+    const session = sessions.find(entry => String(entry.id) === String(sessionId));
+    if (!session) throw new Error('Phiên kiểm hàng không tồn tại.');
+    if (session.date !== getStockCheckTodayKey()) throw new Error('Chỉ được thao tác phiên kiểm hàng hôm nay.');
+    if (!allowCompleted && session.status === 'completed') throw new Error('Phiên kiểm hàng đã nộp, không thể sửa số đếm.');
+    if (currentSession.role !== 'admin' && !isStockCheckAssignee(session)) throw new Error('Bạn không được phân công cho phiên kiểm hàng này.');
+    return session;
+}
+
+function getStockCheckItemOrThrow(session, sku) {
+    const item = (session.items || []).find(entry => String(entry.sku) === String(sku));
+    if (!item) throw new Error('SKU không thuộc phiên kiểm hàng này.');
+    return item;
+}
+
+async function writeStockCheckSessions(sessions, tx = prisma) {
+    await tx.appConfig.upsert({
+        where: { key: 'stockCheckSessionsV2' },
+        update: { value: JSON.stringify(sessions) },
+        create: { key: 'stockCheckSessionsV2', value: JSON.stringify(sessions) },
+    });
+}
+
+// All check sessions are kept in one AppConfig record. Use a PostgreSQL
+// transaction-scoped advisory lock so different desktop clients cannot overwrite
+// each other's session changes with a stale JSON snapshot.
+async function lockStockCheckSessions(tx) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('stockCheckSessionsV2'))`;
+}
+
+function parseStockCheckSessionsFromConfig(record) {
+    try { return record ? JSON.parse(record.value || '[]') : []; } catch { return []; }
+}
+
+function normalizeStockCheckSessionAfterBalance(session) {
+    if (!session?.items?.length) return { ...session, status: 'in_progress', completedAt: undefined };
+    return session.status === 'completed'
+        ? { ...session, completedAt: session.completedAt || new Date().toISOString() }
+        : { ...session, status: 'in_progress', completedAt: undefined };
+}
+
+function buildStockCheckBalanceHistoryItem(item, reference) {
+    const systemStock = Number(item.systemStock || 0);
+    const actualStock = Number(item.actualStock ?? systemStock);
+    return {
+        ...item,
+        systemStock,
+        actualStock,
+        difference: actualStock - systemStock,
+        reference,
+        balancedAt: new Date().toISOString(),
+    };
+}
+
+ipcMain.handle('stockCheck:balanceItems', async (event, payload = {}) => {
+    try {
+        // Atomic batch balance: reads system/count values from the backend session,
+        // so the renderer cannot forge stock deltas.
+        requireRole('admin', 'manager', 'staff');
+        if (!prisma) throw new Error('Prisma not available');
+
+        const username = currentSession.username;
+        const sessionId = String(payload.sessionId || '').trim();
+        const reference = String(payload.reference || '').trim();
+        const rawItems = Array.isArray(payload.items) ? payload.items : [];
+
+        if (!sessionId) throw new Error('Thiếu sessionId cân bằng kho.');
+        if (!reference) throw new Error('Thiếu reference cân bằng kho.');
+        if (!rawItems.length) throw new Error('Không có SKU nào để cân bằng.');
+
+        const response = await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
+            await lockStockCheckSessions(tx);
+            const existingBalance = await tx.stockBalance.findFirst({
+                where: { items: { contains: reference } },
+                orderBy: { createdAt: 'desc' },
+            });
+            if (existingBalance) {
+                const config = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
+                const sessions = parseStockCheckSessionsFromConfig(config);
+                console.log(`[StockCheckAtomic] duplicate reference=${reference} username=${username} sessionId=${sessionId} -> skip`);
+                return { duplicate: true, adjustedCount: 0, matchedCount: 0, stockBalance: existingBalance, sessions };
+            }
+
+            const config = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
+            const sessions = parseStockCheckSessionsFromConfig(config);
+            const sessionIndex = sessions.findIndex(s => String(s?.id) === sessionId);
+            if (sessionIndex < 0) throw new Error(`Không tìm thấy phiên kiểm ${sessionId}.`);
+
+            const session = sessions[sessionIndex];
+            if (session.date !== getStockCheckTodayKey()) {
+                throw new Error('Chỉ được cân bằng phiên kiểm hàng hôm nay.');
+            }
+            if (currentSession?.role !== 'admin' && !isStockCheckAssignee(session)) {
+                throw new Error('Bạn không được phân công cho phiên kiểm hàng này.');
+            }
+
+            const storedItemsBySku = new Map((session.items || []).map(item => [String(item.sku), item]));
+            const completedItems = [];
+            const adjustedItems = [];
+            const matchedItems = [];
+            const nowIso = new Date().toISOString();
+
+            for (const raw of rawItems) {
+                const sku = String(raw?.sku || '').trim();
+                if (!sku) throw new Error('Thiếu SKU trong request cân bằng.');
+                const stored = storedItemsBySku.get(sku);
+                if (!stored) throw new Error(`SKU ${sku} không thuộc phiên kiểm ${sessionId}.`);
+                if (stored.balanced) continue;
+
+                const actualStock = stored.actualStock;
+                if (actualStock === null || actualStock === undefined) throw new Error(`SKU ${sku} chưa nhập tồn thực tế.`);
+                const systemStock = Number(stored.systemStock || 0);
+                const actual = Number(actualStock);
+                const difference = actual - systemStock;
+                const note = String(stored.note ?? '').trim();
+                if (difference !== 0 && !note) throw new Error(`SKU ${sku} chênh lệch nhưng thiếu lý do.`);
+
+                const historyItem = buildStockCheckBalanceHistoryItem({
+                    ...stored,
+                    sku,
+                    systemStock,
+                    actualStock: actual,
+                    difference,
+                    note,
+                }, reference);
+
+                if (difference !== 0) {
+                    const stockResult = await updateProductStockInTx(tx, sku, difference, {
+                        type: 'adjustment',
+                        referenceType: 'CAN_BANG',
+                        reference,
+                        note: `${payload.logPrefix || 'Kiểm hàng'}. HT ${systemStock} -> TT ${actual}. ${note ? `Lý do: ${note}` : ''}`,
+                        createdBy: username,
+                    });
+                    historyItem.oldStock = stockResult.oldStock;
+                    historyItem.newStock = stockResult.newStock;
+                    adjustedItems.push(historyItem);
+                } else {
+                    matchedItems.push(historyItem);
+                }
+                completedItems.push(historyItem);
+            }
+
+            if (!completedItems.length) throw new Error('Không có dòng mới nào để cân bằng.');
+
+            const stockBalance = await tx.stockBalance.create({
+                data: {
+                    date: payload.date ? new Date(payload.date) : new Date(),
+                    adjustedBy: username,
+                    items: JSON.stringify(completedItems),
+                    notes: `${payload.historyNotes || 'Kiểm hàng'} | Ref: ${reference}`,
+                }
+            });
+
+            const completedBySku = new Map(completedItems.map(item => [String(item.sku), item]));
+            sessions[sessionIndex] = normalizeStockCheckSessionAfterBalance({
+                ...session,
+                items: (session.items || []).map(item => {
+                    const balancedItem = completedBySku.get(String(item.sku));
+                    if (!balancedItem) return item;
+                    return {
+                        ...item,
+                        actualStock: balancedItem.actualStock,
+                        systemStock: balancedItem.actualStock,
+                        difference: 0,
+                        note: balancedItem.note || '',
+                        balanced: true,
+                        balancedAt: nowIso,
+                    };
+                }),
+            });
+
+            await writeStockCheckSessions(sessions, tx);
+            await tx.activityLog.create({
+                data: {
+                    module: 'products',
+                    action: 'UPDATE',
+                    description: `Cân bằng kho atomic ${completedItems.length} SKU - ${reference}`,
+                    recordId: stockBalance.id,
+                    recordName: reference,
+                    changes: JSON.stringify({
+                        reference,
+                        sessionId,
+                        username,
+                        adjusted: adjustedItems.map(i => ({ sku: i.sku, before: i.systemStock, after: i.actualStock, difference: i.difference })),
+                        matched: matchedItems.map(i => ({ sku: i.sku, stock: i.actualStock })),
+                    }),
+                    userName: username,
+                    severity: 'INFO',
+                }
+            });
+
+            console.log(`[StockCheckAtomic] OK reference=${reference} username=${username} sessionId=${sessionId} adjusted=${adjustedItems.length} matched=${matchedItems.length}`);
+            return { duplicate: false, adjustedCount: adjustedItems.length, matchedCount: matchedItems.length, stockBalance, sessions };
+        }, { timeout: 30000, maxWait: 10000 }));
+
+        emitStockChanged({ referenceType: 'CAN_BANG', reference, sessionId, username, count: rawItems.length });
+        return {
+            success: true,
+            ...response,
+            data: {
+                stockBalance: response.stockBalance,
+                sessions: (response.sessions || []).map(session => sanitizeStockCheckSession(session, currentSession?.role === 'admin')),
+            }
+        };
+    } catch (error) {
+        console.error('❌ StockCheck atomic balance error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('stockCheck:getSessions', async () => {
+    try {
+        requireRole('admin', 'manager');
+        const sessions = await readStockCheckSessions();
+        const isAdmin = currentSession.role === 'admin';
+        const visibleSessions = isAdmin
+            ? sessions
+            : sessions.filter(session => session.date === getStockCheckTodayKey() && isStockCheckAssignee(session));
+        return { success: true, data: visibleSessions.map(session => sanitizeStockCheckSession(session, isAdmin)) };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('stockCheck:adminSaveSessions', async (event, incomingSessions) => {
+    try {
+        // Bulk session replacement is an admin operation. Managers update a
+        // single assigned count through stockCheck:updateCount/submitSession.
+        requireRole('admin');
+        const isAdmin = currentSession.role === 'admin';
+        const submittedSessions = Array.isArray(incomingSessions) ? incomingSessions : [];
+        const merged = await getPrismaDirectTx().$transaction(async (tx) => {
+            await lockStockCheckSessions(tx);
+            await writeStockCheckSessions(submittedSessions, tx);
+            return submittedSessions;
+        }, { timeout: 30000, maxWait: 10000 });
+        return { success: true, data: merged };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
 // ========================================
 // USERS HANDLERS (NGƯỜI DÙNG / PHÂN QUYỀN)
 // ========================================
+
+ipcMain.handle('stockCheck:updateCount', async (event, payload = {}) => {
+    try {
+        requireRole('admin', 'manager');
+        const actualStock = Number(payload.actualStock);
+        if (!Number.isInteger(actualStock) || actualStock < 0) throw new Error('Số đếm thực tế phải là số nguyên không âm.');
+        const item = await getPrismaDirectTx().$transaction(async (tx) => {
+            await lockStockCheckSessions(tx);
+            const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
+            const sessions = parseStockCheckSessionsFromConfig(record);
+            const session = getStockCheckSessionOrThrow(sessions, payload.sessionId);
+            const storedItem = getStockCheckItemOrThrow(session, payload.sku);
+            if (storedItem.countLocked) throw new Error('Số đếm đang được khóa. Hãy nhập lý do hoặc dùng lượt nhập lại.');
+            storedItem.actualStock = actualStock;
+            storedItem.difference = actualStock - Number(storedItem.systemStock || 0);
+            storedItem.balanced = false;
+            storedItem.requiresNote = false;
+            await writeStockCheckSessions(sessions, tx);
+            return storedItem;
+        }, { timeout: 30000, maxWait: 10000 });
+        return { success: true, status: 'entered', item: sanitizeStockCheckItem(item, currentSession.role === 'admin') };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('stockCheck:retryCount', async (event, payload = {}) => {
+    try {
+        requireRole('admin', 'manager');
+        const item = await getPrismaDirectTx().$transaction(async (tx) => {
+            await lockStockCheckSessions(tx);
+            const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
+            const sessions = parseStockCheckSessionsFromConfig(record);
+            const session = getStockCheckSessionOrThrow(sessions, payload.sessionId, currentSession.role === 'admin');
+            const storedItem = getStockCheckItemOrThrow(session, payload.sku);
+            const retryCount = Number(storedItem.retryCount || 0);
+            if (currentSession.role !== 'admin' && retryCount >= 2) {
+                const error = new Error('Đã dùng hết 2 lượt nhập lại. Hãy nhập lý do để cân bằng.');
+                error.code = 'retry_limit';
+                throw error;
+            }
+            storedItem.actualStock = null;
+            storedItem.note = '';
+            storedItem.difference = 0;
+            storedItem.balanced = false;
+            storedItem.requiresNote = false;
+            storedItem.countLocked = false;
+            storedItem.retryCount = retryCount + 1;
+            await writeStockCheckSessions(sessions, tx);
+            return storedItem;
+        }, { timeout: 30000, maxWait: 10000 });
+        if (currentSession.role === 'admin') {
+            void logActivity({ module: 'stock_check', action: 'REOPEN_COUNT', description: `Mở lại lượt đếm SKU ${item.sku} trong phiên ${payload.sessionId}`, recordName: item.sku });
+        }
+        return { success: true, status: 'retry_opened', item: sanitizeStockCheckItem(item, currentSession.role === 'admin') };
+    } catch (error) {
+        return { success: false, code: error.code, error: error.message };
+    }
+});
+
+ipcMain.handle('stockCheck:updateNote', async (event, payload = {}) => {
+    try {
+        requireRole('admin', 'manager');
+        const note = String(payload.note || '').trim();
+        if (!note) throw new Error('Ghi chú không được để trống.');
+        const item = await getPrismaDirectTx().$transaction(async (tx) => {
+            await lockStockCheckSessions(tx);
+            const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
+            const sessions = parseStockCheckSessionsFromConfig(record);
+            const session = getStockCheckSessionOrThrow(sessions, payload.sessionId, currentSession.role === 'admin');
+            const storedItem = getStockCheckItemOrThrow(session, payload.sku);
+            if (storedItem.balanced) return storedItem;
+            if (!storedItem.requiresNote || !storedItem.countLocked) {
+                throw new Error('SKU này chưa yêu cầu ghi chú chênh lệch.');
+            }
+            storedItem.note = note;
+            await writeStockCheckSessions(sessions, tx);
+            return storedItem;
+        }, { timeout: 30000, maxWait: 10000 });
+        return { success: true, item: sanitizeStockCheckItem(item, currentSession.role === 'admin') };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('stockCheck:balanceItem', async (event, payload = {}) => {
+    try {
+        requireRole('admin', 'manager');
+        const note = String(payload.note || '').trim();
+        const reference = String(payload.reference || `STOCK-CHECK-${payload.sessionId}-${payload.sku}`).trim();
+        const result = await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
+            await lockStockCheckSessions(tx);
+            const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
+            const sessions = record ? JSON.parse(record.value || '[]') : [];
+            const session = getStockCheckSessionOrThrow(sessions, payload.sessionId, currentSession.role === 'admin');
+            const item = getStockCheckItemOrThrow(session, payload.sku);
+            const existingBalance = await tx.stockBalance.findFirst({
+                where: { items: { contains: reference } },
+                orderBy: { createdAt: 'desc' },
+            });
+            if (existingBalance) return { status: 'duplicate', stockBalance: existingBalance };
+            if (item.actualStock === null || item.actualStock === undefined) return { status: 'missing_count' };
+            const difference = Number(item.actualStock) - Number(item.systemStock || 0);
+            item.difference = difference;
+            const historyItem = buildStockCheckBalanceHistoryItem({ ...item, difference, note, sessionId: session.id }, reference);
+            if (difference === 0) {
+                const stockBalance = await tx.stockBalance.create({
+                    data: {
+                        date: new Date(),
+                        adjustedBy: currentSession.username,
+                        items: JSON.stringify([historyItem]),
+                        notes: `Kiểm hàng khớp | Ref: ${reference}`,
+                    },
+                });
+                item.balanced = true;
+                item.countLocked = false;
+                item.requiresNote = false;
+                item.systemStock = Number(item.actualStock);
+                item.difference = 0;
+                await writeStockCheckSessions(sessions, tx);
+                await tx.activityLog.create({
+                    data: {
+                        module: 'stock_check',
+                        action: 'BALANCE',
+                        description: `Cân bằng SKU ${payload.sku} trong phiên ${payload.sessionId}: khớp tồn - ${reference}`,
+                        recordId: stockBalance.id,
+                        recordName: payload.sku,
+                        changes: JSON.stringify({ reference, sessionId: payload.sessionId, sku: payload.sku, before: historyItem.systemStock, after: historyItem.actualStock, difference: 0 }),
+                        userName: currentSession.username,
+                        severity: 'INFO',
+                    }
+                });
+                return { status: 'match', item };
+            }
+            if (!note) {
+                item.countLocked = true;
+                item.requiresNote = true;
+                await writeStockCheckSessions(sessions, tx);
+                return { status: 'mismatch_requires_note', item };
+            }
+            const logContext = {
+                type: 'adjustment',
+                referenceType: 'CAN_BANG',
+                reference,
+                note: `Kiểm hàng phiên ${session.id}; SKU ${item.sku}; người thực hiện ${currentSession.username}; lý do: ${note}`,
+                createdBy: currentSession.id,
+            };
+            const adjustment = await updateProductStockInTx(tx, item.sku, difference, logContext);
+            historyItem.oldStock = adjustment.oldStock;
+            historyItem.newStock = adjustment.newStock;
+            const stockBalance = await tx.stockBalance.create({
+                data: {
+                    date: new Date(),
+                    adjustedBy: currentSession.username,
+                    items: JSON.stringify([historyItem]),
+                    notes: `${note} | Ref: ${reference}`,
+                },
+            });
+            item.note = note;
+            item.balanced = true;
+            item.countLocked = false;
+            item.requiresNote = false;
+            item.systemStock = Number(item.actualStock);
+            item.difference = 0;
+            await writeStockCheckSessions(sessions, tx);
+            await tx.activityLog.create({
+                data: {
+                    module: 'stock_check',
+                    action: 'BALANCE',
+                    description: `Cân bằng SKU ${payload.sku} trong phiên ${payload.sessionId}: ${currentSession.username} - ${reference}`,
+                    recordId: stockBalance.id,
+                    recordName: payload.sku,
+                    changes: JSON.stringify({ reference, sessionId: payload.sessionId, sku: payload.sku, before: historyItem.systemStock, after: historyItem.actualStock, difference }),
+                    userName: currentSession.username,
+                    severity: 'WARNING',
+                }
+            });
+            return { status: 'balanced_mismatch', item };
+        }, { timeout: 30000, maxWait: 10000 }));
+        if (result.status === 'balanced_mismatch') {
+            emitStockChanged({ sku: payload.sku, referenceType: 'CAN_BANG', reference });
+        }
+        return { success: true, status: result.status, item: result.item ? sanitizeStockCheckItem(result.item, currentSession.role === 'admin') : undefined };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('stockCheck:submitSession', async (event, payload = {}) => {
+    try {
+        requireRole('admin', 'manager');
+        const session = await getPrismaDirectTx().$transaction(async (tx) => {
+            await lockStockCheckSessions(tx);
+            const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
+            const sessions = parseStockCheckSessionsFromConfig(record);
+            const storedSession = getStockCheckSessionOrThrow(sessions, payload.sessionId);
+            if ((storedSession.items || []).some(item => item.actualStock === null || item.actualStock === undefined)) {
+                const error = new Error('Cần nhập đủ số đếm cho tất cả SKU trước khi nộp.');
+                error.code = 'missing_count';
+                throw error;
+            }
+            if ((storedSession.items || []).some(item => !item.balanced)) {
+                const error = new Error('Cần cân bằng hoặc xác nhận kết quả cho tất cả SKU trước khi nộp.');
+                error.code = 'unbalanced_items';
+                throw error;
+            }
+            storedSession.status = 'completed';
+            storedSession.completedAt = new Date().toISOString();
+            await writeStockCheckSessions(sessions, tx);
+            return storedSession;
+        }, { timeout: 30000, maxWait: 10000 });
+        return { success: true, status: 'completed', session: sanitizeStockCheckSession(session, currentSession.role === 'admin') };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
 
 const OPERATIONAL_ASSIGNMENT_EXCLUSION = 'exclude_operational_assignment';
 
@@ -8567,6 +9621,7 @@ module.exports = { prisma };
 // ===== REFUNDS: Import từ thư mục =====
 ipcMain.handle('refunds:importFromFolder', async () => {
     try {
+        requireRole('admin');
         // 1. Mở dialog chọn thư mục
         const result = await dialog.showOpenDialog({
             properties: ['openDirectory'],

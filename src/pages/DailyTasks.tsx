@@ -154,6 +154,7 @@ interface Task {
     type?: 'daily' | 'assignment';
     attachments?: unknown;
     evidencePenaltyRecorded?: boolean;
+    evidencePenaltyCount?: number;
 }
 
 interface EvidenceImage {
@@ -197,6 +198,21 @@ const DEADLINE_OVERDUE_FINE_OFFICIAL = 50000;
 const getAssignmentDeadlinePenalty = (task: Task): number => {
     const value = Number(parseAttachments(task.attachments).assignment?.deadlinePenaltyAmount);
     return Number.isFinite(value) && value >= 0 ? value : DEADLINE_OVERDUE_FINE_OFFICIAL;
+};
+const getNextAssignmentEvidencePenalty = (task: Task) => {
+    if (task.type !== 'assignment' || !getEvidence(task).required || task.status === 'completed') return null;
+    const penaltyCount = Number(task.evidencePenaltyCount || 0);
+    if (penaltyCount < 1) return null;
+
+    const nextCycle = penaltyCount + 1;
+    const dueAt = dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm');
+    if (!dueAt.isValid()) return null;
+
+    return {
+        cycle: nextCycle,
+        deadline: dueAt.startOf('day').add(penaltyCount, 'day').hour(7).minute(0).second(0),
+        amount: getAssignmentDeadlinePenalty(task) * nextCycle,
+    };
 };
 const getAssignmentRecipients = (task: Task): string[] => {
     const recipients = parseAttachments(task.attachments).assignment?.assignees;
@@ -499,13 +515,16 @@ const DailyTasks = () => {
                 window.electronAPI.dailyTasks.listEvidencePenalties(),
             ]);
             if (result.success && result.data) {
-                const penaltyKeys = new Set(
-                    (penaltiesResult?.success && Array.isArray(penaltiesResult.data) ? penaltiesResult.data : [])
-                        .map((penalty: any) => `${penalty.taskId}:${penalty.dueAt}`)
-                );
+                const penaltiesByTask = new Map<string, any[]>();
+                (penaltiesResult?.success && Array.isArray(penaltiesResult.data) ? penaltiesResult.data : [])
+                    .forEach((penalty: any) => {
+                        const key = `${penalty.taskId}:${penalty.dueAt}`;
+                        penaltiesByTask.set(key, [...(penaltiesByTask.get(key) || []), penalty]);
+                    });
                 setTasks(result.data.map((t: any) => ({
                     ...t,
-                    evidencePenaltyRecorded: penaltyKeys.has(`${t.id}:${new Date(t.dueDate).toISOString()}`),
+                    evidencePenaltyRecorded: penaltiesByTask.has(`${t.id}:${new Date(t.dueDate).toISOString()}`),
+                    evidencePenaltyCount: (penaltiesByTask.get(`${t.id}:${new Date(t.dueDate).toISOString()}`) || []).length,
                     tags: t.tags ? JSON.parse(t.tags) : [],
                     attachments: parseAttachments(t.attachments),
                     dueTime: dayjs(t.dueDate).format('HH:mm'),
@@ -815,6 +834,7 @@ const DailyTasks = () => {
             }
             const existingAttachments = editingAssignment ? parseAttachments(editingAssignment.attachments) : {};
             const existingEvidence = existingAttachments.evidence || {};
+            const assignmentPenaltyAmount = normalizePenaltyAmount(values.deadlinePenaltyAmount);
             const taskData: any = {
                 title: values.title,
                 description: values.description || '',
@@ -828,14 +848,17 @@ const DailyTasks = () => {
                     assignment: {
                         ...existingAttachments.assignment,
                         fixedAssignee: true,
-                        deadlinePenaltyAmount: normalizePenaltyAmount(values.deadlinePenaltyAmount),
+                        // Bàn giao yêu cầu bằng chứng uses this one base fine
+                        // for the first miss and each subsequent escalation.
+                        deadlinePenaltyAmount: assignmentPenaltyAmount,
+                        evidencePenaltyAmount: assignmentPenaltyAmount,
                     },
                     evidence: values.evidenceRequired ? {
                         ...existingEvidence,
                         required: true,
                         method: 'image',
                         status: existingEvidence.status || 'pending',
-                        penaltyAmount: normalizePenaltyAmount(values.evidencePenaltyAmount),
+                        penaltyAmount: assignmentPenaltyAmount,
                     } : undefined,
                 },
             };
@@ -1704,6 +1727,7 @@ const DailyTasks = () => {
                         key: 'evidence-upload',
                         content: `Đã nộp ${images.length} ảnh (${(sourceBytes / 1024 / 1024).toFixed(1)} MB → ${(uploadedBytes / 1024).toFixed(0)} KB), đang chờ duyệt.`,
                         duration: 5,
+                        ...(result.data?.autoCompleted ? { content: 'Đã nộp bằng chứng và tự ghi nhận hoàn thành.' } : {}),
                     });
                 } catch (error: any) {
                     message.error({ key: 'evidence-upload', content: error.message || 'Không thể gửi bằng chứng.', duration: 5 });
@@ -2619,6 +2643,7 @@ const DailyTasks = () => {
             : selectedAssignments.filter(task => deadlineViewFilter === 'completed' ? task.status === 'completed' : task.status !== 'completed');
         const sourceTasks = scope === 'daily' ? selectedDailyTasks : scope === 'deadline' ? visibleDeadlineTasks : [...selectedDailyTasks, ...selectedAssignments];
         const pendingTasks = sourceTasks.filter(task => task.status !== 'completed');
+        const completedDailyTasks = scope === 'daily' ? sourceTasks.filter(task => task.status === 'completed') : [];
         const completedDeadlineTasks = scope === 'deadline' ? sourceTasks.filter(task => task.status === 'completed') : [];
         const isTaskOverdue = (task: Task) => !isCurrentWorkDate ? false : task.type === 'assignment' ? getDeadlineStatus(task).status === 'overdue' : isOverdue(task);
         const evidenceSoon = (task: Task) => task.type !== 'assignment' && getEvidence(task).required && !isTaskOverdue(task);
@@ -2626,9 +2651,15 @@ const DailyTasks = () => {
             { key: 'overdue', label: 'Quá hạn', color: '#dc2626', tasks: pendingTasks.filter(isTaskOverdue) },
             { key: 'evidence', label: 'Bằng chứng sắp đến hạn', color: '#d97706', tasks: pendingTasks.filter(evidenceSoon) },
             { key: 'normal', label: 'Bình thường', color: '#64748b', tasks: pendingTasks.filter(task => !isTaskOverdue(task) && !evidenceSoon(task)) },
+            ...(completedDailyTasks.length > 0 ? [{ key: 'completed-daily', label: 'Đã hoàn thành', color: '#16a34a', tasks: completedDailyTasks }] : []),
             ...(completedDeadlineTasks.length > 0 ? [{ key: 'completed', label: 'Đã hoàn thành', color: '#16a34a', tasks: completedDeadlineTasks }] : []),
         ].filter(group => group.tasks.length > 0);
-        const attentionTasks = [...pendingTasks.filter(isTaskOverdue), ...reviewTasks].slice(0, 6);
+        const attentionTasks = Array.from(
+            new Map(
+                [...pendingTasks.filter(isTaskOverdue), ...reviewTasks]
+                    .map(task => [`${task.type}-${task.id}`, task])
+            ).values()
+        ).slice(0, 6);
 
         const renderRow = (task: Task, color: string) => {
             const evidence = getEvidence(task);
@@ -2644,6 +2675,9 @@ const DailyTasks = () => {
             const sourceLabel = isAssignment ? 'Bàn giao' : 'Hàng ngày';
             const needsEvidence = evidence.required && evidence.status !== 'submitted' && evidence.status !== 'approved';
             const hasEvidence = evidence.required && (evidence.status === 'submitted' || evidence.status === 'approved');
+            const evidencePenaltyRecorded = Boolean(task.evidencePenaltyRecorded);
+            const evidencePenaltyAmount = isAssignment ? getAssignmentDeadlinePenalty(task) : evidence.penaltyAmount;
+            const nextAssignmentEvidencePenalty = getNextAssignmentEvidencePenalty(task);
             return <div
                 key={`${task.type}-${task.id}`}
                 className="daily-task-list-row"
@@ -2663,12 +2697,19 @@ const DailyTasks = () => {
                 </div>
                 <Tag style={{ width: 'fit-content', margin: 0, color: isAssignment ? '#2563eb' : '#15803d', background: isAssignment ? '#eff6ff' : '#ecfdf5', borderColor: isAssignment ? '#bfdbfe' : '#bbf7d0', fontWeight: 700 }}>{sourceLabel}</Tag>
                 <div style={{ color: color === '#dc2626' ? '#dc2626' : '#475569', fontSize: 13, fontWeight: 650 }}><ClockCircleOutlined /> {deadlineText}</div>
-                <div className="daily-task-evidence-summary" style={{ color: evidence.required ? '#c2410c' : '#64748b' }}>
-                    {evidence.required
-                        ? <><UploadOutlined /> Cần bằng chứng {evidence.penaltyAmount ? `· Phạt ${formatPenaltyAmount(evidence.penaltyAmount)}đ` : ''}</>
+                <div className={`daily-task-evidence-summary${evidencePenaltyRecorded ? ' daily-task-evidence-escalation' : ''}`} style={{ color: evidence.required ? '#c2410c' : '#64748b' }}>
+                    {evidencePenaltyRecorded ? <>
+                        <span className="daily-task-evidence-penalty"><WarningOutlined /> Đã phạt {formatPenaltyAmount(evidencePenaltyAmount)}đ</span>
+                        {nextAssignmentEvidencePenalty && (
+                            <Tooltip title={`Nếu chưa nộp bằng chứng trước mốc này, hệ thống sẽ ghi phạt lần ${nextAssignmentEvidencePenalty.cycle}.`}>
+                                <span className="daily-task-evidence-next"><ClockCircleOutlined /> Tiếp: {nextAssignmentEvidencePenalty.deadline.format('HH:mm DD/MM')} · {formatPenaltyAmount(nextAssignmentEvidencePenalty.amount)}đ</span>
+                            </Tooltip>
+                        )}
+                    </> : <span>{evidence.required
+                        ? <><UploadOutlined /> Cần bằng chứng {evidencePenaltyAmount ? `· Phạt ${formatPenaltyAmount(evidencePenaltyAmount)}đ` : ''}</>
                         : isAssignment
                             ? <><WarningOutlined /> Phạt trễ deadline {formatPenaltyAmount(getAssignmentDeadlinePenalty(task))}đ</>
-                            : 'Không bắt buộc bằng chứng'}
+                            : 'Không bắt buộc bằng chứng'}</span>}
                 </div>
                 {isAssignment ? (
                     <Space size={6} className="daily-task-row-actions">
@@ -2685,7 +2726,7 @@ const DailyTasks = () => {
                 ) : (
                     <Space size={6} className="daily-task-row-actions">
                         {canCompleteDailyTask && needsEvidence && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp bằng chứng</Button>}
-                        {canCompleteDailyTask && hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
+                        {hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
                         {canCompleteDailyTask && !evidence.required && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleToggleComplete(task.id)} className="daily-task-primary-action">Hoàn thành</Button>}
                         {isAdmin && <Tooltip title="Sửa"><Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditTask(task)} /></Tooltip>}
                         {isAdmin && <Tooltip title="Xóa"><Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteTask(task.id)} /></Tooltip>}
@@ -2697,7 +2738,7 @@ const DailyTasks = () => {
         return <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 370px', gap: 16, alignItems: 'start' }}>
             <section style={{ background: '#fff', border: '1px solid #dbe3ec', borderRadius: 8, overflow: 'hidden' }}>
                 <div style={{ padding: '16px 18px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
-                    <div><h2 style={{ margin: 0, color: '#172033', fontSize: 18, fontWeight: 800 }}>{scope === 'all' ? (isCurrentWorkDate ? 'Cần xử lý hôm nay' : `Công việc ngày ${selectedWorkDate.format('DD/MM/YYYY')}`) : scope === 'daily' ? 'Hàng ngày' : 'Bàn giao'}</h2><span style={{ color: '#64748b', fontSize: 13 }}>{scope === 'deadline' && deadlineViewFilter === 'completed' ? `${completedDeadlineCount} công việc đã hoàn thành` : `${pendingTasks.length} công việc đang mở`}</span></div>
+                    <div><h2 style={{ margin: 0, color: '#172033', fontSize: 18, fontWeight: 800 }}>{scope === 'all' ? (isCurrentWorkDate ? 'Cần xử lý hôm nay' : `Công việc ngày ${selectedWorkDate.format('DD/MM/YYYY')}`) : scope === 'daily' ? 'Hàng ngày' : 'Bàn giao'}</h2><span style={{ color: '#64748b', fontSize: 13 }}>{scope === 'daily' ? `${completedDailyTasks.length} đã hoàn thành · ${pendingTasks.length} đang mở` : scope === 'deadline' && deadlineViewFilter === 'completed' ? `${completedDeadlineCount} công việc đã hoàn thành` : `${pendingTasks.length} công việc đang mở`}</span></div>
                     {scope === 'deadline' ? (
                         <Space size={6} wrap>
                             <Button size="small" type={deadlineViewFilter === 'pending' ? 'primary' : 'default'} onClick={() => setDeadlineViewFilter('pending')} style={{ borderRadius: 6 }}>Đang mở ({selectedAssignments.length - completedDeadlineCount})</Button>
@@ -2862,7 +2903,7 @@ const DailyTasks = () => {
                             borderRadius: 8
                         }}
                     >
-                        Hàng ngày ({dailyTasks.filter(t => t.status !== 'completed').length})
+                        Hàng ngày ({dailyTasks.length})
                     </Radio.Button>
                     <Radio.Button
                         value="assignments"
@@ -3274,19 +3315,19 @@ const DailyTasks = () => {
                                 <Option value="urgent">Khẩn cấp</Option>
                             </Select>
                         </Form.Item>
-                        <Form.Item name="deadlinePenaltyAmount" label={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><WarningOutlined style={{ color: '#d97706' }} /> Phạt quá hạn</span>} rules={[{ required: true, message: 'Nhập mức phạt.' }]} style={{ marginBottom: 18 }}>
+                        <Form.Item name="deadlinePenaltyAmount" label={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><WarningOutlined style={{ color: '#d97706' }} /> Mức phạt</span>} rules={[{ required: true, message: 'Nhập mức phạt.' }]} style={{ marginBottom: 18 }}>
                             <InputNumber min={0} precision={0} controls={false} suffix="đ" style={{ width: '100%', height: 42 }} formatter={formatPenaltyAmount} parser={(value) => String(value || '').replace(/[^\d]/g, '')} />
                         </Form.Item>
                     </div>
                     <div style={{ marginTop: -10, marginBottom: 14, color: '#8a5a12', fontSize: 12, lineHeight: 1.45 }}>
-                        <WarningOutlined /> Áp dụng khi quá hạn chưa hoàn thành và được ghi vào Bảng công.
+                        <WarningOutlined /> Mức phạt khi quá hạn. Nếu yêu cầu bằng chứng: quá hạn 20 phút phạt lần đầu; từ 07:00 các ngày sau, mức phạt tăng theo số lần chưa nộp.
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, padding: '10px 12px', border: '1px solid #dbe3ec', borderRadius: 7, background: '#f8fafc' }}>
                         <Form.Item name="evidenceRequired" valuePropName="checked" style={{ margin: 0 }}>
                             <Checkbox>Yêu cầu bằng chứng ảnh trước khi hoàn thành</Checkbox>
                         </Form.Item>
                         <Form.Item noStyle shouldUpdate={(previous, current) => previous.evidenceRequired !== current.evidenceRequired}>
-                            {({ getFieldValue }) => getFieldValue('evidenceRequired') ? (
+                            {({ getFieldValue }) => false && getFieldValue('evidenceRequired') ? (
                                 <Form.Item name="evidencePenaltyAmount" label="Phạt không nộp (đ)" style={{ margin: 0, marginLeft: 'auto', width: 185 }}>
                                     <InputNumber min={0} precision={0} controls={false} suffix="đ" style={{ width: '100%' }} formatter={formatPenaltyAmount} parser={(value) => String(value || '').replace(/[^\d]/g, '')} />
                                 </Form.Item>

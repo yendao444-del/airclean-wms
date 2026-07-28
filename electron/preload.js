@@ -6,11 +6,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Products
     products: {
         getAll: () => ipcRenderer.invoke('products:getAll'),
+        getForAdmin: () => ipcRenderer.invoke('products:getForAdmin'),
+        getCatalogForSale: () => ipcRenderer.invoke('products:getCatalogForSale'),
+        getForStockAlerts: () => ipcRenderer.invoke('products:getForStockAlerts'),
         getById: (id) => ipcRenderer.invoke('products:getById', id),
         create: (data) => ipcRenderer.invoke('products:create', data),
         update: (id, data) => ipcRenderer.invoke('products:update', id, data),
         delete: (id) => ipcRenderer.invoke('products:delete', id),
-        updateStock: (data) => ipcRenderer.invoke('products:updateStock', data),
         getTopSelling: (args) => ipcRenderer.invoke('products:getTopSelling', args),
         onStockChanged: (callback) => {
             const handler = (event, data) => callback(data);
@@ -140,6 +142,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         create: (data) => ipcRenderer.invoke('exportOrders:create', data),
         update: (id, data) => ipcRenderer.invoke('exportOrders:update', id, data),
         delete: (id) => ipcRenderer.invoke('exportOrders:delete', id),
+        adjustStock: (data) => ipcRenderer.invoke('exportOrders:adjustStock', data),
     },
 
     // POS Order (BÁN HÀNG TẠI QUẦY)
@@ -169,12 +172,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
         bulkDelete: (ids) => ipcRenderer.invoke('refunds:bulkDelete', ids),
         bulkCreate: (records) => ipcRenderer.invoke('refunds:bulkCreate', records),
         importFromFolder: () => ipcRenderer.invoke('refunds:importFromFolder'),
+        adjustStock: (data) => ipcRenderer.invoke('refunds:adjustStock', data),
     },
 
     // Stock Balance (CÂN BẰNG KHO)
     stockBalance: {
         getAll: (args) => ipcRenderer.invoke('stockBalance:getAll', args),
         create: (data) => ipcRenderer.invoke('stockBalance:create', data),
+        adjustStock: (data) => ipcRenderer.invoke('stockBalance:adjustStock', data),
+    },
+
+    inventory: {
+        manualAdjust: (data) => ipcRenderer.invoke('inventory:manualAdjust', data),
     },
 
     // Inventory Logs (THẺ KHO)
@@ -182,7 +191,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getAll: (filters) => ipcRenderer.invoke('inventoryLogs:getAll', filters),
         getBySku: (params) => ipcRenderer.invoke('inventoryLogs:getBySku', params),
         getStats: (filters) => ipcRenderer.invoke('inventoryLogs:getStats', filters),
-        create: (data) => ipcRenderer.invoke('inventoryLogs:create', data),
         getRefDetail: (params) => ipcRenderer.invoke('inventoryLogs:getRefDetail', params),
     },
 
@@ -204,6 +212,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     appConfig: {
         get: (key) => ipcRenderer.invoke('appConfig:get', key),
         set: (key, value) => ipcRenderer.invoke('appConfig:set', key, value),
+    },
+    stockCheck: {
+        getSessions: () => ipcRenderer.invoke('stockCheck:getSessions'),
+        adminSaveSessions: (sessions) => ipcRenderer.invoke('stockCheck:adminSaveSessions', sessions),
+        updateCount: (data) => ipcRenderer.invoke('stockCheck:updateCount', data),
+        retryCount: (data) => ipcRenderer.invoke('stockCheck:retryCount', data),
+        updateNote: (data) => ipcRenderer.invoke('stockCheck:updateNote', data),
+        balanceItems: (data) => ipcRenderer.invoke('stockCheck:balanceItems', data),
+        balanceItem: (data) => ipcRenderer.invoke('stockCheck:balanceItem', data),
+        submitSession: (data) => ipcRenderer.invoke('stockCheck:submitSession', data),
     },
 
     // Daily Expenses (CHI PHÍ HÀNG NGÀY - P&L)

@@ -437,7 +437,7 @@ export default function RefundsPage() {
             for (const item of origItems) {
                 if (!item.variantSku || item.quantity <= 0) continue;
                 try {
-                    const result = await window.electronAPI.products.updateStock({
+                    const result = await window.electronAPI.refunds.adjustStock({
                         sku: item.variantSku,
                         quantity: item.quantity,
                         isAdd: true,
@@ -515,7 +515,7 @@ export default function RefundsPage() {
             // Cộng tồn kho theo SKU custom
             for (const item of validItems) {
                 try {
-                    const result = await window.electronAPI.products.updateStock({
+                    const result = await window.electronAPI.refunds.adjustStock({
                         sku: item.sku,
                         quantity: item.qty,
                         isAdd: true,

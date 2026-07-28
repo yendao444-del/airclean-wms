@@ -3343,18 +3343,16 @@ export default function Attendance() {
                 setStockBalanceRecords([]);
             }
             try {
-                const stockCheckResult = await api.appConfig.get('stockCheckSessionsV2');
-                if (stockCheckResult?.success && Array.isArray(stockCheckResult.data)) {
-                    setStockCheckSessions(stockCheckResult.data);
+                if (!isAdmin) {
+                    setStockCheckSessions([]);
                 } else {
-                    const raw = localStorage.getItem('stock-check-sessions-v2');
-                    setStockCheckSessions(raw ? JSON.parse(raw) : []);
+                    const stockCheckResult = await api.stockCheck.getSessions();
+                    setStockCheckSessions(stockCheckResult?.success && Array.isArray(stockCheckResult.data)
+                        ? stockCheckResult.data
+                        : []);
                 }
             } catch {
-                try {
-                    const raw = localStorage.getItem('stock-check-sessions-v2');
-                    setStockCheckSessions(raw ? JSON.parse(raw) : []);
-                } catch { setStockCheckSessions([]); }
+                setStockCheckSessions([]);
             }
         } catch (error) {
             console.error('Lỗi tải dữ liệu deadline công việc:', error);
@@ -3496,7 +3494,7 @@ export default function Attendance() {
             ? overviewDateRange[1].endOf('day')
             : endLimit;
 
-        if (rangeEnd.isBefore(rangeStart, 'day')) return [] as FineRecord[];
+        if (!isAdmin || rangeEnd.isBefore(rangeStart, 'day')) return [] as FineRecord[];
 
         const fines: FineRecord[] = [];
         for (let date = rangeStart; date.isBefore(rangeEnd) || date.isSame(rangeEnd, 'day'); date = date.add(1, 'day')) {
@@ -3557,7 +3555,7 @@ export default function Attendance() {
         }
 
         return fines;
-    }, [employees, stockCheckSessions, stockBalanceRecords, overviewDateRange]);
+    }, [employees, isAdmin, stockCheckSessions, stockBalanceRecords, overviewDateRange]);
 
     const applyFineOverride = useCallback((fine: FineRecord): FineRecord => {
         const override = fineOverrides[getFineOverrideKey(fine)];

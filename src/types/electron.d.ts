@@ -89,14 +89,37 @@ export interface DatabaseImportStats {
     expenses: number;
 }
 
+export interface StockMutationPayload {
+    sku: string;
+    quantity: number;
+    isAdd?: boolean;
+    allowMissing?: boolean;
+    logContext: {
+        type: string;
+        referenceType: 'XUAT' | 'HOAN' | 'CAN_BANG' | 'MANUAL_ADJUST';
+        reference: string;
+        note: string;
+        createdBy?: string;
+    };
+}
+
+export interface StockMutationResult {
+    success: boolean;
+    skipped?: boolean;
+    data?: Product;
+    error?: string;
+}
+
 export interface ElectronAPI {
     products: {
         getAll: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
+        getForAdmin?: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
+        getCatalogForSale?: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
+        getForStockAlerts?: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
         getById: (id: number) => Promise<{ success: boolean; data?: Product; error?: string }>;
         create: (data: Partial<Product>) => Promise<{ success: boolean; data?: Product; error?: string }>;
         update: (id: number, data: Partial<Product>) => Promise<{ success: boolean; data?: Product; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
-        updateStock: (data: { sku: string; quantity: number; isAdd?: boolean; logContext?: any; allowMissing?: boolean }) => Promise<{ success: boolean; skipped?: boolean; data?: Product; error?: string }>;
         getTopSelling?: (args?: { limit?: number }) => Promise<{ success: boolean; data?: Array<{ productId: number | string; productName: string; soldQty: number }>; error?: string }>;
         onStockChanged?: (callback: (data: any) => void) => () => void;
     };
@@ -201,6 +224,7 @@ export interface ElectronAPI {
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
+        adjustStock: (data: StockMutationPayload) => Promise<StockMutationResult>;
     };
     posOrder: {
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -222,15 +246,19 @@ export interface ElectronAPI {
         bulkDelete: (ids: number[]) => Promise<{ success: boolean; data?: number; error?: string }>;
         bulkCreate: (records: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         importFromFolder: () => Promise<{ success: boolean; data?: any[]; error?: string; folderPath?: string; fileResults?: any[]; totalFiles?: number; totalRows?: number }>;
+        adjustStock: (data: StockMutationPayload) => Promise<StockMutationResult>;
     };
     stockBalance: {
         getAll: (filters?: { limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        adjustStock: (data: StockMutationPayload) => Promise<StockMutationResult>;
+    };
+    inventory: {
+        manualAdjust: (data: StockMutationPayload) => Promise<StockMutationResult>;
     };
     inventoryLogs: {
         getAll: (filters?: { sku?: string; type?: string; referenceType?: string; search?: string; startDate?: string; endDate?: string; limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         getBySku: (params: { sku: string; limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
-        create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     };
     pickup: {
         sendTelegram: (data: { token: string; chatId: string; message: string }) => Promise<{ success: boolean; error?: string }>;
@@ -243,6 +271,16 @@ export interface ElectronAPI {
     appConfig: {
         get: (key: string) => Promise<{ success: boolean; data?: any; error?: string }>;
         set: (key: string, value: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+    };
+    stockCheck: {
+        getSessions: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        adminSaveSessions: (sessions: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        updateCount: (data: { sessionId: string; sku: string; actualStock: number }) => Promise<{ success: boolean; status?: string; item?: any; error?: string }>;
+        retryCount: (data: { sessionId: string; sku: string }) => Promise<{ success: boolean; status?: string; item?: any; code?: string; error?: string }>;
+        updateNote: (data: { sessionId: string; sku: string; note: string }) => Promise<{ success: boolean; item?: any; error?: string }>;
+        balanceItems: (data: { sessionId: string; reference: string; date?: string; items: Array<{ sku: string }>; historyNotes?: string; logPrefix?: string }) => Promise<{ success: boolean; duplicate?: boolean; adjustedCount?: number; matchedCount?: number; data?: { sessions?: any[]; stockBalance?: any }; error?: string }>;
+        balanceItem: (data: { sessionId: string; sku: string; note?: string }) => Promise<{ success: boolean; status?: string; item?: any; error?: string }>;
+        submitSession: (data: { sessionId: string }) => Promise<{ success: boolean; status?: string; session?: any; code?: string; error?: string }>;
     };
     dailyExpenses: {
         getAll: (filters?: { startDate?: string; endDate?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;

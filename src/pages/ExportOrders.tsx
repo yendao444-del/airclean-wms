@@ -266,7 +266,7 @@ export default function ExportOrdersPage() {
             // EDIT: hoàn lại tất cả stock cũ trước
             if (isEditing && currentEditingExport) {
                 for (const oldItem of currentEditingExport.items) {
-                    await window.electronAPI.products.updateStock({
+                    await window.electronAPI.exportOrders.adjustStock({
                         sku: oldItem.sku,
                         quantity: oldItem.quantity,
                         isAdd: true,
@@ -277,7 +277,7 @@ export default function ExportOrdersPage() {
 
             // Trừ stock theo items mới
             for (const item of exportItems) {
-                await window.electronAPI.products.updateStock({
+                await window.electronAPI.exportOrders.adjustStock({
                     sku: item.sku,
                     quantity: item.quantity,
                     isAdd: false,
@@ -340,7 +340,7 @@ export default function ExportOrdersPage() {
                 await loadExports();
                 // Hoàn lại stock TẤT CẢ items
                 for (const item of record.items) {
-                    await window.electronAPI.products.updateStock({
+                    await window.electronAPI.exportOrders.adjustStock({
                         sku: item.sku,
                         quantity: item.quantity,
                         isAdd: true,

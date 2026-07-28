@@ -99,6 +99,12 @@ const parseVariants = (product: Product): ProductVariant[] => {
     } catch { return []; }
 };
 
+const hasStockDetails = (product: Product): boolean => {
+    const variants = parseVariants(product);
+    if (variants.length > 0) return variants.some(v => typeof v.stock === 'number');
+    return typeof (product as any).stock === 'number';
+};
+
 const getTotalStock = (product: Product): number => {
     const variants = parseVariants(product);
     if (variants.length > 0) return variants.reduce((s, v) => s + (v.stock || 0), 0);
@@ -145,7 +151,7 @@ export default function POSPage() {
         setLoading(true);
         try {
             const [productsRes, categoriesRes] = await Promise.all([
-                window.electronAPI.products.getAll(),
+                (window.electronAPI.products.getCatalogForSale?.() || window.electronAPI.products.getAll()),
                 window.electronAPI.categories.getAll(),
             ]);
             if (productsRes.success && productsRes.data) {
@@ -235,7 +241,7 @@ export default function POSPage() {
                     sku: variant?.sku || product.sku,
                     variant: variant?.color,
                     price: variant?.price || product.price,
-                    cost: variant?.cost || product.cost,
+                    cost: variant?.cost || product.cost || 0,
                     qty: 1,
                 }]
             });
@@ -361,6 +367,7 @@ export default function POSPage() {
 
     // === Stock class ===
     const stockClass = (product: Product) => {
+        if (!hasStockDetails(product)) return (product as any).available === false ? 'out' : '';
         const total = getTotalStock(product);
         if (total <= 0) return 'out';
         if (total <= (product.minStock || 10)) return 'low';
@@ -432,7 +439,7 @@ export default function POSPage() {
                             const { emoji, isEmoji } = getProductEmoji(p, categories);
                             return (
                                 <div key={p.id} className="pos-product-card" onClick={() => handleProductClick(p)}>
-                                    <span className={`pos-product-stock ${stockClass(p)}`}>{getTotalStock(p)}</span>
+                                    <span className={`pos-product-stock ${stockClass(p)}`}>{hasStockDetails(p) ? getTotalStock(p) : ((p as any).available === false ? 'Hết' : 'Còn')}</span>
                                     {p.isCombo && <span className="pos-combo-tag">COMBO</span>}
                                     <div className="pos-product-img" style={{ background: getColor(p.id), fontSize: isEmoji ? 38 : 24, textShadow: isEmoji ? 'none' : '0 1px 3px rgba(0,0,0,0.25)' }}>
                                         {emoji}
@@ -561,7 +568,7 @@ export default function POSPage() {
                             <div>
                                 <div className="pos-v-name">{v.color}</div>
                                 <div className="pos-v-sku">{v.sku}</div>
-                                <div className="pos-v-stock">Tồn kho: {v.stock}</div>
+                                <div className="pos-v-stock">{typeof v.stock === 'number' ? `Tồn kho: ${v.stock}` : ((v as any).available === false ? 'Hết hàng' : 'Còn hàng')}</div>
                             </div>
                             <div className="pos-v-price">{fmt(v.price)}đ</div>
                         </div>

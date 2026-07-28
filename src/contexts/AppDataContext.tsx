@@ -78,7 +78,7 @@ async function fetchAppDataSnapshot(): Promise<AppDataSnapshot> {
         const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
         const untilNow = new Date().toISOString();
         const [pRes, exRes, ecRes, puRes, cbRes] = await Promise.all([
-            safeListCall<Product>('products:getAll', api.products.getAll()),
+            safeListCall<Product>('products:getCatalogForSale', (api.products.getCatalogForSale?.() || api.products.getAll())),
             safeListCall<ExportOrder>('exportOrders:getAll', api.exportOrders.getAll({ since: since90 })),
             safeListCall<EcommerceExport>('ecommerceExports:getAll', api.ecommerceExports.getAll({ since: since90, until: untilNow, limit: 2000 })),
             safeListCall<Purchase>('purchases:getAll', api.purchases.getAll({ since: since90 })),
