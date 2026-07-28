@@ -675,10 +675,13 @@ async function revokeRememberToken(rawToken) {
 // ========================================
 // ACTIVITY LOG HELPER
 // ========================================
-async function logActivity({ module, action, description, recordId, recordName, changes, userName, severity }) {
-    try {
-        if (!prisma) return;
-        await prisma.activityLog.create({
+// Serialize audit inserts so busy renderer actions cannot exhaust Prisma's pool.
+let activityLogQueue = Promise.resolve();
+function logActivity({ module, action, description, recordId, recordName, changes, userName, userId, severity, ipAddress, deviceInfo }) {
+    activityLogQueue = activityLogQueue.catch(() => undefined).then(async () => {
+        if (!prisma) return null;
+        try {
+            return await prisma.activityLog.create({
             data: {
                 module: module || 'system',
                 action: action || 'UPDATE',
@@ -687,12 +690,18 @@ async function logActivity({ module, action, description, recordId, recordName, 
                 recordName: recordName || null,
                 changes: changes ? (typeof changes === 'string' ? changes : JSON.stringify(changes)) : null,
                 userName: userName || currentSession?.username || 'System',
+                userId: userId ?? null,
                 severity: severity || 'INFO',
+                ipAddress: ipAddress || null,
+                deviceInfo: deviceInfo || null,
             }
-        });
-    } catch (err) {
-        console.error('⚠️ Activity log failed:', err.message);
-    }
+            });
+        } catch (err) {
+            console.error('⚠️ Activity log failed:', err.message);
+            return null;
+        }
+    });
+    return activityLogQueue;
 }
 
 // ========================================
@@ -1049,6 +1058,62 @@ function stockAlertProductForNonAdmin(product) {
     return { ...safeProduct, stock };
 }
 
+function parseConfigObject(value) {
+    try {
+        const parsed = JSON.parse(value || '{}');
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function getInventoryStatus(stock, threshold, paused) {
+    if (paused) return 'ok';
+    const quantity = Number(stock || 0);
+    const minStock = Math.max(0, Number(threshold || 0));
+    if (quantity === 0) return 'out';
+    if (minStock > 0 && quantity <= minStock) return 'low';
+    if (minStock > 0 && quantity <= Math.ceil(minStock * 1.1)) return 'approaching';
+    return 'ok';
+}
+
+async function getInventoryVisibilityConfig() {
+    const configs = await prisma.appConfig.findMany({
+        where: { key: { in: ['variantMinStocks', 'pausedVariants'] } },
+        select: { key: true, value: true }
+    });
+    const values = Object.fromEntries(configs.map(config => [config.key, parseConfigObject(config.value)]));
+    return {
+        variantMinStocks: values.variantMinStocks || {},
+        pausedVariants: values.pausedVariants || {}
+    };
+}
+
+function inventoryCatalogProductForNonAdmin(product, visibilityConfig) {
+    const { stock, minStock, maxStock, cost, variants, ...safeProduct } = product;
+    const variantList = parseJsonArray(variants);
+    if (variantList.length > 0) {
+        const safeVariants = variantList.map(variant => {
+            const { stock: variantStock, cost: variantCost, minStock: variantMinStock, maxStock: variantMaxStock, ...safeVariant } = variant || {};
+            const threshold = visibilityConfig.variantMinStocks[safeVariant.sku] ?? minStock;
+            const inventoryStatus = getInventoryStatus(variantStock, threshold, visibilityConfig.pausedVariants[safeVariant.sku]);
+            return {
+                ...safeVariant,
+                inventoryStatus,
+                ...(inventoryStatus !== 'ok' ? { stock: Number(variantStock || 0) } : {})
+            };
+        });
+        return { ...safeProduct, variants: JSON.stringify(safeVariants) };
+    }
+
+    const inventoryStatus = getInventoryStatus(stock, minStock, false);
+    return {
+        ...safeProduct,
+        inventoryStatus,
+        ...(inventoryStatus !== 'ok' ? { stock: Number(stock || 0) } : {})
+    };
+}
+
 function productSelectForCatalog() {
     return {
         id: true,
@@ -1119,6 +1184,21 @@ ipcMain.handle('products:getForStockAlerts', async () => {
         const products = await prisma.product.findMany({ select: productSelectForCatalog(), orderBy: { createdAt: 'desc' } });
         const alertProducts = products.filter(productNeedsStockAlert);
         return { success: true, data: isAdminSession() ? alertProducts : alertProducts.map(stockAlertProductForNonAdmin) };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Non-admin inventory receives all products plus server-calculated alert state.
+// Exact quantities are sent only for SKUs in a warning state.
+ipcMain.handle('products:getInventoryCatalog', async () => {
+    try {
+        requireRole('admin', 'manager', 'staff');
+        if (!prisma) throw new Error('Prisma not available');
+        const products = await prisma.product.findMany({ select: productSelectForCatalog(), orderBy: { createdAt: 'desc' } });
+        if (isAdminSession()) return { success: true, data: products };
+        const visibilityConfig = await getInventoryVisibilityConfig();
+        return { success: true, data: products.map(product => inventoryCatalogProductForNonAdmin(product, visibilityConfig)) };
     } catch (error) {
         return { success: false, error: error.message };
     }
@@ -2929,21 +3009,7 @@ ipcMain.handle('activityLog:create', async (event, data) => {
         requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
-        const log = await prisma.activityLog.create({
-            data: {
-                module: data.module,
-                action: data.action,
-                recordId: data.recordId,
-                recordName: data.recordName,
-                changes: data.changes ? (typeof data.changes === 'string' ? data.changes : JSON.stringify(data.changes)) : null,
-                description: data.description,
-                userName: data.userName || 'Admin',
-                userId: data.userId,
-                severity: data.severity || 'INFO',
-                ipAddress: data.ipAddress,
-                deviceInfo: data.deviceInfo
-            }
-        });
+        const log = await logActivity(data);
 
         console.log(`✅ Created activity log: ${data.description}`);
         return { success: true, data: log };
@@ -3078,7 +3144,7 @@ function generateVatIdFromFile(fileName = '', fileSize = 0) {
 // Get all purchases
 ipcMain.handle('purchases:getAll', async (event, { since, limit } = {}) => {
     try {
-        requireRole('admin');
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         const vatGroups = await getPurchaseVatGroups();
         const vatFileMeta = await getPurchaseVatFileMeta();
@@ -3471,6 +3537,7 @@ ipcMain.handle('purchases:removeVatGroup', async (event, { purchaseId } = {}) =>
 // Create purchase
 ipcMain.handle('purchases:create', async (event, data) => {
     try {
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
 
         console.log('📦 Creating purchase order with data:', data);
@@ -3576,6 +3643,7 @@ ipcMain.handle('purchases:create', async (event, data) => {
 // Update purchase
 ipcMain.handle('purchases:update', async (event, { id, data }) => {
     try {
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
 
         const purchase = await prisma.purchaseOrder.update({
@@ -3605,6 +3673,7 @@ ipcMain.handle('purchases:update', async (event, { id, data }) => {
 // Delete purchase (Soft-delete & Hoàn kho)
 ipcMain.handle('purchases:delete', async (event, id) => {
     try {
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
 
         console.log(`🗑️  Soft-deleting purchase order #${id}...`);
@@ -7047,7 +7116,7 @@ require('./update-handlers')(prisma, { requireRole });
 
 ipcMain.handle('ecommerceExports:getAll', async (event, { since, sinceField, until, limit, search, statusIn, statusNotIn, skip } = {}) => {
     try {
-        requireRole('admin');
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         const startedAt = Date.now();
         const field = sinceField || 'ecommerceExportDate';
@@ -7173,6 +7242,7 @@ ipcMain.handle('ecommerceExports:checkExistingKeys', async (event, { orderNumber
 
 ipcMain.handle('ecommerceExports:create', async (event, data) => {
     try {
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         const isCompleted = data.status === 'completed';
         const orderKey = (data.orderNumber || data.ecommerceExportCode || '').trim();
@@ -7530,6 +7600,7 @@ async function execEcommerceExportUpdate(id, data) {
 
 ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
     try {
+        requireRole('admin', 'manager');
         const result = await execEcommerceExportUpdate(id, data);
         if (result?.skipped) {
             return { success: true, skipped: true, reason: result.reason, data: result.data };
@@ -7554,6 +7625,7 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
 });
 ipcMain.handle('ecommerceExports:delete', async (event, id) => {
     try {
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
 
         // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
@@ -7971,7 +8043,7 @@ ipcMain.handle('marketplaceOrders:delete', async (event, { id, userName }) => {
 
 ipcMain.handle('exportOrders:getAll', async (event, { since, search, limit } = {}) => {
     try {
-        requireRole('admin');
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         const trimmedSearch = search ? String(search).trim() : '';
         const syntheticIdMatch = trimmedSearch.match(/^#?(?:XH|EX)-(\d+)$/i);
@@ -8002,7 +8074,7 @@ ipcMain.handle('exportOrders:getAll', async (event, { since, search, limit } = {
 
 ipcMain.handle('exportOrders:create', async (event, data) => {
     try {
-        requireRole('admin');
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         const record = await prisma.exportOrder.create({
             data: {
@@ -8026,7 +8098,7 @@ ipcMain.handle('exportOrders:create', async (event, data) => {
 
 ipcMain.handle('exportOrders:update', async (event, id, data) => {
     try {
-        requireRole('admin');
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         const record = await prisma.exportOrder.update({
             where: { id },
@@ -8050,7 +8122,7 @@ ipcMain.handle('exportOrders:update', async (event, id, data) => {
 
 ipcMain.handle('exportOrders:delete', async (event, id) => {
     try {
-        requireRole('admin');
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         await prisma.exportOrder.delete({ where: { id } });
         console.log(`✅ Deleted export order #${id}`);
@@ -8068,7 +8140,7 @@ ipcMain.handle('exportOrders:delete', async (event, id) => {
 
 ipcMain.handle('returns:getAll', async (event, { since } = {}) => {
     try {
-        requireRole('admin');
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         const returns = await prisma.return.findMany({
             where: since ? { createdAt: { gte: new Date(since) } } : undefined,
@@ -8095,6 +8167,7 @@ ipcMain.handle('returns:getAll', async (event, { since } = {}) => {
 
 ipcMain.handle('returns:create', async (event, data) => {
     try {
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         const record = await prisma.return.create({
             data: {
@@ -8123,6 +8196,7 @@ ipcMain.handle('returns:create', async (event, data) => {
 
 ipcMain.handle('returns:update', async (event, id, data) => {
     try {
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         // 🔧 FIX: Chỉ update field được gửi, không ghi đè null các field khác
         const updateData = {};
@@ -8153,6 +8227,7 @@ ipcMain.handle('returns:update', async (event, id, data) => {
 
 ipcMain.handle('returns:delete', async (event, id) => {
     try {
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         await prisma.return.delete({ where: { id } });
         console.log(`✅ Deleted return #${id}`);
@@ -8214,7 +8289,7 @@ ipcMain.handle('returns:bulkCreate', async (event, records) => {
 
 ipcMain.handle('refunds:getAll', async (event, { since, limit } = {}) => {
     try {
-        requireRole('admin');
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         const refunds = await prisma.refund.findMany({
             where: since ? { createdAt: { gte: new Date(since) } } : undefined,
@@ -8234,7 +8309,7 @@ ipcMain.handle('refunds:getAll', async (event, { since, limit } = {}) => {
 
 ipcMain.handle('refunds:create', async (event, data) => {
     try {
-        requireRole('admin');
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         // 🔧 Safe date parsing
         let refundDate = new Date(data.refundDate);
@@ -8267,7 +8342,7 @@ ipcMain.handle('refunds:create', async (event, data) => {
 
 ipcMain.handle('refunds:update', async (event, id, data) => {
     try {
-        requireRole('admin');
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         // 🔧 FIX: Chỉ update các field được gửi lên, KHÔNG overwrite field không có
         const updateData = {};
@@ -8297,7 +8372,7 @@ ipcMain.handle('refunds:update', async (event, id, data) => {
 
 ipcMain.handle('refunds:delete', async (event, id) => {
     try {
-        requireRole('admin');
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         await prisma.refund.delete({ where: { id } });
         console.log(`✅ Deleted refund #${id}`);
@@ -8327,7 +8402,7 @@ ipcMain.handle('refunds:bulkDelete', async (event, ids) => {
 
 ipcMain.handle('refunds:bulkCreate', async (event, records) => {
     try {
-        requireRole('admin');
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         console.log(`📦 refunds:bulkCreate called with ${records.length} records`);
         const created = [];
@@ -9064,8 +9139,9 @@ ipcMain.handle('stockCheck:adminSaveSessions', async (event, incomingSessions) =
 ipcMain.handle('stockCheck:updateCount', async (event, payload = {}) => {
     try {
         requireRole('admin', 'manager');
+        const clearCount = payload.actualStock === null;
         const actualStock = Number(payload.actualStock);
-        if (!Number.isInteger(actualStock) || actualStock < 0) throw new Error('Số đếm thực tế phải là số nguyên không âm.');
+        if (!clearCount && (!Number.isInteger(actualStock) || actualStock < 0)) throw new Error('Số đếm thực tế phải là số nguyên không âm.');
         const item = await getPrismaDirectTx().$transaction(async (tx) => {
             await lockStockCheckSessions(tx);
             const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
@@ -9073,8 +9149,8 @@ ipcMain.handle('stockCheck:updateCount', async (event, payload = {}) => {
             const session = getStockCheckSessionOrThrow(sessions, payload.sessionId);
             const storedItem = getStockCheckItemOrThrow(session, payload.sku);
             if (storedItem.countLocked) throw new Error('Số đếm đang được khóa. Hãy nhập lý do hoặc dùng lượt nhập lại.');
-            storedItem.actualStock = actualStock;
-            storedItem.difference = actualStock - Number(storedItem.systemStock || 0);
+            storedItem.actualStock = clearCount ? null : actualStock;
+            storedItem.difference = clearCount ? 0 : actualStock - Number(storedItem.systemStock || 0);
             storedItem.balanced = false;
             storedItem.requiresNote = false;
             await writeStockCheckSessions(sessions, tx);
@@ -9621,7 +9697,7 @@ module.exports = { prisma };
 // ===== REFUNDS: Import từ thư mục =====
 ipcMain.handle('refunds:importFromFolder', async () => {
     try {
-        requireRole('admin');
+        requireRole('admin', 'manager');
         // 1. Mở dialog chọn thư mục
         const result = await dialog.showOpenDialog({
             properties: ['openDirectory'],

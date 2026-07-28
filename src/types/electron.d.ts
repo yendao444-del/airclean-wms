@@ -116,6 +116,7 @@ export interface ElectronAPI {
         getForAdmin?: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
         getCatalogForSale?: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
         getForStockAlerts?: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
+        getInventoryCatalog?: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
         getById: (id: number) => Promise<{ success: boolean; data?: Product; error?: string }>;
         create: (data: Partial<Product>) => Promise<{ success: boolean; data?: Product; error?: string }>;
         update: (id: number, data: Partial<Product>) => Promise<{ success: boolean; data?: Product; error?: string }>;

@@ -635,7 +635,22 @@ export default function StockCheck() {
 
     const applyActualStock = useCallback((sku: string, total: number | null) => {
         if (!isAdmin) {
-            if (!todaySession || total === null) return;
+            if (!todaySession) return;
+            // Clearing every counting field is an edit, not a no-op. Reflect it
+            // immediately so the row no longer says "Đã nhập" while its IPC
+            // update is queued behind a previous numeric input.
+            if (total === null) {
+                setSessions(current => current.map(session => session.id !== todaySession.id ? session : {
+                    ...session,
+                    items: session.items.map(item => item.sku !== sku ? item : {
+                        ...item,
+                        actualStock: null,
+                        difference: 0,
+                        balanced: false,
+                        requiresNote: false,
+                    }),
+                }));
+            }
             const pending = countRequestQueueRef.current[sku] || Promise.resolve();
             const request: Promise<void> = pending.catch(() => undefined).then(async () => {
                 const result = await window.electronAPI.stockCheck.updateCount({ sessionId: todaySession.id, sku, actualStock: total });

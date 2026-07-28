@@ -53,6 +53,7 @@ interface Product {
     unit?: string;
     variants?: string;
     minStock?: number;
+    inventoryStatus?: InventoryStatus;
     category?: { id: number, name: string };
 }
 
@@ -62,7 +63,10 @@ interface Variant {
     stock: number;
     price?: number;
     cost?: number;
+    inventoryStatus?: InventoryStatus;
 }
+
+type InventoryStatus = 'out' | 'low' | 'approaching' | 'ok';
 
 interface StockBalanceItem {
     sku: string;
@@ -72,6 +76,7 @@ interface StockBalanceItem {
     actualStock: number;
     difference: number;
     cost?: number;
+    inventoryStatus?: InventoryStatus;
 }
 
 interface StockBalanceRecord {
@@ -965,8 +970,8 @@ export default function StockBalancePage() {
         loadPausedVariants();
     }, []);
 
-    // Admin receives the full catalog. Managers must only ever work from the
-    // alert DTO returned by getForStockAlerts; the shared catalog is sanitized.
+    // Non-admin users receive all SKUs with a backend-calculated alert state.
+    // Normal SKU quantities are removed before the response leaves Electron.
     useEffect(() => {
         if (!isAdmin) {
             void loadProducts();
@@ -1049,12 +1054,12 @@ export default function StockBalancePage() {
         let prods = isAdmin ? contextProducts as unknown as Product[] : [];
 
         try {
-            const res = await (window as any).electronAPI.products.getForStockAlerts?.();
+            const res = await (window as any).electronAPI.products.getInventoryCatalog?.();
             if (res?.success && Array.isArray(res.data)) {
                 prods = res.data as Product[];
             }
         } catch (error) {
-            console.error('Error loading stock alert products:', error);
+            console.error('Error loading inventory catalog:', error);
         }
 
         // Khi mở màn Tồn kho quá sớm sau khi khởi động, AppDataContext có thể chưa kịp nạp.
@@ -1062,7 +1067,7 @@ export default function StockBalancePage() {
         if (isAdmin && prods.length === 0 && !appDataLoading && !fallbackProductsLoadTriedRef.current) {
             fallbackProductsLoadTriedRef.current = true;
             try {
-                const res = await ((window as any).electronAPI.products.getForStockAlerts?.() || (window as any).electronAPI.products.getAll());
+                const res = await ((window as any).electronAPI.products.getInventoryCatalog?.() || (window as any).electronAPI.products.getAll());
                 if (res?.success && Array.isArray(res.data)) {
                     prods = res.data as Product[];
                 }
@@ -1092,10 +1097,11 @@ export default function StockBalancePage() {
                             sku: variant.sku,
                             productName: product.name,
                             color: variant.color,
-                            systemStock: variant.stock,
-                            actualStock: variant.stock,
+                            systemStock: typeof variant.stock === 'number' ? variant.stock : 0,
+                            actualStock: typeof variant.stock === 'number' ? variant.stock : 0,
                             difference: 0,
                             cost: variant.cost ?? product.cost,
+                            inventoryStatus: variant.inventoryStatus,
                         };
                         items.push(item);
                         productItems.push(item);
@@ -1104,9 +1110,10 @@ export default function StockBalancePage() {
                     const item: StockBalanceItem = {
                         sku: product.sku,
                         productName: product.name,
-                        systemStock: product.stock,
-                        actualStock: product.stock,
+                        systemStock: typeof product.stock === 'number' ? product.stock : 0,
+                        actualStock: typeof product.stock === 'number' ? product.stock : 0,
                         difference: 0,
+                        inventoryStatus: product.inventoryStatus,
                     };
                     items.push(item);
                     productItems.push(item);
@@ -1115,9 +1122,10 @@ export default function StockBalancePage() {
                 const item: StockBalanceItem = {
                     sku: product.sku,
                     productName: product.name,
-                    systemStock: product.stock,
-                    actualStock: product.stock,
+                    systemStock: typeof product.stock === 'number' ? product.stock : 0,
+                    actualStock: typeof product.stock === 'number' ? product.stock : 0,
                     difference: 0,
+                    inventoryStatus: product.inventoryStatus,
                 };
                 items.push(item);
                 productItems.push(item);
@@ -1739,7 +1747,17 @@ export default function StockBalancePage() {
         setTimeout(() => { variantMinSavingRef.current = false; }, 300);
     };
 
-    const getAlertLevel = (record: ProductRow) => getStockAlertLevel(record, variantMinStocks, pausedVariants);
+    const getAlertLevel = (record: ProductRow) => {
+        if (!isAdmin && record.variants.some(variant => variant.inventoryStatus)) {
+            const statuses = record.variants.map(variant => variant.inventoryStatus || 'ok');
+            if (statuses.every(status => status === 'out')) return 'all_zero';
+            if (statuses.some(status => status === 'out')) return 'has_zero';
+            if (statuses.some(status => status === 'low')) return 'low';
+            if (statuses.some(status => status === 'approaching')) return 'approaching';
+            return 'ok';
+        }
+        return getStockAlertLevel(record, variantMinStocks, pausedVariants);
+    };
 
     // Base filter: category + search text
     const baseFilteredRows = productRows.filter(row => {
@@ -1770,6 +1788,11 @@ export default function StockBalancePage() {
     const canViewStockNumbers = isAdmin || stockFilter === 'need' || stockFilter === 'low';
 
     function isVariantInCurrentStockAlert(variant: StockBalanceItem): boolean {
+        if (!isAdmin && variant.inventoryStatus) {
+            if (stockFilter === 'need') return variant.inventoryStatus === 'out' || variant.inventoryStatus === 'low';
+            if (stockFilter === 'low') return variant.inventoryStatus === 'approaching';
+            return false;
+        }
         if (pausedVariants[variant.sku]) return false;
         const threshold = variantMinStocks[variant.sku] ?? 0;
         if (stockFilter === 'need') {

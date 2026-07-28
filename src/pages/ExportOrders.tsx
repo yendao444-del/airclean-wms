@@ -117,8 +117,8 @@ export default function ExportOrdersPage() {
     const loadExports = async () => {
         try {
             // ⚡ Chỉ lấy 90 ngày gần nhất
-            const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-            const result = await window.electronAPI.exportOrders.getAll({ since: since90 });
+            const sinceOneYear = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString();
+            const result = await window.electronAPI.exportOrders.getAll({ since: sinceOneYear });
             if (result.success && result.data) {
                 setExports(result.data);
             }
