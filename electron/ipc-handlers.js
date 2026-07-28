@@ -26,31 +26,30 @@ function getEvidenceStorageConfigPath() {
     return path.join(app.getPath('userData'), 'supabase-storage.json');
 }
 
-function loadEvidenceStorageConfig() {
-    const fallback = {
-        url: process.env.SUPABASE_URL || config.SUPABASE_URL || '',
-        serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || config.SUPABASE_SERVICE_ROLE_KEY || '',
-        bucket: process.env.SUPABASE_EVIDENCE_BUCKET || config.SUPABASE_EVIDENCE_BUCKET || 'daily-task-evidence',
-    };
-    const configPath = getEvidenceStorageConfigPath();
+function readEvidenceStorageConfig(configPath) {
     try {
-        if (!fs.existsSync(configPath)) {
-            fs.writeFileSync(configPath, JSON.stringify({
-                supabaseUrl: '',
-                serviceRoleKey: '',
-                bucket: 'daily-task-evidence',
-            }, null, 2), 'utf8');
-        }
-        const saved = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-        return {
-            url: String(saved.supabaseUrl || fallback.url || '').trim(),
-            serviceRoleKey: String(saved.serviceRoleKey || fallback.serviceRoleKey || '').trim(),
-            bucket: String(saved.bucket || fallback.bucket || 'daily-task-evidence').trim(),
-        };
+        if (!fs.existsSync(configPath)) return {};
+        return JSON.parse(fs.readFileSync(configPath, 'utf8')) || {};
     } catch (error) {
-        console.warn('Unable to read Supabase Storage configuration:', error.message);
-        return fallback;
+        console.warn(`Unable to read Supabase Storage configuration at ${configPath}:`, error.message);
+        return {};
     }
+}
+
+function loadEvidenceStorageConfig() {
+    // Generated from .env by the release scripts and included in each patch.
+    const bundled = readEvidenceStorageConfig(path.join(__dirname, 'supabase-storage.json'));
+    const fallback = {
+        url: process.env.SUPABASE_URL || bundled.supabaseUrl || config.SUPABASE_URL || '',
+        serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || bundled.serviceRoleKey || config.SUPABASE_SERVICE_ROLE_KEY || '',
+        bucket: process.env.SUPABASE_EVIDENCE_BUCKET || bundled.bucket || config.SUPABASE_EVIDENCE_BUCKET || 'daily-task-evidence',
+    };
+    const saved = readEvidenceStorageConfig(getEvidenceStorageConfigPath());
+    return {
+        url: String(saved.supabaseUrl || fallback.url || '').trim(),
+        serviceRoleKey: String(saved.serviceRoleKey || fallback.serviceRoleKey || '').trim(),
+        bucket: String(saved.bucket || fallback.bucket || 'daily-task-evidence').trim(),
+    };
 }
 
 const evidenceStorageConfig = loadEvidenceStorageConfig();

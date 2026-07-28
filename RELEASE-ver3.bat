@@ -46,6 +46,15 @@ if errorlevel 1 (
 echo [OK] package.json updated to v!NEW_VERSION!
 echo.
 
+echo [1.5/4] Prepare Supabase Storage configuration...
+node scripts\prepare-supabase-storage-config.cjs
+if errorlevel 1 (
+    echo [ERROR] Cannot prepare Supabase Storage configuration.
+    pause
+    exit /b 1
+)
+echo.
+
 echo [2/4] Build Vite...
 echo ----------------------------------------
 call npx vite build

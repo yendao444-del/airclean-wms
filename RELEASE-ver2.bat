@@ -48,6 +48,15 @@ if not "!NEW_VERSION!"=="!CURRENT_VERSION!" (
     echo.
 )
 
+echo [1.5/7] Prepare Supabase Storage configuration...
+node scripts\prepare-supabase-storage-config.cjs
+if errorlevel 1 (
+    echo [ERROR] Cannot prepare Supabase Storage configuration.
+    pause
+    exit /b 1
+)
+echo.
+
 echo [2/7] Regenerate Prisma Client...
 echo ----------------------------------------
 :: Prisma engine can be locked by Electron while the app is running.

@@ -99,8 +99,6 @@ export default function PermissionsPage() {
     const loadUsers = async () => {
         setLoading(true);
         try {
-            // Ensure admin exists
-            await window.electronAPI.users.ensureAdmin();
             const result = await window.electronAPI.users.getAll();
             if (result.success && result.data) {
                 setUsers(result.data);

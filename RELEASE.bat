@@ -25,6 +25,11 @@ echo.
 :: Cập nhật package.json
 node scripts\release-version.cjs set !NEW_VERSION! >nul
 
+echo [0.5/7] Prepare Supabase Storage configuration...
+node scripts\prepare-supabase-storage-config.cjs
+if errorlevel 1 ( echo Cannot prepare Supabase Storage configuration & pause & exit /b 1 )
+echo.
+
 echo [1/6] Regenerate Prisma Client...
 echo ----------------------------------------
 :: Kill Electron/Node neu dang chay (tranh lock file DLL)

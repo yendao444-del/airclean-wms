@@ -33,6 +33,7 @@ dev.db
 
 electron/gdrive-credentials.json
 electron/gdrive-token.json
+electron/supabase-storage.json
 
 # SQLite databases (không commit dữ liệu thật)
 prisma/*.db
