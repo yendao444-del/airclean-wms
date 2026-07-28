@@ -897,6 +897,14 @@ const DailyTasks = () => {
                 }
                 return;
             }
+            if (!isAdmin) {
+                const request = await window.electronAPI.dailyTasks.requestAssignmentCompletion(taskId);
+                if (!request.success) throw new Error(request.error || 'Không thể báo hoàn thành bàn giao.');
+                message.success('Đã báo hoàn thành. Đang chờ quản lý xác nhận.');
+                window.dispatchEvent(new CustomEvent('task-changed'));
+                loadTasks();
+                return;
+            }
             const result = await window.electronAPI.dailyTasks.update(taskId, { status: 'completed' });
             if (!result.success) throw new Error(result.error || 'Không thể hoàn thành bàn giao.');
             message.success('✅ Đã hoàn thành!');
@@ -2251,7 +2259,8 @@ const DailyTasks = () => {
         const deadline = getDeadlineStatus(task);
         const notes = parseNotes(task.note);
         const completed = task.status === 'completed';
-        const canComplete = isAdmin || isAssignmentRecipient(task);
+        const completionRequest = parseAttachments(task.attachments).assignment?.completionRequestedAt;
+        const canComplete = isAdmin || (isAssignmentRecipient(task) && !completionRequest);
         const latestNote = notes.length > 0 ? notes[notes.length - 1] : null;
         const stateColor = completed ? '#16a34a' : deadline.status === 'overdue' ? '#ef4444' : deadline.status === 'warning' ? '#d97706' : '#7c3aed';
         const stateBg = completed ? '#ecfdf5' : deadline.status === 'overdue' ? '#fff1f2' : deadline.status === 'warning' ? '#fffbeb' : '#f5f3ff';
@@ -2356,7 +2365,7 @@ const DailyTasks = () => {
                                 {latestNote ? `Ghi chú: ${latestNote.note}` : 'Chưa có ghi chú'}
                             </div>
                             <Space size={2} style={{ flexShrink: 0 }}>
-                                {!completed && canComplete && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} style={{ background: '#16a34a', borderColor: '#16a34a', borderRadius: 6, fontWeight: 650 }}>Hoàn thành</Button>}
+                                {!completed && canComplete && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} style={{ background: '#16a34a', borderColor: '#16a34a', borderRadius: 6, fontWeight: 650 }}>{isAdmin ? 'Hoàn thành' : 'Báo hoàn thành'}</Button>}
                                 <Button size="small" type="text" onClick={() => handleNoteAssignment(task)} style={{ fontWeight: 600 }}>Ghi chú</Button>
                                 {isAdmin && <Tooltip title="Sửa bàn giao"><Button size="small" type="text" icon={<EditOutlined />} onClick={() => handleEditAssignment(task)} aria-label="Sửa bàn giao" /></Tooltip>}
                                 {isAdmin && <Tooltip title="Xóa bàn giao"><Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => handleDeleteAssignment(task.id)} aria-label="Xóa bàn giao" /></Tooltip>}
@@ -2498,7 +2507,8 @@ const DailyTasks = () => {
                         const notes = parseNotes(task.note);
                         const latestNote = notes.length > 0 ? notes[notes.length - 1] : null;
                         const completed = task.status === 'completed';
-                        const canComplete = isAdmin || isAssignmentRecipient(task);
+                        const completionRequest = parseAttachments(task.attachments).assignment?.completionRequestedAt;
+                        const canComplete = isAdmin || (isAssignmentRecipient(task) && !completionRequest);
                         return (
                             <div key={task.id} style={{
                                 display: 'grid',
@@ -2623,7 +2633,9 @@ const DailyTasks = () => {
         const renderRow = (task: Task, color: string) => {
             const evidence = getEvidence(task);
             const isAssignment = task.type === 'assignment';
-            const canCompleteAssignment = isAssignment && task.status !== 'completed' && (isAdmin || isAssignmentRecipient(task));
+            const completionRequest = parseAttachments(task.attachments).assignment?.completionRequestedAt;
+            const canCompleteAssignment = isAssignment && task.status !== 'completed' && isAdmin;
+            const canRequestAssignmentCompletion = isAssignment && task.status !== 'completed' && isAssignmentRecipient(task) && !completionRequest;
             const canSubmitAssignmentEvidence = isAssignment && (isAdmin || isAssignmentRecipient(task));
             const canCompleteDailyTask = !isAssignment && task.status !== 'completed';
             const deadlineText = isAssignment
@@ -2664,7 +2676,9 @@ const DailyTasks = () => {
                         {hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
                         {evidence.required && evidence.status === 'submitted' && canReviewEvidence && <Tooltip title="Duyệt bằng chứng"><Button type="text" size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ color: '#16a34a' }} /></Tooltip>}
                         <Button size="small" onClick={() => handleNoteAssignment(task)} style={{ borderRadius: 6 }}>Ghi chú</Button>
-                        {canCompleteAssignment && !needsEvidence && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} className="daily-task-primary-action">Hoàn thành</Button>}
+                        {completionRequest && <span style={{ color: '#d97706', fontSize: 12, fontWeight: 650 }}>Đã báo hoàn thành{isAdmin ? ` · ${parseAttachments(task.attachments).assignment?.completionRequestedBy || ''}` : ', chờ quản lý xác nhận'}</span>}
+                        {canRequestAssignmentCompletion && !needsEvidence && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} className="daily-task-primary-action">Báo hoàn thành</Button>}
+                        {canCompleteAssignment && !needsEvidence && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} className="daily-task-primary-action">Xác nhận hoàn thành</Button>}
                         {isAdmin && <Tooltip title="Sửa"><Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditAssignment(task)} /></Tooltip>}
                         {isAdmin && <Tooltip title="Xóa"><Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteAssignment(task.id)} /></Tooltip>}
                     </Space>

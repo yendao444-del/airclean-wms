@@ -5751,6 +5751,49 @@ ipcMain.handle('dailyTasks:createAssignments', async (event, taskData, assignees
     }
 });
 
+// An assignment recipient can request completion, but only an admin can close it.
+ipcMain.handle('dailyTasks:requestAssignmentCompletion', async (_event, id) => {
+    try {
+        const actor = await getCurrentActor();
+        const task = await prisma.dailyTask.findUnique({ where: { id: Number(id) } });
+        if (!task) throw new Error('Assignment task was not found.');
+        if (task.type !== 'assignment') throw new Error('This action only applies to assignment tasks.');
+        if (task.status === 'completed') throw new Error('This assignment is already completed.');
+        if (actor.role !== 'admin' && !actorOwnsTask(actor, task)) {
+            throw new Error('You can only request completion for an assignment assigned to you.');
+        }
+
+        const attachments = parseTaskAttachments(task.attachments);
+        if (attachments?.evidence?.required && attachments.evidence.status !== 'approved') {
+            throw new Error('Evidence must be approved before requesting completion.');
+        }
+        attachments.assignment = {
+            ...(attachments.assignment || {}),
+            completionRequestedAt: new Date().toISOString(),
+            completionRequestedBy: actor.username,
+        };
+        const updated = await prisma.dailyTask.update({
+            where: { id: task.id },
+            data: { attachments: JSON.stringify(attachments) },
+        });
+        await appendDailyTaskHistory({
+            taskId: task.id,
+            taskTitle: task.title,
+            category: task.category,
+            assignee: task.assignee,
+            verifier: task.verifier || '',
+            action: 'completion_requested',
+            timestamp: new Date().toISOString(),
+            description: `${actor.username} requested completion for assignment: "${task.title}"`,
+        });
+        void logActivity({ module: 'daily_tasks', action: 'REQUEST_COMPLETE', recordId: task.id, recordName: task.title, description: `${actor.username} requested completion approval` });
+        return { success: true, data: updated };
+    } catch (error) {
+        console.error('Error requesting assignment completion:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 // Update task
 ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
     try {
@@ -5759,6 +5802,9 @@ ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
         const existingTask = await prisma.dailyTask.findUnique({ where: { id: Number(id) } });
         if (!existingTask) throw new Error('KhÃ´ng tÃ¬m tháº¥y cÃ´ng viá»‡c.');
         const existingAttachments = parseTaskAttachments(existingTask.attachments);
+        if (actor.role !== 'admin' && existingTask.type === 'assignment' && updates.status === 'completed') {
+            throw new Error('Only an admin can complete an assignment.');
+        }
         const canCompleteSharedAssignment = existingTask.type === 'assignment'
             && updates.status === 'completed'
             && actorOwnsTask(actor, existingTask);
@@ -5796,6 +5842,15 @@ ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
         }
 
         // Auto set completedAt khi status thay đổi
+        if (updates.status === 'pending' && existingTask.status === 'completed' && existingTask.type === 'assignment') {
+            const reopenedAttachments = parseTaskAttachments(updateData.attachments || existingTask.attachments);
+            if (reopenedAttachments.assignment) {
+                delete reopenedAttachments.assignment.completionRequestedAt;
+                delete reopenedAttachments.assignment.completionRequestedBy;
+            }
+            updateData.attachments = JSON.stringify(reopenedAttachments);
+        }
+
         if (updates.status === 'completed' && !updates.completedAt) {
             updateData.completedAt = new Date();
         } else if (updates.status === 'pending') {

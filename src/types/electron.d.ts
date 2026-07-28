@@ -166,6 +166,7 @@ export interface ElectronAPI {
         uploadEvidenceImage: (payload: { taskId: number; mimeType: string; data: string; hash: string }) => Promise<{ success: boolean; data?: { storagePath: string }; error?: string }>;
         submitEvidence: (payload: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         reviewEvidence: (taskId: number, approved: boolean) => Promise<{ success: boolean; data?: any; error?: string }>;
+        requestAssignmentCompletion: (taskId: number) => Promise<{ success: boolean; data?: any; error?: string }>;
         completeRegularTask: (taskId: number, payload: { verifier: string; assignee?: string }) => Promise<{ success: boolean; data?: any; error?: string }>;
         getEvidenceImageUrl: (taskId: number, storagePath?: string) => Promise<{ success: boolean; data?: { url: string }; error?: string }>;
         listEvidencePenalties: () => Promise<{ success: boolean; data?: any[]; error?: string }>;

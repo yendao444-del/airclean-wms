@@ -96,6 +96,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         uploadEvidenceImage: (payload) => ipcRenderer.invoke('dailyTasks:uploadEvidenceImage', payload),
         submitEvidence: (payload) => ipcRenderer.invoke('dailyTasks:submitEvidence', payload),
         reviewEvidence: (taskId, approved) => ipcRenderer.invoke('dailyTasks:reviewEvidence', taskId, approved),
+        requestAssignmentCompletion: (taskId) => ipcRenderer.invoke('dailyTasks:requestAssignmentCompletion', taskId),
         completeRegularTask: (taskId, payload) => ipcRenderer.invoke('dailyTasks:completeRegularTask', taskId, payload),
         getEvidenceImageUrl: (taskId, storagePath) => ipcRenderer.invoke('dailyTasks:getEvidenceImageUrl', taskId, storagePath),
         listEvidencePenalties: () => ipcRenderer.invoke('dailyTasks:listEvidencePenalties'),
