@@ -5756,24 +5756,35 @@ function getAssignmentEvidencePenaltyAt(dueAt, cycle) {
     return penaltyAt;
 }
 
+function getAssignmentPenaltyScheduleAnchor(task, dueAt) {
+    const createdAt = task?.createdAt ? new Date(task.createdAt) : null;
+    // A task may be created after its selected deadline. Do not backfill fines
+    // for days before it existed: begin its escalation on the creation date at
+    // the configured deadline time instead.
+    if (!createdAt || Number.isNaN(createdAt.getTime()) || createdAt <= dueAt) return dueAt;
+    const anchor = new Date(createdAt);
+    anchor.setHours(dueAt.getHours(), dueAt.getMinutes(), dueAt.getSeconds(), dueAt.getMilliseconds());
+    return anchor;
+}
+
 // v1.0.336 and earlier escalated assignments at 07:00, ahead of a 19:00
 // deadline. Repair the records on reconciliation so premature cycles never
 // reach payroll and historical records retain the correct scheduled time.
-async function repairLegacyAssignmentPenaltySchedule(task, dueAt, now) {
+async function repairLegacyAssignmentPenaltySchedule(task, dueAt, scheduleAnchor, now) {
     const dueKey = dueAt.toISOString();
     const prefix = `${ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:`;
+    const legacyPrefix = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:`;
     const records = await prisma.appConfig.findMany({
-        where: { key: { startsWith: prefix } },
+        where: { OR: [{ key: { startsWith: prefix } }, { key: { startsWith: legacyPrefix } }] },
         select: { key: true, value: true }
     });
 
     for (const record of records) {
         let penalty;
         try { penalty = JSON.parse(record.value); } catch { continue; }
-        const cycle = Number(penalty?.cycle);
-        if (!Number.isInteger(cycle) || cycle < 1) continue;
+        const cycle = Number(penalty?.cycle) || 1;
 
-        const expectedAt = getAssignmentEvidencePenaltyAt(dueAt, cycle);
+        const expectedAt = getAssignmentEvidencePenaltyAt(scheduleAnchor, cycle);
         if (expectedAt > now) {
             // Another caller may be reconciling the same task. deleteMany is
             // intentionally idempotent when the first caller already removed it.
@@ -5784,7 +5795,7 @@ async function repairLegacyAssignmentPenaltySchedule(task, dueAt, now) {
         if (penalty.penaltyAt !== expectedAt.toISOString()) {
             await prisma.appConfig.updateMany({
                 where: { key: record.key },
-                data: { value: JSON.stringify({ ...penalty, penaltyAt: expectedAt.toISOString() }) }
+                data: { value: JSON.stringify({ ...penalty, cycle, multiplier: Number(penalty?.multiplier) || cycle, penaltyAt: expectedAt.toISOString() }) }
             });
         }
     }
@@ -5803,10 +5814,11 @@ async function createAssignmentEvidencePenaltyIfDue(task, now = new Date()) {
     if (Number.isNaN(dueAt.getTime())) return null;
     const recipients = getTaskRecipients(task, attachments);
     if (recipients.length === 0) return [];
+    const scheduleAnchor = getAssignmentPenaltyScheduleAnchor(task, dueAt);
 
-    await repairLegacyAssignmentPenaltySchedule(task, dueAt, now);
+    await repairLegacyAssignmentPenaltySchedule(task, dueAt, scheduleAnchor, now);
 
-    const checkpoints = getAssignmentEvidencePenaltyCheckpoints(dueAt, now);
+    const checkpoints = getAssignmentEvidencePenaltyCheckpoints(scheduleAnchor, now);
     if (checkpoints.length === 0) return [];
 
     const dueKey = dueAt.toISOString();

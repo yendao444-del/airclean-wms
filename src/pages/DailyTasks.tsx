@@ -147,6 +147,7 @@ interface Task {
     priority: 'low' | 'normal' | 'high' | 'urgent';
     dueTime: string;
     dueDate?: string;
+    createdAt?: string;
     status: 'pending' | 'completed';
     tags?: string[];
     description?: string;
@@ -207,10 +208,14 @@ const getNextAssignmentEvidencePenalty = (task: Task) => {
     const nextCycle = penaltyCount + 1;
     const dueAt = dayjs(`${task.dueDate} ${task.dueTime}`, 'YYYY-MM-DD HH:mm');
     if (!dueAt.isValid()) return null;
+    const createdAt = task.createdAt ? dayjs(task.createdAt) : null;
+    const scheduleAnchor = createdAt?.isValid() && createdAt.isAfter(dueAt)
+        ? createdAt.hour(dueAt.hour()).minute(dueAt.minute()).second(dueAt.second()).millisecond(0)
+        : dueAt;
 
     return {
         cycle: nextCycle,
-        deadline: dueAt.add(penaltyCount, 'day'),
+        deadline: scheduleAnchor.add(penaltyCount, 'day'),
         amount: getAssignmentDeadlinePenalty(task) * nextCycle,
     };
 };
