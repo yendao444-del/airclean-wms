@@ -248,6 +248,7 @@ export interface ElectronAPI {
         bulkCreate: (records: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         importFromFolder: () => Promise<{ success: boolean; data?: any[]; error?: string; folderPath?: string; fileResults?: any[]; totalFiles?: number; totalRows?: number }>;
         adjustStock: (data: StockMutationPayload) => Promise<StockMutationResult>;
+        completeAndRestore: (data: { refundId: number; items?: Array<{ sku?: string; variantSku?: string; quantity?: number; qty?: number; name?: string; productName?: string }>; notes?: string; isCustom?: boolean }) => Promise<{ success: boolean; data?: any; error?: string }>;
     };
     stockBalance: {
         getAll: (filters?: { limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;

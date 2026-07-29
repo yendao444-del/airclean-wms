@@ -2294,6 +2294,62 @@ ipcMain.handle('refunds:adjustStock', async (event, data) => {
     }
 });
 
+// Complete a refund only after every stock movement succeeds. This keeps a
+// failed combo restore visible for retry instead of silently marking it done.
+ipcMain.handle('refunds:completeAndRestore', async (event, data = {}) => {
+    try {
+        requireRole('admin', 'manager');
+        const refundId = Number(data.refundId);
+        if (!Number.isInteger(refundId) || refundId <= 0) throw new Error('Mã hàng hoàn không hợp lệ.');
+
+        const response = await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
+            const refund = await tx.refund.findUnique({ where: { id: refundId } });
+            if (!refund) throw new Error('Không tìm thấy phiếu hàng hoàn.');
+            if (refund.status === 'completed') throw new Error('Phiếu hàng hoàn này đã được xác nhận trước đó.');
+
+            let items = [];
+            if (Array.isArray(data.items)) {
+                items = data.items;
+            } else {
+                try { items = JSON.parse(refund.items || '[]'); } catch { items = []; }
+            }
+
+            const normalizedItems = items.map(item => ({
+                sku: String(item?.sku || item?.variantSku || '').trim(),
+                quantity: Number(item?.quantity ?? item?.qty ?? 0),
+                name: String(item?.name || item?.productName || '').trim(),
+            })).filter(item => item.sku && Number.isFinite(item.quantity) && item.quantity > 0);
+            if (normalizedItems.length === 0) throw new Error('Phiếu hoàn không có SKU hợp lệ để cộng kho.');
+
+            const reference = String(refund.orderNumber || refund.refundCode || `P.Hoan ${refund.id}`).trim();
+            const note = data.isCustom
+                ? `Xác nhận hàng hoàn lệch/custom (${refund.customerName})`
+                : `Xác nhận nhận hàng hoàn/trả về kho (${refund.customerName})`;
+
+            for (const item of normalizedItems) {
+                await deductItemOrCombo(tx, item.sku, item.quantity, {
+                    type: 'refund', referenceType: 'HOAN', reference, note,
+                    createdBy: currentSession.username,
+                });
+            }
+
+            const nextNotes = data.notes === undefined ? refund.notes : String(data.notes || '');
+            const updatedRefund = await tx.refund.update({
+                where: { id: refund.id },
+                data: { status: 'completed', notes: nextNotes },
+            });
+            return { refund: updatedRefund, items: normalizedItems, reference };
+        }, { timeout: 30000, maxWait: 10000 }));
+
+        for (const item of response.items) {
+            emitStockChanged({ sku: item.sku, quantity: item.quantity, isAdd: true, referenceType: 'HOAN', reference: response.reference });
+        }
+        return { success: true, data: response };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
 ipcMain.handle('stockBalance:adjustStock', async (event, data) => {
     try {
         return await handleDedicatedStockMutation(data, ['admin'], ['CAN_BANG']);
@@ -5699,7 +5755,7 @@ async function createEvidencePenaltyIfDue(task, now = new Date()) {
             dueAt: dueAt.toISOString(),
             penaltyAt: penaltyAt.toISOString(),
             type: 'Không nộp bằng chứng đúng hạn',
-            detail: `${task.title} - quá hạn ${EVIDENCE_GRACE_MINUTES} phút chưa nộp bằng chứng (chia ${recipients.length} người)`,
+            detail: `${task.title} - quá hạn ${EVIDENCE_GRACE_MINUTES} phút chưa nộp bằng chứng`,
             source: 'daily_task_evidence_overdue',
         };
         try {
@@ -5850,7 +5906,7 @@ async function createAssignmentEvidencePenaltyIfDue(task, now = new Date()) {
                 cycle: checkpoint.cycle,
                 multiplier: checkpoint.multiplier,
                 type: 'Không nộp bằng chứng bàn giao',
-                detail: `${task.title} - lần ${checkpoint.cycle}: chưa nộp bằng chứng, phạt x${checkpoint.multiplier} (chia ${recipients.length} người)`,
+                detail: `${task.title} - lần ${checkpoint.cycle}: chưa nộp bằng chứng, phạt x${checkpoint.multiplier}`,
                 source: 'assignment_evidence_overdue',
             };
             try {

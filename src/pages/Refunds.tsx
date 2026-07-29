@@ -426,6 +426,26 @@ export default function RefundsPage() {
     // ✅ Xác nhận hoàn ĐẦY ĐỦ → Cộng kho theo hàng gốc
     const confirmFull = async (refundRecord: Refund) => {
         try {
+            const result = await window.electronAPI.refunds.completeAndRestore({ refundId: refundRecord.id });
+            if (!result?.success) throw new Error(result?.error || 'Khong the cong lai ton kho.');
+
+            const restoredItems = result.data?.items || [];
+            const reference = result.data?.reference || refundRecord.orderNumber || refundRecord.refundCode || `P.Hoan ${refundRecord.id}`;
+            setRefunds(prev => prev.map(refund => refund.id === refundRecord.id ? { ...refund, status: 'completed' } : refund));
+            setStockLog(prev => [
+                ...restoredItems.map((item: any) => ({ sku: item.sku, name: item.name || '', qty: item.quantity, orderId: reference, time: dayjs().format('HH:mm:ss DD/MM') })),
+                ...prev,
+            ]);
+            message.success(`Da hoan va cong ${restoredItems.reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0)} SP vao kho`);
+            playSuccess();
+        } catch (error: any) {
+            console.error('Confirm full error:', error);
+            message.error(error?.message || 'Loi khi xac nhan hoan. Don van giu trang thai dang xu ly.');
+        }
+    };
+
+    const legacyConfirmFull = async (refundRecord: Refund) => {
+        try {
             let origItems: RefundItem[] = [];
             try { origItems = JSON.parse(refundRecord.items); } catch { origItems = []; }
 
@@ -499,6 +519,44 @@ export default function RefundsPage() {
 
     // ⚠️ Xác nhận hoàn KHÔNG KHỚP → Cộng kho theo SKU/SL custom
     const confirmCustom = async (refundRecord: Refund) => {
+        const returnItems = returnItemsMap[refundRecord.id] || [];
+        const validItems = returnItems.filter(item => item.sku && item.qty > 0);
+        if (validItems.length === 0) {
+            message.warning('Chua nhap hang thuc nhan.');
+            return;
+        }
+
+        try {
+            let originalItems: RefundItem[] = [];
+            try { originalItems = JSON.parse(refundRecord.items); } catch { originalItems = []; }
+            const originalTotal = originalItems.reduce((sum, item) => sum + item.quantity, 0);
+            const receivedTotal = validItems.reduce((sum, item) => sum + item.qty, 0);
+            const notes = `${refundRecord.notes || ''} | [KHONG KHOP] Gui ${originalTotal} combo -> Nhan ${receivedTotal} SP. Xac nhan: ${dayjs().format('DD/MM HH:mm')}`;
+            const result = await window.electronAPI.refunds.completeAndRestore({
+                refundId: refundRecord.id,
+                items: validItems.map(item => ({ sku: item.sku, quantity: item.qty, name: item.name })),
+                notes,
+                isCustom: true,
+            });
+            if (!result?.success) throw new Error(result?.error || 'Khong the cong lai ton kho.');
+
+            const reference = result.data?.reference || refundRecord.orderNumber || refundRecord.refundCode || `P.Hoan ${refundRecord.id}`;
+            const restoredItems = result.data?.items || [];
+            setRefunds(prev => prev.map(refund => refund.id === refundRecord.id ? { ...refund, status: 'completed', notes } : refund));
+            setStockLog(prev => [
+                ...restoredItems.map((item: any) => ({ sku: item.sku, name: item.name || '', qty: item.quantity, orderId: reference, time: dayjs().format('HH:mm:ss DD/MM') })),
+                ...prev,
+            ]);
+            setMismatchOpen(prev => { const next = new Set(prev); next.delete(refundRecord.id); return next; });
+            message.success('Da hoan va cong kho theo so luong thuc nhan');
+            playSuccess();
+        } catch (error: any) {
+            console.error('Confirm custom error:', error);
+            message.error(error?.message || 'Loi khi xac nhan hoan. Don van giu trang thai dang xu ly.');
+        }
+    };
+
+    const legacyConfirmCustom = async (refundRecord: Refund) => {
         const returnItems = returnItemsMap[refundRecord.id] || [];
         const validItems = returnItems.filter(i => i.sku && i.qty > 0);
 
