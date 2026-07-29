@@ -5775,12 +5775,14 @@ async function repairLegacyAssignmentPenaltySchedule(task, dueAt, now) {
 
         const expectedAt = getAssignmentEvidencePenaltyAt(dueAt, cycle);
         if (expectedAt > now) {
-            await prisma.appConfig.delete({ where: { key: record.key } });
+            // Another caller may be reconciling the same task. deleteMany is
+            // intentionally idempotent when the first caller already removed it.
+            await prisma.appConfig.deleteMany({ where: { key: record.key } });
             continue;
         }
 
         if (penalty.penaltyAt !== expectedAt.toISOString()) {
-            await prisma.appConfig.update({
+            await prisma.appConfig.updateMany({
                 where: { key: record.key },
                 data: { value: JSON.stringify({ ...penalty, penaltyAt: expectedAt.toISOString() }) }
             });
@@ -5862,14 +5864,23 @@ async function createAssignmentEvidencePenaltyIfDue(task, now = new Date()) {
     return created;
 }
 
-async function reconcileEvidencePenalties() {
-    const tasks = await prisma.dailyTask.findMany({ where: { status: { not: 'completed' } } });
-    const created = [];
-    for (const task of tasks) {
-        const penalties = await createEvidencePenaltyIfDue(task);
-        if (Array.isArray(penalties)) created.push(...penalties);
-    }
-    return created;
+let evidencePenaltyReconcilePromise = null;
+function reconcileEvidencePenalties() {
+    // The page loads tasks and penalties in parallel, while a timer also runs
+    // every minute. Share one reconciliation to avoid duplicate repair writes.
+    if (evidencePenaltyReconcilePromise) return evidencePenaltyReconcilePromise;
+    evidencePenaltyReconcilePromise = (async () => {
+        const tasks = await prisma.dailyTask.findMany({ where: { status: { not: 'completed' } } });
+        const created = [];
+        for (const task of tasks) {
+            const penalties = await createEvidencePenaltyIfDue(task);
+            if (Array.isArray(penalties)) created.push(...penalties);
+        }
+        return created;
+    })();
+    return evidencePenaltyReconcilePromise.finally(() => {
+        evidencePenaltyReconcilePromise = null;
+    });
 }
 
 async function cleanupExpiredEvidenceImages() {
