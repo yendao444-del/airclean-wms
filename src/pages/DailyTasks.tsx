@@ -210,7 +210,7 @@ const getNextAssignmentEvidencePenalty = (task: Task) => {
 
     return {
         cycle: nextCycle,
-        deadline: dueAt.startOf('day').add(penaltyCount, 'day').hour(7).minute(0).second(0),
+        deadline: dueAt.add(penaltyCount, 'day'),
         amount: getAssignmentDeadlinePenalty(task) * nextCycle,
     };
 };
@@ -524,7 +524,10 @@ const DailyTasks = () => {
                 setTasks(result.data.map((t: any) => ({
                     ...t,
                     evidencePenaltyRecorded: penaltiesByTask.has(`${t.id}:${new Date(t.dueDate).toISOString()}`),
-                    evidencePenaltyCount: (penaltiesByTask.get(`${t.id}:${new Date(t.dueDate).toISOString()}`) || []).length,
+                    // A handover can be assigned to several people. Count the
+                    // latest penalty cycle, not the number of employee records.
+                    evidencePenaltyCount: Math.max(0, ...(penaltiesByTask.get(`${t.id}:${new Date(t.dueDate).toISOString()}`) || [])
+                        .map((penalty: any) => Number(penalty.cycle) || 1)),
                     tags: t.tags ? JSON.parse(t.tags) : [],
                     attachments: parseAttachments(t.attachments),
                     dueTime: dayjs(t.dueDate).format('HH:mm'),
@@ -2699,7 +2702,7 @@ const DailyTasks = () => {
                 <div style={{ color: color === '#dc2626' ? '#dc2626' : '#475569', fontSize: 13, fontWeight: 650 }}><ClockCircleOutlined /> {deadlineText}</div>
                 <div className={`daily-task-evidence-summary${evidencePenaltyRecorded ? ' daily-task-evidence-escalation' : ''}`} style={{ color: evidence.required ? '#c2410c' : '#64748b' }}>
                     {evidencePenaltyRecorded ? <>
-                        <span className="daily-task-evidence-penalty"><WarningOutlined /> Đã phạt {formatPenaltyAmount(evidencePenaltyAmount)}đ</span>
+                        <span className="daily-task-evidence-penalty"><WarningOutlined /> Đã phạt lần {task.evidencePenaltyCount}: {formatPenaltyAmount(evidencePenaltyAmount * Number(task.evidencePenaltyCount || 1))}đ</span>
                         {nextAssignmentEvidencePenalty && (
                             <Tooltip title={`Nếu chưa nộp bằng chứng trước mốc này, hệ thống sẽ ghi phạt lần ${nextAssignmentEvidencePenalty.cycle}.`}>
                                 <span className="daily-task-evidence-next"><ClockCircleOutlined /> Tiếp: {nextAssignmentEvidencePenalty.deadline.format('HH:mm DD/MM')} · {formatPenaltyAmount(nextAssignmentEvidencePenalty.amount)}đ</span>
@@ -3320,7 +3323,7 @@ const DailyTasks = () => {
                         </Form.Item>
                     </div>
                     <div style={{ marginTop: -10, marginBottom: 14, color: '#8a5a12', fontSize: 12, lineHeight: 1.45 }}>
-                        <WarningOutlined /> Mức phạt khi quá hạn. Nếu yêu cầu bằng chứng: quá hạn 20 phút phạt lần đầu; từ 07:00 các ngày sau, mức phạt tăng theo số lần chưa nộp.
+                        <WarningOutlined /> Mức phạt khi quá hạn. Bàn giao yêu cầu bằng chứng sẽ phạt ngay tại deadline và tăng theo từng ngày, đúng giờ deadline đã đặt.
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, padding: '10px 12px', border: '1px solid #dbe3ec', borderRadius: 7, background: '#f8fafc' }}>
                         <Form.Item name="evidenceRequired" valuePropName="checked" style={{ margin: 0 }}>
