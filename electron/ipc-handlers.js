@@ -8791,7 +8791,8 @@ const CONFIG_ACCESS = Object.freeze({
     dailyTasksSnapshots: { read: ['admin'], write: ['admin'], sensitive: true },
     telegramApiToken: { read: ['admin'], write: ['admin'], sensitive: true },
     telegramChatId: { read: ['admin'], write: ['admin'], sensitive: true },
-    pickupWatchFolder: { read: ['admin'], write: ['admin'], sensitive: true },
+    // Nhặt hàng là công cụ vận hành chung: mọi tài khoản được chọn và khôi phục thư mục theo dõi.
+    pickupWatchFolder: { read: ['admin', 'manager', 'staff'], write: ['admin', 'manager', 'staff'] },
     statusList: { read: ['admin', 'manager'], write: ['admin', 'manager'] },
     activePacker: { read: ['admin', 'manager'], write: ['admin', 'manager'] },
     telegramOrderCounter: { read: ['admin', 'manager'], write: ['admin', 'manager'] },
