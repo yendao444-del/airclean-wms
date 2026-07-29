@@ -5462,7 +5462,6 @@ const EVIDENCE_GRACE_MINUTES = 20;
 const MAX_EVIDENCE_IMAGES = 5;
 const TASK_PENALTY_KEY_PREFIX = 'dailyTaskEvidencePenalty:';
 const ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX = 'assignmentEvidencePenalty:';
-const ASSIGNMENT_EVIDENCE_ESCALATION_HOUR = 7;
 const DAILY_TASK_REST_DAY_HOLIDAYS = new Set(['01-01', '04-30', '05-01', '09-02']);
 
 function isDailyTaskPenaltyRestDay(date) {
@@ -5732,20 +5731,61 @@ function getAssignmentEvidencePenaltyAmount(attachments, evidence) {
 }
 
 function getAssignmentEvidencePenaltyCheckpoints(dueAt, now) {
-    const firstPenaltyAt = new Date(dueAt.getTime() + EVIDENCE_GRACE_MINUTES * 60 * 1000);
+    // Bàn giao phạt ngay tại deadline; the daily-task grace period does not
+    // apply to this escalating assignment policy.
+    const firstPenaltyAt = new Date(dueAt);
     if (now < firstPenaltyAt) return [];
 
     const checkpoints = [{ cycle: 1, multiplier: 1, penaltyAt: firstPenaltyAt }];
     const nextPenaltyAt = new Date(dueAt);
-    nextPenaltyAt.setHours(0, 0, 0, 0);
     nextPenaltyAt.setDate(nextPenaltyAt.getDate() + 1);
-    nextPenaltyAt.setHours(ASSIGNMENT_EVIDENCE_ESCALATION_HOUR, 0, 0, 0);
 
     for (let cycle = 2; nextPenaltyAt <= now; cycle += 1) {
         checkpoints.push({ cycle, multiplier: cycle, penaltyAt: new Date(nextPenaltyAt) });
         nextPenaltyAt.setDate(nextPenaltyAt.getDate() + 1);
     }
     return checkpoints;
+}
+
+function getAssignmentEvidencePenaltyAt(dueAt, cycle) {
+    if (cycle === 1) {
+        return new Date(dueAt);
+    }
+    const penaltyAt = new Date(dueAt);
+    penaltyAt.setDate(penaltyAt.getDate() + cycle - 1);
+    return penaltyAt;
+}
+
+// v1.0.336 and earlier escalated assignments at 07:00, ahead of a 19:00
+// deadline. Repair the records on reconciliation so premature cycles never
+// reach payroll and historical records retain the correct scheduled time.
+async function repairLegacyAssignmentPenaltySchedule(task, dueAt, now) {
+    const dueKey = dueAt.toISOString();
+    const prefix = `${ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:`;
+    const records = await prisma.appConfig.findMany({
+        where: { key: { startsWith: prefix } },
+        select: { key: true, value: true }
+    });
+
+    for (const record of records) {
+        let penalty;
+        try { penalty = JSON.parse(record.value); } catch { continue; }
+        const cycle = Number(penalty?.cycle);
+        if (!Number.isInteger(cycle) || cycle < 1) continue;
+
+        const expectedAt = getAssignmentEvidencePenaltyAt(dueAt, cycle);
+        if (expectedAt > now) {
+            await prisma.appConfig.delete({ where: { key: record.key } });
+            continue;
+        }
+
+        if (penalty.penaltyAt !== expectedAt.toISOString()) {
+            await prisma.appConfig.update({
+                where: { key: record.key },
+                data: { value: JSON.stringify({ ...penalty, penaltyAt: expectedAt.toISOString() }) }
+            });
+        }
+    }
 }
 
 async function createAssignmentEvidencePenaltyIfDue(task, now = new Date()) {
@@ -5761,6 +5801,8 @@ async function createAssignmentEvidencePenaltyIfDue(task, now = new Date()) {
     if (Number.isNaN(dueAt.getTime())) return null;
     const recipients = getTaskRecipients(task, attachments);
     if (recipients.length === 0) return [];
+
+    await repairLegacyAssignmentPenaltySchedule(task, dueAt, now);
 
     const checkpoints = getAssignmentEvidencePenaltyCheckpoints(dueAt, now);
     if (checkpoints.length === 0) return [];
