@@ -262,7 +262,7 @@ export interface ElectronAPI {
         getBySku: (params: { sku: string; limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     };
     pickup: {
-        sendTelegram: (data: { token: string; chatId: string; message: string }) => Promise<{ success: boolean; error?: string }>;
+        sendTelegram: (data: { message: string }) => Promise<{ success: boolean; error?: string }>;
         selectAndWatch: () => Promise<{ success: boolean; data?: { folderPath: string; existingFiles: number }; error?: string }>;
         startWatch: (folderPath: string) => Promise<{ success: boolean; data?: { folderPath: string; existingFiles: number }; error?: string }>;
         readFolderFiles: (folderPath: string) => Promise<{ success: boolean; data?: { name: string; base64: string }[]; error?: string }>;

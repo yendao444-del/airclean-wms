@@ -1861,11 +1861,27 @@ ipcMain.handle('pickup:getStats', async () => {
     }
 });
 
-// Gửi thông báo Telegram
-ipcMain.handle('pickup:sendTelegram', async (event, { token, chatId, message }) => {
+// Gửi thông báo Telegram cho Nhặt hàng. Token/chat ID luôn ở Electron,
+// không trả về renderer cho nhân viên hoặc quản lý.
+ipcMain.handle('pickup:sendTelegram', async (event, { message } = {}) => {
     try {
-        if (!token || !chatId || !message) {
-            return { success: false, error: 'Thiếu thông tin Telegram' };
+        requireRole('admin', 'manager');
+        if (!message) {
+            return { success: false, error: 'Thiếu nội dung Telegram' };
+        }
+
+        if (!prisma) throw new Error('Prisma not available');
+        const configs = await prisma.appConfig.findMany({
+            where: { key: { in: ['telegramApiToken', 'telegramChatId'] } },
+            select: { key: true, value: true }
+        });
+        const configValues = Object.fromEntries(configs.map(item => {
+            try { return [item.key, JSON.parse(item.value)]; } catch { return [item.key, item.value]; }
+        }));
+        const token = String(configValues.telegramApiToken || '').trim();
+        const chatId = String(configValues.telegramChatId || '').trim();
+        if (!token || !chatId) {
+            return { success: false, error: 'Telegram chưa được admin cấu hình' };
         }
 
         return new Promise((resolve) => {

@@ -471,7 +471,6 @@ export default function OrderPickingPage() {
     const [scannedTrackings, setScannedTrackings] = useState<string[]>([]);
     const [currentTracking, setCurrentTracking] = useState('');
     const [scanStatus, setScanStatus] = useState<{ type: string; msg: string }>({ type: 'idle', msg: 'Sẵn sàng — Import thư mục rồi quét mã vận đơn' });
-    const [telegramSettings, setTelegramSettings] = useState({ chatId: '', apiToken: '' });
     const [scanValue, setScanValue] = useState('');
     const [isCompleting, setIsCompleting] = useState(false);
     const [pickSlipNumber, setPickSlipNumber] = useState(1);
@@ -485,9 +484,8 @@ export default function OrderPickingPage() {
     const handleCompletePickingRef = useRef<() => void>(() => { });
     const scanValueRef = useRef('');
 
-    // Load products + combos + telegram config from DB
+    // Load products + combos from DB
     useEffect(() => {
-        loadTelegramSettings();
         autoRestoreWatcher();
 
         // Global Enter key listener cho phím tắt "Hoàn tất"
@@ -525,19 +523,6 @@ export default function OrderPickingPage() {
             if (cleanupNewFile) cleanupNewFile();
         };
     }, []);
-
-    const loadTelegramSettings = async () => {
-        try {
-            const chatIdResult = await window.electronAPI.appConfig.get('telegramChatId');
-            const apiTokenResult = await window.electronAPI.appConfig.get('telegramApiToken');
-            setTelegramSettings({
-                chatId: chatIdResult?.data || '',
-                apiToken: apiTokenResult?.data || ''
-            });
-        } catch (error) {
-            console.error('Error loading telegram settings:', error);
-        }
-    };
 
     // Build SKU maps từ context data khi context sẵn sàng
     useEffect(() => {
@@ -794,12 +779,6 @@ export default function OrderPickingPage() {
 
     // ===== GỬI TELEGRAM (chạy ngầm, không block UI) =====
     const sendTelegramInBackground = (pickList: ConsolidatedItem[], orderCount: number, totalPcs: number, slipNo: number) => {
-        const { chatId, apiToken } = telegramSettings;
-        if (!chatId || !apiToken) {
-            console.log('ℹ️ Telegram chưa cấu hình — bỏ qua gửi.');
-            return;
-        }
-
         // Tạo nội dung tin nhắn
         let msg = `📋 Phiếu nhặt hàng #${slipNo}\n`;
         msg += `━━━━━━━━━━━━━━━━\n`;
@@ -814,8 +793,6 @@ export default function OrderPickingPage() {
             try {
                 if (window.electronAPI?.pickup?.sendTelegram) {
                     const result = await window.electronAPI.pickup.sendTelegram({
-                        token: apiToken,
-                        chatId: chatId,
                         message: msg
                     });
                     if (result.success) {
@@ -823,6 +800,7 @@ export default function OrderPickingPage() {
                         message.success('📱 Đã gửi Telegram!');
                     } else {
                         console.warn('⚠️ Telegram lỗi:', result.error);
+                        message.warning(`Không gửi được Telegram: ${result.error || 'lỗi không xác định'}`);
                     }
                 } else {
                     console.log('ℹ️ pickup.sendTelegram chưa có — cần restart Electron');
