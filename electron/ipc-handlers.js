@@ -622,6 +622,16 @@ function sanitizeUserForClient(user) {
     return { ...safeUser, isActive: user.status === 'active', mustChangePassword };
 }
 
+// Inventory cards expose stock movements and source documents. Grant the
+// approved warehouse manager read-only access without widening write rights.
+const INVENTORY_LEDGER_VIEWER_USERNAMES = new Set(['nguyenvankhanh']);
+function requireInventoryLedgerReadAccess() {
+    requireRole();
+    if (currentSession.role === 'admin') return;
+    if (currentSession.role === 'manager' && INVENTORY_LEDGER_VIEWER_USERNAMES.has(String(currentSession.username || '').toLowerCase())) return;
+    throw new Error('Khong co quyen xem The kho.');
+}
+
 function hashRememberToken(token) {
     return crypto.createHash('sha256').update(String(token || ''), 'utf8').digest('hex');
 }
@@ -8744,7 +8754,7 @@ async function getProductInfoBySku(sku) {
 // Lấy tất cả inventory logs (có filter + phân trang)
 ipcMain.handle('inventoryLogs:getAll', async (event, filters = {}) => {
     try {
-        requireRole('admin');
+        requireInventoryLedgerReadAccess();
         if (!prisma) throw new Error('Prisma not available');
 
         const where = {};
@@ -8798,7 +8808,7 @@ ipcMain.handle('inventoryLogs:getAll', async (event, filters = {}) => {
 // Lấy log theo SKU (thẻ kho 1 sản phẩm)
 ipcMain.handle('inventoryLogs:getBySku', async (event, { sku, limit = 100 }) => {
     try {
-        requireRole('admin');
+        requireInventoryLedgerReadAccess();
         if (!prisma) throw new Error('Prisma not available');
 
         const logs = await prisma.inventoryLog.findMany({
@@ -8826,7 +8836,7 @@ ipcMain.handle('inventoryLogs:getBySku', async (event, { sku, limit = 100 }) => 
 // Lấy chi tiết chứng từ gốc từ inventory log (click Mã CT)
 ipcMain.handle('inventoryLogs:getRefDetail', async (event, { referenceType, reference }) => {
     try {
-        requireRole('admin');
+        requireInventoryLedgerReadAccess();
         if (!prisma) throw new Error('Prisma not available');
         if (!reference) return { success: false, error: 'Không có mã chứng từ' };
 

@@ -216,6 +216,7 @@ export default function StockCheck() {
     // still enter counts and balance their own session.
     const canManage = user?.role === 'admin';
     const isAdmin = user?.role === 'admin';
+    const canViewLedger = isAdmin || user?.username?.toLowerCase() === 'nguyenvankhanh';
 
     const [currentDate, setCurrentDate] = useState(dayjs());
     const [activeTab, setActiveTab] = useState<'daily' | 'full'>('daily');
@@ -1937,7 +1938,7 @@ export default function StockCheck() {
                                                     style={{ marginBottom: 0 }}
                                                     items={[
                                                         { key: 'check', label: '⚖️ Kiểm hàng' },
-                                                        ...(isAdmin ? [{ key: 'ledger', label: '📋 Thẻ kho' }] : []),
+                                                        ...(canViewLedger ? [{ key: 'ledger', label: '📋 Thẻ kho' }] : []),
                                                     ]}
                                                 />
                                                 <Tooltip title="Cấu hình quy đổi đơn vị" placement="left">
