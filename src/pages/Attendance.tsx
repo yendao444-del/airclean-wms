@@ -3188,10 +3188,6 @@ export default function Attendance() {
     const [packingDateRange, setPackingDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
     const loadPurchasesRef = useRef(false);
 
-    useEffect(() => {
-        loadPackingOrders();
-    }, []);
-
     const loadPackingPromiseRef = useRef<Promise<PackingOrderLog[]> | null>(null);
     const [packingOrdersLoading, setPackingOrdersLoading] = useState(false);
     const loadPackingOrders = async (since?: string, options?: { strict?: boolean }): Promise<PackingOrderLog[]> => {
@@ -3381,12 +3377,22 @@ export default function Attendance() {
 
     // Reload packing orders khi đổi kỳ
     useEffect(() => {
+        if (activeTab !== 'overview') return;
         loadPackingOrders(overviewDateRange[0].startOf('day').toISOString());
-        loadPurchaseVatTracking(overviewDateRange[0].subtract(7, 'day').startOf('day').toISOString());
-        loadDailyTaskTracking();
-        const taskTrackingTimer = window.setInterval(loadDailyTaskTracking, 60 * 1000);
-        return () => window.clearInterval(taskTrackingTimer);
-    }, [overviewDateRange]);
+        // Supporting indicators are not needed for the first overview paint.
+        // Yield once so the shell and primary attendance data render first.
+        const deferredLoad = window.setTimeout(() => {
+            loadPurchaseVatTracking(overviewDateRange[0].subtract(7, 'day').startOf('day').toISOString());
+            loadDailyTaskTracking();
+        }, 0);
+        const taskTrackingTimer = window.setInterval(() => {
+            if (document.visibilityState === 'visible') loadDailyTaskTracking();
+        }, 60 * 1000);
+        return () => {
+            window.clearTimeout(deferredLoad);
+            window.clearInterval(taskTrackingTimer);
+        };
+    }, [overviewDateRange, activeTab]);
 
     // Gộp finesData gốc + extraFines
     const autoVatOverdueFines = useMemo(() => {

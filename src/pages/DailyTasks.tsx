@@ -154,6 +154,7 @@ interface Task {
     note?: string;
     type?: 'daily' | 'assignment';
     attachments?: unknown;
+    penaltyDueKey?: string;
     evidencePenaltyRecorded?: boolean;
     evidencePenaltyCount?: number;
 }
@@ -492,11 +493,15 @@ const DailyTasks = () => {
 
     // Load tasks from backend
     useEffect(() => {
+        // Show task cards first; reset/history work can finish in the background.
+        void loadTasks();
+        void loadHistory();
         (async () => {
             // 🔄 Reset daily tasks nếu sang ngày mới
             try {
                 const resetResult = await window.electronAPI.dailyTasks.resetDaily();
                 if (resetResult.success && resetResult.data?.reset) {
+                    await loadTasks();
                     message.info({
                         content: `🔄 Sang ngày mới! Đã reset ${resetResult.data.resetCount} công việc về chưa hoàn thành.`,
                         duration: 4
@@ -506,35 +511,46 @@ const DailyTasks = () => {
                 console.log('Daily reset skipped:', err);
             }
 
-            // Load data
-            loadTasks();
-            loadHistory();
         })();
     }, []);
+
+    const applyEvidencePenalties = async () => {
+        try {
+            const penaltiesResult = await window.electronAPI.dailyTasks.listEvidencePenalties();
+            const penaltiesByTaskDeadline = new Map<string, any[]>();
+            (penaltiesResult?.success && Array.isArray(penaltiesResult.data) ? penaltiesResult.data : [])
+                .forEach((penalty: any) => {
+                    const key = `${penalty.taskId}:${penalty.dueAt}`;
+                    penaltiesByTaskDeadline.set(key, [...(penaltiesByTaskDeadline.get(key) || []), penalty]);
+                });
+
+            setTasks(prev => prev.map(task => {
+                const penalties = penaltiesByTaskDeadline.get(`${task.id}:${task.penaltyDueKey}`) || [];
+                return {
+                    ...task,
+                    evidencePenaltyRecorded: penalties.length > 0,
+                    evidencePenaltyCount: Math.max(0, ...penalties.map((penalty: any) => Number(penalty.cycle) || 1)),
+                };
+            }));
+        } catch (error) {
+            console.error('Error loading evidence penalties:', error);
+        }
+    };
 
     const loadTasks = async () => {
         try {
             setLoading(true);
-            const [result, penaltiesResult] = await Promise.all([
-                window.electronAPI.dailyTasks.list({}),
-                window.electronAPI.dailyTasks.listEvidencePenalties(),
-            ]);
+            const result = await window.electronAPI.dailyTasks.list({});
             if (result.success && result.data) {
-                const penaltiesByTask = new Map<string, any[]>();
-                (penaltiesResult?.success && Array.isArray(penaltiesResult.data) ? penaltiesResult.data : [])
-                    .forEach((penalty: any) => {
-                        const key = `${penalty.taskId}:${penalty.dueAt}`;
-                        penaltiesByTask.set(key, [...(penaltiesByTask.get(key) || []), penalty]);
-                    });
                 setTasks(result.data.map((t: any) => ({
                     ...t,
-                    evidencePenaltyRecorded: penaltiesByTask.has(`${t.id}:${new Date(t.dueDate).toISOString()}`),
-                    // A handover can be assigned to several people. Count the
-                    // latest penalty cycle, not the number of employee records.
-                    evidencePenaltyCount: Math.max(0, ...(penaltiesByTask.get(`${t.id}:${new Date(t.dueDate).toISOString()}`) || [])
-                        .map((penalty: any) => Number(penalty.cycle) || 1)),
+                    evidencePenaltyRecorded: false,
+                    evidencePenaltyCount: 0,
                     tags: t.tags ? JSON.parse(t.tags) : [],
                     attachments: parseAttachments(t.attachments),
+                    // Daily tasks keep the same ID across days, so retain the
+                    // original deadline for matching only that day's penalty.
+                    penaltyDueKey: new Date(t.dueDate).toISOString(),
                     dueTime: dayjs(t.dueDate).format('HH:mm'),
                     dueDate: dayjs(t.dueDate).format('YYYY-MM-DD'),
                     type: t.type || 'daily'
@@ -547,6 +563,8 @@ const DailyTasks = () => {
         } finally {
             setLoading(false);
         }
+        // Penalty badges are supplemental. Do not hold back the task cards.
+        void applyEvidencePenalties();
     };
 
     // === ASSIGNMENT DEADLINE LOGIC ===

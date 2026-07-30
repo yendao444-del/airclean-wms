@@ -6243,7 +6243,9 @@ ipcMain.handle('dailyTasks:listEvidencePenalties', async () => {
 ipcMain.handle('dailyTasks:list', async (event, filters = {}) => {
     try {
         requireRole();
-        await reconcileEvidencePenalties();
+        // Reconciliation may inspect and write many overdue tasks. Keep it in
+        // the background so opening Daily Tasks is not blocked by that scan.
+        void reconcileEvidencePenalties().catch(error => console.error('Evidence penalty scan error:', error));
         void cleanupExpiredEvidenceImages().catch(error => console.error('Evidence cleanup error:', error));
         const { status, assignee, startDate, endDate, priority } = filters;
 
