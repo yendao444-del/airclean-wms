@@ -13,8 +13,8 @@ try { offlineQueue.init(app.getPath('userData')); } catch (e) { console.error('[
 const isPostgresUrl = (value) => typeof value === 'string' && /^postgres(?:ql)?:\/\//i.test(value.trim());
 // A shell or another local project can leave DATABASE_URL/DIRECT_URL behind.
 // Never pass a non-PostgreSQL value to Prisma; use the packaged fallback instead.
-const databaseUrl = isPostgresUrl(process.env.DATABASE_URL) ? process.env.DATABASE_URL : config.DATABASE_URL;
-const directDatabaseUrl = isPostgresUrl(process.env.DIRECT_URL) ? process.env.DIRECT_URL : (config.DIRECT_URL || databaseUrl);
+const databaseUrl = isPostgresUrl(config.DATABASE_URL) ? config.DATABASE_URL : process.env.DATABASE_URL;
+const directDatabaseUrl = isPostgresUrl(config.DIRECT_URL) ? config.DIRECT_URL : (databaseUrl || process.env.DIRECT_URL);
 process.env.DATABASE_URL = databaseUrl;
 process.env.DIRECT_URL = directDatabaseUrl;
 
@@ -5198,6 +5198,171 @@ ipcMain.handle('users:updateProfile', async (event, data = {}) => {
         console.error('Update profile error:', error);
         return { success: false, error: error.message };
     }
+});
+
+// ========================================
+// SUPPLIER DEBT / PAYABLES
+// ========================================
+const SUPPLIER_DEBT_PAYMENTS_KEY = 'supplierPaymentLedgerV1';
+const SUPPLIER_DEBT_BANKS_KEY = 'supplierPaymentQrV1';
+const SUPPLIER_DEBT_LEGACY_IMPORTS_KEY = 'supplierPaymentLegacyImportsV1';
+const SUPPLIER_DEBT_IMPORT_OVERRIDES_KEY = 'supplierPaymentImportOverridesV1';
+const SUPPLIER_DEBT_QR_IMAGE_KEY_PREFIX = 'supplierPaymentQrImageV1:';
+const SUPPLIER_DEBT_AUTO_IMPORT_START = new Date('2026-08-01T00:00:00+07:00');
+const parseSupplierDebtConfig = (value, fallback = {}) => {
+    try { return value ? JSON.parse(value) : fallback; } catch { return fallback; }
+};
+
+async function readSupplierDebtConfig(key, fallback = {}) {
+    const record = await prisma.appConfig.findUnique({ where: { key } });
+    return parseSupplierDebtConfig(record?.value, fallback);
+}
+
+async function applyLegacySupplierQrMappings() {
+    const legacyQrs = await readSupplierDebtConfig('supplierPaymentLegacyQrsV1', []);
+    if (!Array.isArray(legacyQrs) || !legacyQrs.length) return;
+    const suppliers = await prisma.supplier.findMany({ where: { name: { in: ['Monji', 'Duy Ngọc', 'Duy Quân'] } }, select: { id: true, name: true } });
+    const supplierByName = new Map(suppliers.map(supplier => [supplier.name, supplier]));
+    const mappings = [
+        { supplierName: 'Monji', qrName: 'CÔNG TY MONJI', details: {} },
+        { supplierName: 'Duy Ngọc', qrName: 'CÔNG TY DUY NGỌC', details: { bankName: 'ICB', accountNumber: '117002909072' } },
+        { supplierName: 'Duy Quân', qrName: 'DUY QUÂN', details: { bankName: 'ICB', accountNumber: '113602191888' } },
+    ];
+    const banks = await readSupplierDebtConfig(SUPPLIER_DEBT_BANKS_KEY, {});
+    let changed = false;
+    for (const mapping of mappings) {
+        const supplier = supplierByName.get(mapping.supplierName);
+        const qr = legacyQrs.find(item => item.name === mapping.qrName);
+        if (!supplier || !qr?.image || banks[String(supplier.id)]?.qrImage) continue;
+        banks[String(supplier.id)] = {
+            ...banks[String(supplier.id)], ...mapping.details,
+            accountName: banks[String(supplier.id)]?.accountName || supplier.name,
+            qrImage: qr.image,
+            source: 'Ảnh QR từ QUAN LY TIEN NONG',
+            updatedAt: new Date().toISOString(),
+        };
+        changed = true;
+    }
+    if (changed) await prisma.appConfig.upsert({ where: { key: SUPPLIER_DEBT_BANKS_KEY }, update: { value: JSON.stringify(banks) }, create: { key: SUPPLIER_DEBT_BANKS_KEY, value: JSON.stringify(banks) } });
+}
+
+ipcMain.handle('supplierDebt:getWorkbench', async (event, { supplierId } = {}) => {
+    try {
+        requireRole('admin', 'manager');
+        const [purchases, suppliers, legacyImports, importOverrides] = await Promise.all([
+            prisma.purchaseOrder.findMany({
+                where: { status: { not: 'cancelled' }, createdAt: { gte: SUPPLIER_DEBT_AUTO_IMPORT_START } },
+                include: { supplier: { select: { id: true, code: true, name: true, taxCode: true } } },
+                orderBy: { createdAt: 'desc' },
+            }),
+            prisma.supplier.findMany({ select: { id: true, code: true, name: true, taxCode: true }, orderBy: { name: 'asc' } }),
+            readSupplierDebtConfig(SUPPLIER_DEBT_LEGACY_IMPORTS_KEY, []),
+            readSupplierDebtConfig(SUPPLIER_DEBT_IMPORT_OVERRIDES_KEY, {}),
+        ]);
+        const legacySelected = supplierId === 'legacy';
+        const selectedId = legacySelected ? 'legacy' : (Number(supplierId) || 'legacy');
+        const supplier = selectedId === 'legacy'
+            ? { id: 'legacy', code: 'LICH-SU', name: 'Dữ liệu lịch sử (tool cũ)', taxCode: null }
+            : suppliers.find(item => item.id === selectedId) || null;
+        const supplierPurchases = (selectedId === 'legacy'
+            ? (Array.isArray(legacyImports) ? legacyImports : [])
+            : purchases.filter(p => p.supplierId === selectedId).map(p => ({
+                id: p.id, poNumber: p.poNumber, date: p.receivedAt || p.createdAt,
+                total: Number(importOverrides[String(p.id)] ?? p.total ?? 0), note: p.note,
+            }))).slice().sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+        const [banks, paymentHistory, qrImage] = await Promise.all([
+            readSupplierDebtConfig(SUPPLIER_DEBT_BANKS_KEY, {}),
+            readSupplierDebtConfig(SUPPLIER_DEBT_PAYMENTS_KEY, []),
+            selectedId !== 'legacy' ? readSupplierDebtConfig(`${SUPPLIER_DEBT_QR_IMAGE_KEY_PREFIX}${selectedId}`, null) : null,
+        ]);
+        const payments = Array.isArray(paymentHistory) ? paymentHistory.filter(p => String(p.supplierId) === String(selectedId)).sort((a, b) => new Date(b.paymentDate || b.createdAt).getTime() - new Date(a.paymentDate || a.createdAt).getTime()) : [];
+        const totalImports = supplierPurchases.reduce((sum, purchase) => sum + Number(purchase.total || 0), 0);
+        const totalPayments = payments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+        return {
+            success: true,
+            data: {
+                suppliers: [{ id: 'legacy', code: 'LICH-SU', name: 'Dữ liệu lịch sử (tool cũ)' }, ...suppliers],
+                supplier,
+                summary: { totalImports, totalPayments, balance: totalImports - totalPayments },
+                bankDetails: selectedId !== 'legacy' ? { ...(banks[String(selectedId)] || {}), ...(qrImage ? { qrImage } : {}) } : null,
+                purchases: supplierPurchases,
+                payments,
+            },
+        };
+    } catch (error) { return { success: false, error: error.message }; }
+});
+
+ipcMain.handle('supplierDebt:getLegacyQrs', async () => {
+    try {
+        requireRole('admin', 'manager');
+        const qrs = await readSupplierDebtConfig('supplierPaymentLegacyQrsV1', []);
+        return {
+            success: true,
+            data: Array.isArray(qrs) ? qrs.map(item => ({ id: item.id, name: item.name, note: item.note || '', image: item.image || '' })) : [],
+        };
+    } catch (error) { return { success: false, error: error.message }; }
+});
+
+ipcMain.handle('supplierDebt:updateImportAmount', async (event, data = {}) => {
+    try {
+        requireRole('admin', 'manager');
+        const id = String(data.id || '');
+        const amount = Number(data.amount);
+        if (!id || !Number.isFinite(amount) || amount < 0) throw new Error('Số tiền điều chỉnh không hợp lệ.');
+        if (id.startsWith('legacy-import-')) {
+            const imports = await readSupplierDebtConfig(SUPPLIER_DEBT_LEGACY_IMPORTS_KEY, []);
+            const index = imports.findIndex(item => String(item.id) === id);
+            if (index < 0) throw new Error('Không tìm thấy dòng dữ liệu lịch sử.');
+            imports[index] = { ...imports[index], total: amount, editedAt: new Date().toISOString(), editedBy: currentSession.username };
+            await prisma.appConfig.upsert({ where: { key: SUPPLIER_DEBT_LEGACY_IMPORTS_KEY }, update: { value: JSON.stringify(imports) }, create: { key: SUPPLIER_DEBT_LEGACY_IMPORTS_KEY, value: JSON.stringify(imports) } });
+        } else {
+            const order = await prisma.purchaseOrder.findFirst({ where: { id: Number(id), status: { not: 'cancelled' }, createdAt: { gte: SUPPLIER_DEBT_AUTO_IMPORT_START } }, select: { id: true } });
+            if (!order) throw new Error('Chỉ được điều chỉnh phiếu nhập từ ngày 01/08/2026.');
+            const overrides = await readSupplierDebtConfig(SUPPLIER_DEBT_IMPORT_OVERRIDES_KEY, {});
+            overrides[id] = amount;
+            await prisma.appConfig.upsert({ where: { key: SUPPLIER_DEBT_IMPORT_OVERRIDES_KEY }, update: { value: JSON.stringify(overrides) }, create: { key: SUPPLIER_DEBT_IMPORT_OVERRIDES_KEY, value: JSON.stringify(overrides) } });
+        }
+        return { success: true };
+    } catch (error) { return { success: false, error: error.message }; }
+});
+
+ipcMain.handle('supplierDebt:saveBankDetails', async (event, data = {}) => {
+    try {
+        requireRole('admin', 'manager');
+        const supplierId = data.supplierId === 'legacy' ? 'legacy' : Number(data.supplierId);
+        if (!supplierId) throw new Error('Nhà cung cấp không hợp lệ.');
+        const bankName = String(data.bankName || '').trim();
+        const accountNumber = String(data.accountNumber || '').replace(/\s/g, '');
+        const accountName = String(data.accountName || '').trim();
+        if (!bankName || !accountNumber || !accountName) throw new Error('Cần nhập đủ ngân hàng, số tài khoản và chủ tài khoản.');
+        const banks = await readSupplierDebtConfig(SUPPLIER_DEBT_BANKS_KEY, {});
+        banks[String(supplierId)] = { ...banks[String(supplierId)], bankName, accountNumber, accountName, updatedAt: new Date().toISOString() };
+        await prisma.appConfig.upsert({ where: { key: SUPPLIER_DEBT_BANKS_KEY }, update: { value: JSON.stringify(banks) }, create: { key: SUPPLIER_DEBT_BANKS_KEY, value: JSON.stringify(banks) } });
+        return { success: true, data: banks[String(supplierId)] };
+    } catch (error) { return { success: false, error: error.message }; }
+});
+
+ipcMain.handle('supplierDebt:confirmPayment', async (event, data = {}) => {
+    try {
+        requireRole('admin', 'manager');
+        const supplierId = Number(data.supplierId);
+        const amount = Number(data.amount);
+        const type = ['VAT', 'TIEN_HANG', 'UNG_TRUOC'].includes(data.type) ? data.type : 'TIEN_HANG';
+        if ((!supplierId && supplierId !== 'legacy') || !Number.isFinite(amount) || amount <= 0) throw new Error('Hãy nhập nhà cung cấp và số tiền thanh toán hợp lệ.');
+        const result = await getPrismaDirectTx().$transaction(async (tx) => {
+            if (supplierId !== 'legacy') await tx.$executeRaw`SELECT pg_advisory_xact_lock(${supplierId})`;
+            const now = new Date();
+            const paymentNumber = `PTNCC-${now.toISOString().slice(0, 10).replace(/-/g, '')}-${String(now.getTime()).slice(-6)}`;
+            const config = await tx.appConfig.findUnique({ where: { key: SUPPLIER_DEBT_PAYMENTS_KEY } });
+            const payments = parseSupplierDebtConfig(config?.value, []);
+            const payment = { id: paymentNumber, paymentNumber, supplierId, amount, type, method: data.method === 'cash' ? 'cash' : 'bank_transfer', bankReference: String(data.bankReference || '').trim(), note: String(data.note || '').trim(), paymentDate: data.paymentDate ? new Date(data.paymentDate).toISOString() : now.toISOString(), createdAt: now.toISOString(), confirmedBy: currentSession.username };
+            payments.push(payment);
+            await tx.appConfig.upsert({ where: { key: SUPPLIER_DEBT_PAYMENTS_KEY }, update: { value: JSON.stringify(payments.slice(-1000)) }, create: { key: SUPPLIER_DEBT_PAYMENTS_KEY, value: JSON.stringify([payment]) } });
+            await tx.activityLog.create({ data: { module: 'supplier_debt', action: 'PAYMENT_CREATE', description: `Ghi nhận thanh toán ${type}: ${amount.toLocaleString('vi-VN')}đ`, recordName: paymentNumber, changes: JSON.stringify(payment), userName: currentSession.username, userId: currentSession.id, severity: 'INFO' } });
+            return payment;
+        }, { timeout: 30000, maxWait: 10000 });
+        return { success: true, data: result };
+    } catch (error) { return { success: false, error: error.message }; }
 });
 
 // Change password (user changes their own password)

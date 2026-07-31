@@ -28,6 +28,7 @@ import {
     OrderedListOutlined,
     LineChartOutlined,
     AuditOutlined,
+    WalletOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import viVN from 'antd/locale/vi_VN';
@@ -55,6 +56,7 @@ const DailyTasksPage = lazy(() => import('./pages/DailyTasks'));
 const ProductsPage = lazy(() => import('./pages/Products'));
 const ComboProductsPage = lazy(() => import('./pages/ComboProducts'));
 const PurchasePage = lazy(() => import('./pages/Purchase'));
+const SupplierDebtPage = lazy(() => import('./pages/SupplierDebt'));
 const ReturnsPage = lazy(() => import('./pages/Returns'));
 const RefundsPage = lazy(() => import('./pages/Refunds'));
 const EcommerceExportPage = lazy(() => import('./pages/EcommerceExport'));
@@ -235,6 +237,9 @@ function AppContent() {
         if (accessibleKeys.includes('purchase')) {
             inventoryChildren.push(createMenuItem('Nhập hàng', 'purchase', <ImportOutlined />));
         }
+        if (accessibleKeys.includes('supplier-debt')) {
+            inventoryChildren.push(createMenuItem('Công nợ NCC', 'supplier-debt', <WalletOutlined />));
+        }
         if (accessibleKeys.includes('export')) {
             inventoryChildren.push(createMenuItem('Xuất hàng', 'export', <ScanOutlined />));
         }
@@ -336,6 +341,8 @@ function AppContent() {
                 return withAppData(<OrderPickingPage />);
             case 'purchase':
                 return <PurchasePage />;
+            case 'supplier-debt':
+                return <SupplierDebtPage />;
             case 'export':
                 return <ExportOrdersPage />;
             case 'returns':

@@ -15,6 +15,8 @@ export type Permission =
     | 'purchase.create'
     | 'purchase.update'
     | 'purchase.delete'
+    | 'supplier-debt.view'
+    | 'supplier-debt.create'
     | 'export.view'
     | 'export.create'
     | 'returns.view'
@@ -58,6 +60,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'purchase.create',
         'purchase.update',
         'purchase.delete',
+        'supplier-debt.view',
+        'supplier-debt.create',
         'export.view',
         'export.create',
         'returns.view',
@@ -179,6 +183,7 @@ export function getAccessibleMenuKeys(role: Role | undefined): string[] {
             'fee-calculator',
             'products',
             'purchase',
+            'supplier-debt',
             'export',
             'returns',
             'refunds',

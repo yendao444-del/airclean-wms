@@ -65,6 +65,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         update: (id, data) => ipcRenderer.invoke('suppliers:update', id, data),
         delete: (id) => ipcRenderer.invoke('suppliers:delete', id),
     },
+    supplierDebt: {
+        getWorkbench: (supplierId) => ipcRenderer.invoke('supplierDebt:getWorkbench', { supplierId }),
+        getLegacyQrs: () => ipcRenderer.invoke('supplierDebt:getLegacyQrs'),
+        saveBankDetails: (data) => ipcRenderer.invoke('supplierDebt:saveBankDetails', data),
+        confirmPayment: (data) => ipcRenderer.invoke('supplierDebt:confirmPayment', data),
+        updateImportAmount: (data) => ipcRenderer.invoke('supplierDebt:updateImportAmount', data),
+    },
 
     // Database Export/Import
     database: {
