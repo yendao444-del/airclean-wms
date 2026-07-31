@@ -76,6 +76,10 @@ interface CheckSession {
     completedAt?: string;
     completedBy?: string;
     rolledOverTo?: string;
+    fullCheckExemptions?: Array<{
+        sku: string;
+        productName: string;
+    }>;
     completionSummary?: {
         totalSku: number;
         balancedSku: number;
@@ -303,6 +307,12 @@ export default function StockCheck() {
         s.date === todayStr &&
         (activeTab === 'full' ? s.type === 'full' : s.type !== 'full')
     );
+    const fullCheckExemptions = activeTab === 'daily'
+        ? (todaySession?.fullCheckExemptions || [])
+        : [];
+    const fullCheckExemptionGroups = Array.from(new Set(
+        fullCheckExemptions.map(item => item.productName).filter(Boolean)
+    ));
     const isToday = currentDate.isSame(dayjs(), 'day');
     const isPast = currentDate.isBefore(dayjs(), 'day');
     const isFuture = currentDate.isAfter(dayjs(), 'day');
@@ -2033,6 +2043,19 @@ export default function StockCheck() {
     return (
         <div style={{ background: '#F8FAFC', minHeight: '100vh' }}>
             <main style={{ width: '100%', maxWidth: 'none', margin: 0, padding: '16px 28px 0' }}>
+                {isToday && activeTab === 'daily' && fullCheckExemptions.length > 0 && (
+                    <Alert
+                        type="success"
+                        showIcon
+                        style={{ marginBottom: 12, borderRadius: 8, fontSize: 12 }}
+                        message={
+                            <span>
+                                <strong>Đã miễn kiểm hàng ngày {fullCheckExemptions.length} SKU.</strong>{' '}
+                                {fullCheckExemptionGroups.join(', ')} đã được cân bằng trong Kiểm toàn bộ hôm nay nên không cần kiểm lại.
+                            </span>
+                        }
+                    />
+                )}
                 {isToday && todaySession && totalCount > 0 && !isSessionSubmitted && !isSessionReadyToSubmit && (
                     <Alert
                         type="warning"

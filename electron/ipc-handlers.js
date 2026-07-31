@@ -9220,6 +9220,7 @@ function createDailyCarryOverSession(sessions) {
 }
 
 function hasValidStockCheckConversion(conversionRates, productName) {
+    if (conversionRates?.[productName]?.noConversion === true) return true;
     const units = conversionRates?.[productName]?.units;
     return Array.isArray(units) && units.some(unit => {
         const rate = Number(unit?.rate);
@@ -9227,6 +9228,48 @@ function hasValidStockCheckConversion(conversionRates, productName) {
             && Number.isInteger(rate)
             && rate > 0;
     });
+}
+
+// A SKU balanced in a full check on the same date has already been physically
+// verified. Remove it from an open daily assignment so staff do not repeat the
+// same work, while retaining an explicit audit trail for the daily screen.
+function applySameDayFullCheckExemptions(sessions) {
+    let changed = false;
+    const balancedFullSkusByDate = new Map();
+
+    for (const session of sessions) {
+        if (session?.type !== 'full') continue;
+        const date = String(session.date || '');
+        if (!date) continue;
+        const balancedItems = (session.items || []).filter(item => item?.balanced === true && item?.sku);
+        if (!balancedItems.length) continue;
+        const bySku = balancedFullSkusByDate.get(date) || new Map();
+        balancedItems.forEach(item => bySku.set(String(item.sku), item));
+        balancedFullSkusByDate.set(date, bySku);
+    }
+
+    const updatedSessions = sessions.map(session => {
+        if (session?.type !== 'daily' || session?.date !== getStockCheckTodayKey() || session?.status === 'completed') return session;
+        const balancedBySku = balancedFullSkusByDate.get(String(session.date || ''));
+        if (!balancedBySku?.size) return session;
+
+        const exemptedItems = (session.items || []).filter(item => balancedBySku.has(String(item.sku)));
+        if (!exemptedItems.length) return session;
+
+        const existing = Array.isArray(session.fullCheckExemptions) ? session.fullCheckExemptions : [];
+        const exemptionBySku = new Map(existing.map(item => [String(item?.sku || ''), item]));
+        exemptedItems.forEach(item => exemptionBySku.set(String(item.sku), {
+            sku: String(item.sku),
+            productName: item.productName || '',
+        }));
+        changed = true;
+        return {
+            ...session,
+            items: (session.items || []).filter(item => !balancedBySku.has(String(item.sku))),
+            fullCheckExemptions: Array.from(exemptionBySku.values()),
+        };
+    });
+    return { sessions: updatedSessions, changed };
 }
 
 async function requireStockCheckConversion(tx, productName) {
@@ -9457,8 +9500,9 @@ ipcMain.handle('stockCheck:getSessions', async () => {
             const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
             const storedSessions = parseStockCheckSessionsFromConfig(record);
             const carried = createDailyCarryOverSession(storedSessions);
-            if (carried.changed) await writeStockCheckSessions(carried.sessions, tx);
-            return carried.sessions;
+            const exempted = applySameDayFullCheckExemptions(carried.sessions);
+            if (carried.changed || exempted.changed) await writeStockCheckSessions(exempted.sessions, tx);
+            return exempted.sessions;
         }, { timeout: 30000, maxWait: 10000 });
         const isAdmin = currentSession.role === 'admin';
         const visibleSessions = isAdmin
@@ -9516,8 +9560,9 @@ ipcMain.handle('stockCheck:adminSaveSessions', async (event, incomingSessions) =
                 }
             });
 
-            await writeStockCheckSessions(protectedSessions, tx);
-            return protectedSessions;
+            const exempted = applySameDayFullCheckExemptions(protectedSessions);
+            await writeStockCheckSessions(exempted.sessions, tx);
+            return exempted.sessions;
         }, { timeout: 30000, maxWait: 10000 });
         return { success: true, data: merged };
     } catch (error) {
