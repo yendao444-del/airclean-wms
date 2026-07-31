@@ -282,6 +282,7 @@ export default function PurchasePage() {
     const productSelectRef = useRef<any>(null);
     // Ref cho debounce timeout
     const autoAddTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const priceBackfillAttemptedRef = useRef(false);
 
     // 📤 Inline upload trong modal (upload ngay khi tạo phiếu)
     const [pendingImportFiles, setPendingImportFiles] = useState<File[]>([]);
@@ -302,6 +303,40 @@ export default function PurchasePage() {
         loadSuppliers();
         loadProducts();
     }, []);
+
+    useEffect(() => {
+        if (!modalVisible || priceBackfillAttemptedRef.current || !products.length || !purchaseItems.length) return;
+        priceBackfillAttemptedRef.current = true;
+
+        let restoredCount = 0;
+        const next = purchaseItems.map(item => {
+            if (Number(item.unitPrice) > 0) return item;
+            const product = products.find(entry => Number(entry.id) === Number(item.productId));
+            if (!product) return item;
+
+            let suggestedPrice = Number((product as any).cost || 0);
+            if (item.variantSku) {
+                try {
+                    const variants = JSON.parse((product as any).variants || '[]');
+                    const variant = variants.find((entry: any) => entry?.sku === item.variantSku);
+                    suggestedPrice = Number(variant?.cost || 0);
+                } catch {
+                    suggestedPrice = 0;
+                }
+            }
+            if (!Number.isFinite(suggestedPrice) || suggestedPrice <= 0) return item;
+            restoredCount += 1;
+            return {
+                ...item,
+                unitPrice: suggestedPrice,
+                total: Number(item.quantity || 0) * suggestedPrice,
+            };
+        });
+        if (restoredCount > 0) {
+            setPurchaseItems(next);
+            message.info(`Đã gợi ý lại giá nhập cho ${restoredCount} dòng chưa có giá.`);
+        }
+    }, [modalVisible, products, purchaseItems]);
 
     // 📜 Load lịch sử khi chuyển sang tab lịch sử
     useEffect(() => {
@@ -347,10 +382,12 @@ export default function PurchasePage() {
 
     const loadProducts = async () => {
         try {
-            if (!window.electronAPI?.products?.getAll) {
+            const getPurchaseCatalog = window.electronAPI?.products?.getCatalogForPurchase
+                || window.electronAPI?.products?.getAll;
+            if (!getPurchaseCatalog) {
                 return;
             }
-            const result = await window.electronAPI.products.getAll();
+            const result = await getPurchaseCatalog();
             if (result.success && result.data) {
                 setProducts(result.data);
             } else {
@@ -383,6 +420,7 @@ export default function PurchasePage() {
 
     const handleAdd = async () => {
         setEditingPurchase(null);
+        priceBackfillAttemptedRef.current = false;
         setPurchaseItems([]);
         setSelectedProductVariants([]);
         setPendingImportFiles([]);
@@ -422,6 +460,7 @@ export default function PurchasePage() {
 
     const handleEdit = (purchase: Purchase) => {
         setEditingPurchase(purchase);
+        priceBackfillAttemptedRef.current = false;
         setPurchaseItems(JSON.parse(purchase.items));
         form.setFieldsValue({
             supplierId: purchase.supplierId,
@@ -916,6 +955,44 @@ export default function PurchasePage() {
         setViewModalVisible(true);
     };
 
+    const handleRepairMissingPrices = (purchase: Purchase) => {
+        Modal.confirm({
+            title: 'Khôi phục giá nhập đang thiếu',
+            content: 'Hệ thống sẽ chỉ điền các dòng đơn giá 0đ bằng giá nhập hiện tại của sản phẩm hoặc phân loại, sau đó tính lại tổng phiếu.',
+            okText: 'Khôi phục giá',
+            cancelText: 'Hủy',
+            onOk: async () => {
+                const result = await window.electronAPI.purchases.repairMissingPrices(purchase.id);
+                if (!result.success || !result.data?.order) {
+                    message.error(result.error || 'Không thể khôi phục giá nhập.');
+                    return;
+                }
+                const order = result.data.order;
+                const items = order.items.map((item: any) => ({
+                    productId: item.productId,
+                    productName: item.product?.name,
+                    sku: item.product?.sku,
+                    quantity: item.quantity,
+                    unitPrice: item.price,
+                    total: item.subtotal,
+                    color: item.color || null,
+                    variantSku: item.variantSku || null,
+                    unit: item.product?.unit || 'Cái',
+                }));
+                const updatedPurchase = {
+                    ...purchase,
+                    items: JSON.stringify(items),
+                    totalAmount: order.total,
+                };
+                setDetailModalRecord(updatedPurchase);
+                setPurchases(current => current.map(entry => entry.id === purchase.id ? updatedPurchase : entry));
+                message.success(result.data.repairedCount > 0
+                    ? `Đã khôi phục giá cho ${result.data.repairedCount} dòng.`
+                    : 'Không có dòng 0đ nào có giá gợi ý để khôi phục.');
+            },
+        });
+    };
+
     // 📦 Đánh dấu / hoàn tác Đơn THHT
     const handleMarkThht = (purchase: Purchase, revert: boolean) => {
         Modal.confirm({
@@ -1311,6 +1388,14 @@ export default function PurchasePage() {
                             onClick={() => handleEdit(record)}
                         >
                             Sửa
+                        </Button>
+                    )}
+                    {false && isAdmin && items.some(item => Number(item.unitPrice) <= 0) && (
+                        <Button
+                            icon={<ReloadOutlined />}
+                            onClick={() => handleRepairMissingPrices(record)}
+                        >
+                            Khôi phục giá gợi ý
                         </Button>
                     )}
                     {isAdmin && (

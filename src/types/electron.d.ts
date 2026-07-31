@@ -114,6 +114,7 @@ export interface ElectronAPI {
     products: {
         getAll: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
         getForAdmin?: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
+        getCatalogForPurchase?: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
         getCatalogForSale?: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
         getForStockAlerts?: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
         getInventoryCatalog?: () => Promise<{ success: boolean; data?: Product[]; error?: string }>;
@@ -151,6 +152,7 @@ export interface ElectronAPI {
         getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        repairMissingPrices: (purchaseId: number) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         uploadVATInvoice: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         uploadVatGroupInvoice: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -280,6 +282,7 @@ export interface ElectronAPI {
         updateCount: (data: { sessionId: string; sku: string; actualStock: number }) => Promise<{ success: boolean; status?: string; item?: any; error?: string }>;
         retryCount: (data: { sessionId: string; sku: string }) => Promise<{ success: boolean; status?: string; item?: any; code?: string; error?: string }>;
         updateNote: (data: { sessionId: string; sku: string; note: string }) => Promise<{ success: boolean; item?: any; error?: string }>;
+        getReconciliationLogs: (data: { sessionId: string; sku: string; page?: number }) => Promise<{ success: boolean; data?: { logs: Array<{ id: number; sku: string; type: string; referenceType?: string | null; reference?: string | null; quantity: number; createdAt: string }>; total: number; page: number; pageSize: number }; error?: string }>;
         balanceItems: (data: { sessionId: string; reference: string; date?: string; items: Array<{ sku: string }>; historyNotes?: string; logPrefix?: string }) => Promise<{ success: boolean; duplicate?: boolean; adjustedCount?: number; matchedCount?: number; data?: { sessions?: any[]; stockBalance?: any }; error?: string }>;
         balanceItem: (data: { sessionId: string; sku: string; note?: string }) => Promise<{ success: boolean; status?: string; item?: any; session?: any; error?: string }>;
         submitSession: (data: { sessionId: string }) => Promise<{ success: boolean; status?: 'completed' | 'already_completed'; session?: any; code?: string; error?: string }>;

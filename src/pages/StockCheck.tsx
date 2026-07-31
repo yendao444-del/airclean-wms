@@ -131,7 +131,23 @@ interface InventoryLogItem {
     createdAt: string;
 }
 
-type ProductTabKey = 'check' | 'ledger' | 'conversion';
+interface ReconciliationLogItem {
+    id: number;
+    sku: string;
+    type: string;
+    referenceType?: string | null;
+    reference?: string | null;
+    quantity: number;
+    createdAt: string;
+}
+
+interface ReconciliationLogPage {
+    total: number;
+    page: number;
+    pageSize: number;
+}
+
+type ProductTabKey = 'check' | 'ledger' | 'reconciliation' | 'conversion';
 
 const createStockCheckRunId = () =>
     globalThis.crypto?.randomUUID?.() || `stock-check-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -256,6 +272,10 @@ export default function StockCheck() {
     const [ledgerLogsByProduct, setLedgerLogsByProduct] = useState<Record<string, InventoryLogItem[]>>({});
     const [ledgerLoadingByProduct, setLedgerLoadingByProduct] = useState<Record<string, boolean>>({});
     const [ledgerSkuFilterByProduct, setLedgerSkuFilterByProduct] = useState<Record<string, string>>({});
+    const [reconciliationSkuByProduct, setReconciliationSkuByProduct] = useState<Record<string, string>>({});
+    const [reconciliationLogsBySku, setReconciliationLogsBySku] = useState<Record<string, ReconciliationLogItem[]>>({});
+    const [reconciliationPageBySku, setReconciliationPageBySku] = useState<Record<string, ReconciliationLogPage>>({});
+    const [reconciliationLoadingBySku, setReconciliationLoadingBySku] = useState<Record<string, boolean>>({});
     const [expandedRefId, setExpandedRefId] = useState<number | null>(null);
     const [refDetailCache, setRefDetailCache] = useState<Record<number, { loading: boolean; data: any; type: string; error: string }>>({});
     const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -351,6 +371,33 @@ export default function StockCheck() {
             setLedgerLoadingByProduct(prev => ({ ...prev, [group.productName]: false }));
         }
     }, [currentDate, ledgerLogsByProduct]);
+
+    const openReconciliation = useCallback(async (group: ProductGroup, item: CheckItem, page = 1) => {
+        if (!todaySession || isAdmin || !item.countLocked || !item.requiresNote) return;
+        setProductTabs(prev => ({ ...prev, [group.productName]: 'reconciliation' }));
+        setReconciliationSkuByProduct(prev => ({ ...prev, [group.productName]: item.sku }));
+        setReconciliationLoadingBySku(prev => ({ ...prev, [item.sku]: true }));
+        try {
+            const result = await window.electronAPI.stockCheck.getReconciliationLogs({
+                sessionId: todaySession.id,
+                sku: item.sku,
+                page,
+            });
+            if (!result?.success) throw new Error(result?.error || 'Không thể tải dữ liệu đối soát.');
+            const data = result.data || { logs: [], total: 0, page, pageSize: 50 };
+            setReconciliationLogsBySku(prev => ({ ...prev, [item.sku]: data.logs || [] }));
+            setReconciliationPageBySku(prev => ({ ...prev, [item.sku]: {
+                total: Number(data.total) || 0,
+                page: Number(data.page) || page,
+                pageSize: Number(data.pageSize) || 50,
+            } }));
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể tải dữ liệu đối soát.');
+            setProductTabs(prev => ({ ...prev, [group.productName]: 'check' }));
+        } finally {
+            setReconciliationLoadingBySku(prev => ({ ...prev, [item.sku]: false }));
+        }
+    }, [todaySession, isAdmin]);
 
     const flushPendingCountUpdates = useCallback(async () => {
         Object.entries(countSaveTimersRef.current).forEach(([sku, timer]) => {
@@ -1144,34 +1191,20 @@ export default function StockCheck() {
                     delete next[item.sku];
                     return next;
                 });
+                setProductTabs(prev => ({ ...prev, [item.productName]: 'check' }));
+                setReconciliationLogsBySku(prev => {
+                    const next = { ...prev };
+                    delete next[item.sku];
+                    return next;
+                });
+                setReconciliationPageBySku(prev => {
+                    const next = { ...prev };
+                    delete next[item.sku];
+                    return next;
+                });
                 message.info(`Đã mở lượt nhập lại ${retryCount + 1}/${MAX_COUNT_RETRIES}.`);
             })
             .catch((error: any) => message.error(error?.message || 'Không thể mở lượt nhập lại.'));
-        return;
-        if (retryCount >= MAX_COUNT_RETRIES) {
-            message.warning('Đã dùng hết 2 lượt nhập lại. Hãy ghi lý do để xác nhận cân bằng.');
-            return;
-        }
-
-        persistSessions(sessions.map(session => session.id !== todaySessionId ? session : {
-            ...session,
-            items: session.items.map(current => current.sku !== item.sku ? current : {
-                ...current,
-                actualStock: null,
-                difference: 0,
-                note: '',
-                balanced: false,
-                countLocked: false,
-                requiresNote: false,
-                retryCount: retryCount + 1,
-            }),
-        }));
-        setCountingInputs(prev => {
-            const next = { ...prev };
-            delete next[item.sku];
-            return next;
-        });
-        message.info(`Đã mở lượt nhập lại ${retryCount + 1}/${MAX_COUNT_RETRIES}.`);
     };
 
     const executeBalanceItems = async (
@@ -1266,8 +1299,23 @@ export default function StockCheck() {
                 : {
                     ...session,
                     items: session.items.map(entry => entry.sku !== item.sku ? entry : { ...entry, ...(result.item || {}), verificationStatus: result.status === 'match' || result.status === 'balanced_mismatch' ? result.status : undefined }),
-                }
+            }
         )));
+        if (result.status === 'match' || result.status === 'balanced_mismatch') {
+            setProductTabs(prev => prev[item.productName] === 'reconciliation'
+                ? { ...prev, [item.productName]: 'check' }
+                : prev);
+            setReconciliationLogsBySku(prev => {
+                const next = { ...prev };
+                delete next[item.sku];
+                return next;
+            });
+            setReconciliationPageBySku(prev => {
+                const next = { ...prev };
+                delete next[item.sku];
+                return next;
+            });
+        }
         if (result.status === 'match') message.success('Khớp. Đã ghi nhận kết quả kiểm.');
         if (result.status === 'mismatch_requires_note') message.warning('Không khớp. Nhập lý do hoặc dùng lượt nhập lại.');
         if (result.status === 'balanced_mismatch') message.success('Đã cân bằng theo lý do đã nhập.');
@@ -1759,6 +1807,54 @@ export default function StockCheck() {
         );
     };
 
+    const renderReconciliationTab = (group: ProductGroup) => {
+        const sku = reconciliationSkuByProduct[group.productName];
+        const logs = sku ? reconciliationLogsBySku[sku] || [] : [];
+        const page = sku ? reconciliationPageBySku[sku] : undefined;
+        const loading = sku ? !!reconciliationLoadingBySku[sku] : false;
+        const typeLabels: Record<string, string> = {
+            NHAP: 'Nhập hàng', POS: 'Bán tại quầy', TMDT: 'Bán online',
+            XUAT: 'Xuất kho', TRA: 'Trả hàng', HOAN: 'Hàng hoàn',
+        };
+        return (
+            <div style={{ padding: '18px 22px' }}>
+                <Alert
+                    type="info"
+                    showIcon
+                    message="Đối soát biến động 48 giờ gần nhất"
+                    description="Chỉ hiển thị giao dịch của SKU đang chênh lệch. Tồn đầu, tồn cuối, điều chỉnh kho và chi tiết chứng từ được ẩn."
+                    style={{ marginBottom: 16 }}
+                />
+                <div style={{ marginBottom: 12, color: '#1e3a5f', fontWeight: 700 }}>
+                    SKU: <Tag color="blue">{sku || 'Chưa chọn SKU'}</Tag>
+                </div>
+                <Table
+                    dataSource={logs}
+                    loading={loading}
+                    rowKey="id"
+                    size="small"
+                    pagination={{
+                        current: page?.page || 1,
+                        pageSize: page?.pageSize || 50,
+                        total: page?.total || 0,
+                        showSizeChanger: false,
+                        onChange: nextPage => {
+                            const item = group.items.find(entry => entry.sku === sku);
+                            if (item) void openReconciliation(group, item, nextPage);
+                        },
+                    }}
+                    locale={{ emptyText: sku ? 'Không có giao dịch trong 48 giờ gần nhất' : 'Chọn SKU cần đối soát' }}
+                    columns={[
+                        { title: 'Thời gian', dataIndex: 'createdAt', width: 150, render: (date: string) => dayjs(date).format('DD/MM/YYYY HH:mm') },
+                        { title: 'Loại phát sinh', dataIndex: 'referenceType', width: 160, render: (type: string, record: ReconciliationLogItem) => typeLabels[type] || record.type },
+                        { title: 'Mã chứng từ', dataIndex: 'reference', width: 190, render: (reference: string) => reference || '—' },
+                        { title: 'Số lượng', dataIndex: 'quantity', align: 'right' as const, render: (quantity: number) => <span style={{ color: quantity >= 0 ? '#1677ff' : '#cf1322', fontWeight: 700 }}>{quantity > 0 ? `+${quantity}` : quantity}</span> },
+                    ]}
+                />
+            </div>
+        );
+    };
+
     const renderLedgerTab = (group: ProductGroup) => {
         const logs = ledgerLogsByProduct[group.productName] || [];
         const loading = !!ledgerLoadingByProduct[group.productName];
@@ -2076,6 +2172,9 @@ export default function StockCheck() {
                                                     items={[
                                                         { key: 'check', label: '⚖️ Kiểm hàng' },
                                                         ...(canViewLedger ? [{ key: 'ledger', label: '📋 Thẻ kho' }] : []),
+                                                        ...(!isAdmin && group.items.some(item => item.countLocked && item.requiresNote && !item.balanced)
+                                                            ? [{ key: 'reconciliation', label: '🔎 Đối soát 48h' }]
+                                                            : []),
                                                     ]}
                                                 />
                                             </div>
@@ -2323,6 +2422,16 @@ export default function StockCheck() {
                                                                                         </Button>
                                                                                     </Tooltip>
                                                                                 )}
+                                                                            {!isAdmin && item.countLocked && item.requiresNote && !item.balanced && (
+                                                                                <Button
+                                                                                    type="link"
+                                                                                    size="small"
+                                                                                    onClick={() => { void openReconciliation(group, item); }}
+                                                                                    style={{ display: 'block', margin: '4px auto 0', padding: 0, height: 20, fontSize: 11, fontWeight: 700 }}
+                                                                                >
+                                                                                    Đối soát 48h
+                                                                                </Button>
+                                                                            )}
                                                                         </td>
                                                                     </tr>
                                                                 );
@@ -2358,6 +2467,7 @@ export default function StockCheck() {
                                                 </div>
                                             )}
                                             {isAdmin && (productTabs[group.productName] || 'check') === 'ledger' && renderLedgerTab(group)}
+                                            {!isAdmin && (productTabs[group.productName] || 'check') === 'reconciliation' && renderReconciliationTab(group)}
                                         </div>
                                     )}
                                 </div>

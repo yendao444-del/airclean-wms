@@ -1041,6 +1041,18 @@ function sanitizeProductForNonAdmin(product) {
     return { ...safeProduct, variants: stripStockFromVariants(variants), available: getProductTotalStock(product) > 0 };
 }
 
+// Purchase users need the latest import price as a suggestion, but never the
+// stock fields that are hidden from non-admin accounts.
+function purchaseCatalogProductForNonAdmin(product) {
+    if (!product) return product;
+    const { stock, minStock, maxStock, variants, ...safeProduct } = product;
+    const safeVariants = parseJsonArray(variants).map(variant => {
+        const { stock: variantStock, minStock: variantMinStock, maxStock: variantMaxStock, ...safeVariant } = variant || {};
+        return safeVariant;
+    });
+    return { ...safeProduct, variants: JSON.stringify(safeVariants) };
+}
+
 function productNeedsStockAlert(product) {
     const minStock = Number(product?.minStock ?? 0);
     const variants = parseJsonArray(product?.variants);
@@ -1164,6 +1176,20 @@ ipcMain.handle('products:getForAdmin', async () => {
         if (!prisma) throw new Error('Prisma not available');
         const products = await prisma.product.findMany({ select: productSelectForCatalog(), orderBy: { createdAt: 'desc' } });
         return { success: true, data: products };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('products:getCatalogForPurchase', async () => {
+    try {
+        requireRole('admin', 'manager');
+        if (!prisma) throw new Error('Prisma not available');
+        const products = await prisma.product.findMany({ select: productSelectForCatalog(), orderBy: { createdAt: 'desc' } });
+        return {
+            success: true,
+            data: isAdminSession() ? products : products.map(purchaseCatalogProductForNonAdmin),
+        };
     } catch (error) {
         return { success: false, error: error.message };
     }
@@ -3748,16 +3774,89 @@ ipcMain.handle('purchases:update', async (event, { id, data }) => {
     }
 });
 
+// One-time repair for purchase receipts created while the non-admin catalog did
+// not expose import prices. Only zero-price rows are changed and every repair is
+// recorded for audit.
+ipcMain.handle('purchases:repairMissingPrices', async (event, purchaseId) => {
+    try {
+        requireRole('admin');
+        const id = Number(purchaseId);
+        if (!Number.isInteger(id) || id <= 0) throw new Error('Phiếu nhập không hợp lệ.');
+
+        const result = await getPrismaDirectTx().$transaction(async (tx) => {
+            const order = await tx.purchaseOrder.findUnique({
+                where: { id },
+                include: {
+                    items: {
+                        include: {
+                            product: { select: { id: true, cost: true, variants: true } },
+                        },
+                    },
+                },
+            });
+            if (!order) throw new Error('Không tìm thấy phiếu nhập.');
+
+            let repairedCount = 0;
+            for (const item of order.items) {
+                if (Number(item.price) > 0) continue;
+                let suggestedPrice = Number(item.product?.cost || 0);
+                if (item.variantSku) {
+                    const variant = parseJsonArray(item.product?.variants).find(entry => entry?.sku === item.variantSku);
+                    suggestedPrice = Number(variant?.cost || 0);
+                }
+                if (!Number.isFinite(suggestedPrice) || suggestedPrice <= 0) continue;
+                await tx.purchaseItem.update({
+                    where: { id: item.id },
+                    data: { price: suggestedPrice, subtotal: Number(item.quantity) * suggestedPrice },
+                });
+                repairedCount += 1;
+            }
+
+            if (!repairedCount) return { order, repairedCount: 0 };
+            const totals = await tx.purchaseItem.aggregate({
+                where: { purchaseOrderId: order.id },
+                _sum: { subtotal: true },
+            });
+            const total = Number(totals._sum.subtotal || 0);
+            const updatedOrder = await tx.purchaseOrder.update({
+                where: { id: order.id },
+                data: { subtotal: total, total },
+                include: { items: { include: { product: { select: { name: true, sku: true, unit: true } } } }, supplier: true },
+            });
+            return { order: updatedOrder, repairedCount };
+        }, { timeout: 30000, maxWait: 10000 });
+
+        if (result.repairedCount > 0) {
+            void logActivity({
+                module: 'purchases',
+                action: 'REPAIR_MISSING_PRICES',
+                description: `Khôi phục giá nhập cho ${result.repairedCount} dòng của phiếu ${result.order.poNumber}`,
+                recordId: result.order.id,
+                recordName: result.order.poNumber,
+                userName: currentSession.username,
+            });
+        }
+        return { success: true, data: result };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
 // Delete purchase (Soft-delete & Hoàn kho)
 ipcMain.handle('purchases:delete', async (event, id) => {
     try {
         requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
 
-        console.log(`🗑️  Soft-deleting purchase order #${id}...`);
+        const purchaseId = Number(id);
+        if (!Number.isInteger(purchaseId) || purchaseId <= 0) {
+            throw new Error('Mã phiếu nhập không hợp lệ.');
+        }
+
+        console.log(`🗑️  Soft-deleting purchase order #${purchaseId}...`);
 
         const order = await prisma.purchaseOrder.findUnique({
-            where: { id },
+            where: { id: purchaseId },
             include: { items: true }
         });
         if (!order) throw new Error(`Không tìm thấy phiếu nhập #${id}`);
@@ -3790,7 +3889,7 @@ ipcMain.handle('purchases:delete', async (event, id) => {
 
             // 2. Chuyển trạng thái sang cancelled thay vì xóa vật lý khối item
             await tx.purchaseOrder.update({
-                where: { id },
+                where: { id: purchaseId },
                 data: { status: 'cancelled' }
             });
         }));
@@ -9048,6 +9147,46 @@ function isStockCheckSessionCompleted(session) {
     return session?.status === 'completed' && Boolean(session?.completedAt);
 }
 
+// Make an unfinished daily check durable across days. This runs in the main
+// process so the obligation does not depend on an admin opening the React page.
+function createDailyCarryOverSession(sessions) {
+    const today = getStockCheckTodayKey();
+    if (sessions.some(session => session.date === today && session.type === 'daily')) {
+        return { sessions, changed: false };
+    }
+
+    const source = sessions
+        .filter(session => session.type === 'daily'
+            && session.date < today
+            && session.status !== 'completed'
+            && !session.rolledOverTo
+            && Array.isArray(session.items)
+            && session.items.length > 0)
+        .sort((a, b) => a.date.localeCompare(b.date))[0];
+    if (!source) return { sessions, changed: false };
+
+    const remainingItems = source.items.filter(item => !item.balanced);
+    const items = remainingItems.length > 0 ? remainingItems : source.items;
+    const carryOverSession = {
+        id: today,
+        runId: `carry-over-${today}-${Date.now()}`,
+        date: today,
+        type: 'daily',
+        assignedTo: source.assignedTo,
+        assignedName: source.assignedName,
+        status: 'in_progress',
+        items: items.map(item => ({ ...item })),
+        notes: `Tiếp tục ${items.length} SKU tồn đọng từ ${source.date}.`,
+        createdAt: new Date().toISOString(),
+    };
+    return {
+        sessions: sessions.map(session => session.id === source.id
+            ? { ...session, rolledOverTo: today }
+            : session).concat(carryOverSession),
+        changed: true,
+    };
+}
+
 function hasValidStockCheckConversion(conversionRates, productName) {
     const units = conversionRates?.[productName]?.units;
     return Array.isArray(units) && units.some(unit => {
@@ -9281,7 +9420,14 @@ ipcMain.handle('stockCheck:balanceItems', async (event, payload = {}) => {
 ipcMain.handle('stockCheck:getSessions', async () => {
     try {
         requireRole('admin', 'manager');
-        const sessions = await readStockCheckSessions();
+        const sessions = await getPrismaDirectTx().$transaction(async (tx) => {
+            await lockStockCheckSessions(tx);
+            const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
+            const storedSessions = parseStockCheckSessionsFromConfig(record);
+            const carried = createDailyCarryOverSession(storedSessions);
+            if (carried.changed) await writeStockCheckSessions(carried.sessions, tx);
+            return carried.sessions;
+        }, { timeout: 30000, maxWait: 10000 });
         const isAdmin = currentSession.role === 'admin';
         const visibleSessions = isAdmin
             ? sessions
@@ -9431,6 +9577,70 @@ ipcMain.handle('stockCheck:updateNote', async (event, payload = {}) => {
             return storedItem;
         }, { timeout: 30000, maxWait: 10000 });
         return { success: true, item: sanitizeStockCheckItem(item, currentSession.role === 'admin') };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// A narrowly scoped audit view for the assigned checker. This deliberately does
+// not reuse inventoryLogs:getAll: it exposes neither balances nor document details.
+ipcMain.handle('stockCheck:getReconciliationLogs', async (event, payload = {}) => {
+    try {
+        requireRole('manager');
+        const sessionId = String(payload.sessionId || '').trim();
+        const sku = String(payload.sku || '').trim();
+        const page = Math.max(1, Number.parseInt(payload.page, 10) || 1);
+        const pageSize = 50;
+        if (!sessionId || !sku) throw new Error('Thiếu phiên kiểm hoặc SKU cần đối soát.');
+
+        const result = await getPrismaDirectTx().$transaction(async (tx) => {
+            await lockStockCheckSessions(tx);
+            const config = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
+            const sessions = parseStockCheckSessionsFromConfig(config);
+            const session = getStockCheckSessionOrThrow(sessions, sessionId, false);
+            const item = getStockCheckItemOrThrow(session, sku);
+            if (!item.countLocked || !item.requiresNote || item.balanced) {
+                throw new Error('Chỉ mở đối soát cho SKU đang chờ giải trình chênh lệch.');
+            }
+
+            const since = new Date(Date.now() - 48 * 60 * 60 * 1000);
+            const where = {
+                sku,
+                createdAt: { gte: since },
+                NOT: {
+                    OR: [
+                        { referenceType: 'CAN_BANG' },
+                        { type: 'adjustment' },
+                    ],
+                },
+            };
+            const [logs, total] = await Promise.all([
+                tx.inventoryLog.findMany({
+                    where,
+                    select: {
+                        id: true,
+                        sku: true,
+                        type: true,
+                        referenceType: true,
+                        reference: true,
+                        quantity: true,
+                        createdAt: true,
+                    },
+                    orderBy: { createdAt: 'desc' },
+                    skip: (page - 1) * pageSize,
+                    take: pageSize,
+                }),
+                tx.inventoryLog.count({ where }),
+            ]);
+            return {
+                logs: logs.map(log => ({ ...log, createdAt: log.createdAt.toISOString() })),
+                total,
+                page,
+                pageSize,
+            };
+        }, { timeout: 30000, maxWait: 10000 });
+
+        return { success: true, data: result };
     } catch (error) {
         return { success: false, error: error.message };
     }

@@ -3529,18 +3529,25 @@ export default function Attendance() {
             if (!isPastStockCheckWorkingDay(date)) continue;
 
             const dateKey = date.format('YYYY-MM-DD');
-            // A partial count is not a completed stock check. The session can
-            // only be submitted after every SKU has been counted and balanced,
-            // so only that final state exempts the assigned checker from a fine.
-            const hasCompletedStockCheck = stockCheckSessions.some((s: any) =>
-                s.date === dateKey
-                && s.type !== 'full'
-                && s.status === 'completed'
-                && Boolean(s.completedAt)
+            // A daily session is exempt when it is submitted, or when every SKU
+            // assigned for that day was already balanced in a full-stock check.
+            const dailySession = stockCheckSessions.find((s: any) =>
+                s.date === dateKey && s.type !== 'full'
             );
-            if (hasCompletedStockCheck) continue;
+            const hasCompletedDailyCheck = Boolean(
+                dailySession?.status === 'completed' && dailySession?.completedAt
+            );
+            const dailyItems = Array.isArray(dailySession?.items) ? dailySession.items : [];
+            const fullSessionItems = stockCheckSessions
+                .filter((s: any) => s.date === dateKey && s.type === 'full')
+                .flatMap((s: any) => Array.isArray(s.items) ? s.items : []);
+            const dailyCoveredByFullCheck = dailyItems.length > 0
+                && dailyItems.every((dailyItem: any) => fullSessionItems.some((fullItem: any) =>
+                    String(fullItem?.sku) === String(dailyItem?.sku) && fullItem?.balanced === true
+                ));
+            if (hasCompletedDailyCheck || dailyCoveredByFullCheck) continue;
 
-            const session = stockCheckSessions.find((s: any) => s.date === dateKey && s.type !== 'full');
+            const session = dailySession;
 
             let assignee: typeof employees[number] | undefined;
             if (session) {

@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     products: {
         getAll: () => ipcRenderer.invoke('products:getAll'),
         getForAdmin: () => ipcRenderer.invoke('products:getForAdmin'),
+        getCatalogForPurchase: () => ipcRenderer.invoke('products:getCatalogForPurchase'),
         getCatalogForSale: () => ipcRenderer.invoke('products:getCatalogForSale'),
         getForStockAlerts: () => ipcRenderer.invoke('products:getForStockAlerts'),
         getInventoryCatalog: () => ipcRenderer.invoke('products:getInventoryCatalog'),
@@ -45,6 +46,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getAll: (filters) => ipcRenderer.invoke('purchases:getAll', filters),
         create: (data) => ipcRenderer.invoke('purchases:create', data),
         update: (id, data) => ipcRenderer.invoke('purchases:update', { id, data }),
+        repairMissingPrices: (purchaseId) => ipcRenderer.invoke('purchases:repairMissingPrices', purchaseId),
         delete: (id) => ipcRenderer.invoke('purchases:delete', id),
         uploadVATInvoice: (data) => ipcRenderer.invoke('purchases:uploadVATInvoice', data),
         uploadVatGroupInvoice: (data) => ipcRenderer.invoke('purchases:uploadVatGroupInvoice', data),
@@ -221,6 +223,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         updateCount: (data) => ipcRenderer.invoke('stockCheck:updateCount', data),
         retryCount: (data) => ipcRenderer.invoke('stockCheck:retryCount', data),
         updateNote: (data) => ipcRenderer.invoke('stockCheck:updateNote', data),
+        getReconciliationLogs: (data) => ipcRenderer.invoke('stockCheck:getReconciliationLogs', data),
         balanceItems: (data) => ipcRenderer.invoke('stockCheck:balanceItems', data),
         balanceItem: (data) => ipcRenderer.invoke('stockCheck:balanceItem', data),
         submitSession: (data) => ipcRenderer.invoke('stockCheck:submitSession', data),
