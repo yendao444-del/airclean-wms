@@ -9013,7 +9013,7 @@ const CONFIG_ACCESS = Object.freeze({
     stockCheckSessionsV2: { read: ['admin'], write: ['admin'], sensitive: true },
     variantMinStocks: { read: ['admin'], write: ['admin'], sensitive: true },
     pausedVariants: { read: ['admin'], write: ['admin'], sensitive: true },
-    stockConversionRates: { read: ['admin', 'manager'], write: ['admin'], sensitive: true },
+    stockConversionRates: { read: ['admin', 'manager'], write: ['admin', 'manager'], sensitive: true },
     attendanceData: { read: ['admin'], write: ['admin'], sensitive: true },
     dailyTasksHistory: { read: ['admin'], write: ['admin'], sensitive: true },
     dailyTasksSnapshots: { read: ['admin'], write: ['admin'], sensitive: true },

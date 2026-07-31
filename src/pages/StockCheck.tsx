@@ -313,6 +313,7 @@ export default function StockCheck() {
     const isAssignedChecker = isAdmin || (assignedUsername !== '' && assignedUsername === loggedInUsername);
     const isSessionSubmitted = todaySession?.status === 'completed';
     const canEditCounts = !!todaySession && !isLockedDate && !isSessionSubmitted && isAssignedChecker;
+    const canManageConversions = !!todaySession && !isLockedDate && !isSessionSubmitted && isAssignedChecker;
     const checkedCount = todaySession?.items.filter(it => it.actualStock !== null).length ?? 0;
     const totalCount = todaySession?.items.length ?? 0;
     const balancedCount = todaySession?.items.filter(it => it.balanced).length ?? 0;
@@ -679,21 +680,21 @@ export default function StockCheck() {
     }, []);
 
     const addUnit = (productName: string) => {
-        if (!isAdmin) return;
+        if (!canManageConversions) return;
         setConversionRates(prev => {
         const updated = { ...prev, [productName]: { units: [...(prev[productName]?.units || []), { label: '', rate: 0 }] } };
         saveConversionRates(updated); return updated;
         });
     };
     const removeUnit = (productName: string, idx: number) => {
-        if (!isAdmin) return;
+        if (!canManageConversions) return;
         setConversionRates(prev => {
         const updated = { ...prev, [productName]: { units: (prev[productName]?.units || []).filter((_, i) => i !== idx) } };
         saveConversionRates(updated); return updated;
         });
     };
     const updateUnit = (productName: string, idx: number, field: 'label' | 'rate', value: string | number) => {
-        if (!isAdmin) return;
+        if (!canManageConversions) return;
         setConversionRates(prev => {
         const units = [...(prev[productName]?.units || [])];
         if (units[idx]) units[idx] = { ...units[idx], [field]: value };
@@ -1277,7 +1278,7 @@ export default function StockCheck() {
         }
         if (!hasValidConversion(item.productName)) {
             message.warning('Cần thiết lập quy đổi đơn vị trước khi cân bằng kho.');
-            if (isAdmin) setConversionModalGroup(item.productName);
+            if (canManageConversions) setConversionModalGroup(item.productName);
             return;
         }
         if (!await flushConversionRates()) return;
@@ -1361,8 +1362,8 @@ export default function StockCheck() {
     };
 
     const handleGroupBalance = async (group: ProductGroup) => {
-        if (!isAdmin) {
-            message.warning('Chỉ admin được xem chênh lệch và cân bằng kho.');
+        if (!isAssignedChecker) {
+            message.warning('Chỉ người phụ trách phiên kiểm mới có thể cân hàng loạt.');
             return;
         }
         if (isLockedDate) {
@@ -2450,7 +2451,7 @@ export default function StockCheck() {
                                                             <Button
                                                                 icon={<CheckOutlined />}
                                                                 loading={bulkBalancing[group.productName]}
-                                                                disabled={!hasConversion || bulkNeedsCounts || pendingGroupItems.length === 0 || bulkBalancing[group.productName] || isLockedDate}
+                                                                disabled={!hasConversion || bulkNeedsCounts || pendingGroupItems.length === 0 || bulkBalancing[group.productName] || isLockedDate || !isAssignedChecker}
                                                                 onClick={() => handleGroupBalance(group)}
                                                                 style={{
                                                                     minWidth: 182, height: 42,
@@ -2810,12 +2811,12 @@ export default function StockCheck() {
                         width={520}
                     >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: '8px 0' }}>
-                            {!isAdmin && (
+                            {!canManageConversions && (
                                 <Alert
                                     type="warning"
                                     showIcon
                                     message="Chưa thể cân bằng nếu sản phẩm chưa có quy đổi"
-                                    description="Chỉ admin được thiết lập hoặc thay đổi quy đổi đơn vị."
+                                    description="Chỉ người phụ trách phiên kiểm hoặc admin được thiết lập, thay đổi quy đổi đơn vị."
                                 />
                             )}
                             <div style={{ fontSize: 12, color: '#64748b', background: '#f8fafc', borderRadius: 8, padding: '8px 12px', border: '1px solid #e2e8f0' }}>
@@ -2837,7 +2838,7 @@ export default function StockCheck() {
                                         <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600, marginBottom: 3 }}>Tên đơn vị</div>
                                         <input
                                             value={unit.label}
-                                            disabled={!isAdmin}
+                                            disabled={!canManageConversions}
                                             placeholder="VD: Thùng, Tải, Kiện..."
                                             style={{
                                                 width: '100%', border: '1px solid #e2e8f0', borderRadius: 6,
@@ -2850,7 +2851,7 @@ export default function StockCheck() {
                                         <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600, marginBottom: 3 }}>Số lượng ({modalGroup?.items[0]?.unit || 'cái'})</div>
                                         <InputNumber
                                             value={unit.rate || undefined}
-                                            disabled={!isAdmin}
+                                            disabled={!canManageConversions}
                                             min={1} placeholder="0"
                                             style={{ width: '100%', fontWeight: 700 }}
                                             onChange={v => updateUnit(conversionModalGroup, i, 'rate', v || 0)}
@@ -2862,7 +2863,7 @@ export default function StockCheck() {
                                     <Button
                                         type="text" danger size="small"
                                         icon={<MinusOutlined />}
-                                        disabled={!isAdmin}
+                                        disabled={!canManageConversions}
                                         style={{ marginTop: 18 }}
                                         onClick={() => removeUnit(conversionModalGroup, i)}
                                     />
@@ -2870,7 +2871,7 @@ export default function StockCheck() {
                             ))}
                             <Button
                                 onClick={() => addUnit(conversionModalGroup)}
-                                disabled={!isAdmin}
+                                disabled={!canManageConversions}
                                 style={{ borderStyle: 'dashed', fontWeight: 600, borderRadius: 8, height: 40 }}
                                 block
                             >
