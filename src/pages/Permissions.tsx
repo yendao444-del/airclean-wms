@@ -234,6 +234,31 @@ export default function PermissionsPage() {
         }
     };
 
+    const handleForcePasswordChange = () => {
+        if (!changingPasswordUser) return;
+        Modal.confirm({
+            title: 'Bắt đổi mật khẩu',
+            content: `Giữ nguyên mật khẩu hiện tại của ${changingPasswordUser.username}. Ở lần đăng nhập tiếp theo, họ phải tự đổi mật khẩu trước khi dùng hệ thống.`,
+            okText: 'Bắt đổi ở lần đăng nhập tới',
+            cancelText: 'Hủy',
+            onOk: async () => {
+                const forcePasswordChange = window.electronAPI.users.forcePasswordChange;
+                if (!forcePasswordChange) {
+                    message.error('Ứng dụng cần khởi động lại để nạp chức năng bắt đổi mật khẩu.');
+                    throw new Error('Missing users:forcePasswordChange IPC bridge');
+                }
+                const result = await forcePasswordChange(changingPasswordUser.id);
+                if (!result.success) {
+                    message.error(result.error || 'Không thể bắt đổi mật khẩu.');
+                    throw new Error(result.error || 'Không thể bắt đổi mật khẩu.');
+                }
+                await loadUsers();
+                setPasswordModalVisible(false);
+                message.success(`Đã yêu cầu ${changingPasswordUser.username} đổi mật khẩu ở lần đăng nhập tiếp theo.`);
+            },
+        });
+    };
+
     const columns: ColumnsType<User> = [
         {
             title: 'ID',
@@ -336,7 +361,7 @@ export default function PermissionsPage() {
                             onClick={() => handleChangePassword(record)}
                             style={{ color: '#52c41a' }}
                         >
-                            Đổi MK
+                            Mật khẩu
                         </Button>
                     )}
                     <Button
@@ -467,7 +492,7 @@ export default function PermissionsPage() {
 
             {/* Password Change Modal */}
             <Modal
-                title={<><KeyOutlined style={{ color: '#52c41a', marginRight: 8 }} /> Đặt lại mật khẩu</>}
+                title={<><KeyOutlined style={{ color: '#52c41a', marginRight: 8 }} /> Mật khẩu</>}
                 open={passwordModalVisible}
                 onCancel={() => setPasswordModalVisible(false)}
                 footer={null}
@@ -523,6 +548,17 @@ export default function PermissionsPage() {
                             Đặt mật khẩu tạm
                         </Button>
                     </div>
+                    {changingPasswordUser?.role !== 'admin' && (
+                        <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #f0f0f0' }}>
+                            <Text strong>Bắt đổi mật khẩu</Text>
+                            <Text type="secondary" style={{ display: 'block', marginTop: 4, marginBottom: 10 }}>
+                                Giữ nguyên mật khẩu hiện tại và yêu cầu nhân viên tự đổi ở lần đăng nhập tiếp theo.
+                            </Text>
+                            <Button onClick={handleForcePasswordChange} icon={<LockOutlined />}>
+                                Bắt đổi mật khẩu
+                            </Button>
+                        </div>
+                    )}
                 </Form>
             </Modal>
         </div>

@@ -6108,6 +6108,38 @@ ipcMain.handle('dailyTasks:uploadEvidenceImage', async (_event, payload) => {
     }
 });
 
+// Force a non-admin user to change their current password on the next login.
+// Unlike resetPassword, this does not overwrite the existing password.
+ipcMain.handle('users:forcePasswordChange', async (event, userId) => {
+    try {
+        requireRole('admin');
+        if (!prisma) throw new Error('Prisma not available');
+
+        const id = Number(userId);
+        if (!Number.isInteger(id) || id <= 0) throw new Error('Mã người dùng không hợp lệ.');
+        const user = await prisma.user.findUnique({ where: { id } });
+        if (!user) throw new Error('Người dùng không tồn tại.');
+        if (user.role === 'admin') throw new Error('Không áp dụng bắt đổi mật khẩu cho tài khoản quản trị.');
+
+        await prisma.user.update({
+            where: { id },
+            data: { forcePasswordChange: true }
+        });
+        await revokeRememberTokensForUser(id);
+        void logActivity({
+            module: 'users',
+            action: 'FORCE_PASSWORD_CHANGE',
+            description: `Bắt đổi mật khẩu ở lần đăng nhập tiếp theo: ${user.username}`,
+            recordName: user.username,
+            userName: currentSession?.username || 'admin'
+        });
+        return { success: true };
+    } catch (error) {
+        console.error('Force password change error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
     const uploadedPaths = [];
     const imageRegistryKeys = [];

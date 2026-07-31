@@ -244,6 +244,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         updateProfile: (data) => ipcRenderer.invoke('users:updateProfile', data),
         changePassword: (data) => ipcRenderer.invoke('users:changePassword', data),
         resetPassword: (data) => ipcRenderer.invoke('users:resetPassword', data),
+        forcePasswordChange: (userId) => ipcRenderer.invoke('users:forcePasswordChange', userId),
         delete: (id) => ipcRenderer.invoke('users:delete', id),
         login: (username, password, rememberMe) => ipcRenderer.invoke('users:login', username, password, rememberMe),
         logout: (rememberToken) => ipcRenderer.invoke('users:logout', rememberToken),

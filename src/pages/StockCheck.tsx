@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Alert,
     Button,
+    Checkbox,
     Dropdown,
     Empty,
     Input,
@@ -38,6 +39,7 @@ const DAILY_RANDOM_COUNT = 4;
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 interface ConversionUnit { label: string; rate: number; }
+interface ConversionConfig { units: ConversionUnit[]; noConversion?: boolean; }
 
 interface CheckItem {
     sku: string;
@@ -265,7 +267,7 @@ export default function StockCheck() {
     const [bulkNoteModalGroup, setBulkNoteModalGroup] = useState<string | null>(null);
     const [noteModalSku, setNoteModalSku] = useState<string | null>(null);
     const [noteModalValue, setNoteModalValue] = useState('');
-    const [conversionRates, setConversionRates] = useState<Record<string, { units: ConversionUnit[] }>>({});
+    const [conversionRates, setConversionRates] = useState<Record<string, ConversionConfig>>({});
     const [countingInputs, setCountingInputs] = useState<Record<string, { unitCounts: number[]; le: number }>>({});
     const [balanceRecords, setBalanceRecords] = useState<BalanceHistoryRecord[]>([]);
     const [productTabs, setProductTabs] = useState<Record<string, ProductTabKey>>({});
@@ -279,7 +281,7 @@ export default function StockCheck() {
     const [expandedRefId, setExpandedRefId] = useState<number | null>(null);
     const [refDetailCache, setRefDetailCache] = useState<Record<number, { loading: boolean; data: any; type: string; error: string }>>({});
     const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const pendingConversionRatesRef = useRef<Record<string, { units: ConversionUnit[] }>>({});
+    const pendingConversionRatesRef = useRef<Record<string, ConversionConfig>>({});
     const countRequestQueueRef = useRef<Record<string, Promise<void>>>({});
     const countSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
     const countSaveCallbacksRef = useRef<Record<string, () => void>>({});
@@ -318,6 +320,7 @@ export default function StockCheck() {
     const totalCount = todaySession?.items.length ?? 0;
     const balancedCount = todaySession?.items.filter(it => it.balanced).length ?? 0;
     const progressPct = totalCount ? Math.round((checkedCount / totalCount) * 100) : 0;
+    const uncountedSkuCount = todaySession?.items.filter(item => item.actualStock === null).length ?? 0;
     const incompleteSkuCount = todaySession?.items.filter(item => !item.balanced).length ?? 0;
     const isSessionReadyToSubmit = totalCount > 0 && incompleteSkuCount === 0;
 
@@ -643,7 +646,7 @@ export default function StockCheck() {
         try {
             const result = await window.electronAPI.appConfig.get('stockConversionRates');
             if (result.success && result.data) {
-                const migrated: Record<string, { units: ConversionUnit[] }> = {};
+                const migrated: Record<string, ConversionConfig> = {};
                 for (const [key, val] of Object.entries(result.data as Record<string, any>)) {
                     if (val && Array.isArray(val.units)) { migrated[key] = val; }
                     else if (val && typeof val === 'object') {
@@ -658,7 +661,7 @@ export default function StockCheck() {
         } catch { /* no-op */ }
     }, []);
 
-    const saveConversionRates = useCallback((rates: Record<string, { units: ConversionUnit[] }>) => {
+    const saveConversionRates = useCallback((rates: Record<string, ConversionConfig>) => {
         pendingConversionRatesRef.current = rates;
         if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
         saveTimeoutRef.current = setTimeout(async () => {
@@ -682,14 +685,14 @@ export default function StockCheck() {
     const addUnit = (productName: string) => {
         if (!canManageConversions) return;
         setConversionRates(prev => {
-        const updated = { ...prev, [productName]: { units: [...(prev[productName]?.units || []), { label: '', rate: 0 }] } };
+        const updated = { ...prev, [productName]: { units: [...(prev[productName]?.units || []), { label: '', rate: 0 }], noConversion: false } };
         saveConversionRates(updated); return updated;
         });
     };
     const removeUnit = (productName: string, idx: number) => {
         if (!canManageConversions) return;
         setConversionRates(prev => {
-        const updated = { ...prev, [productName]: { units: (prev[productName]?.units || []).filter((_, i) => i !== idx) } };
+        const updated = { ...prev, [productName]: { ...prev[productName], units: (prev[productName]?.units || []).filter((_, i) => i !== idx) } };
         saveConversionRates(updated); return updated;
         });
     };
@@ -698,13 +701,31 @@ export default function StockCheck() {
         setConversionRates(prev => {
         const units = [...(prev[productName]?.units || [])];
         if (units[idx]) units[idx] = { ...units[idx], [field]: value };
-        const updated = { ...prev, [productName]: { units } };
+        const updated = { ...prev, [productName]: { ...prev[productName], units } };
         saveConversionRates(updated); return updated;
         });
     };
 
+    const setNoConversion = (productName: string, noConversion: boolean) => {
+        if (!canManageConversions) return;
+        setConversionRates(prev => {
+            const updated = {
+                ...prev,
+                [productName]: {
+                    // Keep existing units so an accidental toggle does not erase
+                    // the product's conversion setup. They are simply ignored
+                    // while direct counting is selected.
+                    units: prev[productName]?.units || [],
+                    noConversion,
+                },
+            };
+            saveConversionRates(updated);
+            return updated;
+        });
+    };
+
     const hasValidConversion = useCallback((productName: string) =>
-        (conversionRates[productName]?.units || []).some(unit =>
+        conversionRates[productName]?.noConversion === true || (conversionRates[productName]?.units || []).some(unit =>
             String(unit.label || '').trim().length > 0
             && Number.isInteger(Number(unit.rate))
             && Number(unit.rate) > 0
@@ -1516,6 +1537,8 @@ export default function StockCheck() {
         ? activeProductGroup
         : productGroups[0]?.productName || '';
 
+    const inProgressGroupCount = productGroups.filter(group => group.items.some(item => item.actualStock !== null && !item.balanced)).length;
+
     const maxUnitsCount = useMemo(() => {
         let max = 0;
         for (const group of productGroups) {
@@ -2057,9 +2080,9 @@ export default function StockCheck() {
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 18, padding: '16px 2px 18px' }}>
                                     <Progress type="dashboard" percent={progressPct} size={104} strokeWidth={9} trailColor="#e2f3ee" strokeColor="#10b981" format={percent => <span style={{ color: '#10b981', fontWeight: 800, fontSize: 20 }}>{percent}%</span>} />
                                     <div style={{ display: 'grid', gap: 10, fontSize: 13 }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 28 }}><span style={{ color: '#64748b' }}>Đã kiểm</span><strong style={{ color: '#10b981' }}>{checkedCount}</strong></div>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 28 }}><span style={{ color: '#64748b' }}>Đang kiểm</span><strong style={{ color: '#334155' }}>{productGroups.filter(group => group.items.some(item => item.actualStock !== null && !item.balanced)).length}</strong></div>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 28 }}><span style={{ color: '#64748b' }}>Chưa kiểm</span><strong style={{ color: '#f97316' }}>{incompleteSkuCount}</strong></div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 28 }}><span style={{ color: '#64748b' }}>Đã nhập số</span><strong style={{ color: '#10b981' }}>{checkedCount}</strong></div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 28 }}><span style={{ color: '#64748b' }}>Nhóm đang xử lý</span><strong style={{ color: '#334155' }}>{inProgressGroupCount}</strong></div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 28 }}><span style={{ color: '#64748b' }}>Chưa nhập</span><strong style={{ color: '#f97316' }}>{uncountedSkuCount}</strong></div>
                                         <strong style={{ color: '#64748b', fontSize: 12 }}>{balancedCount} / {totalCount} SKU đã cân</strong>
                                     </div>
                                 </div>
@@ -2067,8 +2090,10 @@ export default function StockCheck() {
                                 <div style={{ fontSize: 14, fontWeight: 800, color: '#334155', marginBottom: 8 }}>Danh sách nhóm hàng</div>
                                 <div style={{ display: 'grid', gap: 2 }}>
                                     {productGroups.map(group => {
+                                        const entered = group.items.filter(item => item.actualStock !== null).length;
                                         const balanced = group.items.filter(item => item.balanced).length;
                                         const remaining = group.items.length - balanced;
+                                        const isInProgress = entered > balanced;
                                         const active = group.productName === selectedProductGroup;
                                         const completed = remaining === 0 && group.items.length > 0;
                                         return (
@@ -2087,9 +2112,10 @@ export default function StockCheck() {
                                                 <span style={{ minWidth: 0 }}>
                                                     <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13, fontWeight: active ? 800 : 600 }}>{group.productName}</span>
                                                 </span>
-                                                <span style={{ display: 'flex', alignItems: 'center', gap: 9, color: active ? '#7c8da6' : '#8c9aaf', fontSize: 12, fontWeight: 700 }}>
-                                                    {balanced}/{group.items.length}
-                                                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: completed ? '#10b981' : '#f97316' }} />
+                                                <span style={{ display: 'flex', alignItems: 'center', gap: 7, color: active ? '#7c8da6' : '#8c9aaf', fontSize: 12, fontWeight: 700 }}>
+                                                    {isInProgress && <span style={{ color: '#2563eb' }}>{entered} nhập</span>}
+                                                    <span>{balanced}/{group.items.length} cân</span>
+                                                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: completed ? '#10b981' : isInProgress ? '#2563eb' : '#f97316' }} />
                                                 </span>
                                             </button>
                                         );
@@ -2104,6 +2130,7 @@ export default function StockCheck() {
                             <section style={{ minWidth: 0, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, overflow: 'hidden', boxShadow: '0 2px 8px rgba(15, 23, 42, 0.04)' }}>
                         {productGroups.filter(group => group.productName === selectedProductGroup).map(group => {
                             const units = conversionRates[group.productName]?.units || [];
+                            const hasNoConversion = conversionRates[group.productName]?.noConversion === true;
                             const hasConversion = hasValidConversion(group.productName);
                             const pendingGroupItems = group.items.filter(item => !item.balanced);
                             const blockedGroupItems = pendingGroupItems.filter(item => getBalanceBlockReason(item));
@@ -2136,9 +2163,9 @@ export default function StockCheck() {
                                     <div style={{ padding: '20px 22px 18px', borderBottom: '1px solid #e9eef5' }}>
                                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
                                             <button onClick={() => setActiveProductGroup('')} style={{ border: 0, background: 'transparent', padding: 0, color: '#7c8da6', fontSize: 13, cursor: 'pointer' }}>← Quay lại danh sách nhóm</button>
-                                            <Tooltip title={hasConversion ? 'Xem hoặc cập nhật quy đổi đơn vị' : 'Bắt buộc thiết lập quy đổi trước khi cân bằng kho'}>
+                                            <Tooltip title={hasConversion ? 'Xem hoặc cập nhật cách nhập số lượng' : 'Bắt buộc thiết lập quy đổi hoặc chọn hàng không có quy đổi trước khi cân bằng kho'}>
                                                 <button onClick={() => setConversionModalGroup(group.productName)} style={{ display: 'flex', alignItems: 'center', gap: 8, color: hasConversion ? '#0f766e' : '#b54708', background: hasConversion ? '#ecfdf5' : '#fff7ed', border: `1px solid ${hasConversion ? '#6ee7b7' : '#fdba74'}`, borderRadius: 8, padding: '10px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 800, boxShadow: hasConversion ? '0 2px 5px rgba(16, 185, 129, 0.12)' : '0 3px 8px rgba(249, 115, 22, 0.16)' }}>
-                                                    <SettingOutlined /> {hasConversion ? `Quy đổi · ${units.length} đơn vị` : 'Thiết lập quy đổi'}
+                                                    <SettingOutlined /> {hasNoConversion ? 'Nhập trực tiếp' : hasConversion ? `Quy đổi · ${units.length} đơn vị` : 'Thiết lập quy đổi'}
                                                 </button>
                                             </Tooltip>
                                         </div>
@@ -2788,6 +2815,7 @@ export default function StockCheck() {
             {/* ── Conversion Modal ── */}
             {conversionModalGroup && (() => {
                 const modalUnits = conversionRates[conversionModalGroup]?.units || [];
+                const modalNoConversion = conversionRates[conversionModalGroup]?.noConversion === true;
                 const modalGroup = productGroups.find(g => g.productName === conversionModalGroup);
                 return (
                     <Modal
@@ -2822,12 +2850,24 @@ export default function StockCheck() {
                             <div style={{ fontSize: 12, color: '#64748b', background: '#f8fafc', borderRadius: 8, padding: '8px 12px', border: '1px solid #e2e8f0' }}>
                                 💡 Mỗi đơn vị quy đổi giúp tính nhanh tổng tồn khi đếm bằng &quot;thùng&quot;, &quot;tải&quot;...
                             </div>
-                            {modalUnits.length === 0 && (
+                            <div style={{ border: '1px solid #dbeafe', background: '#f8fbff', borderRadius: 8, padding: '10px 12px' }}>
+                                <Checkbox
+                                    checked={modalNoConversion}
+                                    disabled={!canManageConversions}
+                                    onChange={event => setNoConversion(conversionModalGroup, event.target.checked)}
+                                >
+                                    <span style={{ fontWeight: 700, color: '#1e3a5f' }}>Hàng không có quy đổi</span>
+                                </Checkbox>
+                                <div style={{ marginTop: 4, marginLeft: 24, color: '#64748b', fontSize: 12 }}>
+                                    Nhập trực tiếp tổng số lượng thực tế, không cần thùng, tải hoặc gói.
+                                </div>
+                            </div>
+                            {!modalNoConversion && modalUnits.length === 0 && (
                                 <div style={{ textAlign: 'center', color: '#94a3b8', padding: '24px 0', fontSize: 13 }}>
                                     Chưa có đơn vị quy đổi nào.
                                 </div>
                             )}
-                            {modalUnits.map((unit, i) => (
+                            {!modalNoConversion && modalUnits.map((unit, i) => (
                                 <div key={i} style={{
                                     display: 'grid', gridTemplateColumns: '1fr 120px auto 32px',
                                     gap: 8, alignItems: 'center',
@@ -2869,14 +2909,14 @@ export default function StockCheck() {
                                     />
                                 </div>
                             ))}
-                            <Button
+                            {!modalNoConversion && <Button
                                 onClick={() => addUnit(conversionModalGroup)}
                                 disabled={!canManageConversions}
                                 style={{ borderStyle: 'dashed', fontWeight: 600, borderRadius: 8, height: 40 }}
                                 block
                             >
                                 <PlusOutlined /> Thêm đơn vị mới
-                            </Button>
+                            </Button>}
                         </div>
                     </Modal>
                 );
