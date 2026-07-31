@@ -62,6 +62,7 @@ const MAX_COUNT_RETRIES = 2;
 
 interface CheckSession {
     id: string;
+    runId?: string;
     date: string;
     type: 'daily' | 'weekend' | 'full';
     assignedTo: string;
@@ -77,11 +78,13 @@ interface ProductGroup { productName: string; items: CheckItem[]; }
 
 interface BalanceHistoryItem extends CheckItem {
     cost?: number;
+    stockCheckRunId?: string;
 }
 
 interface BalanceHistoryRecord {
     id?: number;
     date: string;
+    createdAt?: string;
     adjustedBy: string;
     items: BalanceHistoryItem[] | string;
     notes?: string | null;
@@ -119,6 +122,9 @@ interface InventoryLogItem {
 }
 
 type ProductTabKey = 'check' | 'ledger' | 'conversion';
+
+const createStockCheckRunId = () =>
+    globalThis.crypto?.randomUUID?.() || `stock-check-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 const normalizeUserText = (value?: string) =>
     (value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
@@ -216,7 +222,7 @@ export default function StockCheck() {
     // still enter counts and balance their own session.
     const canManage = user?.role === 'admin';
     const isAdmin = user?.role === 'admin';
-    const canViewLedger = isAdmin || user?.username?.toLowerCase() === 'nguyenvankhanh';
+    const canViewLedger = isAdmin;
 
     const [currentDate, setCurrentDate] = useState(dayjs());
     const [activeTab, setActiveTab] = useState<'daily' | 'full'>('daily');
@@ -227,6 +233,7 @@ export default function StockCheck() {
     const [selectedStaffUsername, setSelectedStaffUsername] = useState('');
     const [balancing, setBalancing] = useState<Record<string, boolean>>({});
     const [bulkBalancing, setBulkBalancing] = useState<Record<string, boolean>>({});
+    const [submittingSession, setSubmittingSession] = useState(false);
     const [bulkNoteEditors, setBulkNoteEditors] = useState<Record<string, boolean>>({});
     const [bulkNoteDrafts, setBulkNoteDrafts] = useState<Record<string, string>>({});
     const [conversionRates, setConversionRates] = useState<Record<string, { units: ConversionUnit[] }>>({});
@@ -241,6 +248,7 @@ export default function StockCheck() {
     const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const countRequestQueueRef = useRef<Record<string, Promise<void>>>({});
     const [expandedProductGroups, setExpandedProductGroups] = useState<Record<string, boolean>>({});
+    const [activeProductGroup, setActiveProductGroup] = useState('');
     const [expandedConvGroups, setExpandedConvGroups] = useState<Record<string, boolean>>({});
     const [conversionModalGroup, setConversionModalGroup] = useState<string | null>(null);
     const [topSellingProducts, setTopSellingProducts] = useState<TopSellingProduct[]>([]);
@@ -270,9 +278,10 @@ export default function StockCheck() {
     const canEditCounts = !!todaySession && !isLockedDate && !isSessionSubmitted && isAssignedChecker;
     const checkedCount = todaySession?.items.filter(it => it.actualStock !== null).length ?? 0;
     const totalCount = todaySession?.items.length ?? 0;
-    const diffCount = todaySession?.items.filter(it => it.actualStock !== null && it.difference !== 0).length ?? 0;
     const balancedCount = todaySession?.items.filter(it => it.balanced).length ?? 0;
     const progressPct = totalCount ? Math.round((checkedCount / totalCount) * 100) : 0;
+    const incompleteSkuCount = todaySession?.items.filter(item => !item.balanced).length ?? 0;
+    const isSessionReadyToSubmit = totalCount > 0 && incompleteSkuCount === 0;
 
     const loadTopSellingProducts = useCallback(async (): Promise<TopSellingProduct[]> => {
         try {
@@ -403,6 +412,7 @@ export default function StockCheck() {
         // daily session would immediately be recreated by the auto-assignment rule.
         const resetSession: CheckSession = {
             ...todaySession,
+            runId: createStockCheckRunId(),
             items: [],
             notes: '',
             status: 'in_progress',
@@ -428,34 +438,6 @@ export default function StockCheck() {
             message.error(error?.message || 'Không thể xóa danh sách kiểm.');
         }
     }, [sessions, todaySession, todaySessionId]);
-
-    const handleSubmitSession = useCallback(async () => {
-        if (!todaySession || isLockedDate) return;
-        if (!isAssignedChecker) {
-            message.warning('Chỉ người phụ trách phiên kiểm mới có thể nộp kết quả.');
-            return;
-        }
-        if (todaySession.items.some(item => item.actualStock === null)) {
-            message.warning('Hãy nhập đủ số lượng thực tế trước khi nộp kết quả.');
-            return;
-        }
-        if (todaySession.items.some(item => !item.balanced)) {
-            message.warning('Hãy bấm Cân bằng kho cho tất cả SKU trước khi nộp kết quả.');
-            return;
-        }
-
-        try {
-            await flushPendingCountUpdates();
-            const result = await window.electronAPI.stockCheck.submitSession({ sessionId: todaySessionId });
-            if (!result?.success) throw new Error(result?.error || 'Không thể lưu kết quả kiểm.');
-            setSessions(current => current.map(session => session.id === todaySessionId
-                ? { ...session, ...(result.session || {}), status: 'completed' as const }
-                : session));
-            message.success('Đã nộp kết quả kiểm. Chờ admin kiểm tra và cân bằng.');
-        } catch (error: any) {
-            message.error(error?.message || 'Không thể nộp kết quả kiểm.');
-        }
-    }, [flushPendingCountUpdates, isAssignedChecker, isLockedDate, todaySession, todaySessionId]);
 
     useEffect(() => {
         setHeaderExtra(
@@ -488,18 +470,12 @@ export default function StockCheck() {
 
                 {/* ── Assignee (phải) ── */}
                 {todaySession && (
-                    <div style={{ marginLeft: 'auto' }}>
+                    <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
                         <Dropdown
                             trigger={['click']}
                             placement="bottomRight"
                             menu={{
                                 items: [
-                                    ...(isToday && !isSessionSubmitted && todaySession.items.length > 0 ? [{
-                                        key: 'submit',
-                                        label: checkedCount === totalCount ? 'Nộp kết quả kiểm' : `Nộp kết quả (${checkedCount}/${totalCount})`,
-                                        disabled: !isAssignedChecker || checkedCount !== totalCount,
-                                        onClick: handleSubmitSession,
-                                    }] : []),
                                     ...(canManage && isToday ? [{
                                         key: 'change',
                                         label: 'Đổi người kiểm',
@@ -513,7 +489,7 @@ export default function StockCheck() {
                                             label: <span style={{ color: '#ef4444' }}>↩ Xóa danh sách kiểm</span>,
                                             onClick: () => Modal.confirm({
                                                 title: 'Xóa danh sách kiểm?',
-                                                content: `Xóa các dòng kiểm của "${activeTab === 'full' ? 'Kiểm toàn bộ' : 'Kiểm hàng ngày'}" ngày ${currentDate.format('DD/MM/YYYY')}. Người phụ trách vẫn được giữ để tạo lại danh sách test.`,
+                                                content: `Xóa các dòng kiểm của "${activeTab === 'full' ? 'Kiểm toàn bộ' : 'Kiểm hàng ngày'}" ngày ${currentDate.format('DD/MM/YYYY')}. Người phụ trách vẫn được giữ để tạo lại danh sách test. Lịch sử cân bằng kho đã ghi nhận sẽ không bị xóa, nhưng không còn thuộc danh sách kiểm mới.`,
                                                 okText: 'Xóa danh sách',
                                                 okType: 'danger',
                                                 cancelText: 'Hủy',
@@ -581,7 +557,7 @@ export default function StockCheck() {
             </div>
         );
         return () => clearHeaderExtra();
-    }, [activeTab, todaySession, isAdmin, isToday, canManage, isAssignedChecker, isSessionSubmitted, checkedCount, totalCount, setHeaderExtra, clearHeaderExtra, handleUndoSession, handleSubmitSession]);
+    }, [activeTab, todaySession, isAdmin, isToday, canManage, isSessionSubmitted, setHeaderExtra, clearHeaderExtra, handleUndoSession]);
 
     const fetchStaff = async () => {
         try {
@@ -727,6 +703,7 @@ export default function StockCheck() {
                 session.type !== 'full' &&
                 session.date < todayStr &&
                 session.status !== 'completed' &&
+                !session.completedAt &&
                 assignableManagers.some(manager => manager.username.toLowerCase() === String(session.assignedTo || '').toLowerCase())
             )
             .sort((a, b) => b.date.localeCompare(a.date))[0];
@@ -795,7 +772,7 @@ export default function StockCheck() {
     };
 
     useEffect(() => {
-        if (!isAdmin || !sessions.length || !contextProducts.length) return;
+        if (!isAdmin || !isToday || !sessions.length || !contextProducts.length) return;
         const stockBySku = buildStockBySku(contextProducts);
         let changed = false;
 
@@ -819,7 +796,7 @@ export default function StockCheck() {
         });
 
         if (changed) persistSessions(updated);
-    }, [contextProducts, sessions, todayStr, isAdmin]);
+    }, [contextProducts, sessions, todayStr, isAdmin, isToday]);
 
     // Auto-assign người phụ trách khi page load — nếu hôm nay chưa có session thì gán ngay,
     // không cần chờ nhân viên bấm "Tạo phiên kiểm". Nếu không kiểm → vẫn bị phạt.
@@ -847,7 +824,7 @@ export default function StockCheck() {
         }
 
         const preSession: CheckSession = {
-            id: todayStr, date: todayStr, type: 'daily',
+            id: todayStr, runId: createStockCheckRunId(), date: todayStr, type: 'daily',
             assignedTo: assignee.username, assignedName: assignee.username,
             status: 'in_progress', items: [], notes: '',
             createdAt: dayjs().toISOString(),
@@ -914,7 +891,7 @@ export default function StockCheck() {
         const sessionId = activeTab === 'full' ? `${todayStr}-full` : todayStr;
         const sessionType: CheckSession['type'] = activeTab === 'full' ? 'full' : 'daily';
         const session: CheckSession = {
-            id: sessionId, date: todayStr, type: sessionType,
+            id: sessionId, runId: createStockCheckRunId(), date: todayStr, type: sessionType,
             assignedTo: assignee.username, assignedName: assignee.username,
             status: 'in_progress', items, notes: '', createdAt: dayjs().toISOString(),
         };
@@ -956,7 +933,7 @@ export default function StockCheck() {
     };
 
     const getBulkNoteTargets = (group: ProductGroup) =>
-        group.items.filter(item => !item.balanced && item.actualStock !== null && item.difference !== 0);
+        group.items.filter(item => !item.balanced && item.actualStock !== null && item.requiresNote);
 
     const openBulkNoteEditor = (productName: string) => {
         setBulkNoteEditors(prev => ({ ...prev, [productName]: true }));
@@ -1001,7 +978,7 @@ export default function StockCheck() {
     const getBalanceBlockReason = (item: CheckItem): string | null => {
         if (item.balanced) return 'Đã cân';
         if (item.actualStock === null) return 'Chưa nhập tồn';
-        if (item.difference !== 0 && !item.note.trim()) return 'Cần nhập ghi chú';
+        if (item.requiresNote && !item.note.trim()) return 'Cần nhập ghi chú';
         return null;
     };
 
@@ -1128,10 +1105,14 @@ export default function StockCheck() {
                 message.error(result?.error || 'Không thể cân bằng kho.');
                 return;
             }
-            setSessions(current => current.map(session => session.id !== todaySessionId ? session : {
-                ...session,
-                items: session.items.map(entry => entry.sku !== item.sku ? entry : { ...entry, ...(result.item || {}), verificationStatus: result.status === 'match' || result.status === 'balanced_mismatch' ? result.status : undefined }),
-            }));
+            setSessions(current => current.map(session => session.id !== todaySessionId ? session : (
+                result.session
+                    ? { ...session, ...result.session }
+                    : {
+                        ...session,
+                        items: session.items.map(entry => entry.sku !== item.sku ? entry : { ...entry, ...(result.item || {}), verificationStatus: result.status === 'match' || result.status === 'balanced_mismatch' ? result.status : undefined }),
+                    }
+            )));
             if (result.status === 'match') message.success('Khớp. Đã ghi nhận kết quả kiểm.');
             if (result.status === 'mismatch_requires_note') message.warning('Không khớp. Nhập lý do hoặc dùng lượt nhập lại.');
             if (result.status === 'balanced_mismatch') message.success('Đã cân bằng theo lý do đã nhập.');
@@ -1152,17 +1133,13 @@ export default function StockCheck() {
             return;
         }
         if (item.difference !== 0 && !item.note.trim()) {
-            if (!isAdmin) {
-                persistSessions(sessions.map(session => session.id !== todaySessionId ? session : {
-                    ...session,
-                    items: session.items.map(current => current.sku !== item.sku
-                        ? current
-                        : { ...current, countLocked: true, requiresNote: true }),
-                }));
-                message.warning('Số liệu chưa khớp. Hãy nhập ghi chú để xác nhận cân bằng.');
-            } else {
-                message.warning(`Chênh ${item.difference > 0 ? '+' : ''}${item.difference} — cần nhập lý do!`);
-            }
+            persistSessions(sessions.map(session => session.id !== todaySessionId ? session : {
+                ...session,
+                items: session.items.map(current => current.sku !== item.sku
+                    ? current
+                    : { ...current, countLocked: !isAdmin, requiresNote: true }),
+            }));
+            message.warning('Cần nhập lý do trước khi cân bằng SKU này.');
             return;
         }
         Modal.confirm({
@@ -1201,6 +1178,40 @@ export default function StockCheck() {
         });
     };
 
+    const handleSubmitSession = () => {
+        if (!todaySession) return;
+        if (!isAssignedChecker) {
+            message.warning('Chỉ người phụ trách phiên kiểm mới có thể chốt phiên.');
+            return;
+        }
+        if (!isSessionReadyToSubmit) {
+            message.warning(`Còn ${incompleteSkuCount} SKU chưa cân bằng, chưa thể chốt phiên.`);
+            return;
+        }
+        Modal.confirm({
+            title: 'Chốt phiên kiểm hàng',
+            content: 'Toàn bộ SKU đã cân bằng. Sau khi chốt, phiên kiểm hôm nay không thể sửa số đếm.',
+            okText: 'Chốt phiên',
+            okButtonProps: { icon: <CheckOutlined /> },
+            cancelText: 'Hủy',
+            onOk: async () => {
+                setSubmittingSession(true);
+                try {
+                    await flushPendingCountUpdates();
+                    const result = await window.electronAPI.stockCheck.submitSession({ sessionId: todaySession.id });
+                    if (!result?.success || !result.session) {
+                        message.error(result?.error || 'Không thể chốt phiên kiểm hàng.');
+                        return;
+                    }
+                    setSessions(current => current.map(session => session.id === todaySession.id ? { ...session, ...result.session } : session));
+                    message.success('Đã chốt phiên kiểm hàng.');
+                } finally {
+                    setSubmittingSession(false);
+                }
+            },
+        });
+    };
+
     const handleGroupBalance = (group: ProductGroup) => {
         if (!isAdmin) {
             message.warning('Chỉ admin được xem chênh lệch và cân bằng kho.');
@@ -1213,6 +1224,20 @@ export default function StockCheck() {
         const pendingItems = group.items.filter(item => !item.balanced);
         if (!pendingItems.length) {
             message.info('Sản phẩm này đã cân hết.');
+            return;
+        }
+
+        const unconfirmedMismatches = pendingItems.filter(item =>
+            item.actualStock !== null && item.difference !== 0 && !item.note.trim() && !item.requiresNote
+        );
+        if (unconfirmedMismatches.length > 0) {
+            persistSessions(sessions.map(session => session.id !== todaySessionId ? session : {
+                ...session,
+                items: session.items.map(item => unconfirmedMismatches.some(target => target.sku === item.sku)
+                    ? { ...item, requiresNote: true, countLocked: !isAdmin }
+                    : item),
+            }));
+            message.warning(`Cần nhập lý do cho ${unconfirmedMismatches.length} SKU trước khi chốt và cân bằng.`);
             return;
         }
 
@@ -1293,6 +1318,7 @@ export default function StockCheck() {
     const sessionBalanceRecords = useMemo(() => {
         if (!todaySession) return [];
         const sessionSkus = new Set(todaySession.items.map(item => item.sku));
+        const sessionStartedAt = dayjs(todaySession.createdAt);
         return balanceRecords
             .map(record => ({
                 ...record,
@@ -1300,7 +1326,13 @@ export default function StockCheck() {
             }))
             .filter(record =>
                 record.items.length > 0 &&
-                dayjs(record.date).isSame(todaySession.date, 'day')
+                dayjs(record.date).isSame(todaySession.date, 'day') &&
+                record.items.some(item => {
+                    if (item.stockCheckRunId) return item.stockCheckRunId === todaySession.runId;
+                    // Legacy records have no run ID. They belong to this session
+                    // only when created after this session was started.
+                    return !sessionStartedAt.isValid() || dayjs(record.createdAt || record.date).isSame(sessionStartedAt) || dayjs(record.createdAt || record.date).isAfter(sessionStartedAt);
+                })
             );
     }, [balanceRecords, todaySession]);
     const latestBalancedItemBySku = useMemo(() => {
@@ -1332,6 +1364,10 @@ export default function StockCheck() {
         return Array.from(map.entries()).map(([productName, items]) => ({ productName, items }));
     }, [todaySession]);
 
+    const selectedProductGroup = productGroups.some(group => group.productName === activeProductGroup)
+        ? activeProductGroup
+        : productGroups[0]?.productName || '';
+
     const maxUnitsCount = useMemo(() => {
         let max = 0;
         for (const group of productGroups) {
@@ -1345,6 +1381,35 @@ export default function StockCheck() {
     const renderDiff = (item: CheckItem) => {
         // Chưa nhập → dash
         if (item.actualStock === null) return <span style={{ color: '#bbb' }}>—</span>;
+
+        if (item.balanced) {
+            // Older sessions did not store verificationStatus. Recover that
+            // result from the immutable balance history for a clear audit view.
+            const balanceHistory = latestBalancedItemBySku.get(item.sku);
+            const isMatch = item.verificationStatus === 'match' || balanceHistory?.difference === 0;
+            if (isMatch) {
+                return <span style={{ color: '#15803d', fontWeight: 700, whiteSpace: 'nowrap' }}>✓ Khớp</span>;
+            }
+
+            const adjustmentText = balanceHistory
+                ? `Tồn cũ ${balanceHistory.systemStock} → tồn mới ${balanceHistory.actualStock}`
+                : 'Đã cân bằng kho';
+            return (
+                <Tooltip title={isAdmin ? adjustmentText : 'Đã cân bằng kho'}>
+                    <span style={{ color: '#15803d', fontWeight: 700, whiteSpace: 'nowrap', cursor: 'help' }}>
+                        ✓ Đã điều chỉnh
+                    </span>
+                </Tooltip>
+            );
+        }
+
+        // Never compare a typed count in the UI. The outcome is only revealed
+        // after the balance action has committed this SKU.
+        if (!item.balanced) {
+            return item.requiresNote
+                ? <span style={{ color: '#b45309', fontWeight: 700 }}>Cần nhập lý do</span>
+                : <span style={{ color: '#64748b', fontWeight: 600 }}>Đã nhập</span>;
+        }
 
         // A comparison result is only shown after the count has been committed
         // through the balance action; it must not update while staff are typing.
@@ -1749,16 +1814,18 @@ export default function StockCheck() {
     return (
         <div style={{ background: '#F8FAFC', minHeight: '100vh' }}>
             <main style={{ maxWidth: 1280, margin: '0 auto', padding: '16px 20px 0' }}>
-                <Alert
-                    type="warning"
-                    showIcon
-                    style={{ marginBottom: 12, borderRadius: 8, padding: '4px 10px', fontSize: 12 }}
-                    message={
-                        <span style={{ fontSize: 12 }}>
-                            Không kiểm hàng → người phụ trách bị phạt <strong>{STOCK_CHECK_MISSING_FINE.toLocaleString('vi-VN')}đ</strong> trong Bảng công (từ {dayjs(STOCK_CHECK_POLICY_START_DATE).format('DD/MM/YYYY')}, trừ CN & ngày lễ).
-                        </span>
-                    }
-                />
+                {isToday && todaySession && totalCount > 0 && !isSessionSubmitted && !isSessionReadyToSubmit && (
+                    <Alert
+                        type="warning"
+                        showIcon
+                        style={{ marginBottom: 12, borderRadius: 8, fontSize: 12 }}
+                        message={
+                            <span>
+                                Phiên kiểm chưa hoàn tất: còn <strong>{incompleteSkuCount}/{totalCount} SKU</strong> chưa cân bằng. Kiểm một phần SKU không được tính là hoàn thành; cần cân bằng đủ toàn bộ SKU trước khi nộp, nếu không người phụ trách sẽ bị phạt <strong>{STOCK_CHECK_MISSING_FINE.toLocaleString('vi-VN')}đ</strong> trong Bảng công.
+                            </span>
+                        }
+                    />
+                )}
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, marginBottom: 16 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
                         <div style={{
@@ -1789,10 +1856,7 @@ export default function StockCheck() {
                             {([
                                 { label: 'Tổng', value: totalCount, color: '#f97316' },
                                 { label: isAdmin ? 'Đã kiểm' : 'Đã nhập', value: checkedCount, color: '#10b981' },
-                                ...(isAdmin ? [
-                                    { label: 'Chênh lệch', value: diffCount, color: '#ef4444' },
-                                    { label: 'Đã cân bằng', value: balancedCount, color: '#3b82f6' },
-                                ] : []),
+                                ...(isAdmin ? [{ label: 'Đã cân bằng', value: balancedCount, color: '#3b82f6' }] : []),
                             ] as const).map((s, i) => (
                                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
                                     <div style={{ padding: '4px 18px', textAlign: 'center' as const, borderRight: '1px solid #f0f0f0' }}>
@@ -1832,30 +1896,73 @@ export default function StockCheck() {
                                     <span style={{
                                         display: 'inline-flex', alignItems: 'center', gap: 5,
                                         fontSize: 11, fontWeight: 700,
-                                        color: progressPct === 100 ? '#f97316' : '#64748b',
-                                        background: progressPct === 100 ? '#fff7ed' : '#f8fafc',
-                                        border: `1px solid ${progressPct === 100 ? '#fed7aa' : '#e2e8f0'}`,
+                                        color: isSessionSubmitted ? '#15803d' : isSessionReadyToSubmit ? '#f97316' : '#64748b',
+                                        background: isSessionSubmitted ? '#f0fdf4' : isSessionReadyToSubmit ? '#fff7ed' : '#f8fafc',
+                                        border: `1px solid ${isSessionSubmitted ? '#bbf7d0' : isSessionReadyToSubmit ? '#fed7aa' : '#e2e8f0'}`,
                                         borderRadius: 6, padding: '3px 10px', textTransform: 'uppercase' as const, letterSpacing: 0.8,
                                     }}>
                                         <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'currentColor', flexShrink: 0 }} />
-                                        {isSessionSubmitted ? 'Đã nộp' : progressPct === 100 ? 'Sẵn sàng nộp' : 'Đang kiểm'}
+                                        {isSessionSubmitted ? 'Đã hoàn tất' : isSessionReadyToSubmit ? 'Sẵn sàng hoàn tất' : `Còn ${incompleteSkuCount} SKU`}
                                     </span>
                                 )}
                             </div>
                         </div>
 
                         {/* ── Product groups ── */}
-                        {productGroups.map(group => {
+                        <div style={{
+                            display: 'grid', gridTemplateColumns: '248px minmax(0, 1fr)', gap: 16,
+                            alignItems: 'start', marginTop: 16,
+                        }}>
+                            <aside style={{
+                                position: 'sticky', top: 16, background: '#fff', border: '1px solid #e2e8f0',
+                                borderRadius: 8, padding: 12,
+                            }}>
+                                <div style={{ fontSize: 12, fontWeight: 800, color: '#334155', margin: '2px 4px 10px' }}>Nhóm sản phẩm</div>
+                                <div style={{ display: 'grid', gap: 4 }}>
+                                    {productGroups.map(group => {
+                                        const balanced = group.items.filter(item => item.balanced).length;
+                                        const remaining = group.items.length - balanced;
+                                        const active = group.productName === selectedProductGroup;
+                                        const completed = remaining === 0 && group.items.length > 0;
+                                        return (
+                                            <button
+                                                key={group.productName}
+                                                onClick={() => setActiveProductGroup(group.productName)}
+                                                style={{
+                                                    width: '100%', display: 'grid', gridTemplateColumns: '1fr auto', gap: 8,
+                                                    textAlign: 'left', alignItems: 'center', padding: '9px 10px', borderRadius: 6,
+                                                    background: active ? '#ecfdf5' : '#fff',
+                                                    border: `1px solid ${active ? '#86efac' : 'transparent'}`,
+                                                    cursor: 'pointer', color: '#334155',
+                                                }}
+                                            >
+                                                <span style={{ minWidth: 0 }}>
+                                                    <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: active ? 800 : 600 }}>{group.productName}</span>
+                                                    <span style={{ display: 'block', marginTop: 3, fontSize: 11, color: '#94a3b8' }}>{balanced}/{group.items.length} đã cân</span>
+                                                </span>
+                                                <span style={{ width: 8, height: 8, borderRadius: '50%', background: completed ? '#16a34a' : '#f97316' }} />
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                                <div style={{ borderTop: '1px solid #f1f5f9', marginTop: 12, padding: '10px 4px 2px', fontSize: 11, color: '#64748b', lineHeight: 1.7 }}>
+                                    <div><span style={{ color: '#16a34a' }}>●</span> Đã cân bằng</div>
+                                    <div><span style={{ color: '#f97316' }}>●</span> Còn SKU cần xử lý</div>
+                                </div>
+                            </aside>
+                            <section style={{ minWidth: 0 }}>
+                        {productGroups.filter(group => group.productName === selectedProductGroup).map(group => {
                             const units = conversionRates[group.productName]?.units || [];
                             const pendingGroupItems = group.items.filter(item => !item.balanced);
                             const blockedGroupItems = pendingGroupItems.filter(item => getBalanceBlockReason(item));
                             const missingStockCount = blockedGroupItems.filter(item => item.actualStock === null).length;
-                            const missingNoteCount = blockedGroupItems.filter(item => item.actualStock !== null && item.difference !== 0 && !item.note.trim()).length;
+                            const missingNoteCount = blockedGroupItems.filter(item => item.actualStock !== null && item.requiresNote && !item.note.trim()).length;
                             const canBulkBalance = pendingGroupItems.length > 0 && blockedGroupItems.length === 0;
-                            const isProductExpanded = !!expandedProductGroups[group.productName];
+                            const isProductExpanded = true;
                             const groupCheckedCount = group.items.filter(item => item.actualStock !== null).length;
                             const groupBalancedCount = group.items.filter(item => item.balanced).length;
-                            const groupDiffCount = group.items.filter(item => item.actualStock !== null && item.difference !== 0).length;
+                            const groupRemainingCount = group.items.length - groupBalancedCount;
+                            const groupCompleted = groupRemainingCount === 0 && group.items.length > 0;
                             const bulkNoteTargets = getBulkNoteTargets(group);
                             const isBulkNoteEditing = !!bulkNoteEditors[group.productName];
                             const bulkNoteDraft = bulkNoteDrafts[group.productName] || '';
@@ -1869,14 +1976,15 @@ export default function StockCheck() {
                                     : `Cân bằng ${pendingGroupItems.length} dòng của sản phẩm này`;
                             return (
                                 <div key={group.productName} style={{
-                                    background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10,
+                                    background: '#fff',
+                                    border: `1px solid ${groupCompleted ? '#bbf7d0' : '#dbe5f0'}`, borderRadius: 8,
                                     marginBottom: 8, overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.04)',
                                 }}>
                                     <div
                                         style={{
                                             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                                             padding: '12px 16px', cursor: 'pointer',
-                                            background: isProductExpanded ? '#f8faff' : '#fff',
+                                            background: groupCompleted ? '#f0fdf4' : '#f8fafc',
                                         }}
                                         onClick={() => toggleProductGroup(group.productName)}
                                     >
@@ -1896,34 +2004,19 @@ export default function StockCheck() {
                                             <span style={{ fontSize: 12, color: '#94a3b8', whiteSpace: 'nowrap' }}>
                                                 {groupCheckedCount}/{group.items.length} đã kiểm
                                             </span>
-                                            {isAdmin && groupDiffCount > 0 && (
-                                                <Tag color="red" style={{ margin: 0, fontSize: 11 }}>{groupDiffCount} chênh</Tag>
-                                            )}
                                         </div>
                                         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0, minWidth: isAdmin ? 220 : 0, justifyContent: 'flex-end' }}>
+                                            <span style={{
+                                                fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap', borderRadius: 999, padding: '3px 9px',
+                                                color: groupCompleted ? '#15803d' : '#b45309',
+                                                background: groupCompleted ? '#dcfce7' : '#ffedd5',
+                                                border: `1px solid ${groupCompleted ? '#bbf7d0' : '#fed7aa'}`,
+                                            }}>
+                                                {groupCompleted ? `Đã cân ${groupBalancedCount}/${group.items.length}` : `Còn ${groupRemainingCount} SKU`}
+                                            </span>
                                             {isAdmin && <span style={{ fontSize: 12, color: '#cbd5e1', fontWeight: 700, minWidth: 80, textAlign: 'right' }}>
                                                 {groupBalancedCount}/{group.items.length} đã cân
                                             </span>}
-                                            {isAdmin && <Tooltip title={bulkTooltip}>
-                                                <span style={{ display: 'inline-block' }}>
-                                                    <Button
-                                                        size="small"
-                                                        loading={bulkBalancing[group.productName]}
-                                                        disabled={!canBulkBalance || bulkBalancing[group.productName] || isLockedDate}
-                                                        onClick={e => { e.stopPropagation(); handleGroupBalance(group); }}
-                                                        style={{
-                                                            background: canBulkBalance ? '#faad14' : undefined,
-                                                            borderColor: canBulkBalance ? '#faad14' : undefined,
-                                                            color: canBulkBalance ? '#fff' : undefined,
-                                                            fontWeight: 700,
-                                                            fontSize: 12,
-                                                            minWidth: 112,
-                                                        }}
-                                                    >
-                                                        Cân bằng tất cả
-                                                    </Button>
-                                                </span>
-                                            </Tooltip>}
                                         </div>
                                     </div>
 
@@ -1991,7 +2084,7 @@ export default function StockCheck() {
                                                                 ) : (
                                                                     <th style={{ ...S.th, background: '#f8fafc', color: '#64748b', width: 100, textAlign: 'center' }}>Tổng TT</th>
                                                                 )}
-                                                                <th style={{ ...S.th, background: '#f8fafc', color: '#64748b', width: isAdmin ? 60 : 90, textAlign: 'right' }}>{isAdmin ? 'Chênh' : 'Trạng thái'}</th>
+                                                                <th style={{ ...S.th, background: '#f8fafc', color: '#64748b', width: 130, textAlign: 'center' }}>Trạng thái</th>
                                                                 <th style={{ ...S.th, background: '#f8fafc', color: '#64748b', textAlign: 'center', textTransform: 'none' }}>
                                                                     {isAdmin ? (isBulkNoteEditing ? (
                                                                         <div>
@@ -2064,10 +2157,8 @@ export default function StockCheck() {
                                                         </thead>
                                                         <tbody>
                                                             {group.items.map((item, idx) => {
-                                                                const needNote = item.difference !== 0 && !item.note.trim() && item.actualStock !== null;
-                                                                const balanceBlockedByNote = isAdmin
-                                                                    ? needNote
-                                                                    : !!item.requiresNote && !item.note.trim();
+                                                                const needNote = !!item.requiresNote && !item.note.trim() && item.actualStock !== null;
+                                                                const balanceBlockedByNote = needNote;
                                                                 const retriesRemaining = Math.max(0, MAX_COUNT_RETRIES - (item.retryCount || 0));
                                                                 const canRetryCount = !isAdmin && !!item.requiresNote && retriesRemaining > 0 && !item.note.trim();
                                                                 const rowBg = item.balanced ? '#f6ffed' : (idx % 2 === 0 ? '#fff' : '#fafafa');
@@ -2079,6 +2170,13 @@ export default function StockCheck() {
                                                                     calcTotal = ci.le || 0;
                                                                     units.forEach((u, i) => { calcTotal! += (ci.unitCounts?.[i] || 0) * (u.rate || 0); });
                                                                 }
+                                                                // The unit split only lives in the current renderer
+                                                                // session. After reload, keep showing the saved total
+                                                                // so a balanced row never looks as though it was empty.
+                                                                const savedActualStock = item.actualStock === null || item.actualStock === undefined
+                                                                    ? null
+                                                                    : Number(item.actualStock);
+                                                                const displayedTotal = calcTotal ?? savedActualStock;
                                                                 const disabled = item.balanced || item.countLocked || !canEditCounts;
                                                                 return (
                                                                     <tr key={item.sku} style={{ background: rowBg }}>
@@ -2125,7 +2223,7 @@ export default function StockCheck() {
                                                                                 </td>
                                                                                 <td style={{ ...S.td, textAlign: 'center', fontWeight: 900, fontSize: 14, color: '#096dd9' }}>
                                                                                     {units.length > 0 ? (
-                                                                                        calcTotal !== null ? calcTotal : <span style={{ color: '#bfbfbf', fontWeight: 400, fontSize: 13 }}>—</span>
+                                                                                        displayedTotal !== null ? displayedTotal : <span style={{ color: '#bfbfbf', fontWeight: 400, fontSize: 13 }}>—</span>
                                                                                     ) : (
                                                                                         <InputNumber
                                                                                             min={0} size="small" value={item.actualStock ?? undefined}
@@ -2146,9 +2244,18 @@ export default function StockCheck() {
                                                                                 />
                                                                             </td>
                                                                         )}
-                                                                        <td style={{ ...S.td, textAlign: 'right' }}>{renderDiff(item)}</td>
+                                                                        <td style={{
+                                                                            ...S.td,
+                                                                            width: 130,
+                                                                            minWidth: 130,
+                                                                            height: 42,
+                                                                            textAlign: 'center',
+                                                                            whiteSpace: 'nowrap',
+                                                                        }}>
+                                                                            {renderDiff(item)}
+                                                                        </td>
                                                                         <td style={{ ...S.td }}>
-                                                                            {(isAdmin ? item.difference !== 0 : item.requiresNote) ? (
+                                                                            {item.requiresNote ? (
                                                                                 <Input
                                                                                     size="small" value={item.note} disabled={isAdmin ? item.balanced || isLockedDate : item.balanced || !canEditCounts}
                                                                                     onChange={e => handleUpdateNote(item.sku, e.target.value)}
@@ -2187,12 +2294,56 @@ export default function StockCheck() {
                                                     </table>
                                                 </div>
                                             )}
+                                            {isAdmin && (productTabs[group.productName] || 'check') === 'check' && (
+                                                <div style={{
+                                                    display: 'flex', justifyContent: 'flex-end', alignItems: 'center',
+                                                    padding: '12px 2px 0', marginTop: 10, borderTop: '1px solid #edf2f7',
+                                                }}>
+                                                    <Tooltip title={bulkTooltip}>
+                                                        <span>
+                                                            <Button
+                                                                icon={<CheckOutlined />}
+                                                                loading={bulkBalancing[group.productName]}
+                                                                disabled={!canBulkBalance || bulkBalancing[group.productName] || isLockedDate}
+                                                                onClick={() => handleGroupBalance(group)}
+                                                                style={{
+                                                                    background: '#fff7ed', borderColor: '#fb923c', color: '#c2410c',
+                                                                    fontWeight: 700,
+                                                                }}
+                                                            >
+                                                                Cân bằng toàn bộ
+                                                            </Button>
+                                                        </span>
+                                                    </Tooltip>
+                                                </div>
+                                            )}
                                             {isAdmin && (productTabs[group.productName] || 'check') === 'ledger' && renderLedgerTab(group)}
                                         </div>
                                     )}
                                 </div>
                             );
                         })}
+                            </section>
+                        </div>
+
+                        {isToday && todaySession && totalCount > 0 && !isSessionSubmitted && (
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '12px 0 20px' }}>
+                                <Tooltip title={isSessionReadyToSubmit ? 'Chốt phiên sau khi toàn bộ SKU đã cân bằng' : `Còn ${incompleteSkuCount} SKU chưa cân bằng`}>
+                                    <span>
+                                        <Button
+                                            type="primary"
+                                            size="large"
+                                            icon={<CheckOutlined />}
+                                            loading={submittingSession}
+                                            disabled={!isSessionReadyToSubmit || submittingSession || !isAssignedChecker}
+                                            onClick={handleSubmitSession}
+                                        >
+                                            Chốt phiên kiểm hàng
+                                        </Button>
+                                    </span>
+                                </Tooltip>
+                            </div>
+                        )}
 
                         {isAdmin && sessionBalanceRecords.length > 0 && (() => {
                             // Flatten tất cả records → mỗi SKU là 1 dòng
@@ -2224,7 +2375,7 @@ export default function StockCheck() {
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
                                         <span>🧾</span>
                                         <span style={{ fontWeight: 800, fontSize: 12, color: '#166534', textTransform: 'uppercase', letterSpacing: 1 }}>
-                                            Lịch sử cân bằng phiên kiểm
+                                            Lịch sử cân bằng trong ngày
                                         </span>
                                         <Tag color="green" style={{ margin: 0, fontWeight: 700 }}>{flatRows.length} dòng</Tag>
                                     </div>

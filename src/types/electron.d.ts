@@ -281,7 +281,7 @@ export interface ElectronAPI {
         retryCount: (data: { sessionId: string; sku: string }) => Promise<{ success: boolean; status?: string; item?: any; code?: string; error?: string }>;
         updateNote: (data: { sessionId: string; sku: string; note: string }) => Promise<{ success: boolean; item?: any; error?: string }>;
         balanceItems: (data: { sessionId: string; reference: string; date?: string; items: Array<{ sku: string }>; historyNotes?: string; logPrefix?: string }) => Promise<{ success: boolean; duplicate?: boolean; adjustedCount?: number; matchedCount?: number; data?: { sessions?: any[]; stockBalance?: any }; error?: string }>;
-        balanceItem: (data: { sessionId: string; sku: string; note?: string }) => Promise<{ success: boolean; status?: string; item?: any; error?: string }>;
+        balanceItem: (data: { sessionId: string; sku: string; note?: string }) => Promise<{ success: boolean; status?: string; item?: any; session?: any; error?: string }>;
         submitSession: (data: { sessionId: string }) => Promise<{ success: boolean; status?: string; session?: any; code?: string; error?: string }>;
     };
     dailyExpenses: {

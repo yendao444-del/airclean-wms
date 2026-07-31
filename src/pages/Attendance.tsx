@@ -3507,21 +3507,15 @@ export default function Attendance() {
             if (!isPastStockCheckWorkingDay(date)) continue;
 
             const dateKey = date.format('YYYY-MM-DD');
-            const hasStockCheckSessionEvidence = stockCheckSessions.some((s: any) => {
-                if (s.date !== dateKey) return false;
-                const items = Array.isArray(s.items) ? s.items : [];
-                return s.status === 'completed'
-                    || Boolean(s.completedAt)
-                    || items.some((item: any) => item?.balanced || item?.actualStock !== null && item?.actualStock !== undefined);
-            });
-            const hasStockBalanceEvidence = stockBalanceRecords.some((record: any) => {
-                const recordDate = dayjs(record?.date || record?.createdAt);
-                return recordDate.isValid()
-                    && recordDate.isSame(date, 'day')
-                    && normalizeAttendanceText(record?.notes || '').includes('kiem hang');
-            });
-            // Da co bang chung kiem/can bang kho trong ngay (session hoac StockBalance) -> khong phat.
-            if (hasStockCheckSessionEvidence || hasStockBalanceEvidence) continue;
+            // A partial count is not a completed stock check. The session can
+            // only be submitted after every SKU has been counted and balanced,
+            // so only that final state exempts the assigned checker from a fine.
+            const hasCompletedStockCheck = stockCheckSessions.some((s: any) =>
+                s.date === dateKey
+                && s.type !== 'full'
+                && (s.status === 'completed' || Boolean(s.completedAt))
+            );
+            if (hasCompletedStockCheck) continue;
 
             const session = stockCheckSessions.find((s: any) => s.date === dateKey && s.type !== 'full');
 

@@ -622,13 +622,9 @@ function sanitizeUserForClient(user) {
     return { ...safeUser, isActive: user.status === 'active', mustChangePassword };
 }
 
-// Inventory cards expose stock movements and source documents. Grant the
-// approved warehouse manager read-only access without widening write rights.
-const INVENTORY_LEDGER_VIEWER_USERNAMES = new Set(['nguyenvankhanh']);
 function requireInventoryLedgerReadAccess() {
     requireRole();
     if (currentSession.role === 'admin') return;
-    if (currentSession.role === 'manager' && INVENTORY_LEDGER_VIEWER_USERNAMES.has(String(currentSession.username || '').toLowerCase())) return;
     throw new Error('Khong co quyen xem The kho.');
 }
 
@@ -9073,13 +9069,6 @@ function parseStockCheckSessionsFromConfig(record) {
     try { return record ? JSON.parse(record.value || '[]') : []; } catch { return []; }
 }
 
-function normalizeStockCheckSessionAfterBalance(session) {
-    if (!session?.items?.length) return { ...session, status: 'in_progress', completedAt: undefined };
-    return session.status === 'completed'
-        ? { ...session, completedAt: session.completedAt || new Date().toISOString() }
-        : { ...session, status: 'in_progress', completedAt: undefined };
-}
-
 function buildStockCheckBalanceHistoryItem(item, reference) {
     const systemStock = Number(item.systemStock || 0);
     const actualStock = Number(item.actualStock ?? systemStock);
@@ -9131,6 +9120,9 @@ ipcMain.handle('stockCheck:balanceItems', async (event, payload = {}) => {
             if (session.date !== getStockCheckTodayKey()) {
                 throw new Error('Chỉ được cân bằng phiên kiểm hàng hôm nay.');
             }
+            if (session.status === 'completed') {
+                throw new Error('Stock check session has already been submitted.');
+            }
             if (currentSession?.role !== 'admin' && !isStockCheckAssignee(session)) {
                 throw new Error('Bạn không được phân công cho phiên kiểm hàng này.');
             }
@@ -9164,6 +9156,7 @@ ipcMain.handle('stockCheck:balanceItems', async (event, payload = {}) => {
                     difference,
                     note,
                 }, reference);
+                historyItem.stockCheckRunId = session.runId || session.createdAt || session.id;
 
                 if (difference !== 0) {
                     const stockResult = await updateProductStockInTx(tx, sku, difference, {
@@ -9194,22 +9187,30 @@ ipcMain.handle('stockCheck:balanceItems', async (event, payload = {}) => {
             });
 
             const completedBySku = new Map(completedItems.map(item => [String(item.sku), item]));
-            sessions[sessionIndex] = normalizeStockCheckSessionAfterBalance({
-                ...session,
-                items: (session.items || []).map(item => {
-                    const balancedItem = completedBySku.get(String(item.sku));
-                    if (!balancedItem) return item;
-                    return {
-                        ...item,
-                        actualStock: balancedItem.actualStock,
-                        systemStock: balancedItem.actualStock,
-                        difference: 0,
-                        note: balancedItem.note || '',
-                        balanced: true,
-                        balancedAt: nowIso,
-                    };
-                }),
+            const updatedItems = (session.items || []).map(item => {
+                const balancedItem = completedBySku.get(String(item.sku));
+                if (!balancedItem) return item;
+                return {
+                    ...item,
+                    actualStock: balancedItem.actualStock,
+                    systemStock: balancedItem.actualStock,
+                    difference: 0,
+                    note: balancedItem.note || '',
+                    balanced: true,
+                    verificationStatus: balancedItem.difference === 0 ? 'match' : 'balanced_mismatch',
+                    requiresNote: false,
+                    countLocked: false,
+                    balancedAt: nowIso,
+                };
             });
+            // Balancing every SKU only makes the session ready. The assignee
+            // must explicitly submit the completed session afterwards.
+            sessions[sessionIndex] = {
+                ...session,
+                items: updatedItems,
+                status: 'in_progress',
+                completedAt: undefined,
+            };
 
             await writeStockCheckSessions(sessions, tx);
             await tx.activityLog.create({
@@ -9391,6 +9392,7 @@ ipcMain.handle('stockCheck:balanceItem', async (event, payload = {}) => {
             const difference = Number(item.actualStock) - Number(item.systemStock || 0);
             item.difference = difference;
             const historyItem = buildStockCheckBalanceHistoryItem({ ...item, difference, note, sessionId: session.id }, reference);
+            historyItem.stockCheckRunId = session.runId || session.createdAt || session.id;
             if (difference === 0) {
                 const stockBalance = await tx.stockBalance.create({
                     data: {
@@ -9401,6 +9403,7 @@ ipcMain.handle('stockCheck:balanceItem', async (event, payload = {}) => {
                     },
                 });
                 item.balanced = true;
+                item.verificationStatus = 'match';
                 item.countLocked = false;
                 item.requiresNote = false;
                 item.systemStock = Number(item.actualStock);
@@ -9418,7 +9421,7 @@ ipcMain.handle('stockCheck:balanceItem', async (event, payload = {}) => {
                         severity: 'INFO',
                     }
                 });
-                return { status: 'match', item };
+                return { status: 'match', item, session };
             }
             if (!note) {
                 item.countLocked = true;
@@ -9446,6 +9449,7 @@ ipcMain.handle('stockCheck:balanceItem', async (event, payload = {}) => {
             });
             item.note = note;
             item.balanced = true;
+            item.verificationStatus = 'balanced_mismatch';
             item.countLocked = false;
             item.requiresNote = false;
             item.systemStock = Number(item.actualStock);
@@ -9463,12 +9467,17 @@ ipcMain.handle('stockCheck:balanceItem', async (event, payload = {}) => {
                     severity: 'WARNING',
                 }
             });
-            return { status: 'balanced_mismatch', item };
+            return { status: 'balanced_mismatch', item, session };
         }, { timeout: 30000, maxWait: 10000 }));
         if (result.status === 'balanced_mismatch') {
             emitStockChanged({ sku: payload.sku, referenceType: 'CAN_BANG', reference });
         }
-        return { success: true, status: result.status, item: result.item ? sanitizeStockCheckItem(result.item, currentSession.role === 'admin') : undefined };
+        return {
+            success: true,
+            status: result.status,
+            item: result.item ? sanitizeStockCheckItem(result.item, currentSession.role === 'admin') : undefined,
+            session: result.session ? sanitizeStockCheckSession(result.session, currentSession.role === 'admin') : undefined,
+        };
     } catch (error) {
         return { success: false, error: error.message };
     }
