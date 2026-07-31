@@ -9044,6 +9044,31 @@ function getStockCheckSessionOrThrow(sessions, sessionId, allowCompleted = false
     return session;
 }
 
+function isStockCheckSessionCompleted(session) {
+    return session?.status === 'completed' && Boolean(session?.completedAt);
+}
+
+function hasValidStockCheckConversion(conversionRates, productName) {
+    const units = conversionRates?.[productName]?.units;
+    return Array.isArray(units) && units.some(unit => {
+        const rate = Number(unit?.rate);
+        return String(unit?.label || '').trim().length > 0
+            && Number.isInteger(rate)
+            && rate > 0;
+    });
+}
+
+async function requireStockCheckConversion(tx, productName) {
+    const record = await tx.appConfig.findUnique({ where: { key: 'stockConversionRates' } });
+    let conversionRates = {};
+    try { conversionRates = record ? JSON.parse(record.value || '{}') : {}; } catch { }
+    if (!hasValidStockCheckConversion(conversionRates, productName)) {
+        const error = new Error(`Chưa thiết lập quy đổi đơn vị cho sản phẩm "${productName || 'không xác định'}".`);
+        error.code = 'conversion_required';
+        throw error;
+    }
+}
+
 function getStockCheckItemOrThrow(session, sku) {
     const item = (session.items || []).find(entry => String(entry.sku) === String(sku));
     if (!item) throw new Error('SKU không thuộc phiên kiểm hàng này.');
@@ -9139,6 +9164,8 @@ ipcMain.handle('stockCheck:balanceItems', async (event, payload = {}) => {
                 const stored = storedItemsBySku.get(sku);
                 if (!stored) throw new Error(`SKU ${sku} không thuộc phiên kiểm ${sessionId}.`);
                 if (stored.balanced) continue;
+
+                await requireStockCheckConversion(tx, stored.productName);
 
                 const actualStock = stored.actualStock;
                 if (actualStock === null || actualStock === undefined) throw new Error(`SKU ${sku} chưa nhập tồn thực tế.`);
@@ -9274,8 +9301,45 @@ ipcMain.handle('stockCheck:adminSaveSessions', async (event, incomingSessions) =
         const submittedSessions = Array.isArray(incomingSessions) ? incomingSessions : [];
         const merged = await getPrismaDirectTx().$transaction(async (tx) => {
             await lockStockCheckSessions(tx);
-            await writeStockCheckSessions(submittedSessions, tx);
-            return submittedSessions;
+            const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
+            const storedSessions = parseStockCheckSessionsFromConfig(record);
+            const storedById = new Map(storedSessions.map(session => [String(session.id), session]));
+            const incomingIds = new Set();
+            const protectedSessions = [];
+
+            for (const session of submittedSessions) {
+                const sessionId = String(session?.id || '').trim();
+                if (!sessionId || incomingIds.has(sessionId)) {
+                    throw new Error('Dữ liệu phiên kiểm không hợp lệ hoặc bị trùng ID.');
+                }
+                incomingIds.add(sessionId);
+                const storedSession = storedById.get(sessionId);
+
+                // Completed sessions are immutable. They can only be reopened by
+                // a dedicated audited operation, never by a bulk JSON replacement.
+                if (storedSession && isStockCheckSessionCompleted(storedSession)) {
+                    if (JSON.stringify(session) !== JSON.stringify(storedSession)) {
+                        throw new Error('Phiên kiểm đã chốt là bất biến. Muốn sửa phải dùng luồng mở lại phiên có ghi nhận lý do.');
+                    }
+                    protectedSessions.push(storedSession);
+                    continue;
+                }
+                if (session?.status === 'completed' || session?.completedAt) {
+                    throw new Error('Không thể chốt phiên qua lưu hàng loạt. Hãy dùng thao tác Chốt phiên kiểm hàng.');
+                }
+                protectedSessions.push(session);
+            }
+
+            // A stale admin screen must not be able to delete an already-closed
+            // session by omitting it from its local snapshot.
+            storedSessions.forEach(session => {
+                if (isStockCheckSessionCompleted(session) && !incomingIds.has(String(session.id))) {
+                    protectedSessions.push(session);
+                }
+            });
+
+            await writeStockCheckSessions(protectedSessions, tx);
+            return protectedSessions;
         }, { timeout: 30000, maxWait: 10000 });
         return { success: true, data: merged };
     } catch (error) {
@@ -9383,6 +9447,7 @@ ipcMain.handle('stockCheck:balanceItem', async (event, payload = {}) => {
             const sessions = record ? JSON.parse(record.value || '[]') : [];
             const session = getStockCheckSessionOrThrow(sessions, payload.sessionId, currentSession.role === 'admin');
             const item = getStockCheckItemOrThrow(session, payload.sku);
+            await requireStockCheckConversion(tx, item.productName);
             const existingBalance = await tx.stockBalance.findFirst({
                 where: { items: { contains: reference } },
                 orderBy: { createdAt: 'desc' },
@@ -9490,23 +9555,68 @@ ipcMain.handle('stockCheck:submitSession', async (event, payload = {}) => {
             await lockStockCheckSessions(tx);
             const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
             const sessions = parseStockCheckSessionsFromConfig(record);
-            const storedSession = getStockCheckSessionOrThrow(sessions, payload.sessionId);
-            if ((storedSession.items || []).some(item => item.actualStock === null || item.actualStock === undefined)) {
+            const storedSession = getStockCheckSessionOrThrow(sessions, payload.sessionId, true);
+            if (isStockCheckSessionCompleted(storedSession)) {
+                return { session: storedSession, alreadyCompleted: true };
+            }
+            const items = storedSession.items || [];
+            if (items.length === 0) {
+                const error = new Error('Phiên kiểm chưa có SKU nào, không thể chốt.');
+                error.code = 'empty_session';
+                throw error;
+            }
+            if (items.some(item => !Number.isInteger(item.actualStock) || Number(item.actualStock) < 0)) {
                 const error = new Error('Cần nhập đủ số đếm cho tất cả SKU trước khi nộp.');
                 error.code = 'missing_count';
                 throw error;
             }
-            if ((storedSession.items || []).some(item => !item.balanced)) {
+            if (items.some(item => item.balanced !== true)) {
                 const error = new Error('Cần cân bằng hoặc xác nhận kết quả cho tất cả SKU trước khi nộp.');
                 error.code = 'unbalanced_items';
                 throw error;
             }
+            const completedAt = new Date().toISOString();
+            const matchedSkuCount = items.filter(item => item.verificationStatus === 'match').length;
+            const adjustedSkuCount = items.filter(item => item.verificationStatus === 'balanced_mismatch').length;
             storedSession.status = 'completed';
-            storedSession.completedAt = new Date().toISOString();
+            storedSession.completedAt = completedAt;
+            storedSession.completedBy = currentSession.username;
+            storedSession.completionSummary = {
+                totalSku: items.length,
+                balancedSku: items.length,
+                matchedSku: matchedSkuCount,
+                adjustedSku: adjustedSkuCount,
+                completedAt,
+                completedBy: currentSession.username,
+            };
             await writeStockCheckSessions(sessions, tx);
-            return storedSession;
+            await tx.activityLog.create({
+                data: {
+                    module: 'stock_check',
+                    action: 'SESSION_COMPLETED',
+                    description: `Chốt phiên kiểm ${storedSession.id}: ${items.length}/${items.length} SKU đã cân bằng`,
+                    recordName: String(storedSession.id),
+                    changes: JSON.stringify({
+                        sessionId: storedSession.id,
+                        runId: storedSession.runId || null,
+                        completedAt,
+                        completedBy: currentSession.username,
+                        totalSku: items.length,
+                        matchedSku: matchedSkuCount,
+                        adjustedSku: adjustedSkuCount,
+                    }),
+                    userName: currentSession.username,
+                    userId: currentSession.id || null,
+                    severity: 'INFO',
+                },
+            });
+            return { session: storedSession, alreadyCompleted: false };
         }, { timeout: 30000, maxWait: 10000 });
-        return { success: true, status: 'completed', session: sanitizeStockCheckSession(session, currentSession.role === 'admin') };
+        return {
+            success: true,
+            status: session.alreadyCompleted ? 'already_completed' : 'completed',
+            session: sanitizeStockCheckSession(session.session, currentSession.role === 'admin'),
+        };
     } catch (error) {
         return { success: false, error: error.message };
     }

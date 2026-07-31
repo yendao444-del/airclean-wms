@@ -282,7 +282,7 @@ export interface ElectronAPI {
         updateNote: (data: { sessionId: string; sku: string; note: string }) => Promise<{ success: boolean; item?: any; error?: string }>;
         balanceItems: (data: { sessionId: string; reference: string; date?: string; items: Array<{ sku: string }>; historyNotes?: string; logPrefix?: string }) => Promise<{ success: boolean; duplicate?: boolean; adjustedCount?: number; matchedCount?: number; data?: { sessions?: any[]; stockBalance?: any }; error?: string }>;
         balanceItem: (data: { sessionId: string; sku: string; note?: string }) => Promise<{ success: boolean; status?: string; item?: any; session?: any; error?: string }>;
-        submitSession: (data: { sessionId: string }) => Promise<{ success: boolean; status?: string; session?: any; code?: string; error?: string }>;
+        submitSession: (data: { sessionId: string }) => Promise<{ success: boolean; status?: 'completed' | 'already_completed'; session?: any; code?: string; error?: string }>;
     };
     dailyExpenses: {
         getAll: (filters?: { startDate?: string; endDate?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;

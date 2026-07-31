@@ -188,9 +188,21 @@ const getDeletedFineKeys = (logs: any[] = []) => new Set(
         .filter(Boolean)
 );
 
-const mergeFinesWithDeletes = (dbFines: FineRecord[] = [], snapshotFines: FineRecord[] = [], auditLogs: any[] = []) => {
+const mergeFinesWithDeletes = (
+    dbFines: FineRecord[] = [],
+    snapshotFines: FineRecord[] = [],
+    auditLogs: any[] = [],
+    dbAuditLogs: any[] = [],
+    snapshotAuditLogs: any[] = [],
+) => {
     const deletedKeys = getDeletedFineKeys(auditLogs);
     const merged = new Map<string, FineRecord>();
+    const dbLogIds = new Set(dbAuditLogs.map(log => log?.id).filter(Boolean));
+    const snapshotHasNewChange = (fine: FineRecord) => snapshotAuditLogs.some(log => {
+        if (!log?.id || dbLogIds.has(log.id)) return false;
+        const target = log.after || log.before;
+        return target && getFineRecordKeys(target).some(key => key === fine.id || key === getFineContentKey(fine));
+    });
 
     dbFines.forEach((fine, index) => {
         const fineWithId = ensureFineId(fine, index);
@@ -203,7 +215,11 @@ const mergeFinesWithDeletes = (dbFines: FineRecord[] = [], snapshotFines: FineRe
         const fineWithId = ensureFineId(fine, index);
         const key = getFineRecordKey(fine);
         const deleted = getFineRecordKeys(fineWithId).some(item => deletedKeys.has(item));
-        if (key && !deleted) merged.set(key, fineWithId);
+        // A stale renderer must not overwrite a fine that was edited in the DB.
+        // A local record wins only when this snapshot also contains a new audit action for it.
+        if (key && !deleted && (!merged.has(key) || snapshotHasNewChange(fineWithId))) {
+            merged.set(key, fineWithId);
+        }
     });
 
     return Array.from(merged.values());
@@ -3085,7 +3101,13 @@ export default function Attendance() {
             return {
                 ...dbData,
                 ...snapshot,
-                extraFines: mergeFinesWithDeletes(dbData.extraFines || [], snapshot.extraFines || [], mergedFineAuditLog),
+                extraFines: mergeFinesWithDeletes(
+                    dbData.extraFines || [],
+                    snapshot.extraFines || [],
+                    mergedFineAuditLog,
+                    dbData.fineAuditLog || [],
+                    snapshot.fineAuditLog || [],
+                ),
                 fineOverrides: { ...(dbData.fineOverrides || {}), ...(snapshot.fineOverrides || {}) },
                 fineAuditLog: mergedFineAuditLog,
             };
@@ -3513,7 +3535,8 @@ export default function Attendance() {
             const hasCompletedStockCheck = stockCheckSessions.some((s: any) =>
                 s.date === dateKey
                 && s.type !== 'full'
-                && (s.status === 'completed' || Boolean(s.completedAt))
+                && s.status === 'completed'
+                && Boolean(s.completedAt)
             );
             if (hasCompletedStockCheck) continue;
 
