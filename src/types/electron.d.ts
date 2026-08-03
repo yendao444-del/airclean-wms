@@ -156,6 +156,8 @@ export interface ElectronAPI {
         repairMissingPrices: (purchaseId: number) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         uploadVATInvoice: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        uploadCompanyVATInvoice: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        setCompanyVatStatus: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         uploadVatGroupInvoice: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         uploadImportReceipt: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         deleteImportReceipt: (id: number) => Promise<{ success: boolean; error?: string }>;
@@ -170,6 +172,14 @@ export interface ElectronAPI {
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
+        deactivate: (id: number) => Promise<{ success: boolean; data?: any; error?: string }>;
+        reactivate: (id: number) => Promise<{ success: boolean; data?: any; error?: string }>;
+    };
+    goodsCompanies: {
+        getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        create: (data: { name: string }) => Promise<{ success: boolean; data?: any; error?: string }>;
+        update: (id: string, data: { name: string }) => Promise<{ success: boolean; data?: any; error?: string }>;
+        delete: (id: string) => Promise<{ success: boolean; error?: string }>;
     };
     database: {
         exportAll: () => Promise<{ success: boolean; data?: string; error?: string }>;

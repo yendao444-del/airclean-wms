@@ -3210,6 +3210,66 @@ ipcMain.handle('activityLog:getStats', async () => {
 
 const PURCHASE_VAT_GROUPS_KEY = 'purchaseVatGroups_v1';
 const PURCHASE_VAT_FILE_META_KEY = 'purchaseVatFileMeta_v1';
+const PURCHASE_ITEM_COMPANIES_KEY = 'purchaseItemCompanies_v1';
+const PURCHASE_COMPANY_VAT_KEY = 'purchaseCompanyVat_v1';
+
+// A short-lived compatibility repair for names entered while the old renderer
+// wrote Vietnamese diacritics as question marks.  Do this at the data boundary
+// so historical receipts still group with the corrected company name.
+function repairLegacyCompanyName(value) {
+    const name = String(value || '').trim();
+    return name === 'TH?NH PH?T' ? 'THỊNH PHÁT' : name;
+}
+
+function getPurchaseItemCompanyKey(item) {
+    if (Number(item?.id) > 0) return `item:${Number(item.id)}`;
+    return `${Number(item?.productId) || 0}::${String(item?.variantSku || item?.color || item?.sku || '')}`;
+}
+
+async function getPurchaseItemCompanies() {
+    if (!prisma) return {};
+    const config = await prisma.appConfig.findUnique({ where: { key: PURCHASE_ITEM_COMPANIES_KEY } });
+    if (!config?.value) return {};
+    try {
+        const parsed = JSON.parse(config.value);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+async function savePurchaseItemCompanies(companies) {
+    if (!prisma) throw new Error('Prisma not available');
+    await prisma.appConfig.upsert({
+        where: { key: PURCHASE_ITEM_COMPANIES_KEY },
+        update: { value: JSON.stringify(companies) },
+        create: { key: PURCHASE_ITEM_COMPANIES_KEY, value: JSON.stringify(companies) }
+    });
+}
+
+// VAT belongs to a goods company within a purchase receipt.  Keep this
+// separate from the legacy receipt-level VAT fields so one receipt can have
+// one warehouse receipt but several independent supplier invoices.
+async function getPurchaseCompanyVat() {
+    if (!prisma) return {};
+    const config = await prisma.appConfig.findUnique({ where: { key: PURCHASE_COMPANY_VAT_KEY } });
+    if (!config?.value) return {};
+    try {
+        const parsed = JSON.parse(config.value);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+async function savePurchaseCompanyVat(companyVat) {
+    if (!prisma) throw new Error('Prisma not available');
+    await prisma.appConfig.upsert({
+        where: { key: PURCHASE_COMPANY_VAT_KEY },
+        update: { value: JSON.stringify(companyVat) },
+        create: { key: PURCHASE_COMPANY_VAT_KEY, value: JSON.stringify(companyVat) }
+    });
+}
 
 async function getPurchaseVatGroups() {
     if (!prisma) return {};
@@ -3273,8 +3333,12 @@ ipcMain.handle('purchases:getAll', async (event, { since, limit } = {}) => {
     try {
         requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
-        const vatGroups = await getPurchaseVatGroups();
-        const vatFileMeta = await getPurchaseVatFileMeta();
+        const [vatGroups, vatFileMeta, purchaseItemCompanies, purchaseCompanyVat] = await Promise.all([
+            getPurchaseVatGroups(),
+            getPurchaseVatFileMeta(),
+            getPurchaseItemCompanies(),
+            getPurchaseCompanyVat(),
+        ]);
 
         const purchases = await prisma.purchaseOrder.findMany({
             where: {
@@ -3361,6 +3425,8 @@ ipcMain.handle('purchases:getAll', async (event, { since, limit } = {}) => {
         // Format data for frontend
         const formatted = purchases.map(p => {
             // Convert PurchaseItem[] to frontend format
+            const companyByItem = purchaseItemCompanies[String(p.id)] || {};
+            const companyByItemId = companyByItem.byItemId || {};
             const itemsFormatted = p.items.map(item => ({
                 productId: item.productId,
                 productName: item.product.name,
@@ -3370,7 +3436,12 @@ ipcMain.handle('purchases:getAll', async (event, { since, limit } = {}) => {
                 total: item.subtotal,
                 color: item.color || null, // 🎨 Đọc từ database
                 variantSku: item.variantSku || null, // 🎨 Đọc từ database
-                unit: item.product.unit || 'Cái' // Thêm unit
+                unit: item.product.unit || 'Cái', // Thêm unit
+                // New receipts use the immutable PurchaseItem ID.  Fall back
+                // to the old SKU-based map so existing receipts keep working.
+                companyGroup: repairLegacyCompanyName(
+                    companyByItemId[getPurchaseItemCompanyKey(item)] || companyByItem[getPurchaseItemCompanyKey({ ...item, id: null })]
+                ) || null,
             }));
 
             const vatGroupMeta = purchaseGroupMeta.get(p.id) || {};
@@ -3405,6 +3476,9 @@ ipcMain.handle('purchases:getAll', async (event, { since, limit } = {}) => {
                 vatGroupVatFileName: vatGroups[vatGroupMeta.vatGroupId]?.vatFileName || null,
                 vatGroupVatFileSize: vatGroups[vatGroupMeta.vatGroupId]?.vatFileSize || null,
                 sharedVatPurchaseIds: sameVatIdMap.get(p.id) || [],
+                companyVatByGroup: Object.fromEntries(
+                    Object.entries(purchaseCompanyVat[String(p.id)] || {}).map(([company, vat]) => [repairLegacyCompanyName(company), vat])
+                ),
                 // Phiếu nhập kho
                 importReceiptStatus: p.importReceiptStatus,
                 importReceiptFile: p.importReceiptFile,
@@ -3800,6 +3874,26 @@ ipcMain.handle('purchases:create', async (event, data) => {
             return newOrder;
         }, { timeout: 60000, maxWait: 10000 }));
 
+        // PurchaseItem has no free-text company column. Persist the explicitly
+        // selected group per receipt line in AppConfig and return it on reads.
+        try {
+            const purchaseItemCompanies = await getPurchaseItemCompanies();
+            const savedItems = [...(purchase.items || [])].sort((a, b) => Number(a.id) - Number(b.id));
+            purchaseItemCompanies[String(purchase.id)] = {
+                byItemId: Object.fromEntries(
+                    savedItems
+                        .map((savedItem, index) => [
+                            getPurchaseItemCompanyKey(savedItem),
+                            String(items[index]?.companyGroup || '').trim(),
+                        ])
+                        .filter(([, company]) => company)
+                ),
+            };
+            await savePurchaseItemCompanies(purchaseItemCompanies);
+        } catch (companyError) {
+            console.error('Could not save purchase item companies:', companyError);
+        }
+
         console.log(`✅ Created purchase order: ${purchase.poNumber}`);
         void logActivity({ module: 'purchases', action: 'CREATE', description: `Tạo phiếu nhập ${purchase.poNumber} - ${new Intl.NumberFormat('vi-VN').format(data.totalAmount)}đ`, recordName: purchase.poNumber, userName: data.createdBy || 'Admin' });
 
@@ -4178,6 +4272,100 @@ async function sendVatEmail(invoiceData) {
         return { success: false, error: err.message };
     }
 }
+
+ipcMain.handle('purchases:uploadCompanyVATInvoice', async (event, { purchaseId, companyGroup, invoiceNumber, invoiceDate, files = [] }) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        requireRole('admin', 'manager', 'staff');
+        const company = String(companyGroup || '').trim();
+        if (!purchaseId || !company) throw new Error('Thiếu phiếu nhập hoặc công ty hàng hóa');
+        if (!Array.isArray(files) || files.length === 0) throw new Error('Vui lòng chọn ít nhất 1 file hóa đơn VAT');
+
+        const purchase = await prisma.purchaseOrder.findUnique({
+            where: { id: Number(purchaseId) },
+            include: { supplier: true },
+        });
+        if (!purchase) throw new Error(`Không tìm thấy phiếu nhập #${purchaseId}`);
+
+        const vatDir = path.join(app.getPath('userData'), 'vat-invoices');
+        if (!fs.existsSync(vatDir)) fs.mkdirSync(vatDir, { recursive: true });
+
+        const safeCompany = company.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '') || 'company';
+        const localPaths = [];
+        const driveUrls = [];
+        for (let index = 0; index < files.length; index += 1) {
+            const file = files[index] || {};
+            const ext = String(file.fileName || 'jpg').split('.').pop() || 'jpg';
+            const localFileName = `VAT_PO${purchaseId}_${safeCompany}_${Date.now()}_${index + 1}.${ext}`;
+            const localPath = path.join(vatDir, localFileName);
+            const fileBuffer = Buffer.from(file.fileBase64 || '', 'base64');
+            fs.writeFileSync(localPath, fileBuffer);
+            localPaths.push(localPath);
+
+            try {
+                const drive = getDriveClient();
+                const folderId = drive ? await getOrCreateVatDriveFolder() : null;
+                if (drive && folderId) {
+                    const driveFileName = `HD_VAT_${company}_PO${purchaseId}_${invoiceNumber || 'no-number'}_${index + 1}.${ext}`;
+                    const uploaded = await uploadToDrive(drive, folderId, driveFileName, fileBuffer, ext.toLowerCase() === 'pdf' ? 'application/pdf' : 'image/jpeg');
+                    if (uploaded?.webViewLink) driveUrls.push(uploaded.webViewLink);
+                }
+            } catch (driveError) {
+                console.error('Company VAT Drive upload failed:', driveError.message);
+            }
+        }
+
+        const companyVat = await getPurchaseCompanyVat();
+        const receiptVat = companyVat[String(purchaseId)] || {};
+        receiptVat[company] = {
+            status: 'uploaded',
+            invoiceNumber: String(invoiceNumber || '').trim(),
+            invoiceDate: invoiceDate ? new Date(invoiceDate).toISOString() : null,
+            localPaths,
+            driveUrls,
+            fileCount: files.length,
+            updatedAt: new Date().toISOString(),
+        };
+        companyVat[String(purchaseId)] = receiptVat;
+        await savePurchaseCompanyVat(companyVat);
+
+        void logActivity({
+            module: 'purchases', action: 'COMPANY_VAT_UPLOAD',
+            description: `Upload HĐ VAT ${company} cho phiếu ${purchase.poNumber || '#' + purchaseId}`,
+            userName: 'System',
+        });
+        return {
+            success: true,
+            data: { localPaths, driveUrls, invoiceNumber: receiptVat[company].invoiceNumber },
+            driveWarning: driveUrls.length === 0 ? 'File đã lưu tại máy, nhưng chưa tải được lên Google Drive.' : null,
+        };
+    } catch (error) {
+        console.error('Upload company VAT invoice error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('purchases:setCompanyVatStatus', async (event, { purchaseId, companyGroup, status }) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        requireRole('admin', 'manager', 'staff');
+        const company = String(companyGroup || '').trim();
+        const nextStatus = ['pending', 'no_vat'].includes(status) ? status : 'pending';
+        if (!purchaseId || !company) throw new Error('Thiếu phiếu nhập hoặc công ty hàng hóa');
+        const companyVat = await getPurchaseCompanyVat();
+        const receiptVat = companyVat[String(purchaseId)] || {};
+        receiptVat[company] = {
+            ...(receiptVat[company] || {}),
+            status: nextStatus,
+            updatedAt: new Date().toISOString(),
+        };
+        companyVat[String(purchaseId)] = receiptVat;
+        await savePurchaseCompanyVat(companyVat);
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
 
 ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoiceNumber, invoiceDate, files = [], fileBase64, fileName }) => {
     try {
@@ -4576,6 +4764,93 @@ ipcMain.handle('purchases:getImportReceiptFileData', async (event, { purchaseId 
 // ========================================
 // SUPPLIERS HANDLERS
 // ========================================
+
+const GOODS_COMPANIES_CONFIG_KEY = 'goodsCompanies';
+
+async function readGoodsCompanies() {
+    const config = await prisma.appConfig.findUnique({ where: { key: GOODS_COMPANIES_CONFIG_KEY } });
+    try {
+        const companies = JSON.parse(config?.value || '[]');
+        return Array.isArray(companies)
+            ? companies
+                .filter(company => company?.id && String(company?.name || '').trim())
+                .map(company => ({ ...company, name: repairLegacyCompanyName(company.name) }))
+            : [];
+    } catch {
+        return [];
+    }
+}
+
+async function writeGoodsCompanies(companies) {
+    await prisma.appConfig.upsert({
+        where: { key: GOODS_COMPANIES_CONFIG_KEY },
+        create: { key: GOODS_COMPANIES_CONFIG_KEY, value: JSON.stringify(companies) },
+        update: { value: JSON.stringify(companies) },
+    });
+}
+
+// Goods companies / product brands. Persisted in AppConfig so it works with
+// the deployed database permissions without adding a new table.
+ipcMain.handle('goodsCompanies:getAll', async () => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const companies = await readGoodsCompanies();
+        companies.sort((a, b) => String(a.name).localeCompare(String(b.name), 'vi'));
+        return { success: true, data: companies };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('goodsCompanies:create', async (event, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const name = String(data?.name || '').trim();
+        if (!name) return { success: false, error: 'Tên công ty không được để trống.' };
+        const companies = await readGoodsCompanies();
+        if (companies.some(company => String(company.name).toLocaleLowerCase('vi') === name.toLocaleLowerCase('vi'))) {
+            return { success: false, error: 'Tên công ty đã tồn tại.' };
+        }
+        const company = { id: `goods-company-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, name };
+        companies.push(company);
+        await writeGoodsCompanies(companies);
+        return { success: true, data: company };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('goodsCompanies:update', async (event, id, data) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const name = String(data?.name || '').trim();
+        if (!name) return { success: false, error: 'Tên công ty không được để trống.' };
+        const companies = await readGoodsCompanies();
+        const company = companies.find(entry => entry.id === id);
+        if (!company) return { success: false, error: 'Không tìm thấy công ty hàng hóa.' };
+        if (companies.some(entry => entry.id !== id && String(entry.name).toLocaleLowerCase('vi') === name.toLocaleLowerCase('vi'))) {
+            return { success: false, error: 'Tên công ty đã tồn tại.' };
+        }
+        company.name = name;
+        await writeGoodsCompanies(companies);
+        return { success: true, data: company };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('goodsCompanies:delete', async (event, id) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const companies = await readGoodsCompanies();
+        const nextCompanies = companies.filter(company => company.id !== id);
+        if (nextCompanies.length === companies.length) return { success: false, error: 'Không tìm thấy công ty hàng hóa.' };
+        await writeGoodsCompanies(nextCompanies);
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
 
 // Get all suppliers
 ipcMain.handle('suppliers:getAll', async () => {
@@ -5262,6 +5537,36 @@ ipcMain.handle('users:updateProfile', async (event, data = {}) => {
         return { success: true, data: sanitizeUserForClient(user) };
     } catch (error) {
         console.error('Update profile error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// Keep historical purchase receipts intact while removing a supplier from
+// future selection lists.
+ipcMain.handle('suppliers:deactivate', async (event, id) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const supplier = await prisma.supplier.update({
+            where: { id: Number(id) },
+            data: { status: 'inactive' },
+        });
+        void logActivity({ module: 'purchases', action: 'SUPPLIER_DEACTIVATE', description: `Ngừng sử dụng NCC "${supplier.name}"`, recordName: supplier.name });
+        return { success: true, data: supplier };
+    } catch (error) {
+        console.error('Deactivate supplier error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('suppliers:reactivate', async (event, id) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const supplier = await prisma.supplier.update({
+            where: { id: Number(id) },
+            data: { status: 'active' },
+        });
+        return { success: true, data: supplier };
+    } catch (error) {
         return { success: false, error: error.message };
     }
 });
