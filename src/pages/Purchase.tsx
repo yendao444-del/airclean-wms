@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { Fragment, useState, useEffect, useRef } from 'react';
 import {
     Card,
     Button,
@@ -32,6 +32,7 @@ interface Supplier {
     name: string;
     phone?: string;
     email?: string;
+    status?: 'active' | 'inactive' | string;
 }
 
 interface Product {
@@ -48,6 +49,8 @@ interface PurchaseItem {
     sku?: string;
     color?: string;
     variantSku?: string;
+    // Stored in the receipt JSON so an old receipt keeps the same grouping.
+    companyGroup?: string;
     unit?: string; // 📎 Đơn vị tính
     quantity: number;
     unitPrice: number;
@@ -82,6 +85,18 @@ interface Purchase {
     vatFileName?: string | null;
     vatFileSize?: number | null;
     sharedVatPurchaseIds?: number[];
+    companyVatByGroup?: Record<string, {
+        status?: 'pending' | 'uploaded' | 'no_vat';
+        invoiceNumber?: string;
+        invoiceDate?: string;
+        driveUrls?: string[];
+        fileCount?: number;
+    }>;
+}
+
+interface GoodsCompany {
+    id: string;
+    name: string;
 }
 
 // Nén ảnh trước khi upload — giảm từ 5-10MB xuống ~300KB, tăng tốc upload 10-20x
@@ -121,8 +136,10 @@ export default function PurchasePage() {
     const currentUser = useCurrentUser();
     const { user } = useAuth();
     const isAdmin = user?.role === 'admin';
+    const goodsCompaniesApiAvailable = Boolean(window.electronAPI?.goodsCompanies);
     const [purchases, setPurchases] = useState<Purchase[]>([]);
     const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+    const [goodsCompanies, setGoodsCompanies] = useState<GoodsCompany[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
@@ -144,6 +161,9 @@ export default function PurchasePage() {
     const [supplierModalVisible, setSupplierModalVisible] = useState(false);
     const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null);
     const [supplierForm] = Form.useForm();
+    const [companyModalVisible, setCompanyModalVisible] = useState(false);
+    const [editingGoodsCompany, setEditingGoodsCompany] = useState<GoodsCompany | null>(null);
+    const [companyForm] = Form.useForm();
 
     // 👁️ State cho xem chi tiết phiếu
     const [viewingPurchase, setViewingPurchase] = useState<Purchase | null>(null);
@@ -160,6 +180,7 @@ export default function PurchasePage() {
     // 🧾 State cho upload HĐ VAT
     const [vatModalVisible, setVatModalVisible] = useState(false);
     const [vatPurchaseId, setVatPurchaseId] = useState<number | null>(null);
+    const [vatCompanyGroup, setVatCompanyGroup] = useState<string | null>(null);
     const [vatGroupUploadId, setVatGroupUploadId] = useState<string | null>(null);
     const [vatForm] = Form.useForm();
     const [vatFiles, setVatFiles] = useState<File[]>([]);
@@ -197,8 +218,32 @@ export default function PurchasePage() {
         invoiceDate: string;
         purchaseId: number;
         supplierName: string;
+        companyGroup?: string;
     } | null>(null);
     const [vatPreviewIndex, setVatPreviewIndex] = useState(0);
+    const openCompanyVatPreview = (record: Purchase, companyGroup: string) => {
+        const vat = record.companyVatByGroup?.[companyGroup];
+        const isLegacyUnclassified = companyGroup === 'Chưa chọn công ty';
+        const urls = (vat?.driveUrls || (isLegacyUnclassified
+            ? String((record as any).vatInvoiceDriveUrl || '').split('\n')
+            : [])).map(url => String(url).trim()).filter(Boolean);
+        if (urls.length === 0) {
+            message.warning('Hóa đơn này chưa có link Google Drive. Vui lòng tải lại hóa đơn để xem.');
+            return;
+        }
+        setVatPreviewIndex(0);
+        setVatPreviewData({
+            driveUrls: urls,
+            invoiceNumber: vat?.invoiceNumber || (isLegacyUnclassified ? (record as any).vatInvoiceNumber || '' : ''),
+            invoiceDate: vat?.invoiceDate
+                ? dayjs(vat.invoiceDate).format('DD/MM/YYYY')
+                : (isLegacyUnclassified && (record as any).vatInvoiceDate ? dayjs((record as any).vatInvoiceDate).format('DD/MM/YYYY') : ''),
+            purchaseId: record.id,
+            supplierName: record.supplierName || '',
+            companyGroup,
+        });
+        setVatPreviewVisible(true);
+    };
     const openGroupedAwareVatPreview = (record: any) => {
         const isGrouped = !!record.vatGroupId;
         const driveUrl = isGrouped ? record.vatGroupDriveUrl : record.vatInvoiceDriveUrl;
@@ -301,6 +346,7 @@ export default function PurchasePage() {
     useEffect(() => {
         loadPurchases();
         loadSuppliers();
+        loadGoodsCompanies();
         loadProducts();
     }, []);
 
@@ -377,6 +423,19 @@ export default function PurchasePage() {
             }
         } catch (error: any) {
             message.error(`Lỗi tải nhà cung cấp: ${error.message}`);
+        }
+    };
+
+    const loadGoodsCompanies = async () => {
+        // The renderer can hot-reload before Electron reloads preload.js.
+        // Do not break the whole Purchase screen in that short window.
+        if (!window.electronAPI?.goodsCompanies?.getAll) return;
+        try {
+            const result = await window.electronAPI.goodsCompanies.getAll();
+            if (result.success && result.data) setGoodsCompanies(result.data);
+            else message.error(result.error || 'Không thể tải danh sách công ty hàng hóa');
+        } catch (error: any) {
+            message.error(error.message || 'Không thể tải danh sách công ty hàng hóa');
         }
     };
 
@@ -644,16 +703,22 @@ export default function PurchasePage() {
 
                 // 📤 Auto-upload Phiếu nhập kho nếu có file pending
                 if (savedId && pendingImportFiles.length > 0) {
+                    message.info('Phiếu đã lưu. Đang upload Phiếu Nhập Kho ở nền...');
+                    void (async () => {
                     try {
                         const filesData = await Promise.all(pendingImportFiles.map(f => compressImageToBase64(f)));
                         const upResult = await (window.electronAPI as any).purchases.uploadImportReceipt({ purchaseId: savedId, files: filesData });
                         if (upResult.success) message.success('✅ Đã upload Phiếu Nhập Kho!');
                         else message.warning('Upload Phiếu Nhập Kho chưa thành công, vào phiếu để thử lại.');
                     } catch { message.warning('Lỗi upload Phiếu Nhập Kho.'); }
+                    finally { loadPurchases(); }
+                    })();
                 }
 
                 // 📤 Auto-upload HĐ VAT nếu có file pending
                 if (savedId && pendingVatFiles.length > 0) {
+                    message.info('Phiếu đã lưu. Đang upload HĐ VAT ở nền...');
+                    void (async () => {
                     try {
                         const filesData = await Promise.all(pendingVatFiles.map(f => compressImageToBase64(f)));
                         const now = dayjs();
@@ -663,6 +728,8 @@ export default function PurchasePage() {
                         if (upResult.success) message.success('✅ Đã upload HĐ VAT!');
                         else message.warning('Upload HĐ VAT chưa thành công, vào phiếu để thử lại.');
                     } catch { message.warning('Lỗi upload HĐ VAT.'); }
+                    finally { loadPurchases(); }
+                    })();
                 }
 
                 message.success(editingPurchase ? 'Đã cập nhật phiếu nhập!' : 'Đã tạo phiếu nhập mới!');
@@ -701,10 +768,16 @@ export default function PurchasePage() {
         const color = form.getFieldValue('tempColor');
         const quantity = form.getFieldValue('tempQuantity');
         const unitPrice = form.getFieldValue('tempUnitPrice') || 0; // ✨ Mặc định = 0 nếu chưa nhập
+        const companyGroup = String(form.getFieldValue('tempCompanyGroup') || '').trim();
 
         // ✨ Chỉ cần có sản phẩm và số lượng là đủ
         if (!productId || !quantity) {
             message.warning('Vui lòng chọn sản phẩm và nhập số lượng!');
+            return;
+        }
+
+        if (!companyGroup) {
+            message.warning('Vui lòng chọn công ty / thương hiệu hàng hóa!');
             return;
         }
 
@@ -728,6 +801,7 @@ export default function PurchasePage() {
             sku: product?.sku || '',
             color,
             variantSku,
+            companyGroup,
             unit: form.getFieldValue('tempUnit') || 'Cái', // 📎 Lưu đơn vị tính
             quantity,
             unitPrice,
@@ -742,6 +816,7 @@ export default function PurchasePage() {
             tempColor: undefined,
             tempQuantity: undefined,
             tempUnitPrice: undefined,
+            tempCompanyGroup: undefined,
         });
         setSelectedProductVariants([]);
 
@@ -808,45 +883,57 @@ export default function PurchasePage() {
                 setSelectedProductVariants(variantsArray);
 
                 // Tự động focus vào trường màu sắc nếu có variants
-                if (variantsArray.length > 0) {
-                    setTimeout(() => {
-                        if (colorSelectRef.current) {
-                            colorSelectRef.current.focus();
-                        }
-                    }, 100);
-                }
             } catch {
                 setSelectedProductVariants([]);
             }
         } else {
             // Không có variants → tự động thêm luôn với SL=1
             setSelectedProductVariants([]);
-            const costValue = (product as any)?.cost || 0;
-            const newItem: PurchaseItem = {
-                productId,
-                productName: product?.name || '',
-                sku: product?.sku || '',
-                unit: product?.unit || 'Cái',
-                quantity: 1,
-                unitPrice: costValue,
-                total: costValue,
-            };
-            setPurchaseItems(prev => [...prev, newItem]);
-            form.setFieldsValue({ tempProductId: undefined, tempColor: undefined });
-            setTimeout(() => {
-                if (productSelectRef.current) productSelectRef.current.focus();
-            }, 100);
+            form.setFieldsValue({ tempColor: undefined, tempCompanyGroup: undefined });
             return;
         }
         // Reset color when product changes
-        form.setFieldsValue({ tempColor: undefined });
+        form.setFieldsValue({ tempColor: undefined, tempCompanyGroup: undefined });
     };
 
     // 💰 Handler khi chọn màu sắc → Auto-add xuống bảng, giữ sản phẩm
+    const handleCompanyGroupSelect = (companyGroup: string) => {
+        const productId = form.getFieldValue('tempProductId');
+        const product = products.find(p => p.id === productId);
+        if (!product || !companyGroup?.trim()) return;
+
+        let variants: any[] = [];
+        try { variants = JSON.parse(product.variants || '[]'); } catch { variants = []; }
+        if (variants.length > 0) {
+            setTimeout(() => colorSelectRef.current?.focus(), 100);
+            return;
+        }
+
+        const unitPrice = Number((product as any).cost || 0);
+        setPurchaseItems(prev => [...prev, {
+            productId,
+            productName: product.name,
+            sku: product.sku,
+            companyGroup: companyGroup.trim(),
+            unit: product.unit || 'Cái',
+            quantity: 1,
+            unitPrice,
+            total: unitPrice,
+        }]);
+        form.setFieldsValue({ tempProductId: undefined, tempColor: undefined, tempCompanyGroup: undefined });
+        setSelectedProductVariants([]);
+        setTimeout(() => productSelectRef.current?.focus(), 100);
+    };
+
     const handleColorSelect = (color: string) => {
         const productId = form.getFieldValue('tempProductId');
         const product = products.find(p => p.id === productId);
         const variant = selectedProductVariants.find(v => v.color === color);
+        const companyGroup = String(form.getFieldValue('tempCompanyGroup') || '').trim();
+        if (!companyGroup) {
+            message.warning('Vui lòng chọn công ty / thương hiệu hàng hóa trước!');
+            return;
+        }
 
         const newItem: PurchaseItem = {
             productId,
@@ -854,6 +941,7 @@ export default function PurchasePage() {
             sku: (product as any)?.sku || '',
             color,
             variantSku: variant?.sku || '',
+            companyGroup,
             unit: form.getFieldValue('tempUnit') || 'Cái',
             quantity: 1,
             unitPrice: variant?.cost || 0,
@@ -873,6 +961,51 @@ export default function PurchasePage() {
     };
 
     // ✨ SUPPLIER MANAGEMENT
+    const openGoodsCompanyModal = (company?: GoodsCompany) => {
+        setEditingGoodsCompany(company || null);
+        companyForm.setFieldsValue({ name: company?.name || '' });
+        setCompanyModalVisible(true);
+    };
+
+    const handleGoodsCompanySubmit = async (values: { name: string }) => {
+        const result = editingGoodsCompany
+            ? await window.electronAPI.goodsCompanies.update(editingGoodsCompany.id, values)
+            : await window.electronAPI.goodsCompanies.create(values);
+        if (!result.success) {
+            message.error(result.error || 'Không thể lưu công ty hàng hóa');
+            return;
+        }
+        await loadGoodsCompanies();
+        setCompanyModalVisible(false);
+        message.success(editingGoodsCompany ? 'Đã cập nhật công ty hàng hóa' : 'Đã thêm công ty hàng hóa');
+        if (!editingGoodsCompany && result.data?.name) {
+            form.setFieldsValue({ tempCompanyGroup: result.data.name });
+            handleCompanyGroupSelect(result.data.name);
+        }
+    };
+
+    const handleDeleteGoodsCompany = (company: GoodsCompany) => {
+        Modal.confirm({
+            title: 'Xóa công ty hàng hóa',
+            content: `Xóa "${company.name}" khỏi danh mục? Các phiếu đã lưu vẫn giữ tên công ty cũ.`,
+            okText: 'Xóa',
+            okType: 'danger',
+            cancelText: 'Hủy',
+            onOk: async () => {
+                const result = await window.electronAPI.goodsCompanies.delete(company.id);
+                if (!result.success) {
+                    message.error(result.error || 'Không thể xóa công ty hàng hóa');
+                    return;
+                }
+                if (form.getFieldValue('tempCompanyGroup') === company.name) {
+                    form.setFieldsValue({ tempCompanyGroup: undefined });
+                }
+                await loadGoodsCompanies();
+                message.success('Đã xóa công ty hàng hóa');
+            },
+        });
+    };
+
     const handleAddSupplier = () => {
         setEditingSupplier(null);
         supplierForm.resetFields();
@@ -901,23 +1034,23 @@ export default function PurchasePage() {
         }
 
         Modal.confirm({
-            title: 'Xác nhận xóa',
-            content: 'Bạn có chắc muốn xóa nhà cung cấp này?',
-            okText: 'Xóa',
+            title: 'Ngừng sử dụng nhà cung cấp',
+            content: 'Nhà cung cấp sẽ được ẩn khi tạo phiếu mới. Lịch sử phiếu nhập vẫn được giữ nguyên.',
+            okText: 'Ngừng sử dụng',
             okType: 'danger',
             cancelText: 'Hủy',
             onOk: async () => {
                 try {
-                    const result = await window.electronAPI.suppliers.delete(selectedSupplierId);
+                    const result = await window.electronAPI.suppliers.deactivate(selectedSupplierId);
                     if (result.success) {
-                        message.success('Đã xóa nhà cung cấp!');
+                        message.success('Đã ngừng sử dụng nhà cung cấp.');
                         form.setFieldsValue({ supplierId: undefined });
                         loadSuppliers();
                     } else {
                         message.error(result.error || 'Lỗi khi xóa');
                     }
                 } catch (error) {
-                    message.error('Lỗi khi xóa nhà cung cấp');
+                    message.error('Không thể ngừng sử dụng nhà cung cấp');
                 }
             },
         });
@@ -1014,14 +1147,21 @@ export default function PurchasePage() {
     };
 
     // 🧾 Upload HĐ VAT nhà cung cấp
-    const openVatModal = (purchaseId: number, record?: any) => {
+    const openVatModal = (purchaseId: number, record?: any, companyGroup?: string) => {
         setViewModalVisible(false);
         setVatPurchaseId(purchaseId);
+        setVatCompanyGroup(companyGroup || null);
         setVatGroupUploadId(record?.vatGroupId || null);
         setVatFiles([]);
         vatForm.resetFields();
 
-        if (record?.vatGroupId) {
+        const companyVat = companyGroup ? record?.companyVatByGroup?.[companyGroup] : null;
+        if (companyVat) {
+            vatForm.setFieldsValue({
+                invoiceNumber: companyVat.invoiceNumber || '',
+                invoiceDate: companyVat.invoiceDate ? dayjs(companyVat.invoiceDate) : dayjs(),
+            });
+        } else if (record?.vatGroupId) {
             vatForm.setFieldsValue({
                 invoiceNumber: record.vatGroupInvoiceNumber || record.vatGroupId,
                 invoiceDate: record.vatGroupInvoiceDate ? dayjs(record.vatGroupInvoiceDate) : dayjs(),
@@ -1054,6 +1194,31 @@ export default function PurchasePage() {
         setVatUploading(true);
         try {
             const filesData = await Promise.all(vatFiles.map(file => compressImageToBase64(file)));
+
+            if (vatCompanyGroup) {
+                const uploadCompanyVATInvoice = (window.electronAPI as any)?.purchases?.uploadCompanyVATInvoice;
+                if (typeof uploadCompanyVATInvoice !== 'function') {
+                    message.error('Ứng dụng chưa nạp chức năng VAT theo công ty. Vui lòng đóng hẳn ứng dụng và mở lại, rồi thử lại.');
+                    return;
+                }
+                const result = await uploadCompanyVATInvoice({
+                    purchaseId: vatPurchaseId,
+                    companyGroup: vatCompanyGroup,
+                    invoiceNumber: values.invoiceNumber,
+                    invoiceDate: values.invoiceDate.format('YYYY-MM-DD'),
+                    files: filesData,
+                });
+                if (!result.success) {
+                    message.error(result.error || 'Lỗi upload hóa đơn VAT');
+                    return;
+                }
+                message.success(`Đã lưu HĐ VAT cho ${vatCompanyGroup}`);
+                if (result.driveWarning) message.warning(result.driveWarning, 8);
+                setVatModalVisible(false);
+                setVatCompanyGroup(null);
+                loadPurchases();
+                return;
+            }
 
             // Nếu là nhóm mới → tạo nhóm trước, rồi mới upload
             let effectiveGroupId = vatGroupUploadId;
@@ -1114,6 +1279,21 @@ export default function PurchasePage() {
             message.error('Lỗi: ' + (err.message || 'Không xác định'));
         } finally {
             setVatUploading(false);
+        }
+    };
+
+    const handleSetCompanyVatStatus = async (purchaseId: number, companyGroup: string, status: 'pending' | 'no_vat') => {
+        const setCompanyVatStatus = (window.electronAPI as any)?.purchases?.setCompanyVatStatus;
+        if (typeof setCompanyVatStatus !== 'function') {
+            message.error('Ứng dụng chưa nạp chức năng VAT theo công ty. Vui lòng đóng hẳn ứng dụng và mở lại.');
+            return;
+        }
+        const result = await setCompanyVatStatus({ purchaseId, companyGroup, status });
+        if (result.success) {
+            message.success(status === 'no_vat' ? `Đã đánh dấu ${companyGroup} không có VAT` : `Đã mở lại trạng thái VAT cho ${companyGroup}`);
+            loadPurchases();
+        } else {
+            message.error(result.error || 'Không thể cập nhật trạng thái VAT');
         }
     };
 
@@ -1216,6 +1396,24 @@ export default function PurchasePage() {
             key: 'supplierName',
         },
         {
+            title: 'Công ty / thương hiệu hàng hóa',
+            key: 'goodsCompanies',
+            width: 220,
+            render: (_: unknown, record: Purchase) => {
+                try {
+                    const companies = [...new Set((JSON.parse(record.items || '[]') as PurchaseItem[])
+                        .map(item => item.companyGroup)
+                        .filter(Boolean))] as string[];
+                    if (companies.length === 0) return <span style={{ color: '#bfbfbf' }}>—</span>;
+                    return <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {companies.map(company => <Tag key={company} color="purple" style={{ margin: 0 }}>{company}</Tag>)}
+                    </div>;
+                } catch {
+                    return <span style={{ color: '#bfbfbf' }}>—</span>;
+                }
+            },
+        },
+        {
             title: 'Tổng tiền',
             dataIndex: 'totalAmount',
             key: 'totalAmount',
@@ -1262,6 +1460,24 @@ export default function PurchasePage() {
             align: 'center' as const,
             render: (_: any, record: Purchase) => {
                 const r = record as any;
+                let companyNames: string[] = [];
+                try {
+                    companyNames = [...new Set((JSON.parse(record.items || '[]') as PurchaseItem[])
+                        .map(item => item.companyGroup)
+                        .filter(Boolean))] as string[];
+                } catch { companyNames = []; }
+                if (companyNames.length > 0) {
+                    const companyVat = r.companyVatByGroup || {};
+                    const completed = companyNames.filter(name => ['uploaded', 'no_vat'].includes(companyVat[name]?.status)).length;
+                    return (
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                            <Tag color={completed === companyNames.length ? 'success' : 'warning'} style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px', margin: 0 }}>
+                                VAT theo công ty: {completed}/{companyNames.length}
+                            </Tag>
+                            <span style={{ fontSize: 11, color: '#595959' }}>Mở chi tiết để xử lý</span>
+                        </div>
+                    );
+                }
                 if (r.vatInvoiceStatus === 'thht') {
                     return (
                         <Tag color="purple" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px' }}>
@@ -1344,6 +1560,13 @@ export default function PurchasePage() {
     ];
 
     const totalAmount = purchaseItems.reduce((sum, item) => sum + item.total, 0);
+    const groupedPurchaseItems = purchaseItems.reduce<Array<{ company: string; items: Array<{ item: PurchaseItem; index: number }> }>>((groups, item, index) => {
+        const company = item.companyGroup || 'Chưa chọn công ty';
+        const group = groups.find(entry => entry.company === company);
+        if (group) group.items.push({ item, index });
+        else groups.push({ company, items: [{ item, index }] });
+        return groups;
+    }, []);
 
     // ✨ Detail popup modal - hiển thị actions + bảng sản phẩm chuyên nghiệp
     const renderDetailModal = () => {
@@ -1358,6 +1581,13 @@ export default function PurchasePage() {
         }
 
         const itemTotal = items.reduce((sum, i) => sum + i.total, 0);
+        const groupedDetailItems = items.reduce<Array<{ company: string; items: Array<{ item: PurchaseItem; index: number }> }>>((groups, item, index) => {
+            const company = item.companyGroup || 'Chưa chọn công ty';
+            const group = groups.find(entry => entry.company === company);
+            if (group) group.items.push({ item, index });
+            else groups.push({ company, items: [{ item, index }] });
+            return groups;
+        }, []);
 
         return (
             <Modal
@@ -1409,115 +1639,64 @@ export default function PurchasePage() {
                     )}
                 </div>
 
-                {/* KHU VỰC THAO TÁC / XEM CHỨNG TỪ THEO DEMO */}
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 24, background: '#fff', padding: 16, borderRadius: 8, border: '1px solid #91d5ff', marginBottom: 16 }}>
-                    
-                    {/* CỘT 1: CHỨNG TỪ KHO */}
-                    <div style={{ flex: 1 }}>
-                        <h4 style={{ fontWeight: 700, color: '#595959', marginBottom: 8, fontSize: 13 }}>1. Chứng từ Nhập Kho (Thủ kho)</h4>
-                        {((record as any).importReceiptStatus === 'uploaded') ? (
-                            <div style={{ padding: 12, background: '#f0f5ff', border: '1px solid #adc6ff', borderRadius: 6 }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#1d39c4', fontWeight: 600, fontSize: 13 }}>
-                                    <CheckCircleOutlined style={{ fontSize: 16 }} /> Đã tải Phiếu Nhập Kho
-                                </div>
-                                <div style={{ marginTop: 6, paddingLeft: 24, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-                                    <Button type="link" size="small" onClick={() => openImportReceiptPreview(record as any)} style={{ padding: 0, fontWeight: 600 }}>👁️ Xem phiếu</Button>
-                                    <div style={{ width: '1px', height: 12, background: '#d9d9d9', margin: '0 2px' }}></div>
-                                    <Button type="link" size="small" onClick={() => openImportReceiptModal(record.id)} style={{ padding: 0 }}>Sửa</Button>
-                                    <Button type="link" danger size="small" onClick={() => handleDeleteImportReceipt(record.id)} style={{ padding: 0 }}>Xóa</Button>
-                                </div>
-                            </div>
-                        ) : (
-                            <div>
-                                <Button 
-                                    onClick={() => openImportReceiptModal(record.id)}
-                                    style={{ background: '#f0f5ff', borderColor: '#adc6ff', color: '#2f54eb', fontWeight: 500 }}
-                                    icon={<UploadOutlined />}
-                                >
-                                    📤 Tải lên Phiếu Nhập Kho
-                                </Button>
-                                <div style={{ fontSize: 12, color: '#8c8c8c', marginTop: 8 }}>Yêu cầu có chữ ký xác nhận của thủ kho.</div>
-                            </div>
-                        )}
+                {/* Document timeline: one warehouse receipt, VAT per goods company */}
+                <div style={{ display: 'grid', gridTemplateColumns: '42px minmax(0, 1fr)', gap: 12, marginBottom: 18 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                        <div style={{ width: 32, height: 32, borderRadius: '50%', display: 'grid', placeItems: 'center', background: '#1890ff', color: '#fff', fontWeight: 800 }}>1</div>
+                        <div style={{ width: 2, flex: 1, minHeight: 42, background: '#d9d9d9', margin: '6px 0' }} />
+                        <div style={{ width: 32, height: 32, borderRadius: '50%', display: 'grid', placeItems: 'center', background: '#1890ff', color: '#fff', fontWeight: 800 }}>2</div>
                     </div>
-
-                    {/* CỘT 2: VAT */}
-                    <div style={{ flex: 1 }}>
-                        <h4 style={{ fontWeight: 700, color: '#595959', marginBottom: 8, fontSize: 13 }}>2. Hóa đơn Tài chính (Kế toán)</h4>
-                        {(record as any).vatGroupId ? (
-                            <div style={{ padding: 12, background: '#f0f5ff', border: '1px solid #91caff', borderRadius: 6 }}>
-                                <div style={{ color: '#0958d9', fontWeight: 700, fontSize: 13 }}>🔗 HĐ gộp: {(record as any).vatGroupId}</div>
-                                {!!(record as any).vatGroupNote && (
-                                    <div style={{ fontSize: 12, color: '#595959', marginTop: 4 }}>📝 {(record as any).vatGroupNote}</div>
-                                )}
-                                <div style={{ fontSize: 12, color: '#595959', marginTop: 4 }}>
-                                    Gồm {((record as any).vatGroupPurchaseIds || []).length} phiếu: {(((record as any).vatGroupPurchaseIds || []) as number[])
-                                        .map(id => purchases.find(p => p.id === id)?.poNumber || `#${id}`)
-                                        .join(', ')}
-                                </div>
-                                <div style={{ marginTop: 8, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                                    {(record as any).vatGroupHasVat ? (
-                                        <Button type="link" size="small" onClick={() => openGroupedAwareVatPreview(record as any)} style={{ padding: 0, fontWeight: 600 }}>
-                                            👁️ Xem HĐ VAT nhóm
-                                        </Button>
-                                    ) : (
-                                        <Button type="link" size="small" onClick={() => openVatModal(record.id, record)} style={{ padding: 0, fontWeight: 600 }}>
-                                            🧾 Upload HĐ cho nhóm
-                                        </Button>
-                                    )}
-                                    <Button type="link" size="small" danger onClick={() => handleRemoveVatGroup(record)} style={{ padding: 0 }}>
-                                        Tách khỏi nhóm
-                                    </Button>
-                                </div>
-                            </div>
-                        ) : ['thht', 'no_vat'].includes((record as any).vatInvoiceStatus) ? (
-                            <div style={{ padding: 12, background: '#f9f0ff', border: '1px solid #d3adf7', borderRadius: 6 }}>
-                                <div style={{ color: '#722ed1', fontWeight: 600, fontSize: 13 }}>📦 Đơn THHT / Không VAT</div>
-                                <Button type="link" size="small" onClick={() => handleMarkThht(record, true)} style={{ padding: 0, marginTop: 4, color: '#1890ff' }}>↩️ Hoàn tác</Button>
-                            </div>
-                        ) : (
-                            (record as any).vatInvoiceStatus === 'uploaded' ? (
-                                <div style={{ padding: 12, background: '#fff7e6', border: '1px solid #ffd591', borderRadius: 6 }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#d46b08', fontWeight: 600, fontSize: 13 }}>
-                                        <CheckCircleOutlined style={{ fontSize: 16 }} /> Đã tải HĐ VAT
-                                    </div>
-                                    <div style={{ fontSize: 12, color: '#595959', marginTop: 4, paddingLeft: 24, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                                        <span>Tra cứu mã: <b>{(record as any).vatInvoiceNumber}</b></span>
-                                        <Button type="link" size="small" onClick={() => openGroupedAwareVatPreview(record as any)} style={{ padding: 0 }}>
-                                            👁️ Xem
-                                        </Button>
-                                        <Button type="link" danger size="small" onClick={() => handleDeleteVatInvoice(record.id)} style={{ padding: 0 }}>
-                                            Xóa
-                                        </Button>
-                                    </div>
-                                    {((record as any).sharedVatPurchaseIds?.length > 0) && (
-                                        <div style={{ marginTop: 6, paddingLeft: 24, fontSize: 12, color: '#fa8c16', display: 'flex', alignItems: 'center', gap: 4 }}>
-                                            <span>📎 Chung HĐ với:</span>
-                                            {((record as any).sharedVatPurchaseIds as number[]).map(pid => {
-                                                const p = purchases.find(x => x.id === pid);
-                                                return <Tag key={pid} color="orange" style={{ fontSize: 11, margin: 0 }}>{p?.poNumber || `#${pid}`}</Tag>;
-                                            })}
-                                            <span style={{ color: '#8c8c8c', marginLeft: 4 }}>— Cân nhắc dùng "Gộp HĐ VAT"</span>
-                                        </div>
-                                    )}
-                                </div>
-                            ) : (
+                    <div>
+                        <div style={{ border: '1px solid #91d5ff', borderRadius: 8, padding: '14px 16px', background: '#f0f5ff' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
                                 <div>
-                                    <Space>
-                                        <Button 
-                                            onClick={() => openVatModal(record.id, record)}
-                                            style={{ background: '#fff7e6', borderColor: '#faad14', color: '#d48806', fontWeight: 500 }}
-                                            icon={<UploadOutlined />}
-                                        >
-                                            🧾 Cập nhật HĐ VAT (Hóa đơn đỏ)
-                                        </Button>
-                                        <Button onClick={() => handleMarkThht(record, false)} style={{ fontWeight: 500 }}>
-                                            📦 Đánh dấu THHT / Không VAT
-                                        </Button>
-                                    </Space>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700, color: '#262626' }}>
+                                        <span>1. Phiếu Nhập Kho</span>
+                                        <Tag color="blue" style={{ margin: 0 }}>Dùng chung cho toàn phiếu</Tag>
+                                    </div>
+                                    <div style={{ marginTop: 8, color: (record as any).importReceiptStatus === 'uploaded' ? '#1677ff' : '#8c8c8c', fontWeight: 600 }}>
+                                        {(record as any).importReceiptStatus === 'uploaded' ? <><CheckCircleOutlined /> Đã tải Phiếu Nhập Kho</> : 'Chưa tải Phiếu Nhập Kho'}
+                                    </div>
                                 </div>
-                            )
-                        )}
+                                <Space wrap>
+                                    {(record as any).importReceiptStatus === 'uploaded' ? <Button icon={<EyeOutlined />} onClick={() => openImportReceiptPreview(record as any)}>Xem phiếu</Button> : null}
+                                    <Button icon={<UploadOutlined />} onClick={() => openImportReceiptModal(record.id)}>{(record as any).importReceiptStatus === 'uploaded' ? 'Thay thế' : 'Tải phiếu'}</Button>
+                                </Space>
+                            </div>
+                        </div>
+                        <div style={{ marginTop: 18, marginBottom: 10, fontWeight: 700, color: '#262626' }}>2. Hóa đơn VAT theo từng công ty</div>
+                        <div style={{ display: 'grid', gap: 10 }}>
+                            {groupedDetailItems.map(({ company, items: companyItems }) => {
+                                const isLegacyUnclassified = company === 'Chưa chọn công ty';
+                                const legacyVat = isLegacyUnclassified && (record as any).vatInvoiceStatus === 'uploaded'
+                                    ? {
+                                        status: 'uploaded',
+                                        invoiceNumber: (record as any).vatInvoiceNumber,
+                                        invoiceDate: (record as any).vatInvoiceDate,
+                                        driveUrls: String((record as any).vatInvoiceDriveUrl || '').split('\n').filter(Boolean),
+                                    }
+                                    : {};
+                                const vat = record.companyVatByGroup?.[company] || legacyVat;
+                                const isUploaded = vat.status === 'uploaded';
+                                const isNoVat = vat.status === 'no_vat';
+                                return (
+                                    <div key={company} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '12px 14px', border: '1px solid #e6e6e6', borderRadius: 8, background: '#fff', flexWrap: 'wrap' }}>
+                                        <div style={{ minWidth: 150, fontWeight: 700, color: '#4e40bd' }}>{company}</div>
+                                        <div style={{ minWidth: 150 }}>
+                                            {isUploaded ? <Tag color="success" style={{ margin: 0 }}>Đã có HĐ VAT</Tag> : isNoVat ? <Tag style={{ margin: 0 }}>Không VAT</Tag> : <Tag color="warning" style={{ margin: 0 }}>Cần nhập HĐ VAT</Tag>}
+                                        </div>
+                                        <div style={{ flex: 1, minWidth: 180, color: '#595959', fontSize: 12 }}>
+                                            {isUploaded ? <>Số HĐ: <b>{vat.invoiceNumber || '—'}</b>{vat.invoiceDate ? ` · ${dayjs(vat.invoiceDate).format('DD/MM/YYYY')}` : ''}</> : `${companyItems.length} sản phẩm thuộc công ty này`}
+                                        </div>
+                                        <Space wrap>
+                                            {isUploaded && <Button size="small" icon={<EyeOutlined />} onClick={() => openCompanyVatPreview(record, company)}>Xem HĐ VAT</Button>}
+                                            {!isNoVat && <Button size="small" type={isUploaded ? 'default' : 'primary'} icon={<UploadOutlined />} onClick={() => openVatModal(record.id, record, isLegacyUnclassified ? undefined : company)}>{isUploaded ? 'Sửa HĐ VAT' : 'Nhập HĐ VAT'}</Button>}
+                                            {isNoVat ? <Button size="small" onClick={() => handleSetCompanyVatStatus(record.id, company, 'pending')}>Hoàn tác</Button> : <Button size="small" type="link" onClick={() => handleSetCompanyVatStatus(record.id, company, 'no_vat')}>Không VAT</Button>}
+                                        </Space>
+                                    </div>
+                                );
+                            })}
+                        </div>
                     </div>
                 </div>
 
@@ -1559,7 +1738,14 @@ export default function PurchasePage() {
                             </tr>
                         </thead>
                         <tbody>
-                            {items.map((item, idx) => {
+                            {groupedDetailItems.map(({ company, items: companyItems }) => (
+                                <Fragment key={company}>
+                                    <tr>
+                                        <td colSpan={8} style={{ padding: '9px 12px', background: '#f4f1ff', color: '#4e40bd', fontWeight: 700, fontSize: 13 }}>
+                                            {company}
+                                        </td>
+                                    </tr>
+                                    {companyItems.map(({ item, index: idx }) => {
                                 const rowBg = idx % 2 === 0 ? '#fff' : '#fafafa';
                                 return (
                                     <tr key={idx} style={{
@@ -1616,7 +1802,9 @@ export default function PurchasePage() {
                                         </td>
                                     </tr>
                                 );
-                            })}
+                                    })}
+                                </Fragment>
+                            ))}
                         </tbody>
                         <tfoot>
                             <tr style={{ background: 'linear-gradient(135deg, #f0f5ff 0%, #e6f7ff 100%)', borderTop: '2px solid #1890ff' }}>
@@ -1686,26 +1874,6 @@ export default function PurchasePage() {
                 )}
 
                 <Space>
-                    {selectedRowKeys.length > 0 && (
-                        <Button
-                            icon={<LinkOutlined />}
-                            onClick={() => {
-                                const ids = selectedRowKeys.map(id => Number(id)).filter(Boolean);
-                                if (ids.length < 2) { message.warning('Vui lòng chọn ít nhất 2 phiếu!'); return; }
-                                setVatGroupPendingIds(ids);
-                                setVatGroupUploadId(null);
-                                setVatPurchaseId(ids[0]);
-                                setVatFiles([]);
-                                vatForm.resetFields();
-                                vatForm.setFieldsValue({ invoiceNumber: `VATG-${dayjs().format('YYYYMMDD-HHmm')}`, invoiceDate: dayjs() });
-                                setVatModalVisible(true);
-                            }}
-                            type={selectedRowKeys.length >= 2 ? 'primary' : 'default'}
-                            disabled={selectedRowKeys.length < 2}
-                        >
-                            Gộp HĐ VAT ({selectedRowKeys.length})
-                        </Button>
-                    )}
                     {isAdmin && selectedRowKeys.length > 0 && (
                         <Button
                             danger
@@ -1912,6 +2080,7 @@ export default function PurchasePage() {
                                 placeholder={suppliers.length === 0 ? 'Đang tải...' : 'Chọn nhà cung cấp'}
                                 size="large"
                                 loading={loadingData}
+                                optionLabelProp="label"
                                 dropdownRender={(menu) => (
                                     <>
                                         {menu}
@@ -1936,8 +2105,8 @@ export default function PurchasePage() {
                                     </>
                                 )}
                             >
-                                {suppliers.map((supplier) => (
-                                    <Select.Option key={supplier.id} value={supplier.id}>
+                                {suppliers.filter(supplier => supplier.status !== 'inactive').map((supplier) => (
+                                    <Select.Option key={supplier.id} value={supplier.id} label={supplier.name}>
                                         <div style={{
                                             display: 'flex',
                                             justifyContent: 'space-between',
@@ -1973,23 +2142,23 @@ export default function PurchasePage() {
                                                     onClick={(e) => {
                                                         e.stopPropagation();
                                                         Modal.confirm({
-                                                            title: 'Xác nhận xóa',
-                                                            content: `Bạn có chắc muốn xóa "${supplier.name}"?`,
-                                                            okText: 'Xóa',
+                                                            title: 'Ngừng sử dụng nhà cung cấp',
+                                                            content: `Ngừng sử dụng "${supplier.name}"? Nhà cung cấp sẽ ẩn khỏi danh sách tạo phiếu mới, lịch sử vẫn được giữ.`,
+                                                            okText: 'Ngừng sử dụng',
                                                             okType: 'danger',
                                                             cancelText: 'Hủy',
                                                             onOk: async () => {
                                                                 try {
-                                                                    const result = await window.electronAPI.suppliers.delete(supplier.id);
+                                                                    const result = await window.electronAPI.suppliers.deactivate(supplier.id);
                                                                     if (result.success) {
-                                                                        message.success('Đã xóa nhà cung cấp!');
+                                                                        message.success('Đã ngừng sử dụng nhà cung cấp.');
                                                                         form.setFieldsValue({ supplierId: undefined });
                                                                         loadSuppliers();
                                                                     } else {
                                                                         message.error(result.error || 'Lỗi khi xóa');
                                                                     }
                                                                 } catch (error) {
-                                                                    message.error('Lỗi khi xóa nhà cung cấp');
+                                                                    message.error('Không thể ngừng sử dụng nhà cung cấp');
                                                                 }
                                                             },
                                                         });
@@ -2078,7 +2247,7 @@ export default function PurchasePage() {
                             ➕ Thêm sản phẩm
                         </Title>
 
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, alignItems: 'end' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, alignItems: 'end' }}>
                             <Form.Item label={`Sản phẩm ${products.length > 0 ? `(${products.length})` : ''}`} name="tempProductId" style={{ marginBottom: 0 }}>
                                 <Select
                                     ref={productSelectRef}
@@ -2092,6 +2261,44 @@ export default function PurchasePage() {
                                     {products.map((p) => (
                                         <Select.Option key={p.id} value={p.id}>
                                             {p.name}
+                                        </Select.Option>
+                                    ))}
+                                </Select>
+                            </Form.Item>
+
+                            <Form.Item label="Công ty / thương hiệu hàng hóa" name="tempCompanyGroup" style={{ marginBottom: 0 }}>
+                                <Select
+                                    placeholder={goodsCompaniesApiAvailable ? 'Chọn công ty' : 'Khởi động lại app để tải danh mục'}
+                                    size="large"
+                                    disabled={!goodsCompaniesApiAvailable}
+                                    showSearch
+                                    optionFilterProp="label"
+                                    optionLabelProp="label"
+                                    onChange={handleCompanyGroupSelect}
+                                    dropdownRender={(menu) => (
+                                        <>
+                                            {menu}
+                                            <div style={{ padding: 8, borderTop: '1px solid #f0f0f0' }}>
+                                                <Button type="link" icon={<PlusOutlined />} onClick={() => openGoodsCompanyModal()} block style={{ color: '#52c41a' }}>
+                                                    Thêm công ty / thương hiệu
+                                                </Button>
+                                            </div>
+                                        </>
+                                    )}
+                                >
+                                    {goodsCompanies.map(company => (
+                                        <Select.Option key={company.id} value={company.name} label={company.name}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                <span>{company.name}</span>
+                                                <Space
+                                                    size={2}
+                                                    onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }}
+                                                    onClick={event => event.stopPropagation()}
+                                                >
+                                                    <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openGoodsCompanyModal(company)} />
+                                                    <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => handleDeleteGoodsCompany(company)} />
+                                                </Space>
+                                            </div>
                                         </Select.Option>
                                     ))}
                                 </Select>
@@ -2129,30 +2336,38 @@ export default function PurchasePage() {
                     {purchaseItems.length > 0 && (
                         <div style={{ marginBottom: 24 }}>
                             <Title level={5}>Danh sách sản phẩm ({purchaseItems.length})</Title>
-                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                            <div style={{ overflowX: 'auto' }}>
+                            <table style={{ width: '100%', minWidth: 840, borderCollapse: 'collapse', tableLayout: 'fixed' }}>
                                 <thead>
                                     <tr style={{ background: '#fafafa', borderBottom: '2px solid #e0e0e0' }}>
-                                        <th style={{ padding: 12, textAlign: 'left' }}>Sản phẩm</th>
-                                        <th style={{ padding: 12, textAlign: 'left' }}>SKU</th>
-                                        <th style={{ padding: 12, textAlign: 'left' }}>Màu sắc</th>
-                                        <th style={{ padding: 12, textAlign: 'center' }}>ĐVT</th>
-                                        <th style={{ padding: 12, textAlign: 'right' }}>SL</th>
-                                        <th style={{ padding: 12, textAlign: 'right' }}>Đơn giá</th>
-                                        <th style={{ padding: 12, textAlign: 'right' }}>Thành tiền</th>
-                                        <th style={{ padding: 12, width: 80 }}></th>
+                                        <th style={{ padding: 12, textAlign: 'left', width: 160 }}>Sản phẩm</th>
+                                        <th style={{ padding: 12, textAlign: 'left', width: 180 }}>SKU</th>
+                                        <th style={{ padding: 12, textAlign: 'left', width: 115 }}>Màu sắc</th>
+                                        <th style={{ padding: 12, textAlign: 'center', width: 55 }}>ĐVT</th>
+                                        <th style={{ padding: 12, textAlign: 'right', width: 85 }}>SL</th>
+                                        <th style={{ padding: 12, textAlign: 'right', width: 125 }}>Đơn giá</th>
+                                        <th style={{ padding: 12, textAlign: 'right', width: 95 }}>Thành tiền</th>
+                                        <th style={{ padding: 12, width: 55 }}></th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {purchaseItems.map((item, index) => (
+                                    {groupedPurchaseItems.map(({ company, items }) => (
+                                        <Fragment key={company}>
+                                            <tr>
+                                                <td colSpan={8} style={{ padding: '10px 12px', background: '#f4f1ff', color: '#4e40bd', fontWeight: 700, fontSize: 13 }}>
+                                                    {company}
+                                                </td>
+                                            </tr>
+                                            {items.map(({ item, index }) => (
                                         <tr key={index} style={{ borderBottom: '1px solid #f0f0f0' }}>
-                                            <td style={{ padding: 12 }}>
+                                            <td style={{ padding: 12, wordBreak: 'break-word' }}>
                                                 {item.productName}
                                             </td>
                                             <td style={{ padding: 12 }}>
                                                 {item.variantSku ? (
-                                                    <Tag color="cyan">{item.variantSku}</Tag>
+                                                    <Tag color="cyan" title={item.variantSku} style={{ display: 'inline-block', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{item.variantSku}</Tag>
                                                 ) : item.sku ? (
-                                                    <Tag color="blue">{item.sku}</Tag>
+                                                    <Tag color="blue" title={item.sku} style={{ display: 'inline-block', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{item.sku}</Tag>
                                                 ) : (
                                                     <span style={{ color: '#bfbfbf' }}>—</span>
                                                 )}
@@ -2208,6 +2423,8 @@ export default function PurchasePage() {
                                                 </Button>
                                             </td>
                                         </tr>
+                                            ))}
+                                        </Fragment>
                                     ))}
                                     <tr style={{ background: '#f0f9f4', fontWeight: 700, fontSize: 16 }}>
                                         <td colSpan={5} style={{ padding: 16, textAlign: 'right' }}>
@@ -2220,6 +2437,7 @@ export default function PurchasePage() {
                                     </tr>
                                 </tbody>
                             </table>
+                            </div>
                         </div>
                     )}
 
@@ -2273,6 +2491,16 @@ export default function PurchasePage() {
                         <Input type="email" placeholder="VD: contact@abc.com" size="large" />
                     </Form.Item>
 
+                    <Form.Item label="Trạng thái sử dụng" name="status" initialValue="active">
+                        <Select
+                            size="large"
+                            options={[
+                                { value: 'active', label: 'Đang sử dụng' },
+                                { value: 'inactive', label: 'Ngừng sử dụng (ẩn khỏi tạo phiếu mới)' },
+                            ]}
+                        />
+                    </Form.Item>
+
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
                         <Button onClick={() => setSupplierModalVisible(false)} size="large">
                             Hủy
@@ -2280,6 +2508,28 @@ export default function PurchasePage() {
                         <Button type="primary" htmlType="submit" size="large">
                             {editingSupplier ? 'Cập nhật' : 'Thêm mới'}
                         </Button>
+                    </div>
+                </Form>
+            </Modal>
+
+            <Modal
+                title={editingGoodsCompany ? 'Sửa công ty / thương hiệu' : 'Thêm công ty / thương hiệu'}
+                open={companyModalVisible}
+                onCancel={() => setCompanyModalVisible(false)}
+                footer={null}
+                width={460}
+            >
+                <Form form={companyForm} layout="vertical" onFinish={handleGoodsCompanySubmit}>
+                    <Form.Item
+                        label="Tên công ty / thương hiệu hàng hóa"
+                        name="name"
+                        rules={[{ required: true, whitespace: true, message: 'Vui lòng nhập tên công ty / thương hiệu!' }]}
+                    >
+                        <Input autoFocus placeholder="VD: Công ty ABC" size="large" />
+                    </Form.Item>
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
+                        <Button onClick={() => setCompanyModalVisible(false)} size="large">Hủy</Button>
+                        <Button type="primary" htmlType="submit" size="large">{editingGoodsCompany ? 'Cập nhật' : 'Thêm mới'}</Button>
                     </div>
                 </Form>
             </Modal>
@@ -2293,7 +2543,7 @@ export default function PurchasePage() {
                 width={520}
                 destroyOnClose
             >
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, padding: '8px 0 4px' }}>
+                <div style={{ padding: '8px 0 4px' }}>
                     {/* Phiếu Nhập Kho */}
                     <div
                         onClick={() => { setChungTuPickerVisible(false); setTimeout(() => importFileInputRef.current?.click(), 100); }}
@@ -2323,35 +2573,14 @@ export default function PurchasePage() {
                         )}
                     </div>
 
-                    {/* Hóa đơn VAT */}
-                    <div
-                        onClick={() => { setChungTuPickerVisible(false); setTimeout(() => setVatInlineVisible(true), 100); }}
-                        style={{
-                            border: '2px solid #d46b08',
-                            borderRadius: 12,
-                            padding: 20,
-                            cursor: 'pointer',
-                            textAlign: 'center',
-                            background: '#fff7e6',
-                            transition: 'all 0.2s',
-                        }}
-                        onMouseEnter={e => (e.currentTarget.style.background = '#ffe7ba')}
-                        onMouseLeave={e => (e.currentTarget.style.background = '#fff7e6')}
-                    >
-                        <AuditOutlined style={{ fontSize: 36, color: '#d46b08', marginBottom: 10, display: 'block' }} />
-                        <div style={{ fontWeight: 700, fontSize: 15, color: '#d46b08', marginBottom: 6 }}>Hóa đơn VAT</div>
-                        <div style={{ fontSize: 12, color: '#595959', lineHeight: 1.6 }}>
-                            Chứng từ tài chính<br />
-                            Do <b>nhà cung cấp</b> xuất<br />
-                            Hóa đơn đỏ / GTGT
-                        </div>
-                        {pendingVatFiles.length > 0 && (
-                            <div style={{ marginTop: 8, color: '#52c41a', fontWeight: 600, fontSize: 12 }}>
-                                ✅ Đã có {pendingVatFiles.length} file
-                            </div>
-                        )}
-                    </div>
                 </div>
+                <Alert
+                    type="info"
+                    showIcon
+                    message="Hóa đơn VAT được nhập sau khi tạo phiếu"
+                    description="Mở chi tiết phiếu và nhập HĐ VAT riêng cho từng công ty / thương hiệu hàng hóa."
+                    style={{ marginTop: 14 }}
+                />
                 <div style={{ borderTop: '1px dashed #d9d9d9', marginTop: 16, paddingTop: 12, display: 'flex', gap: 8, justifyContent: 'center' }}>
                     <Button
                         icon={<GiftOutlined />}
@@ -2627,6 +2856,7 @@ export default function PurchasePage() {
             {/* === 🧾 MODAL UPLOAD HĐ VAT === */}
             <Modal
                 title={(() => {
+                    if (vatCompanyGroup) return `Hóa đơn VAT — ${vatCompanyGroup}`;
                     if (vatGroupPendingIds.length > 0) return `🔗 Gộp & Upload HĐ VAT (${vatGroupPendingIds.length} phiếu)`;
                     const existing = purchases.find(p => p.id === vatPurchaseId) as any;
                     if (vatGroupUploadId) return `🧾 Upload HĐ VAT cho nhóm ${vatGroupUploadId}`;
@@ -2636,6 +2866,7 @@ export default function PurchasePage() {
                 onCancel={() => {
                     setVatGroupPendingIds([]);
                     setVatGroupUploadId(null);
+                    setVatCompanyGroup(null);
                     setVatModalVisible(false);
                 }}
                 closable
@@ -2657,7 +2888,9 @@ export default function PurchasePage() {
                     {/* File upload */}
                     {(() => {
                         const existing = purchases.find(p => p.id === vatPurchaseId) as any;
-                        const isEdit = vatGroupUploadId ? false : !!existing?.vatInvoiceNumber;
+                        const isEdit = vatCompanyGroup
+                            ? !!existing?.companyVatByGroup?.[vatCompanyGroup]?.invoiceNumber
+                            : (vatGroupUploadId ? false : !!existing?.vatInvoiceNumber);
                         return (
                             <Form.Item label={
                                 <span style={{ fontWeight: 700, fontSize: 14, color: '#262626' }}>
@@ -2699,8 +2932,10 @@ export default function PurchasePage() {
                     <Form.Item>
                         {(() => {
                             const existing = purchases.find(p => p.id === vatPurchaseId) as any;
-                            const isEdit = vatGroupUploadId ? false : !!existing?.vatInvoiceNumber;
-                            const canSubmit = vatFiles.length > 0 || (!vatGroupUploadId && isEdit);
+                            const isEdit = vatCompanyGroup
+                                ? !!existing?.companyVatByGroup?.[vatCompanyGroup]?.invoiceNumber
+                                : (vatGroupUploadId ? false : !!existing?.vatInvoiceNumber);
+                            const canSubmit = vatCompanyGroup ? vatFiles.length > 0 : (vatFiles.length > 0 || (!vatGroupUploadId && isEdit));
                             return (
                                 <Button type="primary" htmlType="submit" loading={vatUploading} block
                                     disabled={!canSubmit}
@@ -2845,7 +3080,7 @@ export default function PurchasePage() {
                         <span style={{ fontSize: 18 }}>🧾</span>
                         <div>
                             <div style={{ fontWeight: 700, fontSize: 16, color: '#262626' }}>
-                                Hóa đơn VAT: #{vatPreviewData?.invoiceNumber}
+                                Hóa đơn VAT{vatPreviewData?.companyGroup ? ` — ${vatPreviewData.companyGroup}` : ''}: #{vatPreviewData?.invoiceNumber}
                                 {(vatPreviewData?.driveUrls?.length || 0) > 1 && (
                                     <Tag color="blue" style={{ marginLeft: 8 }}>
                                         {vatPreviewIndex + 1} / {vatPreviewData?.driveUrls?.length} file
@@ -2872,7 +3107,11 @@ export default function PurchasePage() {
                                 setVatPreviewData(null);
                                 if (vatPreviewData) {
                                     const record = purchases.find(p => p.id === vatPreviewData.purchaseId);
-                                    setTimeout(() => openVatModal(vatPreviewData.purchaseId, record), 150);
+                                    setTimeout(() => openVatModal(
+                                        vatPreviewData.purchaseId,
+                                        record,
+                                        vatPreviewData.companyGroup === 'Chưa chọn công ty' ? undefined : vatPreviewData.companyGroup,
+                                    ), 150);
                                 }
                             }}
                         >

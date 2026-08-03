@@ -51,6 +51,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         repairMissingPrices: (purchaseId) => ipcRenderer.invoke('purchases:repairMissingPrices', purchaseId),
         delete: (id) => ipcRenderer.invoke('purchases:delete', id),
         uploadVATInvoice: (data) => ipcRenderer.invoke('purchases:uploadVATInvoice', data),
+        uploadCompanyVATInvoice: (data) => ipcRenderer.invoke('purchases:uploadCompanyVATInvoice', data),
+        setCompanyVatStatus: (data) => ipcRenderer.invoke('purchases:setCompanyVatStatus', data),
         uploadVatGroupInvoice: (data) => ipcRenderer.invoke('purchases:uploadVatGroupInvoice', data),
         uploadImportReceipt: (data) => ipcRenderer.invoke('purchases:uploadImportReceipt', data),
         deleteImportReceipt: (id) => ipcRenderer.invoke('purchases:deleteImportReceipt', id),
@@ -66,6 +68,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
         create: (data) => ipcRenderer.invoke('suppliers:create', data),
         update: (id, data) => ipcRenderer.invoke('suppliers:update', id, data),
         delete: (id) => ipcRenderer.invoke('suppliers:delete', id),
+        deactivate: (id) => ipcRenderer.invoke('suppliers:deactivate', id),
+        reactivate: (id) => ipcRenderer.invoke('suppliers:reactivate', id),
+    },
+    goodsCompanies: {
+        getAll: () => ipcRenderer.invoke('goodsCompanies:getAll'),
+        create: (data) => ipcRenderer.invoke('goodsCompanies:create', data),
+        update: (id, data) => ipcRenderer.invoke('goodsCompanies:update', id, data),
+        delete: (id) => ipcRenderer.invoke('goodsCompanies:delete', id),
     },
     supplierDebt: {
         getWorkbench: (supplierId) => ipcRenderer.invoke('supplierDebt:getWorkbench', { supplierId }),
@@ -351,6 +361,13 @@ window.addEventListener('DOMContentLoaded', () => {
     const baseStyle = document.createElement('style');
     baseStyle.textContent = 'html, body { overflow: hidden !important; }';
     document.head.appendChild(baseStyle);
+
+    // Ant Design v6 aligns portals correctly by itself. The old global
+    // position override below intermittently moved a newly opened dropdown to
+    // the top-left before rc-trigger completed its own alignment.
+    // Keep the legacy implementation in place for rollback, but do not run it.
+    const useLegacyDropdownPositionFix = false;
+    if (!useLegacyDropdownPositionFix) return;
 
     // 2. Dynamic style tag — CSS rules sẽ override React inline styles
     const dynamicStyle = document.createElement('style');
