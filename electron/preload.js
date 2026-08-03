@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     purchases: {
         getAll: (filters) => ipcRenderer.invoke('purchases:getAll', filters),
+        getVatAlertSummary: () => ipcRenderer.invoke('purchases:getVatAlertSummary'),
         create: (data) => ipcRenderer.invoke('purchases:create', data),
         update: (id, data) => ipcRenderer.invoke('purchases:update', { id, data }),
         repairMissingPrices: (purchaseId) => ipcRenderer.invoke('purchases:repairMissingPrices', purchaseId),

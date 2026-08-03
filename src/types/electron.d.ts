@@ -150,6 +150,7 @@ export interface ElectronAPI {
     };
     purchases: {
         getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getVatAlertSummary: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         repairMissingPrices: (purchaseId: number) => Promise<{ success: boolean; data?: any; error?: string }>;

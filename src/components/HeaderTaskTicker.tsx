@@ -33,7 +33,11 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
         const result: TickerAlert[] = [];
 
         try {
-            const taskRes = await (window as any).electronAPI.dailyTasks.list({});
+            const taskRes = await (window as any).electronAPI.dailyTasks.list({
+                type: 'assignment',
+                excludeCompleted: true,
+                summary: true,
+            });
             if (taskRes.success && taskRes.data) {
                 const now = dayjs();
                 const urgent = taskRes.data
@@ -66,7 +70,7 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
         } catch { }
 
         try {
-            const purRes = await (window as any).electronAPI.purchases.getAll();
+            const purRes = await (window as any).electronAPI.purchases.getVatAlertSummary();
             if (purRes.success && purRes.data) {
                 const CUTOFF = dayjs('2026-03-19');
                 const now = dayjs();

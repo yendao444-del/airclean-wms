@@ -186,7 +186,11 @@ export default function GlobalTaskAlerts() {
     // === Load tasks từ DB ===
     const loadTasks = useCallback(async () => {
         try {
-            const result = await (window as any).electronAPI.dailyTasks.list({});
+            const result = await (window as any).electronAPI.dailyTasks.list({
+                type: 'assignment',
+                excludeCompleted: true,
+                summary: true,
+            });
             if (result.success && result.data) {
                 const assignmentTasks = result.data
                     .filter((t: any) => (t.type === 'assignment') && t.status !== 'completed' && isCurrentUserRecipient(t))

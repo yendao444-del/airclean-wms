@@ -555,7 +555,7 @@ const DailyTasks = () => {
     const loadTasks = async () => {
         try {
             setLoading(true);
-            const result = await window.electronAPI.dailyTasks.list({});
+            const result = await window.electronAPI.dailyTasks.list({ maintenance: true });
             if (result.success && result.data) {
                 setTasks(result.data.map((t: any) => ({
                     ...t,

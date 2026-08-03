@@ -3419,6 +3419,49 @@ ipcMain.handle('purchases:getAll', async (event, { since, limit } = {}) => {
     }
 });
 
+// Header alerts only need VAT state and date. Never send purchase line items
+// to every open desktop just to calculate a notification badge.
+ipcMain.handle('purchases:getVatAlertSummary', async () => {
+    try {
+        requireRole('admin', 'manager');
+        if (!prisma) throw new Error('Prisma not available');
+        const [vatGroups, purchases] = await Promise.all([
+            getPurchaseVatGroups(),
+            prisma.purchaseOrder.findMany({
+                where: { status: { not: 'cancelled' } },
+                select: {
+                    id: true,
+                    vatInvoiceStatus: true,
+                    receivedAt: true,
+                    createdAt: true,
+                },
+                orderBy: { createdAt: 'desc' },
+                take: 100,
+            }),
+        ]);
+        const groupByPurchaseId = new Map();
+        Object.entries(vatGroups || {}).forEach(([groupId, group]) => {
+            (Array.isArray(group?.purchaseIds) ? group.purchaseIds : []).forEach(id => {
+                groupByPurchaseId.set(Number(id), {
+                    vatGroupId: groupId,
+                    vatGroupHasVat: Boolean(group?.vatInvoiceFile),
+                });
+            });
+        });
+        return {
+            success: true,
+            data: purchases.map(purchase => ({
+                vatInvoiceStatus: purchase.vatInvoiceStatus,
+                purchaseDate: purchase.receivedAt || purchase.createdAt,
+                ...(groupByPurchaseId.get(purchase.id) || {}),
+            })),
+        };
+    } catch (error) {
+        console.error('Get purchase VAT alert summary error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 ipcMain.handle('purchases:createVatGroup', async (event, { purchaseIds = [], note = '' } = {}) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
@@ -6580,16 +6623,24 @@ ipcMain.handle('dailyTasks:listEvidencePenalties', async () => {
 ipcMain.handle('dailyTasks:list', async (event, filters = {}) => {
     try {
         requireRole();
-        // Reconciliation may inspect and write many overdue tasks. Keep it in
-        // the background so opening Daily Tasks is not blocked by that scan.
-        void reconcileEvidencePenalties().catch(error => console.error('Evidence penalty scan error:', error));
-        void cleanupExpiredEvidenceImages().catch(error => console.error('Evidence cleanup error:', error));
-        const { status, assignee, startDate, endDate, priority } = filters;
+        const { status, assignee, startDate, endDate, priority, type, excludeCompleted, summary, maintenance } = filters;
+        // Expensive maintenance belongs to the full Daily Tasks screen. Global
+        // alerts poll a compact read model and must not start a full DB scan.
+        if (maintenance) {
+            void reconcileEvidencePenalties().catch(error => console.error('Evidence penalty scan error:', error));
+            void cleanupExpiredEvidenceImages().catch(error => console.error('Evidence cleanup error:', error));
+        }
 
         const where = {};
 
-        if (status && status !== 'all') {
+        if (excludeCompleted) {
+            where.status = { not: 'completed' };
+        } else if (status && status !== 'all') {
             where.status = status;
+        }
+
+        if (type && type !== 'all') {
+            where.type = type;
         }
 
         if (assignee && assignee !== 'all') {
@@ -6608,6 +6659,17 @@ ipcMain.handle('dailyTasks:list', async (event, filters = {}) => {
 
         const tasks = await prisma.dailyTask.findMany({
             where,
+            ...(summary ? {
+                select: {
+                    id: true,
+                    title: true,
+                    assignee: true,
+                    dueDate: true,
+                    status: true,
+                    type: true,
+                    attachments: true,
+                },
+            } : {}),
             orderBy: [
                 { status: 'asc' },
                 { dueDate: 'asc' }
@@ -10030,7 +10092,7 @@ ipcMain.handle('stockCheck:balanceItem', async (event, payload = {}) => {
         const result = await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
             await lockStockCheckSessions(tx);
             const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
-            const sessions = record ? JSON.parse(record.value || '[]') : [];
+            const sessions = parseStockCheckSessionsFromConfig(record);
             const session = getStockCheckSessionOrThrow(sessions, payload.sessionId, currentSession.role === 'admin');
             const item = getStockCheckItemOrThrow(session, payload.sku);
             await requireStockCheckConversion(tx, item.productName);
