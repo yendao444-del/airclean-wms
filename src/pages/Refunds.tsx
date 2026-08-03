@@ -151,7 +151,7 @@ export default function RefundsPage() {
         alertSoundRef.current = new Audio('./sounds/alert_louder.wav');
 
         loadRefunds();
-        const interval = setInterval(() => loadRefunds(true), 30000);
+        const interval = setInterval(() => { if (document.visibilityState === 'visible') void loadRefunds(true); }, 300000);
         return () => clearInterval(interval);
     }, []);
 

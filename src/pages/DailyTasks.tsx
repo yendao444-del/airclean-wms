@@ -162,7 +162,8 @@ interface Task {
 interface EvidenceImage {
     name: string;
     mimeType: string;
-    storagePath: string;
+    storagePath?: string;
+    driveUrl?: string;
     hash: string;
 }
 
@@ -259,6 +260,13 @@ const getEvidenceImageMimeType = (file: File): string | null => {
     return null;
 };
 
+const getDriveImageUrl = (url: string) => {
+    const fileId = url.match(/[-\w]{25,}/)?.[0];
+    // Drive's download endpoint sends Content-Disposition: attachment in
+    // Electron. The thumbnail endpoint returns image content for <img>.
+    return fileId ? `https://drive.google.com/thumbnail?id=${fileId}&sz=w2000` : url;
+};
+
 const compressEvidenceImage = async (file: File): Promise<File> => {
     const sourceUrl = URL.createObjectURL(file);
     try {
@@ -271,8 +279,10 @@ const compressEvidenceImage = async (file: File): Promise<File> => {
         let width = Math.min(image.naturalWidth, 1920);
         let height = Math.round(image.naturalHeight * (width / image.naturalWidth));
 
-        while (width >= 480 && height >= 360) {
-            for (const quality of [0.82, 0.72, 0.62, 0.52, 0.42]) {
+        // Continue reducing extreme screenshots/photos instead of rejecting
+        // them while a usable proof image can still be produced.
+        while (width >= 160 && height >= 120) {
+            for (const quality of [0.82, 0.72, 0.62, 0.52, 0.42, 0.34, 0.25]) {
                 const canvas = document.createElement('canvas');
                 canvas.width = width;
                 canvas.height = height;
@@ -284,8 +294,8 @@ const compressEvidenceImage = async (file: File): Promise<File> => {
                     return new File([blob], `${file.name.replace(/\.[^.]+$/, '')}.webp`, { type: 'image/webp' });
                 }
             }
-            width = Math.round(width * 0.75);
-            height = Math.round(height * 0.75);
+            width = Math.round(width * 0.7);
+            height = Math.round(height * 0.7);
         }
         throw new Error('Không thể nén ảnh xuống dưới 1 MB. Hãy chọn ảnh rõ nét hơn hoặc cắt bớt ảnh.');
     } finally {
@@ -438,6 +448,12 @@ const DailyTasks = () => {
         window.addEventListener('daily-tasks:open-assignments', openAssignments);
         return () => window.removeEventListener('daily-tasks:open-assignments', openAssignments);
     }, []);
+    useEffect(() => {
+        if (activeTab === 'history' || !selectedWorkDate.isSame(dayjs(), 'day')) {
+            void loadHistory();
+        }
+    }, [activeTab, selectedWorkDate]);
+
     const [showTaskActionGuide, setShowTaskActionGuide] = useState(false);
     const hasShownRowActionHintRef = useRef(false);
 
@@ -495,7 +511,6 @@ const DailyTasks = () => {
     useEffect(() => {
         // Show task cards first; reset/history work can finish in the background.
         void loadTasks();
-        void loadHistory();
         (async () => {
             // 🔄 Reset daily tasks nếu sang ngày mới
             try {
@@ -1049,7 +1064,8 @@ const DailyTasks = () => {
     };
 
     // Filter tasks by type
-    const dailyTasks = tasks.filter(t => !t.type || t.type === 'daily');
+    const isSelectedRestDay = isDailyReportRestDay(selectedWorkDate);
+    const dailyTasks = isSelectedRestDay ? [] : tasks.filter(t => !t.type || t.type === 'daily');
     const assignmentTasks = tasks.filter(t => t.type === 'assignment').filter((task, _index, all) => {
         const groupId = parseAttachments(task.attachments).assignment?.groupId;
         if (!groupId) return true;
@@ -1061,21 +1077,24 @@ const DailyTasks = () => {
 
     const loadHistory = async () => {
         try {
-            const [historyResult, snapshotsResult] = await Promise.all([
+            const selectedDateKey = selectedWorkDate.format('YYYY-MM-DD');
+            const [historyResult, snapshotResult] = await Promise.all([
                 window.electronAPI.appConfig.get('dailyTasksHistory'),
-                window.electronAPI.appConfig.get('dailyTasksSnapshots'),
+                window.electronAPI.appConfig.get(`dailyTasksSnapshot:${selectedDateKey}`),
             ]);
-            if (historyResult.success && historyResult.data) {
+            if (historyResult.success && Array.isArray(historyResult.data)) {
                 setHistory(historyResult.data);
             }
-            if (snapshotsResult.success && snapshotsResult.data) {
-                setHistorySnapshots(snapshotsResult.data);
+            if (snapshotResult.success) {
+                setHistorySnapshots(previous => ({
+                    ...previous,
+                    [selectedDateKey]: snapshotResult.data || {},
+                }));
             }
         } catch (error) {
             console.error('Error loading history:', error);
         }
     };
-
     const addToHistory = async (task: Task, action: string) => {
         try {
             const historyEntry = {
@@ -1269,7 +1288,7 @@ const DailyTasks = () => {
 
                         const result = await window.electronAPI.dailyTasks.update(taskId, { status: 'pending' });
                         if (!result.success) throw new Error(result.error || 'Không thể mở lại công việc.');
-                        await loadHistory();
+                        if (activeTab === 'history') await loadHistory();
                     } catch (error: any) {
                         message.error('Lỗi: ' + (error.message || 'Unknown error'));
                     }
@@ -1767,7 +1786,8 @@ const DailyTasks = () => {
         try {
             const result = await window.electronAPI.dailyTasks.reviewEvidence(task.id, approved);
             if (!result.success) throw new Error(result.error || 'Không thể duyệt bằng chứng.');
-            await Promise.all([loadTasks(), loadHistory()]);
+            await loadTasks();
+            if (activeTab === 'history') await loadHistory();
             message.success(approved ? 'Đã duyệt bằng chứng.' : 'Đã từ chối bằng chứng.');
         } catch (error: any) {
             message.error(error.message || 'Không thể duyệt bằng chứng.');
@@ -2176,6 +2196,8 @@ const DailyTasks = () => {
             ? evidence.submittedImages
             : evidence.submittedImage ? [evidence.submittedImage] : [];
         const imageResults = await Promise.all(submittedImages.map(async image => {
+            if (image.driveUrl) return { ...image, url: getDriveImageUrl(image.driveUrl) };
+            if (!image.storagePath) return null;
             const result = await window.electronAPI.dailyTasks.getEvidenceImageUrl(task.id, image.storagePath);
             return result.success && result.data?.url ? { ...image, url: result.data.url } : null;
         }));
@@ -2186,7 +2208,7 @@ const DailyTasks = () => {
         }
         Modal.info({
             title: 'Bằng chứng công việc',
-            width: 720,
+            width: 980,
             content: availableImages.length > 0 ? (
                 <div>
                     <p style={{ marginBottom: 8 }}><strong>{task.title}</strong></p>
@@ -2196,7 +2218,7 @@ const DailyTasks = () => {
                                 <img
                                     src={image.url}
                                     alt={`Bằng chứng ${index + 1}`}
-                                    style={{ display: 'block', width: '100%', height: 220, objectFit: 'contain', borderRadius: 8, background: '#f8fafc' }}
+                                    style={{ display: 'block', width: '100%', height: 520, objectFit: 'contain', borderRadius: 8, background: '#f8fafc' }}
                                 />
                             </a>
                         ))}

@@ -1,383 +1,349 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Card,
-    InputNumber,
-    Switch,
-    Row,
-    Col,
-    Statistic,
-    Typography,
-    Space,
-    Tag,
     Button,
-    Modal,
+    Card,
+    Col,
+    Divider,
     Input,
+    InputNumber,
+    Modal,
+    message,
+    Row,
     Segmented,
-    Divider
+    Select,
+    Space,
+    Statistic,
+    Switch,
+    Tag,
+    Tooltip,
+    Typography,
 } from 'antd';
 import {
+    AppstoreOutlined,
+    CalculatorOutlined,
+    DeleteOutlined,
     DollarOutlined,
-    ShoppingOutlined,
-    RocketOutlined,
     EditOutlined,
+    PercentageOutlined,
+    PlusOutlined,
+    SaveOutlined,
+    SettingOutlined,
+    ShopOutlined,
 } from '@ant-design/icons';
+import './FeeCalculator.css';
 
 const { Title, Text } = Typography;
 
-// Dùng chung fee defaults với BusinessReport
-const DEFAULT_SHOPEE_FEES = [
-    { id: 'troGia', name: 'Trợ giá (Đồng Tài Trợ)', type: 'percent', value: 4.50, icon: '🎁', color: '#ff4d4f' },
-    { id: 'phiCoDinh', name: 'Phí cố định', type: 'percent', value: 12.50, icon: '💳', color: '#1890ff' },
-    { id: 'piShip', name: 'Phí dịch vụ PiShip', type: 'fixed', value: 1620, icon: '🚚', color: '#52c41a' },
-    { id: 'phiDichVu', name: 'Phí Dịch Vụ', type: 'fixed', value: 3000, icon: '⚙️', color: '#722ed1' },
-    { id: 'phiThanhToan', name: 'Phí thanh toán', type: 'percent', value: 4.69, icon: '💰', color: '#fa8c16' },
-    { id: 'thueGTGT', name: 'Thuế GTGT', type: 'percent', value: 0.96, icon: '🏛️', color: '#eb2f96' },
-    { id: 'thueTNCN', name: 'Thuế TNCN', type: 'percent', value: 0.48, icon: '📊', color: '#13c2c2' },
-    { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#52c41a' },
+type Platform = 'shopee' | 'tiktok';
+type Fee = {
+    id: string;
+    name: string;
+    type: 'percent' | 'fixed';
+    value: number;
+    icon?: string;
+    color?: string;
+    enabled?: boolean;
+    required?: boolean;
+};
+type OperatingFee = { id: string; name: string; value: number; enabled: boolean };
+type Category = { id: string; name: string; feeRate: number; description: string };
+
+// Keep the same identifiers used by BusinessReport so both modules share one fee configuration.
+const DEFAULT_SHOPEE_FEES: Fee[] = [
+    { id: 'troGia', name: 'Trợ giá (Đồng Tài Trợ)', type: 'percent', value: 4.5, icon: '🎁', color: '#ef5b5b', enabled: true },
+    { id: 'phiCoDinh', name: 'Phí cố định', type: 'percent', value: 12.5, icon: '💳', color: '#2488e8', enabled: true, required: true },
+    { id: 'piShip', name: 'Phí dịch vụ PiShip', type: 'fixed', value: 1620, icon: '🚚', color: '#16a34a', enabled: true },
+    { id: 'phiDichVu', name: 'Phí dịch vụ', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', enabled: true },
+    { id: 'phiThanhToan', name: 'Phí thanh toán', type: 'percent', value: 4.69, icon: '💰', color: '#f59e0b', enabled: true },
+    { id: 'thueGTGT', name: 'Thuế GTGT', type: 'percent', value: 0.96, icon: '🏛️', color: '#db2777', enabled: true },
+    { id: 'thueTNCN', name: 'Thuế TNCN', type: 'percent', value: 0.48, icon: '📊', color: '#0891b2', enabled: true },
+    { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#16a34a', enabled: false },
+];
+const DEFAULT_TIKTOK_FEES: Fee[] = [
+    { id: 'phiGiaoDich', name: 'Phí giao dịch', type: 'percent', value: 5, icon: '💰', color: '#f59e0b', enabled: true },
+    { id: 'phiHoaHong', name: 'Phí hoa hồng TikTok Shop', type: 'percent', value: 10.31, icon: '💳', color: '#2488e8', enabled: true, required: true },
+    { id: 'phiXuLyDon', name: 'Phí xử lý đơn hàng', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', enabled: true },
+    { id: 'thueGTGT', name: 'Thuế GTGT (TikTok khấu trừ)', type: 'percent', value: 1, icon: '🏛️', color: '#db2777', enabled: true },
+    { id: 'thueTNCN', name: 'Thuế TNCN (TikTok khấu trừ)', type: 'percent', value: 0.5, icon: '📊', color: '#0891b2', enabled: true },
+    { id: 'affiliate', name: 'Hoa hồng liên kết', type: 'percent', value: 15, icon: '🤝', color: '#16a34a', enabled: false },
+];
+const CATEGORIES: Record<Platform, Category[]> = {
+    shopee: [
+        { id: 'sp-health', name: 'Sức khỏe & Sắc đẹp', feeRate: 12, description: 'Khẩu trang, TPCN, y tế, skincare, trang điểm' },
+        { id: 'sp-fashion', name: 'Thời trang & Phụ kiện', feeRate: 12.5, description: 'Quần áo, giày dép, túi xách' },
+        { id: 'sp-home', name: 'Nhà cửa & Đời sống', feeRate: 12, description: 'Đồ bếp, nội thất, chăn ga gối nệm' },
+        { id: 'sp-baby', name: 'Mẹ & Bé', feeRate: 12, description: 'Tã bỉm, sữa, đồ chơi, quần áo trẻ em' },
+        { id: 'sp-electronic', name: 'Thiết bị điện tử & Phụ kiện', feeRate: 8.5, description: 'Điện thoại, tai nghe, cáp sạc, phụ kiện máy tính' },
+        { id: 'sp-appliance', name: 'Thiết bị điện gia dụng', feeRate: 9, description: 'Nồi chiên, quạt, máy hút bụi, tủ lạnh' },
+        { id: 'sp-groceries', name: 'Bách hóa online & Thực phẩm', feeRate: 10, description: 'Đồ ăn vặt, bánh kẹo, gia vị, đồ uống' },
+        { id: 'sp-sports', name: 'Thể thao & Du lịch', feeRate: 11, description: 'Dụng cụ thể thao, vali, lều trại, đồ tập' },
+        { id: 'sp-books', name: 'Sách & Văn phòng phẩm', feeRate: 10, description: 'Sách, truyện, bút, sổ tay, dụng cụ học tập' },
+        { id: 'sp-auto', name: 'Ô tô, Xe máy & Xe đạp', feeRate: 9.5, description: 'Phụ tùng, nón bảo hiểm, đồ chơi xe, dầu nhớt' },
+        { id: 'sp-pets', name: 'Thú cưng', feeRate: 11, description: 'Thức ăn, phụ kiện và đồ chơi thú cưng' },
+        { id: 'sp-other', name: 'Ngành hàng khác', feeRate: 12, description: 'Tự thiết lập mức phí phù hợp' },
+    ],
+    tiktok: [
+        { id: 'tt-health', name: 'Thực phẩm chức năng & Sức khỏe', feeRate: 12, description: 'Vitamin, TPCN, khẩu trang, thiết bị y tế' },
+        { id: 'tt-beauty', name: 'Mỹ phẩm & Sắc đẹp', feeRate: 12, description: 'Skincare, makeup, son môi, nước hoa' },
+        { id: 'tt-fashion-women', name: 'Thời trang nữ', feeRate: 12, description: 'Đầm, áo, quần và trang phục nữ' },
+        { id: 'tt-fashion-men', name: 'Thời trang nam', feeRate: 12, description: 'Áo thun, sơ mi, quần jeans, vest nam' },
+        { id: 'tt-personal-care', name: 'Chăm sóc cá nhân & Giặt giũ', feeRate: 10, description: 'Dầu gội, sữa tắm, nước giặt' },
+        { id: 'tt-electronic', name: 'Điện thoại & Máy tính bảng', feeRate: 6, description: 'Smartphone, tablet, smartwatch' },
+        { id: 'tt-accessories', name: 'Phụ kiện công nghệ', feeRate: 10, description: 'Tai nghe, sạc dự phòng, ốp lưng, cáp sạc' },
+        { id: 'tt-home', name: 'Nhà cửa & Đời sống', feeRate: 10, description: 'Đồ gia dụng, trang trí' },
+        { id: 'tt-baby', name: 'Mẹ & Bé', feeRate: 10, description: 'Sữa, tã, đồ dùng em bé, thời trang trẻ em' },
+        { id: 'tt-food', name: 'Thực phẩm & Đồ uống', feeRate: 10, description: 'Đồ ăn vặt, trà, cà phê, bánh kẹo' },
+        { id: 'tt-other', name: 'Ngành hàng khác', feeRate: 14, description: 'Mức mặc định TikTok Shop' },
+    ],
+};
+const DEFAULT_OPERATING_FEES: OperatingFee[] = [
+    { id: 'packaging', name: 'Túi gói hàng / Hộp carton', value: 1500, enabled: true },
+    { id: 'tape', name: 'Băng keo / Màng xốp bọc hàng', value: 500, enabled: true },
+    { id: 'label', name: 'Giấy in nhiệt / Tem in đơn', value: 300, enabled: true },
+    { id: 'warehouse', name: 'Tiền thuê mặt bằng kho bãi', value: 5000, enabled: true },
+    { id: 'salary', name: 'Tiền lương nhân sự / Đóng gói', value: 10000, enabled: false },
+    { id: 'utilities', name: 'Điện, nước & tiện ích kho', value: 1000, enabled: false },
+    { id: 'internet', name: 'Internet, phần mềm & máy móc', value: 500, enabled: false },
+    { id: 'other', name: 'Chi phí vận hành kho khác', value: 0, enabled: false },
 ];
 
-const DEFAULT_TIKTOK_FEES = [
-    { id: 'phiGiaoDich', name: 'Phí giao dịch', type: 'percent', value: 5.00, icon: '💰', color: '#fa8c16' },
-    { id: 'phiHoaHong', name: 'Phí hoa hồng TikTok Shop', type: 'percent', value: 10.31, icon: '💳', color: '#1890ff' },
-    { id: 'phiXuLyDon', name: 'Phí xử lý đơn hàng', type: 'fixed', value: 3000, icon: '⚙️', color: '#722ed1' },
-    { id: 'thueGTGT', name: 'Thuế GTGT (TikTok khấu trừ)', type: 'percent', value: 1.00, icon: '🏛️', color: '#eb2f96' },
-    { id: 'thueTNCN', name: 'Thuế TNCN (TikTok khấu trừ)', type: 'percent', value: 0.50, icon: '📊', color: '#13c2c2' },
-    { id: 'affiliate', name: 'Hoa hồng liên kết', type: 'percent', value: 15.00, icon: '🤝', color: '#52c41a' },
-];
+const numberFormat = (value: number) => new Intl.NumberFormat('vi-VN').format(Math.round(value || 0));
+const normalizeFees = (fees: Fee[], defaults: Fee[]) => fees.map((fee) => ({
+    ...fee,
+    enabled: fee.enabled ?? true,
+    required: fee.required ?? defaults.find((item) => item.id === fee.id)?.required ?? false,
+}));
 
 export default function FeeCalculator() {
-    const [platform, setPlatform] = useState<'shopee' | 'tiktok'>('shopee');
-    const [shopeeFees, setShopeeFees] = useState(DEFAULT_SHOPEE_FEES);
-    const [tiktokFees, setTiktokFees] = useState(DEFAULT_TIKTOK_FEES);
-    const [doanhThu, setDoanhThu] = useState(149999);
-    const [giaNhap, setGiaNhap] = useState(0);
+    const [loaded, setLoaded] = useState(false);
+    const [platform, setPlatform] = useState<Platform>('shopee');
+    const [shopeeFees, setShopeeFees] = useState<Fee[]>(DEFAULT_SHOPEE_FEES);
+    const [tiktokFees, setTiktokFees] = useState<Fee[]>(DEFAULT_TIKTOK_FEES);
+    const [revenue, setRevenue] = useState(0);
+    const [purchaseCost, setPurchaseCost] = useState(0);
     const [vatRate, setVatRate] = useState(8);
     const [vatEnabled, setVatEnabled] = useState(false);
-    const [editModalVisible, setEditModalVisible] = useState(false);
-    const [editingFee, setEditingFee] = useState<any>(null);
+    const [categoryId, setCategoryId] = useState<Record<Platform, string>>({ shopee: 'sp-health', tiktok: 'tt-health' });
+    const [operatingEnabled, setOperatingEnabled] = useState(false);
+    const [operatingFees, setOperatingFees] = useState<OperatingFee[]>(DEFAULT_OPERATING_FEES);
+    const [monthlyFixedCost, setMonthlyFixedCost] = useState(5000000);
+    const [monthlyOrders, setMonthlyOrders] = useState(1000);
+    const [editingFee, setEditingFee] = useState<Fee | null>(null);
+    const [isScrolled, setIsScrolled] = useState(false);
+    const pageRef = useRef<HTMLElement | null>(null);
 
-    // Load config
     useEffect(() => {
-        (async () => {
+        const load = async () => {
             try {
-                // Load Shopee fees (v3 - đồng bộ với BusinessReport)
-                const shopeeRes = await window.electronAPI.appConfig.get('shopee_fees_v3');
-                if (shopeeRes.success && shopeeRes.data && Array.isArray(shopeeRes.data)) {
-                    setShopeeFees(shopeeRes.data);
-                } else {
-                    await window.electronAPI.appConfig.set('shopee_fees_v3', DEFAULT_SHOPEE_FEES);
-                }
-
-                // Load TikTok fees (v3)
-                const tiktokRes = await window.electronAPI.appConfig.get('tiktok_fees_v3');
-                if (tiktokRes.success && tiktokRes.data && Array.isArray(tiktokRes.data)) {
-                    setTiktokFees(tiktokRes.data);
-                } else {
-                    await window.electronAPI.appConfig.set('tiktok_fees_v3', DEFAULT_TIKTOK_FEES);
-                }
-
-                // Load inputs
-                const savedInputs = await window.electronAPI.appConfig.get('calculator_inputs_v2');
-                if (savedInputs.success && savedInputs.data) {
-                    const inputs = savedInputs.data;
-                    setDoanhThu(inputs.doanhThu || 149999);
-                    setGiaNhap(inputs.giaNhap || 0);
-                    setVatRate(inputs.vatRate !== undefined ? inputs.vatRate : 8);
-                    setVatEnabled(inputs.vatEnabled !== undefined ? inputs.vatEnabled : false);
-                    if (inputs.platform) setPlatform(inputs.platform);
+                const [shopeeRes, tiktokRes, inputRes] = await Promise.all([
+                    window.electronAPI.appConfig.get('shopee_fees_v3'),
+                    window.electronAPI.appConfig.get('tiktok_fees_v3'),
+                    window.electronAPI.appConfig.get('calculator_inputs_v2'),
+                ]);
+                if (shopeeRes.success && Array.isArray(shopeeRes.data)) setShopeeFees(normalizeFees(shopeeRes.data, DEFAULT_SHOPEE_FEES));
+                if (tiktokRes.success && Array.isArray(tiktokRes.data)) setTiktokFees(normalizeFees(tiktokRes.data, DEFAULT_TIKTOK_FEES));
+                if (inputRes.success && inputRes.data) {
+                    const saved = inputRes.data;
+                    // 149.999đ was the previous demo default, not a real business value.
+                    const savedRevenue = saved.doanhThu ?? saved.revenue;
+                    setRevenue(saved.revenueDefaultVersion === 2 ? (savedRevenue ?? 0) : (savedRevenue === 149999 ? 0 : (savedRevenue ?? 0)));
+                    setPurchaseCost(saved.giaNhap ?? saved.purchaseCost ?? 0);
+                    setVatRate(saved.vatRate ?? 8);
+                    setVatEnabled(saved.vatEnabled ?? false);
+                    setPlatform(saved.platform === 'tiktok' ? 'tiktok' : 'shopee');
+                    setCategoryId({ shopee: saved.categories?.shopee ?? 'sp-health', tiktok: saved.categories?.tiktok ?? 'tt-health' });
+                    setOperatingEnabled(saved.operatingEnabled ?? false);
+                    if (Array.isArray(saved.operatingFees)) setOperatingFees(saved.operatingFees);
+                    setMonthlyFixedCost(saved.monthlyFixedCost ?? 5000000);
+                    setMonthlyOrders(saved.monthlyOrders ?? 1000);
                 }
             } catch (error) {
-                console.error('Error loading fee config:', error);
+                console.error('Cannot load fee calculator configuration:', error);
+            } finally {
+                setLoaded(true);
             }
-        })();
+        };
+        load();
     }, []);
 
-    // Save inputs when changed
     useEffect(() => {
-        window.electronAPI.appConfig.set('calculator_inputs_v2', { doanhThu, giaNhap, vatRate, vatEnabled, platform });
-    }, [doanhThu, giaNhap, vatRate, vatEnabled, platform]);
+        const scrollHost = pageRef.current?.parentElement;
+        const updateScrolled = () => setIsScrolled((scrollHost?.scrollTop ?? 0) > 120 || window.scrollY > 120);
+        scrollHost?.addEventListener('scroll', updateScrolled, { passive: true });
+        window.addEventListener('scroll', updateScrolled, { passive: true });
+        return () => {
+            scrollHost?.removeEventListener('scroll', updateScrolled);
+            window.removeEventListener('scroll', updateScrolled);
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!loaded) return;
+        void window.electronAPI.appConfig.set('calculator_inputs_v2', {
+            doanhThu: revenue,
+            revenueDefaultVersion: 2,
+            giaNhap: purchaseCost,
+            vatRate,
+            vatEnabled,
+            platform,
+            categories: categoryId,
+            operatingEnabled,
+            operatingFees,
+            monthlyFixedCost,
+            monthlyOrders,
+        });
+    }, [loaded, revenue, purchaseCost, vatRate, vatEnabled, platform, categoryId, operatingEnabled, operatingFees, monthlyFixedCost, monthlyOrders]);
 
     const currentFees = platform === 'shopee' ? shopeeFees : tiktokFees;
-    const setCurrentFees = platform === 'shopee' ? setShopeeFees : setTiktokFees;
+    const selectedCategory = CATEGORIES[platform].find((category) => category.id === categoryId[platform]) ?? CATEGORIES[platform][0];
+    const activeFees = currentFees.filter((fee) => fee.enabled !== false);
+    const feeAmount = (fee: Fee) => fee.type === 'percent' ? revenue * fee.value / 100 : fee.value;
+    const totalPlatformFees = activeFees.reduce((total, fee) => total + feeAmount(fee), 0);
+    const totalOperatingFees = operatingEnabled ? operatingFees.filter((fee) => fee.enabled).reduce((total, fee) => total + fee.value, 0) : 0;
+    const vatAmount = vatEnabled ? purchaseCost * vatRate / 100 : 0;
+    const convertedMonthlyCost = monthlyOrders > 0 ? Math.round(monthlyFixedCost / monthlyOrders) : 0;
+    const netRevenue = revenue - totalPlatformFees;
+    const profit = netRevenue - purchaseCost - vatAmount - totalOperatingFees;
+    const margin = revenue ? (profit / revenue) * 100 : 0;
 
-    const saveFees = async (newFees: any[]) => {
+    const saveFees = async (fees: Fee[]) => {
         const key = platform === 'shopee' ? 'shopee_fees_v3' : 'tiktok_fees_v3';
-        await window.electronAPI.appConfig.set(key, newFees);
-        setCurrentFees(newFees);
+        if (platform === 'shopee') setShopeeFees(fees); else setTiktokFees(fees);
+        await window.electronAPI.appConfig.set(key, fees);
+    };
+    const updateFee = (id: string, patch: Partial<Fee>) => void saveFees(currentFees.map((fee) => fee.id === id ? { ...fee, ...patch } : fee));
+    const updateOperating = (id: string, patch: Partial<OperatingFee>) => setOperatingFees((fees) => fees.map((fee) => fee.id === id ? { ...fee, ...patch } : fee));
+    const chooseCategory = (id: string) => {
+        const category = CATEGORIES[platform].find((item) => item.id === id);
+        if (!category) return;
+        setCategoryId((items) => ({ ...items, [platform]: id }));
+        const commissionId = platform === 'shopee' ? 'phiCoDinh' : 'phiHoaHong';
+        const nextFees = currentFees.map((fee) => fee.id === commissionId ? { ...fee, value: category.feeRate, enabled: true } : fee);
+        if (platform === 'shopee') setShopeeFees(nextFees); else setTiktokFees(nextFees);
+        const key = platform === 'shopee' ? 'shopee_fees_v3' : 'tiktok_fees_v3';
+        void window.electronAPI.appConfig.set(key, nextFees);
+        message.success(`Đã áp dụng phí hoa hồng ${category.feeRate}% cho ${category.name}`);
     };
 
-    const calculateFee = (fee: any) => {
-        if (fee.type === 'percent') return (doanhThu * fee.value) / 100;
-        return fee.value;
-    };
-
-    const totalFees = currentFees.reduce((sum, fee) => sum + calculateFee(fee), 0);
-    const vatAmount = vatEnabled ? (giaNhap * vatRate) / 100 : 0;
-    const conLai = doanhThu - totalFees - giaNhap - vatAmount;
-    const feePercent = doanhThu > 0 ? (totalFees / doanhThu * 100) : 0;
-
-    const fmt = (v: number) => new Intl.NumberFormat('vi-VN').format(Math.round(v));
-
-    const openEditModal = (fee: any) => {
-        setEditingFee({ ...fee });
-        setEditModalVisible(true);
-    };
-
-    const saveEditedFee = () => {
-        if (!editingFee) return;
-        const newFees = currentFees.map(f => f.id === editingFee.id ? editingFee : f);
-        saveFees(newFees);
-        setEditModalVisible(false);
-        setEditingFee(null);
-    };
-
-    const platformColor = platform === 'shopee' ? '#ff6633' : '#1a1a2e';
-    const platformIcon = platform === 'shopee' ? '🛒' : '🎵';
+    const platformTitle = platform === 'shopee' ? 'Shopee' : 'TikTok Shop';
+    const platformColor = platform === 'shopee' ? '#ee4d2d' : '#151515';
 
     return (
-        <div style={{ padding: '24px', background: '#f0f2f5', minHeight: '100vh' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-                <Title level={2} style={{ margin: 0 }}>
-                    💰 Tính phí sản phẩm
-                </Title>
+        <main ref={pageRef} className="fee-calculator-page">
+            <section className="fee-calculator-header">
+                <div>
+                    <div className="fee-header-title"><span className="fee-header-icon"><CalculatorOutlined /></span><Title level={2}>Tính phí sàn</Title></div>
+                    <Text className="fee-header-subtitle" type="secondary">Ước tính chi phí, lợi nhuận và biên lợi nhuận cho từng đơn hàng.</Text>
+                </div>
                 <Segmented
-                    size="large"
                     value={platform}
-                    onChange={(val) => setPlatform(val as 'shopee' | 'tiktok')}
-                    options={[
-                        { label: '🛒 Shopee', value: 'shopee' },
-                        { label: '🎵 TikTok', value: 'tiktok' },
-                    ]}
-                    style={{ fontWeight: 600 }}
+                    onChange={(value) => setPlatform(value as Platform)}
+                    options={[{ value: 'shopee', label: 'Shopee' }, { value: 'tiktok', label: 'TikTok Shop' }]}
                 />
-            </div>
+            </section>
 
-            {/* Input + Kết quả */}
-            <Row gutter={16} style={{ marginBottom: 24 }}>
-                <Col xs={24} sm={8}>
-                    <Card>
-                        <Statistic
-                            title="Doanh thu (Giá bán)"
-                            value={doanhThu}
-                            precision={0}
-                            prefix={<DollarOutlined />}
-                            suffix="₫"
-                            valueStyle={{ color: '#3f8600' }}
+            <Card className="fee-context-card" bordered={false}>
+                <Row gutter={[16, 16]} align="bottom">
+                    <Col xs={24} md={10} lg={8}>
+                            <Text strong>Chọn sản phẩm / ngành hàng <Tag color="red">Bắt buộc</Tag></Text>
+                        <Select
+                            value={selectedCategory.id}
+                            onChange={chooseCategory}
+                            className="fee-full-width"
+                            optionLabelProp="label"
+                            options={CATEGORIES[platform].map((category) => ({
+                                value: category.id,
+                                label: category.name,
+                                searchLabel: `${category.name} ${category.description}`,
+                                children: <div><b>{category.name}</b><div className="fee-category-description">{category.description} · Phí hoa hồng {category.feeRate}%</div></div>,
+                            }))}
+                            showSearch
+                            optionFilterProp="searchLabel"
                         />
-                        <InputNumber
-                            style={{ width: '100%', marginTop: 8 }}
-                            size="large"
-                            value={doanhThu}
-                            onChange={(value) => setDoanhThu(value || 0)}
-                            formatter={(value) => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                            parser={(value) => Number(value!.replace(/\$\s?|(,*)/g, '')) as any}
-                            addonAfter="₫"
-                        />
-                    </Card>
-                </Col>
-                <Col xs={24} sm={8}>
-                    <Card>
-                        <Statistic
-                            title="Giá nhập"
-                            value={giaNhap}
-                            precision={0}
-                            prefix={<ShoppingOutlined />}
-                            suffix="₫"
-                            valueStyle={{ color: '#cf1322' }}
-                        />
-                        <InputNumber
-                            style={{ width: '100%', marginTop: 8 }}
-                            size="large"
-                            value={giaNhap}
-                            onChange={(value) => setGiaNhap(value || 0)}
-                            formatter={(value) => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                            parser={(value) => Number(value!.replace(/\$\s?|(,*)/g, '')) as any}
-                            addonAfter="₫"
-                        />
-                    </Card>
-                </Col>
-                <Col xs={24} sm={8}>
-                    <Card style={{
-                        background: conLai >= 0
-                            ? 'linear-gradient(135deg, #52c41a 0%, #73d13d 100%)'
-                            : 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)',
-                        border: 'none'
-                    }}>
-                        <Statistic
-                            title={<span style={{ color: '#fff' }}>Lợi nhuận ước tính</span>}
-                            value={conLai}
-                            precision={0}
-                            prefix={<RocketOutlined />}
-                            suffix="₫"
-                            valueStyle={{ color: '#fff', fontWeight: 'bold', fontSize: 32 }}
-                        />
-                        <Tag color={conLai >= 0 ? 'success' : 'error'} style={{ marginTop: 8, fontSize: 14 }}>
-                            {doanhThu > 0 ? ((conLai / doanhThu * 100).toFixed(2) + '%') : '0%'}
-                        </Tag>
-                    </Card>
-                </Col>
+                    </Col>
+                    <Col xs={24} md={7} lg={5}>
+                        <Text strong>Doanh thu đơn hàng</Text>
+                        <InputNumber className="fee-full-width" value={revenue} min={0} onChange={(value) => setRevenue(Number(value || 0))} addonAfter="đ" formatter={(value) => numberFormat(Number(value || 0))} parser={(value) => Number(String(value || '').replace(/[^\d]/g, ''))} />
+                    </Col>
+                    <Col xs={24} md={7} lg={5}>
+                        <Text strong>Giá nhập</Text>
+                        <InputNumber className="fee-full-width" value={purchaseCost} min={0} onChange={(value) => setPurchaseCost(Number(value || 0))} addonAfter="đ" formatter={(value) => numberFormat(Number(value || 0))} parser={(value) => Number(String(value || '').replace(/[^\d]/g, ''))} />
+                    </Col>
+                </Row>
+            </Card>
+
+            <Row gutter={[16, 16]} className="fee-summary-grid">
+                <Col xs={24} sm={12} xl={6}><Card bordered={false}><Statistic title="Doanh thu" value={revenue} precision={0} suffix="đ" prefix={<DollarOutlined />} valueStyle={{ color: '#0e9f6e' }} /></Card></Col>
+                <Col xs={24} sm={12} xl={6}><Card bordered={false}><Statistic title="Tổng phí sàn" value={totalPlatformFees} precision={0} suffix="đ" prefix={<ShopOutlined />} valueStyle={{ color: '#e05252' }} /><Text type="secondary">{revenue ? `${(totalPlatformFees / revenue * 100).toFixed(2)}% doanh thu` : '0% doanh thu'}</Text></Card></Col>
+                <Col xs={24} sm={12} xl={6}><Card bordered={false}><Statistic title="Thực nhận sau phí" value={netRevenue} precision={0} suffix="đ" valueStyle={{ color: '#2563eb' }} /></Card></Col>
+                <Col xs={24} sm={12} xl={6}><Card bordered={false} className={profit >= 0 ? 'fee-profit-positive' : 'fee-profit-negative'}><Statistic title="Lợi nhuận ước tính" value={profit} precision={0} suffix="đ" valueStyle={{ color: profit >= 0 ? '#0e9f6e' : '#dc2626' }} /><Text strong>Biên lợi nhuận: {margin.toFixed(1)}%</Text></Card></Col>
             </Row>
 
-            {/* Các khoản phí */}
-            <Card
-                title={
-                    <span>
-                        {platformIcon} Chi phí {platform === 'shopee' ? 'Shopee' : 'TikTok'}
-                        <Tag color={platform === 'shopee' ? 'orange' : 'default'} style={{ marginLeft: 8 }}>
-                            Tổng: {fmt(totalFees)}₫ ({feePercent.toFixed(2)}%)
-                        </Tag>
-                    </span>
-                }
-                style={{ marginBottom: 16, borderTop: `3px solid ${platformColor}` }}
-            >
-                {/* Bảng chi tiết phí */}
-                <div style={{ marginBottom: 16 }}>
-                    {currentFees.map((fee) => {
-                        const amount = calculateFee(fee);
-                        const pct = doanhThu > 0 ? (amount / doanhThu * 100) : 0;
-
-                        return (
-                            <div
-                                key={fee.id}
-                                style={{
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    padding: '10px 12px',
-                                    borderBottom: '1px solid #f0f0f0',
-                                    transition: 'background 0.2s',
-                                    cursor: 'pointer',
-                                }}
-                                onClick={() => openEditModal(fee)}
-                                onMouseEnter={(e) => (e.currentTarget.style.background = '#fafafa')}
-                                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-                            >
-                                <div style={{
-                                    width: 28, height: 28, borderRadius: 6,
-                                    background: `${fee.color}15`,
-                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                    fontSize: 14, marginRight: 10,
-                                    border: `1px solid ${fee.color}30`,
-                                }}>{fee.icon}</div>
-                                <div style={{ flex: 1 }}>
-                                    <Text style={{ fontSize: 13 }}>{fee.name}</Text>
-                                    <Text type="secondary" style={{ fontSize: 11, marginLeft: 6 }}>
-                                        {fee.type === 'percent' ? `${fee.value}%` : `${fmt(fee.value)}₫/đơn`}
-                                    </Text>
-                                </div>
-                                <div style={{ textAlign: 'right' }}>
-                                    <Text strong style={{ fontSize: 14, color: fee.color }}>
-                                        -{fmt(amount)}₫
-                                    </Text>
-                                    <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
-                                        {pct.toFixed(2)}%
-                                    </Text>
-                                </div>
-                                <EditOutlined style={{ marginLeft: 8, color: '#bfbfbf', fontSize: 12 }} />
+            <Row gutter={[16, 16]} className={operatingEnabled ? 'fee-two-columns' : 'fee-single-column'}>
+                <Col xs={24} xl={operatingEnabled ? 15 : 24}>
+                    <Card
+                        className="fee-panel"
+                        title={<Space><AppstoreOutlined style={{ color: platformColor }} /><span>Phí {platformTitle}</span><Tag>{activeFees.length}/{currentFees.length} khoản áp dụng</Tag></Space>}
+                        extra={operatingEnabled
+                            ? <Text type="secondary">Đồng bộ với Báo cáo kinh doanh</Text>
+                            : <Button className="fee-show-operating" type="primary" icon={<PlusOutlined />} onClick={() => setOperatingEnabled(true)}>Tính thêm chi phí kho bãi & vận hành</Button>}
+                    >
+                        <div className="fee-list">
+                            {currentFees.map((fee) => {
+                                const isEnabled = fee.enabled !== false;
+                                return <div className={`fee-row ${!isEnabled ? 'fee-row-disabled' : ''}`} key={fee.id}>
+                                    <Switch size="small" checked={isEnabled} disabled={fee.required} onChange={(enabled) => updateFee(fee.id, { enabled })} />
+                                    <span className="fee-emoji" style={{ background: `${fee.color || '#64748b'}18` }}>{fee.icon || '•'}</span>
+                                    <div className="fee-row-name"><Text strong>{fee.name}</Text><Text type="secondary">{fee.type === 'percent' ? `${fee.value}% doanh thu` : `${numberFormat(fee.value)}đ / đơn`}</Text></div>
+                                    {fee.required && <Tag color="blue">Bắt buộc</Tag>}
+                                    <Text className="fee-row-amount">-{numberFormat(feeAmount(fee))}đ</Text>
+                                    <Tooltip title="Sửa khoản phí"><Button type="text" icon={<EditOutlined />} onClick={() => setEditingFee({ ...fee })} /></Tooltip>
+                                </div>;
+                            })}
+                        </div>
+                        <Divider />
+                        <div className="fee-total-line"><Text strong>Tổng phí {platformTitle}</Text><Text strong className="fee-total-value">-{numberFormat(totalPlatformFees)}đ</Text></div>
+                    </Card>
+                </Col>
+                {operatingEnabled && <Col xs={24} xl={9}>
+                    <Card className="fee-panel" title={<Space><SettingOutlined /><span>Chi phí khác</span></Space>} extra={<Switch checked={operatingEnabled} onChange={setOperatingEnabled} />}>
+                        <div className="fee-vat-row"><div><Text strong>VAT giá nhập</Text><br /><Text type="secondary">Khấu trừ theo giá vốn đơn hàng</Text></div><Switch checked={vatEnabled} onChange={setVatEnabled} /></div>
+                        {vatEnabled && <div className="fee-vat-rate"><Text>Thuế suất</Text><InputNumber min={0} max={100} value={vatRate} onChange={(value) => setVatRate(Number(value || 0))} addonAfter="%" /></div>}
+                        <Divider />
+                        <Text strong>Chi phí vận hành / đơn</Text>
+                        <div className="fee-converter">
+                            <Text strong>Quy đổi chi phí cố định tháng</Text>
+                            <Text type="secondary">Phân bổ tiền kho, lương, điện nước thành chi phí trên mỗi đơn.</Text>
+                            <div className="fee-converter-grid">
+                                <div><Text>Chi phí cố định / tháng</Text><InputNumber value={monthlyFixedCost} min={0} onChange={(value) => setMonthlyFixedCost(Number(value || 0))} addonAfter="đ" formatter={(value) => numberFormat(Number(value || 0))} parser={(value) => Number(String(value || '').replace(/[^\d]/g, ''))} /></div>
+                                <div><Text>Số đơn / tháng</Text><InputNumber value={monthlyOrders} min={1} onChange={(value) => setMonthlyOrders(Number(value || 0))} addonAfter="đơn" formatter={(value) => numberFormat(Number(value || 0))} parser={(value) => Number(String(value || '').replace(/[^\d]/g, ''))} /></div>
                             </div>
-                        );
-                    })}
-                </div>
-
-                {/* Tổng kết */}
-                <Divider style={{ margin: '8px 0' }} />
-                <div style={{ padding: '8px 12px' }}>
-                    <Row justify="space-between" align="middle">
-                        <Text strong style={{ fontSize: 14 }}>Tổng phí sàn:</Text>
-                        <Text strong style={{ fontSize: 16, color: '#ff4d4f' }}>-{fmt(totalFees)}₫</Text>
-                    </Row>
-                    <Row justify="space-between" align="middle" style={{ marginTop: 4 }}>
-                        <Text strong style={{ fontSize: 14, color: '#52c41a' }}>
-                            Doanh thu ước tính sau phí:
-                        </Text>
-                        <Text strong style={{ fontSize: 18, color: '#52c41a' }}>
-                            {fmt(doanhThu - totalFees)}₫
-                        </Text>
-                    </Row>
-                </div>
-            </Card>
-
-            {/* VAT */}
-            <Card title="🧾 VAT (Giá nhập)" style={{ marginBottom: 16 }}>
-                <Space direction="vertical" style={{ width: '100%' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <Space>
-                            <Switch checked={vatEnabled} onChange={setVatEnabled} />
-                            <Text strong>Hóa đơn VAT</Text>
-                            {vatEnabled && <Tag color="orange">{vatRate}% × Giá nhập</Tag>}
-                        </Space>
-                        {vatEnabled && (
-                            <Button
-                                size="small"
-                                onClick={() => {
-                                    const newRate = prompt('Nhập % VAT:', String(vatRate));
-                                    if (newRate !== null && !isNaN(Number(newRate))) {
-                                        setVatRate(parseFloat(newRate));
-                                    }
-                                }}
-                            >
-                                Sửa {vatRate}%
-                            </Button>
-                        )}
-                    </div>
-                    {vatEnabled && (
-                        <Statistic value={vatAmount} precision={0} suffix="₫" valueStyle={{ color: '#fa8c16' }} />
-                    )}
-                </Space>
-            </Card>
-
-            {/* Edit Modal */}
-            <Modal
-                title={`Sửa ${editingFee?.name || ''}`}
-                open={editModalVisible}
-                onCancel={() => setEditModalVisible(false)}
-                onOk={saveEditedFee}
-                okText="Lưu"
-                cancelText="Hủy"
-            >
-                {editingFee && (
-                    <Space direction="vertical" style={{ width: '100%' }} size={16}>
-                        <div>
-                            <Text>Tên phí:</Text>
-                            <Input
-                                value={editingFee.name}
-                                onChange={(e) => setEditingFee({ ...editingFee, name: e.target.value })}
-                                style={{ marginTop: 8 }}
-                            />
+                            <div className="fee-converter-result">Bình quân: <b>{numberFormat(convertedMonthlyCost)}đ / đơn</b></div>
                         </div>
-                        <div>
-                            <Text>Giá trị:</Text>
-                            <InputNumber
-                                style={{ width: '100%', marginTop: 8 }}
-                                value={editingFee.value}
-                                onChange={(value) => setEditingFee({ ...editingFee, value: value || 0 })}
-                                step={editingFee.type === 'percent' ? 0.01 : 100}
-                                addonAfter={editingFee.type === 'percent' ? '%' : '₫'}
-                                formatter={editingFee.type === 'fixed' ? (v: any) => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : undefined}
-                                parser={editingFee.type === 'fixed' ? ((v: any) => v.replace(/,/g, '')) : undefined}
-                            />
+                        <div className={operatingEnabled ? 'fee-operating-list' : 'fee-operating-list fee-row-disabled'}>
+                            {operatingFees.map((fee) => <div className="fee-operating-row" key={fee.id}><Switch size="small" checked={fee.enabled} disabled={!operatingEnabled} onChange={(enabled) => updateOperating(fee.id, { enabled })} /><Text>{fee.name}</Text><InputNumber size="small" value={fee.value} disabled={!operatingEnabled || !fee.enabled} min={0} onChange={(value) => updateOperating(fee.id, { value: Number(value || 0) })} addonAfter="đ" formatter={(value) => numberFormat(Number(value || 0))} parser={(value) => Number(String(value || '').replace(/[^\d]/g, ''))} /></div>)}
                         </div>
-                        <div>
-                            <Text>Loại:</Text>
-                            <div style={{ marginTop: 8 }}>
-                                <Space>
-                                    <Button
-                                        type={editingFee.type === 'percent' ? 'primary' : 'default'}
-                                        onClick={() => setEditingFee({ ...editingFee, type: 'percent' })}
-                                    >
-                                        % Phần trăm
-                                    </Button>
-                                    <Button
-                                        type={editingFee.type === 'fixed' ? 'primary' : 'default'}
-                                        onClick={() => setEditingFee({ ...editingFee, type: 'fixed' })}
-                                    >
-                                        ₫ Cố định
-                                    </Button>
-                                </Space>
-                            </div>
-                        </div>
-                    </Space>
-                )}
+                        <Divider />
+                        <div className="fee-total-line"><Text>Tổng chi phí khác</Text><Text strong>-{numberFormat(vatAmount + totalOperatingFees)}đ</Text></div>
+                    </Card>
+                </Col>}
+            </Row>
+
+            {isScrolled && <div className="fee-bottom-summary" role="status">
+                <div><small>Doanh thu</small><b>{numberFormat(revenue)}đ</b><span>100%</span></div>
+                <div><small>Giá nhập</small><b>{numberFormat(purchaseCost)}đ</b><span>{revenue ? `${(purchaseCost / revenue * 100).toFixed(1)}%` : '0%'}</span></div>
+                <div><small>Tổng phí sàn</small><b className="fee-bottom-fee">-{numberFormat(totalPlatformFees)}đ</b><span>{revenue ? `${(totalPlatformFees / revenue * 100).toFixed(1)}%` : '0%'}</span></div>
+                <div><small>Sàn trả về ví</small><b className="fee-bottom-payout">{numberFormat(netRevenue)}đ</b><span>{revenue ? `${(netRevenue / revenue * 100).toFixed(1)}%` : '0%'}</span></div>
+                <div className="fee-bottom-profit"><small>Lợi nhuận thực tế</small><b className={profit >= 0 ? 'fee-profit-text-positive' : 'fee-profit-text-negative'}>{profit >= 0 ? '+' : ''}{numberFormat(profit)}đ</b><span>{margin.toFixed(1)}%</span></div>
+            </div>}
+
+            <Modal title={`Sửa ${editingFee?.name || 'khoản phí'}`} open={!!editingFee} onCancel={() => setEditingFee(null)} onOk={() => { if (editingFee) void saveFees(currentFees.map((fee) => fee.id === editingFee.id ? editingFee : fee)); setEditingFee(null); }} okText="Lưu phí" cancelText="Hủy" okButtonProps={{ icon: <SaveOutlined /> }}>
+                {editingFee && <Space direction="vertical" size="middle" className="fee-full-width">
+                    <div><Text>Tên khoản phí</Text><Input value={editingFee.name} onChange={(event) => setEditingFee({ ...editingFee, name: event.target.value })} /></div>
+                    <div><Text>Loại tính phí</Text><Segmented block value={editingFee.type} onChange={(type) => setEditingFee({ ...editingFee, type: type as Fee['type'] })} options={[{ label: 'Phần trăm', value: 'percent', icon: <PercentageOutlined /> }, { label: 'Cố định', value: 'fixed', icon: <DollarOutlined /> }]} /></div>
+                    <div><Text>Giá trị</Text><InputNumber className="fee-full-width" min={0} value={editingFee.value} step={editingFee.type === 'percent' ? 0.1 : 100} onChange={(value) => setEditingFee({ ...editingFee, value: Number(value || 0) })} addonAfter={editingFee.type === 'percent' ? '%' : 'đ'} /></div>
+                </Space>}
             </Modal>
-        </div>
+        </main>
     );
 }

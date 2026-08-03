@@ -23,6 +23,7 @@ const fs = require('fs');
 const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const { createClient } = require('@supabase/supabase-js');
 
 function getEvidenceStorageConfigPath() {
@@ -273,7 +274,7 @@ async function uploadToDrive(drive, folderId, fileName, content, mimeType) {
                 mimeType: mimeType,
                 body: bufferStream,
             },
-            fields: 'id, webViewLink',
+            fields: 'id, webViewLink, webContentLink',
         });
 
         // Set quyền "Anyone with link can view" — fire-and-forget, không block upload
@@ -1343,6 +1344,28 @@ ipcMain.handle('products:getById', async (event, id) => {
     }
 });
 
+ipcMain.handle('products:getBySkus', async (_event, rawSkus = []) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const skus = [...new Set((Array.isArray(rawSkus) ? rawSkus : [])
+            .map(value => String(value || '').trim())
+            .filter(Boolean))].slice(0, 100);
+        if (skus.length === 0) return { success: true, data: [] };
+
+        const products = await prisma.product.findMany({
+            where: {
+                OR: [
+                    { sku: { in: skus } },
+                    ...skus.map(sku => ({ variants: { contains: sku } })),
+                ],
+            },
+            select: productSelectForCatalog(),
+        });
+        return { success: true, data: isAdminSession() ? products : products.map(sanitizeProductForNonAdmin) };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
 ipcMain.handle('products:create', async (event, data) => {
     try {
         requireRole('admin', 'manager');
@@ -6208,7 +6231,12 @@ function reconcileEvidencePenalties() {
     // every minute. Share one reconciliation to avoid duplicate repair writes.
     if (evidencePenaltyReconcilePromise) return evidencePenaltyReconcilePromise;
     evidencePenaltyReconcilePromise = (async () => {
-        const tasks = await prisma.dailyTask.findMany({ where: { status: { not: 'completed' } } });
+        const tasks = await prisma.dailyTask.findMany({
+            where: { status: { not: 'completed' } },
+            // Penalty reconciliation only needs these fields. Avoid sending full
+            // task descriptions and metadata across the database connection.
+            select: { id: true, title: true, assignee: true, dueDate: true, status: true, type: true, attachments: true },
+        });
         const created = [];
         for (const task of tasks) {
             const penalties = await createEvidencePenaltyIfDue(task);
@@ -6243,10 +6271,9 @@ async function cleanupExpiredEvidenceImages() {
     }
 }
 
-// The desktop process stays alive while the app is open, so reconcile every
-// minute. Opening either Daily Tasks or Attendance also performs a catch-up.
-setTimeout(() => void reconcileEvidencePenalties().catch(error => console.error('Evidence penalty startup scan error:', error)), 30 * 1000);
-setInterval(() => void reconcileEvidencePenalties().catch(error => console.error('Evidence penalty scan error:', error)), 60 * 1000);
+// Do not scan every open desktop process once a minute. Reconciliation runs
+// when Daily Tasks is opened or an evidence action occurs, preventing repeated
+// database egress from every staff machine while keeping penalties consistent.
 setTimeout(() => void cleanupExpiredEvidenceImages().catch(error => console.error('Evidence cleanup startup error:', error)), 45 * 1000);
 setInterval(() => void cleanupExpiredEvidenceImages().catch(error => console.error('Evidence cleanup error:', error)), 24 * 60 * 60 * 1000);
 
@@ -6254,7 +6281,10 @@ setInterval(() => void cleanupExpiredEvidenceImages().catch(error => console.err
 ipcMain.handle('dailyTasks:uploadEvidenceImage', async (_event, payload) => {
     try {
         requireRole('admin');
-        if (!evidenceStorage) throw new Error(getEvidenceStorageUnavailableMessage());
+        const drive = getDriveClient();
+        if (!drive) throw new Error('Google Drive chưa được xác minh. Vui lòng xác minh lại Google Drive.');
+        const folderId = await getOrCreateVatDriveFolder();
+        if (!folderId) throw new Error('Không tìm thấy thư mục Google Drive để lưu bằng chứng.');
         const { taskId, mimeType, data, hash } = payload || {};
         if (!taskId || !mimeType || !data || !hash) throw new Error('Dữ liệu ảnh bằng chứng không hợp lệ.');
         const base64 = String(data).replace(/^data:[^;]+;base64,/, '');
@@ -6309,7 +6339,10 @@ ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
     const uploadedPaths = [];
     const imageRegistryKeys = [];
     try {
-        if (!evidenceStorage) throw new Error(getEvidenceStorageUnavailableMessage());
+        const drive = getDriveClient();
+        if (!drive) throw new Error('Google Drive chưa được xác minh. Vui lòng xác minh lại Google Drive.');
+        const folderId = await getOrCreateVatDriveFolder();
+        if (!folderId) throw new Error('Không tìm thấy thư mục Google Drive để lưu bằng chứng.');
         const actor = await getCurrentActor();
         const task = await prisma.dailyTask.findUnique({ where: { id: Number(payload?.taskId) } });
         if (!task || task.status === 'completed') throw new Error('Công việc không còn ở trạng thái chờ nộp bằng chứng.');
@@ -6343,11 +6376,10 @@ ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
                 throw error;
             }
             const ext = image.mimeType === 'image/png' ? 'png' : image.mimeType === 'image/webp' ? 'webp' : 'jpg';
-            const uploadedPath = `daily-tasks/${task.id}/${new Date().toISOString().slice(0, 10)}/${hash}.${ext}`;
-            uploadedPaths.push(uploadedPath);
-            const { error } = await evidenceStorage.storage.from(EVIDENCE_BUCKET).upload(uploadedPath, buffer, { contentType: image.mimeType, upsert: false });
-            if (error) throw error;
-            submittedImages.push({ name: image.name || `evidence.${ext}`, mimeType: image.mimeType, storagePath: uploadedPath, hash });
+            const driveFileName = `BANG_CHUNG_${task.id}_${new Date().toISOString().replace(/[:.]/g, '-')}_${hash.slice(0, 10)}.${ext}`;
+            const uploaded = await uploadToDrive(drive, folderId, driveFileName, buffer, image.mimeType);
+            if (!uploaded?.webViewLink) throw new Error('Không thể tải ảnh bằng chứng lên Google Drive.');
+            submittedImages.push({ name: image.name || `evidence.${ext}`, mimeType: image.mimeType, driveUrl: uploaded.webContentLink || uploaded.webViewLink, hash });
         }
 
         // Reconcile once more immediately before completion. This closes the
@@ -6490,7 +6522,10 @@ ipcMain.handle('dailyTasks:completeRegularTask', async (_event, taskId, payload 
 ipcMain.handle('dailyTasks:getEvidenceImageUrl', async (_event, taskId, requestedPath = '') => {
     try {
         const actor = await getCurrentActor();
-        if (!evidenceStorage) throw new Error(getEvidenceStorageUnavailableMessage());
+        const drive = getDriveClient();
+        if (!drive) throw new Error('Google Drive chưa được xác minh. Vui lòng xác minh lại Google Drive.');
+        const folderId = await getOrCreateVatDriveFolder();
+        if (!folderId) throw new Error('Không tìm thấy thư mục Google Drive để lưu bằng chứng.');
         const task = await prisma.dailyTask.findUnique({ where: { id: Number(taskId) } });
         if (!task) throw new Error('Không tìm thấy công việc.');
         if (actor.role !== 'admin' && !actorOwnsTask(actor, task)) throw new Error('Bạn không có quyền xem bằng chứng này.');
@@ -6914,6 +6949,28 @@ ipcMain.handle('dailyTasks:stats', async (event, filters = {}) => {
     }
 });
 
+const DAILY_TASK_SNAPSHOT_PREFIX = 'dailyTasksSnapshot:';
+
+async function migrateLegacyDailyTaskSnapshots() {
+    const legacy = await prisma.appConfig.findUnique({ where: { key: 'dailyTasksSnapshots' } });
+    if (!legacy) return;
+
+    let snapshots = {};
+    try { snapshots = JSON.parse(legacy.value) || {}; } catch { snapshots = {}; }
+    const entries = Object.entries(snapshots).filter(([date, snapshot]) => /^\d{4}-\d{2}-\d{2}$/.test(date) && snapshot);
+    if (entries.length > 0) {
+        // Multiple desktop clients can start together. This migration must be
+        // idempotent instead of racing on an individual upsert per date.
+        await prisma.appConfig.createMany({
+            data: entries.map(([date, snapshot]) => ({
+                key: `${DAILY_TASK_SNAPSHOT_PREFIX}${date}`,
+                value: JSON.stringify(snapshot),
+            })),
+            skipDuplicates: true,
+        });
+    }
+    await prisma.appConfig.deleteMany({ where: { key: 'dailyTasksSnapshots' } });
+}
 // Reset daily tasks - tự động reset khi sang ngày mới
 ipcMain.handle('dailyTasks:resetDaily', async () => {
     try {
@@ -6926,6 +6983,14 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
         // Lấy ngày hôm nay (theo timezone local)
         const now = new Date();
         const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+        await migrateLegacyDailyTaskSnapshots();
+
+        // Daily work is not generated or reset on Sunday. Assignment tasks
+        // retain their own deadlines and are intentionally unaffected.
+        if (now.getDay() === 0) {
+            return { success: true, data: { reset: false, message: 'Chủ nhật không sinh công việc hàng ngày' } };
+        }
 
         // Kiểm tra ngày reset cuối cùng
         const lastResetConfig = await prisma.appConfig.findUnique({
@@ -6951,20 +7016,25 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
         // tasks before reset so historical totals include unfinished work.
         const dailyTasksBeforeReset = await prisma.dailyTask.findMany({ where: { type: 'daily' } });
         const snapshotDate = lastResetDate || today;
-        const snapshotsConfig = await prisma.appConfig.findUnique({ where: { key: 'dailyTasksSnapshots' } });
-        const snapshots = snapshotsConfig ? JSON.parse(snapshotsConfig.value) : {};
-        if (!snapshots[snapshotDate]) {
-            snapshots[snapshotDate] = {
-                capturedAt: now.toISOString(),
-                tasks: dailyTasksBeforeReset,
-            };
-            const snapshotDates = Object.keys(snapshots).sort().reverse();
-            snapshotDates.slice(90).forEach(date => delete snapshots[date]);
-            await prisma.appConfig.upsert({
-                where: { key: 'dailyTasksSnapshots' },
-                update: { value: JSON.stringify(snapshots) },
-                create: { key: 'dailyTasksSnapshots', value: JSON.stringify(snapshots) },
-            });
+        const snapshotKey = `${DAILY_TASK_SNAPSHOT_PREFIX}${snapshotDate}`;
+        await prisma.appConfig.upsert({
+            where: { key: snapshotKey },
+            update: {},
+            create: {
+                key: snapshotKey,
+                value: JSON.stringify({ capturedAt: now.toISOString(), tasks: dailyTasksBeforeReset }),
+            },
+        });
+        const snapshotRows = await prisma.appConfig.findMany({
+            where: { key: { startsWith: DAILY_TASK_SNAPSHOT_PREFIX } },
+            select: { key: true },
+        });
+        const expiredSnapshotKeys = snapshotRows
+            .map(row => row.key)
+            .sort((left, right) => right.localeCompare(left))
+            .slice(90);
+        if (expiredSnapshotKeys.length > 0) {
+            await prisma.appConfig.deleteMany({ where: { key: { in: expiredSnapshotKeys } } });
         }
 
         const completedTasks = dailyTasksBeforeReset.filter(task => task.status === 'completed');
@@ -9306,7 +9376,7 @@ function sanitizeStockCheckSessions(sessions, isAdmin) {
 
 async function readStockCheckSessions() {
     const record = await prisma.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
-    try { return record ? JSON.parse(record.value || '[]') : []; } catch { return []; }
+    return parseStockCheckSessionsFromConfig(record);
 }
 
 function getStockCheckTodayKey() {
@@ -9344,6 +9414,54 @@ function isStockCheckSessionCompleted(session) {
     return session?.status === 'completed' && Boolean(session?.completedAt);
 }
 
+// A carry-over session transfers the obligation to count, not yesterday's
+// physical count. Keeping any count state here makes an empty row look entered.
+function resetCarriedOverStockCheckItem(item) {
+    const {
+        actualStock,
+        difference,
+        balanced,
+        verificationStatus,
+        requiresNote,
+        countLocked,
+        retryCount,
+        note,
+        balancedAt,
+        balancedBy,
+        ...stockItem
+    } = item;
+    return {
+        ...stockItem,
+        actualStock: null,
+        difference: 0,
+        balanced: false,
+        note: '',
+        requiresNote: false,
+        countLocked: false,
+        retryCount: 0,
+    };
+}
+
+// One-time repair for carry-over sessions created before count-state reset was
+// added. Only today's carry-over is touched, so historical audit data remains.
+function repairTodayCarryOverCounts(sessions) {
+    const today = getStockCheckTodayKey();
+    let changed = false;
+    const repairedSessions = sessions.map(session => {
+        const isTodayCarryOver = session?.date === today
+            && session?.type === 'daily'
+            && String(session?.runId || '').startsWith('carry-over-');
+        if (!isTodayCarryOver || session.carryOverCountResetVersion === 1) return session;
+        changed = true;
+        return {
+            ...session,
+            items: (session.items || []).map(resetCarriedOverStockCheckItem),
+            carryOverCountResetVersion: 1,
+        };
+    });
+    return { sessions: repairedSessions, changed };
+}
+
 // Make an unfinished daily check durable across days. This runs in the main
 // process so the obligation does not depend on an admin opening the React page.
 function createDailyCarryOverSession(sessions) {
@@ -9372,7 +9490,8 @@ function createDailyCarryOverSession(sessions) {
         assignedTo: source.assignedTo,
         assignedName: source.assignedName,
         status: 'in_progress',
-        items: items.map(item => ({ ...item })),
+        items: items.map(resetCarriedOverStockCheckItem),
+        carryOverCountResetVersion: 1,
         notes: `Tiếp tục ${items.length} SKU tồn đọng từ ${source.date}.`,
         createdAt: new Date().toISOString(),
     };
@@ -9454,11 +9573,17 @@ function getStockCheckItemOrThrow(session, sku) {
     return item;
 }
 
+function serializeStockCheckSessions(sessions) {
+    const json = JSON.stringify(sessions);
+    return `gz:${zlib.deflateRawSync(Buffer.from(json, 'utf8')).toString('base64')}`;
+}
+
 async function writeStockCheckSessions(sessions, tx = prisma) {
+    const value = serializeStockCheckSessions(sessions);
     await tx.appConfig.upsert({
         where: { key: 'stockCheckSessionsV2' },
-        update: { value: JSON.stringify(sessions) },
-        create: { key: 'stockCheckSessionsV2', value: JSON.stringify(sessions) },
+        update: { value },
+        create: { key: 'stockCheckSessionsV2', value },
     });
 }
 
@@ -9470,7 +9595,15 @@ async function lockStockCheckSessions(tx) {
 }
 
 function parseStockCheckSessionsFromConfig(record) {
-    try { return record ? JSON.parse(record.value || '[]') : []; } catch { return []; }
+    try {
+        const value = String(record?.value || '[]');
+        const json = value.startsWith('gz:')
+            ? zlib.inflateRawSync(Buffer.from(value.slice(3), 'base64')).toString('utf8')
+            : value;
+        return JSON.parse(json || '[]');
+    } catch {
+        return [];
+    }
 }
 
 function buildStockCheckBalanceHistoryItem(item, reference) {
@@ -9642,7 +9775,7 @@ ipcMain.handle('stockCheck:balanceItems', async (event, payload = {}) => {
             return { duplicate: false, adjustedCount: adjustedItems.length, matchedCount: matchedItems.length, stockBalance, sessions };
         }, { timeout: 30000, maxWait: 10000 }));
 
-        emitStockChanged({ referenceType: 'CAN_BANG', reference, sessionId, username, count: rawItems.length });
+        emitStockChanged({ referenceType: 'CAN_BANG', reference, sessionId, username, skus: response.stockBalance ? rawItems.map(item => String(item?.sku || '').trim()).filter(Boolean) : [], count: rawItems.length });
         return {
             success: true,
             ...response,
@@ -9665,8 +9798,9 @@ ipcMain.handle('stockCheck:getSessions', async () => {
             const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
             const storedSessions = parseStockCheckSessionsFromConfig(record);
             const carried = createDailyCarryOverSession(storedSessions);
-            const exempted = applySameDayFullCheckExemptions(carried.sessions);
-            if (carried.changed || exempted.changed) await writeStockCheckSessions(exempted.sessions, tx);
+            const repaired = repairTodayCarryOverCounts(carried.sessions);
+            const exempted = applySameDayFullCheckExemptions(repaired.sessions);
+            if (carried.changed || repaired.changed || exempted.changed) await writeStockCheckSessions(exempted.sessions, tx);
             return exempted.sessions;
         }, { timeout: 30000, maxWait: 10000 });
         const isAdmin = currentSession.role === 'admin';

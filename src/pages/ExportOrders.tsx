@@ -87,7 +87,7 @@ export default function ExportOrdersPage() {
     useEffect(() => {
         loadProducts();
         loadExports();
-        const interval = setInterval(loadExports, 30000);
+        const interval = setInterval(() => { if (document.visibilityState === 'visible') void loadExports(); }, 300000);
         return () => clearInterval(interval);
     }, []);
 

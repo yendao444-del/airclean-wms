@@ -272,7 +272,7 @@ export default function StockCheck() {
     const [noteModalSku, setNoteModalSku] = useState<string | null>(null);
     const [noteModalValue, setNoteModalValue] = useState('');
     const [conversionRates, setConversionRates] = useState<Record<string, ConversionConfig>>({});
-    const [countingInputs, setCountingInputs] = useState<Record<string, { unitCounts: number[]; le: number }>>({});
+    const [countingInputs, setCountingInputs] = useState<Record<string, { unitCounts: number[]; le: number; unitTouched?: boolean[]; leTouched?: boolean }>>({});
     const [balanceRecords, setBalanceRecords] = useState<BalanceHistoryRecord[]>([]);
     const [productTabs, setProductTabs] = useState<Record<string, ProductTabKey>>({});
     const [ledgerLogsByProduct, setLedgerLogsByProduct] = useState<Record<string, InventoryLogItem[]>>({});
@@ -789,28 +789,30 @@ export default function StockCheck() {
         }
     }, [todaySession, isAdmin]);
 
-    const updateCountingInput = useCallback((sku: string, productName: string, unitIndex: number | 'le', value: number) => {
+    const updateCountingInput = useCallback((sku: string, productName: string, unitIndex: number | 'le', value: number | null) => {
         if (!canEditCounts) return;
         setCountingInputs(prev => {
             const current = prev[sku] || { unitCounts: [], le: 0 };
-            let updated: { unitCounts: number[]; le: number };
+            let updated: { unitCounts: number[]; le: number; unitTouched?: boolean[]; leTouched?: boolean };
             if (unitIndex === 'le') {
-                updated = { ...current, le: value };
+                updated = { ...current, le: value ?? 0, leTouched: value !== null };
             } else {
                 const newCounts = [...(current.unitCounts || [])];
+                const unitTouched = [...(current.unitTouched || [])];
                 while (newCounts.length <= unitIndex) newCounts.push(0);
-                newCounts[unitIndex] = value;
-                updated = { ...current, unitCounts: newCounts };
+                while (unitTouched.length <= unitIndex) unitTouched.push(false);
+                newCounts[unitIndex] = value ?? 0;
+                unitTouched[unitIndex] = value !== null;
+                updated = { ...current, unitCounts: newCounts, unitTouched };
             }
             const units = conversionRates[productName]?.units || [];
-            const hasAny = (updated.unitCounts || []).some(v => v > 0) || updated.le > 0;
+            // Zero is a valid physical count; only a cleared field is uncounted.
+            const hasAny = (updated.unitTouched || []).some(Boolean) || !!updated.leTouched;
             if (hasAny) {
                 let total = updated.le || 0;
                 units.forEach((unit, i) => { total += (updated.unitCounts?.[i] || 0) * (unit.rate || 0); });
                 applyActualStock(sku, total);
             } else {
-                // All counting fields were cleared: remove the previously
-                // calculated total as well, so the row returns to "chưa nhập".
                 applyActualStock(sku, null);
             }
             return { ...prev, [sku]: updated };
@@ -1665,7 +1667,7 @@ export default function StockCheck() {
                     <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
                         <InputNumber
                             min={0} size="small" value={ci.unitCounts?.[i] ?? 0} disabled={disabled}
-                            onChange={v => updateCountingInput(item.sku, item.productName, i, v ?? 0)}
+                            onChange={v => updateCountingInput(item.sku, item.productName, i, v)}
                             style={{ width: 60 }}
                         />
                         <span style={{ fontSize: 11, color: '#888', whiteSpace: 'nowrap' }}>{unit.label}</span>
@@ -1674,7 +1676,7 @@ export default function StockCheck() {
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
                     <InputNumber
                         min={0} size="small" value={ci.le ?? 0} disabled={disabled}
-                        onChange={v => updateCountingInput(item.sku, item.productName, 'le', v ?? 0)}
+                        onChange={v => updateCountingInput(item.sku, item.productName, 'le', v)}
                         style={{ width: 60 }}
                     />
                     <span style={{ fontSize: 11, color: '#888' }}>Lẻ</span>
@@ -2341,7 +2343,7 @@ export default function StockCheck() {
                                                                 const ci = countingInputs[item.sku] || { unitCounts: [], le: 0 };
                                                                 // Tính tổng từ counting inputs nếu có
                                                                 let calcTotal: number | null = null;
-                                                                const hasInput = (ci.unitCounts || []).some(v => v > 0) || ci.le > 0;
+                                                                const hasInput = (ci.unitTouched || []).some(Boolean) || !!ci.leTouched;
                                                                 if (hasInput) {
                                                                     calcTotal = ci.le || 0;
                                                                     units.forEach((u, i) => { calcTotal! += (ci.unitCounts?.[i] || 0) * (u.rate || 0); });
@@ -2370,11 +2372,11 @@ export default function StockCheck() {
                                                                             <td key={unitIdx} style={{ ...S.td, textAlign: 'center' }}>
                                                                                 {unitIdx < units.length ? (
                                                                                     <InputNumber
-                                                                                        value={ci.unitCounts?.[unitIdx] || undefined}
+                                                                                        value={ci.unitTouched?.[unitIdx] ? ci.unitCounts?.[unitIdx] : undefined}
                                                                                         min={0} placeholder="—"
                                                                                         style={{ width: '100%', maxWidth: 65, fontWeight: 700 }} size="small"
                                                                                         disabled={disabled}
-                                                                                        onChange={v => updateCountingInput(item.sku, item.productName, unitIdx, v || 0)}
+                                                                                        onChange={v => updateCountingInput(item.sku, item.productName, unitIdx, v)}
                                                                                     />
                                                                                 ) : (
                                                                                     <span style={{ color: '#e8e8e8' }}>—</span>
@@ -2387,11 +2389,11 @@ export default function StockCheck() {
                                                                                 <td style={{ ...S.td, textAlign: 'center' }}>
                                                                                     {units.length > 0 ? (
                                                                                         <InputNumber
-                                                                                            value={ci.le || undefined}
+                                                                                            value={ci.leTouched ? ci.le : undefined}
                                                                                             min={0} placeholder="—"
                                                                                             style={{ width: '100%', maxWidth: 65, fontWeight: 700 }} size="small"
                                                                                             disabled={disabled}
-                                                                                            onChange={v => updateCountingInput(item.sku, item.productName, 'le', v || 0)}
+                                                                                            onChange={v => updateCountingInput(item.sku, item.productName, 'le', v)}
                                                                                         />
                                                                                     ) : (
                                                                                         <span style={{ color: '#e8e8e8' }}>—</span>

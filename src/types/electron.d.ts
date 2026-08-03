@@ -233,6 +233,7 @@ export interface ElectronAPI {
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         getAll: (filters?: any) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         getById: (id: number) => Promise<{ success: boolean; data?: any; error?: string }>;
+        getBySkus: (skus: string[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     };
     returns: {
         getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;

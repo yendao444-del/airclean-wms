@@ -153,7 +153,7 @@ export default function ReturnsPage() {
         loadReturns();
         loadEmployees();
         loadStatusList();
-        const interval = setInterval(() => loadReturns(true), 30000);
+        const interval = setInterval(() => { if (document.visibilityState === 'visible') void loadReturns(true); }, 300000);
         return () => clearInterval(interval);
     }, []);
 

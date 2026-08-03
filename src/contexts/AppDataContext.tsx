@@ -145,20 +145,25 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
 
     useEffect(() => {
         loadData();
-        const iv = setInterval(() => {
-            if (document.visibilityState === 'visible') loadData(true);
-        }, 300000);
-        return () => clearInterval(iv);
     }, [loadData]);
 
     useEffect(() => {
         const api = (window as any).electronAPI;
-        if (!api?.products?.onStockChanged) return;
+        if (!api?.products?.onStockChanged || !api?.products?.getBySkus) return;
 
-        const unsubscribe = api.products.onStockChanged(() => {
+        const unsubscribe = api.products.onStockChanged((change: { sku?: string; skus?: string[] }) => {
+            const skus = [...new Set([...(change?.skus || []), change?.sku]
+                .map(value => String(value || '').trim())
+                .filter(Boolean))];
+            if (skus.length === 0) return;
+
             if (stockRefreshTimerRef.current) clearTimeout(stockRefreshTimerRef.current);
-            stockRefreshTimerRef.current = setTimeout(() => {
-                if (document.visibilityState === 'visible') loadData(true);
+            stockRefreshTimerRef.current = setTimeout(async () => {
+                if (document.visibilityState !== 'visible') return;
+                const result = await api.products.getBySkus(skus);
+                if (!result?.success || !Array.isArray(result.data)) return;
+                const changedProducts = new Map<number, Product>(result.data.map((product: Product) => [product.id, product] as const));
+                setProducts(current => current.map(product => changedProducts.get(product.id) || product));
             }, 250);
         });
 
@@ -166,7 +171,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
             if (stockRefreshTimerRef.current) clearTimeout(stockRefreshTimerRef.current);
             unsubscribe?.();
         };
-    }, [loadData]);
+    }, []);
 
     return (
         <AppDataContext.Provider value={{

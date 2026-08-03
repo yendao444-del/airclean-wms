@@ -81,7 +81,7 @@ export default function OrdersPage() {
     useEffect(() => {
         loadAllOrders();
         if (datePreset !== 'today') return;
-        const interval = setInterval(() => loadAllOrdersRef.current?.(true), 30000);
+        const interval = setInterval(() => { if (document.visibilityState === 'visible') void loadAllOrdersRef.current?.(true); }, 300000);
         return () => clearInterval(interval);
     }, [datePreset, customRange]);
 

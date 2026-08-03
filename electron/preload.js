@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getForStockAlerts: () => ipcRenderer.invoke('products:getForStockAlerts'),
         getInventoryCatalog: () => ipcRenderer.invoke('products:getInventoryCatalog'),
         getById: (id) => ipcRenderer.invoke('products:getById', id),
+        getBySkus: (skus) => ipcRenderer.invoke('products:getBySkus', skus),
         create: (data) => ipcRenderer.invoke('products:create', data),
         update: (id, data) => ipcRenderer.invoke('products:update', id, data),
         delete: (id) => ipcRenderer.invoke('products:delete', id),

@@ -570,6 +570,7 @@ export default function BusinessReportPage() {
     const productsCacheRef = useRef<{ products: any[]; costMap: Record<string, number> } | null>(null);
 
     const [loading, setLoading] = useState(true);
+    const [refreshToken, setRefreshToken] = useState(0);
     const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs().startOf('day'), dayjs().endOf('day')]);
     const [viewMode, setViewMode] = useState<'range' | 'daily'>('range');
     const [selectedDate, setSelectedDate] = useState<Dayjs>(dayjs());
@@ -630,10 +631,17 @@ export default function BusinessReportPage() {
                 >
                     Báo cáo kho
                 </Button>
+                <Button
+                    icon={<ReloadOutlined />}
+                    loading={loading}
+                    onClick={() => setRefreshToken((token) => token + 1)}
+                >
+                    Làm mới dữ liệu
+                </Button>
             </Space>
         );
         return () => clearHeaderExtra();
-    }, [activeTab, setHeaderExtra, clearHeaderExtra]);
+    }, [activeTab, loading, setHeaderExtra, clearHeaderExtra]);
 
     // ============================================
     // LOAD DATA
@@ -716,7 +724,7 @@ export default function BusinessReportPage() {
             console.error('Load data error:', err);
         }
         setLoading(false);
-    }, [dateRange]);
+    }, [dateRange, refreshToken]);
 
     useEffect(() => { loadData(); }, [loadData]);
 
@@ -860,7 +868,7 @@ export default function BusinessReportPage() {
         const tiktokOrders = filteredEcom.filter(e => (e.customerName || '').toLowerCase().includes('tik') && (e.totalAmount || 0) > 0).length;
 
         // Tính phí Shopee
-        const shopeeFeeDetails = shopeeFeeConfig.map(fee => {
+        const shopeeFeeDetails = shopeeFeeConfig.filter(fee => fee.enabled !== false).map(fee => {
             let amount = 0;
             if (fee.type === 'percent') {
                 amount = shopeeRevenue * fee.value / 100;
@@ -872,7 +880,7 @@ export default function BusinessReportPage() {
         const totalShopeeFees = shopeeFeeDetails.reduce((sum, f) => sum + f.amount, 0);
 
         // Tính phí TikTok
-        const tiktokFeeDetails = tiktokFeeConfig.map(fee => {
+        const tiktokFeeDetails = tiktokFeeConfig.filter(fee => fee.enabled !== false).map(fee => {
             let amount = 0;
             if (fee.type === 'percent') {
                 amount = tiktokRevenue * fee.value / 100;

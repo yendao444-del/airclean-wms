@@ -1,4 +1,4 @@
-// Permission configuration for Role-Based Access Control (RBAC)
+﻿// Permission configuration for Role-Based Access Control (RBAC)
 
 export type Role = 'admin' | 'manager' | 'staff' | 'viewer';
 
@@ -60,8 +60,6 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'purchase.create',
         'purchase.update',
         'purchase.delete',
-        'supplier-debt.view',
-        'supplier-debt.create',
         'export.view',
         'export.create',
         'returns.view',
@@ -87,7 +85,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'history',
         'settings',
         'attendance',
-        // ❌ Manager KHÔNG có quyền: permissions
+        // âŒ Manager KHÃ”NG cÃ³ quyá»n: permissions
     ],
 
     staff: [
@@ -219,3 +217,4 @@ export function getAccessibleMenuKeys(role: Role | undefined): string[] {
 
     return accessibleKeys;
 }
+
