@@ -4450,6 +4450,7 @@ ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoice
 
         // Normalize: hỗ trợ cả nhiều file (files[]) và 1 file (fileBase64/fileName)
         const filesList = files.length > 0 ? files : (fileBase64 ? [{ fileBase64, fileName }] : []);
+        if (filesList.length === 0) throw new Error('Chưa chọn file Hóa đơn VAT.');
 
         const userDataPath = app.getPath('userData');
         const vatDir = path.join(userDataPath, 'vat-invoices');
@@ -4594,40 +4595,28 @@ ipcMain.handle('purchases:uploadImportReceipt', async (event, { purchaseId, file
 
         // Normalize: hỗ trợ cả nhiều file (files[]) và 1 file (fileBase64/fileName)
         const filesList = files.length > 0 ? files : (fileBase64 ? [{ fileBase64, fileName }] : []);
+        if (filesList.length === 0) throw new Error('Chưa chọn file Phiếu Nhập Kho.');
 
-        const userDataPath = app.getPath('userData');
-        const receiptDir = path.join(userDataPath, 'import-receipts');
-        if (!fs.existsSync(receiptDir)) fs.mkdirSync(receiptDir, { recursive: true });
-
-        const localPaths = [];
         const driveUrls = [];
+        const driveFileIds = [];
+        const drive = getDriveClient();
+        if (!drive) throw new Error('Chưa đăng nhập Google Drive. Phiếu chưa được ghi nhận là đã upload.');
+        const folderId = await getOrCreateImportReceiptDriveFolder();
+        if (!folderId) throw new Error('Không mở được thư mục Phiếu Nhập Kho trên Google Drive.');
 
-        // 2. Lưu từng file local + upload Drive
+        // 2. Upload trực tiếp lên Drive; Phiếu Nhập Kho không dùng file local.
         for (let i = 0; i < filesList.length; i++) {
             const { fileBase64: b64, fileName: fn } = filesList[i];
             const ext = (fn || 'jpg').split('.').pop() || 'jpg';
             const suffix = filesList.length > 1 ? `_${i + 1}` : '';
-            const localFileName = `PN_PO${purchaseId}_${Date.now()}${suffix}.${ext}`;
-            const localPath = path.join(receiptDir, localFileName);
-
             const fileBuffer = Buffer.from(b64, 'base64');
-            fs.writeFileSync(localPath, fileBuffer);
-            console.log(`📁 Saved Import Receipt [${i + 1}/${filesList.length}]: ${localPath}`);
-            localPaths.push(localPath);
-
-            // Upload lên Google Drive
             try {
-                const drive = getDriveClient();
-                if (drive) {
-                    const folderId = await getOrCreateImportReceiptDriveFolder(); // Separated folder
-                    if (folderId) {
-                        const driveFileName = `Phiếu_Nhập_${purchase.supplier?.name || 'NCC'}_PO${purchaseId}${suffix}.${ext}`;
-                        const result = await uploadToDrive(drive, folderId, driveFileName, fileBuffer, ext === 'pdf' ? 'application/pdf' : 'image/jpeg');
-                        if (result) {
-                            driveUrls.push(result.webViewLink);
-                            console.log(`☁️ Uploaded Receipt to Drive [${i + 1}]: ${result.webViewLink}`);
-                        }
-                    }
+                const driveFileName = `Phiếu_Nhập_${purchase.supplier?.name || 'NCC'}_PO${purchaseId}${suffix}.${ext}`;
+                const result = await uploadToDrive(drive, folderId, driveFileName, fileBuffer, ext === 'pdf' ? 'application/pdf' : 'image/jpeg');
+                if (result?.fileId && result?.webViewLink) {
+                    driveFileIds.push(result.fileId);
+                    driveUrls.push(result.webViewLink);
+                    console.log(`☁️ Uploaded Receipt to Drive [${i + 1}]: ${result.webViewLink}`);
                 }
             } catch (driveErr) {
                 console.error(`⚠️ Drive upload failed for Receipt file ${i + 1}:`, driveErr.message);
@@ -4635,15 +4624,16 @@ ipcMain.handle('purchases:uploadImportReceipt', async (event, { purchaseId, file
         }
 
         // 3. Cập nhật DB
+        const driveUploadComplete = driveUrls.length === filesList.length;
+        if (!driveUploadComplete) {
+            // Không giữ một bộ chứng từ thiếu file trên Drive.
+            await Promise.all(driveFileIds.map(fileId => drive.files.delete({ fileId }).catch(() => null)));
+        }
         const dbUpdate = {
-            importReceiptStatus: 'uploaded',
+            importReceiptStatus: driveUploadComplete ? 'uploaded' : 'pending',
+            importReceiptFile: null,
+            importReceiptDriveUrl: driveUploadComplete ? driveUrls.join('\n') : null,
         };
-        if (localPaths.length > 0) {
-            dbUpdate.importReceiptFile = localPaths.length === 1 ? localPaths[0] : JSON.stringify(localPaths);
-        }
-        if (driveUrls.length > 0) {
-            dbUpdate.importReceiptDriveUrl = driveUrls.length === 1 ? driveUrls[0] : driveUrls.join('\n');
-        }
         await prisma.purchaseOrder.update({ where: { id: purchaseId }, data: dbUpdate });
 
         void logActivity({
@@ -4652,7 +4642,14 @@ ipcMain.handle('purchases:uploadImportReceipt', async (event, { purchaseId, file
             userName: 'System',
         });
 
-        return { success: true, data: { localPaths, driveUrls } };
+        if (!driveUploadComplete) {
+            return {
+                success: false,
+                data: { localPaths: [], driveUrls: [] },
+                error: `Google Drive chỉ nhận ${driveUrls.length}/${filesList.length} file nên phiếu chưa được ghi nhận là đã upload. Vui lòng tải lại.`,
+            };
+        }
+        return { success: true, data: { localPaths: [], driveUrls } };
     } catch (error) {
         console.error('❌ Upload Import Receipt error:', error);
         return { success: false, error: error.message };
@@ -4793,41 +4790,7 @@ ipcMain.handle('purchases:getVATFileData', async (event, { purchaseId }) => {
 
 // 👁️ Đọc file Phiếu Nhập Kho local → trả về base64 data URL để hiển thị trong app
 ipcMain.handle('purchases:getImportReceiptFileData', async (event, { purchaseId }) => {
-    try {
-        if (!prisma) throw new Error('Prisma not available');
-        const purchase = await prisma.purchaseOrder.findUnique({ where: { id: purchaseId } });
-        if (!purchase || !purchase.importReceiptFile) {
-            return { success: false, error: 'Không tìm thấy file Phiếu Nhập Kho' };
-        }
-
-        // importReceiptFile có thể là 1 path hoặc JSON array nhiều paths
-        let filePaths = [];
-        try {
-            filePaths = JSON.parse(purchase.importReceiptFile);
-        } catch {
-            filePaths = [purchase.importReceiptFile];
-        }
-
-        // Đọc từng file → trả về array data URLs
-        const filesData = [];
-        for (const fp of filePaths) {
-            if (!fs.existsSync(fp)) continue;
-            const buffer = fs.readFileSync(fp);
-            const ext = path.extname(fp).toLowerCase().replace('.', '');
-            const mimeType = ext === 'pdf' ? 'application/pdf' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
-            const dataUrl = `data:${mimeType};base64,${buffer.toString('base64')}`;
-            filesData.push({ dataUrl, fileName: path.basename(fp), mimeType, ext });
-        }
-
-        if (filesData.length === 0) {
-            return { success: false, error: 'File không tồn tại trên máy' };
-        }
-
-        return { success: true, data: filesData };
-    } catch (error) {
-        console.error('❌ Get Import Receipt file data error:', error);
-        return { success: false, error: error.message };
-    }
+    return { success: false, error: 'Phiếu Nhập Kho chỉ được xem từ Google Drive; ứng dụng không còn sử dụng file local.' };
 });
 
 // ========================================
@@ -4867,6 +4830,28 @@ ipcMain.handle('goodsCompanies:getAll', async () => {
         companies.sort((a, b) => String(a.name).localeCompare(String(b.name), 'vi'));
         return { success: true, data: companies };
     } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// Luôn đọc nguồn xem phiếu mới nhất từ DB thay vì dùng record cũ đang giữ trong modal.
+ipcMain.handle('purchases:getImportReceiptPreviewData', async (event, { purchaseId }) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const purchase = await prisma.purchaseOrder.findUnique({
+            where: { id: Number(purchaseId) },
+            select: { importReceiptFile: true, importReceiptDriveUrl: true },
+        });
+        if (!purchase) return { success: false, error: 'Không tìm thấy phiếu nhập kho.' };
+
+        const driveUrls = String(purchase.importReceiptDriveUrl || '')
+            .split('\n')
+            .map(url => url.trim())
+            .filter(Boolean);
+        if (driveUrls.length > 0) return { success: true, data: { driveUrls, localFiles: [] } };
+        return { success: false, error: 'Phiếu chưa được upload thành công lên Google Drive.' };
+    } catch (error) {
+        console.error('❌ Get Import Receipt preview data error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -5764,6 +5749,64 @@ ipcMain.handle('supplierDebt:updateImportAmount', async (event, data = {}) => {
         }
         return { success: true };
     } catch (error) { return { success: false, error: error.message }; }
+});
+
+ipcMain.handle('supplierDebt:addLegacyImport', async (event, data = {}) => {
+    try {
+        requireRole('admin', 'manager');
+        const amount = Number(data.amount);
+        const inputDate = data.date ? new Date(data.date) : new Date();
+        if (!Number.isFinite(amount) || amount <= 0) throw new Error('Số tiền phải lớn hơn 0.');
+        if (Number.isNaN(inputDate.getTime())) throw new Error('Ngày nhập không hợp lệ.');
+
+        const dateKey = getLocalDateKey(inputDate);
+        const note = String(data.note || '').trim().slice(0, 500);
+        const result = await getPrismaDirectTx().$transaction(async (tx) => {
+            // Serialize updates to the JSON-backed legacy ledger.
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(${5649001})`;
+            const record = await tx.appConfig.findUnique({ where: { key: SUPPLIER_DEBT_LEGACY_IMPORTS_KEY } });
+            const imports = parseSupplierDebtConfig(record?.value, []);
+            if (!Array.isArray(imports)) throw new Error('Dữ liệu lịch sử công nợ không hợp lệ.');
+            const maxSequence = imports.reduce((max, item) => {
+                const match = String(item?.poNumber || '').match(/-(\d+)$/);
+                return Math.max(max, match ? Number(match[1]) : 0);
+            }, 0);
+            const poNumber = `LS-${dateKey.replace(/-/g, '')}-${String(maxSequence + 1).padStart(3, '0')}`;
+            const legacyImport = {
+                id: `legacy-import-${crypto.randomUUID()}`,
+                poNumber,
+                date: dateKey,
+                total: amount,
+                note,
+                createdAt: new Date().toISOString(),
+                createdBy: currentSession.username,
+                source: 'manual_legacy_entry',
+            };
+            imports.push(legacyImport);
+            await tx.appConfig.upsert({
+                where: { key: SUPPLIER_DEBT_LEGACY_IMPORTS_KEY },
+                update: { value: JSON.stringify(imports) },
+                create: { key: SUPPLIER_DEBT_LEGACY_IMPORTS_KEY, value: JSON.stringify(imports) },
+            });
+            await tx.activityLog.create({
+                data: {
+                    module: 'supplier_debt',
+                    action: 'LEGACY_IMPORT_CREATE',
+                    description: `Thêm khoản nhập lịch sử ${amount.toLocaleString('vi-VN')}đ`,
+                    recordName: poNumber,
+                    changes: JSON.stringify(legacyImport),
+                    userName: currentSession.username,
+                    userId: currentSession.id,
+                    severity: 'INFO',
+                },
+            });
+            return legacyImport;
+        });
+        return { success: true, data: result };
+    } catch (error) {
+        console.error('supplierDebt:addLegacyImport error:', error);
+        return { success: false, error: error.message };
+    }
 });
 
 ipcMain.handle('supplierDebt:saveBankDetails', async (event, data = {}) => {

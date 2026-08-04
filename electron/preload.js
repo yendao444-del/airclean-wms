@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         markAsThht: (purchaseId, revert) => ipcRenderer.invoke('purchases:markAsThht', { purchaseId, revert }),
         getVATFileData: (purchaseId) => ipcRenderer.invoke('purchases:getVATFileData', { purchaseId }),
         getImportReceiptFileData: (purchaseId) => ipcRenderer.invoke('purchases:getImportReceiptFileData', { purchaseId }),
+        getImportReceiptPreviewData: (purchaseId) => ipcRenderer.invoke('purchases:getImportReceiptPreviewData', { purchaseId }),
     },
     suppliers: {
         getAll: () => ipcRenderer.invoke('suppliers:getAll'),
@@ -84,6 +85,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         saveBankDetails: (data) => ipcRenderer.invoke('supplierDebt:saveBankDetails', data),
         confirmPayment: (data) => ipcRenderer.invoke('supplierDebt:confirmPayment', data),
         updateImportAmount: (data) => ipcRenderer.invoke('supplierDebt:updateImportAmount', data),
+        addLegacyImport: (data) => ipcRenderer.invoke('supplierDebt:addLegacyImport', data),
     },
 
     // Database Export/Import

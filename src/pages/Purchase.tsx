@@ -289,36 +289,48 @@ export default function PurchasePage() {
 
     // Mở modal xem Phiếu Nhập Kho
     const openImportReceiptPreview = async (record: any) => {
-        const driveUrl = record.importReceiptDriveUrl;
-        if (driveUrl) {
-            const urls = driveUrl.split('\n').map((u: string) => u.trim()).filter(Boolean);
-            setImportReceiptPreviewIndex(0);
-            setImportReceiptPreviewData({
-                driveUrls: urls,
-                purchaseId: record.id,
-                supplierName: record.supplierName || '',
-            });
-            setImportReceiptPreviewVisible(true);
-        } else {
-            // Thử đọc file local
-            try {
-                const result = await (window.electronAPI as any).purchases.getImportReceiptFileData(record.id);
-                if (result.success && result.data?.length > 0) {
-                    setImportReceiptPreviewIndex(0);
-                    setImportReceiptPreviewData({
-                        localFiles: result.data,
-                        purchaseId: record.id,
-                        supplierName: record.supplierName || '',
-                    });
-                    setImportReceiptPreviewVisible(true);
-                } else {
-                    message.warning('Không tìm thấy file Phiếu Nhập Kho trên máy. Vui lòng upload lại.');
+        try {
+            const api = (window.electronAPI as any).purchases;
+            if (api.getImportReceiptPreviewData) {
+                const latest = await api.getImportReceiptPreviewData(record.id);
+                if (!latest?.success) {
+                    message.warning(latest?.error || 'Không tìm thấy Phiếu Nhập Kho. Vui lòng upload lại.');
                     openImportReceiptModal(record.id);
+                    return;
                 }
-            } catch (err: any) {
-                console.error('openImportReceiptPreview error:', err);
-                message.error('Lỗi đọc file: ' + (err?.message || String(err)));
+                const driveUrls = latest.data?.driveUrls || [];
+                const localFiles = latest.data?.localFiles || [];
+                setImportReceiptPreviewIndex(0);
+                setImportReceiptPreviewData({
+                    ...(driveUrls.length > 0 ? { driveUrls } : { localFiles }),
+                    purchaseId: record.id,
+                    supplierName: record.supplierName || '',
+                });
+                setImportReceiptPreviewVisible(true);
+                return;
             }
+
+            // Tương thích ngắn hạn khi renderer đã hot-reload nhưng Electron chưa khởi động lại.
+            const driveUrl = record.importReceiptDriveUrl;
+            if (driveUrl) {
+                const urls = driveUrl.split('\n').map((u: string) => u.trim()).filter(Boolean);
+                setImportReceiptPreviewIndex(0);
+                setImportReceiptPreviewData({ driveUrls: urls, purchaseId: record.id, supplierName: record.supplierName || '' });
+                setImportReceiptPreviewVisible(true);
+                return;
+            }
+            const result = await api.getImportReceiptFileData(record.id);
+            if (result.success && result.data?.length > 0) {
+                setImportReceiptPreviewIndex(0);
+                setImportReceiptPreviewData({ localFiles: result.data, purchaseId: record.id, supplierName: record.supplierName || '' });
+                setImportReceiptPreviewVisible(true);
+            } else {
+                message.warning('Không tìm thấy file Phiếu Nhập Kho trên máy. Vui lòng upload lại.');
+                openImportReceiptModal(record.id);
+            }
+        } catch (err: any) {
+            console.error('openImportReceiptPreview error:', err);
+            message.error('Lỗi đọc file: ' + (err?.message || String(err)));
         }
     };
 
@@ -1327,9 +1339,20 @@ export default function PurchasePage() {
             if (result.success) {
                 message.success('✅ Đã upload Phiếu Nhập Kho thành công!');
                 setImportReceiptModalVisible(false);
-                loadPurchases();
+                const receiptPatch = {
+                    importReceiptStatus: 'uploaded',
+                    importReceiptFile: null,
+                    importReceiptDriveUrl: result.data.driveUrls.join('\n'),
+                };
+                setPurchases(current => current.map(item => item.id === importReceiptPurchaseId ? { ...item, ...receiptPatch } : item));
+                setDetailModalRecord(current => current?.id === importReceiptPurchaseId ? { ...current, ...receiptPatch } : current);
+                await loadPurchases();
             } else {
                 message.error(result.error || 'Lỗi upload Phiếu Nhập');
+                const receiptPatch = { importReceiptStatus: 'pending', importReceiptFile: null, importReceiptDriveUrl: null };
+                setPurchases(current => current.map(item => item.id === importReceiptPurchaseId ? { ...item, ...receiptPatch } : item));
+                setDetailModalRecord(current => current?.id === importReceiptPurchaseId ? { ...current, ...receiptPatch } : current);
+                await loadPurchases();
             }
         } catch (err: any) {
             message.error('Lỗi: ' + (err.message || 'Không xác định'));
@@ -3012,6 +3035,7 @@ export default function PurchasePage() {
                 open={importReceiptPreviewVisible}
                 onCancel={() => { setImportReceiptPreviewVisible(false); setImportReceiptPreviewData(null); setImportReceiptPreviewIndex(0); }}
                 width={900}
+                zIndex={1400}
                 style={{ top: 20 }}
                 footer={
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
