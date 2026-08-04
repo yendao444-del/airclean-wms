@@ -3,6 +3,8 @@ import {
     Alert,
     Button,
     Checkbox,
+    Divider,
+    Drawer,
     Dropdown,
     Empty,
     Input,
@@ -10,6 +12,7 @@ import {
     message,
     Modal,
     Progress,
+    Radio,
     Select,
     Spin,
     Tag,
@@ -24,6 +27,7 @@ import {
     MinusOutlined,
     PlusOutlined,
     SettingOutlined,
+    SyncOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useAuth } from '../contexts/AuthContext';
@@ -34,7 +38,8 @@ import { STOCK_CHECK_MISSING_FINE, STOCK_CHECK_POLICY_START_DATE } from '../lib/
 
 const LS_KEY = 'stock-check-sessions-v2';
 const DAILY_TOP_ROTATION_COUNT = 2;
-const DAILY_RANDOM_COUNT = 4;
+const DAILY_RANDOM_COUNT = 2;
+const DAILY_PRODUCT_COUNT = 3;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -66,7 +71,7 @@ interface CheckSession {
     id: string;
     runId?: string;
     date: string;
-    type: 'daily' | 'weekend' | 'full';
+    type: 'daily' | 'weekend' | 'full' | 'recheck';
     assignedTo: string;
     assignedName: string;
     status: 'in_progress' | 'completed';
@@ -80,6 +85,11 @@ interface CheckSession {
         sku: string;
         productName: string;
     }>;
+    sourceSessionId?: string;
+    sourceSessionDate?: string;
+    sourceSessionRunId?: string | null;
+    recheckScope?: 'mismatch' | 'all';
+    createdBy?: string;
     completionSummary?: {
         totalSku: number;
         balancedSku: number;
@@ -254,14 +264,23 @@ export default function StockCheck() {
     // still enter counts and balance their own session.
     const canManage = user?.role === 'admin';
     const isAdmin = user?.role === 'admin';
+    const canBrowseHistory = isAdmin || user?.isTestAccount === true;
     const canViewLedger = isAdmin;
 
     const [currentDate, setCurrentDate] = useState(dayjs());
-    const [activeTab, setActiveTab] = useState<'daily' | 'full'>('daily');
+    const [activeTab, setActiveTab] = useState<'daily' | 'full' | 'recheck'>('daily');
     const [sessions, setSessions] = useState<CheckSession[]>([]);
     const [sessionsLoaded, setSessionsLoaded] = useState(false);
     const [staffList, setStaffList] = useState<StaffUser[]>([]);
     const [staffModalOpen, setStaffModalOpen] = useState(false);
+    const [selectedRecheckId, setSelectedRecheckId] = useState('');
+    const [recheckDrawerOpen, setRecheckDrawerOpen] = useState(false);
+    const [recheckSource, setRecheckSource] = useState<CheckSession | null>(null);
+    const [recheckScope, setRecheckScope] = useState<'mismatch' | 'all'>('mismatch');
+    const [recheckSelectedSkus, setRecheckSelectedSkus] = useState<string[]>([]);
+    const [recheckAssignee, setRecheckAssignee] = useState('');
+    const [recheckReason, setRecheckReason] = useState('');
+    const [creatingRecheck, setCreatingRecheck] = useState(false);
     const [selectedStaffUsername, setSelectedStaffUsername] = useState('');
     const [balancing, setBalancing] = useState<Record<string, boolean>>({});
     const [bulkBalancing, setBulkBalancing] = useState<Record<string, boolean>>({});
@@ -302,11 +321,17 @@ export default function StockCheck() {
     const todayStr = currentDate.format('YYYY-MM-DD');
     const weekend = isWeekend(currentDate);
     // ID session khác nhau cho mỗi tab — tránh update nhầm
-    const todaySessionId = activeTab === 'full' ? `${todayStr}-full` : todayStr;
-    const todaySession = sessions.find(s =>
-        s.date === todayStr &&
-        (activeTab === 'full' ? s.type === 'full' : s.type !== 'full')
-    );
+    const recheckSessionsForDate = sessions
+        .filter(session => session.date === todayStr && session.type === 'recheck')
+        .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    const todaySession = activeTab === 'recheck'
+        ? (recheckSessionsForDate.find(session => session.id === selectedRecheckId) || recheckSessionsForDate[0])
+        : sessions.find(session => session.date === todayStr && (
+            activeTab === 'full'
+                ? session.type === 'full'
+                : session.type !== 'full' && session.type !== 'recheck'
+        ));
+    const todaySessionId = todaySession?.id || (activeTab === 'full' ? `${todayStr}-full` : todayStr);
     const fullCheckExemptions = activeTab === 'daily'
         ? (todaySession?.fullCheckExemptions || [])
         : [];
@@ -317,6 +342,7 @@ export default function StockCheck() {
     const isPast = currentDate.isBefore(dayjs(), 'day');
     const isFuture = currentDate.isAfter(dayjs(), 'day');
     const isLockedDate = isPast || isFuture;
+    const canCreateRecheck = isAdmin || user?.isTestAccount === true;
     // Only admin can compare the physical count to system stock. A historical
     // session remains blind to non-admin users as well.
     const canRevealSystemStock = isAdmin;
@@ -548,6 +574,19 @@ export default function StockCheck() {
                     >
                         Kiểm toàn bộ
                     </button>
+                    <button
+                        onClick={() => { setActiveTab('recheck'); setCurrentDate(dayjs()); }}
+                        style={{
+                            padding: '5px 14px', borderRadius: 7, fontWeight: 600, fontSize: 12,
+                            background: activeTab === 'recheck' ? '#10b981' : 'transparent',
+                            color: activeTab === 'recheck' ? '#fff' : '#64748b',
+                            border: 'none', cursor: 'pointer', transition: 'all 0.15s',
+                        }}
+                    >
+                        Kiểm lại {sessions.filter(session => session.type === 'recheck' && session.date === dayjs().format('YYYY-MM-DD')).length > 0
+                            ? `(${sessions.filter(session => session.type === 'recheck' && session.date === dayjs().format('YYYY-MM-DD')).length})`
+                            : ''}
+                    </button>
                 </div>
 
                 {/* ── Assignee (phải) ── */}
@@ -564,7 +603,7 @@ export default function StockCheck() {
                                         icon: <span>👤</span>,
                                         onClick: () => { setSelectedStaffUsername(todaySession.assignedTo); setStaffModalOpen(true); },
                                     }] : []),
-                                    ...(isAdmin ? [
+                                    ...(isAdmin && activeTab !== 'recheck' ? [
                                         { type: 'divider' as const },
                                         {
                                             key: 'undo',
@@ -639,7 +678,7 @@ export default function StockCheck() {
             </div>
         );
         return () => clearHeaderExtra();
-    }, [activeTab, todaySession, isAdmin, isToday, canManage, isSessionSubmitted, setHeaderExtra, clearHeaderExtra, handleUndoSession]);
+    }, [activeTab, todaySession, isAdmin, isToday, canManage, isSessionSubmitted, sessions, setHeaderExtra, clearHeaderExtra, handleUndoSession]);
 
     const fetchStaff = async () => {
         try {
@@ -650,6 +689,59 @@ export default function StockCheck() {
                     .sort((a, b) => a.username.localeCompare(b.username, 'vi')));
             }
         } catch { /* optional */ }
+    };
+
+    const getRecheckMismatchItems = (session: CheckSession) => session.items.filter(item =>
+        item.verificationStatus === 'balanced_mismatch' || Number(item.difference || 0) !== 0
+    );
+
+    const openRecheckDrawer = (session: CheckSession) => {
+        const mismatches = getRecheckMismatchItems(session);
+        const scope: 'mismatch' | 'all' = mismatches.length > 0 ? 'mismatch' : 'all';
+        const preferredAssignee = staffList.find(staff => staff.username === session.assignedTo) || staffList[0];
+        setRecheckSource(session);
+        setRecheckScope(scope);
+        setRecheckSelectedSkus((scope === 'mismatch' ? mismatches : session.items).map(item => item.sku));
+        setRecheckAssignee(preferredAssignee?.username || '');
+        setRecheckReason('Chênh lệch tồn kho cần kiểm lại để xác minh số liệu.');
+        setRecheckDrawerOpen(true);
+    };
+
+    const changeRecheckScope = (scope: 'mismatch' | 'all') => {
+        if (!recheckSource) return;
+        const scopeItems = scope === 'mismatch' ? getRecheckMismatchItems(recheckSource) : recheckSource.items;
+        setRecheckScope(scope);
+        setRecheckSelectedSkus(scopeItems.map(item => item.sku));
+    };
+
+    const createRecheckSession = async () => {
+        if (!recheckSource || !recheckAssignee || !recheckReason.trim() || !recheckSelectedSkus.length) {
+            message.warning('Chọn SKU, người phụ trách và nhập lý do kiểm lại.');
+            return;
+        }
+        setCreatingRecheck(true);
+        try {
+            const result = await window.electronAPI.stockCheck.createRecheckSession({
+                sourceSessionId: recheckSource.id,
+                scope: recheckScope,
+                skus: recheckSelectedSkus,
+                assignedTo: recheckAssignee,
+                reason: recheckReason.trim(),
+            });
+            if (!result?.success || !result.session) throw new Error(result?.error || 'Không thể tạo phiên kiểm lại.');
+            const nextSessions = Array.isArray(result.data) ? result.data as CheckSession[] : [...sessions, result.session as CheckSession];
+            setSessions(nextSessions);
+            localStorage.setItem(LS_KEY, JSON.stringify(nextSessions));
+            setSelectedRecheckId(result.session.id);
+            setRecheckDrawerOpen(false);
+            setCurrentDate(dayjs());
+            setActiveTab('recheck');
+            message.success(`Đã tạo phiên kiểm lại ${recheckSelectedSkus.length} SKU.`);
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể tạo phiên kiểm lại.');
+        } finally {
+            setCreatingRecheck(false);
+        }
     };
 
     const loadConversionRates = useCallback(async () => {
@@ -892,15 +984,17 @@ export default function StockCheck() {
         return shuffleProducts(contextProducts.filter(product => !excludedKeys.has(productKey(product)))).slice(0, count);
     };
 
-    const buildDailyProductPool = (rankedProducts: TopSellingProduct[]) => {
-        const rotationProducts = getTopProducts(rankedProducts, DAILY_TOP_ROTATION_COUNT);
+    const buildDailyProductPool = (rankedProducts: TopSellingProduct[], excludedProducts: any[] = []) => {
+        const excludedKeys = new Set(excludedProducts.map(productKey));
+        const rotationProducts = getTopProducts(rankedProducts, DAILY_TOP_ROTATION_COUNT)
+            .filter(product => !excludedKeys.has(productKey(product)));
         const dayIndex = currentDate.startOf('day').diff(dayjs('2026-01-01'), 'day');
         const requiredProducts = rotationProducts.length
             ? [rotationProducts[Math.abs(dayIndex) % rotationProducts.length]]
             : [];
-        const randomCount = DAILY_RANDOM_COUNT + (requiredProducts.length ? 0 : 1);
+        const randomCount = Math.max(0, DAILY_PRODUCT_COUNT - requiredProducts.length);
 
-        return [...requiredProducts, ...getRandomProducts(requiredProducts, randomCount)];
+        return [...requiredProducts, ...getRandomProducts([...excludedProducts, ...requiredProducts], randomCount)];
     };
 
     // An unfinished daily session is an obligation, not historical noise. Carry
@@ -2076,18 +2170,49 @@ export default function StockCheck() {
                             display: 'flex', alignItems: 'center', gap: 6, background: '#fff',
                             border: '1px solid #e2e8f0', borderRadius: 8, padding: '5px 12px', fontSize: 13,
                         }}>
-                            {isAdmin && <Button type="text" size="small" onClick={() => setCurrentDate(d => d.subtract(1, 'day'))}>‹</Button>}
+                            {canBrowseHistory && <Button type="text" size="small" onClick={() => setCurrentDate(d => d.subtract(1, 'day'))}>‹</Button>}
                             <span style={{ color: '#10b981', fontWeight: 800 }}>📅</span>
                             <span style={{ fontWeight: 600 }}>{currentDate.format('ddd DD/MM/YYYY')}</span>
-                            {isAdmin && <Button type="text" size="small" disabled={isToday} onClick={() => setCurrentDate(d => d.add(1, 'day'))}>›</Button>}
-                            {isAdmin && !isToday && (
+                            {canBrowseHistory && <Button type="text" size="small" disabled={isToday} onClick={() => setCurrentDate(d => d.add(1, 'day'))}>›</Button>}
+                            {canBrowseHistory && !isToday && (
                                 <Button type="link" size="small" onClick={() => setCurrentDate(dayjs())}>Hôm nay</Button>
                             )}
                         </div>
 
                         {weekend && <Tag color="orange">📅 Thứ 7 — kiểm hàng ngày</Tag>}
                     </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        {activeTab === 'recheck' && recheckSessionsForDate.length > 1 && (
+                            <Select
+                                value={todaySession?.id}
+                                onChange={setSelectedRecheckId}
+                                style={{ width: 280 }}
+                                options={recheckSessionsForDate.map(session => ({
+                                    value: session.id,
+                                    label: `Từ ${dayjs(session.sourceSessionDate).format('DD/MM/YYYY')} · ${session.items.length} SKU · ${session.assignedName}`,
+                                }))}
+                            />
+                        )}
+                        {canCreateRecheck && isPast && todaySession?.status === 'completed' && todaySession.type !== 'recheck' && (
+                            <Button
+                                icon={<SyncOutlined />}
+                                onClick={() => openRecheckDrawer(todaySession)}
+                                style={{ borderColor: '#10b981', color: '#059669', fontWeight: 700 }}
+                            >
+                                Kiểm lại phiên này
+                            </Button>
+                        )}
+                    </div>
                 </div>
+
+                {activeTab === 'recheck' && todaySession?.sourceSessionId && (
+                    <Alert
+                        type="info"
+                        showIcon
+                        style={{ marginBottom: 12, borderRadius: 8 }}
+                        message={<span><strong>Phiên kiểm lại</strong> từ ngày {dayjs(todaySession.sourceSessionDate).format('DD/MM/YYYY')} · {todaySession.items.length} SKU · Lý do: {todaySession.notes}</span>}
+                    />
+                )}
 
                 {todaySession && todaySession.items.length > 0 && (
                     <>
@@ -2726,7 +2851,7 @@ export default function StockCheck() {
                                         <div style={{ fontSize: 13, marginBottom: 24 }}>
                                             {activeTab === 'full'
                                                 ? 'Kiểm toàn bộ sản phẩm.'
-                                                : `${DAILY_TOP_ROTATION_COUNT + DAILY_RANDOM_COUNT} sản phẩm luân phiên & ngẫu nhiên.`}
+                                                : `${DAILY_PRODUCT_COUNT} sản phẩm: 1 bán chạy luân phiên + ${DAILY_RANDOM_COUNT} ngẫu nhiên.`}
                                         </div>
                                     </>
                                 ) : (
@@ -2741,13 +2866,18 @@ export default function StockCheck() {
                                         </div>
                                     </>
                                 )}
-                                {canManage && (
+                                {canManage && activeTab !== 'recheck' && (
                                     <Button
                                         type="primary" size="large" onClick={handleGenerate}
                                         style={{ background: '#10b981', borderColor: '#10b981', borderRadius: 12, fontWeight: 700, height: 44, padding: '0 32px' }}
                                     >
                                         Tạo danh sách kiểm
                                     </Button>
+                                )}
+                                {activeTab === 'recheck' && !todaySession && (
+                                    <div style={{ marginTop: 8, fontSize: 13, color: '#64748b' }}>
+                                        Mở một phiên đã hoàn thành ở ngày trước và chọn <strong>Kiểm lại phiên này</strong>.
+                                    </div>
                                 )}
                             </>
                         )}
@@ -2946,6 +3076,110 @@ export default function StockCheck() {
                     </Modal>
                 );
             })()}
+
+            <Drawer
+                title={
+                    <div>
+                        <div style={{ fontSize: 19, fontWeight: 800, color: '#0f172a' }}>Tạo phiên kiểm lại</div>
+                        {recheckSource && <div style={{ marginTop: 4, fontSize: 12, color: '#64748b', fontWeight: 500 }}>Từ phiên {dayjs(recheckSource.date).format('DD/MM/YYYY')}</div>}
+                    </div>
+                }
+                open={recheckDrawerOpen}
+                onClose={() => setRecheckDrawerOpen(false)}
+                width={640}
+                rootStyle={{ top: 40 }}
+                styles={{ body: { padding: '18px 22px' }, footer: { padding: '14px 22px' } }}
+                footer={
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+                        <Button onClick={() => setRecheckDrawerOpen(false)}>Hủy</Button>
+                        <Button
+                            type="primary"
+                            icon={<SyncOutlined />}
+                            loading={creatingRecheck}
+                            disabled={!recheckSelectedSkus.length || !recheckAssignee || !recheckReason.trim()}
+                            onClick={() => { void createRecheckSession(); }}
+                            style={{ background: '#10b981', borderColor: '#10b981', fontWeight: 700 }}
+                        >
+                            Tạo phiên kiểm lại ({recheckSelectedSkus.length} SKU)
+                        </Button>
+                    </div>
+                }
+            >
+                {recheckSource && (() => {
+                    const mismatchItems = getRecheckMismatchItems(recheckSource);
+                    const scopeItems = recheckScope === 'mismatch' ? mismatchItems : recheckSource.items;
+                    return (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                <Tag color="blue" style={{ padding: '4px 10px', fontWeight: 700 }}>Phiên gốc: {dayjs(recheckSource.date).format('DD/MM/YYYY')}</Tag>
+                                <Tag color="orange" style={{ padding: '4px 10px', fontWeight: 700 }}>{mismatchItems.length}/{recheckSource.items.length} SKU chênh lệch</Tag>
+                                <Tag color="green" style={{ padding: '4px 10px', fontWeight: 700 }}>Hoàn thành</Tag>
+                            </div>
+
+                            <div>
+                                <div style={{ marginBottom: 8, fontWeight: 800, color: '#334155' }}>Phạm vi kiểm lại</div>
+                                <Radio.Group
+                                    value={recheckScope}
+                                    onChange={event => changeRecheckScope(event.target.value)}
+                                    optionType="button"
+                                    buttonStyle="solid"
+                                    style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', width: '100%' }}
+                                >
+                                    <Radio.Button value="mismatch" disabled={mismatchItems.length === 0} style={{ textAlign: 'center' }}>SKU chênh lệch ({mismatchItems.length})</Radio.Button>
+                                    <Radio.Button value="all" style={{ textAlign: 'center' }}>Toàn bộ ({recheckSource.items.length})</Radio.Button>
+                                </Radio.Group>
+                            </div>
+
+                            <Table<CheckItem>
+                                size="small"
+                                rowKey="sku"
+                                dataSource={scopeItems}
+                                pagination={false}
+                                scroll={{ y: 270 }}
+                                rowSelection={{
+                                    selectedRowKeys: recheckSelectedSkus,
+                                    onChange: keys => setRecheckSelectedSkus(keys.map(String)),
+                                }}
+                                columns={[
+                                    { title: 'SKU', dataIndex: 'sku', width: 155, ellipsis: true, render: value => <span style={{ color: '#1677ff', fontSize: 12, fontWeight: 700 }}>{value}</span> },
+                                    { title: 'Sản phẩm', dataIndex: 'productName', ellipsis: true },
+                                    { title: 'Màu', dataIndex: 'color', width: 90, render: value => value ? <Tag color="blue">{value}</Tag> : '—' },
+                                    { title: 'Kết quả cũ', width: 110, render: (_, item) => item.verificationStatus === 'balanced_mismatch' ? <Tag color="orange">Chênh lệch</Tag> : <Tag color="green">Khớp</Tag> },
+                                ]}
+                            />
+
+                            <Divider style={{ margin: 0 }} />
+                            <div>
+                                <div style={{ marginBottom: 7, fontWeight: 800, color: '#334155' }}>Giao cho <span style={{ color: '#ef4444' }}>*</span></div>
+                                <Select
+                                    value={recheckAssignee || undefined}
+                                    onChange={setRecheckAssignee}
+                                    placeholder="Chọn người phụ trách"
+                                    style={{ width: '100%' }}
+                                    options={staffList.map(staff => ({ value: staff.username, label: `${staff.fullName} (${staff.username})` }))}
+                                />
+                            </div>
+                            <div>
+                                <div style={{ marginBottom: 7, fontWeight: 800, color: '#334155' }}>Lý do kiểm lại <span style={{ color: '#ef4444' }}>*</span></div>
+                                <Input.TextArea
+                                    rows={4}
+                                    maxLength={300}
+                                    showCount
+                                    value={recheckReason}
+                                    onChange={event => setRecheckReason(event.target.value)}
+                                    placeholder="Nhập lý do kiểm lại..."
+                                />
+                            </div>
+                            <Alert
+                                type="info"
+                                showIcon
+                                message={`Phiên kiểm lại được tạo cho hôm nay ${dayjs().format('DD/MM/YYYY')}`}
+                                description="Phiên gốc được giữ nguyên. Tồn hệ thống được lấy lại tại thời điểm tạo phiên mới."
+                            />
+                        </div>
+                    );
+                })()}
+            </Drawer>
         </div>
     );
 }

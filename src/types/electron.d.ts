@@ -151,6 +151,7 @@ export interface ElectronAPI {
     purchases: {
         getAll: (filters?: { since?: string }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         getVatAlertSummary: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getMyVatPenaltyAlerts: () => Promise<{ success: boolean; data?: Array<{ id: number; poNumber: string; supplierName: string; purchaseDate: string; fineDate: string; fineAmount: number }>; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: number, data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         repairMissingPrices: (purchaseId: number) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -290,6 +291,7 @@ export interface ElectronAPI {
     };
     stockCheck: {
         getSessions: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        createRecheckSession: (data: { sourceSessionId: string; scope: 'mismatch' | 'all'; skus: string[]; assignedTo: string; reason: string }) => Promise<{ success: boolean; session?: any; data?: any[]; error?: string }>;
         adminSaveSessions: (sessions: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         updateCount: (data: { sessionId: string; sku: string; actualStock: number }) => Promise<{ success: boolean; status?: string; item?: any; error?: string }>;
         retryCount: (data: { sessionId: string; sku: string }) => Promise<{ success: boolean; status?: string; item?: any; code?: string; error?: string }>;

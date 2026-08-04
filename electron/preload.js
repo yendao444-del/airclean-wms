@@ -46,6 +46,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     purchases: {
         getAll: (filters) => ipcRenderer.invoke('purchases:getAll', filters),
         getVatAlertSummary: () => ipcRenderer.invoke('purchases:getVatAlertSummary'),
+        getMyVatPenaltyAlerts: () => ipcRenderer.invoke('purchases:getMyVatPenaltyAlerts'),
         create: (data) => ipcRenderer.invoke('purchases:create', data),
         update: (id, data) => ipcRenderer.invoke('purchases:update', { id, data }),
         repairMissingPrices: (purchaseId) => ipcRenderer.invoke('purchases:repairMissingPrices', purchaseId),
@@ -238,6 +239,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     stockCheck: {
         getSessions: () => ipcRenderer.invoke('stockCheck:getSessions'),
+        createRecheckSession: (data) => ipcRenderer.invoke('stockCheck:createRecheckSession', data),
         adminSaveSessions: (sessions) => ipcRenderer.invoke('stockCheck:adminSaveSessions', sessions),
         updateCount: (data) => ipcRenderer.invoke('stockCheck:updateCount', data),
         retryCount: (data) => ipcRenderer.invoke('stockCheck:retryCount', data),
@@ -329,6 +331,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         detect: (image) => ipcRenderer.invoke('attendance:detect', { image }),
         register: (data) => ipcRenderer.invoke('attendance:register', data),
         getLogs: (filters) => ipcRenderer.invoke('attendance:getLogs', filters),
+        reconcileLateFines: () => ipcRenderer.invoke('attendance:reconcileLateFines'),
         getProfiles: () => ipcRenderer.invoke('attendance:getProfiles'),
         deleteProfile: (face_id) => ipcRenderer.invoke('attendance:deleteProfile', { face_id }),
         verifyAll: () => ipcRenderer.invoke('attendance:verifyAll'),
@@ -366,7 +369,7 @@ window.addEventListener('DOMContentLoaded', () => {
     // position override below intermittently moved a newly opened dropdown to
     // the top-left before rc-trigger completed its own alignment.
     // Keep the legacy implementation in place for rollback, but do not run it.
-    const useLegacyDropdownPositionFix = false;
+    const useLegacyDropdownPositionFix = true;
     if (!useLegacyDropdownPositionFix) return;
 
     // 2. Dynamic style tag — CSS rules sẽ override React inline styles
@@ -461,8 +464,12 @@ window.addEventListener('DOMContentLoaded', () => {
             const rect = popup.getBoundingClientRect();
 
             // On-screen → OK, skip
-            if (rect.left > -100 && rect.top > -100 &&
-                rect.right < winW + 100 && rect.bottom < winH + 100) return;
+            const isOnScreen = rect.left > -100 && rect.top > -100 &&
+                rect.right < winW + 100 && rect.bottom < winH + 100;
+            const isDetachedFromTrigger =
+                (Math.abs(rect.left - triggerSnapshot.left) > Math.max(120, triggerSnapshot.width + 40)) ||
+                (Math.abs(rect.top - triggerSnapshot.bottom) > Math.max(180, triggerSnapshot.height + 120));
+            if (isOnScreen && !isDetachedFromTrigger) return;
 
             // Off-screen → fix nó
             console.log('[preload-fix] Off-screen popup detected at:',
@@ -528,8 +535,6 @@ window.addEventListener('DOMContentLoaded', () => {
                     Math.round(r.width) + 'x' + Math.round(r.height));
 
                 // Prevent the first portal frame from flashing at the top-left.
-                primePopupPosition();
-
                 // Schedule initial fix attempts
                 [0, 16, 50, 100, 200].forEach(d =>
                     setTimeout(() => requestAnimationFrame(checkAndFixPopups), d)

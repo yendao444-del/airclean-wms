@@ -212,15 +212,58 @@ export default function GlobalTaskAlerts() {
         }
     }, [isCurrentUserRecipient, notifyNewAssignments]);
 
+    const loadVatPenaltyAlerts = useCallback(async () => {
+        const username = String(user?.username || '').trim().toLocaleLowerCase('vi-VN');
+        if (!username) return;
+        try {
+            const result = await (window as any).electronAPI.purchases.getMyVatPenaltyAlerts();
+            if (!result?.success || !Array.isArray(result.data) || result.data.length === 0) return;
+
+            const storageKey = `purchases.vatPenaltyNotified.${username}`;
+            let notifiedIds = new Set<string>();
+            try {
+                const stored = JSON.parse(window.localStorage.getItem(storageKey) || '[]');
+                if (Array.isArray(stored)) notifiedIds = new Set(stored.map(String));
+            } catch { }
+
+            const newPenalties = result.data.filter((item: any) => !notifiedIds.has(String(item.id)));
+            if (!newPenalties.length) return;
+            newPenalties.forEach((item: any) => notifiedIds.add(String(item.id)));
+            window.localStorage.setItem(storageKey, JSON.stringify([...notifiedIds].slice(-500)));
+
+            const first = newPenalties[0];
+            const totalFine = newPenalties.reduce((sum: number, item: any) => sum + Number(item.fineAmount || 0), 0);
+            playWarningBeeps(3);
+            addAlertPopup({
+                level: 'overdue',
+                taskName: newPenalties.length === 1
+                    ? `Đã ghi nhận phạt HĐ VAT: ${first.poNumber}`
+                    : `Đã ghi nhận ${newPenalties.length} khoản phạt HĐ VAT`,
+                assignee: user?.fullName || user?.username || '',
+                deadline: dayjs(first.fineDate).format('DD/MM/YYYY'),
+                timeNum: totalFine.toLocaleString('vi-VN'),
+                timeUnit: 'đ tiền phạt đã ghi nhận',
+                actionLabel: 'Xem bảng công',
+                onAction: () => window.dispatchEvent(new CustomEvent('navigate', { detail: 'attendance' })),
+            });
+        } catch (error) {
+            console.log('[GlobalAlerts] Load VAT penalty alerts error:', error);
+        }
+    }, [addAlertPopup, user?.fullName, user?.username]);
+
     // ⚡ Delay 15s lần đầu (Dashboard đã load tasks), sau đó poll mỗi 2 phút
     useEffect(() => {
-        const initDelay = setTimeout(loadTasks, 15000);
-        const interval = setInterval(loadTasks, 120000);
+        const loadAlerts = () => {
+            loadTasks();
+            loadVatPenaltyAlerts();
+        };
+        const initDelay = setTimeout(loadAlerts, 15000);
+        const interval = setInterval(loadAlerts, 120000);
         return () => {
             clearTimeout(initDelay);
             clearInterval(interval);
         };
-    }, [loadTasks]);
+    }, [loadTasks, loadVatPenaltyAlerts]);
 
     // === Lắng nghe events từ DailyTasks ===
     useEffect(() => {

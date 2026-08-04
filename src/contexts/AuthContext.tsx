@@ -8,6 +8,7 @@ interface User {
     avatar?: string | null;
     passwordChangedAt?: string;
     mustChangePassword?: boolean;
+    isTestAccount?: boolean;
     role: 'admin' | 'manager' | 'staff' | 'viewer';
     isActive: boolean;
 }
