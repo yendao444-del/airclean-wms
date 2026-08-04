@@ -17,6 +17,7 @@ import {
     InputNumber,
     message,
     DatePicker,
+    Calendar,
     TimePicker,
     Select,
     Radio,
@@ -438,6 +439,7 @@ const DailyTasks = () => {
     const [history, setHistory] = useState<any[]>([]);
     const [historySnapshots, setHistorySnapshots] = useState<Record<string, { tasks?: any[] }>>({});
     const [selectedWorkDate, setSelectedWorkDate] = useState(dayjs());
+    const [workDatePickerOpen, setWorkDatePickerOpen] = useState(false);
 
     useEffect(() => {
         const openAssignments = () => setActiveTab('assignments');
@@ -1770,9 +1772,8 @@ const DailyTasks = () => {
                     const uploadedBytes = images.reduce((total, image) => total + image.size, 0);
                     message.success({
                         key: 'evidence-upload',
-                        content: `Đã nộp ${images.length} ảnh (${(sourceBytes / 1024 / 1024).toFixed(1)} MB → ${(uploadedBytes / 1024).toFixed(0)} KB), đang chờ duyệt.`,
+                        content: `Đã nộp ${images.length} ảnh (${(sourceBytes / 1024 / 1024).toFixed(1)} MB → ${(uploadedBytes / 1024).toFixed(0)} KB) và tự động hoàn thành công việc.`,
                         duration: 5,
-                        ...(result.data?.autoCompleted ? { content: 'Đã nộp bằng chứng và tự ghi nhận hoàn thành.' } : {}),
                     });
                 } catch (error: any) {
                     message.error({ key: 'evidence-upload', content: error.message || 'Không thể gửi bằng chứng.', duration: 5 });
@@ -2765,7 +2766,13 @@ const DailyTasks = () => {
                         {hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
                         {evidence.required && evidence.status === 'submitted' && canReviewEvidence && <Tooltip title="Duyệt bằng chứng"><Button type="text" size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ color: '#16a34a' }} /></Tooltip>}
                         <Button size="small" onClick={() => handleNoteAssignment(task)} style={{ borderRadius: 6 }}>Ghi chú</Button>
-                        {completionRequest && <span style={{ color: '#d97706', fontSize: 12, fontWeight: 650 }}>Đã báo hoàn thành{isAdmin ? ` · ${parseAttachments(task.attachments).assignment?.completionRequestedBy || ''}` : ', chờ quản lý xác nhận'}</span>}
+                        {completionRequest && (
+                            <Tooltip title={isAdmin
+                                ? `Đã báo hoàn thành: ${parseAttachments(task.attachments).assignment?.completionRequestedBy || 'nhân viên'}`
+                                : 'Đã báo hoàn thành, chờ quản lý xác nhận'}>
+                                <span className="daily-task-completion-request">Đã báo xong</span>
+                            </Tooltip>
+                        )}
                         {canRequestAssignmentCompletion && !needsEvidence && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} className="daily-task-primary-action">Báo hoàn thành</Button>}
                         {canCompleteAssignment && !needsEvidence && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} className="daily-task-primary-action">Xác nhận hoàn thành</Button>}
                         {isAdmin && <Tooltip title="Sửa"><Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditAssignment(task)} /></Tooltip>}
@@ -2850,14 +2857,13 @@ const DailyTasks = () => {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
                         <h1 style={{ margin: 0, color: '#172033', fontSize: 22, fontWeight: 800 }}>Công việc hàng ngày</h1>
-                        <DatePicker
-                            value={selectedWorkDate}
-                            onChange={(value) => value && setSelectedWorkDate(value)}
-                            allowClear={false}
-                            format="dddd, DD/MM/YYYY"
-                            suffixIcon={<CalendarOutlined />}
-                            style={{ height: 36, width: 190, borderRadius: 6, color: '#334155', fontWeight: 600 }}
-                        />
+                        <Button
+                            icon={<CalendarOutlined />}
+                            onClick={() => setWorkDatePickerOpen(true)}
+                            style={{ height: 36, minWidth: 190, borderRadius: 6, color: '#334155', fontWeight: 600, textAlign: 'left' }}
+                        >
+                            {selectedWorkDate.format('dddd, DD/MM/YYYY')}
+                        </Button>
                     </div>
 
                     <Space size={18}>
@@ -2920,6 +2926,24 @@ const DailyTasks = () => {
                     </Button>}
                 </div>
             </Card>
+
+            <Modal
+                title="Chọn ngày công việc"
+                open={workDatePickerOpen}
+                footer={null}
+                width={380}
+                destroyOnHidden
+                onCancel={() => setWorkDatePickerOpen(false)}
+            >
+                <Calendar
+                    fullscreen={false}
+                    value={selectedWorkDate}
+                    onSelect={(value) => {
+                        setSelectedWorkDate(value);
+                        setWorkDatePickerOpen(false);
+                    }}
+                />
+            </Modal>
 
             {/* Tab Switcher */}
             <div style={{ marginBottom: 16 }}>

@@ -22,7 +22,7 @@ interface Product {
 interface Variant {
     color: string;
     sku: string;
-    cost: number;
+    cost?: number;
     stock: number;
 }
 
@@ -98,6 +98,15 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
         }
     };
 
+    const getVariantCost = (variant?: Variant): number | null => {
+        const cost = Number(variant?.cost ?? selectedProduct?.cost);
+        return Number.isFinite(cost) && cost >= 0 ? cost : null;
+    };
+
+    const formatCurrency = (value: number | null): string => (
+        value === null ? 'Chưa có giá vốn' : `${new Intl.NumberFormat('vi-VN').format(value)}₫`
+    );
+
     // Function to remove Vietnamese diacritics
     const removeDiacritics = (str: string): string => {
         return str.normalize('NFD')
@@ -159,11 +168,13 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
         return `Combo ${selectedProduct?.name} - ${variantNames}`;
     };
 
-    const calculatePrice = (): number => {
+    const calculatePrice = (): number | null => {
         const variants = getVariants();
-        return Object.entries(quantities).reduce((sum, [idx, qty]) => {
+        return Object.entries(quantities).reduce<number | null>((sum, [idx, qty]) => {
+            if (sum === null) return null;
             const variant = variants[parseInt(idx)];
-            return sum + (variant.cost * qty);
+            const unitCost = getVariantCost(variant);
+            return unitCost === null ? null : sum + (unitCost * qty);
         }, 0);
     };
 
@@ -199,9 +210,13 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
         });
 
         const cost = calculatePrice();
+        if (cost === null) {
+            message.error('Một hoặc nhiều phân loại chưa có giá vốn. Vui lòng cập nhật giá vốn của sản phẩm trước khi tạo combo.');
+            return;
+        }
         const sku = customSku || generateSku();
         const name = customName || generateName();
-        const price = customPrice || cost;
+        const price = customPrice ?? cost;
 
         onSave({ sku, name, price, items, cost });
     };
@@ -301,7 +316,7 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
                                         <div className="variant-name">{variant.color}</div>
                                         <div className="variant-sku">{variant.sku}</div>
                                     </div>
-                                    <div className="variant-price">{new Intl.NumberFormat('vi-VN').format(variant.cost)}₫</div>
+                                    <div className="variant-price">{formatCurrency(getVariantCost(variant))}</div>
                                     <div className="qty-control">
                                         <InputNumber
                                             min={0}
@@ -356,7 +371,7 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
                                         <div key={idx} className="combo-item">
                                             <div className="combo-item-icon">🎨</div>
                                             <div className="combo-item-details">{variant.color} ({variant.sku})</div>
-                                            <div className="combo-item-qty">{qty} gói × {new Intl.NumberFormat('vi-VN').format(variant.cost)}₫</div>
+                                            <div className="combo-item-qty">{qty} gói × {formatCurrency(getVariantCost(variant))}</div>
                                         </div>
                                     );
                                 })}
@@ -365,11 +380,11 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
                             <div className="price-summary">
                                 <div className="price-row">
                                     <span>Tổng giá vốn:</span>
-                                    <span style={{ fontWeight: 600 }}>{new Intl.NumberFormat('vi-VN').format(autoPrice)}₫</span>
+                                    <span style={{ fontWeight: 600 }}>{formatCurrency(autoPrice)}</span>
                                 </div>
                                 <div className="price-row total">
                                     <span>Giá vốn:</span>
-                                    <span>{new Intl.NumberFormat('vi-VN').format(customPrice || autoPrice)}₫</span>
+                                    <span>{formatCurrency(customPrice ?? autoPrice)}</span>
                                 </div>
                             </div>
 
@@ -391,7 +406,7 @@ export default function ComboWizardModal({ visible, onCancel, onSave, products, 
                                     style={{ width: '100%' }}
                                     value={customPrice}
                                     onChange={(val) => setCustomPrice(val)}
-                                    placeholder={autoPrice.toString()}
+                                    placeholder={autoPrice?.toString()}
                                     formatter={(value) => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
                                 />
                                 <div className="form-hint">Để trống để dùng giá tự động</div>

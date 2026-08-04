@@ -4,6 +4,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 // ✅ PRODUCTION CONFIG - Không cần .env nữa
 const config = require('./config');
+const { reconcileLateAttendanceFines } = require('./attendance-fines');
 
 // 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
 const offlineQueue = require('./offline-queue');
@@ -566,6 +567,7 @@ const PASSWORD_CHANGE_ALLOWED_CHANNELS = new Set([
 ]);
 const LOGIN_MAX_FAILURES = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
+const TEST_OPERATOR_USERNAME = 'test';
 
 const ipcHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, listener) => ipcHandle(channel, async (...args) => {
@@ -611,16 +613,28 @@ function requireRole(...roles) {
     if (!currentSession) {
         throw new Error('Chưa đăng nhập');
     }
-    if (roles.length > 0 && !roles.includes(currentSession.role)) {
+    const canTestAsOperationalRole = isTestOperatorSession()
+        && roles.some(role => role !== 'admin');
+    if (roles.length > 0 && !roles.includes(currentSession.role) && !canTestAsOperationalRole) {
         throw new Error(`Không có quyền thực hiện thao tác này (yêu cầu: ${roles.join('/')})`);
     }
+}
+
+function isTestOperatorSession(session = currentSession) {
+    return String(session?.username || '').trim().toLocaleLowerCase('vi-VN') === TEST_OPERATOR_USERNAME
+        && session?.role !== 'admin';
+}
+
+function isTestOperatorActor(actor) {
+    return String(actor?.username || '').trim().toLocaleLowerCase('vi-VN') === TEST_OPERATOR_USERNAME
+        && actor?.role !== 'admin';
 }
 
 function sanitizeUserForClient(user) {
     if (!user) return null;
     const { password, ...safeUser } = user;
     const mustChangePassword = isPasswordRotationRequired(user);
-    return { ...safeUser, isActive: user.status === 'active', mustChangePassword };
+    return { ...safeUser, isActive: user.status === 'active', mustChangePassword, isTestAccount: isTestOperatorSession(user) };
 }
 
 function requireInventoryLedgerReadAccess() {
@@ -3532,6 +3546,61 @@ ipcMain.handle('purchases:getVatAlertSummary', async () => {
         };
     } catch (error) {
         console.error('Get purchase VAT alert summary error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// Targeted notice for the person who created a purchase. The payroll screen
+// calculates this fine automatically, so the employee needs a durable alert
+// rather than relying on an admin to tell them about it.
+ipcMain.handle('purchases:getMyVatPenaltyAlerts', async () => {
+    try {
+        requireRole();
+        if (!prisma) throw new Error('Prisma not available');
+        const [vatGroups, purchases] = await Promise.all([
+            getPurchaseVatGroups(),
+            prisma.purchaseOrder.findMany({
+                where: {
+                    status: { not: 'cancelled' },
+                    createdBy: currentSession.username,
+                },
+                select: {
+                    id: true,
+                    poNumber: true,
+                    createdAt: true,
+                    receivedAt: true,
+                    vatInvoiceStatus: true,
+                    supplier: { select: { name: true } },
+                },
+                orderBy: { createdAt: 'desc' },
+            }),
+        ]);
+        const vatUploadedPurchaseIds = new Set();
+        Object.values(vatGroups || {}).forEach(group => {
+            if (!group?.vatInvoiceFile) return;
+            (Array.isArray(group.purchaseIds) ? group.purchaseIds : []).forEach(id => vatUploadedPurchaseIds.add(Number(id)));
+        });
+        const policyStart = new Date('2026-03-19T00:00:00');
+        const now = new Date();
+        const alerts = purchases.flatMap(purchase => {
+            const vatStatus = String(purchase.vatInvoiceStatus || 'pending').toLowerCase();
+            const purchaseDate = purchase.receivedAt || purchase.createdAt;
+            const fineDate = new Date(purchaseDate);
+            fineDate.setDate(fineDate.getDate() + 5);
+            const hasVat = vatUploadedPurchaseIds.has(purchase.id) || ['uploaded', 'verified', 'thht', 'no_vat'].includes(vatStatus);
+            if (hasVat || purchaseDate < policyStart || fineDate >= now) return [];
+            return [{
+                id: purchase.id,
+                poNumber: purchase.poNumber,
+                supplierName: purchase.supplier?.name || '',
+                purchaseDate: purchaseDate.toISOString(),
+                fineDate: fineDate.toISOString(),
+                fineAmount: 30000,
+            }];
+        });
+        return { success: true, data: alerts };
+    } catch (error) {
+        console.error('Get personal VAT penalty alerts error:', error);
         return { success: false, error: error.message };
     }
 });
@@ -6698,7 +6767,7 @@ ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
         const required = attachments?.evidence?.required;
         if (!required) throw new Error('Công việc này không yêu cầu bằng chứng.');
         if (!task.assignee || !isFixedAssignee(attachments)) throw new Error('Công việc cần bằng chứng phải được giao cố định cho một nhân viên trước khi nộp.');
-        if (actor.role !== 'admin' && !actorOwnsTask(actor, task)) throw new Error('Bạn chỉ có thể nộp bằng chứng cho công việc được giao cho mình.');
+        if (actor.role !== 'admin' && !isTestOperatorActor(actor) && !actorOwnsTask(actor, task)) throw new Error('Bạn chỉ có thể nộp bằng chứng cho công việc được giao cho mình.');
 
         const images = Array.isArray(payload?.images)
             ? payload.images
@@ -6733,25 +6802,30 @@ ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
         // Reconcile once more immediately before completion. This closes the
         // gap where the desktop app was offline when the 20-minute grace ended.
         await createEvidencePenaltyIfDue(task);
-        const autoCompleteDailyTask = task.type !== 'assignment';
+        // Evidence is the completion proof. Once the assigned user submits a
+        // valid file, approve and complete the task immediately for every task
+        // type; no manager review queue is required.
+        const autoCompleteEvidenceTask = true;
         const submittedAt = new Date().toISOString();
         const evidence = {
             ...attachments.evidence,
             method: 'image',
-            status: autoCompleteDailyTask ? 'approved' : 'submitted',
+            status: 'approved',
             submittedUrl: undefined,
             submittedImage: undefined,
             submittedImages,
             submittedAt,
             submittedBy: actor.fullName,
-            ...(autoCompleteDailyTask ? { reviewedAt: submittedAt, reviewedBy: 'Hệ thống' } : {}),
+            reviewedAt: submittedAt,
+            reviewedBy: 'Hệ thống',
         };
         await prisma.dailyTask.update({
             where: { id: task.id },
             data: {
                 attachments: JSON.stringify({ ...attachments, evidence }),
-                status: autoCompleteDailyTask ? 'completed' : 'pending',
-                completedAt: autoCompleteDailyTask ? new Date() : null,
+                status: 'completed',
+                completedAt: new Date(),
+                verifier: 'Hệ thống',
             }
         });
         await appendDailyTaskHistory({
@@ -6760,12 +6834,12 @@ ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
             category: task.category,
             assignee: actor.fullName,
             verifier: '',
-            action: autoCompleteDailyTask ? 'evidence_approved' : 'evidence_submitted',
+            action: 'evidence_approved',
             timestamp: evidence.submittedAt,
             evidence: getEvidenceHistoryPayload(evidence),
-            description: `Đã nộp bằng chứng cho công việc: "${task.title}"`,
+            description: `Đã nộp bằng chứng và tự động hoàn thành: "${task.title}"`,
         });
-        return { success: true, data: { evidence, autoCompleted: autoCompleteDailyTask } };
+        return { success: true, data: { evidence, autoCompleted: autoCompleteEvidenceTask } };
     } catch (error) {
         if (uploadedPaths.length > 0) {
             await evidenceStorage?.storage.from(EVIDENCE_BUCKET).remove(uploadedPaths).catch(() => {});
@@ -6829,10 +6903,10 @@ ipcMain.handle('dailyTasks:completeRegularTask', async (_event, taskId, payload 
         if (!task || task.status === 'completed') throw new Error('Công việc không còn ở trạng thái chờ hoàn thành.');
         const attachments = parseTaskAttachments(task.attachments);
         if (attachments?.evidence?.required) throw new Error('Công việc này phải nộp bằng chứng, không thể tick hoàn thành trực tiếp.');
-        if (isFixedAssignee(attachments) && !actorOwnsTask(actor, task) && actor.role !== 'admin') {
+        if (isFixedAssignee(attachments) && !actorOwnsTask(actor, task) && actor.role !== 'admin' && !isTestOperatorActor(actor)) {
             throw new Error('Bạn chỉ có thể hoàn thành công việc được giao cố định cho mình.');
         }
-        if (task.assignee && !actorOwnsTask(actor, task) && actor.role !== 'admin') {
+        if (task.assignee && !actorOwnsTask(actor, task) && actor.role !== 'admin' && !isTestOperatorActor(actor)) {
             throw new Error('Công việc này đã được người khác nhận.');
         }
 
@@ -6876,7 +6950,7 @@ ipcMain.handle('dailyTasks:getEvidenceImageUrl', async (_event, taskId, requeste
         if (!folderId) throw new Error('Không tìm thấy thư mục Google Drive để lưu bằng chứng.');
         const task = await prisma.dailyTask.findUnique({ where: { id: Number(taskId) } });
         if (!task) throw new Error('Không tìm thấy công việc.');
-        if (actor.role !== 'admin' && !actorOwnsTask(actor, task)) throw new Error('Bạn không có quyền xem bằng chứng này.');
+        if (actor.role !== 'admin' && !isTestOperatorActor(actor) && !actorOwnsTask(actor, task)) throw new Error('Bạn không có quyền xem bằng chứng này.');
         const attachments = task?.attachments ? JSON.parse(task.attachments) : {};
         const activePaths = getSubmittedEvidenceImages(attachments?.evidence).map(image => image.storagePath);
         let storagePath = requestedPath || activePaths[0] || '';
@@ -7067,7 +7141,7 @@ ipcMain.handle('dailyTasks:requestAssignmentCompletion', async (_event, id) => {
         if (!task) throw new Error('Assignment task was not found.');
         if (task.type !== 'assignment') throw new Error('This action only applies to assignment tasks.');
         if (task.status === 'completed') throw new Error('This assignment is already completed.');
-        if (actor.role !== 'admin' && !actorOwnsTask(actor, task)) {
+        if (actor.role !== 'admin' && !isTestOperatorActor(actor) && !actorOwnsTask(actor, task)) {
             throw new Error('You can only request completion for an assignment assigned to you.');
         }
 
@@ -7110,13 +7184,13 @@ ipcMain.handle('dailyTasks:update', async (event, id, updates) => {
         const existingTask = await prisma.dailyTask.findUnique({ where: { id: Number(id) } });
         if (!existingTask) throw new Error('KhÃ´ng tÃ¬m tháº¥y cÃ´ng viá»‡c.');
         const existingAttachments = parseTaskAttachments(existingTask.attachments);
-        if (actor.role !== 'admin' && existingTask.type === 'assignment' && updates.status === 'completed') {
+        if (actor.role !== 'admin' && !isTestOperatorActor(actor) && existingTask.type === 'assignment' && updates.status === 'completed') {
             throw new Error('Only an admin can complete an assignment.');
         }
         const canCompleteSharedAssignment = existingTask.type === 'assignment'
             && updates.status === 'completed'
             && actorOwnsTask(actor, existingTask);
-        if (actor.role !== 'admin' && !canCompleteSharedAssignment) {
+        if (actor.role !== 'admin' && !isTestOperatorActor(actor) && !canCompleteSharedAssignment) {
             throw new Error('Chỉ admin được cập nhật công việc này.');
         }
         const attachments = updates.attachments !== undefined
@@ -7571,11 +7645,15 @@ async function validateComboItems(rawItems) {
             sku = String(variant.sku);
             unitCost = Number(variant.cost ?? product.cost ?? 0);
         }
+        if (!Number.isFinite(unitCost) || unitCost < 0) {
+            throw new Error(`Missing or invalid cost for combo component ${sku || product.id}.`);
+        }
         if (!sku || seenSkus.has(sku)) throw new Error('A combo cannot contain a duplicate component SKU.');
         seenSkus.add(sku);
         calculatedCost += unitCost * quantity;
         return { productId: product.id, variantIndex: variantIndex === undefined || variantIndex === null || variantIndex === '' ? null : Number(variantIndex), sku, quantity };
     });
+    if (!Number.isFinite(calculatedCost)) throw new Error('Invalid combo cost.');
     return { items: canonicalItems, cost: calculatedCost };
 }
 
@@ -9755,6 +9833,7 @@ function normalizeStockCheckUsername(value) {
 }
 
 function isStockCheckAssignee(session) {
+    if (isTestOperatorSession()) return true;
     return normalizeStockCheckUsername(session?.assignedTo) === normalizeStockCheckUsername(currentSession?.username);
 }
 
@@ -9919,6 +9998,111 @@ function applySameDayFullCheckExemptions(sessions) {
             items: (session.items || []).filter(item => !balancedBySku.has(String(item.sku))),
             fullCheckExemptions: Array.from(exemptionBySku.values()),
         };
+    });
+    return { sessions: updatedSessions, changed };
+}
+
+const DAILY_STOCK_CHECK_PRODUCT_COUNT = 3;
+
+function expandProductForStockCheck(product) {
+    const unit = product?.unit || 'Cái';
+    const category = product?.category?.name || '-';
+    let variants = [];
+    try {
+        variants = typeof product?.variants === 'string'
+            ? JSON.parse(product.variants || '[]')
+            : (Array.isArray(product?.variants) ? product.variants : []);
+    } catch { /* An invalid legacy variants value falls back to the base SKU. */ }
+
+    const variantItems = variants
+        .filter(variant => String(variant?.sku || '').trim())
+        .map(variant => ({
+            sku: String(variant.sku).trim(),
+            productName: product.name,
+            color: variant.color || '',
+            unit,
+            category,
+            systemStock: Number(variant.stock || 0),
+            actualStock: null,
+            note: '',
+            difference: 0,
+            balanced: false,
+        }));
+    if (variantItems.length) return variantItems;
+    if (!String(product?.sku || '').trim()) return [];
+    return [{
+        sku: String(product.sku).trim(),
+        productName: product.name,
+        unit,
+        category,
+        systemStock: Number(product.stock || 0),
+        actualStock: null,
+        note: '',
+        difference: 0,
+        balanced: false,
+    }];
+}
+
+// A daily session is one best-selling product plus two random products. The
+// renderer starts a session, but enforcing the minimum here makes the rule
+// durable for old sessions and for the assigned manager's first page load.
+async function topUpTodayDailyStockCheckProducts(sessions, tx) {
+    const today = getStockCheckTodayKey();
+    const fullyCheckedSkus = new Set(
+        sessions
+            .filter(session => session?.type === 'full' && session?.date === today)
+            .flatMap(session => session.items || [])
+            .filter(item => item?.balanced && item?.sku)
+            .map(item => String(item.sku))
+    );
+    const candidates = await tx.product.findMany({
+        select: productSelectForCatalog(),
+        orderBy: { createdAt: 'asc' },
+    });
+    const candidatesByName = new Map(candidates.map(product => [String(product.name || '').trim(), product]));
+    let changed = false;
+    const updatedSessions = sessions.map(session => {
+        if (session?.type !== 'daily' || session?.date !== today || session?.status === 'completed') return session;
+        const items = Array.isArray(session.items) ? session.items : [];
+        // Do not alter a session once the assignee has begun entering a count.
+        if (!items.length || items.some(item => item?.actualStock !== null && item?.actualStock !== undefined)) return session;
+
+        const productNames = new Set(items.map(item => String(item?.productName || '').trim()).filter(Boolean));
+        const exemptedSkus = new Set([
+            ...fullyCheckedSkus,
+            ...(session.fullCheckExemptions || []).map(item => String(item?.sku || '')),
+        ]);
+        const refreshedItems = [...productNames].flatMap(productName => {
+            const product = candidatesByName.get(productName);
+            if (!product) return items.filter(item => String(item?.productName || '').trim() === productName);
+            return expandProductForStockCheck(product)
+                .filter(item => !exemptedSkus.has(String(item.sku)));
+        });
+        const currentSkus = items.map(item => String(item?.sku || '')).sort();
+        const refreshedSkus = refreshedItems.map(item => String(item?.sku || '')).sort();
+        const variantsChanged = currentSkus.length !== refreshedSkus.length
+            || currentSkus.some((sku, index) => sku !== refreshedSkus[index]);
+        const synchronizedItems = variantsChanged ? refreshedItems : items;
+        if (variantsChanged) changed = true;
+
+        const missingCount = DAILY_STOCK_CHECK_PRODUCT_COUNT - productNames.size;
+        if (missingCount <= 0) return variantsChanged ? { ...session, items: synchronizedItems } : session;
+
+        // Sort deterministically per date. This supplies the missing random
+        // products without changing the products the user already received.
+        const daySeed = Number(today.replace(/\D/g, '')) || 0;
+        const additions = candidates
+            .filter(product => product?.name && !productNames.has(String(product.name).trim()))
+            .map((product, index) => ({ product, score: (daySeed * 31 + (index + 1) * 997) % 100003 }))
+            .sort((left, right) => left.score - right.score)
+            .map(({ product }) => expandProductForStockCheck(product)
+                .filter(item => !fullyCheckedSkus.has(String(item.sku))))
+            .filter(productItems => productItems.length > 0)
+            .slice(0, missingCount)
+            .flat();
+        if (!additions.length) return variantsChanged ? { ...session, items: synchronizedItems } : session;
+        changed = true;
+        return { ...session, items: [...synchronizedItems, ...additions] };
     });
     return { sessions: updatedSessions, changed };
 }
@@ -10167,14 +10351,113 @@ ipcMain.handle('stockCheck:getSessions', async () => {
             const carried = createDailyCarryOverSession(storedSessions);
             const repaired = repairTodayCarryOverCounts(carried.sessions);
             const exempted = applySameDayFullCheckExemptions(repaired.sessions);
-            if (carried.changed || repaired.changed || exempted.changed) await writeStockCheckSessions(exempted.sessions, tx);
-            return exempted.sessions;
+            const toppedUp = await topUpTodayDailyStockCheckProducts(exempted.sessions, tx);
+            if (carried.changed || repaired.changed || exempted.changed || toppedUp.changed) {
+                await writeStockCheckSessions(toppedUp.sessions, tx);
+            }
+            return toppedUp.sessions;
         }, { timeout: 30000, maxWait: 10000 });
         const isAdmin = currentSession.role === 'admin';
-        const visibleSessions = isAdmin
+        const visibleSessions = (isAdmin || isTestOperatorSession())
             ? sessions
             : sessions.filter(session => session.date === getStockCheckTodayKey() && isStockCheckAssignee(session));
         return { success: true, data: visibleSessions.map(session => sanitizeStockCheckSession(session, isAdmin)) };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('stockCheck:createRecheckSession', async (event, payload = {}) => {
+    try {
+        requireRole('admin', 'manager');
+        const sourceSessionId = String(payload.sourceSessionId || '').trim();
+        const assignedTo = String(payload.assignedTo || '').trim();
+        const reason = String(payload.reason || '').trim();
+        const selectedSkus = [...new Set((Array.isArray(payload.skus) ? payload.skus : []).map(sku => String(sku || '').trim()).filter(Boolean))];
+        if (!sourceSessionId) throw new Error('Thiếu phiên gốc cần kiểm lại.');
+        if (!assignedTo) throw new Error('Cần chọn người phụ trách kiểm lại.');
+        if (!reason) throw new Error('Cần nhập lý do kiểm lại.');
+        if (!selectedSkus.length) throw new Error('Cần chọn ít nhất một SKU để kiểm lại.');
+
+        const result = await getPrismaDirectTx().$transaction(async (tx) => {
+            await lockStockCheckSessions(tx);
+            const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
+            const sessions = parseStockCheckSessionsFromConfig(record);
+            const source = sessions.find(session => String(session?.id) === sourceSessionId);
+            if (!source) throw new Error('Không tìm thấy phiên kiểm gốc.');
+            if (!isStockCheckSessionCompleted(source)) throw new Error('Chỉ có thể tạo kiểm lại từ phiên đã hoàn thành.');
+            if (String(source.date || '') >= getStockCheckTodayKey()) throw new Error('Chỉ tạo kiểm lại từ phiên trước ngày hôm nay.');
+
+            const existingOpenRecheck = sessions.find(session => session?.type === 'recheck'
+                && session?.sourceSessionId === sourceSessionId
+                && session?.status !== 'completed');
+            if (existingOpenRecheck) throw new Error('Phiên gốc này đã có một phiên kiểm lại đang thực hiện.');
+
+            const assignee = await tx.user.findUnique({
+                where: { username: assignedTo },
+                select: { username: true, fullName: true, role: true, status: true, permissions: true },
+            });
+            if (!assignee || assignee.status !== 'active' || !isOperationalAssignee(assignee) || assignee.role !== 'manager') {
+                throw new Error('Người phụ trách không hợp lệ hoặc không còn hoạt động.');
+            }
+
+            const sourceBySku = new Map((source.items || []).map(item => [String(item.sku), item]));
+            const invalidSkus = selectedSkus.filter(sku => !sourceBySku.has(sku));
+            if (invalidSkus.length) throw new Error(`SKU không thuộc phiên gốc: ${invalidSkus.join(', ')}.`);
+
+            const products = await tx.product.findMany({ select: productSelectForCatalog() });
+            const currentItemBySku = new Map(products.flatMap(expandProductForStockCheck).map(item => [String(item.sku), item]));
+            const items = selectedSkus.map(sku => {
+                const current = currentItemBySku.get(sku);
+                const original = sourceBySku.get(sku);
+                if (!current) throw new Error(`SKU ${sku} không còn tồn tại trong danh mục sản phẩm.`);
+                return {
+                    ...current,
+                    recheckOriginalSystemStock: Number(original.systemStock || 0),
+                    recheckOriginalActualStock: original.actualStock == null ? null : Number(original.actualStock),
+                    recheckOriginalDifference: Number(original.difference || 0),
+                    recheckOriginalVerificationStatus: original.verificationStatus || null,
+                };
+            });
+            const now = new Date();
+            const today = getStockCheckTodayKey();
+            const session = {
+                id: `recheck-${today}-${now.getTime()}`,
+                runId: `recheck-${crypto.randomUUID?.() || now.getTime()}`,
+                date: today,
+                type: 'recheck',
+                assignedTo: assignee.username,
+                assignedName: assignee.fullName || assignee.username,
+                status: 'in_progress',
+                items,
+                notes: reason,
+                createdAt: now.toISOString(),
+                sourceSessionId: source.id,
+                sourceSessionDate: source.date,
+                sourceSessionRunId: source.runId || null,
+                recheckScope: payload.scope === 'all' ? 'all' : 'mismatch',
+                createdBy: currentSession.username,
+            };
+            const updatedSessions = [...sessions, session].slice(-90);
+            await writeStockCheckSessions(updatedSessions, tx);
+            await tx.activityLog.create({
+                data: {
+                    module: 'stock_check',
+                    action: 'CREATE_RECHECK',
+                    description: `Tạo phiên kiểm lại ${session.id} từ phiên ${source.id}: ${items.length} SKU`,
+                    recordName: session.id,
+                    changes: JSON.stringify({ sourceSessionId: source.id, sourceDate: source.date, assignedTo, reason, skus: selectedSkus }),
+                    userName: currentSession.username,
+                    severity: 'WARNING',
+                },
+            });
+            return { session, sessions: updatedSessions };
+        }, { timeout: 30000, maxWait: 10000 });
+
+        return {
+            success: true,
+            session: sanitizeStockCheckSession(result.session, currentSession.role === 'admin'),
+        };
     } catch (error) {
         return { success: false, error: error.message };
     }
@@ -12932,7 +13215,13 @@ ipcMain.handle('attendance:recognize', async (event, { image }) => {
             }
         });
 
-        return { success: true, data: { ...log, confidence: result.confidence, userName, ...faceInfo } };
+        const fineResult = await reconcileLateAttendanceFines(prisma, {
+            logIds: [log.id],
+            actor: 'system',
+        });
+        const lateFine = fineResult.created[0] || null;
+
+        return { success: true, data: { ...log, confidence: result.confidence, userName, lateFine, ...faceInfo } };
     } catch (err) {
         console.error('❌ attendance:recognize error:', err.message);
         return { success: false, error: err.message };
@@ -12978,6 +13267,22 @@ ipcMain.handle('attendance:getLogs', async (event, { date, month, userId } = {})
         });
         return { success: true, data: logs };
     } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+// Đối soát toàn bộ lịch sử để bù các khoản phạt đi muộn từng bị sót.
+ipcMain.handle('attendance:reconcileLateFines', async () => {
+    try {
+        requireRole('admin');
+        const result = await reconcileLateAttendanceFines(prisma, {
+            useHistoricalRates: true,
+            repairReconciledAmounts: true,
+            actor: currentSession.username,
+        });
+        return { success: true, data: result };
+    } catch (err) {
+        console.error('❌ attendance:reconcileLateFines error:', err.message);
         return { success: false, error: err.message };
     }
 });

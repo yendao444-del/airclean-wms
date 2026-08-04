@@ -1706,47 +1706,8 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                     loadData();
                     if (onLogAdded) onLogAdded();
 
-                    // Tự động tạo phạt đi muộn nếu có config
-                    if (config && onLateFine && res.data.checkType) {
-                        const ct = res.data.checkType as string;
-                        const isIn = ct === 'morning_in' || ct === 'afternoon_in';
-                        if (isIn) {
-                            const now = new Date();
-                            const [startH, startM] = (ct === 'morning_in' ? config.morningStart : config.afternoonStart).split(':').map(Number);
-                            const shiftStartMin = startH * 60 + startM;
-                            const actualMin = now.getHours() * 60 + now.getMinutes();
-                            const lateMin = actualMin - shiftStartMin;
-                            if (lateMin > (config.graceMinutes || 0)) {
-                                const fId = normalizeAttendanceText(res.data.faceId);
-                                const emp = employees.find(e => {
-                                    const u = normalizeAttendanceText(e.username);
-                                    return u === fId || u.endsWith(fId) || e.name === res.data.userName;
-                                });
-                                const isOfficial = !emp || emp.type === 'Official';
-                                let amount = 0;
-                                let level = '';
-                                if (lateMin <= 15) {
-                                    amount = isOfficial ? config.officialFineLevel1 : config.seasonalFineLevel1;
-                                    level = 'Nhẹ';
-                                } else if (lateMin <= 30) {
-                                    amount = isOfficial ? config.officialFineLevel2 : config.seasonalFineLevel2;
-                                    level = 'TB';
-                                } else {
-                                    amount = isOfficial ? config.officialFineLevel3 : config.seasonalFineLevel3;
-                                    level = 'Nặng';
-                                }
-                                const ca = ct === 'morning_in' ? 'sáng' : 'chiều';
-                                onLateFine({
-                                    empId: emp?.id ?? 0,
-                                    type: 'Đi muộn',
-                                    detail: `Đi muộn ca ${ca} ${lateMin} phút (Mức ${level}) — ${now.toLocaleDateString('vi-VN')}`,
-                                    amount,
-                                    date: now.toISOString(),
-                                    source: 'attendance',
-                                });
-                            }
-                        }
-                    }
+                    // Backend ghi phạt cùng lúc với log chấm công; frontend chỉ đồng bộ để hiển thị ngay.
+                    if (res.data.lateFine && onLateFine) onLateFine(res.data.lateFine);
                     // Reset idle timer sau mỗi lần chấm thành công
                     resetIdleTimer();
                     // Hiện kết quả 2s rồi tiếp tục nhận diện người tiếp theo
@@ -2980,6 +2941,12 @@ export default function Attendance() {
                     return matched || uname;
                 };
 
+                if (isAdmin && api.attendance?.reconcileLateFines) {
+                    const reconcileResult = await api.attendance.reconcileLateFines();
+                    if (!reconcileResult?.success) {
+                        console.error('Lỗi đối soát phạt đi muộn:', reconcileResult?.error);
+                    }
+                }
                 const rs = await api.appConfig.get('attendanceData');
                 if (rs && rs.success && rs.data) {
                     const d = rs.data;
@@ -5802,7 +5769,7 @@ export default function Attendance() {
             config={config}
             isAdmin={isAdmin}
             onLateFine={(fine) => {
-                setExtraFines(prev => [...prev, fine]);
+                setExtraFines(prev => prev.some(item => item.id === fine.id) ? prev : [...prev, fine]);
                 message.warning(`⚠️ Phạt đi muộn: ${fine.detail} — ${fine.amount.toLocaleString('vi-VN')}đ`);
             }}
         >

@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef } from 'react';
+import { Fragment, useState, useEffect, useMemo, useRef } from 'react';
 import {
     Card,
     Button,
@@ -82,6 +82,7 @@ interface Purchase {
     vatGroupVatFileName?: string | null;
     vatGroupVatFileSize?: number | null;
     vatId?: string | null;
+    vatInvoiceStatus?: string;
     vatFileName?: string | null;
     vatFileSize?: number | null;
     sharedVatPurchaseIds?: number[];
@@ -1826,6 +1827,24 @@ export default function PurchasePage() {
         );
     };
 
+    const personalVatPenalties = useMemo(() => {
+        const username = String(user?.username || '').trim().toLocaleLowerCase('vi-VN');
+        if (!username) return [];
+        const policyStart = dayjs('2026-03-19');
+        const now = dayjs();
+        return purchases.filter(purchase => {
+            if (String(purchase.createdBy || '').trim().toLocaleLowerCase('vi-VN') !== username) return false;
+            const vatStatus = String(purchase.vatInvoiceStatus || 'pending').toLowerCase();
+            const hasVat = purchase.vatGroupId ? !!purchase.vatGroupHasVat : ['uploaded', 'verified'].includes(vatStatus);
+            const purchaseDate = dayjs(purchase.purchaseDate || purchase.createdAt);
+            return purchaseDate.isValid()
+                && purchaseDate.isAfter(policyStart)
+                && purchaseDate.add(5, 'day').isBefore(now)
+                && !hasVat
+                && !['thht', 'no_vat'].includes(vatStatus);
+        });
+    }, [purchases, user?.username]);
+
     return (
         <div>
             <style>{`
@@ -1903,6 +1922,17 @@ export default function PurchasePage() {
             </div>
 
             {/* ===== DANH SÁCH PHIẾU NHẬP ===== */}
+            {personalVatPenalties.length > 0 && (
+                <Alert
+                    type="error"
+                    showIcon
+                    style={{ marginBottom: 16, borderRadius: 8 }}
+                    message={`Đã ghi nhận phạt HĐ VAT: ${personalVatPenalties.length} phiếu quá hạn`}
+                    description={`Bạn bị ghi nhận ${new Intl.NumberFormat('vi-VN').format(personalVatPenalties.length * 30000)} đ vào Bảng công. Phiếu: ${personalVatPenalties.slice(0, 3).map(item => item.poNumber || `#${item.id}`).join(', ')}${personalVatPenalties.length > 3 ? '…' : ''}.`}
+                    action={<Button danger size="small" onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'attendance' }))}>Xem bảng công</Button>}
+                />
+            )}
+
             {activeTab === 'list' && (() => {
                 const kw = searchText.trim().toLowerCase();
                 const filteredPurchases = purchases.filter(p => {

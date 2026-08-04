@@ -90,7 +90,10 @@ export default function ComboProductsPage() {
 
     const loadProducts = async () => {
         try {
-            const result = await window.electronAPI.products.getAll();
+            // Combo needs per-variant cost to calculate its automatic cost.
+            // The normal catalog hides it from manager accounts.
+            const result = await window.electronAPI.products.getCatalogForPurchase?.()
+                ?? await window.electronAPI.products.getAll();
             if (result.success && result.data) setProducts(result.data as any);
         } catch { message.error('Lỗi tải danh sách sản phẩm'); }
     };
