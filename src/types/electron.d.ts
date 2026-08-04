@@ -167,6 +167,7 @@ export interface ElectronAPI {
         removeVatGroup: (data: { purchaseId: number }) => Promise<{ success: boolean; data?: any; error?: string }>;
         markAsThht: (purchaseId: number, revert?: boolean) => Promise<{ success: boolean; error?: string }>;
         getImportReceiptFileData: (purchaseId: number) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        getImportReceiptPreviewData: (purchaseId: number) => Promise<{ success: boolean; data?: { driveUrls: string[]; localFiles: any[] }; error?: string }>;
     };
     suppliers: {
         getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
