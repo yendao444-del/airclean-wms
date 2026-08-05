@@ -208,6 +208,7 @@ export interface ElectronAPI {
         requestAssignmentCompletion: (taskId: number) => Promise<{ success: boolean; data?: any; error?: string }>;
         completeRegularTask: (taskId: number, payload: { verifier: string; assignee?: string }) => Promise<{ success: boolean; data?: any; error?: string }>;
         getEvidenceImageUrl: (taskId: number, storagePath?: string) => Promise<{ success: boolean; data?: { url: string }; error?: string }>;
+        getDriveEvidenceImageUrl: (taskId: number, driveUrl: string, mimeType?: string) => Promise<{ success: boolean; data?: { url: string }; error?: string }>;
         listEvidencePenalties: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         getStats: (filters?: any) => Promise<{ success: boolean; data?: any; error?: string }>;

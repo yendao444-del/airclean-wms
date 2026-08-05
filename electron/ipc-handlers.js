@@ -6385,9 +6385,9 @@ function clearEvidenceSubmission(attachments) {
 
 function getSubmittedEvidenceImages(evidence) {
     if (Array.isArray(evidence?.submittedImages) && evidence.submittedImages.length > 0) {
-        return evidence.submittedImages.filter(image => image?.storagePath);
+        return evidence.submittedImages.filter(image => image?.storagePath || image?.driveUrl);
     }
-    return evidence?.submittedImage?.storagePath ? [evidence.submittedImage] : [];
+    return evidence?.submittedImage?.storagePath || evidence?.submittedImage?.driveUrl ? [evidence.submittedImage] : [];
 }
 
 // Keep a self-contained proof snapshot in the audit trail before daily reset
@@ -6474,7 +6474,7 @@ function isValidEvidenceImage(buffer, mimeType) {
 async function createEvidencePenaltyIfDue(task, now = new Date()) {
     const attachments = parseTaskAttachments(task.attachments);
     const evidence = attachments.evidence || {};
-    if (!evidence.required || task.status === 'completed') return null;
+    if (!evidence.required) return null;
     if (task.type === 'assignment') return createAssignmentEvidencePenaltyIfDue(task, now);
     if (!task.assignee || !isFixedAssignee(attachments)) return null;
 
@@ -6483,9 +6483,12 @@ async function createEvidencePenaltyIfDue(task, now = new Date()) {
     const penaltyAt = new Date(dueAt.getTime() + EVIDENCE_GRACE_MINUTES * 60 * 1000);
     if (now < penaltyAt) return null;
     const submittedAt = evidence.submittedAt ? new Date(evidence.submittedAt) : null;
+    const hasSubmittedImage = getSubmittedEvidenceImages(evidence).length > 0
+        || Boolean(evidence.imageExpiredAt && evidence.submittedAt);
     // Compatibility with tasks submitted by older clients that left the task
-    // pending: proof submitted within the grace period must not be fined.
-    if (submittedAt && !Number.isNaN(submittedAt.getTime()) && submittedAt <= penaltyAt && evidence.status !== 'rejected') return null;
+    // pending: a real image submitted within the grace period must not be fined.
+    // A completed flag alone is not proof and must never bypass the penalty.
+    if (hasSubmittedImage && submittedAt && !Number.isNaN(submittedAt.getTime()) && submittedAt <= penaltyAt && evidence.status !== 'rejected') return null;
 
     const dueKey = dueAt.toISOString();
     const recipients = getTaskRecipients(task, attachments);
@@ -6613,11 +6616,13 @@ async function repairLegacyAssignmentPenaltySchedule(task, dueAt, scheduleAnchor
 async function createAssignmentEvidencePenaltyIfDue(task, now = new Date()) {
     const attachments = parseTaskAttachments(task.attachments);
     const evidence = attachments.evidence || {};
-    if (task.type !== 'assignment' || !evidence.required || task.status === 'completed') return null;
+    if (task.type !== 'assignment' || !evidence.required) return null;
 
     // Once proof has been submitted, it stops the escalation. An admin can
     // still review or reject it, but no additional missed-submission fines run.
-    if (evidence.submittedAt && evidence.status !== 'rejected') return [];
+    const hasSubmittedImage = getSubmittedEvidenceImages(evidence).length > 0
+        || Boolean(evidence.imageExpiredAt && evidence.submittedAt);
+    if (hasSubmittedImage && evidence.submittedAt && evidence.status !== 'rejected') return [];
 
     const dueAt = new Date(task.dueDate);
     if (Number.isNaN(dueAt.getTime())) return null;
@@ -6635,11 +6640,11 @@ async function createAssignmentEvidencePenaltyIfDue(task, now = new Date()) {
     const created = [];
 
     for (const checkpoint of checkpoints) {
-        const totalForCycle = totalFine * checkpoint.multiplier;
-        const baseFine = Math.floor(totalForCycle / recipients.length);
-        const remainder = totalForCycle % recipients.length;
+        // Assignment penalty is configured per recipient. A handover to two
+        // people at 100,000đ therefore creates two 100,000đ penalties.
+        const finePerRecipient = totalFine * checkpoint.multiplier;
 
-        for (const [index, assignee] of recipients.entries()) {
+        for (const assignee of recipients) {
             // The old single-penalty policy used this key. Treat it as cycle 1
             // so existing fines are retained without creating a duplicate.
             const legacyKey = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:${assignee}`;
@@ -6653,7 +6658,7 @@ async function createAssignmentEvidencePenaltyIfDue(task, now = new Date()) {
                 id: key,
                 taskId: task.id,
                 assignee,
-                amount: baseFine + (index < remainder ? 1 : 0),
+                amount: finePerRecipient,
                 dueAt: dueKey,
                 penaltyAt: checkpoint.penaltyAt.toISOString(),
                 cycle: checkpoint.cycle,
@@ -6692,7 +6697,9 @@ function reconcileEvidencePenalties() {
     if (evidencePenaltyReconcilePromise) return evidencePenaltyReconcilePromise;
     evidencePenaltyReconcilePromise = (async () => {
         const tasks = await prisma.dailyTask.findMany({
-            where: { status: { not: 'completed' } },
+            // Completed rows are included deliberately: old clients could mark a
+            // proof-required task complete without uploading an image.
+            where: { attachments: { not: null } },
             // Penalty reconciliation only needs these fields. Avoid sending full
             // task descriptions and metadata across the database connection.
             select: { id: true, title: true, assignee: true, dueDate: true, status: true, type: true, attachments: true },
@@ -6709,6 +6716,45 @@ function reconcileEvidencePenalties() {
     });
 }
 
+async function reconcileSnapshotEvidencePenalties(now = new Date()) {
+    const today = getLocalDateKey(now);
+    const [snapshotRows, existingPenaltyRows] = await Promise.all([
+        prisma.appConfig.findMany({
+            where: { key: { startsWith: 'dailyTasksSnapshot:' } },
+            select: { key: true, value: true },
+        }),
+        prisma.appConfig.findMany({
+            where: { key: { startsWith: TASK_PENALTY_KEY_PREFIX } },
+            select: { key: true },
+        }),
+    ]);
+    const existingPenaltyKeys = new Set(existingPenaltyRows.map(row => row.key));
+    const created = [];
+    for (const row of snapshotRows) {
+        const snapshotDate = String(row.key || '').slice('dailyTasksSnapshot:'.length);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(snapshotDate) || snapshotDate >= today) continue;
+        let snapshot;
+        try { snapshot = JSON.parse(row.value); } catch { continue; }
+        for (const task of Array.isArray(snapshot?.tasks) ? snapshot.tasks : []) {
+            if ((task?.type || 'daily') !== 'daily') continue;
+            const dueAt = new Date(task?.dueDate);
+            const attachments = parseTaskAttachments(task?.attachments);
+            const recipients = getTaskRecipients(task, attachments);
+            if (!Number.isNaN(dueAt.getTime()) && recipients.length > 0) {
+                const dueKey = dueAt.toISOString();
+                const expectedKeys = recipients.map(assignee => `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:${assignee}`);
+                if (expectedKeys.every(key => existingPenaltyKeys.has(key))) continue;
+            }
+            const penalties = await createEvidencePenaltyIfDue(task, now);
+            if (Array.isArray(penalties)) {
+                created.push(...penalties);
+                penalties.forEach(penalty => existingPenaltyKeys.add(penalty.id));
+            }
+        }
+    }
+    return created;
+}
+
 async function cleanupExpiredEvidenceImages() {
     if (!evidenceStorage) return;
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
@@ -6718,14 +6764,16 @@ async function cleanupExpiredEvidenceImages() {
         const evidence = attachments?.evidence;
         const submittedAt = evidence?.submittedAt ? new Date(evidence.submittedAt).getTime() : NaN;
         const submittedImages = getSubmittedEvidenceImages(evidence);
-        if (submittedImages.length === 0 || !Number.isFinite(submittedAt) || submittedAt > cutoff) continue;
+        const storageImages = submittedImages.filter(image => image?.storagePath);
+        if (storageImages.length === 0 || !Number.isFinite(submittedAt) || submittedAt > cutoff) continue;
 
-        await evidenceStorage.storage.from(EVIDENCE_BUCKET).remove(submittedImages.map(image => image.storagePath)).catch(() => {});
+        await evidenceStorage.storage.from(EVIDENCE_BUCKET).remove(storageImages.map(image => image.storagePath)).catch(() => {});
         // Keep the SHA-256 registry after removing the file. The image itself
         // expires after seven days, but its fingerprint must remain to prevent
         // the same proof from being uploaded again later.
+        const remainingImages = submittedImages.filter(image => !image?.storagePath);
         evidence.submittedImage = undefined;
-        evidence.submittedImages = undefined;
+        evidence.submittedImages = remainingImages.length > 0 ? remainingImages : undefined;
         evidence.imageExpiredAt = new Date().toISOString();
         await prisma.dailyTask.update({ where: { id: task.id }, data: { attachments: JSON.stringify(attachments) } });
     }
@@ -6995,7 +7043,7 @@ ipcMain.handle('dailyTasks:getEvidenceImageUrl', async (_event, taskId, requeste
         if (!task) throw new Error('Không tìm thấy công việc.');
         if (actor.role !== 'admin' && !isTestOperatorActor(actor) && !actorOwnsTask(actor, task)) throw new Error('Bạn không có quyền xem bằng chứng này.');
         const attachments = task?.attachments ? JSON.parse(task.attachments) : {};
-        const activePaths = getSubmittedEvidenceImages(attachments?.evidence).map(image => image.storagePath);
+        const activePaths = getSubmittedEvidenceImages(attachments?.evidence).map(image => image.storagePath).filter(Boolean);
         let storagePath = requestedPath || activePaths[0] || '';
         if (requestedPath && !activePaths.includes(requestedPath)) {
             const historyConfig = await prisma.appConfig.findUnique({ where: { key: 'dailyTasksHistory' } });
@@ -7014,10 +7062,38 @@ ipcMain.handle('dailyTasks:getEvidenceImageUrl', async (_event, taskId, requeste
     }
 });
 
+// Google Drive webView/webContent links are not image URLs and private files
+// cannot be rendered by <img> without the OAuth session. Fetch the file through
+// the authenticated Drive client and return a short-lived data URL instead.
+ipcMain.handle('dailyTasks:getDriveEvidenceImageUrl', async (_event, taskId, driveUrl, mimeType = 'image/jpeg') => {
+    try {
+        const actor = await getCurrentActor();
+        const drive = getDriveClient();
+        if (!drive) throw new Error('Google Drive chưa được xác minh. Vui lòng xác minh lại Google Drive.');
+        const task = await prisma.dailyTask.findUnique({ where: { id: Number(taskId) } });
+        if (!task) throw new Error('Không tìm thấy công việc.');
+        if (actor.role !== 'admin' && !isTestOperatorActor(actor) && !actorOwnsTask(actor, task)) {
+            throw new Error('Bạn không có quyền xem bằng chứng này.');
+        }
+        const fileId = String(driveUrl || '').match(/[-\w]{25,}/)?.[0];
+        if (!fileId) throw new Error('Liên kết Google Drive không hợp lệ.');
+        const allowedMimeTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
+        const contentType = allowedMimeTypes.has(mimeType) ? mimeType : 'image/jpeg';
+        const response = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' });
+        const buffer = Buffer.from(response.data);
+        if (!buffer.length || buffer.length > 8 * 1024 * 1024) throw new Error('Ảnh bằng chứng không hợp lệ hoặc quá lớn.');
+        return { success: true, data: { url: `data:${contentType};base64,${buffer.toString('base64')}` } };
+    } catch (error) {
+        console.error('Drive evidence image error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 ipcMain.handle('dailyTasks:listEvidencePenalties', async () => {
     try {
         requireRole();
         await reconcileEvidencePenalties();
+        await reconcileSnapshotEvidencePenalties();
         const rows = await prisma.appConfig.findMany({
             where: {
                 OR: [
@@ -7049,7 +7125,9 @@ ipcMain.handle('dailyTasks:list', async (event, filters = {}) => {
         // Expensive maintenance belongs to the full Daily Tasks screen. Global
         // alerts poll a compact read model and must not start a full DB scan.
         if (maintenance) {
+            await reconcileRecurringAssignments();
             void reconcileEvidencePenalties().catch(error => console.error('Evidence penalty scan error:', error));
+            void reconcileSnapshotEvidencePenalties().catch(error => console.error('Historical evidence penalty scan error:', error));
             void cleanupExpiredEvidenceImages().catch(error => console.error('Evidence cleanup error:', error));
         }
 
@@ -7143,6 +7221,16 @@ ipcMain.handle('dailyTasks:createAssignments', async (event, taskData, assignees
         if (recipients.length === 0) throw new Error('Chọn ít nhất một người nhận.');
 
         const attachments = parseTaskAttachments(taskData.attachments);
+        // Handover tasks always require an image proof. Older clients could
+        // send evidenceRequired=false; normalize that input at the trust boundary.
+        const assignmentPenaltyAmount = Number(attachments?.assignment?.deadlinePenaltyAmount) || 50000;
+        attachments.evidence = {
+            ...(attachments.evidence || {}),
+            required: true,
+            method: 'image',
+            status: attachments.evidence?.status || 'pending',
+            penaltyAmount: Number(attachments.evidence?.penaltyAmount) || assignmentPenaltyAmount,
+        };
         for (const recipient of recipients) {
             await assertOperationalTaskAssignee(recipient);
             await validateEvidenceAssignment(attachments, recipient);
@@ -7175,6 +7263,80 @@ ipcMain.handle('dailyTasks:createAssignments', async (event, taskData, assignees
         return { success: false, error: error.message };
     }
 });
+
+const ASSIGNMENT_RECURRENCE_KEY_PREFIX = 'dailyAssignmentRecurrence:';
+
+// Generate the next independent handover when a completed handover reaches
+// its configured calendar interval. The AppConfig marker makes this idempotent
+// across multiple desktop clients opening the app at the same time.
+async function reconcileRecurringAssignments(now = new Date()) {
+    const completed = await prisma.dailyTask.findMany({
+        where: { type: 'assignment', status: 'completed' },
+        select: { id: true, title: true, description: true, priority: true, category: true, note: true, assignee: true, verifier: true, dueDate: true, tags: true, attachments: true },
+    });
+    let created = 0;
+    for (const task of completed) {
+        const attachments = parseTaskAttachments(task.attachments);
+        const assignment = attachments.assignment || {};
+        const recurrenceDays = Math.floor(Number(assignment.recurrenceDays) || 0);
+        if (recurrenceDays < 1 || recurrenceDays > 365) continue;
+        const dueAt = new Date(task.dueDate);
+        if (Number.isNaN(dueAt.getTime())) continue;
+        const nextDueAt = new Date(dueAt.getTime() + recurrenceDays * 24 * 60 * 60 * 1000);
+        if (getLocalDateKey(now) < getLocalDateKey(nextDueAt)) continue;
+
+        const recurrenceRootId = String(assignment.recurrenceRootId || task.id);
+        const recurrenceKey = `${ASSIGNMENT_RECURRENCE_KEY_PREFIX}${recurrenceRootId}:${nextDueAt.toISOString()}`;
+        const marker = await prisma.appConfig.createMany({
+            data: { key: recurrenceKey, value: JSON.stringify({ sourceTaskId: task.id, nextDueAt: nextDueAt.toISOString(), createdAt: now.toISOString() }) },
+            skipDuplicates: true,
+        });
+        if (marker.count === 0) continue;
+
+        const recipients = getTaskRecipients(task, attachments);
+        if (recipients.length === 0) {
+            await prisma.appConfig.deleteMany({ where: { key: recurrenceKey } });
+            continue;
+        }
+        const nextGroupId = `assignment-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        const nextAssignment = {
+            ...assignment,
+            groupId: nextGroupId,
+            assignees: recipients,
+            recurrenceRootId,
+            recurrenceSequence: (Number(assignment.recurrenceSequence) || 1) + 1,
+            completionRequestedAt: undefined,
+            completionRequestedBy: undefined,
+        };
+        const evidence = attachments.evidence;
+        const nextEvidence = evidence?.required
+            ? (({ submittedAt, submittedBy, submittedUrl, submittedImage, submittedImages, reviewedAt, reviewedBy, ...config }) => ({ ...config, status: 'pending' }))(evidence)
+            : evidence;
+        try {
+            await prisma.dailyTask.create({
+                data: {
+                    title: task.title,
+                    description: task.description || '',
+                    priority: task.priority || 'normal',
+                    category: task.category || 'Bàn giao',
+                    note: task.note || '',
+                    type: 'assignment',
+                    status: 'pending',
+                    assignee: recipients[0],
+                    verifier: '',
+                    dueDate: nextDueAt,
+                    tags: task.tags || null,
+                    attachments: JSON.stringify({ ...attachments, assignment: nextAssignment, evidence: nextEvidence }),
+                },
+            });
+            created += 1;
+        } catch (error) {
+            await prisma.appConfig.deleteMany({ where: { key: recurrenceKey } });
+            throw error;
+        }
+    }
+    return created;
+}
 
 // An assignment recipient can request completion, but only an admin can close it.
 ipcMain.handle('dailyTasks:requestAssignmentCompletion', async (_event, id) => {
@@ -7469,6 +7631,12 @@ ipcMain.handle('dailyTasks:resetDaily', async () => {
         const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
         await migrateLegacyDailyTaskSnapshots();
+        // Reconcile yesterday's immutable snapshot before any recurring task is
+        // reset or moved to today's deadline. Otherwise the old missed deadline
+        // disappears from the active row and can never be fined.
+        await reconcileSnapshotEvidencePenalties(now);
+        await reconcileEvidencePenalties();
+        await reconcileRecurringAssignments(now);
 
         // Daily work is not generated or reset on Sunday. Assignment tasks
         // retain their own deadlines and are intentionally unaffected.
@@ -9790,7 +9958,8 @@ const CONFIG_ACCESS = Object.freeze({
 function requireConfigAccess(key, operation) {
     if (typeof key !== 'string' || !key.trim()) throw new Error('Invalid configuration key.');
     requireRole();
-    const policy = CONFIG_ACCESS[key];
+    const policy = CONFIG_ACCESS[key]
+        || (key.startsWith('dailyTasksSnapshot:') ? CONFIG_ACCESS.dailyTasksSnapshots : null);
     if (!policy || !policy[operation]?.includes(currentSession.role)) {
         throw new Error(`Not authorized to ${operation} configuration key "${key}".`);
     }
@@ -9858,7 +10027,7 @@ function sanitizeStockCheckSessions(sessions, isAdmin) {
     if (isAdmin) return sessions;
     return sessions.map(session => ({
         ...session,
-        items: (session.items || []).map(({ systemStock, difference, ...item }) => item),
+        items: (session.items || []).map(item => sanitizeStockCheckItem(item, false)),
     }));
 }
 
@@ -9883,6 +10052,18 @@ function isStockCheckAssignee(session) {
 function sanitizeStockCheckItem(item, isAdmin) {
     if (isAdmin) return item;
     const { systemStock, difference, ...safeItem } = item;
+    // Keep the count blind until the checker explicitly asks to balance it.
+    // Once a mismatch has been confirmed (or the row has been balanced), the
+    // immutable comparison snapshot is safe and necessary for reconciliation.
+    if (item?.requiresNote) {
+        safeItem.balanceSystemStock = Number(item.balanceSystemStock ?? systemStock ?? 0);
+        safeItem.balanceActualStock = Number(item.balanceActualStock ?? item.actualStock ?? 0);
+        safeItem.balanceDifference = Number(item.balanceDifference ?? difference ?? 0);
+    } else if (!item?.balanced) {
+        delete safeItem.balanceSystemStock;
+        delete safeItem.balanceActualStock;
+        delete safeItem.balanceDifference;
+    }
     return safeItem;
 }
 
@@ -9917,6 +10098,9 @@ function resetCarriedOverStockCheckItem(item) {
         note,
         balancedAt,
         balancedBy,
+        balanceSystemStock,
+        balanceActualStock,
+        balanceDifference,
         ...stockItem
     } = item;
     return {
@@ -10326,6 +10510,9 @@ ipcMain.handle('stockCheck:balanceItems', async (event, payload = {}) => {
                 return {
                     ...item,
                     actualStock: balancedItem.actualStock,
+                    balanceSystemStock: balancedItem.systemStock,
+                    balanceActualStock: balancedItem.actualStock,
+                    balanceDifference: balancedItem.difference,
                     systemStock: balancedItem.actualStock,
                     difference: 0,
                     note: balancedItem.note || '',
@@ -10583,6 +10770,9 @@ ipcMain.handle('stockCheck:updateCount', async (event, payload = {}) => {
             storedItem.difference = clearCount ? 0 : actualStock - Number(storedItem.systemStock || 0);
             storedItem.balanced = false;
             storedItem.requiresNote = false;
+            delete storedItem.balanceSystemStock;
+            delete storedItem.balanceActualStock;
+            delete storedItem.balanceDifference;
             await writeStockCheckSessions(sessions, tx);
             return storedItem;
         }, { timeout: 30000, maxWait: 10000 });
@@ -10614,6 +10804,9 @@ ipcMain.handle('stockCheck:retryCount', async (event, payload = {}) => {
             storedItem.requiresNote = false;
             storedItem.countLocked = false;
             storedItem.retryCount = retryCount + 1;
+            delete storedItem.balanceSystemStock;
+            delete storedItem.balanceActualStock;
+            delete storedItem.balanceDifference;
             await writeStockCheckSessions(sessions, tx);
             return storedItem;
         }, { timeout: 30000, maxWait: 10000 });
@@ -10737,6 +10930,9 @@ ipcMain.handle('stockCheck:balanceItem', async (event, payload = {}) => {
             item.difference = difference;
             const historyItem = buildStockCheckBalanceHistoryItem({ ...item, difference, note, sessionId: session.id }, reference);
             historyItem.stockCheckRunId = session.runId || session.createdAt || session.id;
+            item.balanceSystemStock = historyItem.systemStock;
+            item.balanceActualStock = historyItem.actualStock;
+            item.balanceDifference = historyItem.difference;
             if (difference === 0) {
                 const stockBalance = await tx.stockBalance.create({
                     data: {

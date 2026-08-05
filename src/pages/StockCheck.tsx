@@ -63,6 +63,10 @@ interface CheckItem {
     requiresNote?: boolean;
     retryCount?: number;
     verificationStatus?: 'match' | 'balanced_mismatch';
+    // Snapshot revealed only after the user explicitly attempts a balance.
+    balanceSystemStock?: number;
+    balanceActualStock?: number;
+    balanceDifference?: number;
 }
 
 const MAX_COUNT_RETRIES = 2;
@@ -1655,87 +1659,52 @@ export default function StockCheck() {
     }, [productGroups, conversionRates]);
 
     // ── Render helpers ────────────────────────────────────────────────────────
-    const renderDiff = (item: CheckItem) => {
-        // Chưa nhập → dash
-        if (item.actualStock === null) return <span style={{ color: '#bbb' }}>—</span>;
+    const getBalanceComparison = (item: CheckItem) => {
+        const history = latestBalancedItemBySku.get(item.sku);
+        const systemStock = item.balanceSystemStock ?? history?.systemStock;
+        const actualStock = item.balanceActualStock ?? history?.actualStock ?? item.actualStock;
+        const difference = item.balanceDifference ?? history?.difference;
+        if (systemStock === undefined || actualStock === null || actualStock === undefined || difference === undefined) return null;
+        return { systemStock: Number(systemStock), actualStock: Number(actualStock), difference: Number(difference) };
+    };
 
-        if (item.balanced) {
-            // Older sessions did not store verificationStatus. Recover that
-            // result from the immutable balance history for a clear audit view.
-            const balanceHistory = latestBalancedItemBySku.get(item.sku);
-            const isMatch = item.verificationStatus === 'match' || balanceHistory?.difference === 0;
-            if (isMatch) {
-                return <span style={{ color: '#15803d', fontWeight: 700, whiteSpace: 'nowrap' }}>✓ Khớp</span>;
-            }
-
-            const adjustmentText = balanceHistory
-                ? `Tồn cũ ${balanceHistory.systemStock} → tồn mới ${balanceHistory.actualStock}`
-                : 'Đã cân bằng kho';
-            return (
-                <Tooltip title={isAdmin ? adjustmentText : 'Đã cân bằng kho'}>
-                    <span style={{ color: '#15803d', fontWeight: 700, whiteSpace: 'nowrap', cursor: 'help' }}>
-                        ✓ Đã điều chỉnh
-                    </span>
-                </Tooltip>
-            );
-        }
-
-        // Never compare a typed count in the UI. The outcome is only revealed
-        // after the balance action has committed this SKU.
-        if (!item.balanced) {
-            return item.requiresNote && item.countLocked
-                ? <span style={{ color: '#b45309', fontWeight: 700 }}>Cần nhập lý do</span>
-                : <span style={{ color: '#64748b', fontWeight: 600 }}>Đã nhập</span>;
-        }
-
-        // A comparison result is only shown after the count has been committed
-        // through the balance action; it must not update while staff are typing.
-        if (!isAdmin) {
-            if (item.requiresNote) {
-                return <span style={{ color: '#dc2626', fontWeight: 700 }}>✕ Không khớp</span>;
-            }
-            return item.balanced
-                ? <span style={{ color: '#52c41a', fontWeight: 700 }}>{item.verificationStatus === 'match' ? '✓ Khớp' : 'Đã cân bằng'}</span>
-                : <span style={{ color: '#64748b', fontWeight: 600 }}>Đã nhập</span>;
-        }
-
-        // Đã CÂN BẰNG → hiện số chênh thật
-        if (item.balanced) {
-            const balanceHistory = latestBalancedItemBySku.get(item.sku);
-            if (balanceHistory && balanceHistory.difference !== 0) {
-                return (
-                    <div style={{ lineHeight: 1.15 }}>
-                        <div style={{ color: '#52c41a', fontWeight: 800 }}>0</div>
-                        <div style={{ color: '#fa8c16', fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap' }}>
-                            Đã xử lý {balanceHistory.difference > 0 ? `+${balanceHistory.difference}` : balanceHistory.difference}
-                        </div>
-                    </div>
-                );
-            }
-            return <span style={{ color: '#52c41a', fontWeight: 700 }}>0</span>;
-        }
-
-        // Đã nhập nhưng CHƯA CÂN BẰNG → chỉ hiện badge trạng thái, không lộ số
-        const matched = item.difference === 0;
-        return matched ? (
-            <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: 3,
-                fontSize: 11, fontWeight: 700, color: '#16a34a',
-                background: '#f0fdf4', border: '1px solid #bbf7d0',
-                borderRadius: 6, padding: '2px 7px', whiteSpace: 'nowrap',
-            }}>
-                ✓ Khớp
-            </span>
-        ) : (
-            <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: 3,
-                fontSize: 11, fontWeight: 700, color: '#dc2626',
-                background: '#fef2f2', border: '1px solid #fecaca',
-                borderRadius: 6, padding: '2px 7px', whiteSpace: 'nowrap',
-            }}>
-                ✗ Lệch
-            </span>
+    const renderComparison = (comparison: { systemStock: number; actualStock: number; difference: number }, balanced: boolean) => {
+        const signedDifference = comparison.difference > 0 ? `+${comparison.difference}` : String(comparison.difference);
+        return (
+            <div style={{ lineHeight: 1.25 }}>
+                <div style={{ color: balanced ? '#15803d' : '#dc2626', fontWeight: 800 }}>
+                    {balanced ? '✓ Đã điều chỉnh' : `⚠ Lệch ${signedDifference}`}
+                </div>
+                <div style={{ color: '#475569', fontSize: 10.5, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                    Tồn cũ {comparison.systemStock.toLocaleString('vi-VN')} → kiểm {comparison.actualStock.toLocaleString('vi-VN')}
+                </div>
+                {balanced && comparison.difference !== 0 && (
+                    <div style={{ color: '#b45309', fontSize: 10.5, fontWeight: 700 }}>Chênh lệch {signedDifference}</div>
+                )}
+            </div>
         );
+    };
+
+    const renderDiff = (item: CheckItem) => {
+        if (item.actualStock === null) return <span style={{ color: '#bbb' }}>—</span>;
+        const comparison = getBalanceComparison(item);
+
+        if (item.balanced) {
+            const isMatch = item.verificationStatus === 'match' || comparison?.difference === 0;
+            if (isMatch) return <span style={{ color: '#15803d', fontWeight: 700, whiteSpace: 'nowrap' }}>✓ Khớp</span>;
+            return comparison
+                ? renderComparison(comparison, true)
+                : <span style={{ color: '#15803d', fontWeight: 700, whiteSpace: 'nowrap' }}>✓ Đã điều chỉnh</span>;
+        }
+
+        // The comparison remains blind while typing and is revealed only after
+        // the user explicitly tries to balance this SKU.
+        if (item.requiresNote && item.countLocked) {
+            return comparison
+                ? renderComparison(comparison, false)
+                : <span style={{ color: '#b45309', fontWeight: 700 }}>Cần nhập lý do</span>;
+        }
+        return <span style={{ color: '#64748b', fontWeight: 600 }}>Đã nhập</span>;
     };
 
     const renderCountInput = (item: CheckItem) => {
@@ -2313,15 +2282,17 @@ export default function StockCheck() {
                                     <div style={{ padding: '20px 22px 18px', borderBottom: '1px solid #e9eef5' }}>
                                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
                                             <button onClick={() => setActiveProductGroup('')} style={{ border: 0, background: 'transparent', padding: 0, color: '#7c8da6', fontSize: 13, cursor: 'pointer' }}>← Quay lại danh sách nhóm</button>
-                                            <Tooltip title={hasConversion ? 'Xem hoặc cập nhật cách nhập số lượng' : 'Bắt buộc thiết lập quy đổi hoặc chọn hàng không có quy đổi trước khi cân bằng kho'}>
-                                                <button onClick={() => setConversionModalGroup(group.productName)} style={{ display: 'flex', alignItems: 'center', gap: 8, color: hasConversion ? '#0f766e' : '#b54708', background: hasConversion ? '#ecfdf5' : '#fff7ed', border: `1px solid ${hasConversion ? '#6ee7b7' : '#fdba74'}`, borderRadius: 8, padding: '10px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 800, boxShadow: hasConversion ? '0 2px 5px rgba(16, 185, 129, 0.12)' : '0 3px 8px rgba(249, 115, 22, 0.16)' }}>
-                                                    <SettingOutlined /> {hasNoConversion ? 'Nhập trực tiếp' : hasConversion ? `Quy đổi · ${units.length} đơn vị` : 'Thiết lập quy đổi'}
-                                                </button>
-                                            </Tooltip>
                                         </div>
                                         <div style={{ marginTop: 22, display: 'flex', alignItems: 'end', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap' }}>
                                             <div>
-                                                <h1 style={{ margin: 0, color: '#1e3557', fontSize: 38, lineHeight: 1.05, letterSpacing: 0, fontWeight: 800 }}>{group.productName}</h1>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                                                    <h1 style={{ margin: 0, color: '#1e3557', fontSize: 38, lineHeight: 1.05, letterSpacing: 0, fontWeight: 800 }}>{group.productName}</h1>
+                                                    <Tooltip title={hasConversion ? 'Xem hoặc cập nhật cách nhập số lượng' : 'Thiết lập đơn vị nhập trước khi cân bằng kho'}>
+                                                        <button onClick={() => setConversionModalGroup(group.productName)} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, color: hasConversion ? '#0f766e' : '#b54708', background: hasConversion ? '#ecfdf5' : '#fff7ed', border: `1px solid ${hasConversion ? '#6ee7b7' : '#fdba74'}`, borderRadius: 8, padding: '7px 11px', cursor: 'pointer', fontSize: 12, fontWeight: 800, boxShadow: 'none' }}>
+                                                            <SettingOutlined /> {hasNoConversion ? 'Đơn vị nhập · trực tiếp' : hasConversion ? `Đơn vị nhập · ${units.length}` : 'Thiết lập đơn vị nhập'}
+                                                        </button>
+                                                    </Tooltip>
+                                                </div>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 38, marginTop: 24 }}>
                                                     <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                                                         <span style={{ width: 42, height: 42, borderRadius: '50%', border: '2px solid #10b981', display: 'inline-block' }} />
@@ -2387,7 +2358,7 @@ export default function StockCheck() {
                                                                 ) : (
                                                                     <th style={{ ...S.th, background: '#f8fafc', color: '#64748b', width: 90, textAlign: 'center' }}>Tổng TT</th>
                                                                 )}
-                                                                <th style={{ ...S.th, background: '#f8fafc', color: '#64748b', width: 108, textAlign: 'center' }}>Trạng thái</th>
+                                                                <th style={{ ...S.th, background: '#f8fafc', color: '#64748b', width: 190, textAlign: 'center' }}>Trạng thái</th>
                                                                 <th style={{ ...S.th, background: '#f8fafc', color: '#64748b', width: 96, minWidth: 96, textAlign: 'center', textTransform: 'none' }}>
                                                                     {isAdmin ? (isBulkNoteEditing ? (
                                                                         <div>
@@ -2462,8 +2433,6 @@ export default function StockCheck() {
                                                             {group.items.map((item, idx) => {
                                                                 const needNote = !!item.requiresNote && !!item.countLocked && !item.note.trim() && item.actualStock !== null;
                                                                 const balanceBlockedByNote = needNote;
-                                                                const retriesRemaining = Math.max(0, MAX_COUNT_RETRIES - (item.retryCount || 0));
-                                                                const canRetryCount = !isAdmin && !!item.requiresNote && !!item.countLocked && retriesRemaining > 0 && !item.note.trim();
                                                                 const rowBg = item.balanced ? '#f6ffed' : (idx % 2 === 0 ? '#fff' : '#fafafa');
                                                                 const ci = countingInputs[item.sku] || { unitCounts: [], le: 0 };
                                                                 // Tính tổng từ counting inputs nếu có
@@ -2549,11 +2518,11 @@ export default function StockCheck() {
                                                                         )}
                                                                         <td style={{
                                                                             ...S.td,
-                                                                            width: 130,
-                                                                            minWidth: 130,
+                                                                            width: 190,
+                                                                            minWidth: 190,
                                                                             height: 42,
                                                                             textAlign: 'center',
-                                                                            whiteSpace: 'nowrap',
+                                                                            whiteSpace: 'normal',
                                                                         }}>
                                                                             {renderDiff(item)}
                                                                         </td>
@@ -2586,17 +2555,16 @@ export default function StockCheck() {
                                                                                     <Tooltip title={
                                                                                         !hasConversion ? 'Cần thiết lập quy đổi trước khi cân bằng'
                                                                                             : item.actualStock === null ? 'Chưa nhập tồn'
-                                                                                            : canRetryCount ? `Có thể nhập lại (${retriesRemaining} lượt)`
-                                                                                                : balanceBlockedByNote ? 'Cần nhập ghi chú'
+                                                                                            : balanceBlockedByNote ? 'Bấm để nhập lý do chênh lệch'
                                                                                                 : 'Cân bằng kho'
                                                                                     }>
                                                                                         <Button size="small"
                                                                                             style={{ minWidth: 112, height: 34, background: '#fff', borderColor: '#34c38f', color: '#169c69', fontSize: 12, fontWeight: 700, borderRadius: 7 }}
                                                                                             loading={balancing[item.sku]}
-                                                                                            disabled={item.balanced || !hasConversion || isLockedDate || item.actualStock === null || (balanceBlockedByNote && !canRetryCount) || (!isAdmin && !isAssignedChecker)}
-                                                                                            onClick={() => canRetryCount ? handleRetryCount(item) : handleSingleBalance(item)}
+                                                                                            disabled={item.balanced || !hasConversion || isLockedDate || item.actualStock === null || (!isAdmin && !isAssignedChecker)}
+                                                                                            onClick={() => balanceBlockedByNote ? openNoteModal(item) : handleSingleBalance(item)}
                                                                                         >
-                                                                                            {canRetryCount ? `Nhập lại (${retriesRemaining})` : 'Cân bằng kho'}
+                                                                                            {balanceBlockedByNote ? 'Nhập lý do' : 'Cân bằng kho'}
                                                                                         </Button>
                                                                                     </Tooltip>
                                                                                 )}
@@ -2898,6 +2866,8 @@ export default function StockCheck() {
                 const noteItem = todaySession?.items.find(item => item.sku === noteModalSku);
                 if (!noteItem) return null;
                 const reasonRequired = noteItem.requiresNote && noteItem.countLocked;
+                const comparison = getBalanceComparison(noteItem);
+                const retriesRemaining = Math.max(0, MAX_COUNT_RETRIES - (noteItem.retryCount || 0));
                 return (
                     <Modal
                         title={reasonRequired ? 'Lý do chênh lệch' : 'Ghi chú SKU'}
@@ -2913,12 +2883,32 @@ export default function StockCheck() {
                             {noteItem.color ? ` · ${noteItem.color}` : ''}
                         </div>
                         {reasonRequired && (
-                            <Alert
-                                type="warning"
-                                showIcon
-                                message="SKU này đang chênh lệch, cần nhập lý do trước khi cân bằng kho."
-                                style={{ marginBottom: 12 }}
-                            />
+                            <>
+                                <Alert
+                                    type="warning"
+                                    showIcon
+                                    message="SKU này đang chênh lệch, cần nhập lý do trước khi cân bằng kho."
+                                    description={comparison ? (
+                                        <div style={{ marginTop: 5, fontWeight: 700 }}>
+                                            Tồn hệ thống cũ: {comparison.systemStock.toLocaleString('vi-VN')} · Kiểm thực tế: {comparison.actualStock.toLocaleString('vi-VN')} · Chênh lệch: {comparison.difference > 0 ? '+' : ''}{comparison.difference.toLocaleString('vi-VN')}
+                                        </div>
+                                    ) : undefined}
+                                    style={{ marginBottom: 12 }}
+                                />
+                                {!isAdmin && retriesRemaining > 0 && !noteItem.note.trim() && (
+                                    <Button
+                                        type="link"
+                                        size="small"
+                                        onClick={() => {
+                                            closeNoteModal();
+                                            handleRetryCount(noteItem);
+                                        }}
+                                        style={{ padding: 0, marginBottom: 10, fontWeight: 700 }}
+                                    >
+                                        Nhập lại số tồn ({retriesRemaining} lượt còn lại)
+                                    </Button>
+                                )}
+                            </>
                         )}
                         <Input.TextArea
                             autoFocus

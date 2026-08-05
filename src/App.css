@@ -98,7 +98,7 @@
     color: #fff !important;
     font-size: 18px !important;
     border-top: 1px solid rgba(255, 255, 255, 0.2) !important;
-    transition: all 0.3s ease !important;
+    transition: background 0.2s ease, box-shadow 0.2s ease, color 0.2s ease !important;
     box-shadow: 0 -2px 8px rgba(0, 171, 86, 0.2) !important;
     display: flex !important;
     align-items: center !important;
@@ -109,7 +109,6 @@
     background: linear-gradient(135deg, #00c964 0%, #00e87a 100%) !important;
     color: #fff !important;
     box-shadow: 0 -4px 12px rgba(0, 171, 86, 0.4) !important;
-    transform: scale(1.05) !important;
 }
 
 /* Icon của collapse button */
@@ -151,12 +150,35 @@
     background: linear-gradient(135deg, #00ab56 0%, #00d66c 100%) !important;
     border: none !important;
     box-shadow: 0 2px 8px rgba(0, 171, 86, 0.3) !important;
+    transition: background 0.2s ease, box-shadow 0.2s ease, color 0.2s ease !important;
 }
 
 .ant-btn-primary:hover {
     background: linear-gradient(135deg, #00c964 0%, #00e87a 100%) !important;
-    transform: translateY(-1px);
     box-shadow: 0 4px 12px rgba(0, 171, 86, 0.4) !important;
+}
+
+/* Keep click/hover feedback stable: do not move controls while they are
+   being clicked, which causes a visible one-frame flicker in Electron. */
+.ant-btn-primary:active,
+.ant-btn-primary:focus-visible {
+    transform: none !important;
+}
+
+/* Ant Design buttons are used across all modules. Keep their hover/press
+   feedback paint-only so a click never causes a one-frame layout jump. */
+.ant-btn:hover,
+.ant-btn:active,
+.ant-btn:focus-visible {
+    transform: none !important;
+}
+
+/* Some modules use native buttons with their own hover/active rules. Keep all
+   controls geometrically stable as well; color/shadow feedback remains intact. */
+button:hover,
+button:active,
+button:focus-visible {
+    transform: none !important;
 }
 
 /* Status Row Colors - Bold & Vibrant */

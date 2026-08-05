@@ -12,6 +12,7 @@ import {
     Typography,
     Tag,
     Switch,
+    Alert,
 } from 'antd';
 import { UserAddOutlined, EditOutlined, DeleteOutlined, LockOutlined, UnlockOutlined, KeyOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -360,8 +361,9 @@ export default function PermissionsPage() {
                             icon={<KeyOutlined />}
                             onClick={() => handleChangePassword(record)}
                             style={{ color: '#52c41a' }}
+                            title="Không thể xem mật khẩu hiện tại; mở để đặt lại mật khẩu tạm"
                         >
-                            Mật khẩu
+                            Đặt lại
                         </Button>
                     )}
                     <Button
@@ -492,12 +494,19 @@ export default function PermissionsPage() {
 
             {/* Password Change Modal */}
             <Modal
-                title={<><KeyOutlined style={{ color: '#52c41a', marginRight: 8 }} /> Mật khẩu</>}
+                title={<><KeyOutlined style={{ color: '#52c41a', marginRight: 8 }} /> Đặt lại mật khẩu</>}
                 open={passwordModalVisible}
                 onCancel={() => setPasswordModalVisible(false)}
                 footer={null}
                 width={500}
             >
+                <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message="Không thể xem mật khẩu hiện tại"
+                    description="Mật khẩu được lưu dưới dạng mã băm bảo mật. Admin chỉ có thể cấp mật khẩu tạm; người dùng sẽ phải đổi lại ở lần đăng nhập tiếp theo."
+                />
                 <Form form={passwordForm} layout="vertical" onFinish={handlePasswordSubmit}>
                     <div style={{ marginBottom: 16, padding: 12, background: '#f0f5ff', borderRadius: 8 }}>
                         <Text strong>Người dùng: </Text>
