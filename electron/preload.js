@@ -126,6 +126,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         requestAssignmentCompletion: (taskId) => ipcRenderer.invoke('dailyTasks:requestAssignmentCompletion', taskId),
         completeRegularTask: (taskId, payload) => ipcRenderer.invoke('dailyTasks:completeRegularTask', taskId, payload),
         getEvidenceImageUrl: (taskId, storagePath) => ipcRenderer.invoke('dailyTasks:getEvidenceImageUrl', taskId, storagePath),
+        getDriveEvidenceImageUrl: (taskId, driveUrl, mimeType) => ipcRenderer.invoke('dailyTasks:getDriveEvidenceImageUrl', taskId, driveUrl, mimeType),
         listEvidencePenalties: () => ipcRenderer.invoke('dailyTasks:listEvidencePenalties'),
         delete: (id) => ipcRenderer.invoke('dailyTasks:delete', id),
         getStats: (filters) => ipcRenderer.invoke('dailyTasks:stats', filters),
