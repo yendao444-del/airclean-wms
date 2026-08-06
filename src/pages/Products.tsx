@@ -24,12 +24,21 @@ import './Products.css';
 
 const { Title } = Typography;
 
+interface GoodsCompany {
+    id: string;
+    name: string;
+    productIds?: number[];
+}
+
 export default function ProductsPage() {
     const currentUser = useCurrentUser();
     const { user } = useAuth();
     const canViewInventoryStock = user?.role === 'admin';
     const [products, setProducts] = useState<Product[]>([]);
     const [categories, setCategories] = useState<Category[]>([]);
+    const [goodsCompanies, setGoodsCompanies] = useState<GoodsCompany[]>([]);
+    const [goodsCompanyModalVisible, setGoodsCompanyModalVisible] = useState(false);
+    const [newGoodsCompanyName, setNewGoodsCompanyName] = useState('');
     const [loading, setLoading] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
     const [editingProduct, setEditingProduct] = useState<Product | null>(null);
@@ -66,6 +75,7 @@ export default function ProductsPage() {
     useEffect(() => {
         loadProducts();
         loadCategories();
+        loadGoodsCompanies();
     }, []);
 
     // Set default category to "Khẩu Trang" when categories are loaded
@@ -254,9 +264,56 @@ export default function ProductsPage() {
         }
     };
 
+    const loadGoodsCompanies = async () => {
+        if (!window.electronAPI?.goodsCompanies?.getAll) return;
+        try {
+            const result = await window.electronAPI.goodsCompanies.getAll();
+            if (result.success && result.data) setGoodsCompanies(result.data);
+        } catch (error) {
+            console.error('Error loading goods companies:', error);
+        }
+    };
+
+    const handleCreateGoodsCompany = async () => {
+        const name = newGoodsCompanyName.trim();
+        if (!name) {
+            message.warning('Nhập tên công ty / thương hiệu trước.');
+            return;
+        }
+        const result = await window.electronAPI.goodsCompanies.create({ name });
+        if (!result.success) {
+            message.error(result.error || 'Không thể thêm công ty.');
+            return;
+        }
+        setNewGoodsCompanyName('');
+        await loadGoodsCompanies();
+        message.success('Đã thêm công ty / thương hiệu.');
+    };
+
+    const handleDeleteGoodsCompany = (company: GoodsCompany) => {
+        Modal.confirm({
+            title: 'Xóa công ty / thương hiệu?',
+            content: `Sản phẩm đã gán “${company.name}” sẽ trở về trạng thái chưa gán. Phiếu nhập cũ không bị thay đổi.`,
+            okText: 'Xóa',
+            okType: 'danger',
+            cancelText: 'Hủy',
+            onOk: async () => {
+                const result = await window.electronAPI.goodsCompanies.delete(company.id);
+                if (!result.success) {
+                    message.error(result.error || 'Không thể xóa công ty.');
+                    return;
+                }
+                await loadGoodsCompanies();
+                form.setFieldValue('companyId', undefined);
+                message.success('Đã xóa công ty / thương hiệu.');
+            },
+        });
+    };
+
     const handleAdd = () => {
         setEditingProduct(null);
         form.resetFields();
+        form.setFieldValue('companyId', undefined);
         setVariants([]);
         setOriginalVariantSkus([]); // Reset danh sách SKU cũ
 
@@ -271,7 +328,10 @@ export default function ProductsPage() {
 
     const handleEdit = (product: Product) => {
         setEditingProduct(product);
-        form.setFieldsValue(product);
+        const companyId = goodsCompanies.find(company =>
+            Array.isArray(company.productIds) && company.productIds.map(Number).includes(Number(product.id))
+        )?.id;
+        form.setFieldsValue({ ...product, companyId });
 
         // Load existing variants
         if (product.variants) {
@@ -524,6 +584,7 @@ export default function ProductsPage() {
 
     const handleSubmit = async (values: any) => {
         try {
+            const { companyId, ...productValues } = values;
             // ✨ Filter out empty/invalid variants (variants without color name)
             // Tự động tính lại combo.cost = variant.cost × combo.quantity khi save
             const validVariants = variants
@@ -540,10 +601,10 @@ export default function ProductsPage() {
 
             // Add variants to payload if exists
             const payload = {
-                ...values,
-                categoryId: values.categoryId || null, // Fix: Convert undefined to null
-                price: values.price || 0, // Default to 0 if not set
-                cost: values.cost || 0, // Default to 0 if not set
+                ...productValues,
+                categoryId: productValues.categoryId || null, // Fix: Convert undefined to null
+                price: productValues.price || 0, // Default to 0 if not set
+                cost: productValues.cost || 0, // Default to 0 if not set
                 variants: validVariants.length > 0 ? JSON.stringify(validVariants) : null,
                 // 🎁 Combo Products Data
                 isCombo: isCombo,
@@ -563,6 +624,17 @@ export default function ProductsPage() {
             if (editingProduct) {
                 const result = await window.electronAPI.products.update(editingProduct.id, updatePayload);
                 if (result.success) {
+                    if (window.electronAPI.goodsCompanies?.setProductCompany) {
+                        const companyResult = await window.electronAPI.goodsCompanies.setProductCompany({
+                            productId: editingProduct.id,
+                            companyId: companyId || null,
+                        });
+                        if (!companyResult.success) {
+                            message.warning(companyResult.error || 'Sản phẩm đã lưu nhưng chưa thể gán công ty.');
+                        }
+                    } else {
+                        message.warning('Sản phẩm đã lưu. Hãy tắt và mở lại ứng dụng để kích hoạt lưu liên kết công ty.');
+                    }
                     // Đồng bộ giá vốn combo số lượng trong bảng combos
                     const comboUpdates: Promise<any>[] = [];
                     if (canViewInventoryStock) validVariants.forEach(v => {
@@ -584,9 +656,19 @@ export default function ProductsPage() {
                             });
                         }
                     });
-                    if (comboUpdates.length > 0) await Promise.all(comboUpdates);
-
                     message.success('Đã cập nhật sản phẩm!');
+                    // The product is already saved. Close immediately; audit
+                    // logging and combo-cost synchronization must never keep
+                    // the edit modal open.
+                    setModalVisible(false);
+                    void loadProducts();
+                    void loadGoodsCompanies();
+
+                    if (comboUpdates.length > 0) {
+                        void Promise.all(comboUpdates).catch(error => {
+                            console.error('Không thể đồng bộ một số combo:', error);
+                        });
+                    }
 
                     // Log activity
                     const changes: any = {};
@@ -611,7 +693,7 @@ export default function ProductsPage() {
                         changeDescriptions.push(`tồn kho từ ${changes.stock.old} → ${changes.stock.new}`);
                     }
 
-                    await window.electronAPI.activityLog.create({
+                    void window.electronAPI.activityLog.create({
                         module: 'products',
                         action: 'UPDATE',
                         recordId: editingProduct.id,
@@ -622,18 +704,30 @@ export default function ProductsPage() {
                         severity: 'INFO'
                     });
 
-                    setModalVisible(false);
-                    loadProducts();
                 } else {
                     message.error(result.error || 'Không thể cập nhật');
                 }
             } else {
                 const result = await window.electronAPI.products.create(payload);
                 if (result.success && result.data) {
+                    if (window.electronAPI.goodsCompanies?.setProductCompany) {
+                        const companyResult = await window.electronAPI.goodsCompanies.setProductCompany({
+                            productId: result.data.id,
+                            companyId: companyId || null,
+                        });
+                        if (!companyResult.success) {
+                            message.warning(companyResult.error || 'Sản phẩm đã tạo nhưng chưa thể gán công ty.');
+                        }
+                    } else {
+                        message.warning('Sản phẩm đã tạo. Hãy tắt và mở lại ứng dụng để kích hoạt lưu liên kết công ty.');
+                    }
                     message.success('Đã thêm sản phẩm mới!');
+                    setModalVisible(false);
+                    void loadProducts();
+                    void loadGoodsCompanies();
 
                     // Log activity
-                    await window.electronAPI.activityLog.create({
+                    void window.electronAPI.activityLog.create({
                         module: 'products',
                         action: 'CREATE',
                         recordId: result.data.id,
@@ -643,8 +737,6 @@ export default function ProductsPage() {
                         severity: 'INFO'
                     });
 
-                    setModalVisible(false);
-                    loadProducts();
                 } else {
                     message.error(result.error || 'Không thể thêm sản phẩm');
                     // Show detailed error for debugging
@@ -1517,6 +1609,28 @@ export default function ProductsPage() {
                         <Input placeholder="VD: Cái, Hộp, Kg..." />
                     </Form.Item>
 
+                    <Form.Item
+                        label={
+                            <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+                                <span>Công ty / thương hiệu hàng hóa</span>
+                                <Button type="link" size="small" onClick={() => setGoodsCompanyModalVisible(true)} style={{ padding: 0, height: 'auto' }}>
+                                    Quản lý
+                                </Button>
+                            </div>
+                        }
+                        name="companyId"
+                        extra="Gán một lần tại danh sách sản phẩm. Khi lập phiếu nhập, công ty sẽ tự điền theo SKU."
+                    >
+                        <Select
+                            placeholder="Chưa gán công ty"
+                            allowClear
+                            showSearch
+                            optionFilterProp="label"
+                            options={goodsCompanies.map(company => ({ value: company.id, label: company.name }))}
+                            notFoundContent="Chưa có công ty. Hãy tạo công ty/thương hiệu hàng hóa trước."
+                        />
+                    </Form.Item>
+
                     {/* Hide price/stock when variants exist - each variant has its own */}
                     {variants.length === 0 && (
                         <>
@@ -1925,6 +2039,34 @@ export default function ProductsPage() {
                         </Space>
                     </Form.Item>
                 </Form>
+            </Modal>
+
+            <Modal
+                title="Cài đặt công ty / thương hiệu hàng hóa"
+                open={goodsCompanyModalVisible}
+                onCancel={() => setGoodsCompanyModalVisible(false)}
+                footer={null}
+                width={560}
+            >
+                <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
+                    <Input
+                        value={newGoodsCompanyName}
+                        onChange={event => setNewGoodsCompanyName(event.target.value)}
+                        onPressEnter={handleCreateGoodsCompany}
+                        placeholder="Ví dụ: UNICARE, Duy Ngọc, Công ty ABC"
+                    />
+                    <Button type="primary" icon={<PlusOutlined />} onClick={handleCreateGoodsCompany}>Thêm</Button>
+                </Space.Compact>
+                <div style={{ display: 'grid', gap: 8 }}>
+                    {goodsCompanies.length === 0 ? (
+                        <div style={{ color: '#8c8c8c', textAlign: 'center', padding: 20 }}>Chưa có công ty / thương hiệu nào.</div>
+                    ) : goodsCompanies.map(company => (
+                        <div key={company.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: '1px solid #f0f0f0', borderRadius: 6, padding: '8px 10px' }}>
+                            <span>{company.name}</span>
+                            <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => handleDeleteGoodsCompany(company)}>Xóa</Button>
+                        </div>
+                    ))}
+                </div>
             </Modal>
 
             {/* Category Management Modal */}

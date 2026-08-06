@@ -364,15 +364,18 @@ const GRADIENT_PRESETS = [
 const DailyTasks = () => {
     const { user } = useAuth();
     const isAdmin = user?.role === 'admin';
-    const canReviewEvidence = user?.role === 'admin' || user?.role === 'manager';
+    // Tài khoản test có vai trò quản lý mở rộng để kiểm thử toàn bộ luồng công việc.
+    const isTestOperator = Boolean(user?.isTestAccount);
+    const canReviewEvidence = user?.role === 'admin' || user?.role === 'manager' || isTestOperator;
     const isAssignmentRecipient = useCallback((task: Task) => {
+        if (isTestOperator) return true;
         const currentUserNames = [user?.username, user?.fullName]
             .map(name => String(name || '').trim().toLowerCase())
             .filter(Boolean);
         return getAssignmentRecipients(task).some(assignee =>
             currentUserNames.includes(String(assignee || '').trim().toLowerCase())
         );
-    }, [user?.fullName, user?.username]);
+    }, [isTestOperator, user?.fullName, user?.username]);
     const [tasks, setTasks] = useState<Task[]>([]);
     const [categories, setCategories] = useState(CATEGORIES);
     const [editingCategory, setEditingCategory] = useState<any>(null);
@@ -492,6 +495,7 @@ const DailyTasks = () => {
 
     const [showTaskActionGuide, setShowTaskActionGuide] = useState(false);
     const hasShownRowActionHintRef = useRef(false);
+    const evidenceImageUrlCacheRef = useRef(new Map<string, { url: string; expiresAt: number }>());
 
     const dismissTaskActionGuide = () => {
         setShowTaskActionGuide(false);
@@ -2236,42 +2240,91 @@ const DailyTasks = () => {
         const submittedImages = evidence.submittedImages?.length
             ? evidence.submittedImages
             : evidence.submittedImage ? [evidence.submittedImage] : [];
-        const imageResults = await Promise.all(submittedImages.map(async image => {
-            if (image.driveUrl) {
-                const result = await window.electronAPI.dailyTasks.getDriveEvidenceImageUrl(task.id, image.driveUrl, image.mimeType);
-                return result.success && result.data?.url ? { ...image, url: result.data.url } : null;
+
+        const imageKey = (image: EvidenceImage) => image.storagePath || image.driveUrl || image.hash || image.name || '';
+        const getCachedImageUrl = (key: string) => {
+            const cached = evidenceImageUrlCacheRef.current.get(key);
+            if (!cached) return '';
+            if (cached.expiresAt <= Date.now()) {
+                evidenceImageUrlCacheRef.current.delete(key);
+                return '';
             }
-            if (!image.storagePath) return null;
-            const result = await window.electronAPI.dailyTasks.getEvidenceImageUrl(task.id, image.storagePath);
-            return result.success && result.data?.url ? { ...image, url: result.data.url } : null;
-        }));
-        const availableImages = imageResults.filter((image): image is EvidenceImage & { url: string } => Boolean(image));
-        if (submittedImages.length > 0 && availableImages.length === 0) {
-            message.error('Không thể tải ảnh bằng chứng.');
-            return;
-        }
-        Modal.info({
-            title: 'Bằng chứng công việc',
-            width: 980,
-            content: availableImages.length > 0 ? (
-                <div>
-                    <p style={{ marginBottom: 8 }}><strong>{task.title}</strong></p>
+            return cached.url;
+        };
+        const cacheImageUrl = (key: string, url: string) => {
+            const cache = evidenceImageUrlCacheRef.current;
+            cache.delete(key);
+            cache.set(key, { url, expiresAt: Date.now() + 4 * 60 * 1000 });
+            while (cache.size > 10) {
+                const oldestKey = cache.keys().next().value;
+                if (!oldestKey) break;
+                cache.delete(oldestKey);
+            }
+        };
+        const renderEvidence = (images: Array<EvidenceImage & { url: string }>, loading: boolean, failed = false) => (
+            <div>
+                <p style={{ marginBottom: 8 }}><strong>{task.title}</strong></p>
+                {images.length > 0 && (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
-                        {availableImages.map((image, index) => (
-                            <a key={image.storagePath || image.driveUrl || image.hash || String(index)} href={image.url} target="_blank" rel="noreferrer" title={image.name}>
+                        {images.map((image, index) => (
+                            <a key={imageKey(image) || String(index)} href={image.url} target="_blank" rel="noreferrer" title={image.name}>
                                 <img
                                     src={image.url}
                                     alt={`Bằng chứng ${index + 1}`}
+                                    loading="lazy"
+                                    decoding="async"
                                     style={{ display: 'block', width: '100%', height: 520, objectFit: 'contain', borderRadius: 8, background: '#f8fafc' }}
                                 />
                             </a>
                         ))}
                     </div>
-                    {evidence.submittedAt && <p style={{ marginTop: 12, color: '#64748b' }}>Đã nộp lúc {dayjs(evidence.submittedAt).format('DD/MM/YYYY HH:mm')}</p>}
-                </div>
-            ) : 'Nhân viên chưa nộp bằng chứng.',
+                )}
+                {loading && (
+                    <div style={{ minHeight: images.length ? 44 : 260, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b' }}>
+                        Đang tải ảnh bằng chứng…
+                    </div>
+                )}
+                {!loading && failed && images.length === 0 && (
+                    <div style={{ minHeight: 180, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#dc2626' }}>
+                        Không thể tải ảnh bằng chứng.
+                    </div>
+                )}
+                {!loading && submittedImages.length === 0 && 'Nhân viên chưa nộp bằng chứng.'}
+                {evidence.submittedAt && <p style={{ marginTop: 12, color: '#64748b' }}>Đã nộp lúc {dayjs(evidence.submittedAt).format('DD/MM/YYYY HH:mm')}</p>}
+            </div>
+        );
+
+        const cachedImages = submittedImages.flatMap(image => {
+            const url = getCachedImageUrl(imageKey(image));
+            return url ? [{ ...image, url }] : [];
+        });
+        const modal = Modal.info({
+            title: 'Bằng chứng công việc',
+            width: 980,
+            content: renderEvidence(cachedImages, cachedImages.length < submittedImages.length),
             okText: 'Đóng',
         });
+        if (submittedImages.length === 0 || cachedImages.length === submittedImages.length) return;
+
+        const imageResults = await Promise.all(submittedImages.map(async image => {
+            const key = imageKey(image);
+            const cachedUrl = getCachedImageUrl(key);
+            if (cachedUrl) return { ...image, url: cachedUrl };
+            if (image.driveUrl) {
+                const result = await window.electronAPI.dailyTasks.getDriveEvidenceImageUrl(task.id, image.driveUrl, image.mimeType);
+                if (!result.success || !result.data?.url) return null;
+                cacheImageUrl(key, result.data.url);
+                return { ...image, url: result.data.url };
+            }
+            if (!image.storagePath) return null;
+            const result = await window.electronAPI.dailyTasks.getEvidenceImageUrl(task.id, image.storagePath);
+            if (!result.success || !result.data?.url) return null;
+            cacheImageUrl(key, result.data.url);
+            return { ...image, url: result.data.url };
+        }));
+        const availableImages = imageResults.filter((image): image is EvidenceImage & { url: string } => Boolean(image));
+        modal.update({ content: renderEvidence(availableImages, false, availableImages.length === 0) });
+        if (availableImages.length === 0) message.error('Không thể tải ảnh bằng chứng.');
     };
 
     const OperationalTaskCard = ({ task, lane }: { task: Task; lane: 'today' | 'evidence' | 'review' }) => {
