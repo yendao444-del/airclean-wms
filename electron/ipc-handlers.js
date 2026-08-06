@@ -3392,9 +3392,9 @@ ipcMain.handle('purchases:getAll', async (event, { since, limit } = {}) => {
                 }
             },
             orderBy: { createdAt: 'desc' },
-            // Payroll needs all purchases in its requested period; normal screens
-            // keep their existing 100-row cap unless they opt into a larger limit.
-            take: Number.isFinite(Number(limit)) ? Number(limit) : (since ? undefined : 100)
+            // Không tự cắt lịch sử: màn hình Nhập hàng cần xem được toàn bộ phiếu.
+            // Caller nào cần giới hạn vẫn có thể truyền `limit`.
+            ...(Number.isFinite(Number(limit)) ? { take: Number(limit) } : {})
         });
 
         const purchaseMap = new Map(purchases.map(p => [p.id, p]));
@@ -3513,8 +3513,9 @@ ipcMain.handle('purchases:getVatAlertSummary', async () => {
     try {
         requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
-        const [vatGroups, purchases] = await Promise.all([
+        const [vatGroups, companyVat, purchases] = await Promise.all([
             getPurchaseVatGroups(),
+            getPurchaseCompanyVat(),
             prisma.purchaseOrder.findMany({
                 where: { status: { not: 'cancelled' } },
                 select: {
@@ -3541,6 +3542,7 @@ ipcMain.handle('purchases:getVatAlertSummary', async () => {
             data: purchases.map(purchase => ({
                 vatInvoiceStatus: purchase.vatInvoiceStatus,
                 purchaseDate: purchase.receivedAt || purchase.createdAt,
+                companyVatByGroup: companyVat[String(purchase.id)] || {},
                 ...(groupByPurchaseId.get(purchase.id) || {}),
             })),
         };
@@ -3557,8 +3559,9 @@ ipcMain.handle('purchases:getMyVatPenaltyAlerts', async () => {
     try {
         requireRole();
         if (!prisma) throw new Error('Prisma not available');
-        const [vatGroups, purchases] = await Promise.all([
+        const [vatGroups, companyVat, purchases] = await Promise.all([
             getPurchaseVatGroups(),
+            getPurchaseCompanyVat(),
             prisma.purchaseOrder.findMany({
                 where: {
                     status: { not: 'cancelled' },
@@ -3587,7 +3590,9 @@ ipcMain.handle('purchases:getMyVatPenaltyAlerts', async () => {
             const purchaseDate = purchase.receivedAt || purchase.createdAt;
             const fineDate = new Date(purchaseDate);
             fineDate.setDate(fineDate.getDate() + 5);
-            const hasVat = vatUploadedPurchaseIds.has(purchase.id) || ['uploaded', 'verified', 'thht', 'no_vat'].includes(vatStatus);
+            const companyVatEntries = Object.values(companyVat?.[String(purchase.id)] || {});
+            const hasCompanyVat = companyVatEntries.length > 0 && companyVatEntries.every(vat => ['uploaded', 'verified', 'no_vat'].includes(String(vat?.status || '').toLowerCase()));
+            const hasVat = vatUploadedPurchaseIds.has(purchase.id) || hasCompanyVat || ['uploaded', 'verified', 'thht', 'no_vat'].includes(vatStatus);
             if (hasVat || purchaseDate < policyStart || fineDate >= now) return [];
             return [{
                 id: purchase.id,
@@ -4901,6 +4906,43 @@ ipcMain.handle('goodsCompanies:delete', async (event, id) => {
         if (nextCompanies.length === companies.length) return { success: false, error: 'Không tìm thấy công ty hàng hóa.' };
         await writeGoodsCompanies(nextCompanies);
         return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+// One catalogue product belongs to one goods company/brand.  The association
+// lives beside the company configuration instead of on Product so existing
+// installations do not require a destructive schema migration.
+ipcMain.handle('goodsCompanies:setProductCompany', async (event, { productId, companyId }) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        const normalizedProductId = Number(productId);
+        if (!Number.isInteger(normalizedProductId) || normalizedProductId <= 0) {
+            return { success: false, error: 'Sản phẩm không hợp lệ.' };
+        }
+
+        const companies = await readGoodsCompanies();
+        let selectedCompany = null;
+        if (companyId) {
+            selectedCompany = companies.find(company => company.id === companyId);
+            if (!selectedCompany) return { success: false, error: 'Không tìm thấy công ty hàng hóa.' };
+        }
+
+        const nextCompanies = companies.map(company => {
+            const productIds = Array.isArray(company.productIds)
+                ? company.productIds.map(Number).filter(Number.isInteger)
+                : [];
+            const withoutProduct = productIds.filter(id => id !== normalizedProductId);
+            return company.id === companyId
+                ? { ...company, productIds: [...withoutProduct, normalizedProductId] }
+                : { ...company, productIds: withoutProduct };
+        });
+        await writeGoodsCompanies(nextCompanies);
+        return {
+            success: true,
+            data: selectedCompany ? { companyId: selectedCompany.id, companyName: selectedCompany.name } : null,
+        };
     } catch (error) {
         return { success: false, error: error.message };
     }
@@ -7035,10 +7077,10 @@ ipcMain.handle('dailyTasks:completeRegularTask', async (_event, taskId, payload 
 ipcMain.handle('dailyTasks:getEvidenceImageUrl', async (_event, taskId, requestedPath = '') => {
     try {
         const actor = await getCurrentActor();
-        const drive = getDriveClient();
-        if (!drive) throw new Error('Google Drive chưa được xác minh. Vui lòng xác minh lại Google Drive.');
-        const folderId = await getOrCreateVatDriveFolder();
-        if (!folderId) throw new Error('Không tìm thấy thư mục Google Drive để lưu bằng chứng.');
+        // This endpoint signs a Supabase Storage object. Initializing Drive and
+        // looking up/creating its folder here added a network round-trip to
+        // every image preview even though Drive is not used at all.
+        if (!evidenceStorage) throw new Error(getEvidenceStorageUnavailableMessage());
         const task = await prisma.dailyTask.findUnique({ where: { id: Number(taskId) } });
         if (!task) throw new Error('Không tìm thấy công việc.');
         if (actor.role !== 'admin' && !isTestOperatorActor(actor) && !actorOwnsTask(actor, task)) throw new Error('Bạn không có quyền xem bằng chứng này.');
@@ -10049,6 +10091,10 @@ function isStockCheckAssignee(session) {
     return normalizeStockCheckUsername(session?.assignedTo) === normalizeStockCheckUsername(currentSession?.username);
 }
 
+function isPrivilegedStockCheckSession() {
+    return currentSession?.role === 'admin' || isTestOperatorSession();
+}
+
 function sanitizeStockCheckItem(item, isAdmin) {
     if (isAdmin) return item;
     const { systemStock, difference, ...safeItem } = item;
@@ -10587,7 +10633,7 @@ ipcMain.handle('stockCheck:getSessions', async () => {
             }
             return toppedUp.sessions;
         }, { timeout: 30000, maxWait: 10000 });
-        const isAdmin = currentSession.role === 'admin';
+        const isAdmin = isPrivilegedStockCheckSession();
         const visibleSessions = (isAdmin || isTestOperatorSession())
             ? sessions
             : sessions.filter(session => session.date === getStockCheckTodayKey() && isStockCheckAssignee(session));
@@ -10686,7 +10732,7 @@ ipcMain.handle('stockCheck:createRecheckSession', async (event, payload = {}) =>
 
         return {
             success: true,
-            session: sanitizeStockCheckSession(result.session, currentSession.role === 'admin'),
+            session: sanitizeStockCheckSession(result.session, isPrivilegedStockCheckSession()),
         };
     } catch (error) {
         return { success: false, error: error.message };
@@ -10698,7 +10744,7 @@ ipcMain.handle('stockCheck:adminSaveSessions', async (event, incomingSessions) =
         // Bulk session replacement is an admin operation. Managers update a
         // single assigned count through stockCheck:updateCount/submitSession.
         requireRole('admin');
-        const isAdmin = currentSession.role === 'admin';
+        const isAdmin = isPrivilegedStockCheckSession();
         const submittedSessions = Array.isArray(incomingSessions) ? incomingSessions : [];
         const merged = await getPrismaDirectTx().$transaction(async (tx) => {
             await lockStockCheckSessions(tx);
@@ -10776,7 +10822,7 @@ ipcMain.handle('stockCheck:updateCount', async (event, payload = {}) => {
             await writeStockCheckSessions(sessions, tx);
             return storedItem;
         }, { timeout: 30000, maxWait: 10000 });
-        return { success: true, status: 'entered', item: sanitizeStockCheckItem(item, currentSession.role === 'admin') };
+        return { success: true, status: 'entered', item: sanitizeStockCheckItem(item, isPrivilegedStockCheckSession()) };
     } catch (error) {
         return { success: false, error: error.message };
     }
@@ -10789,10 +10835,10 @@ ipcMain.handle('stockCheck:retryCount', async (event, payload = {}) => {
             await lockStockCheckSessions(tx);
             const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
             const sessions = parseStockCheckSessionsFromConfig(record);
-            const session = getStockCheckSessionOrThrow(sessions, payload.sessionId, currentSession.role === 'admin');
+            const session = getStockCheckSessionOrThrow(sessions, payload.sessionId, isPrivilegedStockCheckSession());
             const storedItem = getStockCheckItemOrThrow(session, payload.sku);
             const retryCount = Number(storedItem.retryCount || 0);
-            if (currentSession.role !== 'admin' && retryCount >= 2) {
+            if (!isPrivilegedStockCheckSession() && retryCount >= 2) {
                 const error = new Error('Đã dùng hết 2 lượt nhập lại. Hãy nhập lý do để cân bằng.');
                 error.code = 'retry_limit';
                 throw error;
@@ -10810,10 +10856,10 @@ ipcMain.handle('stockCheck:retryCount', async (event, payload = {}) => {
             await writeStockCheckSessions(sessions, tx);
             return storedItem;
         }, { timeout: 30000, maxWait: 10000 });
-        if (currentSession.role === 'admin') {
+        if (isPrivilegedStockCheckSession()) {
             void logActivity({ module: 'stock_check', action: 'REOPEN_COUNT', description: `Mở lại lượt đếm SKU ${item.sku} trong phiên ${payload.sessionId}`, recordName: item.sku });
         }
-        return { success: true, status: 'retry_opened', item: sanitizeStockCheckItem(item, currentSession.role === 'admin') };
+        return { success: true, status: 'retry_opened', item: sanitizeStockCheckItem(item, isPrivilegedStockCheckSession()) };
     } catch (error) {
         return { success: false, code: error.code, error: error.message };
     }
@@ -10828,17 +10874,17 @@ ipcMain.handle('stockCheck:updateNote', async (event, payload = {}) => {
             await lockStockCheckSessions(tx);
             const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
             const sessions = parseStockCheckSessionsFromConfig(record);
-            const session = getStockCheckSessionOrThrow(sessions, payload.sessionId, currentSession.role === 'admin');
+            const session = getStockCheckSessionOrThrow(sessions, payload.sessionId, isPrivilegedStockCheckSession());
             const storedItem = getStockCheckItemOrThrow(session, payload.sku);
             if (storedItem.balanced) return storedItem;
-            if (!storedItem.requiresNote || !storedItem.countLocked) {
-                throw new Error('SKU này chưa yêu cầu ghi chú chênh lệch.');
+            if (storedItem.actualStock === null || storedItem.actualStock === undefined) {
+                throw new Error('SKU này chưa nhập tồn thực tế.');
             }
             storedItem.note = note;
             await writeStockCheckSessions(sessions, tx);
             return storedItem;
         }, { timeout: 30000, maxWait: 10000 });
-        return { success: true, item: sanitizeStockCheckItem(item, currentSession.role === 'admin') };
+        return { success: true, item: sanitizeStockCheckItem(item, isPrivilegedStockCheckSession()) };
     } catch (error) {
         return { success: false, error: error.message };
     }
@@ -10910,7 +10956,10 @@ ipcMain.handle('stockCheck:getReconciliationLogs', async (event, payload = {}) =
 
 ipcMain.handle('stockCheck:balanceItem', async (event, payload = {}) => {
     try {
-        requireRole('admin', 'manager');
+        // Keep single-item balancing aligned with the batch endpoint. The
+        // assigned checker may be a staff user; session assignment is still
+        // enforced by getStockCheckSessionOrThrow below.
+        requireRole('admin', 'manager', 'staff');
         const note = String(payload.note || '').trim();
         const reference = String(payload.reference || `STOCK-CHECK-${payload.sessionId}-${payload.sku}`).trim();
         const result = await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {

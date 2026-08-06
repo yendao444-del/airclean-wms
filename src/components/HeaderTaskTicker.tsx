@@ -76,7 +76,9 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
                 const now = dayjs();
                 const missing = purRes.data.filter((p: any) => {
                     const vatStatus = p.vatInvoiceStatus;
-                    const hasVat = p.vatGroupId ? !!p.vatGroupHasVat : vatStatus === 'uploaded';
+                    const companyVatEntries = Object.values(p.companyVatByGroup || {}) as Array<{ status?: string }>;
+                    const hasCompanyVat = companyVatEntries.length > 0 && companyVatEntries.every(vat => ['uploaded', 'verified', 'no_vat'].includes(String(vat?.status || '').toLowerCase()));
+                    const hasVat = hasCompanyVat || (p.vatGroupId ? !!p.vatGroupHasVat : ['uploaded', 'verified'].includes(String(vatStatus || '').toLowerCase()));
                     const purchaseDate = dayjs(p.purchaseDate || p.invoiceDate || p.createdAt);
                     return !hasVat &&
                         vatStatus !== 'thht' &&

@@ -287,6 +287,7 @@ interface PurchaseVatTracking {
     vatInvoiceStatus?: string;
     vatGroupId?: string | null;
     vatGroupHasVat?: boolean;
+    companyVatByGroup?: Record<string, { status?: string }>;
 }
 
 interface BonusRecord {
@@ -3389,6 +3390,8 @@ export default function Attendance() {
             const vatStatus = String(purchase.vatInvoiceStatus || 'pending').toLowerCase();
             if (['uploaded', 'verified', 'thht', 'no_vat'].includes(vatStatus)) return [];
             if (purchase.vatGroupId && purchase.vatGroupHasVat) return [];
+            const companyVatEntries = Object.values(purchase.companyVatByGroup || {});
+            if (companyVatEntries.length > 0 && companyVatEntries.every(vat => ['uploaded', 'verified', 'no_vat'].includes(String(vat?.status || '').toLowerCase()))) return [];
 
             const purchaseAtRaw = purchase.purchaseDate || purchase.createdAt;
             if (!purchaseAtRaw) return [];
@@ -3407,6 +3410,9 @@ export default function Attendance() {
             if (!creator) return [];
 
             return [{
+                // Stable ID lets us persist the fine once and keep it after a
+                // late VAT upload, without creating duplicates on reload.
+                id: `vat-overdue-${purchase.id}`,
                 empId: creator.id,
                 type: 'VAT quá hạn nhập hàng',
                 detail: `Phiếu ${purchase.poNumber || `#${purchase.id}`}${purchase.supplierName ? ` - ${purchase.supplierName}` : ''} quá 5 ngày chưa cập nhật HĐ VAT`,
@@ -3416,6 +3422,33 @@ export default function Attendance() {
             }];
         });
     }, [employees, purchaseVatTracking, overviewDateRange]);
+
+    // VAT fines are historical events. Once an overdue row has appeared in
+    // payroll, persist it as an ordinary fine; uploading the invoice later
+    // must not erase the already-recorded deduction.
+    useEffect(() => {
+        if (!isAdmin || !isDbLoaded || employees.length === 0 || autoVatOverdueFines.length === 0) return;
+        const existingIds = new Set(extraFines.filter(fine => fine.source === 'purchase_vat_overdue').map(fine => fine.id).filter(Boolean));
+        const missing = autoVatOverdueFines.filter(fine => fine.id && !existingIds.has(fine.id));
+        if (missing.length === 0) return;
+
+        const now = new Date().toLocaleString('vi-VN');
+        const actor = fineAuditActorRef.current;
+        const auditEntries: FineAuditLog[] = missing.map(fine => ({
+            id: `flog-vat-${fine.id}`,
+            action: 'create',
+            timestamp: now,
+            changedBy: actor.username,
+            changedByName: actor.displayName,
+            after: fine,
+            note: `Tự động ghi nhận phạt trễ HĐ VAT: ${fine.detail}`,
+        }));
+        const nextFines = [...extraFines, ...missing];
+        const nextAuditLog = [...fineAuditLog, ...auditEntries];
+        setExtraFines(nextFines);
+        setFineAuditLog(nextAuditLog);
+        void persistAttendanceSnapshotNow({ extraFines: nextFines, fineAuditLog: nextAuditLog });
+    }, [isAdmin, isDbLoaded, employees.length, autoVatOverdueFines, extraFines, fineAuditLog, persistAttendanceSnapshotNow]);
 
     const autoDeadlineOverdueFines = useMemo(() => {
         const officialEmployees = employees.filter(emp => emp.type === 'Official');
@@ -3560,9 +3593,33 @@ export default function Attendance() {
     }, [fineOverrides]);
 
     const allFines = useMemo(
-        () => [...finesData, ...extraFines, ...autoVatOverdueFines, ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoStockCheckMissingFines]
-            .map(applyFineOverride)
-            .filter(f => !f.disabled),
+        () => {
+            const persistedVatIds = new Set(extraFines.filter(fine => fine.source === 'purchase_vat_overdue').map(fine => fine.id).filter(Boolean));
+            const rows = [...finesData, ...extraFines, ...autoVatOverdueFines.filter(fine => !fine.id || !persistedVatIds.has(fine.id)), ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoStockCheckMissingFines]
+                .map(applyFineOverride)
+                .filter(f => !f.disabled);
+            const vatRows = new Map<string, FineRecord>();
+            const result: FineRecord[] = [];
+            rows.forEach(fine => {
+                const detailText = String(fine.detail || '');
+                const isVatFine = fine.source === 'purchase_vat_overdue'
+                    || String(fine.type || '').toLocaleLowerCase('vi-VN').includes('vat')
+                    || detailText.toLocaleLowerCase('vi-VN').includes('hđ vat');
+                if (!isVatFine) {
+                    result.push(fine);
+                    return;
+                }
+                const codeMatch = detailText.match(/(?:pn[-\s]*)?(\d{6}\s*-\s*\d{3})/i);
+                const vatCode = codeMatch?.[1]?.replace(/\s+/g, '') || detailText.trim().toLocaleLowerCase('vi-VN').replace(/\s+/g, ' ');
+                const key = `${fine.empId}|vat|${vatCode.toLocaleLowerCase('vi-VN')}`;
+                const existing = vatRows.get(key);
+                // A manually duplicated VAT fine may already exist from the
+                // previous implementation. Keep the durable system record.
+                if (!existing || (fine.source === 'purchase_vat_overdue' && existing.source !== 'purchase_vat_overdue')) vatRows.set(key, fine);
+            });
+            result.push(...vatRows.values());
+            return result;
+        },
         [extraFines, autoVatOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoStockCheckMissingFines, applyFineOverride]
     );
 
@@ -4964,7 +5021,7 @@ export default function Attendance() {
                 source: overridden.source,
             };
         };
-        const combinedFines = [
+        const combinedFinesRaw = [
             ...finesData
                 .filter(f => inOverviewRange(f.date))
                 .map((f, i) => systemFineRow(f, `base-${i}`))
@@ -4990,6 +5047,35 @@ export default function Attendance() {
                 .map((f, i) => systemFineRow(f, `stock-check-${i}`))
                 .filter(Boolean),
         ];
+        const vatRows = new Map<string, any>();
+        const combinedFines = combinedFinesRaw.filter(fine => {
+            const detailText = String(fine.detail || '');
+            const isVatFine = fine.source === 'purchase_vat_overdue'
+                || String(fine.type || '').toLocaleLowerCase('vi-VN').includes('vat')
+                || detailText.toLocaleLowerCase('vi-VN').includes('hđ vat');
+            if (!isVatFine) return true;
+            const codeMatch = detailText.match(/(?:pn[-\s]*)?(\d{6}\s*-\s*\d{3})/i);
+            const code = codeMatch?.[1]?.replace(/\s+/g, '') || detailText.trim().toLocaleLowerCase('vi-VN').replace(/\s+/g, ' ');
+            const key = `${fine.empId}|vat|${code.toLocaleLowerCase('vi-VN')}`;
+            const existing = vatRows.get(key);
+            if (existing) {
+                if (fine.source === 'purchase_vat_overdue' && existing.source !== 'purchase_vat_overdue') vatRows.set(key, fine);
+                return false;
+            }
+            vatRows.set(key, fine);
+            return true;
+        });
+        // If the system row arrived after a duplicate manual row, replace it
+        // in-place while preserving the rest of the table ordering.
+        vatRows.forEach((fine, key) => {
+            const index = combinedFines.findIndex(row => {
+                const detail = String(row.detail || '');
+                const match = detail.match(/(?:pn[-\s]*)?(\d{6}\s*-\s*\d{3})/i);
+                const code = match?.[1]?.replace(/\s+/g, '') || detail.trim().toLocaleLowerCase('vi-VN').replace(/\s+/g, ' ');
+                return `${row.empId}|vat|${code.toLocaleLowerCase('vi-VN')}` === key;
+            });
+            if (index >= 0) combinedFines[index] = fine;
+        });
         combinedFines.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
         const fineEmployeeOptions = Array.from(new Map(
             combinedFines.map(f => [
@@ -5134,11 +5220,14 @@ export default function Attendance() {
                                         const cleanText = d.replace(/\s*quá 5 ngày chưa cập nhật HĐ VAT\s*$/, '');
                                         const poCode = cleanText.replace(/^Phiếu\s+/, '');
                                         const parts = poCode.split(/\s*-\s*/);
-                                        const code = parts[0];
+                                        const rawCode = parts[0].trim();
+                                        const code = /^PN[-\s]/i.test(rawCode)
+                                            ? rawCode.replace(/\s+/g, '')
+                                            : `PN-${rawCode.replace(/\s+/g, '')}`;
                                         const supplier = parts.slice(1).join(' - ');
                                         return (
                                             <Space size={4}>
-                                                <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ HĐ VAT</Text>
+                                                <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ HĐ VAT — quá hạn 5 ngày</Text>
                                                 <Tag color="cyan" style={{ margin: 0, fontWeight: 700, fontFamily: 'monospace', fontSize: 11, border: 'none', background: '#e6fffb', color: '#08979c' }}>
                                                     <Text copyable={{ text: code }} style={{ color: 'inherit', fontSize: 'inherit', fontWeight: 'inherit', fontFamily: 'inherit' }}>
                                                         {code}

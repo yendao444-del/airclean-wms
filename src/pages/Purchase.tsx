@@ -55,6 +55,14 @@ interface PurchaseItem {
     quantity: number;
     unitPrice: number;
     total: number;
+    packagingLevels?: PackagingLevel[];
+    packagingCounts?: Record<string, number>;
+}
+
+interface PackagingLevel {
+    id: string;
+    name: string;
+    factor: number;
 }
 
 interface Purchase {
@@ -98,6 +106,7 @@ interface Purchase {
 interface GoodsCompany {
     id: string;
     name: string;
+    productIds?: number[];
 }
 
 // Nén ảnh trước khi upload — giảm từ 5-10MB xuống ~300KB, tăng tốc upload 10-20x
@@ -137,7 +146,6 @@ export default function PurchasePage() {
     const currentUser = useCurrentUser();
     const { user } = useAuth();
     const isAdmin = user?.role === 'admin';
-    const goodsCompaniesApiAvailable = Boolean(window.electronAPI?.goodsCompanies);
     const [purchases, setPurchases] = useState<Purchase[]>([]);
     const [suppliers, setSuppliers] = useState<Supplier[]>([]);
     const [goodsCompanies, setGoodsCompanies] = useState<GoodsCompany[]>([]);
@@ -147,9 +155,74 @@ export default function PurchasePage() {
     const [editingPurchase, setEditingPurchase] = useState<Purchase | null>(null);
     const [form] = Form.useForm();
 
+    const getProductCompany = (productId?: number) => goodsCompanies.find(company =>
+        Array.isArray(company.productIds) && company.productIds.map(Number).includes(Number(productId))
+    );
+
     // Items trong phiếu nhập
     const [purchaseItems, setPurchaseItems] = useState<PurchaseItem[]>([]);
     const [selectedProductVariants, setSelectedProductVariants] = useState<any[]>([]);
+    const [addingProduct, setAddingProduct] = useState(false);
+    const [packagingConfigs, setPackagingConfigs] = useState<Record<string, PackagingLevel[]>>({});
+    const [packagingSetupIndex, setPackagingSetupIndex] = useState<number | null>(null);
+    const [packagingDraft, setPackagingDraft] = useState<PackagingLevel[]>([]);
+
+    // Quy cách thuộc về sản phẩm cha, nên mọi màu/SKU của cùng sản phẩm dùng chung.
+    const packagingKey = (item: PurchaseItem) => `product:${Number(item.productId)}`;
+    const defaultPackagingLevels = (): PackagingLevel[] => [{ id: 'lo', name: 'Lẻ', factor: 1 }];
+    // The current product-level configuration is authoritative. Older receipt
+    // rows may carry their old per-SKU setup, but must not make the columns
+    // diverge from other colours of the same product.
+    const getPackagingLevels = (item: PurchaseItem) =>
+        packagingConfigs[packagingKey(item)] || item.packagingLevels || defaultPackagingLevels();
+    const totalFromPackaging = (levels: PackagingLevel[], counts: Record<string, number>) =>
+        levels.reduce((sum, level) => sum + Math.max(0, Number(counts[level.id] || 0)) * Math.max(0, Number(level.factor || 0)), 0);
+
+    useEffect(() => {
+        try {
+            const saved = JSON.parse(localStorage.getItem('purchase-packaging-config-v2') || '{}');
+            if (saved && typeof saved === 'object') setPackagingConfigs(saved);
+        } catch { /* ignore corrupt local setup */ }
+    }, []);
+
+    const openPackagingSetup = (index: number) => {
+        const item = purchaseItems[index];
+        const levels = getPackagingLevels(item).map(level => ({ ...level }));
+        setPackagingSetupIndex(index);
+        setPackagingDraft(levels);
+    };
+
+    const savePackagingSetup = () => {
+        if (packagingSetupIndex === null || packagingDraft.length === 0) return;
+        const index = packagingSetupIndex;
+        const item = purchaseItems[index];
+        const nextConfigs = { ...packagingConfigs, [packagingKey(item)]: packagingDraft };
+        setPackagingConfigs(nextConfigs);
+        localStorage.setItem('purchase-packaging-config-v2', JSON.stringify(nextConfigs));
+        // Cập nhật ngay mọi màu của sản phẩm đang có trên phiếu, giữ nguyên tổng từng dòng.
+        const nextItems = purchaseItems.map((entry, entryIndex) => {
+            if (Number(entry.productId) !== Number(item.productId)) return entry;
+            const counts: Record<string, number> = {};
+            packagingDraft.forEach(level => { counts[level.id] = Number(entry.packagingCounts?.[level.id] || 0); });
+            if (entryIndex !== index || Object.values(counts).every(value => value === 0)) {
+                counts[packagingDraft[packagingDraft.length - 1].id] = Number(entry.quantity || 0);
+            }
+            const quantity = totalFromPackaging(packagingDraft, counts);
+            return { ...entry, packagingLevels: packagingDraft, packagingCounts: counts, quantity, total: quantity * Number(entry.unitPrice || 0) };
+        });
+        setPurchaseItems(nextItems);
+        setPackagingSetupIndex(null);
+    };
+
+    const updatePackagingCount = (index: number, levelId: string, value: number | null) => {
+        const nextItems = [...purchaseItems];
+        const item = nextItems[index];
+        const levels = getPackagingLevels(item);
+        const counts = { ...(item.packagingCounts || {}) , [levelId]: Math.max(0, Number(value || 0)) };
+        const quantity = totalFromPackaging(levels, counts);
+        nextItems[index] = { ...item, packagingLevels: levels, packagingCounts: counts, quantity, total: quantity * Number(item.unitPrice || 0) };
+        setPurchaseItems(nextItems);
+    };
 
     // ✨ State cho xóa hàng loạt
     const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
@@ -407,9 +480,8 @@ export default function PurchasePage() {
     const loadPurchases = async () => {
         setLoading(true);
         try {
-            // ⚡ Chỉ lấy 90 ngày gần nhất
-            const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-            const result = await window.electronAPI.purchases.getAll({ since: since90 });
+            // Lịch sử nhập hàng phải hiển thị toàn bộ dữ liệu, không giới hạn 90 ngày.
+            const result = await window.electronAPI.purchases.getAll({});
             if (result.success && result.data) {
                 setPurchases(result.data);
             } else {
@@ -494,6 +566,7 @@ export default function PurchasePage() {
         setEditingPurchase(null);
         priceBackfillAttemptedRef.current = false;
         setPurchaseItems([]);
+        setAddingProduct(true);
         setSelectedProductVariants([]);
         setPendingImportFiles([]);
         setPendingVatFiles([]);
@@ -534,6 +607,7 @@ export default function PurchasePage() {
         setEditingPurchase(purchase);
         priceBackfillAttemptedRef.current = false;
         setPurchaseItems(JSON.parse(purchase.items));
+        setAddingProduct(false);
         form.setFieldsValue({
             supplierId: purchase.supplierId,
             purchaseDate: dayjs(purchase.purchaseDate),
@@ -682,6 +756,10 @@ export default function PurchasePage() {
             message.warning('Vui lòng thêm ít nhất 1 sản phẩm!');
             return;
         }
+        if (purchaseItems.some(item => Number(item.quantity || 0) <= 0)) {
+            message.warning('Vui lòng nhập số lượng lớn hơn 0 cho tất cả sản phẩm.');
+            return;
+        }
 
         // Bắt buộc đính kèm Phiếu Nhập Kho
         const alreadyHasReceipt = editingPurchase && (editingPurchase as any).importReceiptStatus === 'uploaded';
@@ -820,8 +898,12 @@ export default function PurchasePage() {
             unitPrice,
             total: quantity * unitPrice,
         };
+        const initialLevels = packagingConfigs[`product:${Number(productId)}`] || defaultPackagingLevels();
+        newItem.packagingLevels = initialLevels;
+        newItem.packagingCounts = { [initialLevels[initialLevels.length - 1].id]: quantity };
 
         setPurchaseItems([...purchaseItems, newItem]);
+        setAddingProduct(false);
 
         // Reset temp fields
         form.setFieldsValue({
@@ -885,9 +967,18 @@ export default function PurchasePage() {
     // Handle product selection to load variants
     const handleProductSelect = (productId: number) => {
         const product = products.find(p => p.id === productId);
+        const company = getProductCompany(productId);
 
         // Auto-fill ĐVT (unit)
-        form.setFieldsValue({ tempUnit: product?.unit || 'Cái' });
+        form.setFieldsValue({
+            tempUnit: product?.unit || 'Cái',
+            tempColor: undefined,
+            tempCompanyGroup: company?.name,
+        });
+
+        if (!company) {
+            message.warning('SKU này chưa được gán công ty/thương hiệu. Vào Danh sách sản phẩm để gán trước khi nhập hàng.');
+        }
 
         if (product && product.variants) {
             try {
@@ -902,11 +993,9 @@ export default function PurchasePage() {
         } else {
             // Không có variants → tự động thêm luôn với SL=1
             setSelectedProductVariants([]);
-            form.setFieldsValue({ tempColor: undefined, tempCompanyGroup: undefined });
+            if (company?.name) setTimeout(() => handleCompanyGroupSelect(company.name), 0);
             return;
         }
-        // Reset color when product changes
-        form.setFieldsValue({ tempColor: undefined, tempCompanyGroup: undefined });
     };
 
     // 💰 Handler khi chọn màu sắc → Auto-add xuống bảng, giữ sản phẩm
@@ -929,10 +1018,13 @@ export default function PurchasePage() {
             sku: product.sku,
             companyGroup: companyGroup.trim(),
             unit: product.unit || 'Cái',
-            quantity: 1,
+            quantity: 0,
             unitPrice,
-            total: unitPrice,
+            total: 0,
+            packagingLevels: packagingConfigs[`product:${Number(productId)}`] || defaultPackagingLevels(),
+            packagingCounts: { [(packagingConfigs[`product:${Number(productId)}`] || defaultPackagingLevels()).slice(-1)[0].id]: 0 },
         }]);
+        setAddingProduct(false);
         form.setFieldsValue({ tempProductId: undefined, tempColor: undefined, tempCompanyGroup: undefined });
         setSelectedProductVariants([]);
         setTimeout(() => productSelectRef.current?.focus(), 100);
@@ -956,12 +1048,17 @@ export default function PurchasePage() {
             variantSku: variant?.sku || '',
             companyGroup,
             unit: form.getFieldValue('tempUnit') || 'Cái',
-            quantity: 1,
+            quantity: 0,
             unitPrice: variant?.cost || 0,
-            total: variant?.cost || 0,
+            total: 0,
         };
+        const initialLevels = packagingConfigs[`product:${Number(productId)}`] || defaultPackagingLevels();
+        newItem.packagingLevels = initialLevels;
+        newItem.packagingCounts = { [initialLevels[initialLevels.length - 1].id]: 0 };
 
         setPurchaseItems(prev => [...prev, newItem]);
+        // Giữ bộ chọn đang mở để có thể chọn tiếp màu khác của cùng sản phẩm.
+        setAddingProduct(true);
         form.resetFields(['tempColor']);
 
         setTimeout(() => {
@@ -2089,7 +2186,8 @@ export default function PurchasePage() {
                     setPendingVatDate(null);
                 }}
                 footer={null}
-                width={900}
+                width={1320}
+                style={{ maxWidth: 'calc(100vw - 48px)', top: 24 }}
                 destroyOnClose
             >
                 {suppliers.length === 0 && products.length === 0 && !loadingData && (
@@ -2289,18 +2387,13 @@ export default function PurchasePage() {
                     </div>
 
                     {/* Add Product Section */}
-                    <div style={{
-                        background: '#f0f9f4',
-                        padding: 20,
-                        borderRadius: 12,
-                        marginBottom: 24,
-                        border: '2px dashed #00ab56',
-                    }}>
-                        <Title level={5} style={{ color: '#00ab56', marginBottom: 16 }}>
-                            ➕ Thêm sản phẩm
-                        </Title>
+                    <div style={{ marginBottom: 16 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: addingProduct || purchaseItems.length === 0 ? 12 : 0 }}>
+                            <Title level={5} style={{ margin: 0 }}>Chi tiết sản phẩm</Title>
+                            <Button type="dashed" icon={<PlusOutlined />} onClick={() => setAddingProduct(value => !value)}>Thêm sản phẩm</Button>
+                        </div>
 
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, alignItems: 'end' }}>
+                        {(addingProduct || purchaseItems.length === 0) && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, alignItems: 'end', border: '1px solid #d9f0e3', borderRadius: 8, padding: 14, background: '#fcfffd' }}>
                             <Form.Item label={`Sản phẩm ${products.length > 0 ? `(${products.length})` : ''}`} name="tempProductId" style={{ marginBottom: 0 }}>
                                 <Select
                                     ref={productSelectRef}
@@ -2320,41 +2413,12 @@ export default function PurchasePage() {
                             </Form.Item>
 
                             <Form.Item label="Công ty / thương hiệu hàng hóa" name="tempCompanyGroup" style={{ marginBottom: 0 }}>
-                                <Select
-                                    placeholder={goodsCompaniesApiAvailable ? 'Chọn công ty' : 'Khởi động lại app để tải danh mục'}
+                                <Input
+                                    placeholder="Tự động theo SKU (gán tại Danh sách sản phẩm)"
                                     size="large"
-                                    disabled={!goodsCompaniesApiAvailable}
-                                    showSearch
-                                    optionFilterProp="label"
-                                    optionLabelProp="label"
-                                    onChange={handleCompanyGroupSelect}
-                                    dropdownRender={(menu) => (
-                                        <>
-                                            {menu}
-                                            <div style={{ padding: 8, borderTop: '1px solid #f0f0f0' }}>
-                                                <Button type="link" icon={<PlusOutlined />} onClick={() => openGoodsCompanyModal()} block style={{ color: '#52c41a' }}>
-                                                    Thêm công ty / thương hiệu
-                                                </Button>
-                                            </div>
-                                        </>
-                                    )}
-                                >
-                                    {goodsCompanies.map(company => (
-                                        <Select.Option key={company.id} value={company.name} label={company.name}>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                                <span>{company.name}</span>
-                                                <Space
-                                                    size={2}
-                                                    onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }}
-                                                    onClick={event => event.stopPropagation()}
-                                                >
-                                                    <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openGoodsCompanyModal(company)} />
-                                                    <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => handleDeleteGoodsCompany(company)} />
-                                                </Space>
-                                            </div>
-                                        </Select.Option>
-                                    ))}
-                                </Select>
+                                    readOnly
+                                    style={{ background: '#f6ffed', color: '#237804', fontWeight: 600 }}
+                                />
                             </Form.Item>
 
                             <Form.Item label="Màu sắc / Phân loại" name="tempColor" style={{ marginBottom: 0 }}>
@@ -2382,14 +2446,47 @@ export default function PurchasePage() {
                                         ))}
                                 </Select>
                             </Form.Item>
-                        </div>
+                        </div>}
                     </div>
 
                     {/* Items List */}
                     {purchaseItems.length > 0 && (
                         <div style={{ marginBottom: 24 }}>
-                            <Title level={5}>Danh sách sản phẩm ({purchaseItems.length})</Title>
-                            <div style={{ overflowX: 'auto' }}>
+                            <div style={{ display: 'grid', gap: 10 }}>
+                                {purchaseItems.map((item, index) => {
+                                    const levels = getPackagingLevels(item);
+                                    const counts = item.packagingCounts || { [levels[levels.length - 1].id]: item.quantity };
+                                    const firstInCompany = index === 0 || purchaseItems[index - 1]?.companyGroup !== item.companyGroup;
+                                    const firstForProduct = !purchaseItems.slice(0, index).some(entry => Number(entry.productId) === Number(item.productId));
+                                    return (
+                                        <Fragment key={`packaging-row-${index}`}>
+                                            {firstInCompany && <div style={{ padding: '7px 10px', background: '#f4f1ff', color: '#4e40bd', borderRadius: 6, fontWeight: 700, fontSize: 13 }}>Công ty / thương hiệu: {item.companyGroup || 'Chưa chọn'}</div>}
+                                        <div style={{ border: '1px solid #d9d9d9', borderRadius: 8, padding: 12, background: '#fff', maxWidth: '100%', overflow: 'hidden' }}>
+                                            <div style={{ display: 'grid', gridTemplateColumns: `24px minmax(170px, 1.2fr) minmax(145px, .9fr) minmax(120px, .75fr) 64px repeat(${levels.length}, minmax(72px, .58fr)) 88px 28px`, gap: 8, alignItems: 'center', width: '100%', minWidth: 0 }}>
+                                                <span style={{ color: '#8c8c8c', cursor: 'grab' }}>⠿</span>
+                                                <div><div style={{ fontWeight: 700 }}>{item.productName || 'Sản phẩm'}</div><div style={{ color: '#8c8c8c', fontSize: 12 }}>SKU: {item.variantSku || item.sku || '—'}</div></div>
+                                                <Tag color="blue" style={{ margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.companyGroup}>{item.companyGroup || 'Chưa gán'}</Tag>
+                                                <Select size="small" value={item.color || undefined} placeholder="Phân loại" disabled={!item.color} options={item.color ? [{ value: item.color, label: item.color }] : []} style={{ minWidth: 0 }} />
+                                                <Tag color="green" style={{ margin: 0, textAlign: 'center' }}>{item.unit || 'Cái'}</Tag>
+                                                {levels.map(level => <div key={level.id}><div style={{ fontSize: 11, textAlign: 'center', color: '#595959', marginBottom: 3 }}>{level.name}</div><InputNumber min={0} size="small" value={counts[level.id] || 0} onFocus={event => window.requestAnimationFrame(() => event.target.select())} onChange={value => updatePackagingCount(index, level.id, value)} style={{ width: '100%' }} /><div style={{ fontSize: 10, color: '#8c8c8c', textAlign: 'center', whiteSpace: 'nowrap' }}>1 = {level.factor}</div></div>)}
+                                                <div style={{ textAlign: 'right', whiteSpace: 'nowrap' }}><div style={{ fontSize: 11, color: '#8c8c8c' }}>Tổng ({item.unit || 'ĐVT'})</div><b style={{ color: '#00a854' }}>{new Intl.NumberFormat('vi-VN').format(item.quantity || 0)}</b></div>
+                                                <Button type="text" danger icon={<DeleteOutlined />} onClick={() => handleRemoveItem(index)} />
+                                            </div>
+                                            {firstForProduct && <div style={{ textAlign: 'right', marginTop: 8 }}><Button type="link" size="small" icon={<TagOutlined />} onClick={() => packagingSetupIndex === index ? setPackagingSetupIndex(null) : openPackagingSetup(index)}>Thiết lập quy cách {packagingSetupIndex === index ? '⌃' : '⌄'}</Button></div>}
+                                            {firstForProduct && packagingSetupIndex === index && (
+                                                <div style={{ marginTop: 8, border: '1px solid #d9f0e3', borderRadius: 8, overflow: 'hidden' }}>
+                                                    <div style={{ padding: '10px 12px', fontWeight: 600 }}>Thiết lập quy cách cho {item.productName?.replace(` - ${item.color}`, '') || item.sku}</div>
+                                                    <div style={{ padding: '0 12px 8px', color: '#595959', fontSize: 12 }}>Áp dụng chung cho mọi màu / SKU của sản phẩm này</div>
+                                                    {packagingDraft.map((level, draftIndex) => <div key={level.id} style={{ display: 'grid', gridTemplateColumns: '42px 1fr 120px 1fr 34px', gap: 8, padding: '6px 12px', alignItems: 'center', borderTop: '1px solid #f0f0f0' }}><span>{draftIndex + 1}</span><Input size="small" value={level.name} onChange={event => setPackagingDraft(prev => prev.map(entry => entry.id === level.id ? { ...entry, name: event.target.value } : entry))} /><span style={{ color: '#8c8c8c' }}>{item.unit || 'ĐVT'}</span><InputNumber size="small" min={1} value={level.factor} addonAfter={item.unit || 'ĐVT'} onFocus={event => window.requestAnimationFrame(() => event.target.select())} onChange={value => setPackagingDraft(prev => prev.map(entry => entry.id === level.id ? { ...entry, factor: Number(value || 1) } : entry))} /><Button type="text" danger icon={<DeleteOutlined />} disabled={packagingDraft.length <= 1} onClick={() => setPackagingDraft(prev => prev.filter(entry => entry.id !== level.id))} /></div>)}
+                                                    <div style={{ padding: 10, display: 'flex', justifyContent: 'space-between' }}><Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => setPackagingDraft(prev => [...prev, { id: `level-${Date.now()}`, name: 'Quy cách mới', factor: 1 }])}>Thêm cấp quy cách</Button><Button size="small" type="primary" onClick={savePackagingSetup}>Lưu quy cách</Button></div>
+                                                </div>
+                                            )}
+                                        </div>
+                                        </Fragment>
+                                    );
+                                })}
+                            </div>
+                            <div style={{ display: 'none', overflowX: 'auto' }}>
                             <table style={{ width: '100%', minWidth: 840, borderCollapse: 'collapse', tableLayout: 'fixed' }}>
                                 <thead>
                                     <tr style={{ background: '#fafafa', borderBottom: '2px solid #e0e0e0' }}>
@@ -2510,6 +2607,31 @@ export default function PurchasePage() {
             </Modal>
 
             {/* ✨ Supplier Management Modal */}
+            <Modal
+                title="Thiết lập quy cách nhập"
+                open={false}
+                onCancel={() => setPackagingSetupIndex(null)}
+                onOk={savePackagingSetup}
+                okText="Lưu quy cách"
+                cancelText="Hủy"
+                width={720}
+            >
+                {packagingSetupIndex !== null && purchaseItems[packagingSetupIndex] && (
+                    <>
+                        <Alert type="info" showIcon message={`Áp dụng cho: ${purchaseItems[packagingSetupIndex].productName || ''}`} description={`SKU + Phân loại + Công ty/Thương hiệu: ${purchaseItems[packagingSetupIndex].variantSku || purchaseItems[packagingSetupIndex].sku || '—'} · ${purchaseItems[packagingSetupIndex].color || 'Nguyên bản'} · ${purchaseItems[packagingSetupIndex].companyGroup || 'Chưa chọn'}`} style={{ marginBottom: 14 }} />
+                        {packagingDraft.map((level, index) => (
+                            <div key={level.id} style={{ display: 'grid', gridTemplateColumns: '42px 1fr 150px 36px', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                                <span style={{ color: '#8c8c8c', textAlign: 'center' }}>{index + 1}</span>
+                                <Input value={level.name} onChange={event => setPackagingDraft(prev => prev.map(item => item.id === level.id ? { ...item, name: event.target.value } : item))} placeholder="Tên quy cách" />
+                                <InputNumber min={1} value={level.factor} addonAfter={purchaseItems[packagingSetupIndex].unit || 'ĐVT'} onChange={value => setPackagingDraft(prev => prev.map(item => item.id === level.id ? { ...item, factor: Number(value || 1) } : item))} style={{ width: '100%' }} />
+                                <Button type="text" danger icon={<DeleteOutlined />} disabled={packagingDraft.length <= 1} onClick={() => setPackagingDraft(prev => prev.filter(item => item.id !== level.id))} />
+                            </div>
+                        ))}
+                        <Button type="dashed" icon={<PlusOutlined />} onClick={() => setPackagingDraft(prev => [...prev, { id: `level-${Date.now()}`, name: 'Quy cách mới', factor: 1 }])}>Thêm quy cách</Button>
+                    </>
+                )}
+            </Modal>
+
             <Modal
                 title={editingSupplier ? '✏️ Sửa nhà cung cấp' : '➕ Thêm nhà cung cấp mới'}
                 open={supplierModalVisible}

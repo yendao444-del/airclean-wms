@@ -266,8 +266,11 @@ export default function StockCheck() {
     // Session creation and reassignment replace the complete backend session,
     // therefore they are intentionally admin-only. The assigned manager can
     // still enter counts and balance their own session.
-    const canManage = user?.role === 'admin';
-    const isAdmin = user?.role === 'admin';
+    // Tài khoản test được mở toàn quyền trong module kiểm hàng để kiểm thử
+    // như admin, kể cả các phiên đang phân công cho người khác.
+    const isTestOperator = user?.isTestAccount === true;
+    const canManage = user?.role === 'admin' || isTestOperator;
+    const isAdmin = user?.role === 'admin' || isTestOperator;
     const canBrowseHistory = isAdmin || user?.isTestAccount === true;
     const canViewLedger = isAdmin;
 
@@ -352,7 +355,7 @@ export default function StockCheck() {
     const canRevealSystemStock = isAdmin;
     const assignedUsername = String(todaySession?.assignedTo || '').trim().toLowerCase();
     const loggedInUsername = String(user?.username || currentUser || '').trim().toLowerCase();
-    const isAssignedChecker = isAdmin || (assignedUsername !== '' && assignedUsername === loggedInUsername);
+    const isAssignedChecker = isAdmin || isTestOperator || (assignedUsername !== '' && assignedUsername === loggedInUsername);
     const isSessionSubmitted = todaySession?.status === 'completed';
     const canEditCounts = !!todaySession && !isLockedDate && !isSessionSubmitted && isAssignedChecker;
     const canManageConversions = !!todaySession && !isLockedDate && !isSessionSubmitted && isAssignedChecker;
@@ -1412,27 +1415,36 @@ export default function StockCheck() {
             if (canManageConversions) setConversionModalGroup(item.productName);
             return;
         }
-        if (!await flushConversionRates()) return;
-        if (countSaveTimersRef.current[item.sku]) {
-            await flushPendingCountUpdates();
-        }
-        const result = await window.electronAPI.stockCheck.balanceItem({
-            sessionId: todaySessionId,
-            sku: item.sku,
-            note: item.note,
-        });
-        if (!result?.success) {
-            message.error(result?.error || 'Không thể cân bằng kho.');
-            return;
-        }
-        setSessions(current => current.map(session => session.id !== todaySessionId ? session : (
-            result.session
-                ? { ...session, ...result.session }
-                : {
-                    ...session,
-                    items: session.items.map(entry => entry.sku !== item.sku ? entry : { ...entry, ...(result.item || {}), verificationStatus: result.status === 'match' || result.status === 'balanced_mismatch' ? result.status : undefined }),
+        setBalancing(prev => ({ ...prev, [item.sku]: true }));
+        try {
+            if (!await flushConversionRates()) return;
+            if (countSaveTimersRef.current[item.sku]) {
+                await flushPendingCountUpdates();
             }
-        )));
+            const result = await window.electronAPI.stockCheck.balanceItem({
+                sessionId: todaySessionId,
+                sku: item.sku,
+                note: item.note,
+                // Một ngày có thể có nhiều lượt kiểm (làm mới/kiểm lại).
+                // Dùng runId để không nhận nhầm giao dịch của lượt cũ.
+                reference: `STOCK-CHECK-${todaySession?.runId || todaySessionId}-${item.sku}`,
+            });
+            if (!result?.success) {
+                message.error(result?.error || 'Không thể cân bằng kho.');
+                return;
+            }
+            if (result.status === 'duplicate') {
+                message.warning('SKU này đã có giao dịch cân kho trong lượt kiểm hiện tại. Vui lòng tải lại dữ liệu.');
+                return;
+            }
+            setSessions(current => current.map(session => session.id !== todaySessionId ? session : (
+                result.session
+                    ? { ...session, ...result.session }
+                    : {
+                        ...session,
+                        items: session.items.map(entry => entry.sku !== item.sku ? entry : { ...entry, ...(result.item || {}), verificationStatus: result.status === 'match' || result.status === 'balanced_mismatch' ? result.status : undefined }),
+                }
+            )));
         if (result.status === 'match' || result.status === 'balanced_mismatch') {
             setProductTabs(prev => prev[item.productName] === 'reconciliation'
                 ? { ...prev, [item.productName]: 'check' }
@@ -1448,10 +1460,24 @@ export default function StockCheck() {
                 return next;
             });
         }
-        if (result.status === 'match') message.success('Khớp. Đã ghi nhận kết quả kiểm.');
-        if (result.status === 'mismatch_requires_note') message.warning('Không khớp. Nhập lý do hoặc dùng lượt nhập lại.');
-        if (result.status === 'balanced_mismatch') message.success('Đã cân bằng theo lý do đã nhập.');
-        if (result.status === 'missing_count') message.warning('Chưa nhập số đếm thực tế.');
+            if (result.status === 'match') message.success('Khớp. Đã ghi nhận kết quả kiểm.');
+            if (result.status === 'mismatch_requires_note') {
+                message.warning({
+                    content: 'SKU chưa thể cân bằng: số kiểm bị lệch. Vui lòng bấm Ghi chú, nhập lý do chênh lệch rồi cân bằng lại.',
+                    duration: 8,
+                });
+            }
+            if (result.status === 'balanced_mismatch') message.success('Đã cân bằng theo lý do đã nhập.');
+            if (result.status === 'missing_count') message.warning('Chưa nhập số đếm thực tế.');
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể cân bằng kho.');
+        } finally {
+            setBalancing(prev => {
+                const next = { ...prev };
+                delete next[item.sku];
+                return next;
+            });
+        }
     };
 
     const handleSubmitSession = () => {
@@ -1492,6 +1518,15 @@ export default function StockCheck() {
         });
     };
 
+    const getEffectiveCountedItem = (item: CheckItem): CheckItem => {
+        const ci = countingInputs[item.sku];
+        const units = conversionRates[item.productName]?.units || [];
+        const hasInput = !!ci && ((ci.unitTouched || []).some(Boolean) || !!ci.leTouched);
+        if (!hasInput) return item;
+        const total = (ci.le || 0) + units.reduce((sum, unit, index) => sum + (ci.unitCounts?.[index] || 0) * (unit.rate || 0), 0);
+        return { ...item, actualStock: total };
+    };
+
     const handleGroupBalance = async (group: ProductGroup) => {
         if (!isAssignedChecker) {
             message.warning('Chỉ người phụ trách phiên kiểm mới có thể cân hàng loạt.');
@@ -1510,7 +1545,8 @@ export default function StockCheck() {
         if (group.items.some(item => countSaveTimersRef.current[item.sku])) {
             await flushPendingCountUpdates();
         }
-        const pendingItems = group.items.filter(item => !item.balanced);
+        const effectiveItems = group.items.map(getEffectiveCountedItem);
+        const pendingItems = effectiveItems.filter(item => !item.balanced);
         if (!pendingItems.length) {
             message.info('Sản phẩm này đã cân hết.');
             return;
@@ -2251,7 +2287,7 @@ export default function StockCheck() {
                             const units = conversionRates[group.productName]?.units || [];
                             const hasNoConversion = conversionRates[group.productName]?.noConversion === true;
                             const hasConversion = hasValidConversion(group.productName);
-                            const pendingGroupItems = group.items.filter(item => !item.balanced);
+                            const pendingGroupItems = group.items.map(getEffectiveCountedItem).filter(item => !item.balanced);
                             const blockedGroupItems = pendingGroupItems.filter(item => getBalanceBlockReason(item));
                             const missingStockCount = blockedGroupItems.filter(item => item.actualStock === null).length;
                             const missingNoteCount = blockedGroupItems.filter(item => item.actualStock !== null && item.requiresNote && item.countLocked && !item.note.trim()).length;
@@ -2527,8 +2563,8 @@ export default function StockCheck() {
                                                                             {renderDiff(item)}
                                                                         </td>
                                                                         <td style={{ ...S.td, width: 96, minWidth: 96, textAlign: 'center' }}>
-                                                                            {item.requiresNote && item.countLocked ? (
-                                                                                <Tooltip title={needNote ? 'Bắt buộc nhập lý do chênh lệch' : item.note.trim() ? item.note : 'Thêm ghi chú'}>
+                                                                            {item.actualStock !== null && !item.balanced ? (
+                                                                                <Tooltip title={needNote ? 'Bắt buộc nhập lý do chênh lệch' : item.note.trim() ? item.note : 'Thêm ghi chú trước khi cân bằng'}>
                                                                                     <Button
                                                                                         size="small"
                                                                                         icon={<EditOutlined />}
@@ -2543,7 +2579,7 @@ export default function StockCheck() {
                                                                                             fontWeight: needNote ? 700 : 500,
                                                                                         }}
                                                                                     >
-                                                                                        {needNote ? 'Cần lý do' : item.note.trim() ? 'Xem' : ''}
+                                                                                        {needNote ? 'Cần lý do' : item.note.trim() ? 'Xem' : 'Ghi chú'}
                                                                                     </Button>
                                                                                 </Tooltip>
                                                                             ) : <span style={{ color: '#bfbfbf', fontSize: 12 }}>—</span>}

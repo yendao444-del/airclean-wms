@@ -182,6 +182,7 @@ export interface ElectronAPI {
         create: (data: { name: string }) => Promise<{ success: boolean; data?: any; error?: string }>;
         update: (id: string, data: { name: string }) => Promise<{ success: boolean; data?: any; error?: string }>;
         delete: (id: string) => Promise<{ success: boolean; error?: string }>;
+        setProductCompany: (data: { productId: number; companyId?: string | null }) => Promise<{ success: boolean; data?: any; error?: string }>;
     };
     database: {
         exportAll: () => Promise<{ success: boolean; data?: string; error?: string }>;
@@ -300,7 +301,7 @@ export interface ElectronAPI {
         updateNote: (data: { sessionId: string; sku: string; note: string }) => Promise<{ success: boolean; item?: any; error?: string }>;
         getReconciliationLogs: (data: { sessionId: string; sku: string; page?: number }) => Promise<{ success: boolean; data?: { logs: Array<{ id: number; sku: string; type: string; referenceType?: string | null; reference?: string | null; quantity: number; createdAt: string }>; total: number; page: number; pageSize: number }; error?: string }>;
         balanceItems: (data: { sessionId: string; reference: string; date?: string; items: Array<{ sku: string }>; historyNotes?: string; logPrefix?: string }) => Promise<{ success: boolean; duplicate?: boolean; adjustedCount?: number; matchedCount?: number; data?: { sessions?: any[]; stockBalance?: any }; error?: string }>;
-        balanceItem: (data: { sessionId: string; sku: string; note?: string }) => Promise<{ success: boolean; status?: string; item?: any; session?: any; error?: string }>;
+        balanceItem: (data: { sessionId: string; sku: string; note?: string; reference?: string }) => Promise<{ success: boolean; status?: string; item?: any; session?: any; error?: string }>;
         submitSession: (data: { sessionId: string }) => Promise<{ success: boolean; status?: 'completed' | 'already_completed'; session?: any; code?: string; error?: string }>;
     };
     dailyExpenses: {

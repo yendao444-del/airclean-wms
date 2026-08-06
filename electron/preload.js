@@ -78,6 +78,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         create: (data) => ipcRenderer.invoke('goodsCompanies:create', data),
         update: (id, data) => ipcRenderer.invoke('goodsCompanies:update', id, data),
         delete: (id) => ipcRenderer.invoke('goodsCompanies:delete', id),
+        setProductCompany: (data) => ipcRenderer.invoke('goodsCompanies:setProductCompany', data),
     },
     supplierDebt: {
         getWorkbench: (supplierId) => ipcRenderer.invoke('supplierDebt:getWorkbench', { supplierId }),
