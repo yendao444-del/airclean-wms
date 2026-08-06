@@ -562,7 +562,7 @@ export default function PurchasePage() {
         }
     };
 
-    const handleAdd = async () => {
+    const handleAdd = () => {
         setEditingPurchase(null);
         priceBackfillAttemptedRef.current = false;
         setPurchaseItems([]);
@@ -574,23 +574,9 @@ export default function PurchasePage() {
         setPendingVatDate(null);
         form.resetFields();
 
-        // ⚡ QUAN TRỌNG: Load data TRƯỚC
-        setLoadingData(true);
-        try {
-            await Promise.all([
-                loadSuppliers(),
-                loadProducts()
-            ]);
-        } catch (error) {
-            message.error('Lỗi khi tải dữ liệu nhà cung cấp và sản phẩm');
-            setLoadingData(false);
-            return;
-        }
-
-        // ✅ Tắt loading TRƯỚC
-        setLoadingData(false);
-
-        // ✅ Mở modal SAU
+        // Open immediately with the cached catalogue. The page preloads this
+        // data on mount; waiting for another remote round trip here made the
+        // “Tạo phiếu nhập” button appear stuck for several seconds.
         setModalVisible(true);
 
         // Set values sau khi reset
@@ -601,6 +587,15 @@ export default function PurchasePage() {
                 createdBy: currentUser,
             });
         }, 0);
+
+        // If startup data is still unavailable, load it in the background.
+        // The modal remains usable and shows its normal loading state only for
+        // the selects that do not have data yet.
+        if (suppliers.length === 0 || products.length === 0) {
+            setLoadingData(true);
+            void Promise.all([loadSuppliers(), loadProducts(), loadGoodsCompanies()])
+                .finally(() => setLoadingData(false));
+        }
     };
 
     const handleEdit = (purchase: Purchase) => {
