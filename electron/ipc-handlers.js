@@ -10185,11 +10185,61 @@ function repairTodayCarryOverCounts(sessions) {
 // process so the obligation does not depend on an admin opening the React page.
 function createDailyCarryOverSession(sessions) {
     const today = getStockCheckTodayKey();
-    if (sessions.some(session => session.date === today && session.type === 'daily')) {
-        return { sessions, changed: false };
+    const nowIso = new Date().toISOString();
+    // A session with every SKU balanced is complete in substance.  Do not
+    // require a person to return to a locked past date merely to press a
+    // button; close it before deciding whether there is work to carry over.
+    let changed = false;
+    const normalizedSessions = sessions.map(session => {
+        const items = Array.isArray(session?.items) ? session.items : [];
+        const fullyBalanced = session?.type === 'daily'
+            && session?.date < today
+            && session?.status !== 'completed'
+            && items.length > 0
+            && items.every(item => Number.isInteger(item?.actualStock) && Number(item.actualStock) >= 0 && item?.balanced === true);
+        if (!fullyBalanced) return session;
+        changed = true;
+        return {
+            ...session,
+            status: 'completed',
+            completedAt: session.completedAt || nowIso,
+            completedBy: session.completedBy || 'Hệ thống',
+            completionSummary: session.completionSummary || {
+                totalSku: items.length,
+                balancedSku: items.length,
+                matchedSku: items.filter(item => item.verificationStatus === 'match').length,
+                adjustedSku: items.filter(item => item.verificationStatus === 'balanced_mismatch').length,
+                completedAt: nowIso,
+                completedBy: 'Hệ thống',
+            },
+        };
+    });
+
+    // Repair an old buggy carry-over: its source has just been auto-completed
+    // and the new-day copy has never received a count. Remove only that empty
+    // duplicate; the normal daily assignment will then be generated normally.
+    const repairedSessions = normalizedSessions.filter(session => {
+        if (session?.type !== 'daily' || session?.date !== today || session?.status === 'completed') return true;
+        const isUntouchedCarryOver = String(session?.notes || '').startsWith('Tiếp tục ')
+            && Array.isArray(session.items)
+            && session.items.length > 0
+            && session.items.every(item => item?.actualStock === null || item?.actualStock === undefined);
+        if (!isUntouchedCarryOver) return true;
+        const hasCompletedSource = normalizedSessions.some(source =>
+            source?.type === 'daily'
+            && source?.date < today
+            && source?.status === 'completed'
+            && String(session.notes || '').includes(String(source.date || '').split('-').reverse().slice(0, 2).join('/'))
+        );
+        if (hasCompletedSource) changed = true;
+        return !hasCompletedSource;
+    });
+
+    if (repairedSessions.some(session => session.date === today && session.type === 'daily')) {
+        return { sessions: repairedSessions, changed };
     }
 
-    const source = sessions
+    const source = repairedSessions
         .filter(session => session.type === 'daily'
             && session.date < today
             && session.status !== 'completed'
@@ -10197,10 +10247,12 @@ function createDailyCarryOverSession(sessions) {
             && Array.isArray(session.items)
             && session.items.length > 0)
         .sort((a, b) => a.date.localeCompare(b.date))[0];
-    if (!source) return { sessions, changed: false };
+    if (!source) return { sessions: repairedSessions, changed };
 
     const remainingItems = source.items.filter(item => !item.balanced);
-    const items = remainingItems.length > 0 ? remainingItems : source.items;
+    // Never copy a fully balanced session into the next day.
+    if (remainingItems.length === 0) return { sessions: repairedSessions, changed };
+    const items = remainingItems;
     const carryOverSession = {
         id: today,
         runId: `carry-over-${today}-${Date.now()}`,
@@ -10215,7 +10267,7 @@ function createDailyCarryOverSession(sessions) {
         createdAt: new Date().toISOString(),
     };
     return {
-        sessions: sessions.map(session => session.id === source.id
+        sessions: repairedSessions.map(session => session.id === source.id
             ? { ...session, rolledOverTo: today }
             : session).concat(carryOverSession),
         changed: true,
