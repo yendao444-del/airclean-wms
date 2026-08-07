@@ -159,6 +159,7 @@ export interface ElectronAPI {
         uploadVATInvoice: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         uploadCompanyVATInvoice: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         setCompanyVatStatus: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+        deleteCompanyVATInvoice: (data: { purchaseId: number; companyGroup: string }) => Promise<{ success: boolean; error?: string }>;
         uploadVatGroupInvoice: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         uploadImportReceipt: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
         deleteImportReceipt: (id: number) => Promise<{ success: boolean; error?: string }>;

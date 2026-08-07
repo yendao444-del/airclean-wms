@@ -935,6 +935,7 @@ export default function StockCheck() {
                 session.date < todayStr &&
                 session.status !== 'completed' &&
                 !session.completedAt &&
+                (session.items || []).some(item => !item.balanced) &&
                 assignableManagers.some(manager => manager.username.toLowerCase() === String(session.assignedTo || '').toLowerCase())
             )
             .sort((a, b) => b.date.localeCompare(a.date))[0];
@@ -1005,12 +1006,24 @@ export default function StockCheck() {
 
     const buildDailyProductPool = (rankedProducts: TopSellingProduct[], excludedProducts: any[] = []) => {
         const excludedKeys = new Set(excludedProducts.map(productKey));
+        // Debug rule: keep 5D UNICARE in every daily checking session.
+        // Match both the catalogue name and SKU so this remains stable if the
+        // displayed product name is edited later.
+        const alwaysCheckUnicare = contextProducts.find(product => {
+            const name = String(product?.name || '').toLocaleUpperCase('vi-VN');
+            const sku = String(product?.sku || '').toLocaleUpperCase('vi-VN');
+            return (name.includes('UNICARE') && name.includes('5D')) || sku.includes('5DUNI');
+        });
         const rotationProducts = getTopProducts(rankedProducts, DAILY_TOP_ROTATION_COUNT)
             .filter(product => !excludedKeys.has(productKey(product)));
         const dayIndex = currentDate.startOf('day').diff(dayjs('2026-01-01'), 'day');
-        const requiredProducts = rotationProducts.length
+        const rotatingRequired = rotationProducts.length
             ? [rotationProducts[Math.abs(dayIndex) % rotationProducts.length]]
             : [];
+        const requiredProducts = [
+            ...(alwaysCheckUnicare ? [alwaysCheckUnicare] : []),
+            ...rotatingRequired.filter(product => !alwaysCheckUnicare || productKey(product) !== productKey(alwaysCheckUnicare)),
+        ];
         const randomCount = Math.max(0, DAILY_PRODUCT_COUNT - requiredProducts.length);
 
         return [...requiredProducts, ...getRandomProducts([...excludedProducts, ...requiredProducts], randomCount)];
