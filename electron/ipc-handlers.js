@@ -4441,6 +4441,31 @@ ipcMain.handle('purchases:setCompanyVatStatus', async (event, { purchaseId, comp
     }
 });
 
+ipcMain.handle('purchases:deleteCompanyVATInvoice', async (event, { purchaseId, companyGroup }) => {
+    try {
+        if (!prisma) throw new Error('Prisma not available');
+        requireRole('admin', 'manager', 'staff');
+        const id = String(purchaseId || '').trim();
+        const company = String(companyGroup || '').trim();
+        if (!id || !company) throw new Error('Thiếu phiếu nhập hoặc công ty hàng hóa.');
+        const companyVat = await getPurchaseCompanyVat();
+        const receiptVat = companyVat[id] || {};
+        if (!receiptVat[company]) return { success: false, error: 'Không tìm thấy HĐ VAT của công ty này.' };
+        delete receiptVat[company];
+        if (Object.keys(receiptVat).length === 0) delete companyVat[id];
+        else companyVat[id] = receiptVat;
+        await savePurchaseCompanyVat(companyVat);
+        void logActivity({
+            module: 'purchases', action: 'COMPANY_VAT_DELETE',
+            description: `Xóa HĐ VAT công ty ${company} của phiếu #${id}`,
+            userName: currentSession?.username || 'System',
+        });
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
 ipcMain.handle('purchases:uploadVATInvoice', async (event, { purchaseId, invoiceNumber, invoiceDate, files = [], fileBase64, fileName }) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
