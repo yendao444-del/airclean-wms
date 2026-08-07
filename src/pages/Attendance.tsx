@@ -3429,7 +3429,8 @@ export default function Attendance() {
     useEffect(() => {
         if (!isAdmin || !isDbLoaded || employees.length === 0 || autoVatOverdueFines.length === 0) return;
         const existingIds = new Set(extraFines.filter(fine => fine.source === 'purchase_vat_overdue').map(fine => fine.id).filter(Boolean));
-        const missing = autoVatOverdueFines.filter(fine => fine.id && !existingIds.has(fine.id));
+        const deletedIds = new Set(getDeletedFineKeys(fineAuditLog));
+        const missing = autoVatOverdueFines.filter(fine => fine.id && !existingIds.has(fine.id) && !deletedIds.has(fine.id));
         if (missing.length === 0) return;
 
         const now = new Date().toLocaleString('vi-VN');
@@ -3594,9 +3595,11 @@ export default function Attendance() {
 
     const allFines = useMemo(
         () => {
+            const deletedFineKeys = getDeletedFineKeys(fineAuditLog);
             const persistedVatIds = new Set(extraFines.filter(fine => fine.source === 'purchase_vat_overdue').map(fine => fine.id).filter(Boolean));
             const rows = [...finesData, ...extraFines, ...autoVatOverdueFines.filter(fine => !fine.id || !persistedVatIds.has(fine.id)), ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoStockCheckMissingFines]
                 .map(applyFineOverride)
+                .filter(f => !getFineRecordKeys(f).some(key => deletedFineKeys.has(key)))
                 .filter(f => !f.disabled);
             const vatRows = new Map<string, FineRecord>();
             const result: FineRecord[] = [];

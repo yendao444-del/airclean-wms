@@ -774,8 +774,9 @@ export default function PurchasePage() {
                 items: JSON.stringify(purchaseItems),
                 totalAmount,
                 createdBy: editingPurchase ? editingPurchase.createdBy : currentUser,
-                isThht: values.isThht || false, // 📦 Gửi flag THHT
-                isNoVat: values.isNoVat || false, // 🏷️ Gửi flag Không VAT
+                // On edit, false flags mean “unchanged”, not “clear VAT”.
+                isThht: values.isThht ? true : (editingPurchase ? undefined : false),
+                isNoVat: values.isNoVat ? true : (editingPurchase ? undefined : false),
             };
 
             let result;

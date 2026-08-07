@@ -1347,6 +1347,39 @@ ipcMain.handle('products:getTopSelling', async (event, { limit = 10 } = {}) => {
     }
 });
 
+// Activity signal used by the daily stock-check scheduler. A sale is derived
+// from the immutable inventory ledger so the cadence is not affected by the
+// current product stock value.
+ipcMain.handle('products:getStockCheckActivity', async () => {
+    try {
+        requireRole('manager');
+        if (!prisma) throw new Error('Prisma not available');
+        const since = new Date();
+        since.setDate(since.getDate() - 90);
+        const logs = await prisma.inventoryLog.findMany({
+            where: {
+                createdAt: { gte: since },
+                quantity: { lt: 0 },
+                referenceType: { in: ['POS', 'TMDT'] },
+            },
+            select: { productId: true, createdAt: true },
+            orderBy: { createdAt: 'desc' },
+        });
+        const latestByProduct = new Map();
+        logs.forEach(log => {
+            const key = String(log.productId);
+            if (!latestByProduct.has(key)) latestByProduct.set(key, log.createdAt.toISOString());
+        });
+        return {
+            success: true,
+            data: Array.from(latestByProduct.entries()).map(([productId, lastSaleAt]) => ({ productId, lastSaleAt })),
+        };
+    } catch (error) {
+        console.error('❌ Get stock-check activity error:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 ipcMain.handle('products:getById', async (event, id) => {
     try {
         if (!prisma) throw new Error('Prisma not available');
@@ -3349,11 +3382,12 @@ ipcMain.handle('purchases:getAll', async (event, { since, limit } = {}) => {
     try {
         requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
-        const [vatGroups, vatFileMeta, purchaseItemCompanies, purchaseCompanyVat] = await Promise.all([
+        const [vatGroups, vatFileMeta, purchaseItemCompanies, purchaseCompanyVat, goodsCompanies] = await Promise.all([
             getPurchaseVatGroups(),
             getPurchaseVatFileMeta(),
             getPurchaseItemCompanies(),
             getPurchaseCompanyVat(),
+            readGoodsCompanies(),
         ]);
 
         const purchases = await prisma.purchaseOrder.findMany({
@@ -3398,6 +3432,78 @@ ipcMain.handle('purchases:getAll', async (event, { since, limit } = {}) => {
             // Caller nào cần giới hạn vẫn có thể truyền `limit`.
             ...(Number.isFinite(Number(limit)) ? { take: Number(limit) } : {})
         });
+
+        // One-time-compatible VAT migration: older receipts stored VAT at
+        // receipt level, while the new UI reads it per goods company. Build
+        // the current companies from the immutable purchase line + current
+        // product mapping, then persist a company record for every company
+        // still missing one. Existing company-specific states (including a
+        // deliberate `pending`/`no_vat`) are never overwritten.
+        let companyVatAliasesChanged = false;
+        purchases.forEach(p => {
+            const itemCompanyMap = purchaseItemCompanies[String(p.id)] || {};
+            const byItemId = itemCompanyMap.byItemId || {};
+            const currentCompanies = [...new Set(p.items.map(item => {
+                const explicit = byItemId[getPurchaseItemCompanyKey(item)] || itemCompanyMap[getPurchaseItemCompanyKey({ ...item, id: null })];
+                if (explicit) return repairLegacyCompanyName(explicit);
+                const matched = goodsCompanies.find(company => Array.isArray(company.productIds)
+                    && company.productIds.map(Number).includes(Number(item.productId)));
+                return matched ? repairLegacyCompanyName(matched.name) : '';
+            }).filter(Boolean))];
+            if (currentCompanies.length === 0) return;
+
+            const fileMeta = vatFileMeta[String(p.id)] || {};
+            const group = Object.values(vatGroups || {}).find(entry =>
+                Array.isArray(entry?.purchaseIds) && entry.purchaseIds.map(Number).includes(Number(p.id))
+            ) || null;
+            const hasLegacyVat = ['uploaded', 'verified'].includes(String(p.vatInvoiceStatus || '').toLowerCase())
+                || Boolean(p.vatInvoiceNumber || p.vatInvoiceFile || p.vatInvoiceDriveUrl || fileMeta.vatId)
+                || Boolean(group?.vatInvoiceFile || group?.vatInvoiceNumber || group?.vatInvoiceDriveUrl);
+            if (!hasLegacyVat) return;
+
+            const storedVat = purchaseCompanyVat[String(p.id)] || {};
+            const fallbackVat = {
+                status: 'uploaded',
+                invoiceNumber: p.vatInvoiceNumber || group?.vatInvoiceNumber || fileMeta.vatId || null,
+                invoiceDate: p.vatInvoiceDate || group?.vatInvoiceDate || null,
+                localPaths: p.vatInvoiceFile ? [p.vatInvoiceFile] : [],
+                driveUrls: p.vatInvoiceDriveUrl
+                    ? String(p.vatInvoiceDriveUrl).split('\n').filter(Boolean)
+                    : (group?.vatInvoiceDriveUrl ? String(group.vatInvoiceDriveUrl).split('\n').filter(Boolean) : []),
+                migratedFromReceiptVat: true,
+                migratedAt: new Date().toISOString(),
+            };
+            const nextVat = { ...storedVat };
+            let changed = false;
+            currentCompanies.forEach(company => {
+                if (!nextVat[company]) {
+                    nextVat[company] = fallbackVat;
+                    changed = true;
+                }
+            });
+            if (changed) {
+                purchaseCompanyVat[String(p.id)] = nextVat;
+                companyVatAliasesChanged = true;
+            }
+        });
+        if (companyVatAliasesChanged) await savePurchaseCompanyVat(purchaseCompanyVat);
+
+        // Older edit flows could reset vatInvoiceStatus to `pending` while
+        // leaving the invoice file/Drive metadata intact. Restore the derived
+        // state before formatting so existing VAT invoices are not lost.
+        const recoverableVatIds = purchases
+            .filter(p => p.vatInvoiceStatus === 'pending' && (p.vatInvoiceFile || p.vatInvoiceDriveUrl || vatFileMeta[String(p.id)]?.fileName))
+            .map(p => p.id);
+        if (recoverableVatIds.length > 0) {
+            await prisma.purchaseOrder.updateMany({
+                where: { id: { in: recoverableVatIds }, vatInvoiceStatus: 'pending' },
+                data: { vatInvoiceStatus: 'uploaded' },
+            });
+            purchases.forEach(p => {
+                if (recoverableVatIds.includes(p.id)) p.vatInvoiceStatus = 'uploaded';
+            });
+            console.log(`♻️ Recovered VAT status for ${recoverableVatIds.length} purchase receipt(s).`);
+        }
 
         const purchaseMap = new Map(purchases.map(p => [p.id, p]));
         const purchaseGroupMeta = new Map();
@@ -3462,6 +3568,37 @@ ipcMain.handle('purchases:getAll', async (event, { since, limit } = {}) => {
 
             const vatGroupMeta = purchaseGroupMeta.get(p.id) || {};
             const fileMeta = vatFileMeta[String(p.id)] || {};
+            const companyVatByGroup = Object.fromEntries(
+                Object.entries(purchaseCompanyVat[String(p.id)] || {}).map(([company, vat]) => [repairLegacyCompanyName(company), vat])
+            );
+            const itemCompanies = [...new Set(itemsFormatted.map(item => item.companyGroup).filter(Boolean))];
+            if (itemCompanies.length === 0) {
+                p.items.forEach(item => {
+                    const matched = goodsCompanies.find(company => Array.isArray(company.productIds)
+                        && company.productIds.map(Number).includes(Number(item.productId)));
+                    if (matched) itemCompanies.push(repairLegacyCompanyName(matched.name));
+                });
+            }
+            // Legacy receipts stored one VAT invoice on the purchase itself.
+            // If the catalog now assigns exactly one goods company and there
+            // is no company-specific record yet, expose that legacy invoice
+            // under the current company instead of asking for a duplicate.
+            const legacyVatStatus = String(p.vatInvoiceStatus || '').toLowerCase();
+            const hasLegacyVat = ['uploaded', 'verified'].includes(legacyVatStatus)
+                || Boolean(p.vatInvoiceNumber || p.vatInvoiceFile || p.vatInvoiceDriveUrl || fileMeta.vatId)
+                || Boolean(vatGroupMeta.vatGroupHasVat || vatGroupMeta.vatGroupInvoiceNumber || vatGroupMeta.vatGroupDriveUrl);
+            if (itemCompanies.length === 1 && !companyVatByGroup[itemCompanies[0]] && hasLegacyVat) {
+                companyVatByGroup[itemCompanies[0]] = {
+                    status: 'uploaded',
+                    invoiceNumber: p.vatInvoiceNumber || vatGroupMeta.vatGroupInvoiceNumber || fileMeta.vatId || null,
+                    invoiceDate: p.vatInvoiceDate || vatGroupMeta.vatGroupInvoiceDate || null,
+                    localPaths: p.vatInvoiceFile ? [p.vatInvoiceFile] : [],
+                    driveUrls: p.vatInvoiceDriveUrl
+                        ? String(p.vatInvoiceDriveUrl).split('\n').filter(Boolean)
+                        : (vatGroupMeta.vatGroupDriveUrl ? String(vatGroupMeta.vatGroupDriveUrl).split('\n').filter(Boolean) : []),
+                    migratedFromReceiptVat: true,
+                };
+            }
 
             return {
                 ...p,
@@ -3492,9 +3629,7 @@ ipcMain.handle('purchases:getAll', async (event, { since, limit } = {}) => {
                 vatGroupVatFileName: vatGroups[vatGroupMeta.vatGroupId]?.vatFileName || null,
                 vatGroupVatFileSize: vatGroups[vatGroupMeta.vatGroupId]?.vatFileSize || null,
                 sharedVatPurchaseIds: sameVatIdMap.get(p.id) || [],
-                companyVatByGroup: Object.fromEntries(
-                    Object.entries(purchaseCompanyVat[String(p.id)] || {}).map(([company, vat]) => [repairLegacyCompanyName(company), vat])
-                ),
+                companyVatByGroup,
                 // Phiếu nhập kho
                 importReceiptStatus: p.importReceiptStatus,
                 importReceiptFile: p.importReceiptFile,
@@ -3995,9 +4130,9 @@ ipcMain.handle('purchases:update', async (event, { id, data }) => {
                 total: data.totalAmount,
                 note: data.notes,
                 receivedAt: new Date(data.purchaseDate),
-                ...(data.isThht !== undefined || data.isNoVat !== undefined ? {
-                    vatInvoiceStatus: data.isThht ? 'thht' : (data.isNoVat ? 'no_vat' : 'pending')
-                } : {}), // 📦 THHT / Không VAT
+                // Only an explicit positive flag changes VAT state. A normal
+                // edit must preserve an already-uploaded invoice.
+                ...(data.isThht === true ? { vatInvoiceStatus: 'thht' } : data.isNoVat === true ? { vatInvoiceStatus: 'no_vat' } : {}),
             }
         });
 
