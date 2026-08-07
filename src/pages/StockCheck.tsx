@@ -1984,8 +1984,8 @@ export default function StockCheck() {
                 <Alert
                     type="info"
                     showIcon
-                    message="Đối soát biến động trong ngày"
-                    description="Hiển thị toàn bộ biến động của SKU trong đúng ngày kiểm hàng, gồm tồn đầu, thay đổi, tồn cuối và ghi chú như Thẻ kho."
+                    message="Đối soát biến động 2 ngày gần nhất"
+                    description="Hiển thị biến động của SKU trong ngày hôm trước và ngày kiểm hàng, gồm tồn đầu, thay đổi, tồn cuối và ghi chú như Thẻ kho."
                     style={{ marginBottom: 16 }}
                 />
                 <div style={{ marginBottom: 12, color: '#1e3a5f', fontWeight: 700 }}>
@@ -2006,7 +2006,7 @@ export default function StockCheck() {
                             if (item) void openReconciliation(group, item, nextPage);
                         },
                     }}
-                    locale={{ emptyText: sku ? 'Không có giao dịch trong ngày kiểm hàng' : 'Chọn SKU cần đối soát' }}
+                    locale={{ emptyText: sku ? 'Không có giao dịch trong 2 ngày gần nhất' : 'Chọn SKU cần đối soát' }}
                     columns={[
                         { title: 'Thời gian', dataIndex: 'createdAt', width: 150, render: (date: string) => dayjs(date).format('DD/MM/YYYY HH:mm') },
                         { title: 'Loại phát sinh', dataIndex: 'referenceType', width: 160, render: (type: string, record: ReconciliationLogItem) => typeLabels[type] || record.type },
@@ -2389,7 +2389,7 @@ export default function StockCheck() {
                                                         { key: 'check', label: '⚖️ Kiểm hàng' },
                                                         ...(canViewLedger ? [{ key: 'ledger', label: '📋 Thẻ kho' }] : []),
                                                         ...(!isAdmin && group.items.some(item => item.countLocked && item.requiresNote && !item.balanced)
-                                                            ? [{ key: 'reconciliation', label: '🔎 Đối soát trong ngày' }]
+                                                            ? [{ key: 'reconciliation', label: '🔎 Đối soát 2 ngày' }]
                                                             : []),
                                                     ]}
                                                 />
@@ -2642,7 +2642,7 @@ export default function StockCheck() {
                                                                                     onClick={() => { void openReconciliation(group, item); }}
                                                                                     style={{ display: 'block', margin: '4px auto 0', padding: 0, height: 20, fontSize: 11, fontWeight: 700 }}
                                                                                 >
-                                                                                    Đối soát trong ngày
+                                                                                    Đối soát 2 ngày
                                                                                 </Button>
                                                                             )}
                                                                         </td>
