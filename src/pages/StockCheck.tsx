@@ -158,6 +158,9 @@ interface ReconciliationLogItem {
     referenceType?: string | null;
     reference?: string | null;
     quantity: number;
+    oldStock: number;
+    newStock: number;
+    note?: string | null;
     createdAt: string;
 }
 
@@ -432,7 +435,7 @@ export default function StockCheck() {
             });
             if (!result?.success) throw new Error(result?.error || 'Không thể tải dữ liệu đối soát.');
             const data = result.data || { logs: [], total: 0, page, pageSize: 50 };
-            setReconciliationLogsBySku(prev => ({ ...prev, [item.sku]: data.logs || [] }));
+            setReconciliationLogsBySku(prev => ({ ...prev, [item.sku]: (data.logs || []) as ReconciliationLogItem[] }));
             setReconciliationPageBySku(prev => ({ ...prev, [item.sku]: {
                 total: Number(data.total) || 0,
                 page: Number(data.page) || page,
@@ -1981,8 +1984,8 @@ export default function StockCheck() {
                 <Alert
                     type="info"
                     showIcon
-                    message="Đối soát biến động 48 giờ gần nhất"
-                    description="Chỉ hiển thị giao dịch của SKU đang chênh lệch. Tồn đầu, tồn cuối, điều chỉnh kho và chi tiết chứng từ được ẩn."
+                    message="Đối soát biến động trong ngày"
+                    description="Hiển thị toàn bộ biến động của SKU trong đúng ngày kiểm hàng, gồm tồn đầu, thay đổi, tồn cuối và ghi chú như Thẻ kho."
                     style={{ marginBottom: 16 }}
                 />
                 <div style={{ marginBottom: 12, color: '#1e3a5f', fontWeight: 700 }}>
@@ -2003,12 +2006,15 @@ export default function StockCheck() {
                             if (item) void openReconciliation(group, item, nextPage);
                         },
                     }}
-                    locale={{ emptyText: sku ? 'Không có giao dịch trong 48 giờ gần nhất' : 'Chọn SKU cần đối soát' }}
+                    locale={{ emptyText: sku ? 'Không có giao dịch trong ngày kiểm hàng' : 'Chọn SKU cần đối soát' }}
                     columns={[
                         { title: 'Thời gian', dataIndex: 'createdAt', width: 150, render: (date: string) => dayjs(date).format('DD/MM/YYYY HH:mm') },
                         { title: 'Loại phát sinh', dataIndex: 'referenceType', width: 160, render: (type: string, record: ReconciliationLogItem) => typeLabels[type] || record.type },
                         { title: 'Mã chứng từ', dataIndex: 'reference', width: 190, render: (reference: string) => reference || '—' },
-                        { title: 'Số lượng', dataIndex: 'quantity', align: 'right' as const, render: (quantity: number) => <span style={{ color: quantity >= 0 ? '#1677ff' : '#cf1322', fontWeight: 700 }}>{quantity > 0 ? `+${quantity}` : quantity}</span> },
+                        { title: 'Tồn đầu', dataIndex: 'oldStock', align: 'right' as const, render: (stock: number) => <span style={{ fontWeight: 600 }}>{Number(stock ?? 0).toLocaleString('vi-VN')}</span> },
+                        { title: 'Thay đổi', dataIndex: 'quantity', align: 'right' as const, render: (quantity: number) => <span style={{ color: quantity >= 0 ? '#1677ff' : '#cf1322', fontWeight: 700 }}>{quantity > 0 ? `+${quantity}` : quantity}</span> },
+                        { title: 'Tồn cuối', dataIndex: 'newStock', align: 'right' as const, render: (stock: number) => <span style={{ fontWeight: 700 }}>{Number(stock ?? 0).toLocaleString('vi-VN')}</span> },
+                        { title: 'Ghi chú', dataIndex: 'note', ellipsis: true, render: (note: string) => note || '—' },
                     ]}
                 />
             </div>
@@ -2383,7 +2389,7 @@ export default function StockCheck() {
                                                         { key: 'check', label: '⚖️ Kiểm hàng' },
                                                         ...(canViewLedger ? [{ key: 'ledger', label: '📋 Thẻ kho' }] : []),
                                                         ...(!isAdmin && group.items.some(item => item.countLocked && item.requiresNote && !item.balanced)
-                                                            ? [{ key: 'reconciliation', label: '🔎 Đối soát 48h' }]
+                                                            ? [{ key: 'reconciliation', label: '🔎 Đối soát trong ngày' }]
                                                             : []),
                                                     ]}
                                                 />
@@ -2636,7 +2642,7 @@ export default function StockCheck() {
                                                                                     onClick={() => { void openReconciliation(group, item); }}
                                                                                     style={{ display: 'block', margin: '4px auto 0', padding: 0, height: 20, fontSize: 11, fontWeight: 700 }}
                                                                                 >
-                                                                                    Đối soát 48h
+                                                                                    Đối soát trong ngày
                                                                                 </Button>
                                                                             )}
                                                                         </td>
