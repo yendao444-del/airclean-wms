@@ -639,7 +639,9 @@ function sanitizeUserForClient(user) {
 
 function requireInventoryLedgerReadAccess() {
     requireRole();
-    if (currentSession.role === 'admin') return;
+    // The dedicated test operator mirrors admin permissions in the renderer;
+    // keep the backend read boundary consistent so its ledger tab can load.
+    if (currentSession.role === 'admin' || isTestOperatorSession()) return;
     throw new Error('Khong co quyen xem The kho.');
 }
 
@@ -10967,11 +10969,12 @@ ipcMain.handle('stockCheck:updateNote', async (event, payload = {}) => {
     }
 });
 
-// A narrowly scoped audit view for the assigned checker. This deliberately does
-// not reuse inventoryLogs:getAll: it exposes neither balances nor document details.
+// A narrowly scoped audit view for the assigned checker. It is limited to the
+// current session date and SKU, while exposing the same stock movement columns
+// needed to explain a mismatch (opening, delta, closing and note).
 ipcMain.handle('stockCheck:getReconciliationLogs', async (event, payload = {}) => {
     try {
-        requireRole('manager');
+        requireRole('manager', 'staff');
         const sessionId = String(payload.sessionId || '').trim();
         const sku = String(payload.sku || '').trim();
         const page = Math.max(1, Number.parseInt(payload.page, 10) || 1);
@@ -10988,16 +10991,13 @@ ipcMain.handle('stockCheck:getReconciliationLogs', async (event, payload = {}) =
                 throw new Error('Chỉ mở đối soát cho SKU đang chờ giải trình chênh lệch.');
             }
 
-            const since = new Date(Date.now() - 48 * 60 * 60 * 1000);
+            // “Đối soát trong ngày”: never leak a rolling 48-hour window or
+            // records from the previous/next session date.
+            const since = new Date(`${session.date}T00:00:00`);
+            const until = new Date(`${session.date}T23:59:59.999`);
             const where = {
                 sku,
-                createdAt: { gte: since },
-                NOT: {
-                    OR: [
-                        { referenceType: 'CAN_BANG' },
-                        { type: 'adjustment' },
-                    ],
-                },
+                createdAt: { gte: since, lte: until },
             };
             const [logs, total] = await Promise.all([
                 tx.inventoryLog.findMany({
@@ -11009,6 +11009,9 @@ ipcMain.handle('stockCheck:getReconciliationLogs', async (event, payload = {}) =
                         referenceType: true,
                         reference: true,
                         quantity: true,
+                        oldStock: true,
+                        newStock: true,
+                        note: true,
                         createdAt: true,
                     },
                     orderBy: { createdAt: 'desc' },
