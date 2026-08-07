@@ -123,6 +123,7 @@ export interface ElectronAPI {
         update: (id: number, data: Partial<Product>) => Promise<{ success: boolean; data?: Product; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         getTopSelling?: (args?: { limit?: number }) => Promise<{ success: boolean; data?: Array<{ productId: number | string; productName: string; soldQty: number }>; error?: string }>;
+        getStockCheckActivity?: () => Promise<{ success: boolean; data?: Array<{ productId: number | string; lastSaleAt: string }>; error?: string }>;
         onStockChanged?: (callback: (data: any) => void) => () => void;
     };
     categories: {

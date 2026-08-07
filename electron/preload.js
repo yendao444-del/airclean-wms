@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         update: (id, data) => ipcRenderer.invoke('products:update', id, data),
         delete: (id) => ipcRenderer.invoke('products:delete', id),
         getTopSelling: (args) => ipcRenderer.invoke('products:getTopSelling', args),
+        getStockCheckActivity: () => ipcRenderer.invoke('products:getStockCheckActivity'),
         onStockChanged: (callback) => {
             const handler = (event, data) => callback(data);
             ipcRenderer.on('products:stockChanged', handler);
