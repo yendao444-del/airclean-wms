@@ -10970,8 +10970,8 @@ ipcMain.handle('stockCheck:updateNote', async (event, payload = {}) => {
 });
 
 // A narrowly scoped audit view for the assigned checker. It is limited to the
-// current session date and SKU, while exposing the same stock movement columns
-// needed to explain a mismatch (opening, delta, closing and note).
+// session date plus the immediately preceding calendar day and SKU, while
+// exposing the same stock movement columns needed to explain a mismatch.
 ipcMain.handle('stockCheck:getReconciliationLogs', async (event, payload = {}) => {
     try {
         requireRole('manager', 'staff');
@@ -10991,9 +10991,12 @@ ipcMain.handle('stockCheck:getReconciliationLogs', async (event, payload = {}) =
                 throw new Error('Chỉ mở đối soát cho SKU đang chờ giải trình chênh lệch.');
             }
 
-            // “Đối soát trong ngày”: never leak a rolling 48-hour window or
-            // records from the previous/next session date.
-            const since = new Date(`${session.date}T00:00:00`);
+            // “Đối soát 2 ngày gần nhất”: the previous calendar day and the
+            // session day. This is a calendar window, not a rolling 48 hours,
+            // and never includes future transactions.
+            const sessionDay = new Date(`${session.date}T00:00:00`);
+            const since = new Date(sessionDay);
+            since.setDate(since.getDate() - 1);
             const until = new Date(`${session.date}T23:59:59.999`);
             const where = {
                 sku,
