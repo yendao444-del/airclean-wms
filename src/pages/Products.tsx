@@ -253,6 +253,16 @@ export default function ProductsPage() {
         }
     };
 
+    // Keep this standalone page in sync with stock mutations made from other
+    // screens/machines. The shared app context already listens for this event,
+    // but this page maintains its own product list for editing.
+    useEffect(() => {
+        const unsubscribe = window.electronAPI?.products?.onStockChanged?.(() => {
+            void loadProducts();
+        });
+        return () => unsubscribe?.();
+    }, []);
+
     const loadCategories = async () => {
         try {
             const result = await window.electronAPI.categories.getAll();
