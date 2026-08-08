@@ -1,4 +1,4 @@
-const { ipcMain, dialog, shell, app } = require('electron');
+const { ipcMain, dialog, shell, app, nativeImage } = require('electron');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
@@ -105,6 +105,16 @@ async function withStockLock(fn) {
     } finally {
         releaseStockLock();
     }
+}
+
+// Process-local locking is not enough when two desktop clients share the
+// same PostgreSQL database. This transaction-scoped advisory lock is the
+// database-wide serialization point for every stock mutation. It deliberately
+// uses one global key: variant stock is stored as one JSON document, so locking
+// by SKU alone could still let two variants of the same product overwrite one
+// another.
+async function lockGlobalInventoryMutation(tx) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('inventory-global-stock-mutation'))`;
 }
 
 // ⚡ LAZY LOADING — Module nặng chỉ load khi cần, không block startup
@@ -2288,11 +2298,23 @@ function validateStockMutationPayload(data, allowedReferenceTypes) {
     };
 }
 
+function emitStockChangedForSkus(skus, payload = {}) {
+    const normalized = [...new Set((skus || []).map(sku => String(sku || '').trim()).filter(Boolean))];
+    if (normalized.length === 0) return;
+    emitStockChanged({ ...payload, skus: normalized, count: normalized.length });
+}
+
 async function performStockUpdate({ sku, quantity, isAdd = false, logContext, allowMissing = false }) {
     if (!prisma) throw new Error('Database chưa được khởi tạo.');
     const delta = isAdd ? quantity : -quantity;
 
     const response = await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
+        // Manual warehouse exports must never drive stock negative. This check
+        // runs inside the same transaction/DB lock as the mutation and also
+        // validates every component when the requested SKU is a combo.
+        if (!isAdd && String(logContext?.referenceType || '').toUpperCase() === 'XUAT') {
+            await assertSaleStockAvailable(tx, sku, quantity);
+        }
         const combo = await tx.comboProduct.findUnique({ where: { sku } });
         if (combo) {
             const items = JSON.parse(combo.items || '[]');
@@ -2512,7 +2534,11 @@ async function buildSkuCache(tx) {
  * @param {object} skuCache - Cache từ buildSkuCache()
  */
 async function batchStockUpdate(tx, skuChanges, logContext, skuCache) {
-    const { productMap, comboMap } = skuCache;
+    await lockGlobalInventoryMutation(tx);
+    // Rebuild after acquiring the database lock. A cache created before the
+    // lock could contain a stale variants JSON document from another client.
+    const lockedSkuCache = await buildSkuCache(tx);
+    const { productMap, comboMap } = lockedSkuCache;
 
     // Bước 1: Resolve combo → flat list of actual SKU changes
     const flatChanges = new Map(); // sku → tổng quantity
@@ -2544,8 +2570,10 @@ async function batchStockUpdate(tx, skuChanges, logContext, skuCache) {
     for (const [sku, totalQty] of flatChanges) {
         const info = productMap.get(sku);
         if (!info) {
-            console.warn(`⚠️ [Batch] Bỏ qua SKU ${sku} — không tìm thấy sản phẩm`);
-            continue;
+            // Never silently create an export without reducing inventory. The
+            // caller runs this inside a transaction, so throwing rolls back the
+            // export and keeps the stock ledger/product stock in sync.
+            throw new Error(`SKU TMDT không tồn tại trong kho: ${sku}`);
         }
 
         const { product, isVariant, variantIndex } = info;
@@ -2612,6 +2640,28 @@ async function deductItemOrCombo(tx, variantSku, quantity, logContext, options =
     }
 }
 
+async function assertSaleStockAvailable(tx, sku, quantity) {
+    const requested = Number(quantity);
+    if (!Number.isFinite(requested) || requested <= 0) throw new Error(`Số lượng xuất không hợp lệ cho SKU ${sku}.`);
+    const combo = await tx.comboProduct.findUnique({ where: { sku }, select: { items: true } });
+    if (combo) {
+        let items = [];
+        try { items = JSON.parse(combo.items || '[]'); } catch { throw new Error(`Combo ${sku} có cấu hình thành phần không hợp lệ.`); }
+        for (const item of items) {
+            const componentSku = String(item?.sku || '').trim();
+            const required = Number(item?.quantity || 0) * requested;
+            if (!componentSku || !Number.isFinite(required) || required <= 0) {
+                throw new Error(`Combo ${sku} có thành phần không hợp lệ.`);
+            }
+            const available = await getSkuStockForOrder(tx, componentSku);
+            if (available < required) throw new Error(`Không đủ tồn SKU ${componentSku} (còn ${available}, cần ${required}).`);
+        }
+        return;
+    }
+    const available = await getSkuStockForOrder(tx, sku);
+    if (available < requested) throw new Error(`Không đủ tồn SKU ${sku} (còn ${available}, cần ${requested}).`);
+}
+
 /**
  * Hàm lõi do AI Agent cập nhật theo "Mệnh lệnh tối cao":
  * Bắt buộc 100% chạy trong Prisma Transaction, kèm logContext.
@@ -2627,6 +2677,11 @@ async function updateProductStockInTx(tx, sku, quantity, logContext, options = {
     if (mutationActor === null || mutationActor === undefined || mutationActor === '') {
         throw new Error(`[Inventory Error] Không xác định được người cập nhật SKU: ${sku}.`);
     }
+
+    // Must happen before reading stock/variants. The lock spans the whole
+    // surrounding transaction, so all clients see a serialized read-modify-
+    // write sequence, including variants stored in a shared JSON column.
+    await lockGlobalInventoryMutation(tx);
 
     let product = await tx.product.findUnique({ where: { sku } });
     let isVariant = false;
@@ -2892,6 +2947,11 @@ ipcMain.handle('posOrder:create', async (event, data) => {
             return newOrder;
         }, { timeout: 30000, maxWait: 10000 }));
 
+        emitStockChangedForSkus(items.map(item => item.sku), {
+            referenceType: 'POS',
+            reference: orderNumber,
+        });
+
         // 5. Activity Log
         try {
             await prisma.activityLog.create({
@@ -2925,7 +2985,9 @@ ipcMain.handle('posOrder:create', async (event, data) => {
 // Lấy danh sách đơn hàng POS
 ipcMain.handle('posOrder:getAll', async (event, filters = {}) => {
     try {
-        requireRole('admin');
+        // Order history is a read operation for operational users too. Write
+        // actions remain protected by their own handlers below.
+        requireRole('admin', 'manager', 'staff');
         if (!prisma) throw new Error('Database chưa được khởi tạo.');
 
         const where = { source: 'pos' };
@@ -3115,6 +3177,7 @@ ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
         console.log(`🗑️ [DELETE] order found:`, order ? `#${order.orderNumber} status=${order.status} items=${order.items.length}` : 'NOT FOUND');
         if (!order) throw new Error('Không tìm thấy đơn hàng.');
         if (order.status === 'cancelled') return { success: true };
+        const posRevertedSkus = order.items.map(item => item.sku);
 
         // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
@@ -3128,7 +3191,7 @@ ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
             };
             for (const item of order.items) {
                 // +quantity = cộng lại kho (vì đang hủy đơn bán)
-                await deductItemOrCombo(tx, item.sku, item.quantity, logCtx, { allowMissing: true });
+                await deductItemOrCombo(tx, item.sku, item.quantity, logCtx);
             }
             // Cập nhật trạng thái phiếu thay vì xóa cứng
             await tx.order.update({ where: { id }, data: { status: 'cancelled' } });
@@ -3137,6 +3200,7 @@ ipcMain.handle('posOrder:delete', async (event, { id, userName }) => {
             // await tx.payment.deleteMany({ where: { orderId: id } });
         }, { timeout: 30000, maxWait: 10000 }));
 
+        emitStockChangedForSkus(posRevertedSkus, { referenceType: 'POS_CANCEL', reference: order.orderNumber });
         void logActivity({ module: 'sales', action: 'DELETE', description: `Hủy đơn POS #${order.orderNumber}`, userName: userName || 'System' });
         return { success: true };
     } catch (error) {
@@ -4085,6 +4149,11 @@ ipcMain.handle('purchases:create', async (event, data) => {
             return newOrder;
         }, { timeout: 60000, maxWait: 10000 }));
 
+        emitStockChangedForSkus(items.map(item => item.variantSku || item.sku), {
+            referenceType: 'NHAP',
+            reference: purchase.poNumber,
+        });
+
         // PurchaseItem has no free-text company column. Persist the explicitly
         // selected group per receipt line in AppConfig and return it on reads.
         try {
@@ -4232,6 +4301,7 @@ ipcMain.handle('purchases:delete', async (event, id) => {
         });
         if (!order) throw new Error(`Không tìm thấy phiếu nhập #${id}`);
         if (order.status === 'cancelled') return { success: true };
+        const revertedSkus = order.items.map(item => item.variantSku || item.sku);
 
         // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         await withStockLock(() => getPrismaDirectTx().$transaction(async (tx) => {
@@ -4266,6 +4336,10 @@ ipcMain.handle('purchases:delete', async (event, id) => {
         }));
 
         console.log(`✅ Successfully cancelled purchase order #${id}`);
+        emitStockChangedForSkus(revertedSkus, {
+            referenceType: 'NHAP_CANCEL',
+            reference: order.poNumber,
+        });
         void logActivity({ module: 'purchases', action: 'DELETE', description: `Hủy phiếu nhập #${id}`, recordName: order.poNumber });
         return { success: true };
     } catch (error) {
@@ -6675,6 +6749,84 @@ function isValidEvidenceImage(buffer, mimeType) {
     return false;
 }
 
+// SHA-256 only catches byte-for-byte duplicates. Browser compression can make
+// the exact same photo produce different bytes, so use a small difference hash
+// decoded by Electron as a second, server-side anti-reuse signal.
+function getEvidenceVisualHash(buffer) {
+    try {
+        const image = nativeImage.createFromBuffer(buffer);
+        if (image.isEmpty()) return null;
+        const bitmap = image.resize({ width: 9, height: 8, quality: 'good' }).toBitmap();
+        if (bitmap.length < 9 * 8 * 4) return null;
+        const gray = (x, y) => {
+            const offset = (y * 9 + x) * 4;
+            // Electron bitmap pixels are BGRA on Windows. The weighted sum is
+            // insensitive to this ordering for duplicate-photo comparison.
+            return bitmap[offset] * 0.114 + bitmap[offset + 1] * 0.587 + bitmap[offset + 2] * 0.299;
+        };
+        let hash = '';
+        for (let y = 0; y < 8; y += 1) {
+            for (let x = 0; x < 8; x += 1) hash += gray(x, y) > gray(x + 1, y) ? '1' : '0';
+        }
+        return hash;
+    } catch (error) {
+        console.warn('Cannot calculate evidence visual hash:', error.message);
+        return null;
+    }
+}
+
+function evidenceVisualHashDistance(first, second) {
+    if (!first || !second || first.length !== second.length) return Infinity;
+    let distance = 0;
+    for (let index = 0; index < first.length; index += 1) {
+        if (first[index] !== second[index]) distance += 1;
+    }
+    return distance;
+}
+
+const evidenceVisualHashCache = new Map();
+
+async function getRecentEvidenceVisualHashes() {
+    if (!evidenceStorage) return [];
+    const candidates = [];
+    try {
+        const [historyConfig, tasks] = await Promise.all([
+            prisma.appConfig.findUnique({ where: { key: 'dailyTasksHistory' } }),
+            prisma.dailyTask.findMany({
+                where: { attachments: { not: null } },
+                select: { attachments: true },
+                orderBy: { completedAt: 'desc' },
+                take: 40,
+            }),
+        ]);
+        const history = historyConfig?.value ? JSON.parse(historyConfig.value) : [];
+        [...(Array.isArray(history) ? history : []), ...tasks].forEach(entry => {
+            const attachments = entry?.evidence ? { evidence: entry.evidence } : parseTaskAttachments(entry?.attachments);
+            getSubmittedEvidenceImages(attachments?.evidence).forEach(image => {
+                if (image?.storagePath) candidates.push(image.storagePath);
+            });
+        });
+    } catch (error) {
+        console.warn('Cannot load recent evidence hashes:', error.message);
+        return [];
+    }
+
+    const paths = [...new Set(candidates)].slice(0, 60);
+    const hashes = await Promise.all(paths.map(async storagePath => {
+        if (evidenceVisualHashCache.has(storagePath)) return evidenceVisualHashCache.get(storagePath);
+        try {
+            const { data, error } = await evidenceStorage.storage.from(EVIDENCE_BUCKET).download(storagePath);
+            if (error || !data) return null;
+            const hash = getEvidenceVisualHash(Buffer.from(await data.arrayBuffer()));
+            if (hash) evidenceVisualHashCache.set(storagePath, hash);
+            return hash;
+        } catch {
+            return null;
+        }
+    }));
+    return hashes.filter(Boolean);
+}
+
 async function createEvidencePenaltyIfDue(task, now = new Date()) {
     const attachments = parseTaskAttachments(task.attachments);
     const evidence = attachments.evidence || {};
@@ -6992,11 +7144,8 @@ setInterval(() => void cleanupExpiredEvidenceImages().catch(error => console.err
 // Get all tasks with filters
 ipcMain.handle('dailyTasks:uploadEvidenceImage', async (_event, payload) => {
     try {
-        requireRole('admin');
-        const drive = getDriveClient();
-        if (!drive) throw new Error('Google Drive chưa được xác minh. Vui lòng xác minh lại Google Drive.');
-        const folderId = await getOrCreateVatDriveFolder();
-        if (!folderId) throw new Error('Không tìm thấy thư mục Google Drive để lưu bằng chứng.');
+        requireRole();
+        if (!evidenceStorage) throw new Error(getEvidenceStorageUnavailableMessage());
         const { taskId, mimeType, data, hash } = payload || {};
         if (!taskId || !mimeType || !data || !hash) throw new Error('Dữ liệu ảnh bằng chứng không hợp lệ.');
         const base64 = String(data).replace(/^data:[^;]+;base64,/, '');
@@ -7051,10 +7200,10 @@ ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
     const uploadedPaths = [];
     const imageRegistryKeys = [];
     try {
-        const drive = getDriveClient();
-        if (!drive) throw new Error('Google Drive chưa được xác minh. Vui lòng xác minh lại Google Drive.');
-        const folderId = await getOrCreateVatDriveFolder();
-        if (!folderId) throw new Error('Không tìm thấy thư mục Google Drive để lưu bằng chứng.');
+        // Bằng chứng không dùng chung thư mục Google Drive của hóa đơn VAT.
+        // Supabase Storage là kho riêng, có URL ký để xem ảnh và không bị lỗi
+        // khi Drive đang xác thực lại hoặc thư mục VAT bị xóa/đổi quyền.
+        if (!evidenceStorage) throw new Error(getEvidenceStorageUnavailableMessage());
         const actor = await getCurrentActor();
         const task = await prisma.dailyTask.findUnique({ where: { id: Number(payload?.taskId) } });
         if (!task || task.status === 'completed') throw new Error('Công việc không còn ở trạng thái chờ nộp bằng chứng.');
@@ -7072,6 +7221,20 @@ ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
             throw new Error(`Chỉ được nộp tối đa ${MAX_EVIDENCE_IMAGES} ảnh bằng chứng.`);
         }
 
+        const existingEvidenceHashes = await prisma.appConfig.findMany({
+            where: { key: { startsWith: 'dailyEvidenceHash:' } },
+            select: { value: true },
+        });
+        const knownVisualHashes = existingEvidenceHashes
+            .map(entry => {
+                try { return JSON.parse(entry.value)?.visualHash || null; }
+                catch { return null; }
+            })
+            .filter(Boolean);
+        // Older evidence records only stored a byte hash. Rebuild visual hashes
+        // from recent files too, so a photo submitted before this upgrade cannot
+        // be reused simply by recompressing it in the browser.
+        knownVisualHashes.push(...await getRecentEvidenceVisualHashes());
         const submittedImages = [];
         for (const image of images) {
             if (!image?.data || !['image/jpeg', 'image/png', 'image/webp'].includes(image.mimeType)) throw new Error('Ảnh bằng chứng không hợp lệ.');
@@ -7079,19 +7242,28 @@ ipcMain.handle('dailyTasks:submitEvidence', async (_event, payload) => {
             if (!buffer.length || buffer.length > MAX_EVIDENCE_STORAGE_BYTES) throw new Error('Ảnh sau nén phải không vượt quá 1 MB.');
             if (!isValidEvidenceImage(buffer, image.mimeType)) throw new Error('Dữ liệu tải lên không phải ảnh hợp lệ.');
             const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+            const visualHash = getEvidenceVisualHash(buffer);
+            if (visualHash && knownVisualHashes.some(existingHash => evidenceVisualHashDistance(visualHash, existingHash) <= 4)) {
+                throw new Error('Ảnh này trùng hoặc quá giống bằng chứng đã nộp trước đó. Hãy chụp ảnh mới tại thời điểm thực hiện công việc.');
+            }
             const registryKey = `dailyEvidenceHash:${hash}`;
             try {
-                await prisma.appConfig.create({ data: { key: registryKey, value: JSON.stringify({ taskId: task.id, createdAt: new Date().toISOString() }) } });
+                await prisma.appConfig.create({ data: { key: registryKey, value: JSON.stringify({ taskId: task.id, createdAt: new Date().toISOString(), visualHash }) } });
                 imageRegistryKeys.push(registryKey);
+                if (visualHash) knownVisualHashes.push(visualHash);
             } catch (error) {
                 if (error.code === 'P2002') throw new Error('Ảnh này đã được dùng làm bằng chứng cho công việc khác.');
                 throw error;
             }
             const ext = image.mimeType === 'image/png' ? 'png' : image.mimeType === 'image/webp' ? 'webp' : 'jpg';
-            const driveFileName = `BANG_CHUNG_${task.id}_${new Date().toISOString().replace(/[:.]/g, '-')}_${hash.slice(0, 10)}.${ext}`;
-            const uploaded = await uploadToDrive(drive, folderId, driveFileName, buffer, image.mimeType);
-            if (!uploaded?.webViewLink) throw new Error('Không thể tải ảnh bằng chứng lên Google Drive.');
-            submittedImages.push({ name: image.name || `evidence.${ext}`, mimeType: image.mimeType, driveUrl: uploaded.webContentLink || uploaded.webViewLink, hash });
+            const storagePath = `daily-tasks/${task.id}/${new Date().toISOString().slice(0, 10)}/${hash}.${ext}`;
+            const { error: storageError } = await evidenceStorage.storage.from(EVIDENCE_BUCKET).upload(storagePath, buffer, {
+                contentType: image.mimeType,
+                upsert: false,
+            });
+            if (storageError) throw new Error(`Không thể lưu ảnh bằng chứng: ${storageError.message}`);
+            uploadedPaths.push(storagePath);
+            submittedImages.push({ name: image.name || `evidence.${ext}`, mimeType: image.mimeType, storagePath, hash });
         }
 
         // Reconcile once more immediately before completion. This closes the
@@ -8669,13 +8841,14 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
             if (isCompleted) {
                 for (const item of resolvedItems) {
                     if (item.variantSku) {
+                        await assertSaleStockAvailable(tx, item.variantSku, item.quantity);
                         await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
                             type: 'ecom_sale',
                             referenceType: 'TMDT',
                             reference: data.orderNumber || data.ecommerceExportCode || 'Lưu thủ công',
                             note: `Xuất hàng TMDT: ${data.customerName}`,
                             createdBy: data.createdBy || 'System'
-                        }, { allowMissing: true });
+                        });
                     }
                 }
                 await ensureMarketplaceOrderInTx(tx, newRecord, data.pickedBy || data.createdBy || null);
@@ -8687,6 +8860,11 @@ ipcMain.handle('ecommerceExports:create', async (event, data) => {
             return { success: true, skipped: true, reason: result.reason, data: result.data };
         }
         const record = result.data;
+        const createdItems = typeof record.items === 'string' ? JSON.parse(record.items || '[]') : (record.items || []);
+        emitStockChangedForSkus(createdItems.map(item => item.variantSku || item.sku), {
+            referenceType: 'TMDT',
+            reference: data.orderNumber || data.ecommerceExportCode || `TMDT-${record.id}`,
+        });
         console.log(`✅ Created ecommerce export #${record.id}`);
         void logActivity({ module: 'export', action: 'CREATE', description: `Tạo bàn giao TMDT #${record.id} - ${data.customerName}`, recordName: data.customerName, userName: data.createdBy });
         return { success: true, data: record };
@@ -8914,7 +9092,7 @@ async function execEcommerceExportUpdate(id, data) {
                             reference: oldRecord.orderNumber || oldRecord.ecommerceExportCode || 'Sua thu cong',
                             note: 'Hoan ton (sua don TMDT #' + oldRecord.id + ')',
                             createdBy: data.createdBy || 'System'
-                        }, { allowMissing: true });
+                        });
                     }
                 }
             }
@@ -8950,13 +9128,14 @@ async function execEcommerceExportUpdate(id, data) {
             const newItems = JSON.parse(newItemsStrFinal);
             for (const item of newItems) {
                 if (item.variantSku) {
+                    await assertSaleStockAvailable(tx, item.variantSku, item.quantity);
                     await deductItemOrCombo(tx, item.variantSku, -item.quantity, {
                         type: 'ecom_sale',
                         referenceType: 'TMDT_EDIT',
                         reference: data.orderNumber || data.ecommerceExportCode || 'Sua thu cong',
                         note: 'Tao/Sua don TMDT: ' + (data.customerName || oldRecord.customerName || 'TMDT'),
                         createdBy: data.createdBy || 'System'
-                    }, { allowMissing: true });
+                    });
                 }
             }
         }
@@ -8977,6 +9156,11 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
             return { success: true, skipped: true, reason: result.reason, data: result.data };
         }
         const record = result.data;
+        const updatedItems = typeof record.items === 'string' ? JSON.parse(record.items || '[]') : (record.items || []);
+        emitStockChangedForSkus(updatedItems.map(item => item.variantSku || item.sku), {
+            referenceType: 'TMDT',
+            reference: data.orderNumber || data.ecommerceExportCode || `TMDT-${record.id}`,
+        });
         console.log('Updated ecommerce export #' + record.id);
         void logActivity({ module: 'export', action: 'UPDATE', description: 'Cap nhat ban giao TMDT #' + record.id, recordId: record.id });
         return { success: true, data: record };
@@ -8998,6 +9182,7 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
     try {
         requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
+        const deletedSkus = [];
 
         // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         await withStockLock(() => prisma.$transaction(async (tx) => {
@@ -9008,13 +9193,14 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
                 const items = JSON.parse(doc.items || '[]');
                 for (const item of items) {
                     if (item.variantSku) {
+                        deletedSkus.push(item.variantSku);
                         await deductItemOrCombo(tx, item.variantSku, item.quantity, {
                             type: 'adjustment',
                             referenceType: 'TMDT_CANCEL',
                             reference: doc.orderNumber || doc.ecommerceExportCode || 'Xóa thủ công',
                             note: `Hoàn tồn do xóa đơn TMDT #${id}`,
                             createdBy: 'System'
-                        }, { allowMissing: true });
+                        });
                     }
                 }
             }
@@ -9022,6 +9208,7 @@ ipcMain.handle('ecommerceExports:delete', async (event, id) => {
         }, { timeout: 30000, maxWait: 10000 }));
 
         console.log(`✅ Deleted ecommerce export #${id}`);
+        emitStockChangedForSkus(deletedSkus, { referenceType: 'TMDT_CANCEL', reference: `TMDT-${id}` });
         void logActivity({ module: 'export', action: 'DELETE', description: `Xóa bàn giao TMDT #${id}` });
         return { success: true };
     } catch (error) {
@@ -9035,6 +9222,7 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
         requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const startTime = Date.now();
+        const bulkDeletedSkus = [];
 
         // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
         const count = await withStockLock(() => prisma.$transaction(async (tx) => {
@@ -9053,6 +9241,7 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
                     const items = JSON.parse(doc.items || '[]');
                     for (const item of items) {
                         if (item.variantSku) {
+                            bulkDeletedSkus.push(item.variantSku);
                             skuChanges.push({ sku: item.variantSku, quantity: item.quantity }); // + quantity = hoàn kho
                         }
                     }
@@ -9076,6 +9265,7 @@ ipcMain.handle('ecommerceExports:bulkDelete', async (event, ids) => {
         }, { timeout: 60000, maxWait: 10000 }));
 
         const elapsed = Date.now() - startTime;
+        emitStockChangedForSkus(bulkDeletedSkus, { referenceType: 'TMDT_CANCEL', reference: `TMDT-BULK-${count}` });
         console.log(`✅ Bulk deleted ${count} ecommerce exports in ${elapsed}ms`);
         void logActivity({ module: 'export', action: 'DELETE', description: `Xóa hàng loạt ${count} bàn giao TMDT (${elapsed}ms)` });
         return { success: true, data: count };
@@ -9373,7 +9563,7 @@ ipcMain.handle('marketplaceOrders:delete', async (event, { id, userName }) => {
                             reference: linkedExport.orderNumber || linkedExport.ecommerceExportCode || order.orderNumber,
                             note: `Hoàn tồn do xóa đơn TMDT ${order.orderNumber} từ màn Đơn hàng`,
                             createdBy: userName || 'System'
-                        }, { allowMissing: true });
+                        });
                     }
                 }
             } else if (order.status === 'completed') {
@@ -9385,7 +9575,7 @@ ipcMain.handle('marketplaceOrders:delete', async (event, { id, userName }) => {
                             reference: order.orderNumber,
                             note: `Hoàn tồn do xóa đơn TMDT ${order.orderNumber} từ màn Đơn hàng`,
                             createdBy: userName || 'System'
-                        }, { allowMissing: true });
+                        });
                     }
                 }
             }
@@ -10530,6 +10720,30 @@ function expandProductForStockCheck(product) {
     }];
 }
 
+// Read the authoritative stock for a SKU at the moment a physical count is
+// first entered. Daily sessions may be created hours before the count, so the
+// stock snapshot stored when the session is generated can already be stale.
+async function readCurrentStockForStockCheck(tx, sku) {
+    const direct = await tx.product.findUnique({ where: { sku }, select: { stock: true, variants: true } });
+    if (direct) {
+        if (direct.variants) {
+            try {
+                const variant = JSON.parse(direct.variants).find(item => item?.sku === sku);
+                if (variant) return Number(variant.stock || 0);
+            } catch { }
+        }
+        return Number(direct.stock || 0);
+    }
+    const parents = await tx.product.findMany({ where: { variants: { contains: sku } }, select: { variants: true } });
+    for (const parent of parents) {
+        try {
+            const variant = JSON.parse(parent.variants || '[]').find(item => item?.sku === sku);
+            if (variant) return Number(variant.stock || 0);
+        } catch { }
+    }
+    return null;
+}
+
 // A daily session is one best-selling product plus two random products. The
 // renderer starts a session, but enforcing the minimum here makes the rule
 // durable for old sessions and for the assigned manager's first page load.
@@ -11026,6 +11240,12 @@ ipcMain.handle('stockCheck:updateCount', async (event, payload = {}) => {
             const session = getStockCheckSessionOrThrow(sessions, payload.sessionId);
             const storedItem = getStockCheckItemOrThrow(session, payload.sku);
             if (storedItem.countLocked) throw new Error('Số đếm đang được khóa. Hãy nhập lý do hoặc dùng lượt nhập lại.');
+            // Capture the live stock only when this SKU receives its first
+            // physical count. Later edits must keep the same comparison point.
+            if (!clearCount && storedItem.actualStock === null && !storedItem.balanced) {
+                const liveStock = await readCurrentStockForStockCheck(tx, payload.sku);
+                if (liveStock !== null) storedItem.systemStock = liveStock;
+            }
             storedItem.actualStock = clearCount ? null : actualStock;
             storedItem.difference = clearCount ? 0 : actualStock - Number(storedItem.systemStock || 0);
             storedItem.balanced = false;
