@@ -586,6 +586,30 @@ const fmt = (v: number) => new Intl.NumberFormat('vi-VN').format(Math.round(v)) 
 // Combo 20 gói x1 = 20 SP × 20đ = 400đ
 // CB- (combo mix) SKU: parse prefix tương tự hoặc tính từ combo components
 const VAT_OVERDUE_FINE_AMOUNT = 30000;
+const VAT_FIRST_FINE_AFTER_DAYS = 5;
+// Policy starts prospectively: historical overdue receipts get their first
+// fine at this time, never retroactively before it.
+const VAT_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-10T00:00:00');
+
+const getVatFirstFineAt = (purchaseAt: dayjs.Dayjs) => {
+    const normalFirstFineAt = purchaseAt.add(VAT_FIRST_FINE_AFTER_DAYS, 'day');
+    return normalFirstFineAt.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT) ? VAT_FINE_POLICY_EFFECTIVE_AT : normalFirstFineAt;
+};
+
+const getVatFineStage = (purchaseAt: dayjs.Dayjs, now = dayjs()) => {
+    const firstFineAt = getVatFirstFineAt(purchaseAt);
+    if (now.isBefore(firstFineAt)) return 0;
+    const daysAfterFirstFine = Math.max(0, now.startOf('day').diff(firstFineAt.startOf('day'), 'day'));
+    if (daysAfterFirstFine < 2) return 1;
+    if (daysAfterFirstFine < 4) return 2;
+    if (daysAfterFirstFine < 5) return 3;
+    return 4 + (daysAfterFirstFine - 5);
+};
+
+const getVatFineDate = (purchaseAt: dayjs.Dayjs, stage: number) => {
+    const delayDays = stage <= 3 ? (stage - 1) * 2 : stage + 1;
+    return getVatFirstFineAt(purchaseAt).add(delayDays, 'day');
+};
 const DEADLINE_OVERDUE_FINE_OFFICIAL = 50000;
 const getAssignmentDeadlineFineAmount = (task: any): number => {
     try {
@@ -612,9 +636,6 @@ const getAssignmentDeadlineRecipients = (task: any): string[] => {
     }
     return task?.assignee ? [String(task.assignee)] : [];
 };
-// The VAT deadline policy applies prospectively from this rollout date.
-const VAT_OVERDUE_POLICY_START = dayjs('2026-07-26').startOf('day');
-
 function calcPacksFromItems(items: PackingOrderItem[]): number {
     let totalPacks = 0;
     items.forEach(item => {
@@ -3398,28 +3419,29 @@ export default function Attendance() {
 
             const purchaseAt = dayjs(purchaseAtRaw);
             if (!purchaseAt.isValid()) return [];
-            if (purchaseAt.isBefore(VAT_OVERDUE_POLICY_START)) return [];
-
-            const penaltyDate = purchaseAt.add(5, 'day');
-            if (!penaltyDate.isBefore(dayjs())) return [];
-            if (!inOverviewRange(penaltyDate.toISOString())) return [];
+            const fineStage = getVatFineStage(purchaseAt);
+            if (fineStage === 0) return [];
 
             const creatorKey = normalizeAttendanceText(purchase.createdBy || '');
             const creator = employees.find(emp => normalizeAttendanceText(emp.username) === creatorKey)
                 || employees.find(emp => matchTaskAssigneeToEmployee(purchase.createdBy, emp));
             if (!creator) return [];
 
-            return [{
+            return Array.from({ length: fineStage }, (_, index) => {
+                const stage = index + 1;
+                const penaltyDate = getVatFineDate(purchaseAt, stage);
+                return {
                 // Stable ID lets us persist the fine once and keep it after a
                 // late VAT upload, without creating duplicates on reload.
-                id: `vat-overdue-${purchase.id}`,
+                id: stage === 1 ? `vat-overdue-${purchase.id}` : `vat-overdue-${purchase.id}-stage-${stage}`,
                 empId: creator.id,
                 type: 'VAT quá hạn nhập hàng',
-                detail: `Phiếu ${purchase.poNumber || `#${purchase.id}`}${purchase.supplierName ? ` - ${purchase.supplierName}` : ''} quá 5 ngày chưa cập nhật HĐ VAT`,
+                detail: `Phiếu ${purchase.poNumber || `#${purchase.id}`}${purchase.supplierName ? ` - ${purchase.supplierName}` : ''} quá hạn ${VAT_FIRST_FINE_AFTER_DAYS + (stage <= 3 ? (stage - 1) * 2 : stage + 1)} ngày chưa cập nhật HĐ VAT - phạt lần ${stage}`,
                 amount: VAT_OVERDUE_FINE_AMOUNT,
                 date: penaltyDate.toISOString(),
                 source: 'purchase_vat_overdue' as any,
-            }];
+                };
+            }).filter(fine => inOverviewRange(fine.date));
         });
     }, [employees, purchaseVatTracking, overviewDateRange]);
 
@@ -3428,7 +3450,10 @@ export default function Attendance() {
     // must not erase the already-recorded deduction.
     useEffect(() => {
         if (!isAdmin || !isDbLoaded || employees.length === 0 || autoVatOverdueFines.length === 0) return;
-        const existingIds = new Set(extraFines.filter(fine => fine.source === 'purchase_vat_overdue').map(fine => fine.id).filter(Boolean));
+        const existingIds = new Set(extraFines
+            .filter(fine => fine.source === 'purchase_vat_overdue' && (!fine.date || !dayjs(fine.date).isBefore(VAT_FINE_POLICY_EFFECTIVE_AT)))
+            .map(fine => fine.id)
+            .filter(Boolean));
         const deletedIds = new Set(getDeletedFineKeys(fineAuditLog));
         const missing = autoVatOverdueFines.filter(fine => fine.id && !existingIds.has(fine.id) && !deletedIds.has(fine.id));
         if (missing.length === 0) return;
@@ -3596,10 +3621,16 @@ export default function Attendance() {
     const allFines = useMemo(
         () => {
             const deletedFineKeys = getDeletedFineKeys(fineAuditLog);
-            const persistedVatIds = new Set(extraFines.filter(fine => fine.source === 'purchase_vat_overdue').map(fine => fine.id).filter(Boolean));
+            const persistedVatIds = new Set(extraFines
+                .filter(fine => fine.source === 'purchase_vat_overdue' && (!fine.date || !dayjs(fine.date).isBefore(VAT_FINE_POLICY_EFFECTIVE_AT)))
+                .map(fine => fine.id)
+                .filter(Boolean));
             const rows = [...finesData, ...extraFines, ...autoVatOverdueFines.filter(fine => !fine.id || !persistedVatIds.has(fine.id)), ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoStockCheckMissingFines]
                 .map(applyFineOverride)
                 .filter(f => !getFineRecordKeys(f).some(key => deletedFineKeys.has(key)))
+                // Auto VAT fines made before the approved rollout are invalid;
+                // preserve their audit data but do not show/deduct them.
+                .filter(f => f.source !== 'purchase_vat_overdue' || !f.date || !dayjs(f.date).isBefore(VAT_FINE_POLICY_EFFECTIVE_AT))
                 .filter(f => !f.disabled);
             const vatRows = new Map<string, FineRecord>();
             const result: FineRecord[] = [];
@@ -3614,7 +3645,10 @@ export default function Attendance() {
                 }
                 const codeMatch = detailText.match(/(?:pn[-\s]*)?(\d{6}\s*-\s*\d{3})/i);
                 const vatCode = codeMatch?.[1]?.replace(/\s+/g, '') || detailText.trim().toLocaleLowerCase('vi-VN').replace(/\s+/g, ' ');
-                const key = `${fine.empId}|vat|${vatCode.toLocaleLowerCase('vi-VN')}`;
+                const stage = fine.source === 'purchase_vat_overdue'
+                    ? Number(String(fine.id || '').match(/-stage-(\d+)$/)?.[1] || 1)
+                    : 1;
+                const key = `${fine.empId}|vat|${vatCode.toLocaleLowerCase('vi-VN')}|${stage}`;
                 const existing = vatRows.get(key);
                 // A manually duplicated VAT fine may already exist from the
                 // previous implementation. Keep the durable system record.
@@ -5059,7 +5093,10 @@ export default function Attendance() {
             if (!isVatFine) return true;
             const codeMatch = detailText.match(/(?:pn[-\s]*)?(\d{6}\s*-\s*\d{3})/i);
             const code = codeMatch?.[1]?.replace(/\s+/g, '') || detailText.trim().toLocaleLowerCase('vi-VN').replace(/\s+/g, ' ');
-            const key = `${fine.empId}|vat|${code.toLocaleLowerCase('vi-VN')}`;
+            const stage = fine.source === 'purchase_vat_overdue'
+                ? Number(String(fine.id || '').match(/-stage-(\d+)$/)?.[1] || 1)
+                : 1;
+            const key = `${fine.empId}|vat|${code.toLocaleLowerCase('vi-VN')}|${stage}`;
             const existing = vatRows.get(key);
             if (existing) {
                 if (fine.source === 'purchase_vat_overdue' && existing.source !== 'purchase_vat_overdue') vatRows.set(key, fine);
@@ -5075,7 +5112,10 @@ export default function Attendance() {
                 const detail = String(row.detail || '');
                 const match = detail.match(/(?:pn[-\s]*)?(\d{6}\s*-\s*\d{3})/i);
                 const code = match?.[1]?.replace(/\s+/g, '') || detail.trim().toLocaleLowerCase('vi-VN').replace(/\s+/g, ' ');
-                return `${row.empId}|vat|${code.toLocaleLowerCase('vi-VN')}` === key;
+                const stage = row.source === 'purchase_vat_overdue'
+                    ? Number(String(row.id || '').match(/-stage-(\d+)$/)?.[1] || 1)
+                    : 1;
+                return `${row.empId}|vat|${code.toLocaleLowerCase('vi-VN')}|${stage}` === key;
             });
             if (index >= 0) combinedFines[index] = fine;
         });
@@ -5222,6 +5262,8 @@ export default function Attendance() {
                                     if (record.source === 'purchase_vat_overdue' || d.includes('chưa cập nhật HĐ VAT')) {
                                         const cleanText = d.replace(/\s*quá 5 ngày chưa cập nhật HĐ VAT\s*$/, '');
                                         const poCode = cleanText.replace(/^Phiếu\s+/, '');
+                                        const overdueDays = d.match(/quá hạn\s+(\d+)\s+ngày/i)?.[1] || '5';
+                                        const fineStage = d.match(/phạt lần\s+(\d+)/i)?.[1] || '1';
                                         const parts = poCode.split(/\s*-\s*/);
                                         const rawCode = parts[0].trim();
                                         const code = /^PN[-\s]/i.test(rawCode)
@@ -5230,7 +5272,7 @@ export default function Attendance() {
                                         const supplier = parts.slice(1).join(' - ');
                                         return (
                                             <Space size={4}>
-                                                <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ HĐ VAT — quá hạn 5 ngày</Text>
+                                                <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ HĐ VAT — quá hạn {overdueDays} ngày · phạt lần {fineStage}</Text>
                                                 <Tag color="cyan" style={{ margin: 0, fontWeight: 700, fontFamily: 'monospace', fontSize: 11, border: 'none', background: '#e6fffb', color: '#08979c' }}>
                                                     <Text copyable={{ text: code }} style={{ color: 'inherit', fontSize: 'inherit', fontWeight: 'inherit', fontFamily: 'inherit' }}>
                                                         {code}

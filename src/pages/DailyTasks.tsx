@@ -3576,7 +3576,7 @@ const DailyTasks = () => {
                     <div style={{ marginTop: -10, marginBottom: 14, color: '#8a5a12', fontSize: 12, lineHeight: 1.45 }}>
                         <WarningOutlined /> Mức phạt áp dụng cho từng người nhận. Bàn giao yêu cầu bằng chứng sẽ phạt ngay tại deadline và tăng theo từng ngày, đúng giờ deadline đã đặt.
                     </div>
-                    <Form.Item name="recurrenceDays" label="Tự lặp lại sau (ngày)" extra="0 = không lặp; ví dụ 2 = tự sinh lại sau 2 ngày" style={{ marginBottom: 18 }}>
+                    <Form.Item name="recurrenceDays" label="Tự lặp lại sau (ngày)" extra="0 = không lặp; ví dụ 2 = tự sinh lại sau 2 ngày. Nếu rơi vào Chủ nhật/ngày lễ, tự dời sang ngày làm việc kế tiếp." style={{ marginBottom: 18 }}>
                         <InputNumber min={0} max={365} precision={0} controls style={{ width: 180 }} />
                     </Form.Item>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, padding: '10px 12px', border: '1px solid #bbf7d0', borderRadius: 7, background: '#f0fdf4' }}>

@@ -28,6 +28,63 @@ import dayjs from 'dayjs';
 const { Title } = Typography;
 const { TextArea } = Input;
 
+const VAT_FIRST_FINE_AFTER_DAYS = 5;
+// Policy was approved on 09/08/2026. Do not retroactively fine old receipts.
+const VAT_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-10T00:00:00');
+
+type VatDueStatus = { color: string; text: string; detail: string } | null;
+
+const formatVatDateTime = (value: dayjs.Dayjs) => value.format('HH:mm DD/MM/YYYY');
+
+const formatRemainingVatTime = (target: dayjs.Dayjs, now: dayjs.Dayjs) => {
+    const minutes = Math.max(0, Math.ceil(target.diff(now, 'minute', true)));
+    const days = Math.floor(minutes / (24 * 60));
+    const hours = Math.floor((minutes % (24 * 60)) / 60);
+    const mins = minutes % 60;
+    if (days > 0) return `${days} ngày ${hours} giờ`;
+    if (hours > 0) return `${hours} giờ ${mins} phút`;
+    return `${Math.max(1, mins)} phút`;
+};
+
+const getVatFirstFineAt = (purchasedAt: dayjs.Dayjs) => {
+    const normalFirstFineAt = purchasedAt.add(VAT_FIRST_FINE_AFTER_DAYS, 'day');
+    return normalFirstFineAt.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT) ? VAT_FINE_POLICY_EFFECTIVE_AT : normalFirstFineAt;
+};
+
+const getVatFineDate = (purchasedAt: dayjs.Dayjs, stage: number) =>
+    getVatFirstFineAt(purchasedAt).add(stage <= 3 ? (stage - 1) * 2 : stage + 1, 'day');
+
+function getVatDueStatus(purchaseDate: string | Date | undefined, needsVat: boolean): VatDueStatus {
+    if (!needsVat || !purchaseDate) return null;
+    const purchasedAt = dayjs(purchaseDate);
+    if (!purchasedAt.isValid()) return null;
+    const normalDeadline = purchasedAt.add(VAT_FIRST_FINE_AFTER_DAYS, 'day');
+    const deadline = getVatFirstFineAt(purchasedAt);
+    const now = dayjs();
+    if (now.isBefore(deadline)) {
+        const remaining = formatRemainingVatTime(deadline, now);
+        return {
+            color: 'gold',
+            text: normalDeadline.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT) ? `Còn ${remaining} đến đợt áp dụng phạt VAT` : `Còn ${remaining} để nộp VAT`,
+            detail: `Sẽ phạt lần 1 lúc ${formatVatDateTime(deadline)}`,
+        };
+    }
+
+    const daysLate = Math.max(VAT_FIRST_FINE_AFTER_DAYS, now.startOf('day').diff(purchasedAt.startOf('day'), 'day'));
+    const daysAfterFirstFine = Math.max(0, now.startOf('day').diff(deadline.startOf('day'), 'day'));
+    const fineStage = daysAfterFirstFine < 2 ? 1
+        : daysAfterFirstFine < 4 ? 2
+            : daysAfterFirstFine < 5 ? 3
+                : 4 + (daysAfterFirstFine - 5);
+    const currentFineAt = getVatFineDate(purchasedAt, fineStage);
+    const nextFineAt = getVatFineDate(purchasedAt, fineStage + 1);
+    return {
+        color: 'error',
+        text: `Quá hạn VAT ${daysLate} ngày · phạt lần ${fineStage}`,
+        detail: `Lần ${fineStage}: ${formatVatDateTime(currentFineAt)} · Lần ${fineStage + 1}: ${formatVatDateTime(nextFineAt)} (còn ${formatRemainingVatTime(nextFineAt, now)})`,
+    };
+}
+
 interface Supplier {
     id: number;
     name: string;
@@ -1404,6 +1461,39 @@ export default function PurchasePage() {
         }
     };
 
+    const handleMarkAllNoVat = async (purchase: Purchase, companyNames: string[], revert: boolean) => {
+        const setCompanyVatStatus = (window.electronAPI as any)?.purchases?.setCompanyVatStatus;
+        if (typeof setCompanyVatStatus !== 'function') {
+            message.error('Ứng dụng chưa nạp chức năng VAT theo công ty. Vui lòng mở lại app.');
+            return;
+        }
+        if (companyNames.length === 0) {
+            message.warning('Phiếu này chưa có công ty/thương hiệu để đánh dấu Không VAT.');
+            return;
+        }
+        Modal.confirm({
+            title: revert ? 'Mở lại nhập HĐ VAT' : 'Đánh dấu Không VAT',
+            content: revert
+                ? `Mở lại trạng thái VAT cho toàn bộ ${companyNames.length} công ty trong phiếu ${purchase.poNumber || `#${purchase.id}`}?`
+                : `Đánh dấu Không VAT cho toàn bộ ${companyNames.length} công ty trong phiếu ${purchase.poNumber || `#${purchase.id}`}?`,
+            okText: revert ? 'Mở lại' : 'Xác nhận',
+            cancelText: 'Hủy',
+            onOk: async () => {
+                const results = await Promise.all(companyNames.map(companyGroup => setCompanyVatStatus({
+                    purchaseId: purchase.id,
+                    companyGroup,
+                    status: revert ? 'pending' : 'no_vat',
+                })));
+                const failed = results.find(result => !result?.success);
+                if (failed) message.error(failed.error || 'Không thể cập nhật trạng thái VAT');
+                else {
+                    message.success(revert ? 'Đã mở lại nhập HĐ VAT cho toàn bộ công ty' : 'Đã đánh dấu Không VAT cho toàn bộ công ty');
+                    loadPurchases();
+                }
+            },
+        });
+    };
+
     const handleDeleteCompanyVatInvoice = (purchaseId: number, companyGroup: string) => {
         Modal.confirm({
             title: '🗑️ Xóa HĐ VAT của công ty này?',
@@ -1612,15 +1702,27 @@ export default function PurchasePage() {
                         .map(item => item.companyGroup)
                         .filter(Boolean))] as string[];
                 } catch { companyNames = []; }
+                // THHT applies to the whole receipt, including receipts that
+                // contain several goods companies. It must win over the
+                // per-company VAT workflow below.
+                if (String(r.vatInvoiceStatus || '').toLowerCase() === 'thht') {
+                    return <Tag color="purple" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px' }}>📦 Đơn THHT · không cần VAT</Tag>;
+                }
                 if (companyNames.length > 0) {
                     const companyVat = r.companyVatByGroup || {};
                     const completed = companyNames.filter(name => ['uploaded', 'no_vat'].includes(companyVat[name]?.status)).length;
+                    const allNoVat = companyNames.every(name => companyVat[name]?.status === 'no_vat');
+                    const dueStatus = getVatDueStatus(r.purchaseDate || r.receivedAt || r.createdAt, completed < companyNames.length);
                     return (
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-                            <Tag color={completed === companyNames.length ? 'success' : 'warning'} style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px', margin: 0 }}>
-                                VAT theo công ty: {completed}/{companyNames.length}
+                            <Tag color={allNoVat ? 'default' : completed === companyNames.length ? 'success' : 'warning'} style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px', margin: 0, ...(allNoVat ? { borderStyle: 'dashed', color: '#595959' } : {}) }}>
+                                {allNoVat ? '🏷️ Không VAT' : `VAT theo công ty: ${completed}/${companyNames.length}`}
                             </Tag>
-                            <span style={{ fontSize: 11, color: '#595959' }}>Mở chi tiết để xử lý</span>
+                            {dueStatus && <Tag color={dueStatus.color} style={{ margin: 0, fontWeight: 600, fontSize: 11, whiteSpace: 'normal', textAlign: 'center' }}>
+                                {dueStatus.text}
+                            </Tag>}
+                            {dueStatus && <span style={{ fontSize: 10, color: dueStatus.color === 'error' ? '#cf1322' : '#ad6800', textAlign: 'center', lineHeight: 1.35 }}>{dueStatus.detail}</span>}
+                            <span style={{ fontSize: 11, color: '#595959' }}>{allNoVat ? 'Đã xác nhận không cần HĐ VAT' : 'Mở chi tiết để xử lý'}</span>
                         </div>
                     );
                 }
@@ -1642,6 +1744,7 @@ export default function PurchasePage() {
                 const isGroupedVat = !!r.vatGroupId;
                 const hasVat = isGroupedVat ? !!r.vatGroupHasVat : r.vatInvoiceStatus === 'uploaded';
                 const hasRc = r.importReceiptStatus === 'uploaded';
+                const dueStatus = getVatDueStatus(r.purchaseDate || r.receivedAt || r.createdAt, !hasVat);
 
                 // Phiếu nhập trước 19/03/2026 không bắt buộc chứng từ
                 const CUTOFF = new Date('2026-03-19T00:00:00');
@@ -1690,9 +1793,13 @@ export default function PurchasePage() {
 
                 if (!hasVat && hasRc) {
                     return (
-                        <Tag color="warning" style={{ fontWeight: 600, fontSize: 13, padding: '4px 12px', color: '#faad14', backgroundColor: '#fffbe6', borderColor: '#ffe58f' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                        <Tag color="warning" style={{ margin: 0, fontWeight: 600, fontSize: 13, padding: '4px 12px', color: '#faad14', backgroundColor: '#fffbe6', borderColor: '#ffe58f' }}>
                             ⏳ Đợi HĐ VAT
                         </Tag>
+                        {dueStatus && <Tag color={dueStatus.color} style={{ margin: 0, fontWeight: 600, fontSize: 11, whiteSpace: 'normal', textAlign: 'center' }}>{dueStatus.text}</Tag>}
+                        {dueStatus && <span style={{ fontSize: 10, color: dueStatus.color === 'error' ? '#cf1322' : '#ad6800', textAlign: 'center', lineHeight: 1.35 }}>{dueStatus.detail}</span>}
+                        </div>
                     );
                 }
 
@@ -1778,6 +1885,15 @@ export default function PurchasePage() {
                             Sửa
                         </Button>
                     )}
+                    {isAdmin && (
+                        <Button
+                            danger
+                            icon={<DeleteOutlined />}
+                            onClick={() => handleDelete(record)}
+                        >
+                            Xóa
+                        </Button>
+                    )}
                     {false && isAdmin && items.some(item => Number(item.unitPrice) <= 0) && (
                         <Button
                             icon={<ReloadOutlined />}
@@ -1843,6 +1959,11 @@ export default function PurchasePage() {
                                         icon: isNoVat ? <UploadOutlined /> : <TagOutlined />,
                                         label: isNoVat ? 'Mở lại nhập HĐ VAT' : 'Đánh dấu Không VAT',
                                     },
+                                    {
+                                        key: 'thht',
+                                        icon: <GiftOutlined />,
+                                        label: 'Đánh dấu Đơn THHT',
+                                    },
                                     ...(isUploaded ? [
                                         { type: 'divider' as const },
                                         { key: 'delete', danger: true, icon: <DeleteOutlined />, label: 'Xóa HĐ VAT' },
@@ -1868,6 +1989,7 @@ export default function PurchasePage() {
                                                         if (key === 'delete') handleDeleteCompanyVatInvoice(record.id, company);
                                                         if (key === 'no_vat') handleSetCompanyVatStatus(record.id, company, 'no_vat');
                                                         if (key === 'pending') handleSetCompanyVatStatus(record.id, company, 'pending');
+                                                        if (key === 'thht') handleMarkThht(record, false);
                                                     },
                                                 }}
                                             >
@@ -2010,16 +2132,16 @@ export default function PurchasePage() {
     const personalVatPenalties = useMemo(() => {
         const username = String(user?.username || '').trim().toLocaleLowerCase('vi-VN');
         if (!username) return [];
-        const policyStart = dayjs('2026-03-19');
         const now = dayjs();
         return purchases.filter(purchase => {
             if (String(purchase.createdBy || '').trim().toLocaleLowerCase('vi-VN') !== username) return false;
             const vatStatus = String(purchase.vatInvoiceStatus || 'pending').toLowerCase();
             const hasVat = purchase.vatGroupId ? !!purchase.vatGroupHasVat : ['uploaded', 'verified'].includes(vatStatus);
             const purchaseDate = dayjs(purchase.purchaseDate || purchase.createdAt);
+            const firstFineAt = purchaseDate.isValid() ? getVatFirstFineAt(purchaseDate) : null;
             return purchaseDate.isValid()
-                && purchaseDate.isAfter(policyStart)
-                && purchaseDate.add(5, 'day').isBefore(now)
+                && !!firstFineAt
+                && firstFineAt.isBefore(now)
                 && !hasVat
                 && !['thht', 'no_vat'].includes(vatStatus);
         });

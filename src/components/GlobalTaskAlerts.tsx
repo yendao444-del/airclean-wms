@@ -237,7 +237,7 @@ export default function GlobalTaskAlerts() {
             addAlertPopup({
                 level: 'overdue',
                 taskName: newPenalties.length === 1
-                    ? `Đã ghi nhận phạt HĐ VAT: ${first.poNumber}`
+                    ? `Đã ghi nhận phạt HĐ VAT lần ${first.fineStage || 1}: ${first.poNumber}`
                     : `Đã ghi nhận ${newPenalties.length} khoản phạt HĐ VAT`,
                 assignee: user?.fullName || user?.username || '',
                 deadline: dayjs(first.fineDate).format('DD/MM/YYYY'),
