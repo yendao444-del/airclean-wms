@@ -587,12 +587,15 @@ const fmt = (v: number) => new Intl.NumberFormat('vi-VN').format(Math.round(v)) 
 // CB- (combo mix) SKU: parse prefix tương tự hoặc tính từ combo components
 const VAT_OVERDUE_FINE_AMOUNT = 30000;
 const VAT_FIRST_FINE_AFTER_DAYS = 5;
-// Policy starts prospectively: historical overdue receipts get their first
-// fine at this time, never retroactively before it.
-const VAT_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-10T00:00:00');
+// 10/08 is the final submission day. The first automatic VAT fine may only
+// be created from 00:00 on 11/08.
+const VAT_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-11T00:00:00');
 
 const getVatFirstFineAt = (purchaseAt: dayjs.Dayjs) => {
-    const normalFirstFineAt = purchaseAt.add(VAT_FIRST_FINE_AFTER_DAYS, 'day');
+    // VAT deadlines are calendar-day based, not based on the purchase time.
+    // A receipt dated 06/08 remains valid through 10/08 and is first fined
+    // at 00:00 on 11/08.
+    const normalFirstFineAt = purchaseAt.startOf('day').add(VAT_FIRST_FINE_AFTER_DAYS, 'day');
     return normalFirstFineAt.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT) ? VAT_FINE_POLICY_EFFECTIVE_AT : normalFirstFineAt;
 };
 
@@ -716,6 +719,7 @@ function calculatePayroll(
     monthNum: number,
     yearNum: number,
     orderLogs: PackingOrderLog[],
+    employmentEndDates: Record<string, string> = {},
     overrides?: Record<string, PayrollOverride>,
     attendanceDeductionsReady = true
 ) {
@@ -729,6 +733,12 @@ function calculatePayroll(
     const isRestDay = (date: dayjs.Dayjs) => date.day() === 0 || Boolean(isPublicHoliday(date));
 
     return employeesList.map((emp, idx) => {
+        const employmentEndDate = String(employmentEndDates[normalizeAttendanceText(emp.username)] || '').trim();
+        const employmentEnd = /^\d{4}-\d{2}-\d{2}$/.test(employmentEndDate) ? dayjs(employmentEndDate) : null;
+        // The resignation date itself is the first inactive date: historical
+        // work before it remains payable, nothing on/after it is accrued.
+        const isWithinEmployment = (date: dayjs.Dayjs) => !employmentEnd || !employmentEnd.isValid() || date.isBefore(employmentEnd, 'day');
+        const payrollStart = dayjs(`${yearNum}-${monthNum}-01`, 'YYYY-M-D').startOf('day');
         let shifts = 0;
         let absentDays = 0;
         let extraShifts = 0;
@@ -764,7 +774,7 @@ function calculatePayroll(
                     const logDate = l.date || (l.timestamp ? l.timestamp.substring(0, 10) : '');
                     if (!logDate) return false;
                     const d = new Date(logDate);
-                    return d.getMonth() + 1 === monthNum && d.getFullYear() === yearNum;
+                    return d.getMonth() + 1 === monthNum && d.getFullYear() === yearNum && isWithinEmployment(dayjs(logDate));
                 }
                 return false;
             });
@@ -816,7 +826,7 @@ function calculatePayroll(
                     .filter((schedule) => schedule.empId === emp.id)
                     .forEach((schedule) => {
                         const date = dayjs(schedule.date);
-                        if (date.month() + 1 !== monthNum || date.year() !== yearNum) return;
+                        if (date.month() + 1 !== monthNum || date.year() !== yearNum || !isWithinEmployment(date)) return;
                         if (isRestDay(date) || !date.isBefore(today, 'day')) return;
                         const key = `${schedule.date}|${schedule.session}`;
                         if (workedSessions.has(key)) return;
@@ -837,7 +847,7 @@ function calculatePayroll(
                 const logDate = l.date || (l.timestamp ? l.timestamp.substring(0, 10) : '');
                 if (!logDate) return false;
                 const d = new Date(logDate);
-                return d.getMonth() + 1 === monthNum && d.getFullYear() === yearNum;
+                return d.getMonth() + 1 === monthNum && d.getFullYear() === yearNum && isWithinEmployment(dayjs(logDate));
             });
             const workedSessions = new Set<string>();
             empLogs.forEach((l: any) => {
@@ -861,7 +871,7 @@ function calculatePayroll(
             if (attendanceDeductionsReady) {
                 for (let day = 1; day <= daysInPayrollMonth; day++) {
                     const date = dayjs(`${yearNum}-${monthNum}-${day}`, 'YYYY-M-D');
-                    if (isRestDay(date) || !date.isBefore(today, 'day')) continue;
+                    if (isRestDay(date) || !date.isBefore(today, 'day') || !isWithinEmployment(date)) continue;
                     const dateStr = date.format('YYYY-MM-DD');
                     (['morning', 'afternoon'] as LeaveSession[]).forEach((session) => {
                         const key = `${dateStr}|${session}`;
@@ -875,6 +885,15 @@ function calculatePayroll(
             const dailySalary = emp.baseSalary / STANDARD_WORK_DAYS;
             leaveDeduction = Math.round((paidLeaveSessions * 0.5 * dailySalary) + (unpaidLeaveSessions * 0.5 * dailySalary * 2));
             absentDays = (paidLeaveSessions + unpaidLeaveSessions) / 2;
+            if (employmentEnd && employmentEnd.isValid() && employmentEnd.isBefore(payrollStart.add(daysInPayrollMonth), 'day')) {
+                let eligibleWorkDays = 0;
+                for (let day = 1; day <= daysInPayrollMonth; day++) {
+                    const date = dayjs(`${yearNum}-${monthNum}-${day}`, 'YYYY-M-D');
+                    if (isWithinEmployment(date) && !isRestDay(date)) eligibleWorkDays++;
+                }
+                shifts = Math.min(eligibleWorkDays, STANDARD_WORK_DAYS) * 2;
+                salaryBase = Math.round(emp.baseSalary * Math.min(eligibleWorkDays, STANDARD_WORK_DAYS) / STANDARD_WORK_DAYS);
+            }
         }
 
         const autoShifts = shifts - extraShifts; // Số ca gốc từ điểm danh
@@ -886,6 +905,8 @@ function calculatePayroll(
         let packTotalUnits = 0;
 
         orderLogs.forEach(order => {
+            const orderDate = dayjs(order.timestamp);
+            if (employmentEnd && orderDate.isValid() && !isWithinEmployment(orderDate)) return;
             if (matchPacker(order.packer || '', emp)) {
                 const totalPacks = calcPacksFromItems(order.items);
                 packIncome += totalPacks * unitPrice;
@@ -896,11 +917,15 @@ function calculatePayroll(
 
         const autoPackIncome = packIncome;
 
-        const myFines = activeFines.filter(f => f.empId === emp.id).reduce((sum, f) => sum + f.amount, 0);
+        const isAccruedDuringEmployment = (record: { date?: string }) => {
+            const date = dayjs(record.date || '');
+            return !employmentEnd || !record.date || !date.isValid() || isWithinEmployment(date);
+        };
+        const myFines = activeFines.filter(f => f.empId === emp.id && isAccruedDuringEmployment(f)).reduce((sum, f) => sum + f.amount, 0);
 
         const fineShare = 0;
 
-        const mBonus = bonusesData.filter(b => b.empId === emp.id).reduce((sum, b) => sum + b.amount, 0);
+        const mBonus = bonusesData.filter(b => b.empId === emp.id && isAccruedDuringEmployment(b)).reduce((sum, b) => sum + b.amount, 0);
         const totalBonus = mBonus;
         const finalSalary = salaryBase + packIncome + totalBonus - myFines - leaveDeduction + extraAdjust;
         return {
@@ -910,6 +935,7 @@ function calculatePayroll(
             // Giá trị gốc (auto) để so sánh trên UI
             autoShifts, autoSalaryBase, autoPackIncome,
             extraShifts, extraAdjust, adjustNote, hasOverride, salaryPerShift,
+            employmentEndDate: employmentEndDate || null,
         };
     });
 }
@@ -2939,10 +2965,14 @@ export default function Attendance() {
 
                 // Fetch danh sách username hệ thống TRƯỚC để dùng migrate
                 let sysUsernames: string[] = [];
+                let knownUsernames: string[] = [];
                 try {
                     const usersRes = await api.users.getAll();
                     if (usersRes.success && usersRes.data) {
                         setSystemUsers(usersRes.data);
+                        knownUsernames = usersRes.data
+                            .filter((u: any) => u?.username && u.username.toLowerCase() !== 'admin')
+                            .map((u: any) => u.username);
                         sysUsernames = usersRes.data
                             .filter((u: any) =>
                                 u?.username &&
@@ -2958,8 +2988,8 @@ export default function Attendance() {
                 // Hàm migrate username cũ (toan → nguyendinhtoan) sang username Quản trị
                 const migrateUsername = (uname: string): string => {
                     if (!uname) return uname;
-                    if (sysUsernames.includes(uname)) return uname; // đã đúng
-                    const matched = sysUsernames.find(su => su.endsWith(uname));
+                    if (knownUsernames.includes(uname)) return uname; // đã đúng
+                    const matched = knownUsernames.find(su => su.endsWith(uname));
                     return matched || uname;
                 };
 
@@ -3426,6 +3456,13 @@ export default function Attendance() {
             const creator = employees.find(emp => normalizeAttendanceText(emp.username) === creatorKey)
                 || employees.find(emp => matchTaskAssigneeToEmployee(purchase.createdBy, emp));
             if (!creator) return [];
+            const creatorAccount = systemUsers.find((item: any) =>
+                normalizeAttendanceText(item?.username) === creatorKey
+                || matchTaskAssigneeToEmployee(purchase.createdBy, { username: item?.username, name: item?.fullName })
+            );
+            const resignationDate = creatorAccount?.employmentStatus === 'resigned'
+                ? dayjs(creatorAccount.resignationDate)
+                : null;
 
             return Array.from({ length: fineStage }, (_, index) => {
                 const stage = index + 1;
@@ -3441,9 +3478,27 @@ export default function Attendance() {
                 date: penaltyDate.toISOString(),
                 source: 'purchase_vat_overdue' as any,
                 };
-            }).filter(fine => inOverviewRange(fine.date));
+            }).filter(fine => inOverviewRange(fine.date)
+                && (!resignationDate || !resignationDate.isValid() || dayjs(fine.date).isBefore(resignationDate, 'day')));
         });
-    }, [employees, purchaseVatTracking, overviewDateRange]);
+    }, [employees, purchaseVatTracking, overviewDateRange, systemUsers]);
+
+    // Remove system-generated VAT fines created before the valid policy time.
+    // This is a one-way correction for the 10/08 rollout; manual fines stay intact.
+    useEffect(() => {
+        if (!isAdmin || !isDbLoaded || employees.length === 0) return;
+        const invalidFineIds = new Set(extraFines
+            .filter(fine => fine.source === 'purchase_vat_overdue'
+                && fine.date
+                && dayjs(fine.date).isBefore(VAT_FINE_POLICY_EFFECTIVE_AT))
+            .map(fine => fine.id)
+            .filter(Boolean));
+        if (invalidFineIds.size === 0) return;
+
+        const nextFines = extraFines.filter(fine => !invalidFineIds.has(fine.id));
+        setExtraFines(nextFines);
+        void persistAttendanceSnapshotNow({ extraFines: nextFines });
+    }, [isAdmin, isDbLoaded, employees.length, extraFines, persistAttendanceSnapshotNow]);
 
     // VAT fines are historical events. Once an overdue row has appeared in
     // payroll, persist it as an ordinary fine; uploading the invoice later
@@ -3480,7 +3535,7 @@ export default function Attendance() {
         const officialEmployees = employees.filter(emp => emp.type === 'Official');
 
         return dailyTaskTracking.flatMap((task: any) => {
-            if (!task || task.type !== 'assignment' || task.status === 'completed') return [];
+            if (!task || task.type !== 'assignment' || !['pending', 'in_progress'].includes(task.status)) return [];
             if (!task.assignee || !task.dueDate) return [];
             try {
                 const attachments = typeof task.attachments === 'string' ? JSON.parse(task.attachments) : (task.attachments || {});
@@ -3496,7 +3551,12 @@ export default function Attendance() {
 
             const responsibleEmployees = getAssignmentDeadlineRecipients(task)
                 .map(recipient => officialEmployees.find(emp => matchTaskAssigneeToEmployee(recipient, emp)))
-                .filter((employee): employee is Employee => Boolean(employee));
+                .filter((employee): employee is Employee => Boolean(employee))
+                .filter(employee => !systemUsers.some((account: any) =>
+                    account?.employmentStatus === 'resigned'
+                    && (normalizeAttendanceText(account.username) === normalizeAttendanceText(employee.username)
+                        || normalizeAttendanceText(account.fullName) === normalizeAttendanceText(employee.name))
+                ));
             if (responsibleEmployees.length === 0) return [];
 
             const totalFine = getAssignmentDeadlineFineAmount(task);
@@ -3511,7 +3571,7 @@ export default function Attendance() {
                 source: 'daily_task_overdue' as any,
             }));
         });
-    }, [employees, dailyTaskTracking, overviewDateRange]);
+    }, [employees, dailyTaskTracking, overviewDateRange, systemUsers]);
 
     const autoEvidenceOverdueFines = useMemo(() => {
         const officialEmployees = employees.filter(emp => emp.type === 'Official');
@@ -3529,6 +3589,9 @@ export default function Attendance() {
                 || (account && matchTaskAssigneeToEmployee(account.fullName, emp))
             );
             if (!employee) return [];
+            if (account?.employmentStatus === 'resigned'
+                && account.resignationDate
+                && !penaltyAt.isBefore(dayjs(account.resignationDate), 'day')) return [];
             return [{
                 id: penalty.id,
                 empId: employee.id,
@@ -3687,11 +3750,19 @@ export default function Attendance() {
         ), [lockedPeriods, overviewDateRange]);
     const overviewAttendanceExpectedKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
     const overviewAttendanceReady = overviewAttendanceLogsKey === overviewAttendanceExpectedKey;
+    const employmentEndDates = useMemo(() => Object.fromEntries(
+        systemUsers
+            .filter((item: any) => item?.employmentStatus === 'resigned' && item?.resignationDate)
+            .map((item: any) => [normalizeAttendanceText(item.username), String(item.resignationDate)])
+    ), [systemUsers]);
+    const activeEmployeesForNewRecords = useMemo(() => employees.filter(emp =>
+        !employmentEndDates[normalizeAttendanceText(emp.username)]
+    ), [employees, employmentEndDates]);
 
     const payrollData = useMemo(() => calculatePayroll(
         overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses,
-        overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, payrollOverrides, overviewAttendanceReady
-    ), [overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, payrollOverrides, overviewAttendanceReady]);
+        overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, employmentEndDates, payrollOverrides, overviewAttendanceReady
+    ), [overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, employmentEndDates, payrollOverrides, overviewAttendanceReady]);
 
     function buildPayrollDataFromPackingLogs(orderLogs: PackingOrderLog[]) {
         const freshOverviewPackingLogs = orderLogs.filter(o => inOverviewRange(o.timestamp));
@@ -3707,6 +3778,7 @@ export default function Attendance() {
             overviewDateRange[0].month() + 1,
             overviewDateRange[0].year(),
             freshOverviewPackingLogs,
+            employmentEndDates,
             payrollOverrides,
             overviewAttendanceReady
         );
@@ -7263,7 +7335,7 @@ export default function Attendance() {
                 <Form form={bonusForm} layout="vertical" style={{ marginTop: 16 }}>
                     <Form.Item name="empId" label="Nhân viên" rules={[{ required: true, message: 'Vui lòng chọn nhân viên' }]}>
                         <Select placeholder="Chọn nhân viên nhận thưởng" size="large">
-                            {employees.map(emp => (
+                            {activeEmployeesForNewRecords.map(emp => (
                                 <Select.Option key={emp.id} value={emp.id}>
                                     {emp.name} ({emp.type === 'Official' ? 'Chính thức' : 'Thời vụ'})
                                 </Select.Option>
@@ -7444,7 +7516,7 @@ export default function Attendance() {
                     </Form.Item>
                     <Form.Item name="empId" label="Nhân viên bị phạt" rules={[{ required: true, message: 'Vui lòng chọn nhân viên' }]}>
                         <Select placeholder="Chọn nhân viên" size="large">
-                            {employees.map(emp => (
+                            {activeEmployeesForNewRecords.map(emp => (
                                 <Select.Option key={emp.id} value={emp.id}>
                                     {emp.name} ({emp.type === 'Official' ? 'Chính thức' : 'Thời vụ'})
                                 </Select.Option>

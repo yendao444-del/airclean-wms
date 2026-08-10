@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import dayjs from 'dayjs';
 import {
     Card,
     Button,
@@ -13,6 +14,7 @@ import {
     Tag,
     Switch,
     Alert,
+    DatePicker,
 } from 'antd';
 import { UserAddOutlined, EditOutlined, DeleteOutlined, LockOutlined, UnlockOutlined, KeyOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -27,6 +29,9 @@ interface User {
     email?: string;
     role: 'admin' | 'manager' | 'staff' | 'viewer';
     isActive: boolean;
+    employmentStatus?: 'active' | 'inactive' | 'resigned';
+    resignationDate?: string | null;
+    resignationReason?: string;
     operationalAssignee?: boolean;
     createdAt: string;
     lastActiveAt?: string | null;
@@ -68,6 +73,7 @@ export default function PermissionsPage() {
     const [modalVisible, setModalVisible] = useState(false);
     const [editingUser, setEditingUser] = useState<User | null>(null);
     const [form] = Form.useForm();
+    const employmentStatus = Form.useWatch('employmentStatus', form);
 
     // Password change states
     const [passwordModalVisible, setPasswordModalVisible] = useState(false);
@@ -122,6 +128,7 @@ export default function PermissionsPage() {
         form.setFieldsValue({
             role: 'staff',
             operationalAssignee: true,
+            employmentStatus: 'active',
         });
         setModalVisible(true);
     };
@@ -134,6 +141,9 @@ export default function PermissionsPage() {
             email: user.email,
             role: user.role,
             isActive: user.isActive,
+            employmentStatus: user.employmentStatus || (user.isActive ? 'active' : 'inactive'),
+            resignationDate: user.resignationDate ? dayjs(user.resignationDate) : dayjs(),
+            resignationReason: user.resignationReason || '',
             operationalAssignee: user.operationalAssignee !== false,
         });
         setModalVisible(true);
@@ -176,28 +186,51 @@ export default function PermissionsPage() {
             const payload = {
                 ...values,
                 email: values.email?.trim() || null,
+                resignationDate: values.resignationDate?.format?.('YYYY-MM-DD'),
+                resignationReason: values.resignationReason?.trim() || '',
             };
             if (editingUser && !payload.password) {
                 delete payload.password;
             }
 
+            if (editingUser && payload.employmentStatus === 'resigned') {
+                Modal.confirm({
+                    title: 'Xác nhận nhân viên nghỉ việc',
+                    content: `Từ ${payload.resignationDate}, ${editingUser.fullName} sẽ bị khóa đăng nhập, không thể chấm công và công việc chưa hoàn thành từ ngày này sẽ bị hủy hoặc gỡ khỏi phân công.`,
+                    okText: 'Xác nhận nghỉ việc',
+                    okType: 'danger',
+                    cancelText: 'Hủy',
+                    onOk: async () => {
+                        const result = await window.electronAPI.users.update(editingUser.id, payload);
+                        if (!result?.success) throw new Error(result?.error || 'Không thể cập nhật người dùng.');
+                        await loadUsers();
+                        setModalVisible(false);
+                        form.resetFields();
+                        message.success('Đã ghi nhận nhân viên nghỉ việc.');
+                    },
+                });
+                return;
+            }
+
             if (editingUser) {
                 // Update
-                await window.electronAPI.users.update(editingUser.id, payload);
+                const result = await window.electronAPI.users.update(editingUser.id, payload);
+                if (!result?.success) throw new Error(result?.error || 'Không thể cập nhật người dùng.');
                 await loadUsers();
                 message.success('Đã cập nhật người dùng!');
             } else {
                 // Create
                 const newUser = {
                     username: payload.username,
-                    fullName: ROLES[values.role as keyof typeof ROLES].label,
+                    fullName: payload.fullName,
                     email: payload.email,
                     role: payload.role,
-                    isActive: true,
+                    isActive: payload.employmentStatus !== 'inactive',
                     operationalAssignee: payload.operationalAssignee,
                     password: payload.password,
                 };
-                await window.electronAPI.users.create(newUser);
+                const result = await window.electronAPI.users.create(newUser);
+                if (!result?.success) throw new Error(result?.error || 'Không thể tạo người dùng.');
                 await loadUsers();
                 message.success('Đã thêm người dùng mới!');
             }
@@ -206,6 +239,7 @@ export default function PermissionsPage() {
             form.resetFields();
         } catch (error) {
             console.error('Submit error:', error);
+            message.error(error instanceof Error ? error.message : 'Không thể lưu người dùng.');
         }
     };
 
@@ -332,7 +366,11 @@ export default function PermissionsPage() {
             ],
             onFilter: (value, record) => record.isActive === value,
             render: (isActive, record) => (
-                <Switch
+                record.employmentStatus === 'resigned' ? (
+                    <Tag color="default" title={record.resignationDate ? `Nghỉ từ ${dayjs(record.resignationDate).format('DD/MM/YYYY')}` : ''}>
+                        ĐÃ NGHỈ
+                    </Tag>
+                ) : <Switch
                     checked={isActive}
                     onChange={() => handleToggleActive(record)}
                     checkedChildren={<UnlockOutlined />}
@@ -435,6 +473,14 @@ export default function PermissionsPage() {
                     </Form.Item>
 
                     <Form.Item
+                        label="Họ và tên"
+                        name="fullName"
+                        rules={[{ required: true, message: 'Vui lòng nhập họ và tên!' }]}
+                    >
+                        <Input placeholder="VD: Nguyễn Văn A" size="large" />
+                    </Form.Item>
+
+                    <Form.Item
                         label="Gmail"
                         name="email"
                         rules={[
@@ -473,6 +519,40 @@ export default function PermissionsPage() {
                             ))}
                         </Select>
                     </Form.Item>
+
+                    <Form.Item
+                        label="Trạng thái nhân sự"
+                        name="employmentStatus"
+                        rules={[{ required: true, message: 'Vui lòng chọn trạng thái nhân sự!' }]}
+                    >
+                        <Select size="large" disabled={editingUser?.role === 'admin'}>
+                            <Select.Option value="active">Đang làm việc</Select.Option>
+                            <Select.Option value="inactive">Tạm khóa tài khoản</Select.Option>
+                            <Select.Option value="resigned">Đã nghỉ việc</Select.Option>
+                        </Select>
+                    </Form.Item>
+
+                    {employmentStatus === 'resigned' && (
+                        <>
+                            <Form.Item
+                                label="Ngày nghỉ việc"
+                                name="resignationDate"
+                                rules={[{ required: true, message: 'Vui lòng chọn ngày nghỉ việc!' }]}
+                            >
+                                <DatePicker style={{ width: '100%' }} format="DD/MM/YYYY" />
+                            </Form.Item>
+                            <Form.Item label="Lý do nghỉ (tùy chọn)" name="resignationReason">
+                                <Input.TextArea rows={2} placeholder="VD: Nghỉ theo nguyện vọng cá nhân" />
+                            </Form.Item>
+                            <Alert
+                                type="warning"
+                                showIcon
+                                style={{ marginBottom: 16 }}
+                                message="Tài khoản sẽ bị khóa hoàn toàn từ ngày nghỉ"
+                                description="Không thể đăng nhập, chấm công, nhận việc hoặc phát sinh lương/thưởng/phạt mới. Lịch sử trước ngày nghỉ vẫn được giữ lại."
+                            />
+                        </>
+                    )}
 
                     <Form.Item name="operationalAssignee" valuePropName="checked" style={{ marginBottom: 4 }}>
                         <Switch checkedChildren="Phân công" unCheckedChildren="Không phân công" />
