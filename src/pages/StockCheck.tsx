@@ -69,6 +69,8 @@ interface CheckItem {
     balanceSystemStock?: number;
     balanceActualStock?: number;
     balanceDifference?: number;
+    priorityReason?: string;
+    priorityLevel?: 'critical' | 'high';
 }
 
 const MAX_COUNT_RETRIES = 2;
@@ -223,12 +225,20 @@ function expandToVariants(product: any): CheckItem[] {
             return variants.map(v => ({
                 sku: v.sku, productName: product.name, color: v.color, unit, category,
                 systemStock: Number(v.stock || 0), actualStock: null, note: '', difference: 0, balanced: false,
+                ...(product.__stockCheckPriority?.affectedSkus?.includes(String(v.sku)) ? {
+                    priorityReason: product.__stockCheckPriority.reason,
+                    priorityLevel: product.__stockCheckPriority.level,
+                } : {}),
             }));
         } catch { /* fall */ }
     }
     return [{
         sku: product.sku, productName: product.name, unit, category,
-        systemStock: Number(product.stock || 0), actualStock: null, note: '', difference: 0, balanced: false
+        systemStock: Number(product.stock || 0), actualStock: null, note: '', difference: 0, balanced: false,
+        ...(product.__stockCheckPriority?.affectedSkus?.includes(String(product.sku)) ? {
+            priorityReason: product.__stockCheckPriority.reason,
+            priorityLevel: product.__stockCheckPriority.level,
+        } : {}),
     }];
 }
 
@@ -1041,6 +1051,43 @@ export default function StockCheck() {
         return latestByProduct;
     };
 
+    const getRiskPriorityProducts = (sourceSessions: CheckSession[]) => {
+        const cutoff = currentDate.startOf('day').subtract(14, 'day');
+        const latestVerificationBySku = new Map<string, number>();
+        sourceSessions
+            .filter(session => dayjs(session.date).isValid() && !dayjs(session.date).isAfter(todayStr))
+            .slice()
+            .sort((left, right) => `${right.date}|${right.completedAt || right.createdAt}`.localeCompare(`${left.date}|${left.completedAt || left.createdAt}`))
+            .forEach(session => {
+                if (dayjs(session.date).isBefore(cutoff)) return;
+                session.items.forEach(item => {
+                    if (!item.balanced || latestVerificationBySku.has(item.sku)) return;
+                    const difference = Number(item.balanceDifference ?? item.difference ?? 0);
+                    latestVerificationBySku.set(item.sku, Number.isFinite(difference) ? difference : 0);
+                });
+            });
+
+        return contextProducts.map((product, index) => {
+            const items = expandToVariants(product);
+            const negativeSkus = items.filter(item => item.systemStock < 0).map(item => item.sku);
+            const mismatchSkus = items
+                .filter(item => Math.abs(latestVerificationBySku.get(item.sku) || 0) >= 10)
+                .map(item => item.sku);
+            if (!negativeSkus.length && !mismatchSkus.length) return null;
+            const critical = negativeSkus.length > 0;
+            return {
+                product,
+                index,
+                priority: critical ? 0 : 1,
+                affectedSkus: Array.from(new Set([...negativeSkus, ...mismatchSkus])),
+                reason: critical ? 'Tồn âm cần kiểm khẩn' : 'Chênh lệch lớn cần kiểm lại',
+                level: critical ? 'critical' as const : 'high' as const,
+            };
+        }).filter(Boolean).sort((left: any, right: any) => left.priority - right.priority || left.index - right.index) as Array<{
+            product: any; index: number; priority: number; affectedSkus: string[]; reason: string; level: 'critical' | 'high';
+        }>;
+    };
+
     const buildDailyProductPool = (rankedProducts: TopSellingProduct[], excludedProducts: any[] = [], sourceSessions: CheckSession[] = sessions) => {
         const excludedKeys = new Set(excludedProducts.map(productKey));
         const lastCheckedByProduct = getLastDailyCheckDates(sourceSessions);
@@ -1068,10 +1115,15 @@ export default function StockCheck() {
         const rotatingRequired = rotationProducts.length
             ? [rotationProducts[Math.abs(dayIndex) % rotationProducts.length]]
             : [];
+        const riskProducts = getRiskPriorityProducts(sourceSessions)
+            .filter(risk => !excludedKeys.has(productKey(risk.product)))
+            .map(risk => ({ ...risk.product, __stockCheckPriority: risk }));
         const requiredProducts = [
+            ...riskProducts,
             ...(alwaysCheckUnicare ? [alwaysCheckUnicare] : []),
             ...rotatingRequired.filter(product => !alwaysCheckUnicare || productKey(product) !== productKey(alwaysCheckUnicare)),
-        ];
+        ].filter((product, index, entries) => entries.findIndex(entry => productKey(entry) === productKey(product)) === index)
+            .slice(0, DAILY_PRODUCT_COUNT);
         const randomCount = Math.max(0, DAILY_PRODUCT_COUNT - requiredProducts.length);
 
         const eligibleProducts = contextProducts.filter(product => {
@@ -2571,7 +2623,16 @@ export default function StockCheck() {
                                                                 return (
                                                                     <tr key={item.sku} style={{ background: rowBg }}>
                                                                         <td style={{ ...S.td, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                                            <code style={{ fontSize: 11, background: '#e6f4ff', color: '#0958d9', padding: '1px 6px', borderRadius: 3 }}>{item.sku}</code>
+                                                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                                                                                <code style={{ fontSize: 11, background: '#e6f4ff', color: '#0958d9', padding: '1px 6px', borderRadius: 3, overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.sku}</code>
+                                                                                {item.priorityReason && (
+                                                                                    <Tooltip title={item.priorityReason}>
+                                                                                        <Tag color={item.priorityLevel === 'critical' ? 'red' : 'orange'} style={{ margin: 0, fontSize: 10, lineHeight: '18px' }}>
+                                                                                            Ưu tiên
+                                                                                        </Tag>
+                                                                                    </Tooltip>
+                                                                                )}
+                                                                            </div>
                                                                         </td>
                                                                         <td style={{ ...S.td, textAlign: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                                                             {item.color

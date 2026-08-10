@@ -575,12 +575,32 @@ const PASSWORD_CHANGE_ALLOWED_CHANNELS = new Set([
     'users:getCurrentSession',
     'users:logout',
 ]);
+const SESSION_STATUS_EXEMPT_CHANNELS = new Set([
+    'users:login', 'users:logout', 'users:getCurrentSession', 'users:restoreSession',
+    'users:heartbeat', 'users:changePassword', 'users:updateProfile',
+]);
 const LOGIN_MAX_FAILURES = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
 const TEST_OPERATOR_USERNAME = 'test';
 
 const ipcHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, listener) => ipcHandle(channel, async (...args) => {
+    // Sessions live in each Electron process. Re-check account status before
+    // mutations so an account marked "resigned" by an admin is blocked even
+    // when that employee still has an already-open app window.
+    if (currentSession?.id && !SESSION_STATUS_EXEMPT_CHANNELS.has(channel) && prisma) {
+        const sessionUser = await prisma.user.findUnique({
+            where: { id: currentSession.id },
+            select: { status: true },
+        });
+        if (!sessionUser || sessionUser.status !== 'active') {
+            const resigned = sessionUser?.status === 'resigned';
+            currentSession = null;
+            throw new Error(resigned
+                ? 'Tài khoản đã nghỉ việc và không còn quyền sử dụng hệ thống.'
+                : 'Tài khoản đã bị vô hiệu hóa. Vui lòng liên hệ quản trị viên.');
+        }
+    }
     if (currentSession?.mustChangePassword && !PASSWORD_CHANGE_ALLOWED_CHANNELS.has(channel)) {
         throw new Error('Bạn cần đổi mật khẩu trước khi tiếp tục sử dụng hệ thống.');
     }
@@ -1434,10 +1454,16 @@ ipcMain.handle('products:create', async (event, data) => {
         const isAdmin = isAdminSession();
         const requestedStock = Number(data?.stock || 0);
         const rawVariants = data?.variants ? parseJsonArray(data.variants) : [];
-        if (!isAdmin && (requestedStock !== 0 || rawVariants.some(variant => Number(variant?.stock || 0) !== 0))) {
-            throw new Error('Only an admin can create a SKU with initial inventory. Use a purchase receipt for stock intake.');
+        const variantSkus = rawVariants
+            .map(variant => String(variant?.sku || '').trim())
+            .filter(Boolean);
+        if (new Set(variantSkus).size !== variantSkus.length) {
+            throw new Error('Duplicate variant SKU is not allowed.');
         }
-        const safeVariants = !isAdmin && rawVariants.length
+        if (requestedStock !== 0 || rawVariants.some(variant => Number(variant?.stock || 0) !== 0)) {
+            throw new Error('Khởi tạo tồn phải thực hiện qua phiếu nhập hoặc điều chỉnh tồn có lý do.');
+        }
+        const safeVariants = rawVariants.length
             ? JSON.stringify(rawVariants.map(({ stock, ...variant }) => ({ ...variant, stock: 0 })))
             : (data.variants || null);
         const product = await prisma.product.create({
@@ -1448,7 +1474,7 @@ ipcMain.handle('products:create', async (event, data) => {
                 categoryId: data.categoryId,
                 price: data.price !== undefined ? data.price : 0,
                 cost: data.cost !== undefined ? data.cost : 0,
-                stock: isAdmin ? requestedStock : 0,
+                stock: 0,
                 minStock: isAdmin ? (data.minStock || 10) : 0,
                 unit: data.unit || 'Cái',
                 status: data.status || 'active',
@@ -1486,6 +1512,42 @@ ipcMain.handle('products:update', async (event, id, data) => {
         if (!isAdmin && ['stock', 'minStock', 'variants'].some(field => Object.prototype.hasOwnProperty.call(data || {}, field))) {
             throw new Error('Managers cannot change inventory, stock thresholds, or variant inventory.');
         }
+        const existingProduct = await prisma.product.findUnique({ where: { id } });
+        if (!existingProduct) throw new Error('Không tìm thấy sản phẩm.');
+
+        if (Object.prototype.hasOwnProperty.call(data || {}, 'stock')
+            && Number(data.stock) !== Number(existingProduct.stock)) {
+            throw new Error('Không được sửa tồn tại màn hình Sửa sản phẩm. Dùng Nhập hàng hoặc Cân bằng kho.');
+        }
+
+        let protectedVariants;
+        if (data.variants !== undefined) {
+            const previousVariants = parseJsonArray(existingProduct.variants);
+            const nextVariants = parseJsonArray(data.variants);
+            const nextVariantSkus = nextVariants
+                .map(variant => String(variant?.sku || '').trim())
+                .filter(Boolean);
+            if (new Set(nextVariantSkus).size !== nextVariantSkus.length) {
+                throw new Error('Duplicate variant SKU is not allowed.');
+            }
+            const previousBySku = new Map(previousVariants
+                .filter(variant => String(variant?.sku || '').trim())
+                .map(variant => [String(variant.sku).trim(), variant]));
+            const nextSkus = new Set(nextVariants.map(variant => String(variant?.sku || '').trim()).filter(Boolean));
+            const removedWithStock = previousVariants.filter(variant => {
+                const sku = String(variant?.sku || '').trim();
+                return sku && !nextSkus.has(sku) && Number(variant?.stock || 0) !== 0;
+            });
+            if (removedWithStock.length > 0) {
+                throw new Error(`Không thể xóa phân loại còn tồn: ${removedWithStock.map(variant => variant.sku).join(', ')}.`);
+            }
+            protectedVariants = JSON.stringify(nextVariants.map(variant => {
+                const sku = String(variant?.sku || '').trim();
+                const existingVariant = previousBySku.get(sku);
+                return { ...variant, stock: existingVariant ? Number(existingVariant.stock || 0) : 0 };
+            }));
+        }
+
         const updateData = isAdmin
             ? {
                 ...(data.sku && { sku: data.sku }),
@@ -1494,11 +1556,13 @@ ipcMain.handle('products:update', async (event, id, data) => {
                 ...(data.categoryId && { categoryId: data.categoryId }),
                 ...(data.price !== undefined && { price: data.price }),
                 ...(data.cost !== undefined && { cost: data.cost }),
-                ...(data.stock !== undefined && { stock: data.stock }),
                 ...(data.minStock !== undefined && { minStock: data.minStock }),
                 ...(data.unit && { unit: data.unit }),
                 ...(data.status && { status: data.status }),
-                ...(data.variants !== undefined && { variants: data.variants })
+                ...(protectedVariants !== undefined && {
+                    variants: protectedVariants,
+                    stock: parseJsonArray(protectedVariants).reduce((total, variant) => total + Number(variant?.stock || 0), 0),
+                })
             }
             : {
                 ...(data.name && { name: data.name }),
@@ -2433,12 +2497,10 @@ ipcMain.handle('refunds:completeAndRestore', async (event, data = {}) => {
             if (!refund) throw new Error('Không tìm thấy phiếu hàng hoàn.');
             if (refund.status === 'completed') throw new Error('Phiếu hàng hoàn này đã được xác nhận trước đó.');
 
+            // Stock restoration must be based on the persisted return receipt,
+            // never a caller-controlled items payload from the renderer.
             let items = [];
-            if (Array.isArray(data.items)) {
-                items = data.items;
-            } else {
-                try { items = JSON.parse(refund.items || '[]'); } catch { items = []; }
-            }
+            try { items = JSON.parse(refund.items || '[]'); } catch { items = []; }
 
             const normalizedItems = items.map(item => ({
                 sku: String(item?.sku || item?.variantSku || '').trim(),
@@ -2584,19 +2646,26 @@ async function batchStockUpdate(tx, skuChanges, logContext, skuCache) {
             let variants = JSON.parse(product.variants);
             oldStock = variants[variantIndex].stock || 0;
             newStock = oldStock + totalQty;
+            if (newStock < 0) {
+                throw new Error(`Không đủ tồn SKU ${sku} (còn ${oldStock}, cần ${Math.abs(totalQty)}).`);
+            }
             variants[variantIndex].stock = newStock;
             variantColor = variants[variantIndex].color || variants[variantIndex].name || null;
 
             const updatedVariantsStr = JSON.stringify(variants);
+            const parentStock = variants.reduce((total, variant) => total + Number(variant?.stock || 0), 0);
             await tx.product.update({
                 where: { id: product.id },
-                data: { variants: updatedVariantsStr }
+                data: { variants: updatedVariantsStr, stock: parentStock }
             });
             // 🔧 SYNC CACHE: cập nhật product.variants trong cache
             // để variant khác cùng product đọc đúng data mới nhất
             product.variants = updatedVariantsStr;
         } else {
             oldStock = product.stock || 0;
+            if (oldStock + totalQty < 0) {
+                throw new Error(`Không đủ tồn SKU ${sku} (còn ${oldStock}, cần ${Math.abs(totalQty)}).`);
+            }
             const op = totalQty >= 0 ? { increment: totalQty } : { decrement: Math.abs(totalQty) };
             const updated = await tx.product.update({
                 where: { id: product.id },
@@ -2723,17 +2792,24 @@ async function updateProductStockInTx(tx, sku, quantity, logContext, options = {
 
         oldStock = variants[variantIndex].stock || 0;
         newStock = oldStock + quantity;
+        if (newStock < 0) {
+            throw new Error(`Không đủ tồn SKU ${sku} (còn ${oldStock}, cần ${Math.abs(quantity)}).`);
+        }
         variants[variantIndex].stock = newStock;
         variantColor = variants[variantIndex].color || variants[variantIndex].name || null;
 
         // Lưu biến thể: Bắt buộc serialize xuống JSON, phó thác cho Transaction Sequential của SQLite
+        const parentStock = variants.reduce((total, variant) => total + Number(variant?.stock || 0), 0);
         await tx.product.update({
             where: { id: product.id },
-            data: { variants: JSON.stringify(variants) }
+            data: { variants: JSON.stringify(variants), stock: parentStock }
         });
     } else {
         // [VÁ LỖI RACE CONDITION] Dùng cơ chế Atomic Increment của Database cho trường Integer Native
         oldStock = product.stock || 0;
+        if (oldStock + quantity < 0) {
+            throw new Error(`Không đủ tồn SKU ${sku} (còn ${oldStock}, cần ${Math.abs(quantity)}).`);
+        }
         const op = quantity >= 0 ? { increment: quantity } : { decrement: Math.abs(quantity) };
         const updatedProduct = await tx.product.update({
             where: { id: product.id },
@@ -3784,15 +3860,15 @@ ipcMain.handle('purchases:getMyVatPenaltyAlerts', async () => {
             if (!group?.vatInvoiceFile) return;
             (Array.isArray(group.purchaseIds) ? group.purchaseIds : []).forEach(id => vatUploadedPurchaseIds.add(Number(id)));
         });
-        // VAT penalties begin prospectively on 10/08/2026. Receipts that were
-        // already late before the rollout receive stage 1 at this timestamp,
-        // never a backdated fine.
-        const policyStart = new Date('2026-08-10T00:00:00+07:00');
+        // 10/08 is a full grace day. Receipts already overdue at rollout only
+        // receive stage 1 from 00:00 on 11/08, never backdated.
+        const policyStart = new Date('2026-08-11T00:00:00+07:00');
         const now = new Date();
         const alerts = purchases.flatMap(purchase => {
             const vatStatus = String(purchase.vatInvoiceStatus || 'pending').toLowerCase();
             const purchaseDate = purchase.receivedAt || purchase.createdAt;
             const normalFirstFineDate = new Date(purchaseDate);
+            normalFirstFineDate.setHours(0, 0, 0, 0);
             normalFirstFineDate.setDate(normalFirstFineDate.getDate() + 5);
             const firstFineDate = normalFirstFineDate < policyStart ? new Date(policyStart) : normalFirstFineDate;
             const companyVatEntries = Object.values(companyVat?.[String(purchase.id)] || {});
@@ -4301,7 +4377,7 @@ ipcMain.handle('purchases:repairMissingPrices', async (event, purchaseId) => {
 // Delete purchase (Soft-delete & Hoàn kho)
 ipcMain.handle('purchases:delete', async (event, id) => {
     try {
-        requireRole('admin', 'manager');
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         const purchaseId = Number(id);
@@ -4326,6 +4402,22 @@ ipcMain.handle('purchases:delete', async (event, id) => {
                 where: { id: { in: productIds } }
             });
             const productMap = new Map(products.map(p => [p.id, p]));
+            const quantitiesToRevert = new Map();
+            for (const item of order.items) {
+                const product = productMap.get(item.productId);
+                const sku = item.variantSku || product?.sku;
+                if (!sku) continue;
+                quantitiesToRevert.set(sku, (quantitiesToRevert.get(sku) || 0) + Number(item.quantity || 0));
+            }
+
+            const insufficientSkus = [];
+            for (const [sku, quantity] of quantitiesToRevert) {
+                const available = await getSkuStockForOrder(tx, sku);
+                if (available < quantity) insufficientSkus.push(`${sku} (con ${available}, can hoan ${quantity})`);
+            }
+            if (insufficientSkus.length > 0) {
+                throw new Error(`Không thể hủy phiếu nhập ${order.poNumber} vì sẽ làm âm tồn: ${insufficientSkus.join('; ')}.`);
+            }
 
             // 1. Hoàn lượng tồn kho đã nhập (âm quantity) - ghi thẻ kho Reversal
             for (const item of order.items) {
@@ -5440,6 +5532,7 @@ ipcMain.handle('database:exportAll', async () => {
 // Import all database from Excel
 ipcMain.handle('database:importAll', async () => {
     try {
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         console.log('📥 Starting database import...');
@@ -5558,6 +5651,17 @@ ipcMain.handle('database:importAll', async () => {
 
             // 3. Import Products
             for (const prod of products) {
+                const importedVariants = parseJsonArray(prod.variants);
+                const importedVariantSkus = importedVariants
+                    .map(variant => String(variant?.sku || '').trim())
+                    .filter(Boolean);
+                if (new Set(importedVariantSkus).size !== importedVariantSkus.length) {
+                    throw new Error(`Duplicate variant SKU in import: ${prod.sku}`);
+                }
+                const normalizedVariants = importedVariants.length ? JSON.stringify(importedVariants) : (prod.variants || null);
+                const normalizedStock = importedVariants.length
+                    ? importedVariants.reduce((total, variant) => total + Number(variant?.stock || 0), 0)
+                    : Number(prod.stock || 0);
                 await tx.product.upsert({
                     where: { id: prod.id },
                     update: {
@@ -5568,13 +5672,13 @@ ipcMain.handle('database:importAll', async () => {
                         categoryId: prod.categoryId || null,
                         price: prod.price || 0,
                         cost: prod.cost || 0,
-                        stock: prod.stock || 0,
+                        stock: normalizedStock,
                         minStock: prod.minStock || 0,
                         maxStock: prod.maxStock || null,
                         unit: prod.unit || 'Cái',
                         weight: prod.weight || null,
                         images: prod.images || null,
-                        variants: prod.variants || null,
+                        variants: normalizedVariants,
                         status: prod.status || 'active',
                         updatedAt: new Date()
                     },
@@ -5587,13 +5691,13 @@ ipcMain.handle('database:importAll', async () => {
                         categoryId: prod.categoryId || null,
                         price: prod.price || 0,
                         cost: prod.cost || 0,
-                        stock: prod.stock || 0,
+                        stock: normalizedStock,
                         minStock: prod.minStock || 0,
                         maxStock: prod.maxStock || null,
                         unit: prod.unit || 'Cái',
                         weight: prod.weight || null,
                         images: prod.images || null,
-                        variants: prod.variants || null,
+                        variants: normalizedVariants,
                         status: prod.status || 'active',
                         createdAt: prod.createdAt ? new Date(prod.createdAt) : new Date(),
                         updatedAt: new Date()
@@ -6649,6 +6753,19 @@ function getTaskRecipients(task, attachments = parseTaskAttachments(task?.attach
     return task?.assignee ? [String(task.assignee).trim()] : [];
 }
 
+async function getActiveTaskRecipients(recipients) {
+    const values = [...new Set((recipients || []).map(value => String(value || '').trim()).filter(Boolean))];
+    if (values.length === 0) return [];
+    const activeUsers = await prisma.user.findMany({
+        where: {
+            status: 'active',
+            OR: [{ username: { in: values } }, { fullName: { in: values } }],
+        },
+        select: { username: true, fullName: true },
+    });
+    return values.filter(value => activeUsers.some(user => matchesUserIdentity(value, user)));
+}
+
 function getLocalDateKey(date = new Date()) {
     const localDate = new Date(date);
     localDate.setHours(0, 0, 0, 0);
@@ -6876,7 +6993,7 @@ async function createEvidencePenaltyIfDue(task, now = new Date()) {
     if (hasSubmittedImage && submittedAt && !Number.isNaN(submittedAt.getTime()) && submittedAt <= penaltyAt && evidence.status !== 'rejected') return null;
 
     const dueKey = dueAt.toISOString();
-    const recipients = getTaskRecipients(task, attachments);
+    const recipients = await getActiveTaskRecipients(getTaskRecipients(task, attachments));
     if (recipients.length === 0) return [];
     const totalFine = Number(evidence.penaltyAmount) || 30000;
     const baseFine = Math.floor(totalFine / recipients.length);
@@ -7011,7 +7128,7 @@ async function createAssignmentEvidencePenaltyIfDue(task, now = new Date()) {
 
     const dueAt = new Date(task.dueDate);
     if (Number.isNaN(dueAt.getTime())) return null;
-    const recipients = getTaskRecipients(task, attachments);
+    const recipients = await getActiveTaskRecipients(getTaskRecipients(task, attachments));
     if (recipients.length === 0) return [];
     const scheduleAnchor = getAssignmentPenaltyScheduleAnchor(task, dueAt);
 
@@ -7530,7 +7647,9 @@ ipcMain.handle('dailyTasks:list', async (event, filters = {}) => {
         // alerts poll a compact read model and must not start a full DB scan.
         if (maintenance) {
             await repairRecurringAssignmentRestDays();
+            await dedupeOpenRecurringAssignments();
             await reconcileRecurringAssignments();
+            await dedupeOpenRecurringAssignments();
             void reconcileEvidencePenalties().catch(error => console.error('Evidence penalty scan error:', error));
             void reconcileSnapshotEvidencePenalties().catch(error => console.error('Historical evidence penalty scan error:', error));
             void cleanupExpiredEvidenceImages().catch(error => console.error('Evidence cleanup error:', error));
@@ -7699,6 +7818,37 @@ async function repairRecurringAssignmentRestDays() {
     return repaired;
 }
 
+// Remove duplicate open rows produced by older recurrence workers. A row is
+// considered the same recurrence only when its root, sequence and due time
+// all match; intentionally different handovers are left untouched.
+async function dedupeOpenRecurringAssignments() {
+    const assignments = await prisma.dailyTask.findMany({
+        where: { type: 'assignment', status: { in: ['pending', 'in_progress'] }, attachments: { not: null } },
+        select: { id: true, dueDate: true, attachments: true },
+        orderBy: { id: 'asc' },
+    });
+    const groups = new Map();
+    for (const task of assignments) {
+        const assignment = parseTaskAttachments(task.attachments).assignment || {};
+        const root = String(assignment.recurrenceRootId || '').trim();
+        const sequence = Number(assignment.recurrenceSequence || 0);
+        const dueAt = new Date(task.dueDate);
+        if (!root || !Number.isInteger(sequence) || sequence < 1 || Number.isNaN(dueAt.getTime())) continue;
+        const key = `${root}|${sequence}|${dueAt.toISOString()}`;
+        const rows = groups.get(key) || [];
+        rows.push(task.id);
+        groups.set(key, rows);
+    }
+    let removed = 0;
+    for (const ids of groups.values()) {
+        if (ids.length < 2) continue;
+        const duplicateIds = ids.slice(1);
+        const result = await prisma.dailyTask.deleteMany({ where: { id: { in: duplicateIds } } });
+        removed += result.count;
+    }
+    return removed;
+}
+
 // Generate the next independent handover when a completed handover reaches
 // its configured calendar interval. The AppConfig marker makes this idempotent
 // across multiple desktop clients opening the app at the same time.
@@ -7719,6 +7869,18 @@ async function reconcileRecurringAssignments(now = new Date()) {
         if (getLocalDateKey(now) < getLocalDateKey(nextDueAt)) continue;
 
         const recurrenceRootId = String(assignment.recurrenceRootId || task.id);
+        const recurrenceSequence = (Number(assignment.recurrenceSequence) || 1) + 1;
+        const openCandidates = await prisma.dailyTask.findMany({
+            where: { type: 'assignment', status: { in: ['pending', 'in_progress'] }, dueDate: nextDueAt },
+            select: { id: true, title: true, attachments: true },
+        });
+        const alreadyGenerated = openCandidates.some(candidate => {
+            const candidateAssignment = parseTaskAttachments(candidate.attachments).assignment || {};
+            return candidate.title === task.title
+                && String(candidateAssignment.recurrenceRootId || '') === recurrenceRootId
+                && Number(candidateAssignment.recurrenceSequence || 0) === recurrenceSequence;
+        });
+        if (alreadyGenerated) continue;
         const recurrenceKey = `${ASSIGNMENT_RECURRENCE_KEY_PREFIX}${recurrenceRootId}:${nextDueAt.toISOString()}`;
         const marker = await prisma.appConfig.createMany({
             data: { key: recurrenceKey, value: JSON.stringify({ sourceTaskId: task.id, nextDueAt: nextDueAt.toISOString(), createdAt: now.toISOString() }) },
@@ -7727,7 +7889,19 @@ async function reconcileRecurringAssignments(now = new Date()) {
         if (marker.count === 0) continue;
 
         const recipients = getTaskRecipients(task, attachments);
-        if (recipients.length === 0) {
+        const activeRecipientRows = recipients.length > 0
+            ? await prisma.user.findMany({
+                where: {
+                    status: 'active',
+                    OR: [{ username: { in: recipients } }, { fullName: { in: recipients } }],
+                },
+                select: { username: true, fullName: true },
+            })
+            : [];
+        const activeRecipients = recipients.filter(recipient =>
+            activeRecipientRows.some(user => matchesUserIdentity(recipient, user))
+        );
+        if (activeRecipients.length === 0) {
             await prisma.appConfig.deleteMany({ where: { key: recurrenceKey } });
             continue;
         }
@@ -7735,9 +7909,9 @@ async function reconcileRecurringAssignments(now = new Date()) {
         const nextAssignment = {
             ...assignment,
             groupId: nextGroupId,
-            assignees: recipients,
+            assignees: activeRecipients,
             recurrenceRootId,
-            recurrenceSequence: (Number(assignment.recurrenceSequence) || 1) + 1,
+            recurrenceSequence,
             completionRequestedAt: undefined,
             completionRequestedBy: undefined,
         };
@@ -7759,7 +7933,7 @@ async function reconcileRecurringAssignments(now = new Date()) {
                     note: task.note || '',
                     type: 'assignment',
                     status: 'pending',
-                    assignee: recipients[0],
+                    assignee: activeRecipients[0],
                     verifier: '',
                     dueDate: nextDueAt,
                     tags: task.tags || null,
@@ -9241,7 +9415,7 @@ ipcMain.handle('ecommerceExports:update', async (event, id, data) => {
 });
 ipcMain.handle('ecommerceExports:delete', async (event, id) => {
     try {
-        requireRole('admin', 'manager');
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
         const deletedSkus = [];
 
@@ -9365,7 +9539,7 @@ ipcMain.handle('ecommerceExports:deleteAll', async () => {
 
 ipcMain.handle('ecommerceExports:deleteCancelled', async () => {
     try {
-        requireRole('admin', 'manager');
+        requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
 
         const result = await prisma.ecommerceExport.deleteMany({
@@ -9383,6 +9557,7 @@ ipcMain.handle('ecommerceExports:deleteCancelled', async () => {
 
 ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
     try {
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         const startTime = Date.now();
         const orderKeys = [...new Set(
@@ -9523,6 +9698,7 @@ ipcMain.handle('ecommerceExports:bulkCreate', async (event, records) => {
 // Chỉ cancel đơn pending — không đụng vào đơn completed (đã giao rồi)
 ipcMain.handle('ecommerceExports:bulkCancel', async (event, ids) => {
     try {
+        requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
         if (!ids || ids.length === 0) return { success: true, data: 0 };
 
@@ -10742,6 +10918,65 @@ function applySameDayFullCheckExemptions(sessions) {
 }
 
 const DAILY_STOCK_CHECK_PRODUCT_COUNT = 3;
+const STOCK_CHECK_RISK_WINDOW_DAYS = 14;
+const STOCK_CHECK_LARGE_DIFFERENCE = 10;
+
+function getLatestStockCheckVerificationBySku(sessions, today) {
+    const cutoff = new Date(`${today}T00:00:00`);
+    cutoff.setDate(cutoff.getDate() - STOCK_CHECK_RISK_WINDOW_DAYS);
+    const latestBySku = new Map();
+    const candidates = sessions
+        .filter(session => String(session?.date || '') <= today && Array.isArray(session?.items))
+        .slice()
+        .sort((left, right) => {
+            const leftKey = `${left.date || ''}|${left.completedAt || left.createdAt || ''}`;
+            const rightKey = `${right.date || ''}|${right.completedAt || right.createdAt || ''}`;
+            return rightKey.localeCompare(leftKey);
+        });
+
+    for (const session of candidates) {
+        const sessionDate = new Date(`${session.date}T00:00:00`);
+        if (Number.isNaN(sessionDate.getTime()) || sessionDate < cutoff) continue;
+        for (const item of session.items) {
+            const sku = String(item?.sku || '').trim();
+            if (!sku || latestBySku.has(sku) || item?.balanced !== true) continue;
+            const difference = Number(item.balanceDifference ?? item.difference ?? 0);
+            latestBySku.set(sku, Number.isFinite(difference) ? difference : 0);
+        }
+    }
+    return latestBySku;
+}
+
+// A risk item is deliberately selected before sales-rank/random candidates.
+// It is cleared by a later clean verification for the same SKU, while a
+// current negative balance remains critical until physically reconciled.
+function getStockCheckRiskProducts(products, sessions, today) {
+    const latestVerificationBySku = getLatestStockCheckVerificationBySku(sessions, today);
+    return products.map((product, index) => {
+        const items = expandProductForStockCheck(product);
+        const negativeSkus = items
+            .filter(item => Number(item.systemStock) < 0)
+            .map(item => String(item.sku));
+        const mismatchSkus = items
+            .filter(item => Math.abs(Number(latestVerificationBySku.get(String(item.sku)) || 0)) >= STOCK_CHECK_LARGE_DIFFERENCE)
+            .map(item => String(item.sku));
+        if (!negativeSkus.length && !mismatchSkus.length) return null;
+        const priority = negativeSkus.length ? 0 : 1;
+        const affectedSkus = Array.from(new Set([...negativeSkus, ...mismatchSkus]));
+        const reason = negativeSkus.length
+            ? 'Tồn âm cần kiểm khẩn'
+            : `Chênh lệch lớn (>= ${STOCK_CHECK_LARGE_DIFFERENCE}) cần kiểm lại`;
+        return { product, index, priority, affectedSkus, reason };
+    }).filter(Boolean).sort((left, right) => left.priority - right.priority || left.index - right.index);
+}
+
+function applyStockCheckRiskMetadata(items, risk) {
+    if (!risk) return items;
+    const affected = new Set(risk.affectedSkus || []);
+    return items.map(item => affected.has(String(item.sku))
+        ? { ...item, priorityReason: risk.reason, priorityLevel: risk.priority === 0 ? 'critical' : 'high' }
+        : item);
+}
 
 function expandProductForStockCheck(product) {
     const unit = product?.unit || 'Cái';
@@ -10823,12 +11058,15 @@ async function topUpTodayDailyStockCheckProducts(sessions, tx) {
         orderBy: { createdAt: 'asc' },
     });
     const candidatesByName = new Map(candidates.map(product => [String(product.name || '').trim(), product]));
+    const riskProducts = getStockCheckRiskProducts(candidates, sessions, today);
+    const riskByProductName = new Map(riskProducts.map(risk => [String(risk.product?.name || '').trim(), risk]));
     let changed = false;
     const updatedSessions = sessions.map(session => {
         if (session?.type !== 'daily' || session?.date !== today || session?.status === 'completed') return session;
         const items = Array.isArray(session.items) ? session.items : [];
         // Do not alter a session once the assignee has begun entering a count.
-        if (!items.length || items.some(item => item?.actualStock !== null && item?.actualStock !== undefined)) return session;
+        if (!items.length || String(session?.runId || '').startsWith('carry-over-')
+            || items.some(item => item?.actualStock !== null && item?.actualStock !== undefined)) return session;
 
         const productNames = new Set(items.map(item => String(item?.productName || '').trim()).filter(Boolean));
         const exemptedSkus = new Set([
@@ -10838,15 +11076,49 @@ async function topUpTodayDailyStockCheckProducts(sessions, tx) {
         const refreshedItems = [...productNames].flatMap(productName => {
             const product = candidatesByName.get(productName);
             if (!product) return items.filter(item => String(item?.productName || '').trim() === productName);
-            return expandProductForStockCheck(product)
-                .filter(item => !exemptedSkus.has(String(item.sku)));
+            return applyStockCheckRiskMetadata(
+                expandProductForStockCheck(product).filter(item => !exemptedSkus.has(String(item.sku))),
+                riskByProductName.get(productName)
+            );
         });
         const currentSkus = items.map(item => String(item?.sku || '')).sort();
         const refreshedSkus = refreshedItems.map(item => String(item?.sku || '')).sort();
         const variantsChanged = currentSkus.length !== refreshedSkus.length
-            || currentSkus.some((sku, index) => sku !== refreshedSkus[index]);
+            || currentSkus.some((sku, index) => sku !== refreshedSkus[index])
+            || refreshedItems.some((item, index) => item?.priorityReason !== items[index]?.priorityReason);
         const synchronizedItems = variantsChanged ? refreshedItems : items;
         if (variantsChanged) changed = true;
+
+        // Critical and high-risk product groups displace ordinary rotation
+        // candidates before any work has started. Carry-over work is never
+        // replaced because it remains the assignee's existing obligation.
+        const priorityProducts = riskProducts.filter(risk => {
+            const productName = String(risk.product?.name || '').trim();
+            const availableItems = expandProductForStockCheck(risk.product)
+                .filter(item => !exemptedSkus.has(String(item.sku)));
+            return productName && availableItems.length > 0;
+        });
+        const missingPriorityProducts = priorityProducts.filter(risk => !productNames.has(String(risk.product?.name || '').trim()));
+        if (missingPriorityProducts.length) {
+            const prioritySelection = missingPriorityProducts.slice(0, DAILY_STOCK_CHECK_PRODUCT_COUNT);
+            const remainingSlots = Math.max(0, DAILY_STOCK_CHECK_PRODUCT_COUNT - prioritySelection.length);
+            const retainedProductNames = [...productNames]
+                .filter(productName => !prioritySelection.some(risk => String(risk.product?.name || '').trim() === productName))
+                .slice(0, remainingSlots);
+            const selectedProducts = [
+                ...prioritySelection.map(risk => risk.product),
+                ...retainedProductNames.map(productName => candidatesByName.get(productName)).filter(Boolean),
+            ];
+            const priorityItems = selectedProducts.flatMap(product => {
+                const productName = String(product?.name || '').trim();
+                return applyStockCheckRiskMetadata(
+                    expandProductForStockCheck(product).filter(item => !exemptedSkus.has(String(item.sku))),
+                    riskByProductName.get(productName)
+                );
+            });
+            changed = true;
+            return { ...session, items: priorityItems };
+        }
 
         const missingCount = DAILY_STOCK_CHECK_PRODUCT_COUNT - productNames.size;
         if (missingCount <= 0) return variantsChanged ? { ...session, items: synchronizedItems } : session;
@@ -10858,8 +11130,10 @@ async function topUpTodayDailyStockCheckProducts(sessions, tx) {
             .filter(product => product?.name && !productNames.has(String(product.name).trim()))
             .map((product, index) => ({ product, score: (daySeed * 31 + (index + 1) * 997) % 100003 }))
             .sort((left, right) => left.score - right.score)
-            .map(({ product }) => expandProductForStockCheck(product)
-                .filter(item => !fullyCheckedSkus.has(String(item.sku))))
+            .map(({ product }) => applyStockCheckRiskMetadata(
+                expandProductForStockCheck(product).filter(item => !fullyCheckedSkus.has(String(item.sku))),
+                riskByProductName.get(String(product?.name || '').trim())
+            ))
             .filter(productItems => productItems.length > 0)
             .slice(0, missingCount)
             .flat();
@@ -11279,8 +11553,9 @@ ipcMain.handle('stockCheck:adminSaveSessions', async (event, incomingSessions) =
             });
 
             const exempted = applySameDayFullCheckExemptions(protectedSessions);
-            await writeStockCheckSessions(exempted.sessions, tx);
-            return exempted.sessions;
+            const toppedUp = await topUpTodayDailyStockCheckProducts(exempted.sessions, tx);
+            await writeStockCheckSessions(toppedUp.sessions, tx);
+            return toppedUp.sessions;
         }, { timeout: 30000, maxWait: 10000 });
         return { success: true, data: merged };
     } catch (error) {
@@ -11659,6 +11934,8 @@ ipcMain.handle('stockCheck:submitSession', async (event, payload = {}) => {
 });
 
 const OPERATIONAL_ASSIGNMENT_EXCLUSION = 'exclude_operational_assignment';
+const USER_EMPLOYMENT_CONFIG_KEY = 'userEmploymentStatusV1';
+const USER_STATUS_RESIGNED = 'resigned';
 
 function parseUserPermissions(value) {
     try {
@@ -11683,19 +11960,106 @@ function updateOperationalAssignmentPermission(value, operationalAssignee) {
     return JSON.stringify([...permissions]);
 }
 
+function parseEmploymentStatusConfig(value) {
+    try {
+        const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+async function getEmploymentStatusConfig() {
+    const record = await prisma.appConfig.findUnique({ where: { key: USER_EMPLOYMENT_CONFIG_KEY } });
+    return parseEmploymentStatusConfig(record?.value);
+}
+
+async function saveEmploymentStatusConfig(config) {
+    await prisma.appConfig.upsert({
+        where: { key: USER_EMPLOYMENT_CONFIG_KEY },
+        update: { value: JSON.stringify(config) },
+        create: { key: USER_EMPLOYMENT_CONFIG_KEY, value: JSON.stringify(config) },
+    });
+}
+
+function normalizeEmploymentEndDate(value) {
+    const date = String(value || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(new Date(`${date}T00:00:00`).getTime())) {
+        throw new Error('Ngày nghỉ việc không hợp lệ.');
+    }
+    return date;
+}
+
+function matchesUserIdentity(value, user) {
+    const candidate = normalizeActorName(value);
+    if (!candidate) return false;
+    const identities = [user?.username, user?.fullName].map(normalizeActorName).filter(Boolean);
+    return identities.includes(candidate);
+}
+
+// A resigned employee must never keep an open future assignment. For shared
+// assignments we only remove that recipient; a task with no recipient left is
+// cancelled and kept as an auditable record rather than deleted.
+async function removeFutureTasksForResignedUser(user, effectiveDate) {
+    const cutoff = new Date(`${effectiveDate}T00:00:00`);
+    const tasks = await prisma.dailyTask.findMany({
+        where: {
+            status: { in: ['pending', 'in_progress'] },
+            dueDate: { gte: cutoff },
+        },
+        select: { id: true, assignee: true, note: true, attachments: true },
+    });
+    let updated = 0;
+    for (const task of tasks) {
+        const attachments = parseTaskAttachments(task.attachments);
+        const recipients = getTaskRecipients(task, attachments);
+        const hasRecipient = recipients.some(recipient => matchesUserIdentity(recipient, user));
+        const isPrimaryAssignee = matchesUserIdentity(task.assignee, user);
+        if (!hasRecipient && !isPrimaryAssignee) continue;
+
+        const remainingRecipients = recipients.filter(recipient => !matchesUserIdentity(recipient, user));
+        if (remainingRecipients.length > 0) {
+            if (attachments.assignment) attachments.assignment.assignees = remainingRecipients;
+            await prisma.dailyTask.update({
+                where: { id: task.id },
+                data: {
+                    assignee: isPrimaryAssignee ? remainingRecipients[0] : task.assignee,
+                    attachments: JSON.stringify(attachments),
+                },
+            });
+        } else {
+            const note = [task.note, `Tự hủy từ ${effectiveDate}: người được giao ${user.fullName || user.username} đã nghỉ việc.`]
+                .filter(Boolean)
+                .join('\n');
+            await prisma.dailyTask.update({
+                where: { id: task.id },
+                data: { status: 'cancelled', note },
+            });
+        }
+        updated++;
+    }
+    return updated;
+}
+
 ipcMain.handle('users:getAll', async () => {
     try {
         requireRole();
         if (!prisma) throw new Error('Prisma not available');
         const isAdmin = currentSession?.role === 'admin';
         // Dùng raw SQL để luôn lấy được lastActiveAt kể cả khi Prisma client cũ chưa generate lại
-        const users = await prisma.$queryRaw`SELECT id, username, "fullName", email, role, status, permissions, "createdAt", "lastActiveAt" FROM "User" ORDER BY id ASC`;
+        const [users, employmentStatus] = await Promise.all([
+            prisma.$queryRaw`SELECT id, username, "fullName", email, role, status, permissions, "createdAt", "lastActiveAt" FROM "User" ORDER BY id ASC`,
+            getEmploymentStatusConfig(),
+        ]);
         const formatted = users.map(u => ({
             id: u.id,
             username: u.username,
             fullName: u.fullName,
             role: u.role,
             isActive: u.status === 'active',
+            employmentStatus: u.status === USER_STATUS_RESIGNED ? USER_STATUS_RESIGNED : 'active',
+            resignationDate: u.status === USER_STATUS_RESIGNED ? employmentStatus[String(u.id)]?.effectiveDate || null : null,
+            resignationReason: isAdmin && u.status === USER_STATUS_RESIGNED ? employmentStatus[String(u.id)]?.reason || '' : '',
             operationalAssignee: isOperationalAssignee(u),
             ...(isAdmin ? {
                 email: u.email,
@@ -11747,6 +12111,8 @@ ipcMain.handle('users:update', async (event, id, data) => {
     try {
         requireRole('admin');
         if (!prisma) throw new Error('Prisma not available');
+        const existingUser = await prisma.user.findUnique({ where: { id: Number(id) } });
+        if (!existingUser) throw new Error('User not found');
         const updateData = {};
         if (data.username !== undefined) updateData.username = data.username;
         if (data.fullName !== undefined) updateData.fullName = data.fullName;
@@ -11758,13 +12124,23 @@ ipcMain.handle('users:update', async (event, id, data) => {
             updateData.passwordChangedAt = new Date(0);
             updateData.forcePasswordChange = true;
         }
-        if (data.isActive !== undefined) updateData.status = data.isActive ? 'active' : 'inactive';
+        const employmentStatus = [USER_STATUS_RESIGNED, 'active', 'inactive'].includes(data.employmentStatus)
+            ? data.employmentStatus
+            : null;
+        const resignationDate = employmentStatus === USER_STATUS_RESIGNED
+            ? normalizeEmploymentEndDate(data.resignationDate)
+            : null;
+        if (employmentStatus === USER_STATUS_RESIGNED) {
+            if (existingUser.role === 'admin') throw new Error('Không thể đánh dấu tài khoản quản trị viên là đã nghỉ việc.');
+            updateData.status = USER_STATUS_RESIGNED;
+        } else if (employmentStatus === 'active') {
+            updateData.status = 'active';
+        } else if (employmentStatus === 'inactive') {
+            updateData.status = 'inactive';
+        } else if (data.isActive !== undefined) {
+            updateData.status = data.isActive ? 'active' : 'inactive';
+        }
         if (data.operationalAssignee !== undefined) {
-            const existingUser = await prisma.user.findUnique({
-                where: { id },
-                select: { permissions: true },
-            });
-            if (!existingUser) throw new Error('User not found');
             updateData.permissions = updateOperationalAssignmentPermission(
                 existingUser.permissions,
                 data.operationalAssignee
@@ -11775,6 +12151,29 @@ ipcMain.handle('users:update', async (event, id, data) => {
             where: { id },
             data: updateData
         });
+        if (employmentStatus === USER_STATUS_RESIGNED) {
+            const employmentConfig = await getEmploymentStatusConfig();
+            employmentConfig[String(user.id)] = {
+                effectiveDate: resignationDate,
+                reason: String(data.resignationReason || '').trim(),
+                updatedAt: new Date().toISOString(),
+                updatedBy: currentSession?.username || 'admin',
+            };
+            await saveEmploymentStatusConfig(employmentConfig);
+            await Promise.all([
+                revokeRememberTokensForUser(user.id),
+                prisma.faceProfile.updateMany({ where: { userId: user.id }, data: { isActive: false } }),
+                removeFutureTasksForResignedUser(user, resignationDate),
+            ]);
+            if (currentSession?.id === user.id) currentSession = null;
+        } else if (employmentStatus === 'active' && existingUser.status === USER_STATUS_RESIGNED) {
+            const employmentConfig = await getEmploymentStatusConfig();
+            delete employmentConfig[String(user.id)];
+            await Promise.all([
+                saveEmploymentStatusConfig(employmentConfig),
+                prisma.faceProfile.updateMany({ where: { userId: user.id }, data: { isActive: true } }),
+            ]);
+        }
         if (data.password !== undefined) await revokeRememberTokensForUser(user.id);
         console.log(`✅ Updated user: ${user.username}`);
         void logActivity({ module: 'users', action: 'UPDATE', description: `Cập nhật người dùng "${user.username}"`, recordName: user.username });
@@ -13983,6 +14382,28 @@ ipcMain.handle('attendance:recognize', async (event, { image }) => {
         const profile = await prisma.faceProfile.findUnique({ where: { faceId: result.face_id } });
         const userName = profile?.userName || result.face_id;
         const userId = profile?.userId || null;
+
+        // Face recognition can run at the shared attendance kiosk without an
+        // authenticated desktop session. Check the employee account directly
+        // so a resigned/inactive user cannot generate new attendance logs.
+        const attendanceUser = userId
+            ? await prisma.user.findUnique({ where: { id: userId }, select: { status: true } })
+            : await prisma.user.findFirst({
+                where: { OR: [{ username: userName }, { fullName: userName }] },
+                select: { status: true },
+            });
+        if (attendanceUser && attendanceUser.status !== 'active') {
+            return {
+                success: false,
+                reason: 'inactive_employee',
+                message: attendanceUser.status === USER_STATUS_RESIGNED
+                    ? 'Nhân viên đã nghỉ việc, không thể chấm công.'
+                    : 'Tài khoản nhân viên đang bị vô hiệu hóa.',
+                face_id: result.face_id,
+                userName,
+                ...faceInfo,
+            };
+        }
 
         const now = new Date();
         const today = getLocalDateKey(now);

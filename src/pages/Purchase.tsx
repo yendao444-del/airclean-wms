@@ -29,8 +29,9 @@ const { Title } = Typography;
 const { TextArea } = Input;
 
 const VAT_FIRST_FINE_AFTER_DAYS = 5;
-// Policy was approved on 09/08/2026. Do not retroactively fine old receipts.
-const VAT_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-10T00:00:00');
+// 10/08 remains a full submission day. The policy takes effect from
+// 00:00 on 11/08 and never creates retroactive fines.
+const VAT_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-11T00:00:00');
 
 type VatDueStatus = { color: string; text: string; detail: string } | null;
 
@@ -47,7 +48,7 @@ const formatRemainingVatTime = (target: dayjs.Dayjs, now: dayjs.Dayjs) => {
 };
 
 const getVatFirstFineAt = (purchasedAt: dayjs.Dayjs) => {
-    const normalFirstFineAt = purchasedAt.add(VAT_FIRST_FINE_AFTER_DAYS, 'day');
+    const normalFirstFineAt = purchasedAt.startOf('day').add(VAT_FIRST_FINE_AFTER_DAYS, 'day');
     return normalFirstFineAt.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT) ? VAT_FINE_POLICY_EFFECTIVE_AT : normalFirstFineAt;
 };
 

@@ -92,7 +92,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
                 <div style={{ padding: 48, textAlign: 'center' }}>
                     <Title level={3} type="danger">Ứng dụng gặp lỗi</Title>
                     <p style={{ color: '#666' }}>{this.state.error?.message}</p>
-                    <Button type="primary" onClick={() => this.setState({ hasError: false })}>
+                    <Button type="primary" onClick={() => window.location.reload()}>
                         Thử lại
                     </Button>
                 </div>
