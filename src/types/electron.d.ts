@@ -171,6 +171,10 @@ export interface ElectronAPI {
         getImportReceiptFileData: (purchaseId: number) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         getImportReceiptPreviewData: (purchaseId: number) => Promise<{ success: boolean; data?: { driveUrls: string[]; localFiles: any[] }; error?: string }>;
     };
+    handlingUnits: {
+        getWorkspace: () => Promise<{ success: boolean; data?: { catalog: any[]; register: any[] }; error?: string }>;
+        saveRegister: (records: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    };
     suppliers: {
         getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
         create: (data: any) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -215,7 +219,7 @@ export interface ElectronAPI {
         listEvidencePenalties: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
         delete: (id: number) => Promise<{ success: boolean; error?: string }>;
         getStats: (filters?: any) => Promise<{ success: boolean; data?: any; error?: string }>;
-        resetDaily: () => Promise<{ success: boolean; data?: { reset: boolean; resetCount: number; message: string }; error?: string }>;
+        resetDaily: () => Promise<{ success: boolean; data?: { reset: boolean; resetCount: number; deadlineNormalized?: number; message: string }; error?: string }>;
     };
     ecommerceExports: {
         getAll: (filters?: { since?: string; until?: string; sinceField?: string; limit?: number; search?: string; statusIn?: string[]; statusNotIn?: string[]; skip?: number }) => Promise<{ success: boolean; data?: any[]; hasMore?: boolean; error?: string }>;
@@ -296,6 +300,7 @@ export interface ElectronAPI {
     };
     stockCheck: {
         getSessions: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+        ensureDailySession: (data: { items: any[] }) => Promise<{ success: boolean; session?: any; data?: any[]; error?: string }>;
         createRecheckSession: (data: { sourceSessionId: string; scope: 'mismatch' | 'all'; skus: string[]; assignedTo: string; reason: string }) => Promise<{ success: boolean; session?: any; data?: any[]; error?: string }>;
         adminSaveSessions: (sessions: any[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
         updateCount: (data: { sessionId: string; sku: string; actualStock: number }) => Promise<{ success: boolean; status?: string; item?: any; error?: string }>;

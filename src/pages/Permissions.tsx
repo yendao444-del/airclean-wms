@@ -19,6 +19,7 @@ import {
 import { UserAddOutlined, EditOutlined, DeleteOutlined, LockOutlined, UnlockOutlined, KeyOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useAuth } from '../contexts/AuthContext';
+import PayrollEmployeesManager from '../components/PayrollEmployeesManager';
 
 const { Title, Text } = Typography;
 
@@ -149,9 +150,26 @@ export default function PermissionsPage() {
         setModalVisible(true);
     };
 
-    const handleDelete = (user: User) => {
+    const handleDelete = async (user: User) => {
         if (user.role === 'admin' && users.filter(u => u.role === 'admin').length === 1) {
             message.error('Không thể xóa admin duy nhất!');
+            return;
+        }
+
+        try {
+            const attendanceResult = await window.electronAPI.appConfig.get('attendanceData');
+            const payrollEmployees = Array.isArray(attendanceResult?.data?.employees)
+                ? attendanceResult.data.employees
+                : [];
+            const linkedToPayroll = payrollEmployees.some((employee: any) =>
+                String(employee?.username || '').trim().toLowerCase() === user.username.trim().toLowerCase()
+            );
+            if (linkedToPayroll) {
+                message.warning('Tài khoản đang liên kết với bảng công/lương. Hãy chọn “Đã nghỉ việc” thay vì xóa để giữ lịch sử.');
+                return;
+            }
+        } catch {
+            message.error('Không kiểm tra được liên kết lương. Đã dừng xóa để bảo vệ dữ liệu.');
             return;
         }
 
@@ -439,18 +457,15 @@ export default function PermissionsPage() {
                 </Space>
             </div>
 
-            <Card>
-                <Table
-                    columns={columns}
-                    dataSource={users}
-                    rowKey="id"
-                    loading={loading}
-                    pagination={{
-                        pageSize: 10,
-                        showTotal: (total) => `Tổng ${total} người dùng`,
-                    }}
-                />
-            </Card>
+            <PayrollEmployeesManager
+                users={users}
+                usersLoading={loading}
+                currentUserRole={currentUser?.role}
+                onEditUser={handleEdit}
+                onDeleteUser={handleDelete}
+                onResetPassword={handleChangePassword}
+                onToggleActive={handleToggleActive}
+            />
 
             {/* User Form Modal */}
             <Modal
@@ -469,7 +484,7 @@ export default function PermissionsPage() {
                             { min: 3, message: 'Tên đăng nhập phải có ít nhất 3 ký tự!' },
                         ]}
                     >
-                        <Input placeholder="Nhập tên đăng nhập" size="large" />
+                        <Input placeholder="Nhập tên đăng nhập" size="large" disabled={Boolean(editingUser)} />
                     </Form.Item>
 
                     <Form.Item

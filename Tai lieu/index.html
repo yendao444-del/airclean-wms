@@ -1,0 +1,2323 @@
+<!DOCTYPE html>
+<html lang="vi" class="h-full bg-[#eef1f5]">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quản Lý Kiện Hàng - MISA AMIS Inventory Style</title>
+    
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Google Fonts Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Roboto+Mono:wght@500;700&display=swap" rel="stylesheet">
+
+    <!-- JsBarcode & QRCode CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['Roboto Mono', 'monospace'],
+                    },
+                    colors: {
+                        misa: {
+                            50: '#e6f7ff',
+                            100: '#bae7ff',
+                            500: '#1890ff',
+                            600: '#0073e6',
+                            700: '#0059b3',
+                            900: '#162032',
+                            header: '#1e283d',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        :root {
+            --app-primary: #00b96b;
+            --app-primary-dark: #009b5a;
+            --app-primary-soft: #ecfaf3;
+            --app-ink: #172b4d;
+            --app-muted: #667085;
+            --app-border: #e4e7ec;
+            --app-surface: #ffffff;
+            --app-canvas: #f6f8fb;
+        }
+        body {
+            font-family: 'Inter', -apple-system, Roboto, sans-serif;
+            background-color: var(--app-canvas);
+            color: var(--app-ink);
+        }
+        ::-webkit-scrollbar {
+            width: 5px;
+            height: 5px;
+        }
+        ::-webkit-scrollbar-track {
+            background: var(--app-canvas);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #c8d0da;
+            border-radius: 4px;
+        }
+        .modal-backdrop {
+            background-color: rgba(23, 43, 77, 0.42);
+            backdrop-filter: blur(2px);
+        }
+        .misa-card {
+            background: #ffffff;
+            border: 1px solid var(--app-border);
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+        }
+        .app-module-header {
+            background: rgba(255, 255, 255, 0.98);
+            border-bottom: 1px solid var(--app-border);
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.03);
+        }
+        .app-module-header .tab-list {
+            background: #f7f9fc;
+            border: 1px solid var(--app-border);
+        }
+        .app-module-header .tab-list button {
+            color: var(--app-muted) !important;
+            background: transparent !important;
+        }
+        .app-module-header .tab-list button.tab-active {
+            color: #087443 !important;
+            background: var(--app-primary-soft) !important;
+            box-shadow: inset 0 0 0 1px #b7ebcf !important;
+        }
+        .app-module-header .telegram-button {
+            color: #087443;
+            background: #ffffff;
+            border: 1px solid #b7ebcf;
+        }
+        .app-module-header .telegram-button:hover { background: var(--app-primary-soft); }
+        /* Chỉ hiển thị các luồng đã có nguồn dữ liệu thật trong Electron. */
+        #tabBtnReconciliation, #tabBtnAudit, .telegram-button { display: none !important; }
+        .inventory-stat {
+            background: #ffffff !important;
+            border: 1px solid var(--app-border) !important;
+            border-left-width: 3px !important;
+        }
+        .inventory-stat .stat-icon {
+            background: var(--app-primary-soft) !important;
+            color: var(--app-primary-dark) !important;
+        }
+        #contentContainer { background: #ffffff; }
+        #contentContainer > div:first-child { border-color: var(--app-border) !important; }
+        #contentContainer > div:first-child > div > span:first-child { background: var(--app-primary) !important; }
+        .text-\[\#1890ff\], .text-\[\#0073e6\], .text-\[\#0059b3\] { color: var(--app-primary-dark) !important; }
+        .bg-\[\#1890ff\], #btnCommitShift { background-color: var(--app-primary) !important; }
+        .hover\:bg-\[\#0077ee\]:hover { background-color: var(--app-primary-dark) !important; }
+        .border-l-\[\#1890ff\], .border-\[\#1890ff\] { border-color: var(--app-primary) !important; }
+        .bg-\[\#e6f7ff\] { background-color: var(--app-primary-soft) !important; }
+        .border-\[\#bae7ff\] { border-color: #b7ebcf !important; }
+        .focus\:ring-\[\#1890ff\]:focus { --tw-ring-color: var(--app-primary) !important; }
+        #hierarchyContainer .misa-card { border-radius: 8px; }
+        #hierarchyContainer .misa-card > div.bg-\[\#e6f7ff\] { background: #f5fbf7 !important; }
+        #hierarchyContainer .misa-card > div.bg-\[\#eef1f5\] { background: #f8fafc !important; }
+        .footer-copy { color: #98a2b3; }
+        }
+        @media print {
+            @page {
+                size: 100mm 150mm;
+                margin: 0;
+            }
+            body {
+                background: white !important;
+                padding: 0 !important;
+                margin: 0 !important;
+            }
+            body * {
+                visibility: hidden !important;
+            }
+            #printableArea, #printableArea * {
+                visibility: visible !important;
+            }
+            #printableArea {
+                position: fixed !important;
+                left: 0 !important;
+                top: 0 !important;
+                width: 100% !important;
+                height: 100% !important;
+                padding: 15px !important;
+                background: white !important;
+            }
+        }
+    </style>
+</head>
+<body class="h-full antialiased font-sans flex flex-col min-h-screen">
+
+    <div id="app" class="min-h-full flex flex-col flex-1">
+        
+        <!-- Native Electron module header -->
+        <header class="app-module-header sticky top-0 z-30">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between items-center h-14">
+                    
+                    <div class="flex items-center gap-3">
+                        <div class="w-9 h-9 rounded-lg bg-[#00b96b] text-white flex items-center justify-center font-black text-lg shadow-sm">
+                            <i class="fa-solid fa-boxes-packing text-base"></i>
+                        </div>
+                        <div>
+                            <div class="flex items-center gap-2">
+                                <h1 class="text-sm font-extrabold text-slate-900 tracking-tight leading-none">Quản lý kiện hàng</h1>
+                                <span class="bg-[#ecfaf3] text-[#087443] text-[10px] font-bold px-2 py-0.5 rounded border border-[#b7ebcf] uppercase">Kho hàng</span>
+                            </div>
+                            <p class="text-[10px] text-slate-500 mt-1">Theo dõi tồn, phân kiện và điều chuyển</p>
+                        </div>
+                    </div>
+
+                    <!-- Navigation Tabs -->
+                    <div class="flex items-center gap-2">
+                        
+                        <div class="tab-list p-1 rounded-lg flex items-center gap-1">
+                            <button onclick="switchTab('inventory')" id="tabBtnInventory" class="tab-active px-3 py-1.5 rounded-md text-xs font-bold transition">
+                                <i class="fa-solid fa-folder-tree mr-1.5"></i> Danh Mục Phân Cấp
+                            </button>
+                            <button onclick="switchTab('reconciliation')" id="tabBtnReconciliation" class="px-3 py-1.5 rounded-md text-xs font-semibold transition">
+                                <i class="fa-solid fa-calculator mr-1.5"></i> Đối Soát Ca
+                            </button>
+                            <button onclick="switchTab('specs')" id="tabBtnSpecs" class="px-3 py-1.5 rounded-md text-xs font-semibold transition">
+                                <i class="fa-solid fa-[#1890ff] fa-industry mr-1.5"></i> Quy Cách Xưởng
+                            </button>
+                            <button onclick="switchTab('audit')" id="tabBtnAudit" class="px-3 py-1.5 rounded-md text-xs font-semibold transition">
+                                <i class="fa-solid fa-clock-rotate-left mr-1.5"></i> Nhật Ký
+                            </button>
+                        </div>
+
+                        <button onclick="openTelegramBotModal()" class="telegram-button px-3.5 py-1.5 text-xs font-bold rounded-lg transition flex items-center gap-1.5">
+                            <i class="fa-brands fa-telegram text-sm"></i>
+                            <span class="hidden sm:inline">Kết nối Telegram</span>
+                        </button>
+
+                    </div>
+
+                </div>
+            </div>
+        </header>
+
+        <!-- MAIN CONTENT AREA -->
+        <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-4 space-y-4">
+
+            <!-- TAB 1: INVENTORY MANAGEMENT -->
+            <div id="tabContentInventory" class="space-y-4">
+
+                <!-- MISA STATS CARDS -->
+                <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+                    
+                    <div class="inventory-stat misa-card p-3.5 rounded-lg flex justify-between items-center border-l-4 border-l-[#00b96b]">
+                        <div>
+                            <p class="text-[11px] font-bold text-slate-500 uppercase">Tổng Kiện Hàng</p>
+                            <h3 id="statTotalPackages" class="text-xl font-extrabold text-slate-900 mt-0.5">0</h3>
+                            <p class="text-[10px] text-slate-400">mã kiện vật lý</p>
+                        </div>
+                        <div class="stat-icon w-9 h-9 rounded-lg flex items-center justify-center text-sm font-bold">
+                            <i class="fa-solid fa-boxes-stacked"></i>
+                        </div>
+                    </div>
+
+                    <div class="inventory-stat misa-card p-3.5 rounded-lg flex justify-between items-center border-l-4 border-l-[#00b96b]">
+                        <div>
+                            <p class="text-[11px] font-bold text-[#27ae60] uppercase">Đang Niêm Phong</p>
+                            <h3 id="statSealedPackages" class="text-xl font-extrabold text-[#27ae60] mt-0.5">0</h3>
+                            <p class="text-[10px] text-[#27ae60]">kiện nguyên đai xưởng</p>
+                        </div>
+                        <div class="stat-icon w-9 h-9 rounded-lg flex items-center justify-center text-sm font-bold">
+                            <i class="fa-solid fa-lock"></i>
+                        </div>
+                    </div>
+
+                    <div class="inventory-stat misa-card p-3.5 rounded-lg flex justify-between items-center border-l-4 border-l-amber-400">
+                        <div>
+                            <p class="text-[11px] font-bold text-[#d46b08] uppercase">Đang Sử Dụng</p>
+                            <h3 id="statInUsePackages" class="text-xl font-extrabold text-[#d46b08] mt-0.5">0</h3>
+                            <p class="text-[10px] text-[#d46b08]">kiện đã khui dở</p>
+                        </div>
+                        <div class="stat-icon w-9 h-9 rounded-lg flex items-center justify-center text-sm font-bold">
+                            <i class="fa-solid fa-box-open"></i>
+                        </div>
+                    </div>
+
+                    <div class="inventory-stat misa-card p-3.5 rounded-lg flex justify-between items-center border-l-4 border-l-sky-500">
+                        <div>
+                            <p class="text-[11px] font-bold text-[#1890ff] uppercase">Khu Đóng Gói</p>
+                            <h3 id="statPackingAreaPcs" class="text-xl font-extrabold text-[#1890ff] mt-0.5">0</h3>
+                            <p class="text-[10px] text-[#1890ff]">hàng chờ xuất ca</p>
+                        </div>
+                        <div class="stat-icon w-9 h-9 rounded-lg flex items-center justify-center text-sm font-bold">
+                            <i class="fa-solid fa-dolly"></i>
+                        </div>
+                    </div>
+
+                    <div class="inventory-stat misa-card p-3.5 rounded-lg flex justify-between items-center border-l-4 border-l-violet-500">
+                        <div>
+                            <p class="text-[11px] font-bold text-purple-700 uppercase">Tổng Quy Đổi</p>
+                            <h3 id="statTotalPieces" class="text-xl font-extrabold text-purple-800 mt-0.5">0</h3>
+                            <p class="text-[10px] text-purple-600">đơn vị tồn cơ sở</p>
+                        </div>
+                        <div class="stat-icon w-9 h-9 rounded-lg flex items-center justify-center text-sm font-bold">
+                            <i class="fa-solid fa-cubes"></i>
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- MISA TOOLBAR & SEARCH -->
+                <div class="misa-card rounded p-3 space-y-3">
+                    
+                    <div class="flex flex-col md:flex-row gap-2.5 justify-between items-stretch md:items-center">
+                        
+                        <!-- Search Input -->
+                        <div class="relative flex-1">
+                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                                <i class="fa-solid fa-magnifying-glass text-xs"></i>
+                            </div>
+                            <input type="text" id="searchInput" oninput="handleSearchAndFilter()" placeholder="Tìm theo Nhóm (UNICARE), SKU (1-5DTP-TRANG), Mã Kiện, Dạng đóng gói..." class="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-[#dcdfe6] rounded focus:outline-none focus:ring-1 focus:ring-[#1890ff] font-medium text-slate-800">
+                        </div>
+
+                        <!-- Filters -->
+                        <div class="flex flex-wrap items-center gap-2">
+                            
+                            <select id="productGroupFilter" onchange="handleSearchAndFilter()" class="px-2.5 py-1.5 text-xs bg-white border border-[#dcdfe6] rounded text-slate-700 font-semibold focus:ring-1 focus:ring-[#1890ff]">
+                                <option value="all">Tất cả Nhóm Sản Phẩm</option>
+                                <option value="UNICARE">UNICARE</option>
+                                <option value="KHẨU TRANG 4D MASK">KHẨU TRANG 4D MASK</option>
+                                <option value="GĂNG TAY NITRILE">GĂNG TAY NITRILE</option>
+                            </select>
+
+                            <select id="packageTypeFilter" onchange="handleSearchAndFilter()" class="px-2.5 py-1.5 text-xs bg-white border border-[#dcdfe6] rounded text-slate-700 font-semibold focus:ring-1 focus:ring-[#1890ff]">
+                                <option value="all">Tất cả Dạng Đóng Gói</option>
+                                <option value="Tải">📦 Dạng Tải Nguyên</option>
+                                <option value="Thùng">📦 Dạng Thùng Nguyên</option>
+                                <option value="Lẻ">📦 Dạng Gói Lẻ / Khay</option>
+                            </select>
+
+                            <select id="zoneFilter" onchange="handleSearchAndFilter()" class="px-2.5 py-1.5 text-xs bg-white border border-[#dcdfe6] rounded text-slate-700 font-semibold focus:ring-1 focus:ring-[#1890ff]">
+                                <option value="all">Tất cả Khu Kho</option>
+                                <option value="Kho A">Kho A</option>
+                                <option value="Kho B">Kho B</option>
+                                <option value="Kho C">Kho C</option>
+                                <option value="Kho D">Kho D</option>
+                            </select>
+
+                            <!-- Toggle Hide / Show Depleted Packages -->
+                            <button onclick="toggleHideDepleted()" id="btnToggleDepleted" class="px-2.5 py-1.5 text-xs font-semibold text-slate-600 bg-white border border-[#dcdfe6] hover:bg-slate-50 rounded transition flex items-center gap-1">
+                                <i class="fa-solid fa-eye-slash text-slate-400"></i>
+                                <span id="textToggleDepleted">Ẩn kiện hết tồn (Mặc định)</span>
+                            </button>
+
+                            <button onclick="resetFilters()" class="p-1.5 text-slate-500 hover:text-slate-800 bg-[#eef1f5] border border-[#dcdfe6] rounded transition" title="Đặt lại bộ lọc">
+                                <i class="fa-solid fa-rotate-left text-xs"></i>
+                            </button>
+
+                            <button onclick="openAddModal()" class="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-white bg-[#1890ff] hover:bg-[#0077ee] rounded transition shadow-xs">
+                                <i class="fa-solid fa-plus text-xs"></i>
+                                <span>Tạo Kiện Mới</span>
+                            </button>
+                        </div>
+
+                    </div>
+
+                </div>
+
+                <!-- MISA AMIS AUTHENTIC 3-TIER HIERARCHY TREE -->
+                <div id="contentContainer" class="misa-card rounded p-3.5 space-y-3">
+                    
+                    <div class="flex justify-between items-center px-1 pb-2 border-b border-slate-200">
+                        <div class="flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded bg-[#1890ff]"></span>
+                            <span class="text-xs font-bold text-slate-800 uppercase tracking-wide">CẤU TRÚC PHÂN CẤP DANH MỤC (NHÓM CHA ➔ SKU MÀU SẮC ➔ DẠNG ĐÓNG GÓI)</span>
+                        </div>
+
+                        <button onclick="toggleExpandAllGroups()" id="btnExpandAll" class="text-xs font-bold text-[#1890ff] hover:underline">
+                            [ Mở / Thu gọn tất cả ]
+                        </button>
+                    </div>
+
+                    <div id="hierarchyContainer" class="space-y-3">
+                        <!-- Injected dynamically by JS -->
+                    </div>
+
+                </div>
+
+            </div>
+
+            <!-- TAB 2: SHIFT RECONCILIATION -->
+            <div id="tabContentReconciliation" class="hidden space-y-4">
+                <div class="misa-card p-5 rounded space-y-4">
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-200 pb-3">
+                        <div>
+                            <div class="flex items-center gap-2">
+                                <h2 class="text-sm font-bold text-slate-900 uppercase">Đối Soát Hàng Đóng Gói Cuối Ca MISA</h2>
+                                <span class="bg-[#fff7e6] text-[#d46b08] text-xs font-bold px-2 py-0.5 rounded border border-[#ffe7ba]">Chốt Ca AMIS</span>
+                            </div>
+                            <p class="text-xs text-slate-500 mt-0.5">Cân bằng số liệu giữa Khu đóng gói, đơn đã đóng, hàng trả lại và hàng hỏng/mất trước khi chốt ca.</p>
+                        </div>
+
+                        <div id="reconcileStatusBadge" class="px-3 py-1 rounded text-xs font-bold uppercase border flex items-center gap-1.5 bg-[#f6ffed] text-[#27ae60] border-[#b7eb8f]">
+                            <i class="fa-solid fa-circle-check text-xs"></i>
+                            <span>SỐ LIỆU ĐÃ CÂN BẰNG</span>
+                        </div>
+                    </div>
+
+                    <div class="bg-[#162032] text-white p-3.5 rounded flex flex-col md:flex-row items-center justify-between gap-3 text-xs">
+                        <div class="space-y-1">
+                            <span class="text-amber-300 font-bold uppercase block">Công Thức Cân Bằng Kho MISA:</span>
+                            <div class="font-mono font-bold text-xs text-slate-200">
+                                [ Số Đã Lấy Khỏi Kiện ] = [ Đã Đóng Gói ] + [ Trả Lại Kiện/Hàng Lẻ ] + [ Hỏng / Mất ]
+                            </div>
+                        </div>
+                        <button onclick="recalculateReconciliation()" class="px-3 py-1.5 text-xs font-bold text-slate-900 bg-amber-400 hover:bg-amber-300 rounded transition">
+                            <i class="fa-solid fa-arrows-rotate mr-1"></i> Tính Toán Lại
+                        </button>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                        <div class="bg-[#e6f7ff] p-3.5 rounded border border-[#bae7ff] space-y-1.5">
+                            <span class="text-xs font-bold text-[#1890ff] uppercase block">1. SỐ ĐÃ LẤY KHỎI KIỆN</span>
+                            <div class="text-xl font-bold font-mono text-[#0059b3]" id="recTotalTaken">0</div>
+                            <p class="text-[11px] text-[#1890ff]">Số sản phẩm đã rút khỏi các kiện sang Khu đóng gói</p>
+                        </div>
+
+                        <div class="bg-[#f6ffed] p-3.5 rounded border border-[#b7eb8f] space-y-1.5">
+                            <label class="text-xs font-bold text-[#27ae60] uppercase block">2. ĐÃ ĐÓNG CHỜ XUẤT <span class="text-rose-500">*</span></label>
+                            <input type="number" min="0" id="inputRecPacked" value="0" oninput="recalculateReconciliation()" class="w-full text-lg font-bold font-mono px-2.5 py-1 border border-[#b7eb8f] rounded text-[#27ae60] bg-white focus:ring-1 focus:ring-[#27ae60]">
+                            <p class="text-[11px] text-[#27ae60]">Số lượng đã đóng xong gói hàng chờ bàn giao</p>
+                        </div>
+
+                        <div class="bg-[#fff7e6] p-3.5 rounded border border-[#ffe7ba] space-y-1.5">
+                            <label class="text-xs font-bold text-[#d46b08] uppercase block">3. TRẢ LẠI / HÀNG THỪA <span class="text-rose-500">*</span></label>
+                            <input type="number" min="0" id="inputRecReturned" value="0" oninput="recalculateReconciliation()" class="w-full text-lg font-bold font-mono px-2.5 py-1 border border-[#ffe7ba] rounded text-[#d46b08] bg-white focus:ring-1 focus:ring-[#d46b08]">
+                            <p class="text-[11px] text-[#d46b08]">Hàng thừa trả lại kiện đang mở hoặc khay lẻ</p>
+                        </div>
+
+                        <div class="bg-rose-50 p-3.5 rounded border border-rose-200 space-y-1.5">
+                            <label class="text-xs font-bold text-rose-800 uppercase block">4. HỎNG / MẤT <span class="text-rose-500">*</span></label>
+                            <input type="number" min="0" id="inputRecDamaged" value="0" oninput="recalculateReconciliation()" class="w-full text-lg font-bold font-mono px-2.5 py-1 border border-rose-300 rounded text-rose-900 bg-white focus:ring-1 focus:ring-rose-500">
+                            <p class="text-[11px] text-rose-600">Số lượng rách hỏng trong ca</p>
+                        </div>
+                    </div>
+
+                    <div id="reconcileSummaryBox" class="p-3.5 rounded border bg-[#eef1f5] border-[#dcdfe6] flex justify-between items-center">
+                        <div>
+                            <span class="text-xs font-bold text-slate-600 uppercase block">Chênh lệch đối soát:</span>
+                            <span id="reconcileDiffText" class="text-sm font-bold font-mono text-[#27ae60]">0 (Cân bằng 100%)</span>
+                        </div>
+                        <button id="btnCommitShift" onclick="commitShiftReconciliation()" class="px-4 py-2 font-bold text-xs text-white bg-[#1890ff] hover:bg-[#0077ee] rounded shadow-xs flex items-center gap-1.5">
+                            <i class="fa-solid fa-lock-check text-xs"></i>
+                            <span>CHỐT CA NGHIỆP VỤ</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 3: PACKAGING SPECS -->
+            <div id="tabContentSpecs" class="hidden space-y-4">
+                <div class="misa-card p-5 rounded space-y-3">
+                    <div class="flex justify-between items-center border-b border-slate-200 pb-2.5">
+                        <div>
+                            <h2 class="text-sm font-bold text-slate-900 uppercase">Danh Mục Quy Cách Đóng Gói Theo Xưởng / Nhà Cung Cấp</h2>
+                            <p class="text-xs text-slate-500">Cấu hình tầng đóng gói quy đổi về đơn vị tồn nhỏ nhất của SKU</p>
+                        </div>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left border-collapse text-xs">
+                            <thead>
+                                <tr class="bg-[#e6f7ff] text-slate-700 font-bold uppercase border-b border-[#bae7ff] text-[11px]">
+                                    <th class="py-2.5 px-3">Xưởng / Nhà Cung Cấp</th>
+                                    <th class="py-2.5 px-3">Tên Quy Cách</th>
+                                    <th class="py-2.5 px-3">SKU Áp Dụng</th>
+                                    <th class="py-2.5 px-3">Cấu Trúc Tầng Quy Đổi</th>
+                                    <th class="py-2.5 px-3 text-center">Trạng Thái</th>
+                                </tr>
+                            </thead>
+                            <tbody id="specTableBody" class="divide-y divide-slate-100">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 4: AUDIT LOG -->
+            <div id="tabContentAudit" class="hidden space-y-4">
+                <div class="misa-card p-5 rounded space-y-3">
+                    <div class="flex justify-between items-center border-b border-slate-200 pb-2.5">
+                        <div>
+                            <h2 class="text-sm font-bold text-slate-900 uppercase">Nhật Ký Thao Tác Sổ Kiện (MISA Audit Trail)</h2>
+                            <p class="text-xs text-slate-500">Ghi nhận chi tiết lịch sử khui kiện, rút hàng, trả hàng và đối soát ca</p>
+                        </div>
+                        <button onclick="clearAuditLog()" class="px-2.5 py-1 text-xs font-semibold text-slate-600 bg-[#eef1f5] border border-[#dcdfe6] hover:bg-slate-200 rounded">Xóa Nhật Ký</button>
+                    </div>
+                    <div id="auditLogContainer" class="space-y-2 max-h-[550px] overflow-y-auto pr-1">
+                    </div>
+                </div>
+            </div>
+
+        </main>
+
+        <!-- Footer -->
+        <footer class="mt-auto border-t border-[#dcdfe6] bg-white py-3 text-center text-xs text-slate-500 font-medium">
+            &copy; 2026 MISA LogiStorage Pro - MISA AMIS Enterprise Inventory System
+        </footer>
+
+    </div>
+
+    <!-- MODAL CREATE HANDLING UNIT -->
+    <div id="itemModal" class="fixed inset-0 z-50 hidden modal-backdrop flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+        <div class="bg-white rounded max-w-2xl w-full shadow-xl overflow-hidden border border-[#dcdfe6] my-auto flex flex-col max-h-[92vh]">
+            <div class="px-5 py-3.5 border-b border-slate-200 flex justify-between items-center bg-[#1e283d] text-white">
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-box-archive text-lg text-[#1890ff]"></i>
+                    <div>
+                        <h3 id="modalTitle" class="font-bold text-white text-sm">KHAI BÁO KIỆN VẬT LÝ MỚI</h3>
+                        <p class="text-[11px] text-slate-300">Chọn Nhóm Cha ➔ SKU Variant ➔ Dạng Đóng Gói (Tải/Thùng/Lẻ)</p>
+                    </div>
+                </div>
+                <button onclick="closeModal('itemModal')" class="text-slate-400 hover:text-white text-lg">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <form id="itemForm" onsubmit="handleSaveItem(event)" class="p-5 overflow-y-auto space-y-3.5 flex-1 text-xs">
+                <input type="hidden" id="editingId" value="">
+
+                <div class="bg-[#e6f7ff] p-3 rounded border border-[#bae7ff] space-y-2.5">
+                    <span class="font-bold text-[#1890ff] uppercase block">1. Chọn Nhóm Cha, SKU Variant & Dạng Đóng Gói:</span>
+                    <p id="allocationHelp" class="text-[11px] text-slate-600">Chọn dạng đóng gói theo quy cách phiếu nhập. Với “Lẻ”, nhập số gói thực tế cần gom vào một kiện.</p>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        <div>
+                            <label class="block font-semibold text-slate-600 mb-1">Nhóm Sản Phẩm <span class="text-rose-500">*</span></label>
+                            <select id="inputProductGroup" onchange="handleProductGroupChange()" class="w-full px-2.5 py-1.5 border border-[#dcdfe6] rounded bg-white font-bold text-slate-900">
+                                <option value="UNICARE">UNICARE</option>
+                                <option value="KHẨU TRANG 4D MASK">KHẨU TRANG 4D MASK</option>
+                                <option value="GĂNG TAY NITRILE">GĂNG TAY NITRILE</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block font-semibold text-slate-600 mb-1">SKU Variant / Màu <span class="text-rose-500">*</span></label>
+                            <select id="inputVariantSku" onchange="handleVariantSkuChange()" class="w-full px-2.5 py-1.5 border border-[#dcdfe6] rounded bg-white font-bold text-[#1890ff]">
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block font-semibold text-slate-600 mb-1">Dạng Đóng Gói <span class="text-rose-500">*</span></label>
+                            <select id="inputPackageType" onchange="updatePackageQuantityFields()" class="w-full px-2.5 py-1.5 border border-[#dcdfe6] rounded bg-white font-bold text-[#d46b08]">
+                                <option value="Tải">📦 1 Tải Nguyên (Bulk Bag)</option>
+                                <option value="Thùng">📦 1 Thùng Nguyên (Carton)</option>
+                                <option value="Lẻ">📦 Gói Lẻ / Khay Lấy Hàng</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div>
+                        <label class="block font-semibold text-slate-600 mb-1">Mã Kiện HU Code</label>
+                        <input type="text" id="inputPkgCode" required readonly class="w-full px-2.5 py-1.5 border border-[#dcdfe6] bg-slate-100 rounded font-mono font-bold text-[#d46b08]">
+                    </div>
+
+                    <div>
+                        <label class="block font-semibold text-slate-600 mb-1">Xưởng / Nhà Cung Cấp</label>
+                        <input type="text" id="inputFactoryName" value="Thịnh Phát" placeholder="Thịnh Phát / AMI" class="w-full px-2.5 py-1.5 border border-[#dcdfe6] rounded">
+                    </div>
+
+                    <div>
+                        <label class="block font-semibold text-slate-600 mb-1">Đơn Vị Tồn Cơ Sở</label>
+                        <input type="text" id="inputUnitName" required readonly value="gói" class="w-full px-2.5 py-1.5 border border-[#dcdfe6] bg-slate-100 rounded font-bold">
+                    </div>
+                </div>
+
+                <div class="bg-[#fff7e6] p-3 rounded border border-[#ffe7ba] space-y-2">
+                    <span class="font-bold text-[#d46b08] uppercase block">Vị Trí Lưu Kho (Warehouse Location)</span>
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        <div>
+                            <label class="block font-semibold text-slate-600 mb-0.5">Khu Kho</label>
+                            <select id="locZone" class="w-full px-2 py-1 border border-[#dcdfe6] rounded bg-white font-bold">
+                                <option value="Kho A">Kho A</option>
+                                <option value="Kho B">Kho B</option>
+                                <option value="Kho C">Kho C</option>
+                                <option value="Kho D">Kho D</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block font-semibold text-slate-600 mb-0.5">Dãy / Kệ</label>
+                            <input type="text" id="locRack" placeholder="Kệ A2" required class="w-full px-2 py-1 border border-[#dcdfe6] rounded bg-white">
+                        </div>
+                        <div>
+                            <label class="block font-semibold text-slate-600 mb-0.5">Tầng</label>
+                            <input type="text" id="locLevel" placeholder="Tầng 3" class="w-full px-2 py-1 border border-[#dcdfe6] rounded bg-white">
+                        </div>
+                        <div>
+                            <label class="block font-semibold text-slate-600 mb-0.5">Ô / Vị trí</label>
+                            <input type="text" id="locBin" placeholder="Ô 04" class="w-full px-2 py-1 border border-[#dcdfe6] rounded bg-white">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div>
+                        <label class="block font-semibold text-slate-600 mb-1">Trạng Thái Kiện</label>
+                        <select id="inputStatus" class="w-full px-2.5 py-1.5 border border-[#dcdfe6] rounded font-bold">
+                            <option value="Nguyên niêm phong">🔒 Nguyên Niêm Phong</option>
+                            <option value="Đang sử dụng">🔓 Đang Sử Dụng (Khui)</option>
+                            <option value="Chờ kiểm">⚠️ Chờ Kiểm Tra</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="block font-semibold text-slate-600 mb-1">Tồn Ban Đầu (Số lượng)</label>
+                        <input type="number" min="1" id="inputInitialPcs" required value="1200" class="w-full px-2.5 py-1.5 border border-[#dcdfe6] rounded font-mono font-bold">
+                    </div>
+
+                    <div>
+                        <label class="block font-semibold text-slate-600 mb-1">Số Dư Hiện Tại</label>
+                        <input type="number" min="0" id="inputCurrentPcs" required value="1200" class="w-full px-2.5 py-1.5 border border-[#dcdfe6] rounded font-mono font-bold text-[#27ae60]">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block font-semibold text-slate-600 mb-1">Ghi Chú Chi Tiết Kiện</label>
+                    <input type="text" id="inputNote" placeholder="Ví dụ: Quy cách A: 1 Tải = 1.200 gói..." class="w-full px-2.5 py-1.5 border border-[#dcdfe6] rounded">
+                </div>
+
+                <div class="pt-3 border-t border-slate-200 flex justify-end gap-2">
+                    <button type="button" onclick="closeModal('itemModal')" class="px-3.5 py-1.5 text-xs font-semibold text-slate-600 bg-slate-100 border border-[#dcdfe6] hover:bg-slate-200 rounded">Hủy bỏ</button>
+                    <button type="submit" class="px-4 py-1.5 text-xs font-bold text-white bg-[#1890ff] hover:bg-[#0077ee] rounded shadow-xs">Lưu Vào Sổ Kiện</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- PICK MODAL UI -->
+    <div id="pickModal" class="fixed inset-0 z-50 hidden modal-backdrop flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+        <div class="bg-white rounded max-w-md w-full shadow-xl overflow-hidden border border-[#dcdfe6] my-auto flex flex-col">
+            <div class="px-4 py-3 border-b border-slate-200 bg-[#1e283d] text-white flex justify-between items-center">
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-hand-holding-box text-base text-[#1890ff]"></i>
+                    <div>
+                        <h3 class="font-bold text-white text-sm">Rút Hàng Sang Khu Đóng Gói</h3>
+                        <p class="text-[10px] text-slate-300">Chuyển sản phẩm từ kiện vật lý sang Khu đóng gói</p>
+                    </div>
+                </div>
+                <button onclick="closeModal('pickModal')" class="text-slate-400 hover:text-white text-lg">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            <form id="pickForm" onsubmit="handleConfirmPick(event)" class="p-4 space-y-3 text-xs">
+                <input type="hidden" id="pickItemId" value="">
+
+                <div class="bg-[#e6f7ff] p-3 rounded border border-[#bae7ff] space-y-1">
+                    <div class="flex justify-between items-center">
+                        <span id="pickItemPkgCode" class="font-mono font-bold text-[#1890ff]">--</span>
+                        <span id="pickItemUnit" class="text-[10px] font-bold text-[#1890ff] bg-white px-2 py-0.5 rounded border border-[#bae7ff]">--</span>
+                    </div>
+                    <h4 id="pickItemSku" class="font-bold text-slate-900 text-xs uppercase">--</h4>
+                    <div class="text-xs text-slate-600 flex justify-between items-center pt-1 border-t border-[#bae7ff] mt-1">
+                        <span>Tồn dồn trong kiện:</span>
+                        <span id="pickItemBalance" class="font-mono font-bold text-[#27ae60]">0 gói</span>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block font-bold text-slate-700 uppercase tracking-wide mb-1">Nhập Số Lượng Rút <span class="text-rose-500">*</span></label>
+                    <div class="relative">
+                        <input type="number" min="1" id="pickQtyInput" required value="50" class="w-full pl-3 pr-12 py-1.5 text-base font-mono font-bold text-slate-900 bg-white border border-[#dcdfe6] rounded focus:ring-1 focus:ring-[#1890ff]">
+                        <span class="absolute right-3 top-2 text-xs font-semibold text-slate-400 uppercase" id="pickQtySuffix">cái</span>
+                    </div>
+                </div>
+
+                <div>
+                    <span class="text-[11px] font-semibold text-slate-500 block mb-1">Chọn nhanh số lượng:</span>
+                    <div class="flex items-center gap-1.5">
+                        <button type="button" onclick="setPickPreset(10)" class="px-2 py-1 font-bold bg-[#eef1f5] border border-[#dcdfe6] hover:bg-[#e6f7ff] rounded">+10</button>
+                        <button type="button" onclick="setPickPreset(50)" class="px-2 py-1 font-bold bg-[#eef1f5] border border-[#dcdfe6] hover:bg-[#e6f7ff] rounded">+50</button>
+                        <button type="button" onclick="setPickPreset(100)" class="px-2 py-1 font-bold bg-[#eef1f5] border border-[#dcdfe6] hover:bg-[#e6f7ff] rounded">+100</button>
+                        <button type="button" onclick="setPickPreset('max')" class="px-2 py-1 font-bold bg-[#fff7e6] text-[#d46b08] rounded border border-[#ffe7ba]">Rút Tất Cả</button>
+                    </div>
+                </div>
+
+                <div class="pt-3 border-t border-slate-200 flex justify-end gap-2">
+                    <button type="button" onclick="closeModal('pickModal')" class="px-3.5 py-1.5 font-semibold text-slate-600 bg-slate-100 border border-[#dcdfe6] hover:bg-slate-200 rounded">Hủy bỏ</button>
+                    <button type="submit" class="px-4 py-1.5 font-bold text-white bg-[#1890ff] hover:bg-[#0077ee] rounded shadow-xs">Xác Nhận Rút Hàng</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- RULE ALERT MODAL -->
+    <div id="ruleAlertModal" class="fixed inset-0 z-50 hidden modal-backdrop flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+        <div class="bg-white rounded max-w-md w-full shadow-xl overflow-hidden border border-slate-200 my-auto flex flex-col">
+            <div class="px-4 py-3 border-b border-rose-200 bg-rose-50 text-rose-900 flex justify-between items-center">
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-triangle-exclamation text-rose-600 text-base"></i>
+                    <h3 class="font-bold text-xs text-rose-900 uppercase">Cảnh Báo Quy Tắc Kho</h3>
+                </div>
+                <button onclick="closeModal('ruleAlertModal')" class="text-rose-400 hover:text-rose-800 text-lg">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            <div class="p-4 space-y-3 text-xs">
+                <div class="bg-[#fff7e6] p-3 rounded border border-[#ffe7ba] text-[#d46b08] leading-relaxed font-medium">
+                    <p id="ruleAlertMessage">Cảnh báo...</p>
+                </div>
+                <div class="flex justify-end pt-1">
+                    <button onclick="closeModal('ruleAlertModal')" class="px-4 py-1.5 font-bold text-white bg-slate-900 hover:bg-slate-800 rounded">Tôi Đã Hiểu</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- TELEGRAM BOT WMS MODAL SIMULATOR -->
+    <div id="telegramBotModal" class="fixed inset-0 z-50 hidden modal-backdrop flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
+        <div class="bg-[#17212b] rounded-2xl max-w-sm w-full shadow-2xl overflow-hidden border border-[#0e1621] my-auto flex flex-col h-[650px] font-sans">
+            
+            <!-- Telegram Bot Header -->
+            <div class="bg-[#242f3d] px-4 py-3 text-white flex justify-between items-center border-b border-[#0e1621]">
+                <div class="flex items-center gap-3">
+                    <div class="w-9 h-9 rounded-full bg-[#0088cc] text-white flex items-center justify-center text-lg font-bold shadow-xs">
+                        <i class="fa-brands fa-telegram"></i>
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-white text-sm flex items-center gap-1">
+                            <span>SapoLogiBot</span>
+                            <i class="fa-solid fa-circle-check text-[10px] text-[#0088cc]"></i>
+                        </h3>
+                        <p class="text-[10px] text-slate-400">bot kho tự động • trực tuyến</p>
+                    </div>
+                </div>
+                <button onclick="closeModal('telegramBotModal')" class="text-slate-400 hover:text-white text-lg">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <!-- Telegram Chat Body -->
+            <div class="flex-1 bg-[#0e1621] p-3 space-y-3 overflow-y-auto" id="telegramChatContainer">
+                
+                <!-- System intro message -->
+                <div class="flex flex-col items-start space-y-1 max-w-[85%]">
+                    <div class="bg-[#182533] text-slate-200 p-3 rounded-2xl rounded-tl-xs text-xs space-y-2 border border-[#242f3d]">
+                        <p class="font-bold text-[#64b5f6]">🤖 Xin chào Thủ Kho!</p>
+                        <p>Tôi là Bot Quản Lý Kiện Kho **SapoLogiBot**. Bạn có thể gõ lệnh chat hoặc bấm nút bên dưới để thao tác:</p>
+                        <div class="text-[11px] font-mono bg-[#0f1721] p-2 rounded text-amber-300 space-y-1">
+                            <div>👉 <code>/khui mã_kiện</code> (Ví dụ: /khui TP-TRANG-0001)</div>
+                            <div>👉 <code>/rut mã_kiện số_lượng</code> (Ví dụ: /rut TP-TRANG-0002 50)</div>
+                            <div>👉 <code>/ton</code> (Xem tổng tồn kho)</div>
+                        </div>
+                    </div>
+                    <span class="text-[9px] text-slate-500 font-mono px-1">08:00 AM</span>
+                </div>
+
+            </div>
+
+            <!-- Telegram Quick Actions & Inputs -->
+            <div class="bg-[#17212b] p-3 border-t border-[#242f3d] space-y-2">
+                
+                <!-- Telegram Quick Button Grid -->
+                <div class="grid grid-cols-3 gap-1.5 text-[11px]">
+                    <button onclick="sendTelegramQuickCmd('/khui TP-TRANG-0001')" class="py-1.5 px-2 bg-[#2b5278] hover:bg-[#1890ff] text-white font-bold rounded-lg transition text-center truncate">
+                        🔓 /khui TP-TRANG-0001
+                    </button>
+                    <button onclick="sendTelegramQuickCmd('/rut TP-TRANG-0002 50')" class="py-1.5 px-2 bg-[#2b5278] hover:bg-[#1890ff] text-white font-bold rounded-lg transition text-center truncate">
+                        📦 /rut TP-TRANG-0002 50
+                    </button>
+                    <button onclick="sendTelegramQuickCmd('/ton')" class="py-1.5 px-2 bg-[#2b5278] hover:bg-[#1890ff] text-white font-bold rounded-lg transition text-center truncate">
+                        📊 /ton
+                    </button>
+                </div>
+
+                <!-- Chat Input Field -->
+                <form onsubmit="handleSendTelegramMessage(event)" class="flex items-center gap-2 pt-1">
+                    <input type="text" id="telegramInputMsg" placeholder="Nhập lệnh (/khui, /rut, /ton)..." class="flex-1 px-3 py-2 text-xs bg-[#0e1621] border border-[#242f3d] rounded-xl text-white focus:outline-none focus:ring-1 focus:ring-[#0088cc]">
+                    <button type="submit" class="w-9 h-9 rounded-xl bg-[#0088cc] hover:bg-[#0077bb] text-white flex items-center justify-center text-sm shadow-md">
+                        <i class="fa-solid fa-paper-plane"></i>
+                    </button>
+                </form>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- DETAIL PRINT MODAL -->
+    <div id="detailModal" class="fixed inset-0 z-50 hidden modal-backdrop flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+        <div class="bg-white rounded max-w-xl w-full shadow-xl overflow-hidden border border-[#dcdfe6] my-auto flex flex-col">
+            <div class="px-5 py-3 border-b border-slate-200 flex justify-between items-center bg-[#1e283d] text-white">
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-tags text-amber-400"></i>
+                    <h3 class="font-bold text-white text-sm">Thẻ Nhãn Tem Kiện Hàng MISA</h3>
+                </div>
+                <button onclick="closeModal('detailModal')" class="text-slate-400 hover:text-white text-lg">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            <div class="p-5 overflow-y-auto" id="printableArea">
+                <!-- Pro Industrial WMS Label Card -->
+                <div class="border-2 border-slate-900 rounded-xl overflow-hidden bg-white shadow-md text-slate-900 font-sans">
+                    
+                    <!-- Label Header Banner -->
+                    <div class="bg-[#1e283d] text-white px-4 py-2.5 flex justify-between items-center border-b-2 border-slate-900">
+                        <div class="flex items-center gap-2">
+                            <i class="fa-solid fa-box-archive text-amber-400 text-sm"></i>
+                            <span class="font-black text-xs tracking-widest uppercase text-amber-400">TEM KIỆN HÀNG VẬT LÝ (HU)</span>
+                        </div>
+                        <div class="text-right">
+                            <span class="text-[10px] text-slate-300 block font-bold">MISA AMIS WMS SYSTEM</span>
+                        </div>
+                    </div>
+
+                    <div class="p-4 space-y-3">
+                        
+                        <!-- Product Title & Codes -->
+                        <div class="flex justify-between items-start border-b border-slate-200 pb-2.5">
+                            <div class="space-y-0.5">
+                                <h2 id="modalProductGroupTitle" class="text-xl font-black text-slate-900 tracking-tight leading-none uppercase">UNICARE</h2>
+                                <div class="flex items-center gap-2 pt-1">
+                                    <span id="modalVariantSkuText" class="font-mono font-bold text-xs bg-slate-100 px-2 py-0.5 rounded border border-slate-300">1-5DTP-TRANG</span>
+                                    <span id="modalFactoryName" class="text-xs font-semibold text-slate-600">Xưởng Thịnh Phát</span>
+                                </div>
+                            </div>
+                            <div class="text-right bg-[#fff7e6] px-2.5 py-1 rounded border border-[#ffe7ba]">
+                                <span class="text-[10px] font-bold text-[#d46b08] uppercase block">MÃ KIỆN UNIQUE</span>
+                                <span id="modalCode" class="font-mono font-black text-[#d46b08] text-sm">TP-TRANG-0001</span>
+                            </div>
+                        </div>
+
+                        <!-- High-Visibility Location Grid -->
+                        <div class="bg-[#1e283d] text-white rounded-lg p-2.5 space-y-0.5">
+                            <div class="text-[10px] font-bold text-amber-400 uppercase tracking-widest flex items-center justify-between">
+                                <span>📍 VỊ TRÍ XÁC NHẬN TRONG KHO</span>
+                                <i class="fa-solid fa-location-dot"></i>
+                            </div>
+                            <h3 id="modalLocationString" class="text-base font-black font-mono text-white tracking-wide">KHO A - KỆ A2 - TẦNG 3 - Ô 04</h3>
+                        </div>
+
+                        <!-- 2D QR Code Scanner Box -->
+                        <div class="border border-slate-300 rounded-lg p-3 bg-slate-50 flex flex-col items-center justify-center space-y-1.5">
+                            <div id="qrcodeCanvas" class="p-1.5 bg-white rounded border border-slate-300 shadow-2xs"></div>
+                            <div class="text-center space-y-0.5">
+                                <span id="qrHumanText" class="font-mono font-black text-slate-900 text-xs tracking-widest block">TP-TRANG-0001</span>
+                                <span class="text-[10px] text-slate-500 font-semibold uppercase block">Quét camera di động để mở/khui kiện</span>
+                            </div>
+                        </div>
+
+                        <!-- Status & Inventory Balance Grid -->
+                        <div class="grid grid-cols-2 gap-2 pt-0.5">
+                            <div class="bg-slate-100 p-2.5 rounded border border-slate-300">
+                                <span class="text-[10px] font-bold text-slate-500 block uppercase">TRẠNG THÁI KIỆN</span>
+                                <span id="modalStatusBadge" class="text-xs font-black text-slate-900 font-mono block mt-0.5">🔒 Nguyên niêm phong</span>
+                            </div>
+                            <div class="bg-slate-100 p-2.5 rounded border border-slate-300">
+                                <span class="text-[10px] font-bold text-slate-500 block uppercase">SỐ DƯ / TỒN BAN ĐẦU</span>
+                                <span id="modalBalanceText" class="text-xs font-black text-slate-900 font-mono block mt-0.5">1.200 / 1.200 gói</span>
+                            </div>
+                        </div>
+
+                        <!-- Footer timestamp -->
+                        <div class="text-[10px] text-slate-400 flex justify-between items-center pt-2 border-t border-slate-200 font-medium">
+                            <span>Thời gian tạo/cập nhật: <span id="modalUpdatedAt" class="font-mono font-bold text-slate-600">--</span></span>
+                            <span class="font-mono">MISA Verified HU</span>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+            <div class="px-5 py-2.5 border-t border-slate-200 bg-slate-50 flex justify-end gap-2">
+                <button onclick="printQrLabel()" class="px-3.5 py-1.5 bg-[#1890ff] hover:bg-[#0077ee] text-white font-bold text-xs rounded transition flex items-center gap-1">
+                    <i class="fa-solid fa-print"></i> In Tem QR Kiện
+                </button>
+                <button onclick="closeModal('detailModal')" class="px-3.5 py-1.5 bg-slate-200 text-slate-700 font-semibold text-xs rounded hover:bg-slate-300">Đóng</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- TOAST CONTAINER -->
+    <div id="toastContainer" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2"></div>
+
+    <script>
+        // PRODUCT CATALOG HIERARCHY
+        let PRODUCT_CATALOG = {
+            "UNICARE": [
+                { sku: "1-5DTP-TRANG", variantName: "UNICARE-TRANG", color: "Trắng", unit: "gói", factory: "Thịnh Phát", defaultPcs: 1200 },
+                { sku: "1-5DTP-XANH", variantName: "UNICARE-XANH", color: "Xanh", unit: "gói", factory: "Thịnh Phát", defaultPcs: 1200 },
+                { sku: "1-5DTP-DEN", variantName: "UNICARE-DEN", color: "Đen", unit: "gói", factory: "Thịnh Phát", defaultPcs: 1200 },
+                { sku: "1-5DTP-HONG", variantName: "UNICARE-HONG", color: "Hồng", unit: "gói", factory: "Thịnh Phát", defaultPcs: 1200 }
+            ],
+            "KHẨU TRANG 4D MASK": [
+                { sku: "4D-AMI-TRANG", variantName: "4D-TRANG", color: "Trắng", unit: "chiếc", factory: "AMI", defaultPcs: 1000 },
+                { sku: "4D-AMI-XANH", variantName: "4D-XANH", color: "Xanh", unit: "chiếc", factory: "AMI", defaultPcs: 1000 }
+            ],
+            "GĂNG TAY NITRILE": [
+                { sku: "NITRILE-M", variantName: "NITRILE-SIZE-M", color: "Size M", unit: "hộp", factory: "Chính Hãng", defaultPcs: 100 },
+                { sku: "NITRILE-L", variantName: "NITRILE-SIZE-L", color: "Size L", unit: "hộp", factory: "Chính Hãng", defaultPcs: 100 }
+            ]
+        };
+
+        // Sample Preset Data with 3-Tier Packaging Types
+        const SAMPLE_HANDLING_UNITS = [
+            {
+                id: "TP-TRANG-0001",
+                productGroup: "UNICARE",
+                variantName: "UNICARE-TRANG",
+                skuName: "1-5DTP-TRANG",
+                color: "Trắng",
+                packageType: "Tải",
+                packageLabel: "1 Tải lớn (1.200 gói)",
+                unitName: "gói",
+                factory: "Thịnh Phát",
+                status: "Nguyên niêm phong",
+                location: { zone: "Kho A", rack: "Kệ A2", level: "Tầng 3", bin: "Ô 04" },
+                initialPcs: 1200,
+                currentPcs: 1200,
+                note: "Dạng Tải lớn nguyên niêm phong xưởng",
+                updatedAt: "12/08/2026 08:30"
+            },
+            {
+                id: "TP-TRANG-0002",
+                productGroup: "UNICARE",
+                variantName: "UNICARE-TRANG",
+                skuName: "1-5DTP-TRANG",
+                color: "Trắng",
+                packageType: "Thùng",
+                packageLabel: "1 Thùng (50 gói)",
+                unitName: "gói",
+                factory: "Thịnh Phát",
+                status: "Đang sử dụng",
+                location: { zone: "Kho A", rack: "Kệ A2", level: "Tầng 1", bin: "Ô 01" },
+                initialPcs: 50,
+                currentPcs: 50,
+                note: "Dạng Thùng 50 gói khui lẻ",
+                updatedAt: "12/08/2026 09:15"
+            },
+            {
+                id: "TP-TRANG-0003",
+                productGroup: "UNICARE",
+                variantName: "UNICARE-TRANG",
+                skuName: "1-5DTP-TRANG",
+                color: "Trắng",
+                packageType: "Lẻ",
+                packageLabel: "Gói Lẻ (30 gói)",
+                unitName: "gói",
+                factory: "Thịnh Phát",
+                status: "Đang sử dụng",
+                location: { zone: "Kho A", rack: "Kệ A2", level: "Tầng 1", bin: "Ô 02" },
+                initialPcs: 30,
+                currentPcs: 30,
+                note: "Hàng Lẻ nhặt đơn đóng gói",
+                updatedAt: "12/08/2026 09:20"
+            },
+            {
+                id: "TP-XANH-0001",
+                productGroup: "UNICARE",
+                variantName: "UNICARE-XANH",
+                skuName: "1-5DTP-XANH",
+                color: "Xanh",
+                packageType: "Tải",
+                packageLabel: "1 Tải lớn (1.200 gói)",
+                unitName: "gói",
+                factory: "Thịnh Phát",
+                status: "Nguyên niêm phong",
+                location: { zone: "Kho A", rack: "Kệ A1", level: "Tầng 2", bin: "Ô 03" },
+                initialPcs: 1200,
+                currentPcs: 1200,
+                note: "5D Unicare màu xanh - Quy cách Tải nguyên",
+                updatedAt: "12/08/2026 10:00"
+            },
+            {
+                id: "AMI-TRANG-0088",
+                productGroup: "KHẨU TRANG 4D MASK",
+                variantName: "4D-TRANG",
+                skuName: "4D-AMI-TRANG",
+                color: "Trắng",
+                packageType: "Thùng",
+                packageLabel: "1 Thùng (1.000 chiếc)",
+                unitName: "chiếc",
+                factory: "AMI",
+                status: "Nguyên niêm phong",
+                location: { zone: "Kho B", rack: "Kệ B01", level: "Tầng 2", bin: "Ô 05" },
+                initialPcs: 1000,
+                currentPcs: 1000,
+                note: "1 thùng = 50 hộp = 1.000 chiếc",
+                updatedAt: "11/08/2026 14:20"
+            }
+        ];
+
+        const SAMPLE_SPECS = [
+            { factory: "Thịnh Phát", name: "Quy cách A (Tải lớn)", sku: "1-5DTP-TRANG", structure: "1 Tải = 1.200 Gói", status: "Đang dùng" },
+            { factory: "Thịnh Phát", name: "Quy cách B (Thùng)", sku: "1-5DTP-TRANG", structure: "1 Thùng = 50 Gói", status: "Đang dùng" },
+            { factory: "AMI", name: "Quy cách Chuẩn AMI", sku: "4D-AMI-TRANG", structure: "1 Thùng = 50 Hộp = 1.000 Chiếc", status: "Đang dùng" }
+        ];
+
+        // State Store
+        let inventory = [];
+        let auditLogs = [];
+        let currentTab = 'inventory';
+        let packingAreaPcs = 160;
+        
+        // Track 3-Tier Collapsed/Expanded states
+        let expandedGroups = { "UNICARE": false, "KHẨU TRANG 4D MASK": false, "GĂNG TAY NITRILE": false };
+        let expandedVariants = { "UNICARE-TRANG": false, "UNICARE-XANH": false };
+
+        // Data Normalization & Auto Migration Helper
+        function normalizeInventoryData() {
+            inventory.forEach(item => {
+                if (item.productGroup === '5D UNICARE') item.productGroup = 'UNICARE';
+                if (!item.productGroup) item.productGroup = 'UNICARE';
+
+                if (item.id.includes('TRANG') || item.skuName?.includes('TRANG')) {
+                    item.color = 'Trắng';
+                    item.skuName = '1-5DTP-TRANG';
+                    item.variantName = `${item.productGroup}-TRANG`;
+                } else if (item.id.includes('XANH') || item.skuName?.includes('XANH')) {
+                    item.color = 'Xanh';
+                    item.skuName = '1-5DTP-XANH';
+                    item.variantName = `${item.productGroup}-XANH`;
+                } else if (item.id.includes('DEN') || item.skuName?.includes('DEN')) {
+                    item.color = 'Đen';
+                    item.skuName = '1-5DTP-DEN';
+                    item.variantName = `${item.productGroup}-DEN`;
+                } else if (item.id.includes('HONG') || item.skuName?.includes('HONG')) {
+                    item.color = 'Hồng';
+                    item.skuName = '1-5DTP-HONG';
+                    item.variantName = `${item.productGroup}-HONG`;
+                } else if (!item.variantName) {
+                    item.variantName = `${item.productGroup}-${item.color || 'THUONG'}`;
+                }
+
+                if (item.id === 'TP-TRANG-0001') {
+                    item.packageType = 'Tải';
+                    item.packageLabel = '1 Tải lớn (1.200 gói)';
+                    item.initialPcs = 1200;
+                    if (item.currentPcs === 500) item.currentPcs = 1200;
+                } else if (item.id === 'TP-TRANG-0002') {
+                    item.packageType = 'Thùng';
+                    item.packageLabel = '1 Thùng (50 gói)';
+                    item.initialPcs = 50;
+                    if (item.currentPcs > 50) item.currentPcs = 50;
+                } else if (item.id === 'TP-TRANG-0003') {
+                    item.packageType = 'Lẻ';
+                    item.packageLabel = 'Gói Lẻ (30 gói)';
+                    item.initialPcs = 30;
+                    if (item.currentPcs > 30) item.currentPcs = 30;
+                } else {
+                    if (!item.packageType) item.packageType = 'Tải';
+                    if (!item.packageLabel) item.packageLabel = `1 ${item.packageType} (${formatNumber(item.initialPcs || 500)} ${item.unitName || 'gói'})`;
+                }
+            });
+
+            if (!inventory.some(i => i.id === 'TP-TRANG-0003')) {
+                inventory.push({
+                    id: "TP-TRANG-0003",
+                    productGroup: "UNICARE",
+                    variantName: "UNICARE-TRANG",
+                    skuName: "1-5DTP-TRANG",
+                    color: "Trắng",
+                    packageType: "Lẻ",
+                    packageLabel: "Gói Lẻ (30 gói)",
+                    unitName: "gói",
+                    factory: "Thịnh Phát",
+                    status: "Đang sử dụng",
+                    location: { zone: "Kho A", rack: "Kệ A2", level: "Tầng 1", bin: "Ô 02" },
+                    initialPcs: 30,
+                    currentPcs: 30,
+                    note: "Hàng Lẻ nhặt đơn đóng gói",
+                    updatedAt: "12/08/2026 09:20"
+                });
+            }
+
+            saveInventoryToStorage();
+        }
+
+        // LocalStorage Management
+        function loadInventoryFromStorage() {
+            try {
+                const storedInv = localStorage.getItem('logi_handling_units_v3');
+                const storedLogs = localStorage.getItem('logi_handling_logs_v3');
+
+                if (storedInv) {
+                    inventory = JSON.parse(storedInv);
+                    normalizeInventoryData();
+                } else {
+                    inventory = JSON.parse(JSON.stringify(SAMPLE_HANDLING_UNITS));
+                    saveInventoryToStorage();
+                }
+
+                if (storedLogs) {
+                    auditLogs = JSON.parse(storedLogs);
+                } else {
+                    auditLogs = [
+                        { time: '12/08/2026 09:15', user: 'MISA_NV01', action: 'Khui Kiện (FIFO)', details: 'Đã khui kiện TP-TRANG-0002. Tồn ban đầu: 50 gói' },
+                        { time: '12/08/2026 09:30', user: 'MISA_NV01', action: 'Rút Hàng Sang Khu Đóng Gói', details: 'Rút 160 gói từ kiện TP-TRANG-0002 sang Khu đóng gói' }
+                    ];
+                    saveAuditLogsToStorage();
+                }
+            } catch (err) {
+                console.error(err);
+                inventory = JSON.parse(JSON.stringify(SAMPLE_HANDLING_UNITS));
+            }
+        }
+
+        function saveInventoryToStorage() {
+            if (window.__handlingLiveWorkspace) {
+                persistLiveUnits();
+                return;
+            }
+            try { localStorage.setItem('logi_handling_units_v3', JSON.stringify(inventory)); } catch (e) {}
+        }
+
+        function saveAuditLogsToStorage() {
+            try { localStorage.setItem('logi_handling_logs_v3', JSON.stringify(auditLogs)); } catch (e) {}
+        }
+
+        // LIVE DATA BRIDGE -------------------------------------------------
+        // Phiếu nhập và tồn SKU là nguồn dữ liệu gốc. Sổ kiện bên dưới chỉ
+        // lưu phần vật lý: mã kiện, vị trí và trạng thái xử lý.
+        const HANDLING_REGISTER_KEY = 'handlingUnitsRegisterV1';
+        let handlingCatalogBySku = {};
+
+        function getElectronBridge() {
+            return window.parent?.electronAPI || window.electronAPI || null;
+        }
+
+        function parseLiveJson(value, fallback) {
+            try { return typeof value === 'string' ? JSON.parse(value) : (value ?? fallback); } catch { return fallback; }
+        }
+
+        function normalizeLiveLevels(rawLevels, unitName) {
+            const levels = (Array.isArray(rawLevels) ? rawLevels : []).map(level => ({
+                id: String(level?.id || ''), name: String(level?.name || '').trim(), factor: Math.max(1, Number(level?.factor || 1))
+            })).filter(level => level.id && level.name);
+            const base = levels.find(level => level.id === 'lo' || level.name.toLocaleLowerCase('vi-VN') === 'lẻ') || levels.find(level => level.factor === 1);
+            if (!base) levels.unshift({ id: 'lo', name: unitName || 'Lẻ', factor: 1 });
+            else base.factor = 1;
+            return levels;
+        }
+
+        function currentStockForSku(product, sku) {
+            if (!product) return 0;
+            if (String(product.sku || '') === String(sku)) return Math.max(0, Number(product.stock || 0));
+            const variant = parseLiveJson(product.variants, []).find(entry => String(entry?.sku || '') === String(sku));
+            return Math.max(0, Number(variant?.stock || 0));
+        }
+
+        function packagingSummaryForStock(levels, quantity) {
+            let remaining = Math.max(0, Number(quantity || 0));
+            return [...levels].sort((a, b) => b.factor - a.factor).map(level => {
+                const count = Math.floor(remaining / level.factor);
+                remaining %= level.factor;
+                return count > 0 ? `${formatNumber(count)} ${level.name}` : '';
+            }).filter(Boolean).join(' + ') || `${formatNumber(quantity)} ${levels[0]?.name || 'Lẻ'}`;
+        }
+
+        async function loadLiveInventoryFromPurchases() {
+            const api = getElectronBridge();
+            if (!api?.handlingUnits?.getWorkspace) {
+                throw new Error('Cần khởi động lại ứng dụng để nạp mô-đun Quản lý kiện hàng.');
+            }
+            const workspaceResult = await api.handlingUnits.getWorkspace();
+            if (!workspaceResult?.success) throw new Error(workspaceResult?.error || 'Không tải được dữ liệu Nhập hàng.');
+            applyLiveWorkspace(workspaceResult.data);
+            return;
+
+            /* Legacy fallback kept only as a reference while migrating old
+               local builds. It is intentionally unreachable: this module
+               must use the dedicated handlingUnits IPC contract. */
+            const [purchaseResult, productResult, registerResult] = await Promise.all([
+                api.purchases.getAll({}), api.products.getAll(), api.appConfig.get(HANDLING_REGISTER_KEY)
+            ]);
+            if (!purchaseResult?.success) throw new Error(purchaseResult?.error || 'Không tải được phiếu nhập.');
+            if (!productResult?.success) throw new Error(productResult?.error || 'Không tải được tồn SKU.');
+            if (!registerResult?.success) throw new Error(registerResult?.error || 'Không tải được sổ kiện.');
+
+            const productById = new Map((productResult.data || []).map(product => [Number(product.id), product]));
+            const catalog = new Map();
+            [...(purchaseResult.data || [])].reverse().forEach(purchase => {
+                parseLiveJson(purchase.items, []).forEach(item => {
+                    const sku = String(item?.variantSku || item?.sku || '').trim();
+                    const product = productById.get(Number(item?.productId));
+                    if (!sku || !product) return;
+                    const levels = normalizeLiveLevels(item?.packagingLevels, item?.unit || product.unit || 'Lẻ');
+                    if (levels.length < 2 || !levels.some(level => level.factor > 1)) return;
+                    catalog.set(sku, {
+                        sku, productId: Number(item.productId), productGroup: item.productName || product.name || 'Sản phẩm',
+                        variantName: `${item.productName || product.name || 'Sản phẩm'}${item.color ? ` - ${item.color}` : ''}`,
+                        color: item.color || '', unitName: item.unit || product.unit || 'Lẻ',
+                        factory: item.companyGroup || purchase.supplierName || 'Nhà cung cấp', levels,
+                        stock: currentStockForSku(product, sku), purchaseNumber: purchase.poNumber || `PN-${purchase.id}`
+                    });
+                });
+            });
+
+            handlingCatalogBySku = Object.fromEntries(catalog.entries());
+            PRODUCT_CATALOG = {};
+            Object.values(handlingCatalogBySku).forEach(entry => {
+                if (!PRODUCT_CATALOG[entry.productGroup]) PRODUCT_CATALOG[entry.productGroup] = [];
+                PRODUCT_CATALOG[entry.productGroup].push({
+                    sku: entry.sku, variantName: entry.variantName, color: entry.color,
+                    unit: entry.unitName, factory: entry.factory,
+                    defaultPcs: Math.max(...entry.levels.map(level => level.factor))
+                });
+            });
+
+            const physicalRecords = (Array.isArray(registerResult.data) ? registerResult.data : [])
+                .filter(item => handlingCatalogBySku[item?.skuName])
+                .map(item => ({ ...item, isVirtual: false }));
+            const allocatedBySku = physicalRecords.reduce((totals, item) => {
+                totals[item.skuName] = (totals[item.skuName] || 0) + Math.max(0, Number(item.currentPcs || 0));
+                return totals;
+            }, {});
+            const unallocatedRecords = Object.values(handlingCatalogBySku).map(entry => {
+                const unallocated = Math.max(0, Number(entry.stock || 0) - Number(allocatedBySku[entry.sku] || 0));
+                if (unallocated === 0) return null;
+                return {
+                    id: `CHUA-PHAN-KIEN-${entry.sku}`, productGroup: entry.productGroup, variantName: entry.variantName,
+                    skuName: entry.sku, color: entry.color, packageType: 'Chưa phân kiện',
+                    packageLabel: packagingSummaryForStock(entry.levels, unallocated), unitName: entry.unitName,
+                    factory: entry.factory, status: 'Chưa phân kiện',
+                    location: { zone: 'Chưa phân khu', rack: '—', level: '', bin: '' },
+                    initialPcs: unallocated, currentPcs: unallocated,
+                    note: `Tồn thực tế từ ${entry.purchaseNumber}; cần tạo kiện vật lý.`,
+                    updatedAt: 'Đồng bộ từ Nhập hàng', isVirtual: true
+                };
+            }).filter(Boolean);
+            inventory = [...physicalRecords, ...unallocatedRecords];
+            auditLogs = [];
+            window.__handlingLiveWorkspace = true;
+        }
+
+        function persistLiveUnits() {
+            const api = getElectronBridge();
+            if (!window.__handlingLiveWorkspace || !api?.handlingUnits?.saveRegister) {
+                showToast('Cần khởi động lại ứng dụng để lưu sổ kiện.', 'warning');
+                return;
+            }
+            api.handlingUnits.saveRegister(inventory.filter(item => !item.isVirtual))
+                .then(result => { if (!result?.success) showToast(result?.error || 'Không lưu được sổ kiện.', 'warning'); })
+                .catch(() => showToast('Không lưu được sổ kiện.', 'warning'));
+        }
+
+        function applyLiveWorkspace(workspace) {
+            handlingCatalogBySku = Object.fromEntries((workspace?.catalog || []).map(entry => [entry.sku, entry]));
+            PRODUCT_CATALOG = {};
+            Object.values(handlingCatalogBySku).forEach(entry => {
+                if (!PRODUCT_CATALOG[entry.productGroup]) PRODUCT_CATALOG[entry.productGroup] = [];
+                PRODUCT_CATALOG[entry.productGroup].push({
+                    sku: entry.sku, variantName: entry.variantName, color: entry.color,
+                    unit: entry.unitName, factory: entry.factory,
+                    defaultPcs: Math.max(...entry.levels.map(level => level.factor))
+                });
+            });
+            const physicalRecords = (Array.isArray(workspace?.register) ? workspace.register : [])
+                .map(item => ({ ...item, isVirtual: false }));
+            const allocatedBySku = physicalRecords.reduce((totals, item) => {
+                totals[item.skuName] = (totals[item.skuName] || 0) + Math.max(0, Number(item.currentPcs || 0));
+                return totals;
+            }, {});
+            const unallocatedRecords = Object.values(handlingCatalogBySku).map(entry => {
+                const unallocated = Math.max(0, Number(entry.stock || 0) - Number(allocatedBySku[entry.sku] || 0));
+                if (unallocated === 0) return null;
+                return {
+                    id: `CHUA-PHAN-KIEN-${entry.sku}`, productGroup: entry.productGroup, variantName: entry.variantName,
+                    skuName: entry.sku, color: entry.color, packageType: 'Chưa phân kiện',
+                    packageLabel: packagingSummaryForStock(entry.levels, unallocated), unitName: entry.unitName,
+                    factory: entry.factory, status: 'Chưa phân kiện',
+                    location: { zone: 'Chưa phân khu', rack: '—', level: '', bin: '' },
+                    initialPcs: unallocated, currentPcs: unallocated,
+                    note: `Tồn thực tế từ ${entry.purchaseNumber}; cần tạo kiện vật lý.`,
+                    updatedAt: 'Đồng bộ từ Nhập hàng', isVirtual: true
+                };
+            }).filter(Boolean);
+            inventory = [...physicalRecords, ...unallocatedRecords];
+            auditLogs = [];
+            window.__handlingLiveWorkspace = true;
+        }
+
+        function addLogEntry(action, details) {
+            const now = new Date();
+            const timeStr = `${now.getDate().toString().padStart(2, '0')}/${(now.getMonth()+1).toString().padStart(2, '0')}/${now.getFullYear()} ${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+            auditLogs.unshift({ time: timeStr, user: 'MISA_Admin', action, details });
+            saveAuditLogsToStorage();
+            renderAuditLogs();
+        }
+
+        // Shared modal helpers. The original design referenced these helpers
+        // from every action button but did not define them, leaving the main
+        // create/detail/confirmation flows unusable in Electron.
+        function openModal(id) {
+            const modal = document.getElementById(id);
+            if (!modal) {
+                showToast('Không tìm thấy cửa sổ thao tác.', 'warning');
+                return;
+            }
+            modal.classList.remove('hidden');
+            document.body.classList.add('overflow-hidden');
+            const focusTarget = modal.querySelector('input:not([type="hidden"]), select, button');
+            setTimeout(() => focusTarget?.focus(), 0);
+        }
+
+        function closeModal(id) {
+            const modal = document.getElementById(id);
+            if (!modal) return;
+            modal.classList.add('hidden');
+            if (!document.querySelector('.modal-backdrop:not(.hidden)')) {
+                document.body.classList.remove('overflow-hidden');
+            }
+        }
+
+        function refreshFilterOptions() {
+            const setOptions = (id, label, values) => {
+                const select = document.getElementById(id);
+                if (!select) return;
+                const current = select.value;
+                const options = [...new Set(values.filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b), 'vi'));
+                select.innerHTML = `<option value="all">${label}</option>` + options.map(value => `<option value="${String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}">${value}</option>`).join('');
+                select.value = options.includes(current) ? current : 'all';
+            };
+            setOptions('productGroupFilter', 'Tất cả Nhóm Sản Phẩm', inventory.map(item => item.productGroup));
+            setOptions('packageTypeFilter', 'Tất cả Dạng Đóng Gói', inventory.map(item => item.packageType));
+            setOptions('zoneFilter', 'Tất cả Khu Kho', inventory.map(item => item.location?.zone));
+        }
+
+        // Tab Switcher
+        function switchTab(tabName) {
+            currentTab = tabName;
+            ['inventory', 'reconciliation', 'specs', 'audit'].forEach(t => {
+                const content = document.getElementById(`tabContent${t.charAt(0).toUpperCase() + t.slice(1)}`);
+                const btn = document.getElementById(`tabBtn${t.charAt(0).toUpperCase() + t.slice(1)}`);
+                if (t === tabName) {
+                    content.classList.remove('hidden');
+                    btn.className = "tab-active px-3 py-1.5 rounded-md text-xs font-bold transition";
+                } else {
+                    content.classList.add('hidden');
+                    btn.className = "px-3 py-1.5 rounded-md text-xs font-semibold transition";
+                }
+            });
+
+            if (tabName === 'reconciliation') recalculateReconciliation();
+            if (tabName === 'specs') renderSpecs();
+            if (tabName === 'audit') renderAuditLogs();
+        }
+
+        function formatNumber(num) { return new Intl.NumberFormat('vi-VN').format(num); }
+        function getLocationString(loc) { return loc ? `${loc.zone || 'Kho'} - ${loc.rack || ''}${loc.level ? ' - ' + loc.level : ''}${loc.bin ? ' - ' + loc.bin : ''}` : 'Chưa phân vị trí'; }
+
+        function getStatusBadge(status) {
+            if (status === 'Chưa phân kiện') return `<span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-bold bg-amber-50 text-amber-700 border border-amber-200">Chưa phân kiện</span>`;
+            if (status === 'Nguyên niêm phong') return `<span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-bold bg-[#f6ffed] text-[#27ae60] border border-[#b7eb8f]">🔒 Nguyên Niêm Phong</span>`;
+            if (status === 'Đang sử dụng') return `<span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-bold bg-[#fff7e6] text-[#d46b08] border border-[#ffe7ba]">🔓 Đang Sử Dụng (Khui)</span>`;
+            if (status === 'Chờ kiểm') return `<span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200">⚠️ Chờ Kiểm Tra</span>`;
+            if (status === 'Khóa sử dụng') return `<span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-bold bg-slate-100 text-slate-800 border border-slate-300">🚫 Khóa Sử Dụng</span>`;
+            return `<span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-bold bg-slate-100 text-slate-500 border border-slate-300">🛑 Đã Hết Hàng</span>`;
+        }
+
+        let hideDepletedPackages = true;
+
+        function toggleHideDepleted() {
+            hideDepletedPackages = !hideDepletedPackages;
+            const btnText = document.getElementById('textToggleDepleted');
+            const btnIcon = document.querySelector('#btnToggleDepleted i');
+
+            if (hideDepletedPackages) {
+                btnText.innerText = 'Ẩn kiện hết tồn (Mặc định)';
+                btnIcon.className = 'fa-solid fa-eye-slash text-slate-400';
+            } else {
+                btnText.innerText = 'Hiện tất cả (Gồm kiện đã hết)';
+                btnIcon.className = 'fa-solid fa-eye text-[#1890ff]';
+            }
+
+            renderInventory();
+        }
+
+        function getFilteredInventory() {
+            const search = document.getElementById('searchInput').value.toLowerCase().trim();
+            const productGroup = document.getElementById('productGroupFilter').value;
+            const packageType = document.getElementById('packageTypeFilter').value;
+            const zone = document.getElementById('zoneFilter').value;
+
+            return inventory.filter(item => {
+                const locStr = getLocationString(item.location).toLowerCase();
+                const matchesSearch = item.id.toLowerCase().includes(search) ||
+                                      (item.variantName && item.variantName.toLowerCase().includes(search)) ||
+                                      item.skuName.toLowerCase().includes(search) || 
+                                      (item.productGroup && item.productGroup.toLowerCase().includes(search)) ||
+                                      (item.packageType && item.packageType.toLowerCase().includes(search)) ||
+                                      locStr.includes(search);
+
+                const matchesGroup = (productGroup === 'all') ? true : item.productGroup === productGroup;
+                const matchesType = (packageType === 'all') ? true : item.packageType === packageType;
+                const matchesZone = (zone === 'all') ? true : item.location.zone === zone;
+
+                // Hide depleted packages if toggle is ON
+                const matchesDepleted = hideDepletedPackages ? (item.currentPcs > 0 && item.status !== 'Đã hết') : true;
+
+                return matchesSearch && matchesGroup && matchesType && matchesZone && matchesDepleted;
+            });
+        }
+
+        function updateStats() {
+            let totalPkgs = inventory.filter(i => !i.isVirtual).length;
+            let sealedPkgs = inventory.filter(i => i.status === 'Nguyên niêm phong').length;
+            let inUsePkgs = inventory.filter(i => i.status === 'Đang sử dụng').length;
+            let totalPieces = inventory.reduce((sum, item) => sum + item.currentPcs, 0);
+
+            document.getElementById('statTotalPackages').innerText = formatNumber(totalPkgs);
+            document.getElementById('statSealedPackages').innerText = formatNumber(sealedPkgs);
+            document.getElementById('statInUsePackages').innerText = formatNumber(inUsePkgs);
+            document.getElementById('statPackingAreaPcs').innerText = formatNumber(packingAreaPcs);
+            document.getElementById('statTotalPieces').innerText = formatNumber(totalPieces);
+        }
+
+        // RENDER AUTHENTIC MISA AMIS 3-TIER TREE VIEW
+        function renderInventory() {
+            refreshFilterOptions();
+            const filtered = getFilteredInventory();
+            const container = document.getElementById('hierarchyContainer');
+
+            if (filtered.length === 0) {
+                container.innerHTML = `
+                    <div class="p-10 text-center text-slate-400">
+                        <i class="fa-solid fa-boxes-packing text-3xl mb-2 block text-slate-300"></i>
+                        <span class="font-medium text-xs">Không tìm thấy sản phẩm hoặc kiện hàng nào phù hợp bộ lọc.</span>
+                    </div>`;
+                updateStats();
+                return;
+            }
+
+            const parentGroups = {};
+            filtered.forEach(item => {
+                const grp = item.productGroup || "UNICARE";
+                if (!parentGroups[grp]) parentGroups[grp] = {};
+                
+                const varName = item.variantName || `${grp}-${item.color || 'TRANG'}`;
+                if (!parentGroups[grp][varName]) parentGroups[grp][varName] = [];
+                parentGroups[grp][varName].push(item);
+            });
+
+            container.innerHTML = Object.keys(parentGroups).map(grpName => {
+                const variantsObj = parentGroups[grpName];
+                const isGrpExpanded = expandedGroups[grpName] === true;
+                
+                let grpTotalPkgs = 0;
+                let grpTotalPcs = 0;
+                let sampleUnit = 'gói';
+
+                Object.values(variantsObj).forEach(vList => {
+                    grpTotalPkgs += vList.filter(item => !item.isVirtual).length;
+                    grpTotalPcs += vList.reduce((sum, i) => sum + i.currentPcs, 0);
+                    if (vList[0]?.unitName) sampleUnit = vList[0].unitName;
+                });
+
+                return `
+                    <!-- MISA TIER 1: PARENT GROUP CARD (CLEAN MISA BLUE HIGHLIGHT HEADER) -->
+                    <div class="misa-card rounded overflow-hidden border-l-4 border-l-[#1890ff]">
+                        
+                        <!-- Tier 1 Header -->
+                        <div onclick="toggleGroupAccordion('${grpName}')" class="px-4 py-3 bg-[#e6f7ff] hover:bg-[#bae7ff]/50 flex justify-between items-center cursor-pointer transition select-none border-b border-[#bae7ff]">
+                            <div class="flex items-center gap-2.5">
+                                <i class="fa-solid fa-chevron-down text-[#1890ff] text-xs transform transition-transform duration-200 ${isGrpExpanded ? '' : '-rotate-90'}"></i>
+                                <i class="fa-solid fa-folder-open text-[#1890ff] text-sm"></i>
+                                <h3 class="text-xs font-bold text-slate-900 uppercase tracking-wide">📦 ${grpName}</h3>
+                                <span class="bg-white text-[#1890ff] border border-[#1890ff]/40 font-bold text-[10px] px-2 py-0.5 rounded">
+                                    ${Object.keys(variantsObj).length} SKU Phân Loại màu
+                                </span>
+                            </div>
+
+                            <div class="text-right">
+                                <span class="text-[11px] text-slate-600 font-semibold">Tồn kho nhóm cha: </span>
+                                <span class="font-mono font-extrabold text-[#0059b3] text-xs">${formatNumber(grpTotalPcs)} ${sampleUnit} (${grpTotalPkgs} kiện)</span>
+                            </div>
+                        </div>
+
+                        <!-- TIER 2: VARIANT SKUs CONTAINER -->
+                        <div class="${isGrpExpanded ? '' : 'hidden'} p-3 space-y-2.5 bg-[#eef1f5]">
+                            ${Object.keys(variantsObj).map(variantName => {
+                                const pkgList = variantsObj[variantName];
+                                const isVarExpanded = expandedVariants[variantName] === true;
+                                const skuCode = pkgList[0]?.skuName || '1-5DTP-TRANG';
+                                const colorName = pkgList[0]?.color || 'Trắng';
+                                const varTotalPcs = pkgList.reduce((sum, i) => sum + i.currentPcs, 0);
+
+                                const typeBreakdown = {};
+                                pkgList.forEach(p => {
+                                    const typeKey = p.packageType || 'Tải';
+                                    if (!typeBreakdown[typeKey]) typeBreakdown[typeKey] = 0;
+                                    typeBreakdown[typeKey] += p.currentPcs;
+                                });
+
+                                return `
+                                    <!-- MISA TIER 2: VARIANT CARD -->
+                                    <div class="misa-card rounded overflow-hidden">
+                                        
+                                        <!-- Tier 2 Header (Sleek Single Line Bar - Click anywhere on row to expand/collapse) -->
+                                        <div onclick="toggleVariantAccordion('${variantName}')" class="px-3.5 py-2.5 flex justify-between items-center cursor-pointer transition select-none bg-white hover:bg-[#e6f7ff]/40">
+                                            <div class="flex items-center gap-2">
+                                                <i class="fa-solid fa-chevron-down text-slate-400 text-[11px] transform transition-transform duration-200 ${isVarExpanded ? '' : '-rotate-90'}"></i>
+                                                <span class="font-bold text-slate-900 text-xs uppercase">🎨 ${variantName}</span>
+                                                
+                                                <span class="font-mono font-bold text-[#1890ff] bg-[#e6f7ff] border border-[#bae7ff] px-2 py-0.5 rounded text-[10px]">
+                                                    SKU: ${skuCode}
+                                                </span>
+
+                                                <span class="text-slate-700 font-semibold text-[10px] bg-slate-100 border border-slate-300 px-2 py-0.5 rounded">
+                                                    Màu ${colorName}
+                                                </span>
+                                            </div>
+
+                                            <div class="text-right">
+                                                <span class="text-[10px] text-slate-400 font-semibold uppercase">Tổng Tồn Variant: </span>
+                                                <span class="font-mono font-bold text-[#27ae60] text-xs">${formatNumber(varTotalPcs)} ${pkgList[0]?.unitName || 'gói'}</span>
+                                            </div>
+                                        </div>
+
+                                        <!-- TIER 3: SUB-TABLE OF PHYSICAL PACKAGES (FIT 100% NO SCROLL) -->
+                                        <div class="${isVarExpanded ? '' : 'hidden'} border-t border-[#dcdfe6] bg-white">
+                                            <table class="w-full text-left border-collapse text-[11px]">
+                                                <thead>
+                                                    <tr class="bg-[#e6f7ff] text-slate-700 font-bold uppercase border-b border-[#bae7ff] text-[10px]">
+                                                        <th class="py-2 px-2.5">Mã Kiện HU</th>
+                                                        <th class="py-2 px-2.5">Dạng Đóng Gói</th>
+                                                        <th class="py-2 px-2.5">Trạng Thái</th>
+                                                        <th class="py-2 px-2.5">Vị Trí Kho</th>
+                                                        <th class="py-2 px-2.5">Xưởng / Ghi Chú</th>
+                                                        <th class="py-2 px-2.5 text-right">Tồn / Ban Đầu</th>
+                                                        <th class="py-2 px-2.5 text-center">Thao Tác</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody class="divide-y divide-slate-100 bg-white">
+                                                    ${pkgList.map(item => `
+                                                        <tr class="${item.isVirtual ? 'bg-amber-50/70' : item.currentPcs === 0 ? 'opacity-60 bg-slate-100/80' : 'hover:bg-[#e6f7ff]/40'} transition-colors">
+                                                            <!-- Package HU Code -->
+                                                            <td class="py-2 px-2.5 font-mono font-bold text-[#0073e6]">
+                                                                ${item.id}
+                                                            </td>
+
+                                                            <!-- Package Type Breakdown -->
+                                                            <td class="py-2 px-2.5 font-semibold text-slate-800">
+                                                                ${item.packageLabel || (item.packageType + ' (' + item.initialPcs + ' gói)')}
+                                                            </td>
+
+                                                            <!-- Status Badge -->
+                                                            <td class="py-2 px-2.5">
+                                                                ${getStatusBadge(item.status)}
+                                                            </td>
+
+                                                            <!-- Location Badge (Compact String) -->
+                                                            <td class="py-2 px-2.5">
+                                                                <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-[#f5f5f5] text-[#595959] border border-[#d9d9d9]" title="${getLocationString(item.location)}">
+                                                                    <i class="fa-solid fa-location-dot text-[9px] text-slate-400"></i>
+                                                                    ${item.location ? `${item.location.zone} - ${item.location.rack}` : 'Kho'}
+                                                                </span>
+                                                            </td>
+
+                                                            <!-- Factory & Note -->
+                                                            <td class="py-2 px-2.5 text-xs">
+                                                                <span class="font-bold text-slate-800">${item.factory}</span>
+                                                                <span class="text-[10px] text-slate-400 block truncate max-w-[120px]" title="${item.note}">${item.note}</span>
+                                                            </td>
+
+                                                            <!-- Current Balance / Initial Pcs Combined -->
+                                                            <td class="py-2 px-2.5 text-right font-mono text-xs">
+                                                                <span class="font-bold text-[#27ae60]">${formatNumber(item.currentPcs)}</span>
+                                                                <span class="text-slate-400 text-[10px]"> / ${formatNumber(item.initialPcs)} ${item.unitName}</span>
+                                                            </td>
+
+                                                            <!-- Actions -->
+                                                            <td class="py-2 px-2.5 text-center">
+                                                                <div class="flex items-center justify-center gap-1">
+                                                                    ${item.isVirtual ? `
+                                                                        <button onclick="openAllocationModal('${item.skuName}')" class="px-2.5 py-1 bg-[#00b96b] hover:bg-[#009b5a] text-white font-bold rounded text-[10px] transition shadow-xs" title="Tạo kiện vật lý từ tồn chưa phân kiện">
+                                                                            <i class="fa-solid fa-boxes-packing mr-1"></i>Phân kiện
+                                                                        </button>
+                                                                    ` : `
+                                                                    ${item.status === 'Nguyên niêm phong' ? `
+                                                                        <button onclick="unsealPackage('${item.id}')" class="px-2 py-0.5 bg-[#fa8c16] hover:bg-[#e67e22] text-white font-bold rounded text-[10px] transition shadow-xs" title="Khui kiện">
+                                                                            Khui
+                                                                        </button>
+                                                                    ` : ''}
+
+                                                                    ${item.status === 'Đang sử dụng' ? `
+                                                                        <button disabled class="px-2 py-0.5 bg-slate-200 text-slate-400 font-bold rounded text-[10px] cursor-not-allowed" title="Đang chờ liên kết giao dịch đóng gói/xuất kho">
+                                                                            Rút Hàng (chờ)
+                                                                        </button>
+                                                                    ` : ''}
+
+                                                                    <button onclick="moveItem('${item.id}')" class="p-1 text-slate-400 hover:text-[#1890ff] rounded transition" title="Chuyển vị trí">
+                                                                        <i class="fa-solid fa-location-dot text-xs"></i>
+                                                                    </button>
+
+                                                                    <button onclick="viewDetail('${item.id}')" class="p-1 text-slate-400 hover:text-[#1890ff] rounded transition" title="Xem/in tem QR kiện">
+                                                                        <i class="fa-solid fa-print text-xs"></i>
+                                                                    </button>
+
+                                                                    <button onclick="deleteItem('${item.id}')" class="p-1 text-slate-400 hover:text-rose-600 rounded transition" title="Xóa kiện">
+                                                                        <i class="fa-regular fa-trash-can text-xs"></i>
+                                                                    </button>
+                                                                    `}
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    `).join('')}
+                                                </tbody>
+                                            </table>
+                                        </div>
+
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+
+                    </div>
+                `;
+            }).join('');
+
+            updateStats();
+        }
+
+        function toggleGroupAccordion(grpName) {
+            expandedGroups[grpName] = expandedGroups[grpName] === true ? false : true;
+            renderInventory();
+        }
+
+        function toggleVariantAccordion(variantName) {
+            expandedVariants[variantName] = expandedVariants[variantName] === true ? false : true;
+            renderInventory();
+        }
+
+        function toggleExpandAllGroups() {
+            const hasExpanded = Object.values(expandedGroups).some(v => v === true);
+            Object.keys(PRODUCT_CATALOG).forEach(k => expandedGroups[k] = !hasExpanded);
+            Object.keys(expandedVariants).forEach(v => expandedVariants[v] = !hasExpanded);
+            renderInventory();
+        }
+
+        function handleSearchAndFilter() {
+            renderInventory();
+        }
+
+        function resetFilters() {
+            document.getElementById('searchInput').value = '';
+            document.getElementById('productGroupFilter').value = 'all';
+            document.getElementById('packageTypeFilter').value = 'all';
+            document.getElementById('zoneFilter').value = 'all';
+            renderInventory();
+            showToast('Đã đặt lại bộ lọc', 'info');
+        }
+
+        function handleProductGroupChange() {
+            const pGroup = document.getElementById('inputProductGroup').value;
+            const variantSelect = document.getElementById('inputVariantSku');
+            const variants = PRODUCT_CATALOG[pGroup] || [];
+
+            variantSelect.innerHTML = variants.map(v => `
+                <option value="${v.sku}" data-variant="${v.variantName}" data-color="${v.color}" data-unit="${v.unit}" data-factory="${v.factory}" data-pcs="${v.defaultPcs}">
+                    🎨 ${v.variantName} - [SKU: ${v.sku}] (${v.unit})
+                </option>
+            `).join('');
+
+            handleVariantSkuChange();
+        }
+
+        function handleVariantSkuChange() {
+            const variantSelect = document.getElementById('inputVariantSku');
+            const selectedOpt = variantSelect.options[variantSelect.selectedIndex];
+
+            if (!selectedOpt) return;
+
+            const sku = selectedOpt.value;
+            const unit = selectedOpt.getAttribute('data-unit');
+            const factory = selectedOpt.getAttribute('data-factory');
+            const defaultPcs = parseInt(selectedOpt.getAttribute('data-pcs')) || 1200;
+            const levels = handlingCatalogBySku[sku]?.levels || [];
+            const packageTypeSelect = document.getElementById('inputPackageType');
+            if (levels.length > 0) {
+                packageTypeSelect.innerHTML = levels.slice().sort((a, b) => b.factor - a.factor)
+                    .map(level => `<option value="${level.name}">${level.name} (1 = ${formatNumber(level.factor)} ${unit})</option>`).join('');
+            }
+
+            document.getElementById('inputUnitName').value = unit;
+            document.getElementById('inputFactoryName').value = factory;
+            updatePackageQuantityFields();
+
+            const prefix = sku.includes('TRANG') ? 'TRANG' : (sku.includes('XANH') ? 'XANH' : (sku.includes('DEN') ? 'DEN' : 'ITEM'));
+            document.getElementById('inputPkgCode').value = `${factory.slice(0,2).toUpperCase()}-${prefix}-${Date.now().toString().slice(-4)}`;
+        }
+
+        function updatePackageQuantityFields() {
+            const sku = document.getElementById('inputVariantSku').value;
+            const levelName = document.getElementById('inputPackageType').value;
+            const entry = handlingCatalogBySku[sku];
+            const level = entry?.levels?.find(item => item.name === levelName);
+            const fallback = Number(document.getElementById('inputVariantSku').selectedOptions?.[0]?.dataset?.pcs || 1);
+            const quantity = Math.max(1, Number(level?.factor || fallback));
+            const isLoose = Number(level?.factor || 1) === 1;
+            const initialInput = document.getElementById('inputInitialPcs');
+            const currentInput = document.getElementById('inputCurrentPcs');
+            initialInput.readOnly = !isLoose;
+            currentInput.readOnly = !isLoose;
+            if (!isLoose || !Number(initialInput.value)) {
+                initialInput.value = quantity;
+                currentInput.value = quantity;
+            }
+            const help = document.getElementById('allocationHelp');
+            if (help) help.innerText = isLoose
+                ? 'Dạng lẻ: nhập số lượng thực tế cần gom vào kiện này; phần còn lại tiếp tục ở trạng thái “Chưa phân kiện”.'
+                : `Dạng ${levelName}: mỗi kiện cố định ${formatNumber(quantity)} ${unit}. Chỉ tạo được khi tồn chưa phân kiện đủ số lượng.`;
+        }
+
+        function showRuleAlert(msg) {
+            document.getElementById('ruleAlertMessage').innerHTML = msg;
+            openModal('ruleAlertModal');
+        }
+
+        function unsealPackage(id) {
+            const item = inventory.find(i => i.id === id);
+            if (!item) return;
+            if (item.isVirtual) {
+                showToast('Hàng này chưa được tạo thành kiện vật lý.', 'warning');
+                return;
+            }
+
+            const existingUnsealed = inventory.find(i => i.skuName === item.skuName && i.location.zone === item.location.zone && i.status === 'Đang sử dụng' && i.currentPcs > 0);
+
+            if (existingUnsealed) {
+                showRuleAlert(`<strong>MÃ KIỆN: ${existingUnsealed.id} ĐANG MỞ KHUI DỞ</strong><br><br>Khu <strong>${item.location.zone}</strong> hiện tại đã có 1 kiện SKU [<strong>${item.skuName} - Màu ${item.color}</strong>] đang khui dở (Tồn dư: ${existingUnsealed.currentPcs} ${existingUnsealed.unitName}).<br><br>Quy tắc an toàn kho <strong>CHẶN KHUI KIỆN MỚI</strong> cho tới khi kiện cũ được dùng hết!`);
+                return;
+            }
+
+            item.status = 'Đang sử dụng';
+            saveInventoryToStorage();
+            renderInventory();
+            addLogEntry('Khui Kiện (Unseal)', `Đã khui kiện ${item.id} [${item.skuName}] màu ${item.color} tại ${getLocationString(item.location)}`);
+            showToast(`Đã khui thành công kiện ${item.id}`, 'success');
+        }
+
+        function pickItemsFromPackage(id) {
+            showToast('Luồng rút hàng đang chờ liên kết giao dịch đóng gói/xuất kho.', 'warning');
+            return;
+            /* Kept below as the UI draft for the transaction flow. */
+            const item = inventory.find(i => i.id === id);
+            if (!item) return;
+            if (item.isVirtual) {
+                showToast('Hãy tạo kiện vật lý trước khi rút hàng.', 'warning');
+                return;
+            }
+
+            document.getElementById('pickItemId').value = item.id;
+            document.getElementById('pickItemPkgCode').innerText = item.id;
+            document.getElementById('pickItemSku').innerText = `${item.productGroup} - ${item.variantName || item.skuName} (${item.color})`;
+            document.getElementById('pickItemUnit').innerText = item.unitName.toUpperCase();
+            document.getElementById('pickItemBalance').innerText = `${formatNumber(item.currentPcs)} ${item.unitName}`;
+            
+            const input = document.getElementById('pickQtyInput');
+            input.value = Math.min(50, item.currentPcs);
+            input.max = item.currentPcs;
+            document.getElementById('pickQtySuffix').innerText = item.unitName;
+
+            openModal('pickModal');
+        }
+
+        function setPickPreset(val) {
+            const id = document.getElementById('pickItemId').value;
+            const item = inventory.find(i => i.id === id);
+            if (!item) return;
+
+            const input = document.getElementById('pickQtyInput');
+            if (val === 'max') {
+                input.value = item.currentPcs;
+            } else {
+                input.value = Math.min(item.currentPcs, parseInt(val) || 1);
+            }
+        }
+
+        function handleConfirmPick(e) {
+            e.preventDefault();
+            const id = document.getElementById('pickItemId').value;
+            const item = inventory.find(i => i.id === id);
+            if (!item) return;
+
+            const qty = parseInt(document.getElementById('pickQtyInput').value) || 0;
+
+            if (qty <= 0) {
+                showToast('Số lượng rút phải lớn hơn 0!', 'warning');
+                return;
+            }
+
+            if (qty > item.currentPcs) {
+                showRuleAlert(`Số lượng rút (${qty}) vượt quá số tồn hiện có trong kiện (${item.currentPcs} ${item.unitName})!`);
+                return;
+            }
+
+            item.currentPcs -= qty;
+            if (item.currentPcs === 0) {
+                item.status = 'Đã hết';
+            }
+
+            packingAreaPcs += qty;
+            saveInventoryToStorage();
+            closeModal('pickModal');
+            renderInventory();
+            addLogEntry('Rút Hàng Sang Khu Đóng Gói', `Rút ${qty} ${item.unitName} từ kiện ${item.id}. Tồn kiện còn: ${item.currentPcs}`);
+            showToast(`Đã rút ${qty} ${item.unitName} sang Khu đóng gói`, 'success');
+        }
+
+        function recalculateReconciliation() {
+            document.getElementById('recTotalTaken').innerText = formatNumber(packingAreaPcs);
+            const packed = parseInt(document.getElementById('inputRecPacked').value) || 0;
+            const returned = parseInt(document.getElementById('inputRecReturned').value) || 0;
+            const damaged = parseInt(document.getElementById('inputRecDamaged').value) || 0;
+
+            const sumUser = packed + returned + damaged;
+            const diff = packingAreaPcs - sumUser;
+
+            const statusBadge = document.getElementById('reconcileStatusBadge');
+            const diffText = document.getElementById('reconcileDiffText');
+            const btnCommit = document.getElementById('btnCommitShift');
+
+            if (diff === 0) {
+                statusBadge.className = "px-3 py-1 rounded text-xs font-bold uppercase border flex items-center gap-1.5 bg-[#f6ffed] text-[#27ae60] border-[#b7eb8f]";
+                statusBadge.innerHTML = `<i class="fa-solid fa-circle-check text-xs"></i><span>SỐ LIỆU ĐÃ CÂN BẰNG</span>`;
+                diffText.className = "text-sm font-bold font-mono text-[#27ae60]";
+                diffText.innerText = "0 (Cân bằng 100% - Cho phép chốt ca)";
+                btnCommit.disabled = false;
+                btnCommit.classList.remove('opacity-40', 'cursor-not-allowed');
+            } else {
+                statusBadge.className = "px-3 py-1 rounded text-xs font-bold uppercase border flex items-center gap-1.5 bg-rose-50 text-rose-700 border-rose-200";
+                statusBadge.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-xs"></i><span>CHƯA CÂN BẰNG (LỆCH ${Math.abs(diff)})</span>`;
+                diffText.className = "text-sm font-bold font-mono text-rose-600";
+                diffText.innerText = `${diff > 0 ? '+' : ''}${diff} ${diff > 0 ? '(Thiếu khai báo)' : '(Dư khai báo)'}`;
+                btnCommit.disabled = true;
+                btnCommit.classList.add('opacity-40', 'cursor-not-allowed');
+            }
+        }
+
+        function commitShiftReconciliation() {
+            const packed = parseInt(document.getElementById('inputRecPacked').value) || 0;
+            const returned = parseInt(document.getElementById('inputRecReturned').value) || 0;
+            const damaged = parseInt(document.getElementById('inputRecDamaged').value) || 0;
+
+            if (packingAreaPcs !== (packed + returned + damaged)) {
+                showRuleAlert('Chưa cân bằng số liệu đối soát! Không thể chốt ca.');
+                return;
+            }
+
+            addLogEntry('Chốt Ca Nghiệp Vụ', `Đã chốt ca thành công! Đã lấy: ${packingAreaPcs}, Đã đóng: ${packed}, Trả lại: ${returned}, Hỏng/mất: ${damaged}`);
+            packingAreaPcs = 0;
+            document.getElementById('inputRecPacked').value = 0;
+            document.getElementById('inputRecReturned').value = 0;
+            document.getElementById('inputRecDamaged').value = 0;
+
+            recalculateReconciliation();
+            updateStats();
+            showToast('Đã chốt ca nghiệm thu thành công!', 'success');
+        }
+
+        function openMobileScannerModal() {
+            const select = document.getElementById('mobileScanPkgSelect');
+            select.innerHTML = inventory.map(i => `
+                <option value="${i.id}">${i.id} - ${i.variantName || i.productGroup} (${i.packageType}) - [${i.status}]</option>
+            `).join('');
+            
+            openModal('mobileScannerModal');
+        }
+
+        function executeMobileScanAction(action) {
+            const pkgId = document.getElementById('mobileScanPkgSelect').value;
+            const item = inventory.find(i => i.id === pkgId);
+            const feedback = document.getElementById('mobileScanFeedback');
+
+            if (!item) return;
+
+            if (action === 'unseal') {
+                if (item.status !== 'Nguyên niêm phong') {
+                    feedback.className = "p-2.5 rounded bg-rose-950 border border-rose-700 text-xs font-mono text-center text-rose-300 animate-bounce";
+                    feedback.innerText = `❌ BÁO LỖI (BÍEP BÍEP): Kiện ${item.id} không ở trạng thái Nguyên Niêm Phong!`;
+                    return;
+                }
+                unsealPackage(item.id);
+                feedback.className = "p-2.5 rounded bg-emerald-950 border border-emerald-700 text-xs font-mono text-center text-emerald-300";
+                feedback.innerText = `✅ XÁC NHẬN (TÍT): Đã khui thành công kiện ${item.id}`;
+            } else if (action === 'pick') {
+                if (item.status !== 'Đang sử dụng') {
+                    feedback.className = "p-2.5 rounded bg-rose-950 border border-rose-700 text-xs font-mono text-center text-rose-300";
+                    feedback.innerText = `❌ Kiện ${item.id} chưa khui! Hãy khui trước khi rút hàng.`;
+                    return;
+                }
+                closeModal('mobileScannerModal');
+                pickItemsFromPackage(item.id);
+            } else if (action === 'flag_error') {
+                item.status = 'Chờ kiểm';
+                saveInventoryToStorage();
+                renderInventory();
+                addLogEntry('Báo Kiện Lỗi (PWA)', `Chuyển kiện ${item.id} sang Chờ Kiểm Tra do lỗi rách niêm phong`);
+                feedback.className = "p-2.5 rounded bg-amber-950 border border-amber-700 text-xs font-mono text-center text-amber-300";
+                feedback.innerText = `⚠️ Đã chuyển kiện ${item.id} sang CHỜ KIỂM TRA`;
+            }
+
+            openMobileScannerModal();
+        }
+
+        function renderSpecs() {
+            const tbody = document.getElementById('specTableBody');
+            const liveSpecs = Object.values(handlingCatalogBySku).flatMap(entry => entry.levels
+                .filter(level => Number(level.factor) > 1)
+                .map(level => ({ factory: entry.factory, name: level.name, sku: entry.sku, structure: `1 ${level.name} = ${formatNumber(level.factor)} ${entry.unitName}`, status: 'Đang dùng' })));
+            tbody.innerHTML = liveSpecs.map(s => `
+                <tr class="border-b border-slate-100 hover:bg-slate-50">
+                    <td class="py-2.5 px-3 font-semibold text-slate-900">${s.factory}</td>
+                    <td class="py-2.5 px-3 font-semibold text-[#d46b08]">${s.name}</td>
+                    <td class="py-2.5 px-3 font-mono font-bold text-[#1890ff]">${s.sku}</td>
+                    <td class="py-2.5 px-3 text-slate-700">${s.structure}</td>
+                    <td class="py-2.5 px-3 text-center">
+                        <span class="bg-[#f6ffed] text-[#27ae60] text-[10px] font-bold px-2 py-0.5 rounded border border-[#b7eb8f]">${s.status}</span>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        function renderAuditLogs() {
+            const container = document.getElementById('auditLogContainer');
+            if (auditLogs.length === 0) {
+                container.innerHTML = `<div class="text-xs text-slate-400 text-center py-6">Chưa có nhật ký nào</div>`;
+                return;
+            }
+
+            container.innerHTML = auditLogs.map(log => `
+                <div class="bg-[#eef1f5] p-2.5 rounded border border-[#dcdfe6] flex justify-between items-start text-xs">
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <span class="font-bold text-slate-900 uppercase">${log.action}</span>
+                            <span class="text-[10px] font-mono text-slate-400">${log.time}</span>
+                        </div>
+                        <p class="text-slate-600 mt-0.5">${log.details}</p>
+                    </div>
+                    <span class="font-mono text-[10px] bg-white border border-[#dcdfe6] px-2 py-0.5 rounded text-slate-700 font-semibold">${log.user}</span>
+                </div>
+            `).join('');
+        }
+
+        function clearAuditLog() {
+            if (confirm('Xóa nhật ký thao tác?')) {
+                auditLogs = [];
+                saveAuditLogsToStorage();
+                renderAuditLogs();
+            }
+        }
+
+        function openAddModal() {
+            const groups = Object.keys(PRODUCT_CATALOG);
+            if (groups.length === 0) {
+                showToast('Chưa có SKU nào đủ quy đổi để tạo kiện.', 'warning');
+                return;
+            }
+            document.getElementById('editingId').value = '';
+            document.getElementById('itemForm').reset();
+            const groupSelect = document.getElementById('inputProductGroup');
+            groupSelect.innerHTML = groups.map(group => `<option value="${group}">${group}</option>`).join('');
+            groupSelect.value = groups[0];
+            handleProductGroupChange();
+            openModal('itemModal');
+        }
+
+        // “Chưa phân kiện” is the stock imported from a purchase receipt. It
+        // is not a physical package, so it can only be turned into a package,
+        // never moved, printed, opened or deleted.
+        function openAllocationModal(sku) {
+            const source = inventory.find(item => item.isVirtual && item.skuName === sku);
+            const catalog = handlingCatalogBySku[sku];
+            if (!source || !catalog) {
+                showToast('Không tìm thấy tồn chưa phân kiện của SKU này.', 'warning');
+                return;
+            }
+            openAddModal();
+            const groupSelect = document.getElementById('inputProductGroup');
+            groupSelect.value = catalog.productGroup;
+            handleProductGroupChange();
+            const skuSelect = document.getElementById('inputVariantSku');
+            skuSelect.value = sku;
+            handleVariantSkuChange();
+            document.getElementById('inputInitialPcs').value = source.currentPcs;
+            document.getElementById('inputCurrentPcs').value = source.currentPcs;
+            document.getElementById('inputCurrentPcs').max = source.currentPcs;
+            document.getElementById('inputNote').value = `Phân kiện từ tồn chưa phân kiện: ${formatNumber(source.currentPcs)} ${source.unitName}.`;
+        }
+
+        function handleSaveItem(e) {
+            e.preventDefault();
+            const productGroup = document.getElementById('inputProductGroup').value;
+            const variantSelect = document.getElementById('inputVariantSku');
+            const skuName = variantSelect.value;
+            
+            const selectedOpt = variantSelect.options[variantSelect.selectedIndex];
+            const variantName = selectedOpt.getAttribute('data-variant');
+            const color = selectedOpt.getAttribute('data-color');
+            const unitName = selectedOpt.getAttribute('data-unit');
+            const factory = document.getElementById('inputFactoryName').value.trim() || 'Xưởng';
+            
+            const packageType = document.getElementById('inputPackageType').value;
+            const id = document.getElementById('inputPkgCode').value.trim().toUpperCase();
+            const status = document.getElementById('inputStatus').value;
+            
+            const location = {
+                zone: document.getElementById('locZone').value,
+                rack: document.getElementById('locRack').value.trim(),
+                level: document.getElementById('locLevel').value.trim(),
+                bin: document.getElementById('locBin').value.trim()
+            };
+
+            const selectedPackaging = handlingCatalogBySku[sku]?.levels?.find(level => level.name === packageType);
+            const packageFactor = Math.max(1, Number(selectedPackaging?.factor || 1));
+            const isLoose = packageFactor === 1;
+            const initialPcs = isLoose
+                ? Math.max(1, parseInt(document.getElementById('inputInitialPcs').value) || 1)
+                : packageFactor;
+            const currentPcs = isLoose
+                ? Math.max(1, parseInt(document.getElementById('inputCurrentPcs').value) || initialPcs)
+                : initialPcs;
+            const note = document.getElementById('inputNote').value.trim();
+
+            const sourceStock = inventory.find(item => item.isVirtual && item.skuName === skuName);
+            const availableToAllocate = Math.max(0, Number(sourceStock?.currentPcs || 0));
+            if (!id) {
+                showToast('Vui lòng nhập mã kiện.', 'warning');
+                return;
+            }
+            if (inventory.some(item => !item.isVirtual && item.id === id)) {
+                showToast('Mã kiện đã tồn tại.', 'warning');
+                return;
+            }
+            if (currentPcs <= 0 || currentPcs > availableToAllocate) {
+                showToast(`Số lượng kiện phải từ 1 đến ${formatNumber(availableToAllocate)} ${unitName}.`, 'warning');
+                return;
+            }
+
+            let packageLabel = `1 ${packageType} (${formatNumber(initialPcs)} ${unitName})`;
+            if (isLoose) packageLabel = `Hàng lẻ (${formatNumber(initialPcs)} ${unitName})`;
+
+            const now = new Date();
+            const timeStr = `${now.getDate().toString().padStart(2, '0')}/${(now.getMonth()+1).toString().padStart(2, '0')}/${now.getFullYear()} ${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+
+            const newItem = {
+                id,
+                productGroup,
+                productId: Number(handlingCatalogBySku[sku]?.productId || 0),
+                purchaseOrderId: Number(handlingCatalogBySku[sku]?.purchaseOrderId || 0) || null,
+                purchaseItemId: Number(handlingCatalogBySku[sku]?.purchaseItemId || 0) || null,
+                variantName,
+                skuName,
+                color,
+                packageType,
+                packageLabel,
+                unitName,
+                factory,
+                status,
+                location,
+                initialPcs,
+                currentPcs,
+                note,
+                updatedAt: timeStr
+            };
+
+            if (sourceStock) sourceStock.currentPcs = Math.max(0, sourceStock.currentPcs - currentPcs);
+            inventory.unshift(newItem);
+            saveInventoryToStorage();
+            closeModal('itemModal');
+            renderInventory();
+            addLogEntry('Tạo Kiện Mới', `Tạo mới kiện ${id} cho [${variantName}] Dạng ${packageType} (${initialPcs} ${unitName})`);
+            showToast(`Đã thêm mới thành công kiện ${id}`, 'success');
+        }
+
+        function viewDetail(id) {
+            const item = inventory.find(i => i.id === id);
+            if (!item) return;
+            detailPrintId = id;
+
+            document.getElementById('modalProductGroupTitle').innerText = item.variantName || item.productGroup || 'UNICARE';
+            document.getElementById('modalVariantSkuText').innerText = `Mã SKU: ${item.skuName} (Màu: ${item.color || 'Trắng'}) | Dạng: ${item.packageType || 'Tải'}`;
+            document.getElementById('modalFactoryName').innerText = `Xưởng: ${item.factory}`;
+            document.getElementById('modalCode').innerText = item.id;
+            document.getElementById('modalLocationString').innerText = getLocationString(item.location);
+            document.getElementById('modalStatusBadge').innerText = item.status;
+            document.getElementById('modalBalanceText').innerText = `${formatNumber(item.currentPcs)} / ${formatNumber(item.initialPcs)} ${item.unitName}`;
+            document.getElementById('modalUpdatedAt').innerText = item.updatedAt;
+
+            document.getElementById('qrHumanText').innerText = item.id;
+
+            try {
+                const qrContainer = document.getElementById("qrcodeCanvas");
+                qrContainer.innerHTML = "";
+                
+                new QRCode(qrContainer, {
+                    text: item.id,
+                    width: 150,
+                    height: 150,
+                    colorDark: "#1e283d",
+                    colorLight: "#ffffff",
+                    correctLevel: QRCode.CorrectLevel.H
+                });
+            } catch (err) {
+                console.error("QR Code Error:", err);
+            }
+
+            openModal('detailModal');
+        }
+
+        let detailPrintId = '';
+        function printQrLabel() {
+            const item = inventory.find(entry => entry.id === detailPrintId) || inventory.find(entry => entry.id === document.getElementById('modalCode').innerText);
+            if (!item) return;
+            const printWindow = window.open('', '_blank', 'width=480,height=360');
+            if (!printWindow) { showToast('Trình duyệt đã chặn cửa sổ in.', 'warning'); return; }
+            const qrCanvas = document.querySelector('#qrcodeCanvas canvas');
+            const qrImage = document.querySelector('#qrcodeCanvas img');
+            const qrSource = qrCanvas?.toDataURL('image/png') || qrImage?.src || '';
+            printWindow.document.write(`<html><head><title>${item.id}</title><style>body{font-family:Arial,sans-serif;margin:0;padding:12mm;width:80mm;color:#172033} .label{border:1px solid #172033;padding:10px;border-radius:8px;text-align:center} h1{font-size:16px;margin:0 0 6px} p{font-size:11px;margin:4px 0} #qr{margin:8px auto;width:150px;height:150px}</style></head><body><div class="label"><h1>${item.variantName || item.productGroup}</h1><p><b>${item.skuName}</b> · ${item.packageLabel || item.packageType}</p>${qrSource ? `<img id="qr" src="${qrSource}" alt="QR ${item.id}">` : '<p>Không tạo được mã QR</p>'}<h1>${item.id}</h1><p>${getLocationString(item.location)}</p><p>Còn ${formatNumber(item.currentPcs)} ${item.unitName}</p></div><script>window.onload=function(){setTimeout(function(){window.print();window.close()},250)}<\/script></body></html>`);
+            printWindow.document.close();
+        }
+
+        function deleteItem(id) {
+            if (String(id).startsWith('CHUA-PHAN-KIEN-')) {
+                showToast('Dòng tồn chưa phân kiện được đồng bộ từ Nhập hàng, không thể xóa.', 'warning');
+                return;
+            }
+            const removedItem = inventory.find(i => i.id === id);
+            if (confirm(`Xác nhận xóa kiện ${id} khỏi sổ kiện?`)) {
+                inventory = inventory.filter(i => i.id !== id);
+                const sourceStock = inventory.find(item => item.isVirtual && item.skuName === removedItem?.skuName);
+                if (sourceStock) sourceStock.currentPcs += Math.max(0, Number(removedItem?.currentPcs || 0));
+                saveInventoryToStorage();
+                renderInventory();
+                addLogEntry('Xóa Kiện', `Đã xóa kiện ${id}`);
+                showToast(`Đã xóa kiện ${id}`, 'warning');
+            }
+        }
+
+        function moveItem(id) {
+            const item = inventory.find(entry => entry.id === id);
+            if (!item || item.isVirtual) { showToast('Chỉ kiện vật lý mới có thể chuyển vị trí.', 'warning'); return; }
+            const zone = prompt('Nhập khu kho/khu vực đích:', item.location?.zone || 'Kho A');
+            if (!zone) return;
+            const rack = prompt('Nhập dãy/kệ:', item.location?.rack || '');
+            if (rack === null) return;
+            const level = prompt('Nhập tầng:', item.location?.level || '');
+            if (level === null) return;
+            const bin = prompt('Nhập ô/vị trí:', item.location?.bin || '');
+            if (bin === null) return;
+            item.location = { zone: zone.trim(), rack: rack.trim(), level: level.trim(), bin: bin.trim() };
+            item.updatedAt = new Date().toLocaleString('vi-VN');
+            saveInventoryToStorage();
+            renderInventory();
+            addLogEntry('Chuyển vị trí', `Đã chuyển ${item.id} tới ${getLocationString(item.location)}`);
+            showToast(`Đã chuyển ${item.id} tới ${getLocationString(item.location)}`, 'success');
+        }
+
+        // TELEGRAM BOT SIMULATOR CONTROLLER
+        function openTelegramBotModal() {
+            openModal('telegramBotModal');
+        }
+
+        function sendTelegramQuickCmd(cmdText) {
+            document.getElementById('telegramInputMsg').value = cmdText;
+            handleSendTelegramMessage(new Event('submit'));
+        }
+
+        function appendTelegramUserMessage(text) {
+            const container = document.getElementById('telegramChatContainer');
+            const now = new Date();
+            const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+
+            const userHtml = `
+                <div class="flex flex-col items-end space-y-1 self-end max-w-[85%] ml-auto">
+                    <div class="bg-[#2b5278] text-white p-2.5 px-3 rounded-2xl rounded-tr-xs text-xs font-mono">
+                        ${text}
+                    </div>
+                    <span class="text-[9px] text-slate-500 font-mono px-1">${timeStr}</span>
+                </div>
+            `;
+            container.insertAdjacentHTML('beforeend', userHtml);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function appendTelegramBotReply(replyHtml) {
+            const container = document.getElementById('telegramChatContainer');
+            const now = new Date();
+            const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+
+            const botHtml = `
+                <div class="flex flex-col items-start space-y-1 max-w-[88%]">
+                    <div class="bg-[#182533] text-slate-200 p-3 rounded-2xl rounded-tl-xs text-xs space-y-1.5 border border-[#242f3d]">
+                        ${replyHtml}
+                    </div>
+                    <span class="text-[9px] text-slate-500 font-mono px-1">${timeStr}</span>
+                </div>
+            `;
+            container.insertAdjacentHTML('beforeend', botHtml);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function handleSendTelegramMessage(e) {
+            if (e && e.preventDefault) e.preventDefault();
+            const input = document.getElementById('telegramInputMsg');
+            const text = input.value.trim();
+            if (!text) return;
+
+            appendTelegramUserMessage(text);
+            input.value = '';
+
+            setTimeout(() => {
+                processTelegramCommand(text);
+            }, 400);
+        }
+
+        function processTelegramCommand(cmd) {
+            const parts = cmd.split(' ').filter(p => p.length > 0);
+            const action = parts[0]?.toLowerCase();
+
+            if (action === '/khui') {
+                const pkgId = parts[1]?.toUpperCase();
+                if (!pkgId) {
+                    appendTelegramBotReply(`<p class="text-rose-400 font-bold">⚠️ Vui lòng nhập mã kiện!</p><p class="text-[11px]">Cú pháp: <code>/khui TP-TRANG-0001</code></p>`);
+                    return;
+                }
+                const item = inventory.find(i => i.id === pkgId);
+                if (!item) {
+                    appendTelegramBotReply(`<p class="text-rose-400 font-bold">❌ Không tìm thấy kiện [${pkgId}] trong hệ thống kho!</p>`);
+                    return;
+                }
+                if (item.status !== 'Nguyên niêm phong') {
+                    appendTelegramBotReply(`<p class="text-amber-400 font-bold">⚠️ Kiện [${pkgId}] hiện tại không ở trạng thái Nguyên Niêm Phong (Trạng thái hiện tại: ${item.status})</p>`);
+                    return;
+                }
+                unsealPackage(item.id);
+                appendTelegramBotReply(`
+                    <div class="space-y-1">
+                        <p class="font-bold text-emerald-400">✅ KHUI KIỆN THÀNH CÔNG (TÍT)!</p>
+                        <p>📦 Mã Kiện: <strong class="font-mono text-amber-300">${item.id}</strong></p>
+                        <p>🎨 Sản Phẩm: <strong>${item.variantName || item.productGroup}</strong> (${item.color})</p>
+                        <p>📍 Vị Trí: <strong>${getLocationString(item.location)}</strong></p>
+                        <p>📊 Tồn Dồn: <strong>${formatNumber(item.currentPcs)} ${item.unitName}</strong></p>
+                    </div>
+                `);
+            } else if (action === '/rut') {
+                const pkgId = parts[1]?.toUpperCase();
+                const qty = parseInt(parts[2]) || 0;
+
+                if (!pkgId || qty <= 0) {
+                    appendTelegramBotReply(`<p class="text-rose-400 font-bold">⚠️ Vui lòng nhập đúng cú pháp!</p><p class="text-[11px]">Cú pháp: <code>/rut TP-TRANG-0002 50</code></p>`);
+                    return;
+                }
+
+                const item = inventory.find(i => i.id === pkgId);
+                if (!item) {
+                    appendTelegramBotReply(`<p class="text-rose-400 font-bold">❌ Không tìm thấy kiện [${pkgId}] trong kho!</p>`);
+                    return;
+                }
+
+                if (item.status !== 'Đang sử dụng') {
+                    appendTelegramBotReply(`<p class="text-rose-400 font-bold">❌ Kiện [${pkgId}] chưa khui! Hãy gửi lệnh <code>/khui ${pkgId}</code> trước.</p>`);
+                    return;
+                }
+
+                if (qty > item.currentPcs) {
+                    appendTelegramBotReply(`<p class="text-rose-400 font-bold">❌ Số lượng rút (${qty}) lớn hơn tồn dồn trong kiện (${item.currentPcs} ${item.unitName})!</p>`);
+                    return;
+                }
+
+                item.currentPcs -= qty;
+                if (item.currentPcs === 0) item.status = 'Đã hết';
+                packingAreaPcs += qty;
+                saveInventoryToStorage();
+                renderInventory();
+                addLogEntry('Rút Hàng Qua Telegram Bot', `Rút ${qty} ${item.unitName} từ kiện ${item.id} qua lệnh Telegram Bot`);
+
+                appendTelegramBotReply(`
+                    <div class="space-y-1">
+                        <p class="font-bold text-emerald-400">🚀 RÚT HÀNG SANG KHU ĐÓNG GÓI THÀNH CÔNG!</p>
+                        <p>📦 Mã Kiện: <strong class="font-mono text-amber-300">${item.id}</strong></p>
+                        <p>📉 Số Rút: <strong class="text-blue-400">${qty} ${item.unitName}</strong></p>
+                        <p>📊 Tồn Dồn Còn Lại: <strong>${formatNumber(item.currentPcs)} ${item.unitName}</strong></p>
+                        <p>🛒 Chờ Xuất Khu Đóng Gói: <strong>${formatNumber(packingAreaPcs)} ${item.unitName}</strong></p>
+                    </div>
+                `);
+            } else if (action === '/ton') {
+                const totalPkgs = inventory.length;
+                const totalPcs = inventory.reduce((sum, i) => sum + i.currentPcs, 0);
+                appendTelegramBotReply(`
+                    <div class="space-y-1">
+                        <p class="font-bold text-blue-400">📊 TỔNG BÁO CÁO TỒN KHO AN TOÀN:</p>
+                        <p>• Tổng Kiện Vật Lý: <strong>${totalPkgs} kiện</strong></p>
+                        <p>• Tổng Số Lượng Quy Đổi: <strong>${formatNumber(totalPcs)} đơn vị</strong></p>
+                        <p>• Đang Chờ Đóng Gói: <strong>${formatNumber(packingAreaPcs)} đơn vị</strong></p>
+                    </div>
+                `);
+            } else {
+                appendTelegramBotReply(`
+                    <p class="text-amber-300 font-bold">⚠️ Lệnh không hợp lệ!</p>
+                    <p>Hỗ trợ các lệnh: <code>/khui mã_kiện</code>, <code>/rut mã_kiện số_lượng</code>, <code>/ton</code></p>
+                `);
+            }
+        }
+
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+
+            let bgClass = 'bg-[#1e283d] text-white';
+            let icon = 'fa-circle-info text-[#1890ff]';
+            if (type === 'success') { bgClass = 'bg-[#27ae60] text-white'; icon = 'fa-circle-check'; }
+            else if (type === 'warning') { bgClass = 'bg-[#d46b08] text-white'; icon = 'fa-triangle-exclamation'; }
+
+            toast.className = `flex items-center gap-2 px-3.5 py-2.5 rounded shadow-lg text-xs font-semibold ${bgClass} transition-all duration-300 transform translate-y-2 opacity-0`;
+            toast.innerHTML = `<i class="fa-solid ${icon} text-sm"></i> <span>${message}</span>`;
+
+            container.appendChild(toast);
+            setTimeout(() => toast.classList.remove('translate-y-2', 'opacity-0'), 10);
+            setTimeout(() => {
+                toast.classList.add('opacity-0', 'translate-y-2');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        window.onload = async function() {
+            try {
+                await loadLiveInventoryFromPurchases();
+                renderInventory();
+            } catch (error) {
+                console.error('Handling units live workspace error:', error);
+                inventory = [];
+                renderInventory();
+                showToast(error?.message || 'Không tải được dữ liệu Nhập hàng.', 'warning');
+            }
+        };
+
+        // AUTO HOT-RELOAD SCRIPT (Tự động F5 trên cả file:// và http://127.0.0.1:3333)
+        (function autoHotReload() {
+            let lastLen = null;
+            setInterval(async () => {
+                try {
+                    const url = window.location.protocol === 'file:' 
+                        ? 'http://127.0.0.1:3333/index.html?t=' + Date.now()
+                        : window.location.pathname + '?t=' + Date.now();
+                        
+                    const res = await fetch(url, { cache: "no-store" });
+                    const text = await res.text();
+                    if (lastLen !== null && text && text.length !== lastLen) {
+                        console.log("[Hot Reload] File changed. Reloading page...");
+                        window.location.reload();
+                    }
+                    if (text) lastLen = text.length;
+                } catch (e) {}
+            }, 1000);
+        })();
+    </script>
+</body>
+</html>

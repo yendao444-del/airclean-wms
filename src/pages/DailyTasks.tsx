@@ -262,12 +262,7 @@ const getAssignmentRecipients = (task: Task): string[] => {
         ? [...new Set(recipients.map((name: unknown) => String(name || '').trim()).filter(Boolean))]
         : [task.assignee].filter(Boolean);
 };
-const EVIDENCE_DEADLINE_OPTIONS = Array.from({ length: 24 * 12 }, (_, index) => {
-    const hour = Math.floor(index / 12);
-    const minute = (index % 12) * 5;
-    const value = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
-    return { value, label: value };
-});
+const DAILY_EVIDENCE_DEADLINE = '23:59';
 
 const normalizePenaltyAmount = (value: unknown): number => {
     const raw = typeof value === 'string' ? value.replace(/[^\d]/g, '') : value;
@@ -555,8 +550,10 @@ const DailyTasks = () => {
             // 🔄 Reset daily tasks nếu sang ngày mới
             try {
                 const resetResult = await window.electronAPI.dailyTasks.resetDaily();
-                if (resetResult.success && resetResult.data?.reset) {
+                if (resetResult.success && (resetResult.data?.reset || resetResult.data?.deadlineNormalized)) {
                     await loadTasks();
+                }
+                if (resetResult.success && resetResult.data?.reset) {
                     message.info({
                         content: `🔄 Sang ngày mới! Đã reset ${resetResult.data.resetCount} công việc về chưa hoàn thành.`,
                         duration: 4
@@ -1417,8 +1414,8 @@ const DailyTasks = () => {
             assignmentMode: 'open',
             rotationAssignees: [],
             penaltyAmount: DEFAULT_EVIDENCE_PENALTY,
-            evidenceDeadlineTime: '19:00',
-            dueDate: dayjs().hour(20).minute(0).second(0) // Default 20:00 hôm nay
+            evidenceDeadlineTime: DAILY_EVIDENCE_DEADLINE,
+            dueDate: dayjs().endOf('day')
         });
 
         // ✅ Mở modal SAU
@@ -1444,7 +1441,7 @@ const DailyTasks = () => {
             assignmentMode: mode,
             rotationAssignees,
             penaltyAmount: normalizePenaltyAmount(getEvidence(task).penaltyAmount),
-            evidenceDeadlineTime: task.dueTime,
+            evidenceDeadlineTime: DAILY_EVIDENCE_DEADLINE,
         });
         setTaskModalVisible(true);
     };
@@ -1570,11 +1567,9 @@ const DailyTasks = () => {
                 message.error('Công việc yêu cầu bằng chứng phải cố định người thực hiện để hệ thống phạt đúng người.');
                 return;
             }
-            let dueAt = dayjs(values.dueDate);
-            if (requiresEvidence && values.evidenceDeadlineTime) {
-                const [hour, minute] = String(values.evidenceDeadlineTime).split(':').map(Number);
-                dueAt = dueAt.hour(hour).minute(minute).second(0).millisecond(0);
-            }
+            // Every daily task closes at the end of its selected date. The
+            // Electron handler enforces the same rule for older clients.
+            const dueAt = dayjs(values.dueDate).endOf('day');
             const taskData = {
                 title: values.title,
                 description: values.description || '',
@@ -1715,8 +1710,9 @@ const DailyTasks = () => {
 
     const isOverdue = (task: Task) => {
         if (task.status === 'completed') return false;
-        const [hour, minute] = task.dueTime.split(':').map(Number);
-        const dueTime = dayjs(task.dueDate).hour(hour).minute(minute).second(0).millisecond(0);
+        // Daily work is due at the end of its date. Do not turn 23:59 into
+        // 23:59:00 here, otherwise the UI marks it overdue one minute early.
+        const dueTime = dayjs(task.dueDate).endOf('day');
         return dayjs().isAfter(dueTime);
     };
 
@@ -2791,6 +2787,13 @@ const DailyTasks = () => {
         const completedDailyTasks = scope === 'daily' ? sourceTasks.filter(task => task.status === 'completed') : [];
         const completedDeadlineTasks = scope === 'deadline' ? sourceTasks.filter(task => task.status === 'completed') : [];
         const isTaskOverdue = (task: Task) => !isCurrentWorkDate ? false : task.type === 'assignment' ? getDeadlineStatus(task).status === 'overdue' : isOverdue(task);
+        const getDailyDeadlineText = (task: Task) => {
+            if (!isCurrentWorkDate) return `Hạn ${task.dueTime || DAILY_EVIDENCE_DEADLINE}`;
+            const remainingMinutes = dayjs(task.dueDate).endOf('day').diff(dayjs(), 'minute');
+            return remainingMinutes < 0
+                ? `Quá hạn ${formatTimeDiff(Math.abs(remainingMinutes))}`
+                : `Còn ${formatTimeDiff(remainingMinutes)}`;
+        };
         const evidenceSoon = (task: Task) => task.type !== 'assignment' && getEvidence(task).required && !isTaskOverdue(task);
         const groups = [
             { key: 'overdue', label: 'Quá hạn', color: '#dc2626', tasks: pendingTasks.filter(isTaskOverdue) },
@@ -2851,7 +2854,7 @@ const DailyTasks = () => {
             const canCompleteDailyTask = !isAssignment && task.status !== 'completed';
             const deadlineText = isAssignment
                 ? getDeadlineStatus(task).label
-                : isTaskOverdue(task) ? 'Quá hạn' : `Hạn ${task.dueTime}`;
+                : getDailyDeadlineText(task);
             const sourceLabel = isAssignment ? 'Bàn giao' : 'Hàng ngày';
             const needsEvidence = evidence.required && evidence.status !== 'submitted' && evidence.status !== 'approved';
             const hasEvidence = evidence.required && (evidence.status === 'submitted' || evidence.status === 'approved');
@@ -3865,13 +3868,13 @@ const DailyTasks = () => {
                     <Form.Item noStyle shouldUpdate={(prev, current) => prev.evidenceRequired !== current.evidenceRequired}>
                         {({ getFieldValue }) => getFieldValue('evidenceRequired') ? (
                             <div style={{ display: 'grid', gridTemplateColumns: 'minmax(104px, 0.75fr) minmax(120px, 0.9fr)', gap: 10, padding: 12, marginBottom: 16, border: '1px solid #fed7aa', borderRadius: 8, background: '#fffaf5' }}>
-                                <Form.Item name="evidenceDeadlineTime" label="Hạn chót" rules={[{ required: true, message: 'Chọn giờ hạn chót.' }]} style={{ marginBottom: 0 }}>
-                                    <Select size="middle" disabled={!isAdmin} showSearch optionFilterProp="label" options={EVIDENCE_DEADLINE_OPTIONS} />
+                                <Form.Item name="evidenceDeadlineTime" label="Hạn chót" rules={[{ required: true }]} style={{ marginBottom: 0 }}>
+                                    <Select size="middle" disabled options={[{ value: DAILY_EVIDENCE_DEADLINE, label: '23:59 cuối ngày' }]} />
                                 </Form.Item>
                                 <Form.Item name="penaltyAmount" label="Phạt (đ)" style={{ marginBottom: 0 }}>
                                     <InputNumber min={0} precision={0} controls={false} suffix="đ" disabled={!isAdmin} style={{ width: '100%' }} formatter={formatPenaltyAmount} parser={(value) => String(value || '').replace(/[^\d]/g, '')} />
                                 </Form.Item>
-                                <div style={{ gridColumn: '1 / -1', fontSize: 12, color: '#c2410c' }}>Bằng chứng bằng ảnh, tối đa {MAX_EVIDENCE_IMAGES} ảnh mỗi lần nộp. Ân hạn thêm 20 phút sau giờ hạn trước khi ghi nhận phạt.</div>
+                                <div style={{ gridColumn: '1 / -1', fontSize: 12, color: '#c2410c' }}>Bằng chứng bằng ảnh, tối đa {MAX_EVIDENCE_IMAGES} ảnh mỗi lần nộp. Hệ thống chỉ ghi nhận phạt từ 00:00 ngày kế tiếp.</div>
                             </div>
                         ) : null}
                     </Form.Item>

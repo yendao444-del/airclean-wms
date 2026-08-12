@@ -42,6 +42,9 @@ const LOW_ACTIVITY_AFTER_DAYS = 3;
 const LOW_ACTIVITY_CHECK_INTERVAL_DAYS = 14;
 const DAILY_RANDOM_COUNT = 2;
 const DAILY_PRODUCT_COUNT = 3;
+const DAILY_MIN_SKUS = 12;
+const DAILY_MAX_SKUS = 15;
+const DAILY_VARIANT_PORTION = 3;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -86,6 +89,7 @@ interface CheckSession {
     items: CheckItem[];
     notes: string;
     createdAt: string;
+    autoAssigned?: boolean;
     completedAt?: string;
     completedBy?: string;
     rolledOverTo?: string;
@@ -240,6 +244,69 @@ function expandToVariants(product: any): CheckItem[] {
             priorityLevel: product.__stockCheckPriority.level,
         } : {}),
     }];
+}
+
+function stableStockCheckHash(value: string): number {
+    return [...value].reduce((hash, char) => ((hash * 31) + char.charCodeAt(0)) >>> 0, 0);
+}
+
+function isMandatoryFullDailyProduct(product: any): boolean {
+    const name = String(product?.name || '').toLocaleUpperCase('vi-VN');
+    const sku = String(product?.sku || '').toLocaleUpperCase('vi-VN');
+    return (name.includes('UNICARE') && name.includes('5D')) || sku.includes('5DUNI');
+}
+
+function selectDailyItemsForProduct(product: any, dateKey: string): CheckItem[] {
+    const items = expandToVariants(product).sort((left, right) => left.sku.localeCompare(right.sku));
+    if (items.length <= 1) return items;
+    if (isMandatoryFullDailyProduct(product)) return items;
+
+    const quota = Math.max(1, Math.ceil(items.length / DAILY_VARIANT_PORTION));
+    const priorityItems = items.filter(item => item.priorityReason);
+    const selected = priorityItems.slice(0, quota);
+    const selectedSkus = new Set(selected.map(item => item.sku));
+    const startAt = (stableStockCheckHash(`${dateKey}:${product?.name || product?.sku || ''}`) + Number(dateKey.replace(/\D/g, ''))) % items.length;
+
+    for (let offset = 0; selected.length < quota && offset < items.length; offset += 1) {
+        const item = items[(startAt + offset) % items.length];
+        if (!selectedSkus.has(item.sku)) {
+            selected.push(item);
+            selectedSkus.add(item.sku);
+        }
+    }
+    return selected;
+}
+
+function buildDailyItems(products: any[], dateKey: string, fallbackProducts: any[] = []): CheckItem[] {
+    const selected: CheckItem[] = [];
+    const selectedProductKeys = new Set<string>();
+    const appendProduct = (product: any) => {
+        const productKey = String(product?.id ?? product?.sku ?? product?.name ?? '');
+        if (!productKey || selectedProductKeys.has(productKey)) return;
+        const remaining = DAILY_MAX_SKUS - selected.length;
+        if (remaining <= 0) return;
+        selected.push(...selectDailyItemsForProduct(product, dateKey).slice(0, remaining));
+        selectedProductKeys.add(productKey);
+    };
+
+    // 5D UNICARE is a non-negotiable daily control group. Add it before
+    // rotating ordinary products so a large selected group cannot consume the
+    // 15-SKU cap and accidentally exclude it.
+    const allCandidates = [...products, ...fallbackProducts];
+    const mandatoryProducts = allCandidates.filter(isMandatoryFullDailyProduct);
+    mandatoryProducts.forEach(appendProduct);
+    products.forEach(appendProduct);
+    if (selected.length >= DAILY_MIN_SKUS) return selected;
+
+    const supplementalProducts = fallbackProducts
+        .filter(product => !selectedProductKeys.has(String(product?.id ?? product?.sku ?? product?.name ?? '')))
+        .sort((left, right) => stableStockCheckHash(`${dateKey}:${left?.name || left?.sku || ''}`)
+            - stableStockCheckHash(`${dateKey}:${right?.name || right?.sku || ''}`));
+    for (const product of supplementalProducts) {
+        if (selected.length >= DAILY_MIN_SKUS || selected.length >= DAILY_MAX_SKUS) break;
+        appendProduct(product);
+    }
+    return selected;
 }
 
 function buildStockBySku(products: any[]): Map<string, number> {
@@ -967,6 +1034,7 @@ export default function StockCheck() {
                 session.date < todayStr &&
                 session.status !== 'completed' &&
                 !session.completedAt &&
+                !session.rolledOverTo &&
                 (session.items || []).some(item => !item.balanced) &&
                 assignableManagers.some(manager => manager.username.toLowerCase() === String(session.assignedTo || '').toLowerCase())
             )
@@ -1104,11 +1172,7 @@ export default function StockCheck() {
         // Debug rule: keep 5D UNICARE in every daily checking session.
         // Match both the catalogue name and SKU so this remains stable if the
         // displayed product name is edited later.
-        const alwaysCheckUnicare = contextProducts.find(product => {
-            const name = String(product?.name || '').toLocaleUpperCase('vi-VN');
-            const sku = String(product?.sku || '').toLocaleUpperCase('vi-VN');
-            return (name.includes('UNICARE') && name.includes('5D')) || sku.includes('5DUNI');
-        });
+        const alwaysCheckUnicare = contextProducts.find(isMandatoryFullDailyProduct);
         const rotationProducts = getTopProducts(rankedProducts, DAILY_TOP_ROTATION_COUNT)
             .filter(product => !excludedKeys.has(productKey(product)) && isEligible(product));
         const dayIndex = currentDate.startOf('day').diff(dayjs('2026-01-01'), 'day');
@@ -1119,8 +1183,8 @@ export default function StockCheck() {
             .filter(risk => !excludedKeys.has(productKey(risk.product)))
             .map(risk => ({ ...risk.product, __stockCheckPriority: risk }));
         const requiredProducts = [
-            ...riskProducts,
             ...(alwaysCheckUnicare ? [alwaysCheckUnicare] : []),
+            ...riskProducts,
             ...rotatingRequired.filter(product => !alwaysCheckUnicare || productKey(product) !== productKey(alwaysCheckUnicare)),
         ].filter((product, index, entries) => entries.findIndex(entry => productKey(entry) === productKey(product)) === index)
             .slice(0, DAILY_PRODUCT_COUNT);
@@ -1211,7 +1275,7 @@ export default function StockCheck() {
             id: todayStr, runId: createStockCheckRunId(), date: todayStr, type: 'daily',
             assignedTo: assignedManager.username, assignedName: assignedManager.username,
             status: 'in_progress', items: [], notes: '',
-            createdAt: dayjs().toISOString(),
+            createdAt: dayjs().toISOString(), autoAssigned: true,
         };
         const updated = current.filter(s => s.id !== todayStr).concat(preSession);
         persistSessions(updated);
@@ -1235,7 +1299,7 @@ export default function StockCheck() {
             const pool = carryOver.items.length > 0 ? [] : buildDailyProductPool(rankedProducts, getPreviousDayCheckedProducts());
             const items = carryOver.items.length > 0
                 ? carryOver.items
-                : pool.flatMap((product: any) => expandToVariants(product));
+                : buildDailyItems(pool, todayStr, contextProducts);
             if (!items.length) return;
 
             autoGeneratedSessionRef.current = todaySession.id;
@@ -1260,6 +1324,33 @@ export default function StockCheck() {
         return () => { cancelled = true; };
     }, [isAdmin, isToday, activeTab, todaySession, contextProducts, topSellingProducts, stockCheckActivityLoaded, stockCheckActivity, sessions, loadTopSellingProducts]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    // Quản lý cần có thể khởi tạo phiên của ngày hiện tại khi không có admin
+    // mở màn hình. Việc tạo thực hiện ở main process: client chỉ gửi danh sách
+    // SKU, còn máy chủ tự chọn người theo vòng và khóa giao dịch.
+    useEffect(() => {
+        if (isAdmin || user?.role !== 'manager' || !isToday || activeTab !== 'daily' || todaySession || !stockCheckActivityLoaded) return;
+        if (!contextProducts.length || autoGeneratedSessionRef.current === `manager-${todayStr}`) return;
+
+        let cancelled = false;
+        void (async () => {
+            const rankedProducts = topSellingProducts.length ? topSellingProducts : await loadTopSellingProducts();
+            if (cancelled || autoGeneratedSessionRef.current === `manager-${todayStr}`) return;
+            const pool = buildDailyProductPool(rankedProducts, getPreviousDayCheckedProducts());
+            const items = buildDailyItems(pool, todayStr, contextProducts);
+            if (!items.length) return;
+
+            autoGeneratedSessionRef.current = `manager-${todayStr}`;
+            const result = await window.electronAPI.stockCheck.ensureDailySession({ items });
+            if (!result?.success) {
+                autoGeneratedSessionRef.current = null;
+                message.error(result?.error || 'Không thể tự tạo phiên kiểm hôm nay.');
+                return;
+            }
+            if (result.session) setSessions(previous => [...previous.filter(session => session.id !== result.session.id), result.session]);
+        })();
+        return () => { cancelled = true; };
+    }, [isAdmin, user?.role, isToday, activeTab, todaySession, contextProducts, topSellingProducts, stockCheckActivityLoaded, todayStr, loadTopSellingProducts]); // eslint-disable-line react-hooks/exhaustive-deps
+
     const handleGenerate = async () => {
         if (isPast) {
             message.warning('Ngày đã khóa, không thể tạo phiên kiểm.');
@@ -1278,7 +1369,9 @@ export default function StockCheck() {
             : carryOver.items.length > 0 ? [] : buildDailyProductPool(rankedProducts, previousDayChecked);
         const items = carryOver.items.length > 0
             ? carryOver.items
-            : pool.flatMap((p: any) => expandToVariants(p));
+            : useFullInventory
+            ? pool.flatMap((p: any) => expandToVariants(p))
+                : buildDailyItems(pool, todayStr, contextProducts);
         if (!items.length) { message.error('Không có sản phẩm.'); return; }
         // Giữ người phụ trách đã được gán trước đó (pre-assign), nếu có
         const preAssigned = todaySession?.items.length === 0
@@ -1876,7 +1969,7 @@ export default function StockCheck() {
 
     const renderCountInput = (item: CheckItem) => {
         const units = conversionRates[item.productName]?.units || [];
-        const ci = countingInputs[item.sku] || { unitCounts: [], le: 0 };
+        const ci = countingInputs[item.sku] || { unitCounts: [], le: undefined };
         const disabled = item.balanced || isLockedDate;
 
         if (units.length === 0) {
@@ -1896,7 +1989,7 @@ export default function StockCheck() {
                 {units.map((unit, i) => (
                     <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
                         <InputNumber
-                            min={0} size="small" value={ci.unitCounts?.[i] ?? 0} disabled={disabled}
+                            min={0} size="small" value={ci.unitCounts?.[i] ?? undefined} placeholder="0" disabled={disabled}
                             onChange={v => updateCountingInput(item.sku, item.productName, i, v)}
                             style={{ width: 60 }}
                         />
@@ -1905,7 +1998,7 @@ export default function StockCheck() {
                 ))}
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
                     <InputNumber
-                        min={0} size="small" value={ci.le ?? 0} disabled={disabled}
+                        min={0} size="small" value={ci.le ?? undefined} placeholder="0" disabled={disabled}
                         onChange={v => updateCountingInput(item.sku, item.productName, 'le', v)}
                         style={{ width: 60 }}
                     />

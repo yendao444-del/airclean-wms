@@ -29,6 +29,7 @@ import {
     LineChartOutlined,
     AuditOutlined,
     WalletOutlined,
+    ApartmentOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import viVN from 'antd/locale/vi_VN';
@@ -69,6 +70,7 @@ const BusinessReportPage = lazy(() => import('./pages/BusinessReport'));
 const AttendancePage = lazy(() => import('./pages/Attendance'));
 const StockCheckPage = lazy(() => import('./pages/StockCheck'));
 const MyProfilePage = lazy(() => import('./pages/MyProfile'));
+const HandlingUnitsPage = lazy(() => import('./pages/HandlingUnits'));
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -234,6 +236,9 @@ function AppContent() {
         if (accessibleKeys.includes('stock-check')) {
             inventoryChildren.push(createMenuItem('Kiểm hàng', 'stock-check', <AuditOutlined />));
         }
+        if (accessibleKeys.includes('handling-units')) {
+            inventoryChildren.push(createMenuItem('Quản lý kiện hàng', 'handling-units', <ApartmentOutlined />));
+        }
         if (accessibleKeys.includes('purchase')) {
             inventoryChildren.push(createMenuItem('Nhập hàng', 'purchase', <ImportOutlined />));
         }
@@ -359,6 +364,8 @@ function AppContent() {
                 return withAppData(<StockBalancePage />);
             case 'stock-check':
                 return withAppData(<StockCheckPage />);
+            case 'handling-units':
+                return <HandlingUnitsPage />;
             case 'business-report':
                 return <BusinessReportPage />;
             case 'daily-tasks':

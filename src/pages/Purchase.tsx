@@ -18,6 +18,7 @@ import {
     Upload,
     Checkbox,
     Dropdown,
+    Tooltip,
 } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, EyeOutlined, HistoryOutlined, ClockCircleOutlined, UploadOutlined, FileTextOutlined, CheckCircleOutlined, LinkOutlined, InboxOutlined, AuditOutlined, GiftOutlined, TagOutlined, PaperClipOutlined, SearchOutlined, FilterOutlined, MoreOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -159,6 +160,7 @@ interface Purchase {
         invoiceDate?: string;
         driveUrls?: string[];
         fileCount?: number;
+        needsReupload?: boolean;
     }>;
 }
 
@@ -229,18 +231,100 @@ export default function PurchasePage() {
     // Quy cách thuộc về sản phẩm cha, nên mọi màu/SKU của cùng sản phẩm dùng chung.
     const packagingKey = (item: PurchaseItem) => `product:${Number(item.productId)}`;
     const defaultPackagingLevels = (): PackagingLevel[] => [{ id: 'lo', name: 'Lẻ', factor: 1 }];
+    const basePackagingLevel = (levels: PackagingLevel[]) =>
+        levels.find(level => level.id === 'lo' || String(level.name || '').trim().toLocaleLowerCase('vi-VN') === 'lẻ')
+        || levels.find(level => Number(level.factor) === 1)
+        || levels[0];
+    // A previous version put the existing total into the last row on save.
+    // Configurations such as “Lẻ = 1200, Tải = 1” are that legacy data
+    // pattern, so repair it while keeping the intended large-unit factor.
+    const normalizePackagingLevels = (rawLevels?: PackagingLevel[]): PackagingLevel[] => {
+        const levels = (rawLevels?.length ? rawLevels : defaultPackagingLevels()).map(level => ({
+            ...level,
+            name: String(level.name || '').trim() || 'Quy cách mới',
+            factor: Math.max(1, Number(level.factor || 1)),
+        }));
+        const base = basePackagingLevel(levels);
+        if (!base) return defaultPackagingLevels();
+        if (base.factor !== 1) {
+            const oldBaseFactor = base.factor;
+            const largeUnit = levels.find(level => level.id !== base.id && level.factor === 1);
+            base.factor = 1;
+            if (largeUnit && oldBaseFactor > 1) largeUnit.factor = oldBaseFactor;
+        }
+        return levels;
+    };
     // The current product-level configuration is authoritative. Older receipt
     // rows may carry their old per-SKU setup, but must not make the columns
     // diverge from other colours of the same product.
     const getPackagingLevels = (item: PurchaseItem) =>
-        packagingConfigs[packagingKey(item)] || item.packagingLevels || defaultPackagingLevels();
+        normalizePackagingLevels(packagingConfigs[packagingKey(item)] || item.packagingLevels || defaultPackagingLevels());
     const totalFromPackaging = (levels: PackagingLevel[], counts: Record<string, number>) =>
         levels.reduce((sum, level) => sum + Math.max(0, Number(counts[level.id] || 0)) * Math.max(0, Number(level.factor || 0)), 0);
+    // Receipts created before packaging details were persisted only contain a
+    // base-unit total. Present those records in the largest whole packages so
+    // 2,400 Gói with “Tải 1200” becomes 2 Tải instead of 2,400 Lẻ.
+    const getPackagingCounts = (item: PurchaseItem, levels: PackagingLevel[]) => {
+        if (item.packagingCounts !== undefined) return item.packagingCounts;
+        let remaining = Math.max(0, Number(item.quantity || 0));
+        const counts: Record<string, number> = {};
+        [...levels].sort((left, right) => Number(right.factor) - Number(left.factor)).forEach(level => {
+            const factor = Math.max(1, Number(level.factor || 1));
+            const count = Math.floor(remaining / factor);
+            if (count > 0) counts[level.id] = count;
+            remaining %= factor;
+        });
+        return counts;
+    };
+    const packagingSummary = (item: PurchaseItem) => {
+        const levels = getPackagingLevels(item);
+        const counts = getPackagingCounts(item, levels);
+        const detail = [...levels]
+            .sort((left, right) => Number(right.factor) - Number(left.factor))
+            .map(level => ({ level, count: Number(counts[level.id] || 0) }))
+            .filter(entry => entry.count > 0)
+            .map(entry => `${entry.count.toLocaleString('vi-VN')} ${entry.level.name}`)
+            .join(' + ');
+        return detail || `${Number(item.quantity || 0).toLocaleString('vi-VN')} ${item.unit || 'Cái'}`;
+    };
 
+    const displayPurchaseUnit = (item: PurchaseItem) => {
+        const levels = getPackagingLevels(item);
+        const counts = getPackagingCounts(item, levels);
+        const base = basePackagingLevel(levels);
+        const entries = [...levels]
+            .sort((left, right) => Number(right.factor) - Number(left.factor))
+            .map(level => ({ level, count: Number(counts[level.id] || 0) }))
+            .filter(entry => entry.count > 0);
+
+        if (entries.length === 1) {
+            return {
+                quantity: entries[0].count.toLocaleString('vi-VN'),
+                unit: entries[0].level.id === base?.id ? (item.unit || 'Cái') : entries[0].level.name,
+            };
+        }
+        return { quantity: packagingSummary(item), unit: 'Quy đổi' };
+    };
+
+    const packagingTooltip = (item: PurchaseItem) => {
+        const levels = getPackagingLevels(item);
+        const base = basePackagingLevel(levels);
+        const conversions = levels
+            .filter(level => level.id !== base?.id && Number(level.factor || 1) > 1)
+            .map(level => `1 ${level.name} = ${Number(level.factor).toLocaleString('vi-VN')} ${base?.name || item.unit || 'Cái'}`)
+            .join(' · ');
+        return [packagingSummary(item), conversions && `Quy đổi: ${conversions}`, `Tổng: ${Number(item.quantity || 0).toLocaleString('vi-VN')} ${item.unit || 'Cái'}`]
+            .filter(Boolean)
+            .join(' — ');
+    };
     useEffect(() => {
         try {
             const saved = JSON.parse(localStorage.getItem('purchase-packaging-config-v2') || '{}');
-            if (saved && typeof saved === 'object') setPackagingConfigs(saved);
+            if (saved && typeof saved === 'object') {
+                const normalized = Object.fromEntries(Object.entries(saved).map(([key, levels]) => [key, normalizePackagingLevels(levels as PackagingLevel[])]));
+                setPackagingConfigs(normalized);
+                localStorage.setItem('purchase-packaging-config-v2', JSON.stringify(normalized));
+            }
         } catch { /* ignore corrupt local setup */ }
     }, []);
 
@@ -255,19 +339,19 @@ export default function PurchasePage() {
         if (packagingSetupIndex === null || packagingDraft.length === 0) return;
         const index = packagingSetupIndex;
         const item = purchaseItems[index];
-        const nextConfigs = { ...packagingConfigs, [packagingKey(item)]: packagingDraft };
+        const normalizedDraft = normalizePackagingLevels(packagingDraft);
+        const nextConfigs = { ...packagingConfigs, [packagingKey(item)]: normalizedDraft };
         setPackagingConfigs(nextConfigs);
         localStorage.setItem('purchase-packaging-config-v2', JSON.stringify(nextConfigs));
         // Cập nhật ngay mọi màu của sản phẩm đang có trên phiếu, giữ nguyên tổng từng dòng.
         const nextItems = purchaseItems.map((entry, entryIndex) => {
             if (Number(entry.productId) !== Number(item.productId)) return entry;
-            const counts: Record<string, number> = {};
-            packagingDraft.forEach(level => { counts[level.id] = Number(entry.packagingCounts?.[level.id] || 0); });
-            if (entryIndex !== index || Object.values(counts).every(value => value === 0)) {
-                counts[packagingDraft[packagingDraft.length - 1].id] = Number(entry.quantity || 0);
-            }
-            const quantity = totalFromPackaging(packagingDraft, counts);
-            return { ...entry, packagingLevels: packagingDraft, packagingCounts: counts, quantity, total: quantity * Number(entry.unitPrice || 0) };
+            // Changing the setup must never multiply the existing receipt
+            // quantity. Keep its total in the base (“Lẻ”) unit instead.
+            const base = basePackagingLevel(normalizedDraft);
+            const quantity = Number(entry.quantity || 0);
+            const counts: Record<string, number> = base && quantity > 0 ? { [base.id]: quantity } : {};
+            return { ...entry, packagingLevels: normalizedDraft, packagingCounts: counts, quantity, total: quantity * Number(entry.unitPrice || 0) };
         });
         setPurchaseItems(nextItems);
         setPackagingSetupIndex(null);
@@ -277,7 +361,9 @@ export default function PurchasePage() {
         const nextItems = [...purchaseItems];
         const item = nextItems[index];
         const levels = getPackagingLevels(item);
-        const counts = { ...(item.packagingCounts || {}) , [levelId]: Math.max(0, Number(value || 0)) };
+        const counts = { ...(item.packagingCounts || {}) };
+        if (value === null) delete counts[levelId];
+        else counts[levelId] = Math.max(0, Number(value));
         const quantity = totalFromPackaging(levels, counts);
         nextItems[index] = { ...item, packagingLevels: levels, packagingCounts: counts, quantity, total: quantity * Number(item.unitPrice || 0) };
         setPurchaseItems(nextItems);
@@ -715,6 +801,7 @@ export default function PurchasePage() {
                 try {
                     let successCount = 0;
                     let failCount = 0;
+                    const failureReasons: string[] = [];
 
                     for (const id of selectedRowKeys) {
                         try {
@@ -723,9 +810,11 @@ export default function PurchasePage() {
                                 successCount++;
                             } else {
                                 failCount++;
+                                failureReasons.push(result.error || `Không thể xóa phiếu #${id}.`);
                             }
-                        } catch {
+                        } catch (error: any) {
                             failCount++;
+                            failureReasons.push(error?.message || `Không thể xóa phiếu #${id}.`);
                         }
                     }
 
@@ -733,7 +822,7 @@ export default function PurchasePage() {
                         message.success(`Đã xóa ${successCount} phiếu nhập!`);
                     }
                     if (failCount > 0) {
-                        message.error(`Không thể xóa ${failCount} phiếu nhập!`);
+                        message.error(`${failCount} phiếu chưa được hủy: ${failureReasons[0] || 'Lỗi không xác định.'}`, 8);
                     }
 
                     setSelectedRowKeys([]);
@@ -815,22 +904,33 @@ export default function PurchasePage() {
             return;
         }
 
-        // Bắt buộc đính kèm Phiếu Nhập Kho
-        const alreadyHasReceipt = editingPurchase && (editingPurchase as any).importReceiptStatus === 'uploaded';
-        if (!alreadyHasReceipt && pendingImportFiles.length === 0) {
+        // Phiếu mới bắt buộc có chứng từ. Khi sửa chỉ thay chứng từ nếu người
+        // dùng chủ động chọn file mới; không bắt họ upload lại file cũ.
+        if (!editingPurchase && pendingImportFiles.length === 0) {
             message.error('Vui lòng đính kèm Phiếu Nhập Kho trước khi lưu!');
             return;
         }
 
         setSubmitting(true);
         try {
-            const totalAmount = purchaseItems.reduce((sum, item) => sum + item.total, 0);
+            const itemsForSave = purchaseItems.map(item => {
+                const levels = getPackagingLevels(item);
+                return { ...item, packagingLevels: levels, packagingCounts: getPackagingCounts(item, levels) };
+            });
+            const totalAmount = itemsForSave.reduce((sum, item) => sum + item.total, 0);
+            // Send the mandatory warehouse receipt with the create request.
+            // The backend also validates this so an older renderer cannot
+            // create a receipt without supporting evidence.
+            const importReceiptFiles = !editingPurchase
+                ? await Promise.all(pendingImportFiles.map(file => compressImageToBase64(file)))
+                : undefined;
 
             const payload = {
                 ...values,
                 purchaseDate: values.purchaseDate.format('YYYY-MM-DD HH:mm:ss'),
-                items: JSON.stringify(purchaseItems),
+                items: JSON.stringify(itemsForSave),
                 totalAmount,
+                ...(importReceiptFiles ? { importReceiptFiles } : {}),
                 createdBy: editingPurchase ? editingPurchase.createdBy : currentUser,
                 // On edit, false flags mean “unchanged”, not “clear VAT”.
                 isThht: values.isThht ? true : (editingPurchase ? undefined : false),
@@ -847,8 +947,10 @@ export default function PurchasePage() {
             if (result.success) {
                 const savedId = result.data?.id || editingPurchase?.id;
 
-                // 📤 Auto-upload Phiếu nhập kho nếu có file pending
-                if (savedId && pendingImportFiles.length > 0) {
+                // Existing receipts may receive a replacement document after
+                // an edit. New receipts already uploaded theirs atomically
+                // during creation and therefore skip this background step.
+                if (editingPurchase && savedId && pendingImportFiles.length > 0) {
                     message.info('Phiếu đã lưu. Đang upload Phiếu Nhập Kho ở nền...');
                     void (async () => {
                     try {
@@ -880,7 +982,14 @@ export default function PurchasePage() {
 
                 message.success(editingPurchase ? 'Đã cập nhật phiếu nhập!' : 'Đã tạo phiếu nhập mới!');
                 setModalVisible(false);
-                loadPurchases();
+                // The detail modal holds a snapshot of the old receipt. Close
+                // it after saving so it cannot keep showing stale quantities;
+                // reopening it uses the freshly loaded receipt instead.
+                if (editingPurchase) {
+                    setDetailModalVisible(false);
+                    setDetailModalRecord(null);
+                }
+                await loadPurchases();
 
                 // Log activity
                 await window.electronAPI.activityLog.create({
@@ -955,7 +1064,7 @@ export default function PurchasePage() {
         };
         const initialLevels = packagingConfigs[`product:${Number(productId)}`] || defaultPackagingLevels();
         newItem.packagingLevels = initialLevels;
-        newItem.packagingCounts = { [initialLevels[initialLevels.length - 1].id]: quantity };
+        newItem.packagingCounts = { [basePackagingLevel(initialLevels).id]: quantity };
 
         setPurchaseItems([...purchaseItems, newItem]);
         setAddingProduct(false);
@@ -1077,7 +1186,7 @@ export default function PurchasePage() {
             unitPrice,
             total: 0,
             packagingLevels: packagingConfigs[`product:${Number(productId)}`] || defaultPackagingLevels(),
-            packagingCounts: { [(packagingConfigs[`product:${Number(productId)}`] || defaultPackagingLevels()).slice(-1)[0].id]: 0 },
+            packagingCounts: {},
         }]);
         setAddingProduct(false);
         form.setFieldsValue({ tempProductId: undefined, tempColor: undefined, tempCompanyGroup: undefined });
@@ -1109,7 +1218,7 @@ export default function PurchasePage() {
         };
         const initialLevels = packagingConfigs[`product:${Number(productId)}`] || defaultPackagingLevels();
         newItem.packagingLevels = initialLevels;
-        newItem.packagingCounts = { [initialLevels[initialLevels.length - 1].id]: 0 };
+        newItem.packagingCounts = {};
 
         setPurchaseItems(prev => [...prev, newItem]);
         // Giữ bộ chọn đang mở để có thể chọn tiếp màu khác của cùng sản phẩm.
@@ -1977,7 +2086,7 @@ export default function PurchasePage() {
                                             {isUploaded ? <Tag color="success" style={{ margin: 0 }}>Đã có HĐ VAT</Tag> : isNoVat ? <Tag style={{ margin: 0 }}>Không VAT</Tag> : <Tag color="warning" style={{ margin: 0 }}>Cần nhập HĐ VAT</Tag>}
                                         </div>
                                         <div style={{ flex: 1, minWidth: 180, color: '#595959', fontSize: 12 }}>
-                                            {isUploaded ? <>Số HĐ: <b>{vat.invoiceNumber || '—'}</b>{vat.invoiceDate ? ` · ${dayjs(vat.invoiceDate).format('DD/MM/YYYY')}` : ''}</> : `${companyItems.length} sản phẩm thuộc công ty này`}
+                                            {isUploaded ? <>Số HĐ: <b>{vat.invoiceNumber || '—'}</b>{vat.invoiceDate ? ` · ${dayjs(vat.invoiceDate).format('DD/MM/YYYY')}` : ''}</> : (vat as any).needsReupload ? 'File cũ chỉ lưu trên máy nhân viên, cần tải lại để đồng bộ Google Drive.' : `${companyItems.length} sản phẩm thuộc công ty này`}
                                         </div>
                                         <Space size={4} wrap>
                                             {isUploaded && <Button size="small" type="link" icon={<EyeOutlined />} onClick={() => openCompanyVatPreview(record, company)}>Xem</Button>}
@@ -2028,13 +2137,13 @@ export default function PurchasePage() {
                                     SKU
                                 </th>
                                 <th style={{ padding: '10px 12px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 60 }}>
-                                    ĐVT
+                                    ĐVT nhập
                                 </th>
                                 <th style={{ padding: '10px 12px', textAlign: 'right', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 80 }}>
-                                    Đơn giá
+                                    Đơn giá/Gói
                                 </th>
                                 <th style={{ padding: '10px 12px', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 60 }}>
-                                    SL
+                                    SL nhập
                                 </th>
                                 <th style={{ padding: '10px 12px', textAlign: 'right', fontSize: 12, fontWeight: 700, color: '#fff', minWidth: 100 }}>
                                     Thành tiền
@@ -2051,6 +2160,7 @@ export default function PurchasePage() {
                                     </tr>
                                     {companyItems.map(({ item, index: idx }) => {
                                 const rowBg = idx % 2 === 0 ? '#fff' : '#fafafa';
+                                const purchaseUnit = displayPurchaseUnit(item);
                                 return (
                                     <tr key={idx} style={{
                                         background: rowBg,
@@ -2080,24 +2190,17 @@ export default function PurchasePage() {
                                             </span>
                                         </td>
                                         <td style={{ padding: '10px 12px', textAlign: 'center' }}>
-                                            <Tag color="purple" style={{ margin: 0 }}>{item.unit || 'Cái'}</Tag>
+                                            <Tag color="purple" style={{ margin: 0 }}>{purchaseUnit.unit}</Tag>
                                         </td>
                                         <td style={{ padding: '10px 12px', textAlign: 'right', fontSize: 12, color: '#595959' }}>
                                             {new Intl.NumberFormat('vi-VN').format(item.unitPrice)}đ
                                         </td>
                                         <td style={{ padding: '10px 12px', textAlign: 'center' }}>
-                                            <div style={{
-                                                background: 'linear-gradient(135deg, #1890ff 0%, #40a9ff 100%)',
-                                                color: '#fff',
-                                                padding: '4px 10px',
-                                                borderRadius: 6,
-                                                fontWeight: 900,
-                                                fontSize: 14,
-                                                display: 'inline-block',
-                                                minWidth: 40,
-                                            }}>
-                                                {item.quantity}
-                                            </div>
+                                            <Tooltip title={packagingTooltip(item)}>
+                                                <Tag color="blue" style={{ margin: 0, fontWeight: 700, whiteSpace: 'nowrap', padding: '2px 7px', cursor: 'help' }}>
+                                                    {purchaseUnit.quantity}
+                                                </Tag>
+                                            </Tooltip>
                                         </td>
                                         <td style={{ padding: '10px 12px', textAlign: 'right' }}>
                                             <strong style={{ color: '#00ab56', fontSize: 13 }}>
@@ -2638,7 +2741,7 @@ export default function PurchasePage() {
                             <div style={{ display: 'grid', gap: 10 }}>
                                 {purchaseItems.map((item, index) => {
                                     const levels = getPackagingLevels(item);
-                                    const counts = item.packagingCounts || { [levels[levels.length - 1].id]: item.quantity };
+                                    const counts = getPackagingCounts(item, levels);
                                     const firstInCompany = index === 0 || purchaseItems[index - 1]?.companyGroup !== item.companyGroup;
                                     const firstForProduct = !purchaseItems.slice(0, index).some(entry => Number(entry.productId) === Number(item.productId));
                                     return (
@@ -2651,7 +2754,7 @@ export default function PurchasePage() {
                                                 <Tag color="blue" style={{ margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.companyGroup}>{item.companyGroup || 'Chưa gán'}</Tag>
                                                 <Select size="small" value={item.color || undefined} placeholder="Phân loại" disabled={!item.color} options={item.color ? [{ value: item.color, label: item.color }] : []} style={{ minWidth: 0 }} />
                                                 <Tag color="green" style={{ margin: 0, textAlign: 'center' }}>{item.unit || 'Cái'}</Tag>
-                                                {levels.map(level => <div key={level.id}><div style={{ fontSize: 11, textAlign: 'center', color: '#595959', marginBottom: 3 }}>{level.name}</div><InputNumber min={0} size="small" value={counts[level.id] || 0} onFocus={event => window.requestAnimationFrame(() => event.target.select())} onChange={value => updatePackagingCount(index, level.id, value)} style={{ width: '100%' }} /><div style={{ fontSize: 10, color: '#8c8c8c', textAlign: 'center', whiteSpace: 'nowrap' }}>1 = {level.factor}</div></div>)}
+                                                {levels.map(level => <div key={level.id}><div style={{ fontSize: 11, textAlign: 'center', color: '#595959', marginBottom: 3 }}>{level.name}</div><InputNumber min={0} controls={false} size="small" value={counts[level.id] ?? undefined} placeholder="0" onWheel={event => event.currentTarget.blur()} onChange={value => updatePackagingCount(index, level.id, value)} style={{ width: '100%' }} /><div style={{ fontSize: 10, color: '#8c8c8c', textAlign: 'center', whiteSpace: 'nowrap' }}>1 {level.name} = {level.factor} {item.unit || 'ĐVT'}</div></div>)}
                                                 <div style={{ textAlign: 'right', whiteSpace: 'nowrap' }}><div style={{ fontSize: 11, color: '#8c8c8c' }}>Tổng ({item.unit || 'ĐVT'})</div><b style={{ color: '#00a854' }}>{new Intl.NumberFormat('vi-VN').format(item.quantity || 0)}</b></div>
                                                 <Button type="text" danger icon={<DeleteOutlined />} onClick={() => handleRemoveItem(index)} />
                                             </div>
@@ -2660,7 +2763,7 @@ export default function PurchasePage() {
                                                 <div style={{ marginTop: 8, border: '1px solid #d9f0e3', borderRadius: 8, overflow: 'hidden' }}>
                                                     <div style={{ padding: '10px 12px', fontWeight: 600 }}>Thiết lập quy cách cho {item.productName?.replace(` - ${item.color}`, '') || item.sku}</div>
                                                     <div style={{ padding: '0 12px 8px', color: '#595959', fontSize: 12 }}>Áp dụng chung cho mọi màu / SKU của sản phẩm này</div>
-                                                    {packagingDraft.map((level, draftIndex) => <div key={level.id} style={{ display: 'grid', gridTemplateColumns: '42px 1fr 120px 1fr 34px', gap: 8, padding: '6px 12px', alignItems: 'center', borderTop: '1px solid #f0f0f0' }}><span>{draftIndex + 1}</span><Input size="small" value={level.name} onChange={event => setPackagingDraft(prev => prev.map(entry => entry.id === level.id ? { ...entry, name: event.target.value } : entry))} /><span style={{ color: '#8c8c8c' }}>{item.unit || 'ĐVT'}</span><InputNumber size="small" min={1} value={level.factor} addonAfter={item.unit || 'ĐVT'} onFocus={event => window.requestAnimationFrame(() => event.target.select())} onChange={value => setPackagingDraft(prev => prev.map(entry => entry.id === level.id ? { ...entry, factor: Number(value || 1) } : entry))} /><Button type="text" danger icon={<DeleteOutlined />} disabled={packagingDraft.length <= 1} onClick={() => setPackagingDraft(prev => prev.filter(entry => entry.id !== level.id))} /></div>)}
+                                                    {packagingDraft.map((level, draftIndex) => <div key={level.id} style={{ display: 'grid', gridTemplateColumns: '42px 28px 1fr 28px 1fr 34px', gap: 8, padding: '6px 12px', alignItems: 'center', borderTop: '1px solid #f0f0f0' }}><span>{draftIndex + 1}</span><span style={{ color: '#8c8c8c' }}>1</span><Input size="small" value={level.name} onChange={event => setPackagingDraft(prev => prev.map(entry => entry.id === level.id ? { ...entry, name: event.target.value } : entry))} /><span style={{ color: '#8c8c8c' }}>=</span><InputNumber size="small" min={1} controls={false} value={level.factor} addonAfter={item.unit || 'ĐVT'} onWheel={event => event.currentTarget.blur()} onChange={value => setPackagingDraft(prev => prev.map(entry => entry.id === level.id ? { ...entry, factor: Number(value || 1) } : entry))} /><Button type="text" danger icon={<DeleteOutlined />} disabled={packagingDraft.length <= 1} onClick={() => setPackagingDraft(prev => prev.filter(entry => entry.id !== level.id))} /></div>)}
                                                     <div style={{ padding: 10, display: 'flex', justifyContent: 'space-between' }}><Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => setPackagingDraft(prev => [...prev, { id: `level-${Date.now()}`, name: 'Quy cách mới', factor: 1 }])}>Thêm cấp quy cách</Button><Button size="small" type="primary" onClick={savePackagingSetup}>Lưu quy cách</Button></div>
                                                 </div>
                                             )}

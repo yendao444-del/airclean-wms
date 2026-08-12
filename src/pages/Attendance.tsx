@@ -3108,30 +3108,33 @@ export default function Attendance() {
     // 2a. Luôn cập nhật ref khi state thay đổi (không debounce, không ghi DB)
     useEffect(() => {
         if (!isDbLoaded || employees.length === 0) return;
-        latestSnapshotRef.current = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog };
+        latestSnapshotRef.current = { config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog };
     }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded]);
 
     const mergeAttendanceSnapshotWithDb = useCallback(async (snapshot: Record<string, any>) => {
         const api = (window as any).electronAPI;
+        // Employee identities are managed only in Settings > Administration.
+        // Never let an open Attendance screen overwrite a newer employee list.
+        const { employees: _ignoredEmployees, ...safeSnapshot } = snapshot;
         try {
             const latest = await api.appConfig.get('attendanceData');
             const dbData = latest?.success && latest.data ? latest.data : {};
-            const mergedFineAuditLog = mergeAuditLogs(dbData.fineAuditLog || [], snapshot.fineAuditLog || []);
+            const mergedFineAuditLog = mergeAuditLogs(dbData.fineAuditLog || [], safeSnapshot.fineAuditLog || []);
             return {
                 ...dbData,
-                ...snapshot,
+                ...safeSnapshot,
                 extraFines: mergeFinesWithDeletes(
                     dbData.extraFines || [],
-                    snapshot.extraFines || [],
+                    safeSnapshot.extraFines || [],
                     mergedFineAuditLog,
                     dbData.fineAuditLog || [],
-                    snapshot.fineAuditLog || [],
+                    safeSnapshot.fineAuditLog || [],
                 ),
-                fineOverrides: { ...(dbData.fineOverrides || {}), ...(snapshot.fineOverrides || {}) },
+                fineOverrides: { ...(dbData.fineOverrides || {}), ...(safeSnapshot.fineOverrides || {}) },
                 fineAuditLog: mergedFineAuditLog,
             };
         } catch {
-            return snapshot;
+            return safeSnapshot;
         }
     }, []);
 
@@ -3147,7 +3150,6 @@ export default function Attendance() {
         if (!isDbLoaded || employees.length === 0) return false;
         const baseSnapshot = latestSnapshotRef.current || {
             config,
-            employees,
             bonusAuditLog,
             extraBonuses,
             extraFundTx,
@@ -3175,7 +3177,7 @@ export default function Attendance() {
         if (!isDbLoaded) return; // Không lưu đè lúc chưa tải xong
         if (employees.length === 0) return; // Chưa có data employees → không ghi đè DB
 
-        const snapshot = { config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog };
+        const snapshot = { config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog };
 
         const saveData = async () => {
             try {
@@ -7275,6 +7277,7 @@ export default function Attendance() {
                         },
                         {
                             key: 'employees',
+                            disabled: true,
                             label: <span><TeamOutlined /> Nhân viên</span>,
                             children: (
                                 <div style={{ marginTop: 4 }}>
@@ -7317,7 +7320,7 @@ export default function Attendance() {
                                 </div>
                             ),
                         },
-                    ]}
+                    ].filter(item => item.key !== 'employees')}
                 />
             </Modal>
 
