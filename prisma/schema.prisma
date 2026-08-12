@@ -160,6 +160,30 @@ model Supplier {
   purchaseOrders PurchaseOrder[]
 }
 
+// Physical package ledger. Product stock stays the financial inventory total;
+// this table records only stock that has been identified as a physical package.
+model HandlingUnit {
+  id               Int      @id @default(autoincrement())
+  code             String   @unique
+  purchaseOrderId  Int?
+  purchaseItemId   Int?
+  productId        Int
+  sku              String
+  color            String?
+  packagingName    String
+  baseUnit         String
+  conversionFactor Int
+  initialQuantity  Int
+  remainingQuantity Int
+  status           String   @default("sealed") // sealed | opened | empty
+  zone             String   @default("Chưa phân khu")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([sku, status])
+  @@index([purchaseOrderId])
+}
+
 model PurchaseOrder {
   id         Int      @id @default(autoincrement())
   poNumber   String   @unique

@@ -67,6 +67,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getImportReceiptFileData: (purchaseId) => ipcRenderer.invoke('purchases:getImportReceiptFileData', { purchaseId }),
         getImportReceiptPreviewData: (purchaseId) => ipcRenderer.invoke('purchases:getImportReceiptPreviewData', { purchaseId }),
     },
+    handlingUnits: {
+        getWorkspace: () => ipcRenderer.invoke('handlingUnits:getWorkspace'),
+        saveRegister: (records) => ipcRenderer.invoke('handlingUnits:saveRegister', records),
+    },
     suppliers: {
         getAll: () => ipcRenderer.invoke('suppliers:getAll'),
         create: (data) => ipcRenderer.invoke('suppliers:create', data),
@@ -245,6 +249,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     stockCheck: {
         getSessions: () => ipcRenderer.invoke('stockCheck:getSessions'),
+        ensureDailySession: (data) => ipcRenderer.invoke('stockCheck:ensureDailySession', data),
         createRecheckSession: (data) => ipcRenderer.invoke('stockCheck:createRecheckSession', data),
         adminSaveSessions: (sessions) => ipcRenderer.invoke('stockCheck:adminSaveSessions', sessions),
         updateCount: (data) => ipcRenderer.invoke('stockCheck:updateCount', data),
@@ -343,6 +348,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         verifyAll: () => ipcRenderer.invoke('attendance:verifyAll'),
         sendPayslipEmail: (data) => ipcRenderer.invoke('attendance:sendPayslipEmail', data),
         savePayslipPDF: (data) => ipcRenderer.invoke('attendance:savePayslipPDF', data),
+        saveEmployeeProfile: (data) => ipcRenderer.invoke('attendance:saveEmployeeProfile', data),
     },
 
     offlineQueue: {

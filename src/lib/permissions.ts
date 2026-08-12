@@ -30,6 +30,7 @@ export type Permission =
     | 'stock-balance.view'
     | 'stock-check.view'
     | 'stock-check.create'
+    | 'handling-units'
     | 'combos.view'
     | 'combos.create'
     | 'combos.update'
@@ -73,6 +74,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
         'stock-balance.view',
         'stock-check.view',
         'stock-check.create',
+        'handling-units',
         'combos.view',
         'combos.create',
         'combos.update',
@@ -189,6 +191,7 @@ export function getAccessibleMenuKeys(role: Role | undefined): string[] {
             'einvoice',
             'stock-balance',
             'stock-check',
+            'handling-units',
             'combos',
             'order-picking',
             'daily-tasks',

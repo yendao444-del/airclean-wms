@@ -16,6 +16,7 @@ export function usePermissions() {
         'pos', 'orders', 'fee-calculator', 'products', 'purchase',
         'supplier-debt', 'export', 'returns', 'refunds', 'ecommerce-export',
         'einvoice', 'stock-balance', 'stock-check', 'combos', 'order-picking',
+        'handling-units',
         'daily-tasks', 'business-report', 'reports', 'history', 'settings', 'attendance',
     ];
 
