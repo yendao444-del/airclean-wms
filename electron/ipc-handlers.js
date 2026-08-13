@@ -4196,7 +4196,9 @@ ipcMain.handle('purchases:getMyVatPenaltyAlerts', async () => {
                     purchaseDate: purchaseDate.toISOString(),
                     fineDate: fineDate.toISOString(),
                     fineStage: stage,
-                    fineAmount: 30000,
+                    // Late VAT fine escalates by 10,000đ for every new stage:
+                    // stage 1 = 30,000đ; stage 2 = 40,000đ; stage 3 = 50,000đ.
+                    fineAmount: 30000 + (stage - 1) * 10000,
                 };
             });
         });
@@ -11721,7 +11723,7 @@ async function topUpTodayDailyStockCheckProducts(sessions, tx) {
         // A generated daily scope is immutable once a physical count has been
         // entered. Only repair an untouched scope that violates the 12-15 SKU
         // policy or that omitted the mandatory 5D UNICARE product.
-        if (!items.length || String(session?.runId || '').startsWith('carry-over-')
+        if (!items.length
             || items.some(item => (item?.actualStock !== null && item?.actualStock !== undefined) || item?.balanced)) return session;
         const exemptedSkus = new Set([
             ...fullyCheckedSkus,
@@ -11757,9 +11759,20 @@ async function topUpTodayDailyStockCheckProducts(sessions, tx) {
             expandProductForStockCheck(product).filter(item => !exemptedSkus.has(String(item.sku))),
             riskByProductName.get(String(product?.name || '').trim())
         ));
-        let scopedItems = selectDailyStockCheckScopeItems(availableItems, today);
+        // Carry-over items are obligations from yesterday and must never be
+        // replaced. Keep them first, then add today's mandatory/risk/rotation
+        // scope until the daily minimum is reached.
+        const generatedItems = selectDailyStockCheckScopeItems(availableItems, today);
+        const scopedItems = items.slice();
+        const selectedSkus = new Set(scopedItems.map(item => String(item?.sku || '')));
+        for (const item of generatedItems) {
+            if (scopedItems.length >= DAILY_STOCK_CHECK_MAX_SKUS) break;
+            if (!selectedSkus.has(String(item.sku))) {
+                scopedItems.push(item);
+                selectedSkus.add(String(item.sku));
+            }
+        }
         if (scopedItems.length < DAILY_STOCK_CHECK_MIN_SKUS) {
-            const selectedSkus = new Set(scopedItems.map(item => String(item.sku)));
             for (const item of availableItems) {
                 if (scopedItems.length >= DAILY_STOCK_CHECK_MIN_SKUS || scopedItems.length >= DAILY_STOCK_CHECK_MAX_SKUS) break;
                 if (!selectedSkus.has(String(item.sku))) {
@@ -11770,7 +11783,7 @@ async function topUpTodayDailyStockCheckProducts(sessions, tx) {
         }
         if (!scopedItems.length) return session;
         changed = true;
-        return { ...session, items: scopedItems, dailyScopePolicyVersion: 2 };
+        return { ...session, items: scopedItems, dailyScopePolicyVersion: 3 };
     });
     return { sessions: updatedSessions, changed };
 }
@@ -12479,10 +12492,41 @@ ipcMain.handle('stockCheck:balanceItem', async (event, payload = {}) => {
             }
             await requireStockCheckConversion(tx, item.productName);
             const existingBalance = await tx.stockBalance.findFirst({
-                where: { items: { contains: reference } },
+                // Match the complete JSON reference value. A plain substring
+                // makes SKU "...-XANH" collide with "...-XANHTHAN"/"...-XANHZIP".
+                where: { items: { contains: `"reference":"${reference}"` } },
                 orderBy: { createdAt: 'desc' },
             });
-            if (existingBalance) return { status: 'duplicate', stockBalance: existingBalance };
+            if (existingBalance) {
+                // A retry can arrive after the first request committed but before
+                // its renderer received the response. Reconcile the session from
+                // the immutable balance record so it never stays "Đã nhập" while
+                // the backend correctly rejects a second stock adjustment.
+                const historyItems = parseJsonArray(existingBalance.items);
+                const historyItem = historyItems.find(entry => String(entry?.reference || '') === reference
+                    && String(entry?.sku || '') === String(payload.sku || ''));
+                const session = sessions.find(entry => String(entry?.id) === String(payload.sessionId));
+                if (historyItem && session) {
+                    const item = (session.items || []).find(entry => String(entry?.sku) === String(payload.sku || ''));
+                    if (item && !item.balanced) {
+                        item.actualStock = Number(historyItem.actualStock);
+                        item.balanceSystemStock = Number(historyItem.systemStock);
+                        item.balanceActualStock = Number(historyItem.actualStock);
+                        item.balanceDifference = Number(historyItem.difference || 0);
+                        item.systemStock = Number(historyItem.actualStock);
+                        item.difference = 0;
+                        item.note = String(historyItem.note || '');
+                        item.balanced = true;
+                        item.verificationStatus = Number(historyItem.difference || 0) === 0 ? 'match' : 'balanced_mismatch';
+                        item.requiresNote = false;
+                        item.countLocked = false;
+                        item.balancedAt = historyItem.balancedAt || existingBalance.createdAt?.toISOString?.() || new Date().toISOString();
+                        await writeStockCheckSessions(sessions, tx);
+                    }
+                    return { status: 'duplicate_repaired', stockBalance: existingBalance, item, session };
+                }
+                return { status: 'duplicate', stockBalance: existingBalance };
+            }
             if (item.actualStock === null || item.actualStock === undefined) return { status: 'missing_count' };
             const difference = Number(item.actualStock) - Number(item.systemStock || 0);
             item.difference = difference;

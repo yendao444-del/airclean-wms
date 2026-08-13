@@ -30,6 +30,8 @@ const { Title } = Typography;
 const { TextArea } = Input;
 
 const VAT_FIRST_FINE_AFTER_DAYS = 5;
+const VAT_OVERDUE_FINE_FIRST_AMOUNT = 30000;
+const VAT_OVERDUE_FINE_STAGE_INCREMENT = 10000;
 // 10/08 remains a full submission day. The policy takes effect from
 // 00:00 on 11/08 and never creates retroactive fines.
 const VAT_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-11T00:00:00');
@@ -56,6 +58,19 @@ const getVatFirstFineAt = (purchasedAt: dayjs.Dayjs) => {
 const getVatFineDate = (purchasedAt: dayjs.Dayjs, stage: number) =>
     getVatFirstFineAt(purchasedAt).add(stage <= 3 ? (stage - 1) * 2 : stage + 1, 'day');
 
+const getVatFineAmount = (stage: number) =>
+    VAT_OVERDUE_FINE_FIRST_AMOUNT + (Math.max(1, stage) - 1) * VAT_OVERDUE_FINE_STAGE_INCREMENT;
+
+const getVatFineStage = (purchasedAt: dayjs.Dayjs, now = dayjs()) => {
+    const firstFineAt = getVatFirstFineAt(purchasedAt);
+    if (now.isBefore(firstFineAt)) return 0;
+    const daysAfterFirstFine = Math.max(0, now.startOf('day').diff(firstFineAt.startOf('day'), 'day'));
+    if (daysAfterFirstFine < 2) return 1;
+    if (daysAfterFirstFine < 4) return 2;
+    if (daysAfterFirstFine < 5) return 3;
+    return 4 + (daysAfterFirstFine - 5);
+};
+
 function getVatDueStatus(purchaseDate: string | Date | undefined, needsVat: boolean): VatDueStatus {
     if (!needsVat || !purchaseDate) return null;
     const purchasedAt = dayjs(purchaseDate);
@@ -73,17 +88,13 @@ function getVatDueStatus(purchaseDate: string | Date | undefined, needsVat: bool
     }
 
     const daysLate = Math.max(VAT_FIRST_FINE_AFTER_DAYS, now.startOf('day').diff(purchasedAt.startOf('day'), 'day'));
-    const daysAfterFirstFine = Math.max(0, now.startOf('day').diff(deadline.startOf('day'), 'day'));
-    const fineStage = daysAfterFirstFine < 2 ? 1
-        : daysAfterFirstFine < 4 ? 2
-            : daysAfterFirstFine < 5 ? 3
-                : 4 + (daysAfterFirstFine - 5);
+    const fineStage = getVatFineStage(purchasedAt, now);
     const currentFineAt = getVatFineDate(purchasedAt, fineStage);
     const nextFineAt = getVatFineDate(purchasedAt, fineStage + 1);
     return {
         color: 'error',
         text: `Quá hạn VAT ${daysLate} ngày · phạt lần ${fineStage}`,
-        detail: `Lần ${fineStage}: ${formatVatDateTime(currentFineAt)} · Lần ${fineStage + 1}: ${formatVatDateTime(nextFineAt)} (còn ${formatRemainingVatTime(nextFineAt, now)})`,
+        detail: `Lần ${fineStage}: ${getVatFineAmount(fineStage).toLocaleString('vi-VN')}đ lúc ${formatVatDateTime(currentFineAt)} · Lần ${fineStage + 1}: ${getVatFineAmount(fineStage + 1).toLocaleString('vi-VN')}đ lúc ${formatVatDateTime(nextFineAt)} (còn ${formatRemainingVatTime(nextFineAt, now)})`,
     };
 }
 
@@ -2334,7 +2345,11 @@ export default function PurchasePage() {
                     showIcon
                     style={{ marginBottom: 16, borderRadius: 8 }}
                     message={`Đã ghi nhận phạt HĐ VAT: ${personalVatPenalties.length} phiếu quá hạn`}
-                    description={`Bạn bị ghi nhận ${new Intl.NumberFormat('vi-VN').format(personalVatPenalties.length * 30000)} đ vào Bảng công. Phiếu: ${personalVatPenalties.slice(0, 3).map(item => item.poNumber || `#${item.id}`).join(', ')}${personalVatPenalties.length > 3 ? '…' : ''}.`}
+                    description={`Bạn bị ghi nhận ${new Intl.NumberFormat('vi-VN').format(personalVatPenalties.reduce((total, item) => {
+                        const purchaseAt = dayjs(item.purchaseDate || item.createdAt);
+                        const stage = purchaseAt.isValid() ? getVatFineStage(purchaseAt) : 0;
+                        return total + Array.from({ length: stage }, (_, index) => getVatFineAmount(index + 1)).reduce((sum, amount) => sum + amount, 0);
+                    }, 0))} đ vào Bảng công. Phiếu: ${personalVatPenalties.slice(0, 3).map(item => item.poNumber || `#${item.id}`).join(', ')}${personalVatPenalties.length > 3 ? '…' : ''}.`}
                     action={<Button danger size="small" onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'attendance' }))}>Xem bảng công</Button>}
                 />
             )}

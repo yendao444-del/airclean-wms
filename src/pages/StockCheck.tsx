@@ -381,6 +381,7 @@ export default function StockCheck() {
     const [noteModalValue, setNoteModalValue] = useState('');
     const [conversionRates, setConversionRates] = useState<Record<string, ConversionConfig>>({});
     const [countingInputs, setCountingInputs] = useState<Record<string, { unitCounts: number[]; le: number; unitTouched?: boolean[]; leTouched?: boolean }>>({});
+    const countingInputsRef = useRef<Record<string, { unitCounts: number[]; le: number; unitTouched?: boolean[]; leTouched?: boolean }>>({});
     const [balanceRecords, setBalanceRecords] = useState<BalanceHistoryRecord[]>([]);
     const [productTabs, setProductTabs] = useState<Record<string, ProductTabKey>>({});
     const [ledgerLogsByProduct, setLedgerLogsByProduct] = useState<Record<string, InventoryLogItem[]>>({});
@@ -644,6 +645,7 @@ export default function StockCheck() {
 
             localStorage.setItem(LS_KEY, JSON.stringify(normalized));
             setSessions(normalized);
+            countingInputsRef.current = {};
             setCountingInputs({});
             setExpandedProductGroups({});
             setExpandedConvGroups({});
@@ -989,33 +991,39 @@ export default function StockCheck() {
 
     const updateCountingInput = useCallback((sku: string, productName: string, unitIndex: number | 'le', value: number | null) => {
         if (!canEditCounts) return;
-        setCountingInputs(prev => {
-            const current = prev[sku] || { unitCounts: [], le: 0 };
-            let updated: { unitCounts: number[]; le: number; unitTouched?: boolean[]; leTouched?: boolean };
-            if (unitIndex === 'le') {
-                updated = { ...current, le: value ?? 0, leTouched: value !== null };
-            } else {
-                const newCounts = [...(current.unitCounts || [])];
-                const unitTouched = [...(current.unitTouched || [])];
-                while (newCounts.length <= unitIndex) newCounts.push(0);
-                while (unitTouched.length <= unitIndex) unitTouched.push(false);
-                newCounts[unitIndex] = value ?? 0;
-                unitTouched[unitIndex] = value !== null;
-                updated = { ...current, unitCounts: newCounts, unitTouched };
-            }
-            const units = conversionRates[productName]?.units || [];
-            // Zero is a valid physical count; only a cleared field is uncounted.
-            const hasAny = (updated.unitTouched || []).some(Boolean) || !!updated.leTouched;
-            if (hasAny) {
-                let total = updated.le || 0;
-                units.forEach((unit, i) => { total += (updated.unitCounts?.[i] || 0) * (unit.rate || 0); });
-                applyActualStock(sku, total);
-            } else {
-                applyActualStock(sku, null);
-            }
-            return { ...prev, [sku]: updated };
-        });
+        const previous = countingInputsRef.current;
+        const current = previous[sku] || { unitCounts: [], le: 0 };
+        let updated: { unitCounts: number[]; le: number; unitTouched?: boolean[]; leTouched?: boolean };
+        if (unitIndex === 'le') {
+            updated = { ...current, le: value ?? 0, leTouched: value !== null };
+        } else {
+            const newCounts = [...(current.unitCounts || [])];
+            const unitTouched = [...(current.unitTouched || [])];
+            while (newCounts.length <= unitIndex) newCounts.push(0);
+            while (unitTouched.length <= unitIndex) unitTouched.push(false);
+            newCounts[unitIndex] = value ?? 0;
+            unitTouched[unitIndex] = value !== null;
+            updated = { ...current, unitCounts: newCounts, unitTouched };
+        }
+        const next = { ...previous, [sku]: updated };
+        countingInputsRef.current = next;
+        setCountingInputs(next);
+        const units = conversionRates[productName]?.units || [];
+        // Zero is a valid physical count; only a cleared field is uncounted.
+        const hasAny = (updated.unitTouched || []).some(Boolean) || !!updated.leTouched;
+        if (hasAny) {
+            let total = updated.le || 0;
+            units.forEach((unit, i) => { total += (updated.unitCounts?.[i] || 0) * (unit.rate || 0); });
+            applyActualStock(sku, total);
+        } else {
+            applyActualStock(sku, null);
+        }
     }, [conversionRates, applyActualStock, canEditCounts]);
+
+    const commitCountInputOnBlur = useCallback((sku: string, productName: string, unitIndex: number | 'le', rawValue: string) => {
+        const normalized = rawValue.replace(/[^0-9]/g, '');
+        updateCountingInput(sku, productName, unitIndex, normalized === '' ? null : Number(normalized));
+    }, [updateCountingInput]);
 
     const assignableManagers = useMemo(() =>
         staffList
@@ -1404,6 +1412,7 @@ export default function StockCheck() {
                 ? { ...existing, rolledOverTo: todayStr }
                 : existing)
             .concat(session));
+        countingInputsRef.current = {};
         setCountingInputs({});
         setExpandedProductGroups({});
         setExpandedConvGroups({});
@@ -1548,6 +1557,7 @@ export default function StockCheck() {
                 setCountingInputs(prev => {
                     const next = { ...prev };
                     delete next[item.sku];
+                    countingInputsRef.current = next;
                     return next;
                 });
                 setProductTabs(prev => ({ ...prev, [item.productName]: 'check' }));
@@ -1658,7 +1668,9 @@ export default function StockCheck() {
                 return;
             }
             if (result.status === 'duplicate') {
-                message.warning('SKU này đã có giao dịch cân kho trong lượt kiểm hiện tại. Vui lòng tải lại dữ liệu.');
+                const refreshed = await loadSessions();
+                setSessions(refreshed.map(normalizeSessionStatus));
+                message.warning('SKU này đã có giao dịch cân kho trong lượt kiểm hiện tại. Dữ liệu đã được tải lại.');
                 return;
             }
             setSessions(current => current.map(session => session.id !== todaySessionId ? session : (
@@ -1669,7 +1681,7 @@ export default function StockCheck() {
                         items: session.items.map(entry => entry.sku !== item.sku ? entry : { ...entry, ...(result.item || {}), verificationStatus: result.status === 'match' || result.status === 'balanced_mismatch' ? result.status : undefined }),
                 }
             )));
-        if (result.status === 'match' || result.status === 'balanced_mismatch') {
+        if (result.status === 'match' || result.status === 'balanced_mismatch' || result.status === 'duplicate_repaired') {
             setProductTabs(prev => prev[item.productName] === 'reconciliation'
                 ? { ...prev, [item.productName]: 'check' }
                 : prev);
@@ -1692,6 +1704,7 @@ export default function StockCheck() {
                 });
             }
             if (result.status === 'balanced_mismatch') message.success('Đã cân bằng theo lý do đã nhập.');
+            if (result.status === 'duplicate_repaired') message.success('Đã đồng bộ lại kết quả cân bằng trước đó.');
             if (result.status === 'missing_count') message.warning('Chưa nhập số đếm thực tế.');
         } catch (error: any) {
             message.error(error?.message || 'Không thể cân bằng kho.');
@@ -1991,6 +2004,7 @@ export default function StockCheck() {
                         <InputNumber
                             min={0} size="small" value={ci.unitCounts?.[i] ?? undefined} placeholder="0" disabled={disabled}
                             onChange={v => updateCountingInput(item.sku, item.productName, i, v)}
+                            onBlur={event => commitCountInputOnBlur(item.sku, item.productName, i, event.currentTarget.value)}
                             style={{ width: 60 }}
                         />
                         <span style={{ fontSize: 11, color: '#888', whiteSpace: 'nowrap' }}>{unit.label}</span>
@@ -2000,6 +2014,7 @@ export default function StockCheck() {
                     <InputNumber
                         min={0} size="small" value={ci.le ?? undefined} placeholder="0" disabled={disabled}
                         onChange={v => updateCountingInput(item.sku, item.productName, 'le', v)}
+                        onBlur={event => commitCountInputOnBlur(item.sku, item.productName, 'le', event.currentTarget.value)}
                         style={{ width: 60 }}
                     />
                     <span style={{ fontSize: 11, color: '#888' }}>Lẻ</span>
@@ -2743,6 +2758,7 @@ export default function StockCheck() {
                                                                                         style={{ width: '100%', maxWidth: 65, fontWeight: 700 }} size="small"
                                                                                         disabled={disabled}
                                                                                         onChange={v => updateCountingInput(item.sku, item.productName, unitIdx, v)}
+                                                                                        onBlur={event => commitCountInputOnBlur(item.sku, item.productName, unitIdx, event.currentTarget.value)}
                                                                                     />
                                                                                 ) : (
                                                                                     <span style={{ color: '#e8e8e8' }}>—</span>
@@ -2760,6 +2776,7 @@ export default function StockCheck() {
                                                                                             style={{ width: '100%', maxWidth: 65, fontWeight: 700 }} size="small"
                                                                                             disabled={disabled}
                                                                                             onChange={v => updateCountingInput(item.sku, item.productName, 'le', v)}
+                                                                                            onBlur={event => commitCountInputOnBlur(item.sku, item.productName, 'le', event.currentTarget.value)}
                                                                                         />
                                                                                     ) : (
                                                                                         <span style={{ color: '#e8e8e8' }}>—</span>
