@@ -585,7 +585,8 @@ const fmt = (v: number) => new Intl.NumberFormat('vi-VN').format(Math.round(v)) 
 // SKU format: {prefix}-{code} e.g. "20-5DUNI-TRANG" → prefix 20 = 20 sản phẩm
 // Combo 20 gói x1 = 20 SP × 20đ = 400đ
 // CB- (combo mix) SKU: parse prefix tương tự hoặc tính từ combo components
-const VAT_OVERDUE_FINE_AMOUNT = 30000;
+const VAT_OVERDUE_FINE_FIRST_AMOUNT = 30000;
+const VAT_OVERDUE_FINE_STAGE_INCREMENT = 10000;
 const VAT_FIRST_FINE_AFTER_DAYS = 5;
 // 10/08 is the final submission day. The first automatic VAT fine may only
 // be created from 00:00 on 11/08.
@@ -613,6 +614,9 @@ const getVatFineDate = (purchaseAt: dayjs.Dayjs, stage: number) => {
     const delayDays = stage <= 3 ? (stage - 1) * 2 : stage + 1;
     return getVatFirstFineAt(purchaseAt).add(delayDays, 'day');
 };
+
+const getVatFineAmount = (stage: number) =>
+    VAT_OVERDUE_FINE_FIRST_AMOUNT + (Math.max(1, stage) - 1) * VAT_OVERDUE_FINE_STAGE_INCREMENT;
 const DEADLINE_OVERDUE_FINE_OFFICIAL = 50000;
 const getAssignmentDeadlineFineAmount = (task: any): number => {
     try {
@@ -3476,7 +3480,7 @@ export default function Attendance() {
                 empId: creator.id,
                 type: 'VAT quá hạn nhập hàng',
                 detail: `Phiếu ${purchase.poNumber || `#${purchase.id}`}${purchase.supplierName ? ` - ${purchase.supplierName}` : ''} quá hạn ${VAT_FIRST_FINE_AFTER_DAYS + (stage <= 3 ? (stage - 1) * 2 : stage + 1)} ngày chưa cập nhật HĐ VAT - phạt lần ${stage}`,
-                amount: VAT_OVERDUE_FINE_AMOUNT,
+                amount: getVatFineAmount(stage),
                 date: penaltyDate.toISOString(),
                 source: 'purchase_vat_overdue' as any,
                 };
