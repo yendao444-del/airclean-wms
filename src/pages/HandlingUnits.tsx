@@ -79,6 +79,8 @@ type LocationItem = {
 };
 type TelegramStatus = {
   isRunning: boolean;
+  isPollingOwner: boolean;
+  pollingOwner: string;
   botUsername: string;
   groupChatId: string | null;
   groupTitle: string;
@@ -569,6 +571,28 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [showPrintModal, setShowPrintModal] = useState(false);
   const [printUnits, setPrintUnits] = useState<UnitRow[]>([]);
   const [printLabelSize, setPrintLabelSize] = useState<"A6" | "A7">("A6");
+
+  const handlePrintLabels = () => {
+    if (document.body.classList.contains("hu-label-printing")) return;
+    const pageSize = printLabelSize === "A6" ? "105mm 148mm" : "74mm 105mm";
+    const printStyle = document.createElement("style");
+    printStyle.id = "hu-label-page-size";
+    printStyle.media = "print";
+    printStyle.textContent = `@page { size: ${pageSize}; margin: 0; }`;
+    document.getElementById(printStyle.id)?.remove();
+    document.head.appendChild(printStyle);
+    document.body.classList.add("hu-label-printing");
+
+    const cleanupTimer = window.setTimeout(() => cleanup(), 60000);
+    function cleanup() {
+      window.clearTimeout(cleanupTimer);
+      document.body.classList.remove("hu-label-printing");
+      document.getElementById(printStyle.id)?.remove();
+      window.removeEventListener("afterprint", cleanup);
+    }
+    window.addEventListener("afterprint", cleanup);
+    requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
+  };
   const [showLocations, setShowLocations] = useState(false);
   const [locationFocusUnit, setLocationFocusUnit] = useState<UnitRow | null>(null);
   const [showAllocation, setShowAllocation] = useState(false);
@@ -602,6 +626,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [pickForm] = Form.useForm();
   const [isSubmittingPick, setIsSubmittingPick] = useState(false);
   const [deletingUnitCode, setDeletingUnitCode] = useState("");
+  const workspaceLoadRequestRef = useRef(0);
+  const workspaceLoadInFlightRef = useRef(false);
+  const workspaceReloadQueuedRef = useRef(false);
   const isSubmittingPickRef = useRef(false);
   const pickRequestIdRef = useRef("");
   const [showFinalCheckModal, setShowFinalCheckModal] = useState(false);
@@ -632,10 +659,21 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     },
   ]);
 
-  const loadWorkspace = async () => {
+  const loadWorkspace = async (prioritizeFreshData = false) => {
+    if (workspaceLoadInFlightRef.current) {
+      if (prioritizeFreshData) {
+        workspaceLoadRequestRef.current += 1;
+        workspaceReloadQueuedRef.current = true;
+      }
+      return;
+    }
+
+    workspaceLoadInFlightRef.current = true;
+    const requestId = ++workspaceLoadRequestRef.current;
     try {
       if (window.electronAPI?.handlingUnits?.getWorkspace) {
         const res = await window.electronAPI.handlingUnits.getWorkspace();
+        if (requestId !== workspaceLoadRequestRef.current) return;
         if (res?.success && res.data) {
           const catalog = Array.isArray(res.data.catalog) ? res.data.catalog : [];
           const register = Array.isArray(res.data.register) ? res.data.register : [];
@@ -663,7 +701,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     } catch (err) {
       console.warn("Load handling units error:", err);
     } finally {
+      workspaceLoadInFlightRef.current = false;
       setIsWorkspaceLoading(false);
+      if (workspaceReloadQueuedRef.current) {
+        workspaceReloadQueuedRef.current = false;
+        void loadWorkspace();
+      }
     }
   };
 
@@ -674,7 +717,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     }, 2000);
     const unsub = window.electronAPI?.handlingUnits?.onChanged?.((evt) => {
       console.log("⚡ Handling units changed event:", evt);
-      loadWorkspace();
+      loadWorkspace(true);
     });
     return () => {
       clearInterval(intervalTimer);
@@ -735,6 +778,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       message.success(
         `Đã khui kiện ${unit.id} thành công (chuyển sang Đang sử dụng)!`,
       );
+      await loadWorkspace(true);
     } catch (err: any) {
       message.error(err?.message || "Lỗi khui kiện");
     }
@@ -3390,6 +3434,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 </>
               )}
             </p>
+            <Typography.Text style={{ fontSize: 12 }}>
+              Máy xử lý Telegram: <b>{telegramStatus?.pollingOwner || "Đang xác định"}</b>
+              {telegramStatus?.isPollingOwner ? " · Máy này đang giữ quyền bot" : " · Máy này đang ở chế độ chờ"}
+            </Typography.Text>
           </div>
 
           {/* KHUNG CHAT TELEGRAM TRỰC QUAN */}
@@ -3506,6 +3554,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
       {/* MODAL IN TEM DÁN TẢI / KIỆN HÀNG (A6 / A7) */}
       <Modal
+        className="hu-print-modal"
         title={
           <Flex align="center" gap={8}>
             <PrinterOutlined style={{ color: "#0284c7", fontSize: 20 }} />
@@ -3536,9 +3585,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               <Typography.Text strong style={{ fontSize: 13 }}>
                 Khổ giấy:
               </Typography.Text>
-              <Segmented
+              <Select
                 value={printLabelSize}
-                onChange={(val) => setPrintLabelSize(val as "A6" | "A7")}
+                onChange={(value) => setPrintLabelSize(value)}
+                style={{ width: 205 }}
                 options={[
                   { label: "Khổ A6 (105 × 148 mm)", value: "A6" },
                   { label: "Khổ A7 (74 × 105 mm)", value: "A7" },
@@ -3557,7 +3607,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               <Button
                 type="primary"
                 icon={<PrinterOutlined />}
-                onClick={() => window.print()}
+                onClick={handlePrintLabels}
                 style={{ background: "#00b96b", borderColor: "#00b96b" }}
               >
                 In {printUnits.length || (detail ? 1 : 0)} tem ngay

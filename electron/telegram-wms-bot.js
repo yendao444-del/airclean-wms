@@ -387,6 +387,33 @@ function editTelegramWmsMessage(chatId, messageId, text, replyMarkup = null) {
     });
 }
 
+function clearTelegramWmsInlineKeyboard(chatId, messageId) {
+    if (!TELEGRAM_WMS_BOT_TOKEN || !chatId || !messageId) return Promise.resolve(null);
+    return new Promise((resolve) => {
+        const data = JSON.stringify({
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: { inline_keyboard: [] }
+        });
+        const req = https.request({
+            hostname: 'api.telegram.org',
+            path: `/bot${TELEGRAM_WMS_BOT_TOKEN}/editMessageReplyMarkup`,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(data),
+            },
+            timeout: 10000,
+        }, (res) => {
+            res.resume();
+            res.on('end', () => resolve(true));
+        });
+        req.on('error', () => resolve(null));
+        req.write(data);
+        req.end();
+    });
+}
+
 async function sendRutHangMenu(chatId, messageId = null) {
     const list = await getAllHandlingUnitsFromStore();
     const openedUnits = list.filter(u => u.status === 'opened' || u.status === 'Đang sử dụng');
@@ -631,13 +658,9 @@ async function handleTelegramWmsCallbackQuery(callbackQuery) {
             const res = await executeRutHang(code, qty, actor);
             await answerTelegramCallbackQuery(queryId, `✅ Đã rút ${qty} sản phẩm!`);
             const unit = res.unit;
-            const resHtml = `🚀 <b>RÚT HÀNG 1 CHẠM THÀNH CÔNG!</b>\n\n` +
-                `👤 <b>Thực hiện bởi:</b> <b>${userLabel}</b>\n` +
-                `📦 <b>Mã Kiện:</b> <code>${code}</code>\n` +
-                `🏷️ <b>SKU:</b> <code>${unit.sku || unit.skuName}</code>\n` +
-                `📉 <b>Đã rút:</b> <b>${res.picked.toLocaleString('vi-VN')} ${unit.baseUnit || unit.unitName || 'Gói'}</b>\n` +
-                `📊 <b>Còn lại trong kiện:</b> <b>${res.remaining.toLocaleString('vi-VN')} ${unit.baseUnit || unit.unitName || 'Gói'}</b> ${unit.status === 'empty' ? '<i>(Đã hết kiện)</i>' : ''}\n` +
-                `🛒 <b>Tổng tại Khu đóng gói:</b> <b>${res.packingAreaPcs.toLocaleString('vi-VN')} đơn vị</b>`;
+            const resHtml = `✅ <b>${userLabel} rút hàng thành công ${code}</b>\n` +
+                `📉 <b>Đã rút:</b> ${res.picked.toLocaleString('vi-VN')} ${unit.baseUnit || unit.unitName || 'Gói'}\n` +
+                `📊 <b>Còn lại:</b> ${res.remaining.toLocaleString('vi-VN')} ${unit.baseUnit || unit.unitName || 'Gói'}`;
                 
             const markup = {
                 inline_keyboard: [
@@ -645,7 +668,8 @@ async function handleTelegramWmsCallbackQuery(callbackQuery) {
                     [{ text: '📦 Rút kiện khác', callback_data: 'menu_rut' }, { text: '📊 Xem tồn kho', callback_data: 'menu_ton' }]
                 ]
             };
-            await editTelegramWmsMessage(chatId, messageId, resHtml, markup);
+            await clearTelegramWmsInlineKeyboard(chatId, messageId);
+            await sendTelegramWmsMessage(chatId, resHtml, markup);
         } catch (err) {
             await answerTelegramCallbackQuery(queryId, `❌ Lỗi: ${err.message}`);
             await sendTelegramWmsMessage(chatId, `❌ <b>Lỗi rút hàng:</b> ${err.message}`);
@@ -737,13 +761,9 @@ async function handleTelegramWmsIncomingMessage(message) {
             try {
                 const res = await executeRutHang(code, qty, userLabel);
                 const unit = res.unit;
-                const resHtml = `🚀 <b>TỰ NHẬP RÚT ${qty} SẢN PHẨM THÀNH CÔNG!</b>\n\n` +
-                    `👤 <b>Thực hiện bởi:</b> <b>${userLabel}</b>\n` +
-                    `📦 <b>Mã Kiện:</b> <code>${code}</code>\n` +
-                    `🏷️ <b>SKU:</b> <code>${unit.sku || unit.skuName}</code>\n` +
-                    `📉 <b>Đã rút:</b> <b>${res.picked.toLocaleString('vi-VN')} ${unit.baseUnit || unit.unitName || 'Gói'}</b>\n` +
-                    `📊 <b>Còn lại trong kiện:</b> <b>${res.remaining.toLocaleString('vi-VN')} ${unit.baseUnit || unit.unitName || 'Gói'}</b> ${unit.status === 'empty' ? '<i>(Đã hết kiện)</i>' : ''}\n` +
-                    `🛒 <b>Tổng tại Khu đóng gói:</b> <b>${res.packingAreaPcs.toLocaleString('vi-VN')} đơn vị</b>`;
+                const resHtml = `✅ <b>${userLabel} rút hàng thành công ${code}</b>\n` +
+                    `📉 <b>Đã rút:</b> ${res.picked.toLocaleString('vi-VN')} ${unit.baseUnit || unit.unitName || 'Gói'}\n` +
+                    `📊 <b>Còn lại:</b> ${res.remaining.toLocaleString('vi-VN')} ${unit.baseUnit || unit.unitName || 'Gói'}`;
                     
                 const markup = {
                     inline_keyboard: [

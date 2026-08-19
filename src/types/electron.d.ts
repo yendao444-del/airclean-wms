@@ -343,6 +343,8 @@ export interface ElectronAPI {
       success: boolean;
       data?: {
         isRunning: boolean;
+        isPollingOwner: boolean;
+        pollingOwner: string;
         botUsername: string;
         defaultChatId: string;
         groupChatId: string | null;
