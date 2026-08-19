@@ -1435,20 +1435,27 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           .replace(/[^A-Za-z0-9]/g, "")
           .slice(2, 6)
           .toUpperCase() || "KN";
-      const existingUnits = workspace.register.filter(
-        (u) => u.skuName === targetSku.sku,
+      const codePrefix = `KN-${skuPrefix}-`;
+      const usedCodes = new Set(
+        workspace.register.map((unit) => unit.id.trim().toUpperCase()),
       );
+      let nextSequence = 1;
+      const nextUnitCode = () => {
+        let code = "";
+        do {
+          code = `${codePrefix}${String(nextSequence).padStart(2, "0")}`;
+          nextSequence += 1;
+        } while (usedCodes.has(code));
+        usedCodes.add(code);
+        return code;
+      };
 
       if (method === "TAI") {
         const count = Math.max(1, Number(values.packageCount || 1));
         const factor = Math.max(1, Number(values.conversionFactor || 1200));
-        created = Array.from({ length: count }, (_, offset) => {
-          const seq = String(existingUnits.length + offset + 1).padStart(
-            2,
-            "0",
-          );
+        created = Array.from({ length: count }, () => {
           return {
-            id: `KN-${skuPrefix}-${seq}`,
+            id: nextUnitCode(),
             receiptCode,
             skuName: targetSku.sku,
             packageType: "Tải dứa",
@@ -1464,13 +1471,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       } else if (method === "THUNG") {
         const count = Math.max(1, Number(values.packageCount || 1));
         const factor = Math.max(1, Number(values.conversionFactor || 50));
-        created = Array.from({ length: count }, (_, offset) => {
-          const seq = String(existingUnits.length + offset + 1).padStart(
-            2,
-            "0",
-          );
+        created = Array.from({ length: count }, () => {
           return {
-            id: `KN-${skuPrefix}-${seq}`,
+            id: nextUnitCode(),
             receiptCode,
             skuName: targetSku.sku,
             packageType: "Thùng carton",
@@ -1486,10 +1489,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       } else {
         // Hàng lẻ
         const qty = Math.max(1, Number(values.looseQty || 1));
-        const seq = String(existingUnits.length + 1).padStart(2, "0");
         created = [
           {
-            id: `KN-${skuPrefix}-${seq}`,
+            id: nextUnitCode(),
             receiptCode,
             skuName: targetSku.sku,
             packageType: "Túi lẻ",
