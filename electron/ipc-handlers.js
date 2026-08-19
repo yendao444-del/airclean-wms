@@ -5926,6 +5926,45 @@ async function isTelegramWmsContextAllowed(chat, from) {
   );
 }
 
+async function isTelegramWmsGroupManager(chatId, userId) {
+  if (!TELEGRAM_WMS_BOT_TOKEN || !chatId || !userId) return false;
+  if (String(userId) === TELEGRAM_WMS_DEFAULT_CHAT) return true;
+
+  return new Promise((resolve) => {
+    const path =
+      `/bot${TELEGRAM_WMS_BOT_TOKEN}/getChatMember` +
+      `?chat_id=${encodeURIComponent(chatId)}` +
+      `&user_id=${encodeURIComponent(userId)}`;
+    const req = https.request(
+      {
+        hostname: "api.telegram.org",
+        path,
+        method: "GET",
+        timeout: 10000,
+      },
+      (res) => {
+        let body = "";
+        res.on("data", (chunk) => (body += chunk));
+        res.on("end", () => {
+          try {
+            const json = JSON.parse(body);
+            const status = String(json?.result?.status || "");
+            resolve(status === "creator" || status === "administrator");
+          } catch {
+            resolve(false);
+          }
+        });
+      },
+    );
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.end();
+  });
+}
+
 async function sendTelegramWmsMessage(chatId, text, replyMarkup = null) {
   if (!TELEGRAM_WMS_BOT_TOKEN) return Promise.resolve(null);
   const groupConfig = await loadTelegramWmsGroupConfig();
@@ -6555,6 +6594,16 @@ async function sendRutHangMenu(chatId, messageId = null) {
     return;
   }
 
+  // Chỉ có một kiện đang mở thì bỏ qua bước chọn kiện.
+  if (openedUnits.length === 1) {
+    await sendPickQuantityMenu(
+      chatId,
+      openedUnits[0].code || openedUnits[0].id,
+      messageId,
+    );
+    return;
+  }
+
   const inlineKeyboard = openedUnits.map((u) => {
     const code = u.code || u.id;
     const remaining = u.remainingQuantity ?? u.currentPcs ?? 0;
@@ -6857,10 +6906,12 @@ async function handleTelegramWmsIncomingMessage(message) {
       );
       return;
     }
-    if (String(message.from?.id || "") !== TELEGRAM_WMS_DEFAULT_CHAT) {
+    if (
+      !(await isTelegramWmsGroupManager(chatId, message.from?.id))
+    ) {
       await sendTelegramWmsMessage(
         chatId,
-        "⛔ Chỉ tài khoản chủ hệ thống mới được phép kết nối nhóm này.",
+        "⛔ Chỉ chủ nhóm hoặc quản trị viên Telegram mới được phép kết nối nhóm này.",
       );
       return;
     }
@@ -6879,6 +6930,22 @@ async function handleTelegramWmsIncomingMessage(message) {
       );
     }
     return;
+  }
+
+  // Nếu chưa có nhóm nào được đăng ký, lệnh đầu tiên của chủ hệ thống trong
+  // nhóm sẽ tự kết nối. Điều này tránh việc một poller cũ nuốt mất /ketnoi.
+  if (
+    isGroup &&
+    (await isTelegramWmsGroupManager(chatId, message.from?.id))
+  ) {
+    const currentGroup = await loadTelegramWmsGroupConfig();
+    if (!currentGroup.chatId) {
+      const connected = await saveTelegramWmsGroupConfig(message.chat);
+      await sendTelegramWmsMessage(
+        chatId,
+        `✅ Đã tự động kết nối nhóm <b>${connected.title.replace(/[<>]/g, "")}</b> với hệ thống quản lý kiện hàng.`,
+      );
+    }
   }
 
   if (!(await isTelegramWmsContextAllowed(message.chat, message.from))) {

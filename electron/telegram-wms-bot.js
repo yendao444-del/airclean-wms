@@ -403,6 +403,12 @@ async function sendRutHangMenu(chatId, messageId = null) {
         }
         return;
     }
+
+    // Chỉ có một kiện đang mở thì vào thẳng màn hình chọn số lượng.
+    if (openedUnits.length === 1) {
+        await sendPickQuantityMenu(chatId, openedUnits[0].code || openedUnits[0].id, messageId);
+        return;
+    }
     
     const inlineKeyboard = openedUnits.map(u => {
         const code = u.code || u.id;
@@ -481,6 +487,21 @@ async function sendKhuiKienMenu(chatId, messageId = null) {
 
 const userPendingPickCode = {};
 
+function pendingPickKey(chatId, userId) {
+    return `${chatId}:${userId}`;
+}
+
+function formatLocation(rawLocation) {
+    if (!rawLocation) return 'Chưa xếp vị trí';
+    try {
+        const parsed = typeof rawLocation === 'string' ? JSON.parse(rawLocation) : rawLocation;
+        const parts = [parsed.zone, parsed.rack, parsed.level, parsed.bin].filter(Boolean);
+        return parts.length ? parts.join(' · ') : 'Chưa xếp vị trí';
+    } catch {
+        return String(rawLocation);
+    }
+}
+
 async function sendPickQuantityMenu(chatId, code, messageId = null) {
     const list = await getAllHandlingUnitsFromStore();
     const unit = list.find(u => (u.code || u.id || '').toUpperCase() === String(code).toUpperCase());
@@ -493,8 +514,8 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
     const remaining = unit.remainingQuantity ?? unit.currentPcs ?? 0;
     const baseUnit = unit.baseUnit || unit.unitName || 'Gói';
     
-    // Các mức chuẩn: 10, 20, 40, 50, 100
-    const presetQtys = [10, 20, 40, 50, 100];
+    // Mỗi lần xuất lẻ qua Telegram phải dưới 100.
+    const presetQtys = [10, 20, 40, 50];
     const availablePresets = presetQtys.filter(q => q <= remaining);
     
     const row1 = [];
@@ -510,7 +531,7 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
     });
     
     // Nút rút hết kiện nếu số tồn khác các mức trên
-    if (!availablePresets.includes(remaining) && remaining > 0) {
+    if (!availablePresets.includes(remaining) && remaining > 0 && remaining < 100) {
         row2.push({
             text: `➖ Rút hết (${remaining.toLocaleString('vi-VN')} ${baseUnit})`,
             callback_data: `do_pick:${code}:${remaining}`
@@ -521,15 +542,15 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
     if (row1.length) inlineKeyboard.push(row1);
     if (row2.length) inlineKeyboard.push(row2);
     inlineKeyboard.push([
-        { text: '✏️ Tự nhập số lượng khác', callback_data: `custom_pick:${code}` },
-        { text: '🔙 Chọn kiện khác', callback_data: 'menu_rut' }
+        { text: '✏️ Nhập số lượng tùy chọn', callback_data: `custom_pick:${code}` }
     ]);
+    inlineKeyboard.push([{ text: '🔙 Chọn kiện khác', callback_data: 'menu_rut' }]);
     
     const text = `📦 <b>RÚT HÀNG TỪ KIỆN:</b> <code>${code}</code>\n` +
         `🏷️ <b>SKU:</b> <code>${unit.sku || unit.skuName}</code>\n` +
         `📊 <b>Tồn trong kiện:</b> <b>${remaining.toLocaleString('vi-VN')} ${baseUnit}</b>\n` +
-        `📍 <b>Vị trí:</b> ${unit.zone || 'Khu A1'}\n\n` +
-        `👉 <b>CHỌN MỨC RÚT NHANH (10 · 20 · 40 · 50 · 100) HOẶC TỰ NHẬP:</b>`;
+        `📍 <b>Vị trí:</b> ${formatLocation(unit.zone || unit.location)}\n\n` +
+        `👉 <b>CHỌN MỨC RÚT NHANH (10 · 20 · 40 · 50) HOẶC TỰ NHẬP:</b>`;
         
     const markup = { inline_keyboard: inlineKeyboard };
     if (messageId) {
@@ -584,10 +605,10 @@ async function handleTelegramWmsCallbackQuery(callbackQuery) {
     
     if (data.startsWith('custom_pick:')) {
         const code = data.split(':')[1];
-        userPendingPickCode[chatId] = code;
+        userPendingPickCode[pendingPickKey(chatId, callbackQuery.from?.id)] = code;
         await answerTelegramCallbackQuery(queryId, 'Hãy gửi số lượng bạn muốn rút');
         const text = `✏️ <b>BẠN ĐANG CHỌN RÚT TỪ KIỆN:</b> <code>${code}</code>\n\n` +
-            `👉 <b>Hãy gửi tin nhắn là con số bạn muốn rút</b> (Ví dụ: <code>15</code>, <code>35</code>, <code>60</code>...)\n` +
+            `👉 <b>Hãy gửi một số từ 1 đến 99</b> (Ví dụ: <code>15</code>, <code>35</code>, <code>60</code>...)\n` +
             `<i>Bot sẽ tự động rút đúng số lượng bạn vừa gửi!</i>`;
         const markup = {
             inline_keyboard: [[{ text: '🔙 Quay lại danh sách mức rút', callback_data: `pick_unit:${code}` }]]
@@ -599,6 +620,11 @@ async function handleTelegramWmsCallbackQuery(callbackQuery) {
     if (data.startsWith('do_pick:')) {
         const [, code, qtyStr] = data.split(':');
         const qty = parseInt(qtyStr, 10);
+        if (!Number.isInteger(qty) || qty < 1 || qty >= 100) {
+            await answerTelegramCallbackQuery(queryId, 'Mỗi lần xuất phải từ 1 đến 99');
+            await sendPickQuantityMenu(chatId, code, messageId);
+            return;
+        }
         try {
             const res = await executeRutHang(code, qty, actor);
             await answerTelegramCallbackQuery(queryId, `✅ Đã rút ${qty} sản phẩm!`);
@@ -698,9 +724,14 @@ async function handleTelegramWmsIncomingMessage(message) {
     // Nếu người dùng gửi tin nhắn là 1 con số (Tự nhập số lượng)
     if (/^\d+$/.test(text)) {
         const qty = parseInt(text, 10);
-        const code = userPendingPickCode[chatId];
+        const pendingKey = pendingPickKey(chatId, message.from?.id);
+        const code = userPendingPickCode[pendingKey];
         if (code && qty > 0) {
-            delete userPendingPickCode[chatId];
+            if (qty >= 100) {
+                await sendTelegramWmsMessage(chatId, '⚠️ Mỗi lần xuất phải dưới 100. Vui lòng nhập số từ <b>1 đến 99</b>.');
+                return;
+            }
+            delete userPendingPickCode[pendingKey];
             try {
                 const res = await executeRutHang(code, qty, userLabel);
                 const unit = res.unit;
@@ -736,6 +767,10 @@ async function handleTelegramWmsIncomingMessage(message) {
         const qty = parseInt(parts[2], 10);
         if (!code || isNaN(qty) || qty <= 0) {
             await sendPickQuantityMenu(chatId, code);
+            return;
+        }
+        if (qty >= 100) {
+            await sendTelegramWmsMessage(chatId, '⚠️ Mỗi lần xuất qua Telegram phải dưới 100. Hãy nhập số từ <b>1 đến 99</b>.');
             return;
         }
         try {
@@ -927,4 +962,3 @@ async function runPollingLoop() {
 }
 
 runPollingLoop();
-
