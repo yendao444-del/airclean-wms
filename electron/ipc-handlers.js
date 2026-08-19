@@ -5829,17 +5829,108 @@ ipcMain.handle("handlingUnits:updateUnit", async (_event, payload = {}) => {
 // ────────────────────────────────────────────────────────────────────────────
 const TELEGRAM_WMS_BOT_TOKEN = "8848101745:AAHqXEJimBslv1YoWWw9WH0XBJxv7uOMv_A";
 const TELEGRAM_WMS_DEFAULT_CHAT = "1397184795";
+const TELEGRAM_WMS_GROUP_CONFIG_KEY = "telegramWmsGroupConfig";
 let telegramWmsBotRunning = false;
 let telegramWmsLastUpdateId = 0;
 let telegramWmsPollRequest = null;
 let telegramWmsPollTimer = null;
 let telegramWmsLastPollAt = null;
 let telegramWmsLastError = null;
+let telegramWmsGroupChatId = null;
+let telegramWmsGroupTitle = "";
+let telegramWmsGroupConfigLoaded = false;
+const telegramWmsPendingCustomPicks = new Map();
 
-function sendTelegramWmsMessage(chatId, text, replyMarkup = null) {
+function telegramWmsActorKey(chatId, userId) {
+  return `${chatId}:${userId}`;
+}
+
+function formatTelegramWmsLocation(rawLocation) {
+  if (!rawLocation) return "Chưa xếp vị trí";
+  try {
+    const parsed =
+      typeof rawLocation === "string" ? JSON.parse(rawLocation) : rawLocation;
+    const parts = [parsed.zone, parsed.rack, parsed.level, parsed.bin].filter(
+      Boolean,
+    );
+    return parts.length ? parts.join(" · ") : "Chưa xếp vị trí";
+  } catch {
+    return String(rawLocation);
+  }
+}
+
+function buildTelegramWmsPickResult(code, res) {
+  const unit = res.unit;
+  return (
+    `🚀 <b>RÚT HÀNG THÀNH CÔNG!</b>\n\n` +
+    `📦 <b>Mã Kiện:</b> <code>${code}</code>\n` +
+    `🏷️ <b>SKU:</b> <code>${unit.sku || unit.skuName}</code>\n` +
+    `📉 <b>Đã rút:</b> <b>${res.picked.toLocaleString("vi-VN")} ${unit.baseUnit || unit.unitName || "Gói"}</b>\n` +
+    `📊 <b>Còn lại theo sổ:</b> <b>${res.remaining.toLocaleString("vi-VN")} ${unit.baseUnit || unit.unitName || "Gói"}</b> ${unit.status === "pending_check" ? "<i>(Chờ kiểm thực tế)</i>" : ""}\n` +
+    `🛒 <b>Tổng tại Khu đóng gói:</b> <b>${Number(res.destinationPcs ?? res.packingAreaPcs ?? 0).toLocaleString("vi-VN")} đơn vị</b>`
+  );
+}
+
+async function loadTelegramWmsGroupConfig() {
+  if (telegramWmsGroupConfigLoaded) {
+    return { chatId: telegramWmsGroupChatId, title: telegramWmsGroupTitle };
+  }
+  telegramWmsGroupConfigLoaded = true;
+  if (!prisma) return { chatId: null, title: "" };
+  try {
+    const configRow = await prisma.appConfig.findUnique({
+      where: { key: TELEGRAM_WMS_GROUP_CONFIG_KEY },
+    });
+    const configValue = JSON.parse(configRow?.value || "{}");
+    telegramWmsGroupChatId = configValue.chatId
+      ? String(configValue.chatId)
+      : null;
+    telegramWmsGroupTitle = String(configValue.title || "");
+  } catch (error) {
+    console.warn("[TelegramWMS] Cannot load group config:", error.message);
+  }
+  return { chatId: telegramWmsGroupChatId, title: telegramWmsGroupTitle };
+}
+
+async function saveTelegramWmsGroupConfig(chat) {
+  if (!prisma) throw new Error("Database chưa sẵn sàng để lưu nhóm Telegram.");
+  const configValue = {
+    chatId: String(chat.id),
+    title: String(chat.title || "Nhóm quản lý kiện hàng"),
+    type: String(chat.type || "group"),
+    connectedAt: new Date().toISOString(),
+  };
+  await prisma.appConfig.upsert({
+    where: { key: TELEGRAM_WMS_GROUP_CONFIG_KEY },
+    create: {
+      key: TELEGRAM_WMS_GROUP_CONFIG_KEY,
+      value: JSON.stringify(configValue),
+    },
+    update: { value: JSON.stringify(configValue) },
+  });
+  telegramWmsGroupChatId = configValue.chatId;
+  telegramWmsGroupTitle = configValue.title;
+  telegramWmsGroupConfigLoaded = true;
+  return configValue;
+}
+
+async function isTelegramWmsContextAllowed(chat, from) {
+  if (!chat) return false;
+  const chatType = String(chat.type || "private");
+  if (chatType === "private") {
+    return String(from?.id || chat.id) === TELEGRAM_WMS_DEFAULT_CHAT;
+  }
+  const groupConfig = await loadTelegramWmsGroupConfig();
+  return Boolean(
+    groupConfig.chatId && String(chat.id) === String(groupConfig.chatId),
+  );
+}
+
+async function sendTelegramWmsMessage(chatId, text, replyMarkup = null) {
   if (!TELEGRAM_WMS_BOT_TOKEN) return Promise.resolve(null);
+  const groupConfig = await loadTelegramWmsGroupConfig();
+  const targetChat = chatId || groupConfig.chatId || TELEGRAM_WMS_DEFAULT_CHAT;
   return new Promise((resolve) => {
-    const targetChat = chatId || TELEGRAM_WMS_DEFAULT_CHAT;
     const payload = { chat_id: targetChat, text, parse_mode: "HTML" };
     if (replyMarkup) payload.reply_markup = replyMarkup;
     const data = JSON.stringify(payload);
@@ -6555,18 +6646,10 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
   const remaining = unit.remainingQuantity ?? unit.currentPcs ?? 0;
   const baseUnit = unit.baseUnit || unit.unitName || "Gói";
 
-  // Tạo các mức rút gợi ý 1 chạm
-  const qtyOptions = [];
-  if (remaining <= 50) {
-    if (remaining > 10) qtyOptions.push(10);
-    if (remaining > 20) qtyOptions.push(20);
+  // Các lần xuất lẻ đều dưới 100; số khác được nhập qua nút tùy chọn.
+  const qtyOptions = [10, 20, 40, 50].filter((qty) => qty <= remaining);
+  if (remaining < 100 && !qtyOptions.includes(remaining)) {
     qtyOptions.push(remaining);
-  } else if (remaining <= 250) {
-    qtyOptions.push(20, 50, 100);
-    if (!qtyOptions.includes(remaining)) qtyOptions.push(remaining);
-  } else {
-    qtyOptions.push(50, 100, 200, 500);
-    if (!qtyOptions.includes(remaining)) qtyOptions.push(remaining);
   }
 
   const qtyRow1 = [];
@@ -6584,6 +6667,9 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
   if (qtyRow1.length) inlineKeyboard.push(qtyRow1);
   if (qtyRow2.length) inlineKeyboard.push(qtyRow2);
   inlineKeyboard.push([
+    { text: "✍️ Nhập số lượng tùy chọn", callback_data: `custom_pick:${code}` },
+  ]);
+  inlineKeyboard.push([
     { text: "🔙 Chọn kiện khác", callback_data: "menu_rut" },
   ]);
 
@@ -6591,7 +6677,7 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
     `📦 <b>RÚT HÀNG TỪ KIỆN:</b> <code>${code}</code>\n` +
     `🏷️ <b>SKU:</b> <code>${unit.sku || unit.skuName}</code>\n` +
     `📊 <b>Tồn trong kiện:</b> <b>${remaining.toLocaleString("vi-VN")} ${baseUnit}</b>\n` +
-    `📍 <b>Vị trí:</b> ${unit.zone || "Khu A1"}\n\n` +
+    `📍 <b>Vị trí:</b> ${formatTelegramWmsLocation(unit.zone || unit.location)}\n\n` +
     `👉 <b>CHẠM VÀO SỐ LƯỢNG MUỐN RÚT:</b>`;
 
   const markup = { inline_keyboard: inlineKeyboard };
@@ -6610,6 +6696,19 @@ async function handleTelegramWmsCallbackQuery(callbackQuery) {
   const queryId = callbackQuery.id;
   const actor = `Telegram: ${callbackQuery.from?.username || callbackQuery.from?.first_name || chatId}`;
 
+  if (
+    !(await isTelegramWmsContextAllowed(
+      callbackQuery.message?.chat,
+      callbackQuery.from,
+    ))
+  ) {
+    await answerTelegramCallbackQuery(
+      queryId,
+      "Nhóm này chưa được kết nối với hệ thống kho.",
+    );
+    return;
+  }
+
   if (data.startsWith("pick_unit:")) {
     const code = data.split(":")[1];
     await answerTelegramCallbackQuery(queryId, `Đã chọn kiện ${code}`);
@@ -6617,20 +6716,41 @@ async function handleTelegramWmsCallbackQuery(callbackQuery) {
     return;
   }
 
+  if (data.startsWith("custom_pick:")) {
+    const code = data.slice("custom_pick:".length);
+    const actorKey = telegramWmsActorKey(chatId, callbackQuery.from?.id);
+    telegramWmsPendingCustomPicks.set(actorKey, {
+      code,
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    });
+    await answerTelegramCallbackQuery(queryId, "Hãy nhập số lượng muốn rút");
+    await sendTelegramWmsMessage(
+      chatId,
+      `✍️ <b>NHẬP SỐ LƯỢNG TÙY CHỌN</b>\n\n📦 Kiện: <code>${code}</code>\n👉 Hãy trả lời tin nhắn này bằng một số từ <b>1 đến 99</b>.\n<i>Ví dụ: 15, 30, 45, 75...</i>`,
+      {
+        force_reply: true,
+        selective: true,
+        input_field_placeholder: "Nhập số lượng từ 1 đến 99",
+      },
+    );
+    return;
+  }
+
   if (data.startsWith("do_pick:")) {
     const [, code, qtyStr] = data.split(":");
     const qty = parseInt(qtyStr, 10);
+    if (!Number.isInteger(qty) || qty < 1 || qty >= 100) {
+      await answerTelegramCallbackQuery(
+        queryId,
+        "Mỗi lần xuất phải từ 1 đến 99.",
+      );
+      await sendPickQuantityMenu(chatId, code, messageId);
+      return;
+    }
     try {
       const res = await executeRutHang(code, qty, actor);
       await answerTelegramCallbackQuery(queryId, `✅ Đã rút ${qty} sản phẩm!`);
-      const unit = res.unit;
-      const resHtml =
-        `🚀 <b>RÚT HÀNG 1 CHẠM THÀNH CÔNG!</b>\n\n` +
-        `📦 <b>Mã Kiện:</b> <code>${code}</code>\n` +
-        `🏷️ <b>SKU:</b> <code>${unit.sku || unit.skuName}</code>\n` +
-        `📉 <b>Đã rút:</b> <b>${res.picked.toLocaleString("vi-VN")} ${unit.baseUnit || unit.unitName || "Gói"}</b>\n` +
-        `📊 <b>Còn lại theo sổ:</b> <b>${res.remaining.toLocaleString("vi-VN")} ${unit.baseUnit || unit.unitName || "Gói"}</b> ${unit.status === "pending_check" ? "<i>(Chờ kiểm thực tế)</i>" : ""}\n` +
-        `🛒 <b>Tổng tại Khu đóng gói:</b> <b>${Number(res.destinationPcs ?? res.packingAreaPcs ?? 0).toLocaleString("vi-VN")} đơn vị</b>`;
+      const resHtml = buildTelegramWmsPickResult(code, res);
 
       const markup = {
         inline_keyboard: [
@@ -6725,7 +6845,112 @@ async function handleTelegramWmsIncomingMessage(message) {
   const chatId = message.chat.id;
   const text = message.text.trim();
   const parts = text.split(/\s+/);
-  const cmd = parts[0]?.toLowerCase();
+  const cmd = parts[0]?.split("@")[0]?.toLowerCase();
+  const chatType = String(message.chat?.type || "private");
+  const isGroup = chatType === "group" || chatType === "supergroup";
+
+  if (cmd === "/ketnoi") {
+    if (!isGroup) {
+      await sendTelegramWmsMessage(
+        chatId,
+        "ℹ️ Hãy tạo nhóm Telegram, thêm bot làm quản trị viên rồi gửi <code>/ketnoi</code> ngay trong nhóm đó.",
+      );
+      return;
+    }
+    if (String(message.from?.id || "") !== TELEGRAM_WMS_DEFAULT_CHAT) {
+      await sendTelegramWmsMessage(
+        chatId,
+        "⛔ Chỉ tài khoản chủ hệ thống mới được phép kết nối nhóm này.",
+      );
+      return;
+    }
+    try {
+      const connected = await saveTelegramWmsGroupConfig(message.chat);
+      await sendTelegramWmsMessage(
+        chatId,
+        `✅ <b>ĐÃ KẾT NỐI NHÓM QUẢN LÝ KIỆN HÀNG</b>\n\n🏢 Nhóm: <b>${connected.title.replace(/[<>]/g, "")}</b>\n🆔 Group ID: <code>${connected.chatId}</code>\n👥 Nhân viên trong nhóm có thể dùng menu bên dưới để rút hàng. Mọi thao tác đều ghi lại tài khoản Telegram thực hiện.`,
+        TELEGRAM_MAIN_KEYBOARD,
+      );
+      await sendRutHangMenu(chatId);
+    } catch (error) {
+      await sendTelegramWmsMessage(
+        chatId,
+        `❌ Không thể kết nối nhóm: ${error.message}`,
+      );
+    }
+    return;
+  }
+
+  if (!(await isTelegramWmsContextAllowed(message.chat, message.from))) {
+    if (isGroup) {
+      await sendTelegramWmsMessage(
+        chatId,
+        "🔒 Nhóm này chưa được cấp quyền. Chủ hệ thống hãy gửi <code>/ketnoi</code> để đăng ký nhóm.",
+      );
+    } else {
+      await sendTelegramWmsMessage(
+        chatId,
+        "🔒 Bot chỉ nhận thao tác của nhân viên trong nhóm quản lý kiện hàng đã được kết nối.",
+      );
+    }
+    return;
+  }
+
+  const actorKey = telegramWmsActorKey(chatId, message.from?.id);
+  const pendingCustomPick = telegramWmsPendingCustomPicks.get(actorKey);
+  if (pendingCustomPick) {
+    if (pendingCustomPick.expiresAt < Date.now()) {
+      telegramWmsPendingCustomPicks.delete(actorKey);
+      await sendTelegramWmsMessage(
+        chatId,
+        "⌛ Yêu cầu nhập số lượng đã hết hạn. Vui lòng chọn lại kiện và bấm <b>Nhập số lượng tùy chọn</b>.",
+      );
+      return;
+    }
+    if (cmd === "/huy") {
+      telegramWmsPendingCustomPicks.delete(actorKey);
+      await sendTelegramWmsMessage(chatId, "✅ Đã hủy nhập số lượng tùy chọn.");
+      return;
+    }
+    if (!/^\d+$/.test(text)) {
+      await sendTelegramWmsMessage(
+        chatId,
+        "⚠️ Vui lòng chỉ nhập một số từ <b>1 đến 99</b>, hoặc gửi <code>/huy</code> để hủy.",
+      );
+      return;
+    }
+
+    const qty = Number(text);
+    if (!Number.isInteger(qty) || qty < 1 || qty >= 100) {
+      await sendTelegramWmsMessage(
+        chatId,
+        "⚠️ Mỗi lần xuất phải dưới 100. Vui lòng nhập số từ <b>1 đến 99</b>.",
+      );
+      return;
+    }
+
+    const actor = `Telegram: ${message.from?.username || message.from?.first_name || chatId}`;
+    try {
+      const res = await executeRutHang(pendingCustomPick.code, qty, actor);
+      telegramWmsPendingCustomPicks.delete(actorKey);
+      await sendTelegramWmsMessage(
+        chatId,
+        buildTelegramWmsPickResult(pendingCustomPick.code, res),
+        {
+          inline_keyboard: [
+            [{ text: "📦 Rút tiếp kiện khác", callback_data: "menu_rut" }],
+            [{ text: "📊 Xem tồn kho", callback_data: "menu_ton" }],
+          ],
+        },
+      );
+    } catch (error) {
+      await sendTelegramWmsMessage(
+        chatId,
+        `❌ <b>Không thể rút hàng:</b> ${error.message}\n👉 Bạn có thể nhập lại số khác hoặc gửi <code>/huy</code>.`,
+      );
+    }
+    return;
+  }
 
   // Các phím bấm từ bàn phím dưới màn hình
   if (
@@ -6839,6 +7064,13 @@ async function handleTelegramWmsIncomingMessage(message) {
         const subParts = p.replace(/^rut[_-]/i, "").split("_");
         const code = subParts[0]?.replace(/_/g, "-");
         const qty = parseInt(subParts[1] || "50", 10);
+        if (!Number.isInteger(qty) || qty < 1 || qty >= 100) {
+          await sendTelegramWmsMessage(
+            chatId,
+            "⚠️ Mỗi lần xuất qua Telegram phải từ <b>1 đến 99</b>.",
+          );
+          return;
+        }
         try {
           const result = await executeRutHang(
             code,
@@ -6888,6 +7120,13 @@ async function handleTelegramWmsIncomingMessage(message) {
     const qty = parseInt(parts[2], 10);
     if (!code || isNaN(qty) || qty <= 0) {
       await sendPickQuantityMenu(chatId, code);
+      return;
+    }
+    if (qty >= 100) {
+      await sendTelegramWmsMessage(
+        chatId,
+        "⚠️ Mỗi lần xuất qua Telegram phải dưới 100. Hãy nhập số từ <b>1 đến 99</b>.",
+      );
       return;
     }
     try {
@@ -7098,6 +7337,81 @@ ipcMain.handle("handlingUnits:sealUnit", async (_event, payload = {}) => {
     return { success: true };
   } catch (error) {
     console.error("Seal handling unit error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("handlingUnits:deleteUnit", async (_event, payload = {}) => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Prisma not available");
+    const code = String(payload.code || "").trim().toUpperCase();
+    const reason = String(payload.reason || "Xóa kiện tạo nhầm").trim();
+    if (!code) throw new Error("Mã kiện không hợp lệ.");
+
+    const deleted = await prisma.$transaction(async (tx) => {
+      const unit = await tx.handlingUnit.findUnique({ where: { code } });
+      if (!unit) throw new Error(`Không tìm thấy kiện [${code}].`);
+      if (Number(unit.remainingQuantity) !== Number(unit.initialQuantity)) {
+        throw new Error(
+          `Không thể xóa kiện [${code}] vì đã phát sinh rút hoặc điều chỉnh số lượng.`,
+        );
+      }
+      if (unit.status === "pending_check" || unit.status === "empty") {
+        throw new Error(
+          `Không thể xóa kiện [${code}] ở trạng thái chờ kiểm hoặc đã hết.`,
+        );
+      }
+
+      await appendHandlingUnitsTransaction(tx, {
+        unitId: code,
+        type: "Xóa kiện",
+        quantity: 0,
+        remaining: unit.remainingQuantity,
+        actor: currentSession?.username || "Renderer",
+        note: reason,
+      });
+      try {
+        await tx.handlingUnitAudit.create({
+          data: {
+            entityType: "handling_unit",
+            entityId: code,
+            action: "DELETE",
+            before: JSON.stringify(unit),
+            actorId: currentSession?.id || null,
+          },
+        });
+      } catch {}
+
+      const legacyConfig = await tx.appConfig.findUnique({
+        where: { key: "handlingUnitsRegisterJson" },
+      });
+      if (legacyConfig?.value) {
+        try {
+          const legacyUnits = JSON.parse(legacyConfig.value);
+          if (Array.isArray(legacyUnits)) {
+            await tx.appConfig.update({
+              where: { key: "handlingUnitsRegisterJson" },
+              data: {
+                value: JSON.stringify(
+                  legacyUnits.filter(
+                    (item) =>
+                      String(item?.code || item?.id || "").toUpperCase() !== code,
+                  ),
+                ),
+              },
+            });
+          }
+        } catch {}
+      }
+
+      return tx.handlingUnit.delete({ where: { code } });
+    });
+
+    broadcastHandlingUnitsChanged("DELETE", { code });
+    return { success: true, data: { code, unit: deleted } };
+  } catch (error) {
+    console.error("Delete handling unit error:", error);
     return { success: false, error: error.message };
   }
 });
@@ -7318,12 +7632,16 @@ ipcMain.handle("handlingUnits:finalizePick", async (_event, payload = {}) => {
 });
 
 ipcMain.handle("handlingUnits:getTelegramStatus", async () => {
+  const groupConfig = await loadTelegramWmsGroupConfig();
   return {
     success: true,
     data: {
       isRunning: telegramWmsBotRunning,
       botUsername: "quanlykienhang_bot",
       defaultChatId: TELEGRAM_WMS_DEFAULT_CHAT,
+      groupChatId: groupConfig.chatId,
+      groupTitle: groupConfig.title,
+      isGroupConnected: Boolean(groupConfig.chatId),
       lastPollAt: telegramWmsLastPollAt,
       lastError: telegramWmsLastError,
     },
@@ -7335,7 +7653,7 @@ ipcMain.handle(
   async (_event, payload = {}) => {
     try {
       const text = String(payload.text || "Test message từ hệ thống POS");
-      const chatId = payload.chatId || TELEGRAM_WMS_DEFAULT_CHAT;
+      const chatId = payload.chatId || null;
       const res = await sendTelegramWmsMessage(chatId, text);
       return { success: !!res?.ok, data: res };
     } catch (error) {

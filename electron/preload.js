@@ -77,6 +77,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         finalizePick: (data) => ipcRenderer.invoke('handlingUnits:finalizePick', data),
         moveUnit: (data) => ipcRenderer.invoke('handlingUnits:move', data),
         updateUnit: (data) => ipcRenderer.invoke('handlingUnits:updateUnit', data),
+        deleteUnit: (data) => ipcRenderer.invoke('handlingUnits:deleteUnit', data),
         getTelegramStatus: () => ipcRenderer.invoke('handlingUnits:getTelegramStatus'),
         sendTelegramTest: (data) => ipcRenderer.invoke('handlingUnits:sendTelegramTest', data),
         onChanged: (callback) => {

@@ -39,6 +39,7 @@ import {
   PrinterOutlined,
   CompassOutlined,
   EditOutlined,
+  DeleteOutlined,
 } from "@ant-design/icons";
 import { Warehouse2DMap } from "../components/Warehouse2DMap";
 import sealedSackImage from "../assets/warehouse-sack-sealed.png";
@@ -75,6 +76,15 @@ type LocationItem = {
   type: string;
   description?: string;
   isActive: boolean;
+};
+type TelegramStatus = {
+  isRunning: boolean;
+  botUsername: string;
+  groupChatId: string | null;
+  groupTitle: string;
+  isGroupConnected: boolean;
+  lastPollAt: string | null;
+  lastError: string | null;
 };
 type Workspace = {
   catalog: CatalogItem[];
@@ -591,6 +601,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [pickingUnit, setPickingUnit] = useState<UnitRow | null>(null);
   const [pickForm] = Form.useForm();
   const [isSubmittingPick, setIsSubmittingPick] = useState(false);
+  const [deletingUnitCode, setDeletingUnitCode] = useState("");
   const isSubmittingPickRef = useRef(false);
   const pickRequestIdRef = useRef("");
   const [showFinalCheckModal, setShowFinalCheckModal] = useState(false);
@@ -604,13 +615,16 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [showTelegramModal, setShowTelegramModal] = useState(false);
   const [telegramTestMsg, setTelegramTestMsg] = useState("");
   const [isSendingTelegram, setIsSendingTelegram] = useState(false);
+  const [telegramStatus, setTelegramStatus] = useState<TelegramStatus | null>(
+    null,
+  );
   const [telegramChatLog, setTelegramChatLog] = useState<
     Array<{ id: string; sender: "user" | "bot"; text: string; time: string }>
   >([
     {
       id: "m-0",
       sender: "bot",
-      text: "👋 Chào bạn! Bot <b>@quanlykienhang_bot</b> đã kết nối trực tiếp với kho. Bạn có thể gửi lệnh <code>/khui</code>, <code>/rut</code>, <code>/ton</code> từ ô bên dưới hoặc trực tiếp trên Telegram!",
+      text: "👋 Bot <b>@quanlykienhang_bot</b> hỗ trợ thao tác kho theo nhóm. Tạo nhóm, thêm bot làm quản trị viên, rồi chủ hệ thống gửi <code>/ketnoi</code> trong nhóm để nhân viên cùng rút hàng.",
       time: new Date().toLocaleTimeString("vi-VN", {
         hour: "2-digit",
         minute: "2-digit",
@@ -667,6 +681,16 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       unsub?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (!showTelegramModal) return;
+    window.electronAPI?.handlingUnits
+      ?.getTelegramStatus?.()
+      .then((res) => {
+        if (res?.success && res.data) setTelegramStatus(res.data);
+      })
+      .catch((err) => console.warn("Load Telegram status error:", err));
+  }, [showTelegramModal]);
 
   const handleUnsealUnit = async (unit: UnitRow) => {
     try {
@@ -751,6 +775,45 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     } catch (err: any) {
       message.error(err?.message || "Lỗi đóng niêm phong");
     }
+  };
+
+  const handleDeleteUnit = (unit: UnitRow) => {
+    const hasQuantityChanges = unit.currentPcs !== unit.initialPcs;
+    Modal.confirm({
+      title: `Xóa kiện ${unit.id}?`,
+      icon: <DeleteOutlined style={{ color: "#dc2626" }} />,
+      content: hasQuantityChanges
+        ? "Kiện đã phát sinh biến động số lượng nên không thể xóa. Hãy giữ kiện để bảo toàn lịch sử kho."
+        : "Kiện sẽ bị xóa khỏi danh sách quản lý. Thao tác này vẫn được ghi lại trong lịch sử hệ thống.",
+      okText: "Xóa kiện",
+      okButtonProps: { danger: true, disabled: hasQuantityChanges },
+      cancelText: "Hủy",
+      centered: true,
+      async onOk() {
+        if (hasQuantityChanges) return;
+        setDeletingUnitCode(unit.id);
+        try {
+          const result = await window.electronAPI?.handlingUnits?.deleteUnit({
+            code: unit.id,
+            reason: "Xóa kiện tạo nhầm từ màn Quản lý kiện hàng",
+          });
+          if (!result?.success) {
+            throw new Error(result?.error || "Không thể xóa kiện.");
+          }
+          setWorkspace((previous) => ({
+            ...previous,
+            register: previous.register.filter((item) => item.id !== unit.id),
+          }));
+          setDetail((current) => (current?.id === unit.id ? null : current));
+          message.success(`Đã xóa kiện ${unit.id}.`);
+        } catch (error: any) {
+          message.error(error?.message || "Không thể xóa kiện.");
+          throw error;
+        } finally {
+          setDeletingUnitCode("");
+        }
+      },
+    });
   };
 
   const handlePickUnit = (unit: UnitRow) => {
@@ -898,27 +961,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   };
 
   const sendToTelegramApi = async (text: string) => {
-    try {
-      if (window.electronAPI?.handlingUnits?.sendTelegramTest) {
-        await window.electronAPI.handlingUnits.sendTelegramTest({ text });
-        return;
-      }
-    } catch {}
-    try {
-      await fetch(
-        "https://api.telegram.org/bot8848101745:AAHqXEJimBslv1YoWWw9WH0XBJxv7uOMv_A/sendMessage",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: "1397184795",
-            text,
-            parse_mode: "HTML",
-          }),
-        },
-      );
-    } catch (err) {
-      console.warn("Direct fetch telegram error:", err);
+    if (!window.electronAPI?.handlingUnits?.sendTelegramTest) {
+      throw new Error("Telegram Bot chưa sẵn sàng trong ứng dụng desktop.");
+    }
+    const res = await window.electronAPI.handlingUnits.sendTelegramTest({ text });
+    if (!res?.success) {
+      throw new Error(res?.error || "Không thể gửi tin nhắn tới nhóm Telegram.");
     }
   };
 
@@ -1816,7 +1864,23 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                             {unit.packageType}
                           </span>
                         </div>
-                        {statusFor(unit.status)}
+                        <div className="hu-card-header-actions">
+                          {statusFor(unit.status)}
+                          <Tooltip title="Xóa kiện">
+                            <button
+                              type="button"
+                              className="hu-card-delete-icon"
+                              disabled={deletingUnitCode === unit.id}
+                              aria-label={`Xóa kiện ${unit.id}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleDeleteUnit(unit);
+                              }}
+                            >
+                              <DeleteOutlined />
+                            </button>
+                          </Tooltip>
+                        </div>
                       </header>
                       <img src={imageFor(unit)} alt={`Minh hoạ ${unit.id}`} />
                       <div className="hu-package-number">
@@ -3292,7 +3356,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 type="secondary"
                 style={{ display: "block", fontSize: 12 }}
               >
-                Bot: @quanlykienhang_bot · Chat ID: 1397184795
+                Bot: @quanlykienhang_bot · {telegramStatus?.isGroupConnected
+                  ? `Nhóm: ${telegramStatus.groupTitle || telegramStatus.groupChatId}`
+                  : "Chưa kết nối nhóm"}
               </Typography.Text>
             </div>
           </Flex>
@@ -3308,9 +3374,19 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         <div className="hu-telegram-modal-content">
           <div className="hu-tg-banner">
             <p>
-              🤖 Bot <b>@quanlykienhang_bot</b> đang chạy nền và kết nối trực
-              tiếp với hệ thống kho. Bạn có thể mở ứng dụng Telegram trên điện
-              thoại và gửi lệnh trực tiếp bất kỳ lúc nào!
+              {telegramStatus?.isGroupConnected ? (
+                <>
+                  ✅ Bot đang kết nối với nhóm <b>{telegramStatus.groupTitle}</b>.
+                  Nhân viên trong nhóm có thể dùng menu để rút hàng và hệ thống
+                  sẽ ghi lại tài khoản Telegram thực hiện.
+                </>
+              ) : (
+                <>
+                  1. Tạo nhóm Telegram và thêm nhân viên. 2. Thêm bot
+                  <b> @quanlykienhang_bot</b> làm quản trị viên. 3. Chủ hệ thống
+                  gửi <code>/ketnoi</code> trong nhóm để hoàn tất kết nối.
+                </>
+              )}
             </p>
           </div>
 
