@@ -1,4 +1,4 @@
-import { useState, useEffect, lazy, Suspense, Component, ErrorInfo, ReactNode } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense, Component, ErrorInfo, ReactNode } from 'react';
 import { Layout, Menu, Button, Typography, ConfigProvider, Space, Dropdown, Tooltip, Avatar } from 'antd';
 import AntAppProvider from './components/AntAppProvider';
 import {
@@ -113,6 +113,7 @@ function AppContent() {
     const { getAccessibleMenuKeys, hasPermission } = usePermissions();
     const [selectedKey, setSelectedKey] = useState('dashboard');
     const [collapsed, setCollapsed] = useState(true);
+    const previousAccessiblePageRef = useRef('dashboard');
     const roleLabel = user?.role === 'admin' ? 'Quản trị viên' : user?.role === 'manager' ? 'Quản lý' : 'Nhân viên';
     const profileLabel = user?.fullName?.trim().toLocaleLowerCase('vi-VN') === roleLabel.toLocaleLowerCase('vi-VN')
         ? user.username
@@ -123,8 +124,22 @@ function AppContent() {
     const canAccessKey = (key: string) => accessibleKeys.includes(key);
     const navigateTo = (key: string) => {
         if (key === 'my-profile' || canAccessKey(key)) {
-            setSelectedKey(key);
+            setSelectedKey(currentKey => {
+                if (key === 'handling-units' && currentKey !== 'handling-units') {
+                    previousAccessiblePageRef.current = currentKey;
+                }
+                return key;
+            });
         }
+    };
+
+    const exitHandlingUnits = () => {
+        const previousKey = previousAccessiblePageRef.current;
+        const destination =
+            previousKey !== 'handling-units' && canAccessKey(previousKey)
+                ? previousKey
+                : accessibleKeys.find(key => key !== 'handling-units') || 'my-profile';
+        navigateTo(destination);
     };
 
     // Redirect về trang đầu tiên có quyền khi user không có quyền xem dashboard
@@ -368,7 +383,7 @@ function AppContent() {
             case 'stock-check':
                 return withAppData(<StockCheckPage />);
             case 'handling-units':
-                return <HandlingUnitsPage onExit={() => navigateTo('stock-balance')} />;
+                return <HandlingUnitsPage onExit={exitHandlingUnits} />;
             case 'business-report':
                 return <BusinessReportPage />;
             case 'daily-tasks':
