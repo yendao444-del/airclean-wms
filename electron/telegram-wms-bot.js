@@ -1,8 +1,10 @@
 const https = require('https');
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
-const TELEGRAM_WMS_BOT_TOKEN = '8848101745:AAHqXEJimBslv1YoWWw9WH0XBJxv7uOMv_A';
+const TELEGRAM_WMS_BOT_TOKEN = process.env.TELEGRAM_WMS_BOT_TOKEN || '';
 const TELEGRAM_WMS_DEFAULT_CHAT = '1397184795';
 let telegramWmsLastUpdateId = 0;
 

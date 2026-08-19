@@ -5827,7 +5827,8 @@ ipcMain.handle("handlingUnits:updateUnit", async (_event, payload = {}) => {
 // ────────────────────────────────────────────────────────────────────────────
 // TELEGRAM BOT SERVICE — QUẢN LÝ KIỆN HÀNG WMS (@quanlykienhang_bot)
 // ────────────────────────────────────────────────────────────────────────────
-const TELEGRAM_WMS_BOT_TOKEN = "8848101745:AAHqXEJimBslv1YoWWw9WH0XBJxv7uOMv_A";
+// Keep the bot credential outside source so revoking a leaked token is immediate.
+const TELEGRAM_WMS_BOT_TOKEN = process.env.TELEGRAM_WMS_BOT_TOKEN || "";
 const TELEGRAM_WMS_DEFAULT_CHAT = "1397184795";
 const TELEGRAM_WMS_GROUP_CONFIG_KEY = "telegramWmsGroupConfig";
 let telegramWmsBotRunning = false;
