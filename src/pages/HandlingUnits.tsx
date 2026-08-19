@@ -3627,12 +3627,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                       <b>{unit.packageLabel || unit.packageType}</b>
                     </div>
                     <div className="hu-pl-info-item">
-                      <label>SỐ LƯỢNG:</label>
-                      <b className="hu-pl-qty-val">
-                        {fmt(unit.initialPcs)} {unit.unitName}
-                      </b>
-                    </div>
-                    <div className="hu-pl-info-item">
                       <label>VỊ TRÍ LƯU KHO:</label>
                       <b className="hu-pl-loc-val">{locationFor(unit)}</b>
                     </div>
@@ -3642,6 +3636,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     </div>
                   </div>
                 </div>
+              </div>
+
+              <div className="hu-pl-hero-qty">
+                <strong>{fmt(unit.initialPcs)}</strong>
+                <b>{unit.unitName}</b>
               </div>
 
               {/* FOOTER TEM */}
