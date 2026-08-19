@@ -5831,7 +5831,12 @@ ipcMain.handle("handlingUnits:updateUnit", async (_event, payload = {}) => {
 const TELEGRAM_WMS_BOT_TOKEN = process.env.TELEGRAM_WMS_BOT_TOKEN || "";
 const TELEGRAM_WMS_DEFAULT_CHAT = "1397184795";
 const TELEGRAM_WMS_GROUP_CONFIG_KEY = "telegramWmsGroupConfig";
+const TELEGRAM_WMS_LEASE_KEY = "telegramWmsPollingLease";
+const TELEGRAM_WMS_LEASE_DURATION_MS = 75 * 1000;
+const TELEGRAM_WMS_INSTANCE_ID = `${os.hostname()}:${process.pid}:${crypto.randomBytes(4).toString("hex")}`;
 let telegramWmsBotRunning = false;
+let telegramWmsIsLeaseOwner = false;
+let telegramWmsLeaseOwnerLabel = "";
 let telegramWmsLastUpdateId = 0;
 let telegramWmsPollRequest = null;
 let telegramWmsPollTimer = null;
@@ -5841,6 +5846,105 @@ let telegramWmsGroupChatId = null;
 let telegramWmsGroupTitle = "";
 let telegramWmsGroupConfigLoaded = false;
 const telegramWmsPendingCustomPicks = new Map();
+
+function parseTelegramWmsLease(value) {
+  try {
+    const parsed = JSON.parse(String(value || ""));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function tryAcquireTelegramWmsLease() {
+  if (!prisma) return false;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const acquired = await prisma.$transaction(async (tx) => {
+        const clockRows = await tx.$queryRaw`
+          SELECT CURRENT_TIMESTAMP AS "dbNow"
+        `;
+        const dbNow = new Date(clockRows?.[0]?.dbNow || Date.now()).getTime();
+        const nextLease = {
+          ownerId: TELEGRAM_WMS_INSTANCE_ID,
+          ownerLabel: `${os.hostname()} (PID ${process.pid})`,
+          expiresAt: new Date(
+            dbNow + TELEGRAM_WMS_LEASE_DURATION_MS,
+          ).toISOString(),
+        };
+        const rows = await tx.$queryRaw`
+          SELECT "value"
+          FROM "AppConfig"
+          WHERE "key" = ${TELEGRAM_WMS_LEASE_KEY}
+          FOR UPDATE
+        `;
+        const currentRow = Array.isArray(rows) ? rows[0] : null;
+
+        if (!currentRow) {
+          await tx.appConfig.create({
+            data: {
+              key: TELEGRAM_WMS_LEASE_KEY,
+              value: JSON.stringify(nextLease),
+            },
+          });
+          telegramWmsLeaseOwnerLabel = nextLease.ownerLabel;
+          return true;
+        }
+
+        const currentLease = parseTelegramWmsLease(currentRow.value);
+        const expiresAt = Date.parse(String(currentLease.expiresAt || ""));
+        const isCurrentOwner = currentLease.ownerId === TELEGRAM_WMS_INSTANCE_ID;
+        const isExpired = !Number.isFinite(expiresAt) || expiresAt <= dbNow;
+
+        if (!isCurrentOwner && !isExpired) {
+          telegramWmsLeaseOwnerLabel = String(
+            currentLease.ownerLabel || currentLease.ownerId || "máy khác",
+          );
+          return false;
+        }
+
+        await tx.appConfig.update({
+          where: { key: TELEGRAM_WMS_LEASE_KEY },
+          data: { value: JSON.stringify(nextLease) },
+        });
+        telegramWmsLeaseOwnerLabel = nextLease.ownerLabel;
+        return true;
+      });
+      return acquired;
+    } catch (error) {
+      // Hai máy có thể cùng tạo bản ghi lease lần đầu; máy thua thử đọc lại.
+      if (error?.code === "P2002" && attempt === 0) continue;
+      telegramWmsLastError = `Không thể giành quyền Telegram bot: ${error.message}`;
+      console.warn("[TelegramWMS] Lease error:", error.message);
+      return false;
+    }
+  }
+
+  return false;
+}
+
+async function releaseTelegramWmsLease() {
+  if (!prisma || !telegramWmsIsLeaseOwner) return;
+  try {
+    const current = await prisma.appConfig.findUnique({
+      where: { key: TELEGRAM_WMS_LEASE_KEY },
+    });
+    const lease = parseTelegramWmsLease(current?.value);
+    if (lease.ownerId !== TELEGRAM_WMS_INSTANCE_ID) return;
+    await prisma.appConfig.update({
+      where: { key: TELEGRAM_WMS_LEASE_KEY },
+      data: {
+        value: JSON.stringify({
+          ...lease,
+          expiresAt: new Date(0).toISOString(),
+        }),
+      },
+    });
+  } catch (error) {
+    console.warn("[TelegramWMS] Release lease error:", error.message);
+  }
+}
 
 function telegramWmsActorKey(chatId, userId) {
   return `${chatId}:${userId}`;
@@ -5860,16 +5964,30 @@ function formatTelegramWmsLocation(rawLocation) {
   }
 }
 
-function buildTelegramWmsPickResult(code, res) {
+function buildTelegramWmsPickResult(code, res, actorLabel = "") {
   const unit = res.unit;
+  const safeActor = String(actorLabel || "").replace(/[<>]/g, "");
+  const unitName = unit.baseUnit || unit.unitName || "Gói";
   return (
-    `🚀 <b>RÚT HÀNG THÀNH CÔNG!</b>\n\n` +
-    `📦 <b>Mã Kiện:</b> <code>${code}</code>\n` +
-    `🏷️ <b>SKU:</b> <code>${unit.sku || unit.skuName}</code>\n` +
-    `📉 <b>Đã rút:</b> <b>${res.picked.toLocaleString("vi-VN")} ${unit.baseUnit || unit.unitName || "Gói"}</b>\n` +
-    `📊 <b>Còn lại theo sổ:</b> <b>${res.remaining.toLocaleString("vi-VN")} ${unit.baseUnit || unit.unitName || "Gói"}</b> ${unit.status === "pending_check" ? "<i>(Chờ kiểm thực tế)</i>" : ""}\n` +
-    `🛒 <b>Tổng tại Khu đóng gói:</b> <b>${Number(res.destinationPcs ?? res.packingAreaPcs ?? 0).toLocaleString("vi-VN")} đơn vị</b>`
+    `✅ <b>${safeActor || "Nhân viên kho"} rút hàng thành công ${code}</b>\n` +
+    `📉 <b>Đã rút:</b> ${res.picked.toLocaleString("vi-VN")} ${unitName}\n` +
+    `📊 <b>Còn lại:</b> ${res.remaining.toLocaleString("vi-VN")} ${unitName}`
   );
+}
+
+function buildTelegramWmsPostPickKeyboard(code, remaining) {
+  const rows = [];
+  if (Number(remaining) > 0) {
+    rows.push([
+      {
+        text: "🔁 Rút tiếp kiện này",
+        callback_data: `pick_unit:${code}`,
+      },
+    ]);
+  }
+  rows.push([{ text: "📦 Rút kiện khác", callback_data: "menu_rut_list" }]);
+  rows.push([{ text: "📊 Xem tồn kho", callback_data: "menu_ton" }]);
+  return { inline_keyboard: rows };
 }
 
 async function loadTelegramWmsGroupConfig() {
@@ -6082,6 +6200,37 @@ function editTelegramWmsMessage(chatId, messageId, text, replyMarkup = null) {
   });
 }
 
+function clearTelegramWmsInlineKeyboard(chatId, messageId) {
+  if (!TELEGRAM_WMS_BOT_TOKEN || !chatId || !messageId)
+    return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const data = JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: { inline_keyboard: [] },
+    });
+    const req = https.request(
+      {
+        hostname: "api.telegram.org",
+        path: `/bot${TELEGRAM_WMS_BOT_TOKEN}/editMessageReplyMarkup`,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(data),
+        },
+        timeout: 10000,
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () => resolve(true));
+      },
+    );
+    req.on("error", () => resolve(null));
+    req.write(data);
+    req.end();
+  });
+}
+
 function broadcastHandlingUnitsChanged(type, data) {
   try {
     const { BrowserWindow } = require("electron");
@@ -6250,14 +6399,16 @@ async function executeKhuiKien(code, actor = "Telegram Bot") {
           where: { code: normalizedCode },
           data: { status: "opened", updatedAt: new Date() },
         });
-        broadcastHandlingUnitsChanged("UNSEAL", {
-          code: normalizedCode,
-          unit: updated,
-          actor,
-        });
         return updated;
       });
-      if (res) return res;
+      if (res) {
+        broadcastHandlingUnitsChanged("UNSEAL", {
+          code: normalizedCode,
+          unit: res,
+          actor,
+        });
+        return res;
+      }
     } catch (dbErr) {
       if (
         dbErr.message.includes("đang mở") ||
@@ -6569,7 +6720,7 @@ const TELEGRAM_MAIN_KEYBOARD = {
   resize_keyboard: true,
 };
 
-async function sendRutHangMenu(chatId, messageId = null) {
+async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
   const list = await getAllHandlingUnitsFromStore();
   const openedUnits = list.filter(
     (u) => u.status === "opened" || u.status === "Đang sử dụng",
@@ -6595,8 +6746,9 @@ async function sendRutHangMenu(chatId, messageId = null) {
     return;
   }
 
-  // Chỉ có một kiện đang mở thì bỏ qua bước chọn kiện.
-  if (openedUnits.length === 1) {
+  // Lối tắt chỉ áp dụng khi mở menu rút hàng lần đầu. Nút "Chọn kiện khác"
+  // phải luôn hiện danh sách để người dùng có thể khui hoặc chọn kiện khác.
+  if (openedUnits.length === 1 && !forceList) {
     await sendPickQuantityMenu(
       chatId,
       openedUnits[0].code || openedUnits[0].id,
@@ -6720,7 +6872,7 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
     { text: "✍️ Nhập số lượng tùy chọn", callback_data: `custom_pick:${code}` },
   ]);
   inlineKeyboard.push([
-    { text: "🔙 Chọn kiện khác", callback_data: "menu_rut" },
+    { text: "🔙 Chọn kiện khác", callback_data: "menu_rut_list" },
   ]);
 
   const text =
@@ -6745,6 +6897,9 @@ async function handleTelegramWmsCallbackQuery(callbackQuery) {
   const data = callbackQuery.data;
   const queryId = callbackQuery.id;
   const actor = `Telegram: ${callbackQuery.from?.username || callbackQuery.from?.first_name || chatId}`;
+  const actorLabel = callbackQuery.from?.username
+    ? `@${callbackQuery.from.username}`
+    : callbackQuery.from?.first_name || "Nhân viên kho";
 
   if (
     !(await isTelegramWmsContextAllowed(
@@ -6800,14 +6955,9 @@ async function handleTelegramWmsCallbackQuery(callbackQuery) {
     try {
       const res = await executeRutHang(code, qty, actor);
       await answerTelegramCallbackQuery(queryId, `✅ Đã rút ${qty} sản phẩm!`);
-      const resHtml = buildTelegramWmsPickResult(code, res);
+      const resHtml = buildTelegramWmsPickResult(code, res, actorLabel);
 
-      const markup = {
-        inline_keyboard: [
-          [{ text: "📦 Rút tiếp kiện khác", callback_data: "menu_rut" }],
-          [{ text: "📊 Xem tồn kho", callback_data: "menu_ton" }],
-        ],
-      };
+      const markup = buildTelegramWmsPostPickKeyboard(code, res.remaining);
       await editTelegramWmsMessage(chatId, messageId, resHtml, markup);
     } catch (err) {
       await answerTelegramCallbackQuery(queryId, `❌ Lỗi: ${err.message}`);
@@ -6839,7 +6989,7 @@ async function handleTelegramWmsCallbackQuery(callbackQuery) {
               callback_data: `pick_unit:${unit.code || unit.id}`,
             },
           ],
-          [{ text: "🔙 Danh sách kiện mở", callback_data: "menu_rut" }],
+          [{ text: "🔙 Danh sách kiện mở", callback_data: "menu_rut_list" }],
         ],
       };
       await editTelegramWmsMessage(chatId, messageId, resHtml, markup);
@@ -6856,6 +7006,12 @@ async function handleTelegramWmsCallbackQuery(callbackQuery) {
   if (data === "menu_rut") {
     await answerTelegramCallbackQuery(queryId);
     await sendRutHangMenu(chatId, messageId);
+    return;
+  }
+
+  if (data === "menu_rut_list") {
+    await answerTelegramCallbackQuery(queryId);
+    await sendRutHangMenu(chatId, messageId, true);
     return;
   }
 
@@ -6998,18 +7154,19 @@ async function handleTelegramWmsIncomingMessage(message) {
     }
 
     const actor = `Telegram: ${message.from?.username || message.from?.first_name || chatId}`;
+    const actorLabel = message.from?.username
+      ? `@${message.from.username}`
+      : message.from?.first_name || "Nhân viên kho";
     try {
       const res = await executeRutHang(pendingCustomPick.code, qty, actor);
       telegramWmsPendingCustomPicks.delete(actorKey);
       await sendTelegramWmsMessage(
         chatId,
-        buildTelegramWmsPickResult(pendingCustomPick.code, res),
-        {
-          inline_keyboard: [
-            [{ text: "📦 Rút tiếp kiện khác", callback_data: "menu_rut" }],
-            [{ text: "📊 Xem tồn kho", callback_data: "menu_ton" }],
-          ],
-        },
+        buildTelegramWmsPickResult(pendingCustomPick.code, res, actorLabel),
+        buildTelegramWmsPostPickKeyboard(
+          pendingCustomPick.code,
+          res.remaining,
+        ),
       );
     } catch (error) {
       await sendTelegramWmsMessage(
@@ -7151,12 +7308,10 @@ async function handleTelegramWmsIncomingMessage(message) {
             `📉 <b>Đã rút:</b> <b>${result.picked.toLocaleString("vi-VN")} ${result.unit.baseUnit || result.unit.unitName || "Gói"}</b>\n` +
             `📊 <b>Còn lại theo sổ:</b> <b>${result.remaining.toLocaleString("vi-VN")} ${result.unit.baseUnit || result.unit.unitName || "Gói"}</b> ${result.unit.status === "pending_check" ? "<i>(Chờ kiểm thực tế)</i>" : ""}\n` +
             `🛒 <b>Chờ xuất tại Khu đóng gói:</b> <b>${Number(result.destinationPcs ?? result.packingAreaPcs ?? 0).toLocaleString("vi-VN")} đơn vị</b>`;
-          const markup = {
-            inline_keyboard: [
-              [{ text: "📦 Rút tiếp kiện khác", callback_data: "menu_rut" }],
-              [{ text: "📊 Xem tồn kho", callback_data: "menu_ton" }],
-            ],
-          };
+          const markup = buildTelegramWmsPostPickKeyboard(
+            result.unit.code || result.unit.id,
+            result.remaining,
+          );
           await sendTelegramWmsMessage(chatId, resHtml, markup);
           return;
         } catch (err) {
@@ -7210,11 +7365,10 @@ async function handleTelegramWmsIncomingMessage(message) {
         `📉 <b>Đã rút:</b> <b>${result.picked.toLocaleString("vi-VN")} ${result.unit.baseUnit || result.unit.unitName || "Gói"}</b>\n` +
         `📊 <b>Còn lại trong kiện:</b> <b>${result.remaining.toLocaleString("vi-VN")} ${result.unit.baseUnit || result.unit.unitName || "Gói"}</b>\n` +
         `🛒 <b>Tổng chờ xuất tại Khu đóng gói:</b> <b>${Number(result.destinationPcs ?? result.packingAreaPcs ?? 0).toLocaleString("vi-VN")} đơn vị</b>`;
-      const markup = {
-        inline_keyboard: [
-          [{ text: "📦 Rút tiếp kiện khác", callback_data: "menu_rut" }],
-        ],
-      };
+      const markup = buildTelegramWmsPostPickKeyboard(
+        result.unit.code || result.unit.id,
+        result.remaining,
+      );
       await sendTelegramWmsMessage(chatId, resHtml, markup);
     } catch (err) {
       await sendTelegramWmsMessage(
@@ -7281,6 +7435,23 @@ function startTelegramWmsPolling() {
   const pollUpdates = async () => {
     if (!telegramWmsBotRunning) return;
     try {
+      const acquiredLease = await tryAcquireTelegramWmsLease();
+      if (!telegramWmsBotRunning) return;
+      if (!acquiredLease) {
+        if (telegramWmsIsLeaseOwner) {
+          console.warn("[TelegramWMS] Lost polling ownership.");
+        }
+        telegramWmsIsLeaseOwner = false;
+        scheduleNextPoll(5000);
+        return;
+      }
+      if (!telegramWmsIsLeaseOwner) {
+        console.log(
+          `🤖 [TelegramWMS] This machine is now bot owner: ${telegramWmsLeaseOwnerLabel}`,
+        );
+      }
+      telegramWmsIsLeaseOwner = true;
+
       const path = `/bot${TELEGRAM_WMS_BOT_TOKEN}/getUpdates?offset=${telegramWmsLastUpdateId}&timeout=25`;
       telegramWmsPollRequest = https.request(
         {
@@ -7353,6 +7524,8 @@ function stopTelegramWmsPolling() {
     telegramWmsPollRequest.destroy();
     telegramWmsPollRequest = null;
   }
+  void releaseTelegramWmsLease();
+  telegramWmsIsLeaseOwner = false;
 }
 
 // Electron is the single polling owner so inbound commands use the same live
@@ -7705,6 +7878,8 @@ ipcMain.handle("handlingUnits:getTelegramStatus", async () => {
     success: true,
     data: {
       isRunning: telegramWmsBotRunning,
+      isPollingOwner: telegramWmsIsLeaseOwner,
+      pollingOwner: telegramWmsLeaseOwnerLabel,
       botUsername: "quanlykienhang_bot",
       defaultChatId: TELEGRAM_WMS_DEFAULT_CHAT,
       groupChatId: groupConfig.chatId,

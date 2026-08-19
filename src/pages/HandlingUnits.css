@@ -1546,15 +1546,71 @@
 
 /* Khổ A6 (105 x 148 mm tỉ lệ chuẩn) */
 .hu-print-label.a6 {
-  width: 440px;
-  min-height: 580px;
+  width: 105mm;
+  height: 148mm;
 }
 
 /* Khổ A7 (74 x 105 mm tỉ lệ chuẩn) */
 .hu-print-label.a7 {
-  width: 340px;
-  min-height: 460px;
+  width: 74mm;
+  height: 105mm;
   padding: 12px;
+}
+
+.hu-print-label.a7 .hu-pl-header {
+  gap: 6px;
+  padding-bottom: 4px;
+  margin-bottom: 6px;
+}
+.hu-print-label.a7 .hu-pl-brand b {
+  font-size: 11px;
+}
+.hu-print-label.a7 .hu-pl-brand span {
+  font-size: 7px;
+}
+.hu-print-label.a7 .hu-pl-tag {
+  max-width: 108px;
+  padding: 2px 4px;
+  font-size: 7px;
+  line-height: 1.15;
+  text-align: center;
+}
+.hu-print-label.a7 .hu-pl-code-banner {
+  padding: 4px 6px;
+  margin-bottom: 6px;
+}
+.hu-print-label.a7 .hu-pl-code-banner small {
+  font-size: 8px;
+}
+.hu-print-label.a7 .hu-pl-code-banner h1 {
+  font-size: 19px !important;
+}
+.hu-print-label.a7 .hu-pl-body {
+  gap: 8px;
+}
+.hu-print-label.a7 .hu-pl-qr-border {
+  padding: 4px;
+}
+.hu-print-label.a7 .hu-pl-scan-text {
+  max-width: 108px;
+  font-size: 7px;
+}
+.hu-print-label.a7 .hu-pl-info-col {
+  gap: 4px;
+}
+.hu-print-label.a7 .hu-pl-info-item label {
+  font-size: 7px;
+}
+.hu-print-label.a7 .hu-pl-info-item strong {
+  font-size: 10px;
+}
+.hu-print-label.a7 .hu-pl-sku-code {
+  font-size: 8px;
+}
+.hu-print-label.a7 .hu-pl-info-grid {
+  gap: 4px;
+  margin-top: 2px;
+  padding-top: 4px;
 }
 
 .hu-pl-header {
@@ -1713,14 +1769,19 @@
 }
 
 .hu-print-label.a7 .hu-pl-hero-qty {
-  min-height: 82px;
-  padding-top: 8px;
+  min-height: 64px;
+  padding-top: 4px;
 }
 .hu-print-label.a7 .hu-pl-hero-qty strong {
-  font-size: 52px;
+  font-size: 44px;
 }
 .hu-print-label.a7 .hu-pl-hero-qty b {
-  font-size: 14px;
+  font-size: 12px;
+}
+.hu-print-label.a7 .hu-pl-footer {
+  margin-top: 6px;
+  padding-top: 4px;
+  font-size: 7px;
 }
 
 .hu-pl-footer {
@@ -1738,18 +1799,55 @@
    PRINT MEDIA RULES (Cho máy in tem/máy in decal)
    ========================================================================== */
 @media print {
+  @page {
+    margin: 0;
+  }
+  html,
+  body {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: auto !important;
+    height: auto !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+  }
   body * {
     visibility: hidden;
+  }
+  body.hu-label-printing > #root {
+    display: none !important;
+  }
+  body.hu-label-printing .ant-modal-mask,
+  body.hu-label-printing .hu-print-modal .ant-modal-header,
+  body.hu-label-printing .hu-print-modal .ant-modal-footer,
+  body.hu-label-printing .hu-print-modal .ant-modal-close {
+    display: none !important;
+  }
+  body.hu-label-printing .ant-modal-root,
+  body.hu-label-printing .ant-modal-wrap,
+  body.hu-label-printing .hu-print-modal,
+  body.hu-label-printing .hu-print-modal .ant-modal-content,
+  body.hu-label-printing .hu-print-modal .ant-modal-body {
+    position: static !important;
+    inset: auto !important;
+    width: auto !important;
+    max-width: none !important;
+    height: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    transform: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
   }
   .hu-print-preview-wrapper,
   .hu-print-preview-wrapper * {
     visibility: visible;
   }
   .hu-print-preview-wrapper {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 100%;
+    position: static !important;
+    display: block !important;
+    width: auto !important;
     height: auto;
     max-height: none;
     overflow: visible;
@@ -1760,8 +1858,11 @@
   }
   .hu-print-label {
     box-shadow: none;
-    border: 2px solid #000;
-    margin: 0 auto;
+    border: 0;
+    border-radius: 0;
+    margin: 0;
+    padding: 5mm;
+    overflow: hidden;
     page-break-inside: avoid;
     break-inside: avoid;
     page-break-after: always;
@@ -1770,12 +1871,13 @@
     page-break-after: auto;
   }
   .hu-print-label.a6 {
-    width: 100mm;
-    height: 140mm;
+    width: 105mm;
+    height: 148mm;
   }
   .hu-print-label.a7 {
-    width: 70mm;
-    height: 100mm;
+    width: 74mm;
+    height: 105mm;
+    padding: 4mm;
   }
 }
 
