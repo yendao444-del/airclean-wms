@@ -3875,7 +3875,11 @@ ipcMain.handle('handlingUnits:getWorkspace', async () => {
         requireRole('admin', 'manager');
         if (!prisma) throw new Error('Prisma not available');
 
-        const [purchases, packagingStore, dbRegister, registerConfig] = await Promise.all([
+        const [products, purchases, packagingStore, dbRegister, registerConfig] = await Promise.all([
+            prisma.product.findMany({
+                where: { status: 'active' },
+                select: { id: true, name: true, sku: true, unit: true, stock: true, variants: true }
+            }),
             prisma.purchaseOrder.findMany({
                 where: { status: { not: 'cancelled' } },
                 orderBy: { createdAt: 'asc' },
@@ -3932,6 +3936,37 @@ ipcMain.handle('handlingUnits:getWorkspace', async () => {
                     levels,
                     stock: Math.max(0, stock),
                     purchaseNumber: purchase.poNumber || `PN-${purchase.id}`,
+                });
+            });
+        });
+
+        // Pilot scope: the workspace reads real Product records and exposes
+        // only the two UNICARE families selected for the first rollout.
+        const isPilotUnicareProduct = (name) => {
+            const normalized = String(name || '')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .replace(/đ/g, 'd')
+                .toLowerCase();
+            return normalized.includes('5d unicare') || normalized.includes('unicare upf uv');
+        };
+        products.filter(product => isPilotUnicareProduct(product.name)).forEach(product => {
+            const variants = parseJsonArray(product.variants);
+            const entries = variants.length > 0 ? variants : [{ sku: product.sku, stock: product.stock }];
+            entries.forEach(variant => {
+                const sku = String(variant?.sku || product.sku || '').trim();
+                if (!sku) return;
+                const existing = catalog.get(sku);
+                catalog.set(sku, {
+                    ...existing,
+                    sku,
+                    productId: product.id,
+                    productGroup: product.name,
+                    variantName: `${product.name}${variant?.color ? ` - ${variant.color}` : ''}`,
+                    color: variant?.color || existing?.color || '',
+                    unitName: product.unit || 'Lẻ',
+                    stock: Math.max(0, Number(variant?.stock ?? product.stock ?? 0)),
+                    levels: existing?.levels || [{ id: 'lo', name: product.unit || 'Lẻ', factor: 1 }],
                 });
             });
         });
@@ -3996,11 +4031,17 @@ ipcMain.handle('handlingUnits:getWorkspace', async () => {
             } catch (migrationError) { console.warn('Handling unit compatibility migration skipped:', migrationError.message); }
         }
 
+        const pilotSkuSet = new Set(
+            [...catalog.values()]
+                .filter(item => isPilotUnicareProduct(item.productGroup))
+                .map(item => item.sku)
+        );
+
         return {
             success: true,
             data: {
-                catalog: [...catalog.values()],
-                register: register.filter(item => catalog.has(String(item?.skuName || ''))),
+                catalog: [...catalog.values()].filter(item => pilotSkuSet.has(item.sku)),
+                register: register.filter(item => pilotSkuSet.has(String(item?.skuName || ''))),
             }
         };
     } catch (error) {
@@ -4060,9 +4101,15 @@ ipcMain.handle('handlingUnits:saveRegister', async (_event, records = []) => {
             if (item.currentPcs > item.initialPcs) throw new Error(`Số dư kiện ${item.id} không thể lớn hơn tồn ban đầu.`);
             allocatedBySku.set(item.skuName, (allocatedBySku.get(item.skuName) || 0) + item.currentPcs);
         });
+        const persistedAllocatedBySku = new Map();
+        const persistedUnits = await prisma.handlingUnit.findMany({ select: { sku: true, remainingQuantity: true } });
+        persistedUnits.forEach(unit => {
+            persistedAllocatedBySku.set(unit.sku, (persistedAllocatedBySku.get(unit.sku) || 0) + Math.max(0, Number(unit.remainingQuantity || 0)));
+        });
         for (const [sku, quantity] of allocatedBySku) {
             const stock = stockBySku.get(sku);
-            if (stock !== undefined && quantity > stock) throw new Error(`Tổng tồn kiện của ${sku} vượt tồn Nhập hàng (${stock}).`);
+            const persistedQuantity = persistedAllocatedBySku.get(sku) || 0;
+            if (stock !== undefined && quantity > stock && quantity > persistedQuantity) throw new Error(`Thao tác làm tổng tồn kiện của ${sku} vượt tồn Nhập hàng (${stock}).`);
         }
         await prisma.$transaction(async tx => {
             const existing = await tx.handlingUnit.findMany({ select: { code: true } });

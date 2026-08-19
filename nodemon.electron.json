@@ -1,0 +1,12 @@
+{
+  "watch": ["electron"],
+  "ext": "js,json",
+  "ignore": [
+    "electron/gdrive-token.json",
+    "electron/gdrive-credentials.json",
+    "electron/supabase-storage.json",
+    "electron/**/*.log"
+  ],
+  "delay": 350,
+  "exec": "electron ."
+}

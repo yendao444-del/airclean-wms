@@ -444,6 +444,24 @@ export default function StockCheck() {
     const isSessionSubmitted = todaySession?.status === 'completed';
     const canEditCounts = !!todaySession && !isLockedDate && !isSessionSubmitted && isAssignedChecker;
     const canManageConversions = !!todaySession && !isLockedDate && !isSessionSubmitted && isAssignedChecker;
+    const resolveAssigneeLabel = (session?: CheckSession) => {
+        if (!session) return '';
+        const username = String(session.assignedTo || '').trim();
+        const currentStaff = staffList.find(staff =>
+            staff.username.trim().toLowerCase() === username.toLowerCase()
+        );
+        const currentName = String(currentStaff?.fullName || session.assignedName || username).trim();
+        return username && currentName.toLowerCase() !== username.toLowerCase()
+            ? `${currentName} (${username})`
+            : (currentName || username);
+    };
+    const todayAssigneeLabel = resolveAssigneeLabel(todaySession);
+    const todayAssigneeInitial = String(
+        staffList.find(staff => staff.username.trim().toLowerCase() === assignedUsername)?.fullName
+        || todaySession?.assignedName
+        || todaySession?.assignedTo
+        || '?'
+    ).trim().charAt(0).toUpperCase();
     const checkedCount = todaySession?.items.filter(it => it.actualStock !== null).length ?? 0;
     const totalCount = todaySession?.items.length ?? 0;
     const balancedCount = todaySession?.items.filter(it => it.balanced).length ?? 0;
@@ -756,7 +774,7 @@ export default function StockCheck() {
                                     fontWeight: 800, fontSize: 13, color: '#fff', flexShrink: 0,
                                     boxShadow: '0 2px 6px rgba(16,185,129,0.35)',
                                 }}>
-                                    {todaySession.assignedName.charAt(0).toUpperCase()}
+                                    {todayAssigneeInitial}
                                 </div>
 
                                 {/* Text block */}
@@ -771,7 +789,7 @@ export default function StockCheck() {
                                         fontSize: 13, fontWeight: 700, color: '#0f172a',
                                         whiteSpace: 'nowrap',
                                     }}>
-                                        {todaySession.assignedName}
+                                        {todayAssigneeLabel}
                                     </span>
                                 </div>
 
@@ -786,7 +804,7 @@ export default function StockCheck() {
             </div>
         );
         return () => clearHeaderExtra();
-    }, [activeTab, todaySession, isAdmin, isToday, canManage, isSessionSubmitted, sessions, setHeaderExtra, clearHeaderExtra, handleUndoSession]);
+    }, [activeTab, todaySession, todayAssigneeInitial, todayAssigneeLabel, isAdmin, isToday, canManage, isSessionSubmitted, sessions, setHeaderExtra, clearHeaderExtra, handleUndoSession]);
 
     const fetchStaff = async () => {
         try {
@@ -2436,7 +2454,7 @@ export default function StockCheck() {
                                 style={{ width: 280 }}
                                 options={recheckSessionsForDate.map(session => ({
                                     value: session.id,
-                                    label: `Từ ${dayjs(session.sourceSessionDate).format('DD/MM/YYYY')} · ${session.items.length} SKU · ${session.assignedName}`,
+                                    label: `Từ ${dayjs(session.sourceSessionDate).format('DD/MM/YYYY')} · ${session.items.length} SKU · ${resolveAssigneeLabel(session)}`,
                                 }))}
                             />
                         )}
@@ -3072,7 +3090,7 @@ export default function StockCheck() {
                                 <div style={{ fontSize: 15, fontWeight: 700, color: '#64748b', marginBottom: 6 }}>Ngày này đã khoá</div>
                                 {todaySession ? (
                                     <div style={{ fontSize: 13 }}>
-                                        Người được giao: <strong style={{ color: '#ef4444' }}>{todaySession.assignedName}</strong> — Không thực hiện kiểm hàng.
+                                        Người được giao: <strong style={{ color: '#ef4444' }}>{todayAssigneeLabel}</strong> — Không thực hiện kiểm hàng.
                                     </div>
                                 ) : (
                                     <div style={{ fontSize: 13 }}>Không có phiên kiểm nào được ghi nhận.</div>
@@ -3103,7 +3121,7 @@ export default function StockCheck() {
                                             Người phụ trách hôm nay
                                         </div>
                                         <div style={{ fontSize: 24, fontWeight: 800, color: '#10b981', marginBottom: 6 }}>
-                                            {todaySession.assignedName}
+                                            {todayAssigneeLabel}
                                         </div>
                                         <div style={{ fontSize: 13, marginBottom: 24 }}>
                                             {activeTab === 'full'

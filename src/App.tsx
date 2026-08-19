@@ -236,9 +236,6 @@ function AppContent() {
         if (accessibleKeys.includes('stock-check')) {
             inventoryChildren.push(createMenuItem('Kiểm hàng', 'stock-check', <AuditOutlined />));
         }
-        if (accessibleKeys.includes('handling-units')) {
-            inventoryChildren.push(createMenuItem('Quản lý kiện hàng', 'handling-units', <ApartmentOutlined />));
-        }
         if (accessibleKeys.includes('purchase')) {
             inventoryChildren.push(createMenuItem('Nhập hàng', 'purchase', <ImportOutlined />));
         }
@@ -256,6 +253,12 @@ function AppContent() {
         }
         if (inventoryChildren.length > 0) {
             items.push(createMenuItem('Quản lý kho', 'inventory', <InboxOutlined />, inventoryChildren));
+        }
+
+        // Quản lý kiện hàng là một workspace vận hành kho độc lập. Nó dùng
+        // chung phân quyền nhưng không nằm dưới menu Quản lý kho.
+        if (accessibleKeys.includes('handling-units')) {
+            items.push(createMenuItem('Quản lý kiện hàng', 'handling-units', <ApartmentOutlined />));
         }
 
         // 📮 Bàn giao TMDT submenu
@@ -365,7 +368,7 @@ function AppContent() {
             case 'stock-check':
                 return withAppData(<StockCheckPage />);
             case 'handling-units':
-                return <HandlingUnitsPage />;
+                return <HandlingUnitsPage onExit={() => navigateTo('stock-balance')} />;
             case 'business-report':
                 return <BusinessReportPage />;
             case 'daily-tasks':
@@ -399,6 +402,9 @@ function AppContent() {
 
     const { headerExtra } = usePageHeader();
     const hideHeaderTitle = selectedKey === 'business-report' || selectedKey === 'stock-check';
+    // Handling units is a warehouse workspace, not another cramped POS page.
+    // It keeps the Electron title bar/session but owns the complete app area.
+    const isHandlingUnitsWorkspace = selectedKey === 'handling-units';
 
     return (
         <ConfigProvider
@@ -508,7 +514,7 @@ function AppContent() {
                     </div>
                 </div>
                 <Layout style={{ minHeight: '100vh', background: '#f0f2f5', paddingTop: 40 }}>
-                    <Sider
+                    {!isHandlingUnitsWorkspace && <Sider
                         collapsible
                         collapsed={collapsed}
                         onCollapse={setCollapsed}
@@ -534,10 +540,10 @@ function AppContent() {
                             onClick={handleMenuClick}
                             style={{ borderRight: 0 }}
                         />
-                    </Sider>
+                    </Sider>}
 
-                    <Layout style={{ marginLeft: collapsed ? 80 : 260, transition: 'all 0.2s' }}>
-                        {selectedKey !== 'daily-tasks' && <Header
+                    <Layout style={{ marginLeft: isHandlingUnitsWorkspace ? 0 : (collapsed ? 80 : 260), transition: 'all 0.2s' }}>
+                        {!isHandlingUnitsWorkspace && selectedKey !== 'daily-tasks' && <Header
                             style={{
                                 padding: '0 24px',
                                 background: '#fff',
@@ -566,10 +572,10 @@ function AppContent() {
 
                         <Content
                             style={{
-                                margin: selectedKey === 'pos' ? 0 : 24,
+                                margin: (selectedKey === 'pos' || isHandlingUnitsWorkspace) ? 0 : 24,
                                 padding: 0,
                                 minHeight: 280,
-                                maxHeight: selectedKey === 'pos' ? 'calc(100vh - 64px)' : 'calc(100vh - 112px)',
+                                maxHeight: (selectedKey === 'pos' || isHandlingUnitsWorkspace) ? 'calc(100vh - 40px)' : 'calc(100vh - 112px)',
                                 overflowY: selectedKey === 'pos' ? 'hidden' : 'auto',
                                 overflowX: 'auto',
                             }}

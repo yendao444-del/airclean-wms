@@ -181,12 +181,19 @@ const getFineRecordKeys = (fine: Partial<FineRecord> | undefined) => {
     return [fine.id || '', getFineContentKey(fine)].filter(Boolean);
 };
 
-const getDeletedFineKeys = (logs: any[] = []) => new Set(
-    logs
+const getDeletedFineKeys = (logs: any[] = []) => {
+    const deletedKeys = new Set<string>(logs
         .filter(log => log?.action === 'delete' && log?.before)
         .flatMap(log => getFineRecordKeys(log.before))
-        .filter(Boolean)
-);
+        .filter(Boolean));
+    // A deliberate restoration is the only operation allowed to clear a
+    // historical delete tombstone. Ordinary edits keep the deletion durable.
+    logs
+        .filter(log => log?.restoresDeletedFine === true && log?.after)
+        .flatMap(log => getFineRecordKeys(log.after))
+        .forEach(key => deletedKeys.delete(key));
+    return deletedKeys;
+};
 
 const mergeFinesWithDeletes = (
     dbFines: FineRecord[] = [],
@@ -287,7 +294,8 @@ interface PurchaseVatTracking {
     vatInvoiceStatus?: string;
     vatGroupId?: string | null;
     vatGroupHasVat?: boolean;
-    companyVatByGroup?: Record<string, { status?: string }>;
+    companyVatByGroup?: Record<string, { status?: string; updatedAt?: string }>;
+    vatRequiredCompanies?: string[];
 }
 
 interface BonusRecord {
@@ -328,6 +336,14 @@ interface FineAuditLog {
     before?: Partial<FineRecord>;
     after?: Partial<FineRecord>;
     note: string;
+    restoresDeletedFine?: boolean;
+}
+
+interface FineWaiverRecord {
+    id: string;
+    fine: FineRecord;
+    waivedAt: string;
+    reason: string;
 }
 
 interface AttendanceLog {
@@ -592,31 +608,83 @@ const VAT_FIRST_FINE_AFTER_DAYS = 5;
 // be created from 00:00 on 11/08.
 const VAT_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-11T00:00:00');
 
+// Sunday is not a VAT penalty day. The 5-day grace period remains unchanged;
+// if a fine date lands on Sunday it moves to the next chargeable day, and the
+// later escalation schedule continues through Monday-Saturday.
+const addVatChargeableDays = (start: dayjs.Dayjs, count: number) => {
+    let cursor = start.startOf('day');
+    let added = 0;
+    while (added < Math.max(0, count)) {
+        cursor = cursor.add(1, 'day');
+        if (cursor.day() !== 0) added += 1;
+    }
+    return cursor;
+};
+
 const getVatFirstFineAt = (purchaseAt: dayjs.Dayjs) => {
     // VAT deadlines are calendar-day based, not based on the purchase time.
     // A receipt dated 06/08 remains valid through 10/08 and is first fined
     // at 00:00 on 11/08.
     const normalFirstFineAt = purchaseAt.startOf('day').add(VAT_FIRST_FINE_AFTER_DAYS, 'day');
-    return normalFirstFineAt.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT) ? VAT_FINE_POLICY_EFFECTIVE_AT : normalFirstFineAt;
+    const effectiveFirstFineAt = normalFirstFineAt.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT)
+        ? VAT_FINE_POLICY_EFFECTIVE_AT
+        : normalFirstFineAt;
+    return effectiveFirstFineAt.day() === 0 ? effectiveFirstFineAt.add(1, 'day') : effectiveFirstFineAt;
 };
 
 const getVatFineStage = (purchaseAt: dayjs.Dayjs, now = dayjs()) => {
     const firstFineAt = getVatFirstFineAt(purchaseAt);
     if (now.isBefore(firstFineAt)) return 0;
-    const daysAfterFirstFine = Math.max(0, now.startOf('day').diff(firstFineAt.startOf('day'), 'day'));
-    if (daysAfterFirstFine < 2) return 1;
-    if (daysAfterFirstFine < 4) return 2;
-    if (daysAfterFirstFine < 5) return 3;
-    return 4 + (daysAfterFirstFine - 5);
+    let stage = 0;
+    while (stage < 366 && !now.isBefore(getVatFineDate(purchaseAt, stage + 1))) stage += 1;
+    return stage;
 };
 
 const getVatFineDate = (purchaseAt: dayjs.Dayjs, stage: number) => {
     const delayDays = stage <= 3 ? (stage - 1) * 2 : stage + 1;
-    return getVatFirstFineAt(purchaseAt).add(delayDays, 'day');
+    return addVatChargeableDays(getVatFirstFineAt(purchaseAt), delayDays);
 };
 
 const getVatFineAmount = (stage: number) =>
     VAT_OVERDUE_FINE_FIRST_AMOUNT + (Math.max(1, stage) - 1) * VAT_OVERDUE_FINE_STAGE_INCREMENT;
+
+const getVatFineId = (purchaseId: number, purchaseAt: dayjs.Dayjs, stage: number) => {
+    const baseId = stage === 1 ? `vat-overdue-${purchaseId}` : `vat-overdue-${purchaseId}-stage-${stage}`;
+    const legacyFirstFineAt = purchaseAt.startOf('day').add(VAT_FIRST_FINE_AFTER_DAYS, 'day');
+    const effectiveLegacyFirstFineAt = legacyFirstFineAt.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT)
+        ? VAT_FINE_POLICY_EFFECTIVE_AT
+        : legacyFirstFineAt;
+    const legacyDate = effectiveLegacyFirstFineAt.add(stage <= 3 ? (stage - 1) * 2 : stage + 1, 'day');
+    const correctedDate = getVatFineDate(purchaseAt, stage);
+    return correctedDate.isSame(legacyDate, 'day')
+        ? baseId
+        : `${baseId}-workday-${correctedDate.format('YYYYMMDD')}`;
+};
+
+const getRequiredCompanyVatEntries = (purchase: PurchaseVatTracking) => {
+    const companyVat = purchase.companyVatByGroup || {};
+    const required = [...new Set((purchase.vatRequiredCompanies || [])
+        .map(company => String(company || '').trim())
+        .filter(company => company && normalizeAttendanceText(company) !== normalizeAttendanceText('Chưa chọn công ty')))];
+    if (required.length > 0) {
+        return required.map(company => Object.entries(companyVat).find(([name]) =>
+            normalizeAttendanceText(name) === normalizeAttendanceText(company))?.[1] || { status: 'pending' });
+    }
+    return Object.entries(companyVat)
+        .filter(([name]) => normalizeAttendanceText(name) !== normalizeAttendanceText('Chưa chọn công ty'))
+        .map(([, vat]) => vat);
+};
+
+const isCompanyVatComplete = (purchase: PurchaseVatTracking, completedBefore?: dayjs.Dayjs) => {
+    const entries = getRequiredCompanyVatEntries(purchase);
+    if (entries.length === 0) return false;
+    return entries.every(vat => {
+        const valid = ['uploaded', 'verified', 'thht', 'no_vat'].includes(String(vat?.status || '').toLowerCase());
+        if (!valid || !completedBefore) return valid;
+        const updatedAt = vat?.updatedAt ? dayjs(vat.updatedAt) : null;
+        return Boolean(updatedAt?.isValid() && !updatedAt.isAfter(completedBefore));
+    });
+};
 const DEADLINE_OVERDUE_FINE_OFFICIAL = 50000;
 const getAssignmentDeadlineFineAmount = (task: any): number => {
     try {
@@ -2919,6 +2987,9 @@ export default function Attendance() {
     const [extraFines, setExtraFines] = useState<FineRecord[]>([]);
     const [fineOverrides, setFineOverrides] = useState<Record<string, FineRecord>>({});
     const [fineAuditLog, setFineAuditLog] = useState<FineAuditLog[]>([]);
+    // Kept separately from the fine ledger so a waived violation is visible
+    // on the employee's payslip without affecting net pay.
+    const [fineWaivers, setFineWaivers] = useState<FineWaiverRecord[]>([]);
     const [fineEmployeeFilter, setFineEmployeeFilter] = useState<number | 'all'>('all');
     const [editingFine, setEditingFine] = useState<{
         isManual: boolean;
@@ -3035,6 +3106,7 @@ export default function Attendance() {
                     }
                     if (d.fineOverrides) setFineOverrides(d.fineOverrides);
                     if (d.fineAuditLog) setFineAuditLog(d.fineAuditLog);
+                    if (d.fineWaivers) setFineWaivers(d.fineWaivers);
                     if (d.lockedPeriods) setLockedPeriods(d.lockedPeriods);
                     if (d.payrollOverrides) setPayrollOverrides(d.payrollOverrides);
                     if (d.gmailSentLog) setGmailSentLog(d.gmailSentLog);
@@ -3112,8 +3184,8 @@ export default function Attendance() {
     // 2a. Luôn cập nhật ref khi state thay đổi (không debounce, không ghi DB)
     useEffect(() => {
         if (!isDbLoaded || employees.length === 0) return;
-        latestSnapshotRef.current = { config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog };
-    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded]);
+        latestSnapshotRef.current = { config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog };
+    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded]);
 
     const mergeAttendanceSnapshotWithDb = useCallback(async (snapshot: Record<string, any>) => {
         const api = (window as any).electronAPI;
@@ -3124,6 +3196,19 @@ export default function Attendance() {
             const latest = await api.appConfig.get('attendanceData');
             const dbData = latest?.success && latest.data ? latest.data : {};
             const mergedFineAuditLog = mergeAuditLogs(dbData.fineAuditLog || [], safeSnapshot.fineAuditLog || []);
+            const mergedFineOverrides: Record<string, any> = {
+                ...(dbData.fineOverrides || {}),
+                ...(safeSnapshot.fineOverrides || {}),
+            };
+            // Restoring an amnestied fine may happen while an older Attendance
+            // screen is still open. A stale snapshot must not disable it again.
+            Object.entries(dbData.fineOverrides || {}).forEach(([key, dbOverride]: [string, any]) => {
+                const restoredAt = dayjs(dbOverride?.waiverRestoredAt);
+                const localRestoredAt = dayjs((safeSnapshot.fineOverrides || {})[key]?.waiverRestoredAt);
+                if (restoredAt.isValid() && (!localRestoredAt.isValid() || restoredAt.isAfter(localRestoredAt))) {
+                    mergedFineOverrides[key] = dbOverride;
+                }
+            });
             return {
                 ...dbData,
                 ...safeSnapshot,
@@ -3134,8 +3219,11 @@ export default function Attendance() {
                     dbData.fineAuditLog || [],
                     safeSnapshot.fineAuditLog || [],
                 ),
-                fineOverrides: { ...(dbData.fineOverrides || {}), ...(safeSnapshot.fineOverrides || {}) },
+                fineOverrides: mergedFineOverrides,
                 fineAuditLog: mergedFineAuditLog,
+                // Waivers are administered centrally. Keep the latest DB list
+                // so an already-open renderer cannot recreate a revoked waiver.
+                fineWaivers: dbData.fineWaivers ?? safeSnapshot.fineWaivers ?? [],
             };
         } catch {
             return safeSnapshot;
@@ -3161,6 +3249,7 @@ export default function Attendance() {
             extraFines,
             fineOverrides,
             fineAuditLog,
+            fineWaivers,
             lockedPeriods,
             payrollOverrides,
             gmailSentLog,
@@ -3174,14 +3263,14 @@ export default function Attendance() {
         } catch (err) {
             console.error('Lỗi lưu nhanh dữ liệu chấm công vào DB:', err);
         }
-    }, [isDbLoaded, employees, config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, saveAttendanceSnapshot]);
+    }, [isDbLoaded, employees, config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, saveAttendanceSnapshot]);
 
     // 2b. Lưu tự động khi có thay đổi state với Debounce
     useEffect(() => {
         if (!isDbLoaded) return; // Không lưu đè lúc chưa tải xong
         if (employees.length === 0) return; // Chưa có data employees → không ghi đè DB
 
-        const snapshot = { config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog };
+        const snapshot = { config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog };
 
         const saveData = async () => {
             try {
@@ -3193,7 +3282,7 @@ export default function Attendance() {
 
         const timer = setTimeout(saveData, 500); // Đợi 500ms thao tác cuối rồi mới save
         return () => clearTimeout(timer);
-    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded, saveAttendanceSnapshot]);
+    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded, saveAttendanceSnapshot]);
 
     // 2c. Flush save khi component unmount (navigate sang tab khác) để tránh mất data
     useEffect(() => {
@@ -3447,8 +3536,7 @@ export default function Attendance() {
             const vatStatus = String(purchase.vatInvoiceStatus || 'pending').toLowerCase();
             if (['uploaded', 'verified', 'thht', 'no_vat'].includes(vatStatus)) return [];
             if (purchase.vatGroupId && purchase.vatGroupHasVat) return [];
-            const companyVatEntries = Object.values(purchase.companyVatByGroup || {});
-            if (companyVatEntries.length > 0 && companyVatEntries.every(vat => ['uploaded', 'verified', 'no_vat'].includes(String(vat?.status || '').toLowerCase()))) return [];
+            if (isCompanyVatComplete(purchase)) return [];
 
             const purchaseAtRaw = purchase.purchaseDate || purchase.createdAt;
             if (!purchaseAtRaw) return [];
@@ -3476,7 +3564,7 @@ export default function Attendance() {
                 return {
                 // Stable ID lets us persist the fine once and keep it after a
                 // late VAT upload, without creating duplicates on reload.
-                id: stage === 1 ? `vat-overdue-${purchase.id}` : `vat-overdue-${purchase.id}-stage-${stage}`,
+                id: getVatFineId(purchase.id, purchaseAt, stage),
                 empId: creator.id,
                 type: 'VAT quá hạn nhập hàng',
                 detail: `Phiếu ${purchase.poNumber || `#${purchase.id}`}${purchase.supplierName ? ` - ${purchase.supplierName}` : ''} quá hạn ${VAT_FIRST_FINE_AFTER_DAYS + (stage <= 3 ? (stage - 1) * 2 : stage + 1)} ngày chưa cập nhật HĐ VAT - phạt lần ${stage}`,
@@ -3489,22 +3577,48 @@ export default function Attendance() {
         });
     }, [employees, purchaseVatTracking, overviewDateRange, systemUsers]);
 
-    // Remove system-generated VAT fines created before the valid policy time.
-    // This is a one-way correction for the 10/08 rollout; manual fines stay intact.
+    // Correct invalid automatic VAT deductions without touching manual fines:
+    // - pre-policy rows;
+    // - rows whose old calendar schedule differs from the Sunday-free schedule;
+    // - rows created after every real goods company had already uploaded VAT
+    //   or selected THHT/no-VAT. Stale "Chưa chọn công ty" data is ignored.
     useEffect(() => {
         if (!isAdmin || !isDbLoaded || employees.length === 0) return;
-        const invalidFineIds = new Set(extraFines
-            .filter(fine => fine.source === 'purchase_vat_overdue'
-                && fine.date
-                && dayjs(fine.date).isBefore(VAT_FINE_POLICY_EFFECTIVE_AT))
-            .map(fine => fine.id)
-            .filter(Boolean));
+        const purchaseById = new Map(purchaseVatTracking.map(purchase => [purchase.id, purchase]));
+        const invalidFines = extraFines.filter(fine => {
+            if (fine.source !== 'purchase_vat_overdue' || !fine.id || !fine.date) return false;
+            const fineAt = dayjs(fine.date);
+            if (!fineAt.isValid()) return false;
+            if (fineAt.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT)) return true;
+            const idMatch = String(fine.id).match(/^vat-overdue-(\d+)(?:-stage-(\d+))?/);
+            if (!idMatch) return false;
+            const purchase = purchaseById.get(Number(idMatch[1]));
+            if (!purchase) return false;
+            const stage = Number(idMatch[2] || 1);
+            const purchaseAt = dayjs(purchase.purchaseDate || purchase.createdAt);
+            if (purchaseAt.isValid() && !fineAt.isSame(getVatFineDate(purchaseAt, stage), 'day')) return true;
+            return isCompanyVatComplete(purchase, fineAt);
+        });
+        const invalidFineIds = new Set(invalidFines.map(fine => fine.id).filter(Boolean));
         if (invalidFineIds.size === 0) return;
 
         const nextFines = extraFines.filter(fine => !invalidFineIds.has(fine.id));
+        const now = new Date().toLocaleString('vi-VN');
+        const actor = fineAuditActorRef.current;
+        const correctionLogs: FineAuditLog[] = invalidFines.map(fine => ({
+            id: `flog-vat-correction-${fine.id}-${Date.now()}`,
+            action: 'delete',
+            timestamp: now,
+            changedBy: actor.username,
+            changedByName: actor.displayName,
+            before: fine,
+            note: 'Hệ thống gỡ khoản phạt VAT sai: bỏ Chủ nhật và chỉ xét công ty thực sự có hàng trong phiếu.',
+        }));
+        const nextAuditLog = [...fineAuditLog, ...correctionLogs];
         setExtraFines(nextFines);
-        void persistAttendanceSnapshotNow({ extraFines: nextFines });
-    }, [isAdmin, isDbLoaded, employees.length, extraFines, persistAttendanceSnapshotNow]);
+        setFineAuditLog(nextAuditLog);
+        void persistAttendanceSnapshotNow({ extraFines: nextFines, fineAuditLog: nextAuditLog });
+    }, [isAdmin, isDbLoaded, employees.length, extraFines, fineAuditLog, purchaseVatTracking, persistAttendanceSnapshotNow]);
 
     // VAT fines are historical events. Once an overdue row has appeared in
     // payroll, persist it as an ordinary fine; uploading the invoice later
@@ -5123,6 +5237,26 @@ export default function Attendance() {
     const renderFines = () => {
         // Gộp phạt gốc + phạt thủ công, đánh dấu nguồn
         const systemFineRow = (fine: FineRecord, key: string) => {
+            // Some automatic penalties are reconciled later with a corrected
+            // description/time. Match the amnesty by durable source ID first,
+            // so that a wording change cannot make a waived fine reappear.
+            const waiver = fineWaivers.find(item =>
+                (fine.id && item?.fine?.id === fine.id)
+                || getFineContentKey(item?.fine) === getFineContentKey(fine)
+            );
+            if (waiver) {
+                return {
+                    ...fine,
+                    key,
+                    empName: employees.find(e => e.id === fine.empId)?.name,
+                    isManual: false,
+                    manualIndex: -1,
+                    overrideKey: getFineOverrideKey(fine),
+                    isWaived: true,
+                    waiverReason: waiver.reason,
+                    waivedAt: waiver.waivedAt,
+                };
+            }
             const overrideKey = getFineOverrideKey(fine);
             const overridden = applyFineOverride(fine);
             if (overridden.disabled) return null;
@@ -5136,6 +5270,18 @@ export default function Attendance() {
                 source: overridden.source,
             };
         };
+        const liveSystemFineIds = new Set([
+            ...autoVatOverdueFines,
+            ...autoDeadlineOverdueFines,
+            ...autoEvidenceOverdueFines,
+            ...autoStockCheckMissingFines,
+        ].map(fine => String((fine as any).id || '')).filter(Boolean));
+        const liveSystemFineContentKeys = new Set([
+            ...autoVatOverdueFines,
+            ...autoDeadlineOverdueFines,
+            ...autoEvidenceOverdueFines,
+            ...autoStockCheckMissingFines,
+        ].map(fine => getFineContentKey(fine)));
         const combinedFinesRaw = [
             ...finesData
                 .filter(f => inOverviewRange(f.date))
@@ -5161,6 +5307,21 @@ export default function Attendance() {
                 .filter(f => inOverviewRange(f.date))
                 .map((f, i) => systemFineRow(f, `stock-check-${i}`))
                 .filter(Boolean),
+            ...fineWaivers
+                .filter(waiver => inOverviewRange(waiver.fine?.date)
+                    && (waiver.fine?.id
+                        ? !liveSystemFineIds.has(String(waiver.fine.id))
+                        : !liveSystemFineContentKeys.has(getFineContentKey(waiver.fine))))
+                .map((waiver, i) => ({
+                    ...waiver.fine,
+                    key: `waived-${waiver.id || i}`,
+                    empName: employees.find(e => e.id === waiver.fine.empId)?.name,
+                    isManual: false,
+                    manualIndex: -1,
+                    isWaived: true,
+                    waiverReason: waiver.reason,
+                    waivedAt: waiver.waivedAt,
+                })),
         ];
         const vatRows = new Map<string, any>();
         const combinedFines = combinedFinesRaw.filter(fine => {
@@ -5197,7 +5358,13 @@ export default function Attendance() {
             });
             if (index >= 0) combinedFines[index] = fine;
         });
-        combinedFines.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+        const getFineSortTime = (fine: any) => {
+            const parsed = dayjs(fine?.date);
+            return parsed.isValid() ? parsed.valueOf() : 0;
+        };
+        // Never return NaN from the comparator: one legacy malformed date
+        // used to preserve insertion order and put older fines above 13/08.
+        combinedFines.sort((a, b) => getFineSortTime(b) - getFineSortTime(a));
         const fineEmployeeOptions = Array.from(new Map(
             combinedFines.map(f => [
                 f.empId,
@@ -5212,7 +5379,14 @@ export default function Attendance() {
         const selectedFineEmployeeName = fineEmployeeFilter === 'all'
             ? ''
             : fineEmployeeOptions.find(option => option.value === fineEmployeeFilter)?.label || '';
-        const totalFineAmount = filteredFines.reduce((sum, f) => sum + f.amount, 0);
+        const totalFineAmount = filteredFines.reduce((sum, f) => sum + ((f as any).isWaived ? 0 : f.amount), 0);
+        const fineDetailCellStyle = {
+            minWidth: 0,
+            whiteSpace: 'normal',
+            overflowWrap: 'anywhere',
+            wordBreak: 'break-word',
+            lineHeight: 1.45,
+        } as const;
 
         return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -5272,18 +5446,26 @@ export default function Attendance() {
                         dataSource={filteredFines}
                         pagination={{ pageSize: 10, size: 'small', showTotal: (total) => `Tổng ${total} vi phạm` }}
                         size="middle"
-                        scroll={{ x: 'max-content' }}
+                        tableLayout="fixed"
                         columns={[
                             {
-                                title: 'Nhân viên', dataIndex: 'empName', key: 'name', width: 200,
-                                render: (n: string) => <Text strong>{n}</Text>,
+                                title: 'Nhân viên', dataIndex: 'empName', key: 'name', width: 160,
+                                render: (n: string) => <Text strong style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{n}</Text>,
                             },
                             {
-                                title: 'Lỗi vi phạm', dataIndex: 'type', key: 'type', width: 160,
-                                render: (t: string) => <Tag color="error" style={{ fontWeight: 700, fontSize: 10, textTransform: 'uppercase' }}>{t}</Tag>,
+                                title: 'Lỗi vi phạm', dataIndex: 'type', key: 'type', width: 145,
+                                render: (t: string) => <Tag color="error" style={{ margin: 0, fontWeight: 700, fontSize: 10, textTransform: 'uppercase', whiteSpace: 'normal', lineHeight: 1.3 }}>{t}</Tag>,
                             },
                             {
-                                title: 'Thời gian', dataIndex: 'date', key: 'date', width: 140,
+                                title: 'Trạng thái', key: 'status', width: 108,
+                                render: (_: unknown, record: any) => record.isWaived ? (
+                                    <Tooltip title={record.waiverReason || 'Vi phạm đã được ghi nhận nhưng không khấu trừ lương.'}>
+                                        <Tag color="success" style={{ margin: 0, fontWeight: 800, fontSize: 10, whiteSpace: 'normal', lineHeight: 1.3 }}>ĐÃ MIỄN PHẠT</Tag>
+                                    </Tooltip>
+                                ) : <Text type="secondary" style={{ fontSize: 12 }}>Đang áp dụng</Text>,
+                            },
+                            {
+                                title: 'Thời gian', dataIndex: 'date', key: 'date', width: 118,
                                 render: (date: string) => {
                                     const d = date ? dayjs(date) : null;
                                     if (!d?.isValid()) return <Text type="secondary">-</Text>;
@@ -5304,7 +5486,7 @@ export default function Attendance() {
                                         const code = match?.[1]?.trim();
                                         if (code) {
                                             return (
-                                                <Space size={4}>
+                                                <Space size={[4, 4]} wrap style={fineDetailCellStyle}>
                                                     <Text style={{ color: '#595959', fontWeight: 500 }}>Phát sinh THHT</Text>
                                                     <Tag color="magenta" style={{ margin: 0, fontWeight: 700, fontFamily: 'monospace', fontSize: 12, border: 'none', background: '#fff0f6', color: '#c41d7f' }}>
                                                         <Text copyable={{ text: code }} style={{ color: 'inherit', fontSize: 'inherit', fontWeight: 'inherit', fontFamily: 'inherit' }}>
@@ -5327,7 +5509,7 @@ export default function Attendance() {
                                         };
                                         const color = levelColors[level] || { bg: '#f5f5f5', text: '#595959' };
                                         return (
-                                            <Space size={6}>
+                                            <Space size={[6, 4]} wrap style={fineDetailCellStyle}>
                                                 <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ ca {ca} <span style={{ fontWeight: 700, color: '#262626' }}>{minutes} phút</span></Text>
                                                 <Tag style={{ margin: 0, fontWeight: 700, fontSize: 10, border: 'none', background: color.bg, color: color.text }}>
                                                     MỨC {level.toUpperCase()}
@@ -5349,15 +5531,17 @@ export default function Attendance() {
                                             : `PN-${rawCode.replace(/\s+/g, '')}`;
                                         const supplier = parts.slice(1).join(' - ');
                                         return (
-                                            <Space size={4}>
-                                                <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ HĐ VAT — quá hạn {overdueDays} ngày · phạt lần {fineStage}</Text>
+                                            <div style={fineDetailCellStyle}>
+                                                <Space size={[4, 4]} wrap>
+                                                    <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ HĐ VAT — quá hạn {overdueDays} ngày · phạt lần {fineStage}</Text>
                                                 <Tag color="cyan" style={{ margin: 0, fontWeight: 700, fontFamily: 'monospace', fontSize: 11, border: 'none', background: '#e6fffb', color: '#08979c' }}>
                                                     <Text copyable={{ text: code }} style={{ color: 'inherit', fontSize: 'inherit', fontWeight: 'inherit', fontFamily: 'inherit' }}>
                                                         {code}
                                                     </Text>
                                                 </Tag>
-                                                {supplier && <Text type="secondary" style={{ fontSize: 11 }}>({supplier})</Text>}
-                                            </Space>
+                                                </Space>
+                                                {supplier && <Text type="secondary" style={{ display: 'block', marginTop: 2, fontSize: 11, ...fineDetailCellStyle }}>Nhà cung cấp: {supplier}</Text>}
+                                            </div>
                                         );
                                     }
 
@@ -5365,7 +5549,7 @@ export default function Attendance() {
                                     if (record.source === 'daily_task_overdue' || d.endsWith('quá deadline')) {
                                         const taskTitle = d.replace(/\s*quá deadline\s*$/, '');
                                         return (
-                                            <Space size={4}>
+                                            <Space size={[4, 4]} wrap style={fineDetailCellStyle}>
                                                 <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ deadline</Text>
                                                 <Tag color="volcano" style={{ margin: 0, fontWeight: 600, fontSize: 11, border: 'none', background: '#fff2e8', color: '#d4380d' }}>
                                                     {taskTitle}
@@ -5379,7 +5563,7 @@ export default function Attendance() {
                                         const matchDate = d.match(/ngày\s+(\d{2}\/\d{2}\/\d{4})/);
                                         const missingDate = matchDate?.[1];
                                         return (
-                                            <Space size={4}>
+                                            <Space size={[4, 4]} wrap style={fineDetailCellStyle}>
                                                 <Text style={{ color: '#595959', fontWeight: 500 }}>Thiếu báo cáo ngày</Text>
                                                 {missingDate && (
                                                     <Tag color="blue" style={{ margin: 0, fontWeight: 700, fontSize: 11, border: 'none', background: '#e6f7ff', color: '#096dd9' }}>
@@ -5395,7 +5579,7 @@ export default function Attendance() {
                                         const matchDate = d.match(/ngày\s+(\d{2}\/\d{2}\/\d{4})/);
                                         const missingDate = matchDate?.[1];
                                         return (
-                                            <Space size={4}>
+                                            <Space size={[4, 4]} wrap style={fineDetailCellStyle}>
                                                 <Text style={{ color: '#595959', fontWeight: 500 }}>Thiếu kiểm hàng ngày</Text>
                                                 {missingDate && (
                                                     <Tag color="purple" style={{ margin: 0, fontWeight: 700, fontSize: 11, border: 'none', background: '#f9f0ff', color: '#531dab' }}>
@@ -5407,30 +5591,20 @@ export default function Attendance() {
                                     }
 
                                     // Mặc định cho các loại phạt nhập tay hoặc khác
-                                    return <Text strong style={{ color: '#595959' }}>{d}</Text>;
-                                },
-                            },
-                            {
-                                title: 'Nguồn', key: 'source', width: 100, align: 'center' as const,
-                                render: (_: any, record: any) => {
-                                    if (record.source === 'attendance')
-                                        return <Tag color="blue" style={{ fontWeight: 700, fontSize: 10 }}>ĐIỂM DANH</Tag>;
-                                    if (record.source === 'returns')
-                                        return <Tag color="volcano" style={{ fontWeight: 700, fontSize: 10 }}>TRẢ HÀNG</Tag>;
-                                    if (record.isManual)
-                                        return <Tag color="orange" style={{ fontWeight: 700, fontSize: 10 }}>THỦ CÔNG</Tag>;
-                                    return <Tag style={{ fontWeight: 700, fontSize: 10, color: '#8c8c8c' }}>HỆ THỐNG</Tag>;
+                                    return <Text strong style={{ color: '#595959', ...fineDetailCellStyle }}>{d}</Text>;
                                 },
                             },
                             {
                                 title: <Text style={{ color: '#ff4d4f' }}>Số tiền trừ</Text>,
-                                dataIndex: 'amount', key: 'amount', width: 140, align: 'right' as const,
-                                render: (v: number) => <Text strong style={{ color: '#ff4d4f' }}>- {fmt(v)}</Text>,
+                                dataIndex: 'amount', key: 'amount', width: 125, align: 'right' as const,
+                                render: (v: number, record: any) => record.isWaived
+                                    ? <Text strong style={{ color: '#389e0d', whiteSpace: 'nowrap' }}>0 đ</Text>
+                                    : <Text strong style={{ color: '#ff4d4f', whiteSpace: 'nowrap' }}>- {fmt(v)}</Text>,
                             },
                             {
-                                title: '', key: 'actions', width: 90, align: 'center' as const,
+                                title: '', key: 'actions', width: 72, align: 'center' as const,
                                 render: (_: any, record: any) => {
-                                    if (!isAdmin || isCurrentPeriodLocked) return null;
+                                    if (!isAdmin || isCurrentPeriodLocked || record.isWaived) return null;
                                     return (
                                         <Space size={2}>
                                             <Tooltip title="Sửa phạt">
@@ -6546,6 +6720,9 @@ export default function Attendance() {
 
                     const empFines = overviewFines.filter(f => f.empId === p.id);
                     const empBonuses = overviewBonuses.filter(b => b.empId === p.id);
+                    const empFineWaivers = fineWaivers.filter(waiver =>
+                        waiver?.fine?.empId === p.id && inOverviewRange(waiver.fine.date)
+                    );
                     const fineDescription = (f: FineRecord) => {
                         const fineDate = f.date ? dayjs(f.date) : null;
                         let text = (f.detail || f.type || 'Phạt').trim();
@@ -7016,6 +7193,28 @@ export default function Attendance() {
                                                         <td className="text-right ps-inv-text-green">+{fmt(p.mBonus)}</td>
                                                     </tr>
                                                 )}
+
+                                                {empFineWaivers.length > 0 && (
+                                                    <tr className="ps-inv-section-row ps-inv-section-neutral">
+                                                        <td colSpan={3}>Vi phạm đã được miễn trong đợt ưu đãi</td>
+                                                    </tr>
+                                                )}
+
+                                                {empFineWaivers.map((waiver, i) => (
+                                                    <tr key={`fine-waiver-${waiver.id || i}`}>
+                                                        <td>
+                                                            <span className="ps-inv-row-label">
+                                                                <span className="ps-inv-icon ps-inv-icon-green"><CheckCircleOutlined /></span>
+                                                                {waiver.fine.type || 'Vi phạm nội quy'}
+                                                            </span>
+                                                        </td>
+                                                        <td>
+                                                            {fineDescription(waiver.fine)}
+                                                            <span className="ps-inv-text-muted">Đã ghi nhận vi phạm; được miễn phạt theo ưu đãi 01–10/08.</span>
+                                                        </td>
+                                                        <td className="text-right ps-inv-text-green">Đã miễn {fmt(waiver.fine.amount)}</td>
+                                                    </tr>
+                                                ))}
 
                                                 {p.myFines > 0 && (
                                                     <tr className="ps-inv-section-row">

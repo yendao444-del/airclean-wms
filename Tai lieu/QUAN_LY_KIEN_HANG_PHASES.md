@@ -1,6 +1,8 @@
 # Quản lý kiện hàng — Hồ sơ yêu cầu và phase triển khai
 
 > Tài liệu chỉ ghi nhận các nội dung đã được người dùng xác nhận **Chốt**.
+>
+> **Cập nhật kiến trúc:** triển khai theo hướng module workspace độc lập bên trong Electron App, dùng chung dữ liệu chuẩn với Nhập hàng, Tồn kho, Xuất hàng và Kiểm hàng. Đặc tả ưu tiên cho phần giao diện, routing, đồng bộ dữ liệu và transaction nằm tại [`KIEN_HANG_WORKSPACE_ARCHITECTURE.md`](KIEN_HANG_WORKSPACE_ARCHITECTURE.md). Những đoạn trong tài liệu này nói “không đồng bộ”, “không cập nhật tồn kho” hoặc “sổ kiện hoàn toàn riêng” được thay thế bởi đặc tả mới khi team triển khai tích hợp thật.
 
 ## Mục tiêu cốt lõi
 

@@ -841,6 +841,32 @@
         </div>
     </div>
 
+    <!-- QUICK SKU PACKAGING OVERVIEW -->
+    <div id="packagingOverviewModal" class="fixed inset-0 z-[60] hidden modal-backdrop flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+        <div class="w-full max-w-6xl rounded-xl overflow-hidden bg-white shadow-2xl border border-slate-200">
+            <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between bg-white">
+                <div>
+                    <h2 class="text-lg font-black text-slate-900">Kiện hàng &amp; tồn theo quy cách</h2>
+                    <p id="packagingOverviewMeta" class="mt-1 text-xs text-slate-500">SKU · Màu sắc · Tổng tồn</p>
+                </div>
+                <button onclick="closeModal('packagingOverviewModal')" class="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition" aria-label="Đóng"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="p-5">
+                <div class="grid grid-cols-1 lg:grid-cols-[280px_1fr] border border-slate-200 rounded-xl overflow-hidden min-h-[430px]">
+                    <div class="bg-slate-50 border-r border-slate-200">
+                        <div id="packagingPackageNav" class="divide-y divide-slate-200"></div>
+                    </div>
+                    <div id="packagingSelectedDetail" class="p-5 bg-white"></div>
+                </div>
+                <div id="packagingLooseRow" class="mt-4"></div>
+                <section class="mt-4 border border-slate-200 rounded-xl overflow-hidden" aria-label="Lịch sử nhập xuất kiện">
+                    <div class="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between"><div><p class="text-sm font-black text-slate-900"><i class="fa-solid fa-clock-rotate-left mr-2 text-emerald-600"></i>Lịch sử nhập – xuất kiện</p><p class="mt-0.5 text-[11px] text-slate-500">Theo SKU đang xem · dữ liệu demo</p></div><button type="button" onclick="showToast('Đã tải lại lịch sử demo', 'success')" class="text-xs font-bold text-emerald-700 hover:text-emerald-900"><i class="fa-solid fa-rotate mr-1"></i>Làm mới</button></div>
+                    <div id="packagingHistory" class="divide-y divide-slate-100"></div>
+                </section>
+            </div>
+        </div>
+    </div>
+
     <!-- TOAST CONTAINER -->
     <div id="toastContainer" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2"></div>
 
@@ -866,7 +892,7 @@
         // Sample Preset Data with 3-Tier Packaging Types
         const SAMPLE_HANDLING_UNITS = [
             {
-                id: "TP-TRANG-0001",
+                id: "TAI-TRANG-A",
                 productGroup: "UNICARE",
                 variantName: "UNICARE-TRANG",
                 skuName: "1-5DTP-TRANG",
@@ -879,42 +905,94 @@
                 location: { zone: "Kho A", rack: "Kệ A2", level: "Tầng 3", bin: "Ô 04" },
                 initialPcs: 1200,
                 currentPcs: 1200,
-                note: "Dạng Tải lớn nguyên niêm phong xưởng",
+                note: "Tải A - nguyên tải, chưa khui",
                 updatedAt: "12/08/2026 08:30"
             },
             {
-                id: "TP-TRANG-0002",
+                id: "TAI-TRANG-B",
+                productGroup: "UNICARE",
+                variantName: "UNICARE-TRANG",
+                skuName: "1-5DTP-TRANG",
+                color: "Trắng",
+                packageType: "Tải",
+                packageLabel: "1 Tải lớn (1.200 gói)",
+                unitName: "gói",
+                factory: "Thịnh Phát",
+                status: "Nguyên niêm phong",
+                location: { zone: "Kho A", rack: "Kệ A2", level: "Tầng 3", bin: "Ô 05" },
+                initialPcs: 1200,
+                currentPcs: 1200,
+                note: "Tải B - nguyên tải, chưa khui",
+                updatedAt: "12/08/2026 09:15"
+            },
+            {
+                id: "TAI-TRANG-C",
+                productGroup: "UNICARE",
+                variantName: "UNICARE-TRANG",
+                skuName: "1-5DTP-TRANG",
+                color: "Trắng",
+                packageType: "Tải",
+                packageLabel: "1 Tải lớn (1.200 gói)",
+                unitName: "gói",
+                factory: "Thịnh Phát",
+                status: "Đang sử dụng",
+                location: { zone: "Kho A", rack: "Kệ A2", level: "Tầng 2", bin: "Ô 02" },
+                initialPcs: 1200,
+                currentPcs: 950,
+                note: "Tải C - đã khui, còn 950 gói",
+                updatedAt: "12/08/2026 09:20"
+            },
+            {
+                id: "THUNG-TRANG-A",
                 productGroup: "UNICARE",
                 variantName: "UNICARE-TRANG",
                 skuName: "1-5DTP-TRANG",
                 color: "Trắng",
                 packageType: "Thùng",
-                packageLabel: "1 Thùng (50 gói)",
+                packageLabel: "1 Thùng carton (600 gói)",
+                unitName: "gói",
+                factory: "Thịnh Phát",
+                status: "Nguyên niêm phong",
+                location: { zone: "Kho A", rack: "Kệ A2", level: "Tầng 2", bin: "Ô 03" },
+                initialPcs: 600,
+                currentPcs: 600,
+                note: "Thùng A - carton kho trơn, chưa khui",
+                updatedAt: "12/08/2026 09:25"
+            },
+            {
+                id: "THUNG-TRANG-B",
+                productGroup: "UNICARE",
+                variantName: "UNICARE-TRANG",
+                skuName: "1-5DTP-TRANG",
+                color: "Trắng",
+                packageType: "Thùng",
+                packageLabel: "1 Thùng carton (600 gói)",
                 unitName: "gói",
                 factory: "Thịnh Phát",
                 status: "Đang sử dụng",
-                location: { zone: "Kho A", rack: "Kệ A2", level: "Tầng 1", bin: "Ô 01" },
-                initialPcs: 50,
-                currentPcs: 50,
-                note: "Dạng Thùng 50 gói khui lẻ",
-                updatedAt: "12/08/2026 09:15"
+                location: { zone: "Kho A", rack: "Kệ A2", level: "Tầng 2", bin: "Ô 04" },
+                initialPcs: 600,
+                currentPcs: 500,
+                note: "Thùng B - carton kho trơn, đã khui",
+                updatedAt: "12/08/2026 09:30"
             },
             {
-                id: "TP-TRANG-0003",
+                id: "LE-TRANG-001",
                 productGroup: "UNICARE",
                 variantName: "UNICARE-TRANG",
                 skuName: "1-5DTP-TRANG",
                 color: "Trắng",
                 packageType: "Lẻ",
-                packageLabel: "Gói Lẻ (30 gói)",
+                packageLabel: "Hàng lẻ chưa phân kiện (90 gói)",
                 unitName: "gói",
                 factory: "Thịnh Phát",
-                status: "Đang sử dụng",
-                location: { zone: "Kho A", rack: "Kệ A2", level: "Tầng 1", bin: "Ô 02" },
-                initialPcs: 30,
-                currentPcs: 30,
-                note: "Hàng Lẻ nhặt đơn đóng gói",
-                updatedAt: "12/08/2026 09:20"
+                status: "Chưa phân kiện",
+                location: null,
+                initialPcs: 90,
+                currentPcs: 90,
+                note: "Hàng lẻ đang chờ phân kiện",
+                updatedAt: "12/08/2026 09:20",
+                isVirtual: true
             },
             {
                 id: "TP-XANH-0001",
@@ -957,6 +1035,9 @@
             { factory: "Thịnh Phát", name: "Quy cách B (Thùng)", sku: "1-5DTP-TRANG", structure: "1 Thùng = 50 Gói", status: "Đang dùng" },
             { factory: "AMI", name: "Quy cách Chuẩn AMI", sku: "4D-AMI-TRANG", structure: "1 Thùng = 50 Hộp = 1.000 Chiếc", status: "Đang dùng" }
         ];
+
+        // Demo-only state: package data stays isolated from the live Purchase module.
+        const DEMO_MODE = true;
 
         // State Store
         let inventory = [];
@@ -1068,6 +1149,7 @@
         }
 
         function saveInventoryToStorage() {
+            if (DEMO_MODE) return;
             if (window.__handlingLiveWorkspace) {
                 persistLiveUnits();
                 return;
@@ -1459,7 +1541,7 @@
                                     <div class="misa-card rounded overflow-hidden">
                                         
                                         <!-- Tier 2 Header (Sleek Single Line Bar - Click anywhere on row to expand/collapse) -->
-                                        <div onclick="toggleVariantAccordion('${variantName}')" class="px-3.5 py-2.5 flex justify-between items-center cursor-pointer transition select-none bg-white hover:bg-[#e6f7ff]/40">
+                                        <div onclick="openVariantOverview('${variantName}')" class="px-3.5 py-2.5 flex justify-between items-center cursor-pointer transition select-none bg-white hover:bg-[#e6f7ff]/40" title="Bấm để xem tồn theo từng tải, thùng và hàng lẻ">
                                             <div class="flex items-center gap-2">
                                                 <i class="fa-solid fa-chevron-down text-slate-400 text-[11px] transform transition-transform duration-200 ${isVarExpanded ? '' : '-rotate-90'}"></i>
                                                 <span class="font-bold text-slate-900 text-xs uppercase">🎨 ${variantName}</span>
@@ -1591,6 +1673,123 @@
         function toggleVariantAccordion(variantName) {
             expandedVariants[variantName] = expandedVariants[variantName] === true ? false : true;
             renderInventory();
+        }
+
+        // Demo UX: a SKU opens a focused overview that treats every physical tải/thùng
+        // as a separate handling unit. Loose stock is intentionally shown separately.
+        let activeOverviewVariant = null;
+        let activeOverviewPackageId = null;
+
+        function getVariantItems(variantName) {
+            return inventory.filter(item => item.variantName === variantName);
+        }
+
+        function bulkSackImage(className = 'h-10 w-10') {
+            return `<img src="__BULK_SACK_IMAGE__" alt="Bao tải hàng" class="${className} object-contain" onerror="if(!this.dataset.fallback){this.dataset.fallback='1';this.src='/images/bulk-sack-pallet.png'}else{this.style.display='none'}">`;
+        }
+
+        function cartonImage(className = 'h-10 w-10') {
+            return `<img src="__PLAIN_KRAFT_CARTON_IMAGE__" alt="Thùng carton trơn" class="${className} object-contain" onerror="this.src='/images/plain-kraft-carton.png'">`;
+        }
+
+        function loosePouchImage(className = 'h-10 w-10') {
+            return `<img src="__NEUTRAL_LOOSE_POUCH_IMAGE__" alt="Gói lẻ không thương hiệu" class="${className} object-contain" onerror="this.src='/images/neutral-loose-pouch.png'">`;
+        }
+
+        function overviewImage(item, className) {
+            if (item.packageType === 'Thùng') return cartonImage(className);
+            if (item.packageType === 'Lẻ' || item.isVirtual) return loosePouchImage(className);
+            return bulkSackImage(className);
+        }
+
+        function overviewName(item) {
+            if (item.packageType === 'Thùng') return item.id.replace('THUNG-TRANG-', 'Thùng ');
+            if (item.packageType === 'Lẻ' || item.isVirtual) return 'Gói lẻ';
+            return item.id.replace('TAI-TRANG-', 'Tải ');
+        }
+
+        function openVariantOverview(variantName) {
+            activeOverviewVariant = variantName;
+            const items = getVariantItems(variantName);
+            activeOverviewPackageId = items.find(item => item.packageType === 'Lẻ' || item.isVirtual)?.id || items.find(item => !item.isVirtual)?.id || null;
+            renderPackagingOverview();
+            openModal('packagingOverviewModal');
+        }
+
+        function selectOverviewPackage(packageId) {
+            activeOverviewPackageId = packageId;
+            renderPackagingOverview();
+        }
+
+        function renderPackagingOverview() {
+            const items = getVariantItems(activeOverviewVariant);
+            if (!items.length) return;
+            const first = items[0];
+            const unit = first.unitName || 'gói';
+            const total = items.reduce((sum, item) => sum + Number(item.currentPcs || 0), 0);
+            const loads = items.filter(item => item.packageType === 'Tải' && !item.isVirtual);
+            const cartons = items.filter(item => item.packageType === 'Thùng' && !item.isVirtual);
+            const loose = items.filter(item => item.packageType === 'Lẻ' || item.isVirtual);
+            const loosePieces = loose.reduce((sum, item) => sum + Number(item.currentPcs || 0), 0);
+            const physicalAndLoose = [...loads, ...cartons, ...loose];
+            const selected = physicalAndLoose.find(item => item.id === activeOverviewPackageId) || loose[0] || loads[0] || cartons[0];
+            activeOverviewPackageId = selected?.id || null;
+
+            document.getElementById('packagingOverviewMeta').innerHTML = `
+                <span class="font-mono font-bold text-emerald-700">SKU: ${first.skuName}</span>
+                <span class="mx-2 text-slate-300">|</span>Màu ${first.color || '—'}
+                <span class="mx-2 text-slate-300">|</span>Tổng tồn: <strong class="text-emerald-700">${formatNumber(total)} ${unit}</strong>`;
+            const navSection = (label, count, collection, kind) => {
+                if (!collection.length) return '';
+                const rows = collection.map(item => {
+                const active = item.id === activeOverviewPackageId;
+                const sealed = item.status === 'Nguyên niêm phong';
+                const tone = kind === 'loose' ? 'border-emerald-500 bg-emerald-50' : active ? 'border-emerald-500 bg-emerald-50' : 'border-transparent hover:bg-white';
+                const state = item.packageType === 'Lẻ' ? 'Chưa phân kiện' : sealed ? `Nguyên ${item.packageType.toLowerCase()}` : 'Đã khui';
+                return `<button type="button" onclick="selectOverviewPackage('${item.id}')" class="w-full text-left px-3 py-3 flex items-center gap-3 transition border-l-4 ${tone}">
+                    ${overviewImage(item, 'h-12 w-12')}
+                    <span class="min-w-0 flex-1"><span class="block text-sm font-black text-slate-900">${overviewName(item)}</span><span class="block mt-0.5 text-[11px] ${sealed ? 'text-emerald-700' : 'text-amber-700'}">${formatNumber(item.currentPcs)} ${unit} · ${state}</span></span>
+                    ${active ? '<i class="fa-solid fa-chevron-right text-emerald-600 text-xs"></i>' : ''}
+                </button>`;
+                }).join('');
+                return `<div class="px-4 py-3 border-b border-slate-200 flex items-center justify-between"><span class="text-[11px] font-black uppercase tracking-wide text-slate-500">${label}</span><span class="text-[11px] font-bold text-emerald-700">${count}</span></div>${rows}`;
+            };
+            document.getElementById('packagingPackageNav').innerHTML = `${navSection('Tải hàng', `${loads.length} tải`, loads, 'load')}${navSection('Thùng', `${cartons.length} thùng`, cartons, 'carton')}${navSection('Gói lẻ', `${formatNumber(loosePieces)} ${unit}`, loose, 'loose')}` || '<div class="p-6 text-xs text-slate-400">Chưa có kiện vật lý.</div>';
+
+            const detail = document.getElementById('packagingSelectedDetail');
+            if (!selected) {
+                detail.innerHTML = '<div class="h-full flex items-center justify-center text-sm text-slate-400">Chọn một tải để xem chi tiết.</div>';
+            } else {
+                const isLoose = selected.packageType === 'Lẻ' || selected.isVirtual;
+                const sealed = selected.status === 'Nguyên niêm phong';
+                const statusTone = isLoose ? 'text-slate-600 bg-slate-50 border-slate-200' : sealed ? 'text-emerald-700 bg-emerald-50 border-emerald-200' : 'text-amber-700 bg-amber-50 border-amber-200';
+                const usedPcs = Math.max(0, Number(selected.initialPcs || 0) - Number(selected.currentPcs || 0));
+                const percent = selected.initialPcs ? Math.round((selected.currentPcs / selected.initialPcs) * 100) : 0;
+                const statusText = isLoose ? 'Chưa phân kiện' : sealed ? `Nguyên ${selected.packageType.toLowerCase()}` : 'Đã khui';
+                const detailLocation = isLoose ? 'Khu chờ phân kiện' : getLocationString(selected.location);
+                detail.innerHTML = `
+                    <div class="h-full flex flex-col">
+                        <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                            <div class="flex items-center gap-5">${overviewImage(selected, 'h-40 w-40')}<div><p class="text-xl font-black text-slate-900">${overviewName(selected)}</p><span class="inline-flex mt-2 px-2.5 py-1 rounded border text-xs font-bold ${statusTone}"><i class="fa-solid ${isLoose ? 'fa-circle' : sealed ? 'fa-lock' : 'fa-lock-open'} mr-1.5"></i>${statusText}</span></div></div>
+                            <button type="button" onclick="closeModal('packagingOverviewModal'); viewDetail('${selected.id}')" class="px-3 py-2 rounded-lg border border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-xs font-bold"><i class="fa-solid fa-qrcode mr-1"></i> Xem tem QR</button>
+                        </div>
+                        <div class="mt-5"><div class="flex items-baseline gap-2"><span class="text-4xl font-black ${isLoose || sealed ? 'text-emerald-600' : 'text-amber-600'}">${formatNumber(selected.currentPcs)}</span>${isLoose ? `<span class="font-semibold text-slate-500">${unit}</span>` : `<span class="font-semibold text-slate-500">/ ${formatNumber(selected.initialPcs)} ${unit}</span>`}</div><div class="mt-3 h-2 rounded-full bg-slate-100 overflow-hidden"><span class="block h-full ${isLoose || sealed ? 'bg-[#00b96b]' : 'bg-amber-500'}" style="width:${percent}%"></span></div><p class="mt-2 text-[11px] text-slate-500">${isLoose ? `Hàng lẻ đang chờ được đóng thành tải hoặc thùng vật lý.` : sealed ? `${selected.packageType} còn nguyên niêm phong, chưa phát sinh rút hàng.` : `Đã rút ${formatNumber(usedPcs)} ${unit}; tồn còn lại trong ${selected.packageType.toLowerCase()}.`}</p></div>
+                        <div class="mt-5 grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-slate-200 border border-slate-200 rounded-lg overflow-hidden"><div class="p-3"><p class="text-[10px] uppercase font-bold text-slate-400">Vị trí</p><p class="mt-1 text-sm font-bold text-slate-800">${detailLocation}</p></div><div class="p-3"><p class="text-[10px] uppercase font-bold text-slate-400">Mã kiện</p><p class="mt-1 text-sm font-mono font-bold text-[#0073e6]">${isLoose ? 'GÓI LẺ' : selected.id}</p></div></div>
+                        <div class="mt-auto pt-5 flex justify-end"><button type="button" onclick="${isLoose ? `closeModal('packagingOverviewModal'); openAllocationModal('${first.skuName}')` : sealed ? `unsealPackage('${selected.id}'); auditLogs.unshift({ action: 'Khui ${overviewName(selected)}', detail: '${formatNumber(selected.currentPcs)} ${unit} còn lại', timestamp: new Date().toLocaleString('vi-VN') }); renderPackagingOverview()` : `showToast('${overviewName(selected)} đang ở trạng thái đã khui.', 'info')`}" class="px-3.5 py-2 rounded-lg ${isLoose ? 'bg-[#00b96b] hover:bg-[#009b5a] text-white' : sealed ? 'bg-amber-500 hover:bg-amber-600 text-white' : 'bg-slate-100 text-slate-500'} text-xs font-bold"><i class="fa-solid ${isLoose ? 'fa-boxes-packing' : sealed ? 'fa-lock-open' : 'fa-circle-info'} mr-1"></i>${isLoose ? 'Tạo kiện từ gói lẻ' : sealed ? `Khui ${selected.packageType.toLowerCase()}` : 'Đã khui'}</button></div>
+                    </div>`;
+            }
+
+            // Gói lẻ is already a first-class selection in the left rail and the detail
+            // pane; avoid repeating it as another large card before the history.
+            document.getElementById('packagingLooseRow').innerHTML = '';
+
+            const baseHistory = [
+                { icon: 'fa-arrow-down', tone: 'text-emerald-600 bg-emerald-50', title: 'Nhập kho', detail: 'Tạo 3 tải, 2 thùng và hàng lẻ từ phiếu demo PN-260811-001', time: '12/08/2026 09:30' },
+                { icon: 'fa-box-open', tone: 'text-amber-600 bg-amber-50', title: 'Khui Tải C', detail: 'Rút 250 gói từ Tải C · còn 950 gói', time: '12/08/2026 09:20' },
+                { icon: 'fa-location-dot', tone: 'text-blue-600 bg-blue-50', title: 'Xếp vị trí', detail: 'Đã đưa Thùng B vào Kho A · Kệ A2 · Tầng 2 · Ô 04', time: '12/08/2026 09:30' }
+            ];
+            const history = [...auditLogs.slice(0, 3), ...baseHistory].slice(0, 4);
+            document.getElementById('packagingHistory').innerHTML = history.map(entry => `<div class="px-4 py-3 flex items-center gap-3"><span class="w-8 h-8 rounded-full ${entry.tone || 'text-slate-600 bg-slate-100'} flex items-center justify-center"><i class="fa-solid ${entry.icon || 'fa-clock-rotate-left'} text-xs"></i></span><div class="min-w-0 flex-1"><p class="text-xs font-bold text-slate-800">${entry.title || entry.action}</p><p class="mt-0.5 text-[11px] text-slate-500 truncate">${entry.detail}</p></div><time class="text-[10px] text-slate-400 whitespace-nowrap">${entry.time || entry.timestamp}</time></div>`).join('');
         }
 
         function toggleExpandAllGroups() {
@@ -2287,37 +2486,15 @@
             }, 3000);
         }
 
-        window.onload = async function() {
-            try {
-                await loadLiveInventoryFromPurchases();
-                renderInventory();
-            } catch (error) {
-                console.error('Handling units live workspace error:', error);
-                inventory = [];
-                renderInventory();
-                showToast(error?.message || 'Không tải được dữ liệu Nhập hàng.', 'warning');
-            }
+        window.onload = function() {
+            // This iteration is intentionally self-contained: no Product, Purchase,
+            // database, or preload API is read until the package workflow is approved.
+            inventory = JSON.parse(JSON.stringify(SAMPLE_HANDLING_UNITS));
+            auditLogs = [];
+            expandedGroups = { "UNICARE": true, "KHẨU TRANG 4D MASK": false, "GĂNG TAY NITRILE": false };
+            expandedVariants = { "UNICARE-TRANG": false, "UNICARE-XANH": false };
+            renderInventory();
         };
-
-        // AUTO HOT-RELOAD SCRIPT (Tự động F5 trên cả file:// và http://127.0.0.1:3333)
-        (function autoHotReload() {
-            let lastLen = null;
-            setInterval(async () => {
-                try {
-                    const url = window.location.protocol === 'file:' 
-                        ? 'http://127.0.0.1:3333/index.html?t=' + Date.now()
-                        : window.location.pathname + '?t=' + Date.now();
-                        
-                    const res = await fetch(url, { cache: "no-store" });
-                    const text = await res.text();
-                    if (lastLen !== null && text && text.length !== lastLen) {
-                        console.log("[Hot Reload] File changed. Reloading page...");
-                        window.location.reload();
-                    }
-                    if (text) lastLen = text.length;
-                } catch (e) {}
-            }, 1000);
-        })();
     </script>
 </body>
 </html>
