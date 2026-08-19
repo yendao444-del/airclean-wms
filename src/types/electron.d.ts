@@ -335,12 +335,19 @@ export interface ElectronAPI {
       location: { zone?: string; rack?: string };
       note?: string;
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
+    deleteUnit: (data: {
+      code: string;
+      reason?: string;
+    }) => Promise<{ success: boolean; data?: any; error?: string }>;
     getTelegramStatus: () => Promise<{
       success: boolean;
       data?: {
         isRunning: boolean;
         botUsername: string;
         defaultChatId: string;
+        groupChatId: string | null;
+        groupTitle: string;
+        isGroupConnected: boolean;
         lastPollAt: string | null;
         lastError: string | null;
       };

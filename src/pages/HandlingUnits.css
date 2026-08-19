@@ -605,6 +605,35 @@
   font-size: 10px;
   flex-shrink: 0;
 }
+.hu-card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.hu-card-delete-icon {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fff;
+  color: #dc2626;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.hu-card-delete-icon:hover:not(:disabled) {
+  border-color: #dc2626;
+  background: #dc2626;
+  color: #fff;
+}
+.hu-card-delete-icon:disabled {
+  cursor: wait;
+  opacity: 0.45;
+}
 .hu-package-card > img {
   width: calc(100% - 28px);
   max-width: 140px;
