@@ -59,12 +59,17 @@ echo.
 
 echo [2/7] Regenerate Prisma Client...
 echo ----------------------------------------
-:: Prisma engine can be locked by Electron while the app is running.
+:: Stop watchers first; otherwise Nodemon can restart Electron after taskkill.
+powershell -NoProfile -Command "$root=(Resolve-Path '.').Path; Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and (($_.CommandLine -like ('*'+$root+'*') -and $_.CommandLine -match 'nodemon.+nodemon\.electron\.json') -or $_.CommandLine -match 'prisma.+db.+execute.+20260811090000_add_handling_units') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+timeout /t 1 /nobreak >nul
 taskkill /F /IM electron.exe >nul 2>&1
 taskkill /F /IM "DBY POS.exe" >nul 2>&1
-timeout /t 2 /nobreak >nul
+timeout /t 3 /nobreak >nul
+del /Q "node_modules\.prisma\client\query_engine-windows.dll.node.tmp*" 2>nul
 call node_modules\.bin\prisma generate
 if errorlevel 1 (
+    node scripts\release-version.cjs set !CURRENT_VERSION! >nul
+    echo [ROLLBACK] Restored package.json to v!CURRENT_VERSION! because release did not complete.
     echo [ERROR] Prisma generate failed.
     pause
     exit /b 1

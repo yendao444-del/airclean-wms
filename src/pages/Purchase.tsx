@@ -36,6 +36,16 @@ const VAT_OVERDUE_FINE_STAGE_INCREMENT = 10000;
 // 00:00 on 11/08 and never creates retroactive fines.
 const VAT_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-11T00:00:00');
 
+const addVatChargeableDays = (start: dayjs.Dayjs, count: number) => {
+    let cursor = start.startOf('day');
+    let added = 0;
+    while (added < Math.max(0, count)) {
+        cursor = cursor.add(1, 'day');
+        if (cursor.day() !== 0) added += 1;
+    }
+    return cursor;
+};
+
 type VatDueStatus = { color: string; text: string; detail: string } | null;
 
 const formatVatDateTime = (value: dayjs.Dayjs) => value.format('HH:mm DD/MM/YYYY');
@@ -52,11 +62,14 @@ const formatRemainingVatTime = (target: dayjs.Dayjs, now: dayjs.Dayjs) => {
 
 const getVatFirstFineAt = (purchasedAt: dayjs.Dayjs) => {
     const normalFirstFineAt = purchasedAt.startOf('day').add(VAT_FIRST_FINE_AFTER_DAYS, 'day');
-    return normalFirstFineAt.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT) ? VAT_FINE_POLICY_EFFECTIVE_AT : normalFirstFineAt;
+    const effectiveFirstFineAt = normalFirstFineAt.isBefore(VAT_FINE_POLICY_EFFECTIVE_AT)
+        ? VAT_FINE_POLICY_EFFECTIVE_AT
+        : normalFirstFineAt;
+    return effectiveFirstFineAt.day() === 0 ? effectiveFirstFineAt.add(1, 'day') : effectiveFirstFineAt;
 };
 
 const getVatFineDate = (purchasedAt: dayjs.Dayjs, stage: number) =>
-    getVatFirstFineAt(purchasedAt).add(stage <= 3 ? (stage - 1) * 2 : stage + 1, 'day');
+    addVatChargeableDays(getVatFirstFineAt(purchasedAt), stage <= 3 ? (stage - 1) * 2 : stage + 1);
 
 const getVatFineAmount = (stage: number) =>
     VAT_OVERDUE_FINE_FIRST_AMOUNT + (Math.max(1, stage) - 1) * VAT_OVERDUE_FINE_STAGE_INCREMENT;
@@ -64,11 +77,9 @@ const getVatFineAmount = (stage: number) =>
 const getVatFineStage = (purchasedAt: dayjs.Dayjs, now = dayjs()) => {
     const firstFineAt = getVatFirstFineAt(purchasedAt);
     if (now.isBefore(firstFineAt)) return 0;
-    const daysAfterFirstFine = Math.max(0, now.startOf('day').diff(firstFineAt.startOf('day'), 'day'));
-    if (daysAfterFirstFine < 2) return 1;
-    if (daysAfterFirstFine < 4) return 2;
-    if (daysAfterFirstFine < 5) return 3;
-    return 4 + (daysAfterFirstFine - 5);
+    let stage = 0;
+    while (stage < 366 && !now.isBefore(getVatFineDate(purchasedAt, stage + 1))) stage += 1;
+    return stage;
 };
 
 function getVatDueStatus(purchaseDate: string | Date | undefined, needsVat: boolean): VatDueStatus {

@@ -70,6 +70,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     handlingUnits: {
         getWorkspace: () => ipcRenderer.invoke('handlingUnits:getWorkspace'),
         saveRegister: (records) => ipcRenderer.invoke('handlingUnits:saveRegister', records),
+        unsealUnit: (data) => ipcRenderer.invoke('handlingUnits:unsealUnit', data),
+        sealUnit: (data) => ipcRenderer.invoke('handlingUnits:sealUnit', data),
+        pickUnit: (data) => ipcRenderer.invoke('handlingUnits:pickUnit', data),
+        requestFinalCheck: (data) => ipcRenderer.invoke('handlingUnits:requestFinalCheck', data),
+        finalizePick: (data) => ipcRenderer.invoke('handlingUnits:finalizePick', data),
+        moveUnit: (data) => ipcRenderer.invoke('handlingUnits:move', data),
+        updateUnit: (data) => ipcRenderer.invoke('handlingUnits:updateUnit', data),
+        getTelegramStatus: () => ipcRenderer.invoke('handlingUnits:getTelegramStatus'),
+        sendTelegramTest: (data) => ipcRenderer.invoke('handlingUnits:sendTelegramTest', data),
+        onChanged: (callback) => {
+            const handler = (_event, data) => callback(data);
+            ipcRenderer.on('handlingUnits:changed', handler);
+            return () => ipcRenderer.removeListener('handlingUnits:changed', handler);
+        },
     },
     suppliers: {
         getAll: () => ipcRenderer.invoke('suppliers:getAll'),

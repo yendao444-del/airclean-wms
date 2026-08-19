@@ -50,6 +50,7 @@ import {
     MessageOutlined,
     SendOutlined,
     HistoryOutlined,
+    InfoCircleOutlined,
     LeftOutlined,
     RightOutlined
 } from '@ant-design/icons';
@@ -380,7 +381,7 @@ const DailyTasks = () => {
     const [editingTask, setEditingTask] = useState<Task | null>(null);
     const [taskModalVisible, setTaskModalVisible] = useState(false);
     const [taskForm] = Form.useForm();
-    const [assignmentMode, setAssignmentMode] = useState<'open' | 'fixed' | 'daily'>('open');
+    const [assignmentMode, setAssignmentMode] = useState<'fixed' | 'daily'>('fixed');
     const [loading, setLoading] = useState(false);
 
     // Quick note state for assignment cards
@@ -592,7 +593,9 @@ const DailyTasks = () => {
     const loadTasks = async () => {
         try {
             setLoading(true);
-            const result = await window.electronAPI.dailyTasks.list({ maintenance: true });
+            // Reset and reconciliation run independently on page entry. Task
+            // cards should not wait for the full maintenance scan.
+            const result = await window.electronAPI.dailyTasks.list({ maintenance: false });
             if (result.success && result.data) {
                 setTasks(result.data.map((t: any) => ({
                     ...t,
@@ -900,9 +903,7 @@ const DailyTasks = () => {
         setIsSavingAssignment(true);
         try {
             const values = await assignmentForm.validateFields();
-            const assignees = Array.from(new Set(editingAssignment
-                ? [values.assignee]
-                : selectedAssignmentAssignees));
+            const assignees = Array.from(new Set(selectedAssignmentAssignees));
             if (assignees.length === 0) {
                 message.error('Chọn ít nhất một người thực hiện.');
                 return;
@@ -929,6 +930,7 @@ const DailyTasks = () => {
                     assignment: {
                         ...existingAttachments.assignment,
                         fixedAssignee: true,
+                        assignees,
                         // Bàn giao yêu cầu bằng chứng uses this one base fine
                         // for the first miss and each subsequent escalation.
                         deadlinePenaltyAmount: assignmentPenaltyAmount,
@@ -1402,7 +1404,7 @@ const DailyTasks = () => {
     // Add task
     const handleAddTask = (categoryKey?: string) => {
         setEditingTask(null);
-        setAssignmentMode('open');
+        setAssignmentMode('fixed');
         taskForm.resetFields();
 
         // ⚡ Set data TRƯỚC
@@ -1411,7 +1413,7 @@ const DailyTasks = () => {
             category: categoryKey || categories[0]?.key || 'Sàn TMDT',
             status: 'pending',
             evidenceRequired: false,
-            assignmentMode: 'open',
+            assignmentMode: 'fixed',
             rotationAssignees: [],
             penaltyAmount: DEFAULT_EVIDENCE_PENALTY,
             evidenceDeadlineTime: DAILY_EVIDENCE_DEADLINE,
@@ -1431,7 +1433,7 @@ const DailyTasks = () => {
             : Array.isArray(assignment.weeklyRotation?.assignees)
                 ? assignment.weeklyRotation.assignees
             : [];
-        const mode = rotationAssignees.length > 0 ? 'daily' : task.assignee ? 'fixed' : 'open';
+        const mode: 'fixed' | 'daily' = rotationAssignees.length > 0 ? 'daily' : 'fixed';
         setAssignmentMode(mode);
         taskForm.setFieldsValue({
             ...task,
@@ -1468,86 +1470,6 @@ const DailyTasks = () => {
         });
     };
 
-    // Nhận việc (Claim task)
-    const handleClaimTask = async (taskId: number, claimerName?: string) => {
-        const task = tasks.find(t => t.id === taskId);
-        if (!task) return;
-
-        // Nếu task đã có assignee → không cho claim
-        if (task.assignee) {
-            message.info(`Công việc này đã được gán cho ${task.assignee}`);
-            return;
-        }
-
-        // Nếu có claimerName (từ dropdown) → dùng luôn
-        if (claimerName) {
-            try {
-                const result = await window.electronAPI.dailyTasks.update(taskId, { assignee: claimerName });
-                if (!result.success) throw new Error(result.error || 'Không thể nhận việc.');
-                message.success(`✅ ${claimerName} đã nhận việc: "${task.title}"`);
-                loadTasks();
-            } catch (e: any) {
-                message.error('Lỗi: ' + e.message);
-            }
-            return;
-        }
-
-        // Hiển thị modal chọn người nhận việc
-        let selectedPerson = '';
-        Modal.confirm({
-            title: '🙋 Nhận việc',
-            icon: null,
-            width: 420,
-            content: (
-                <div>
-                    <p style={{ marginBottom: 8 }}>
-                        <strong>{task.title}</strong>
-                    </p>
-                    <p style={{ color: '#666', fontSize: 13, marginBottom: 16 }}>
-                        Chọn người nhận công việc này:
-                    </p>
-                    <Select
-                        placeholder="Chọn người nhận việc"
-                        style={{ width: '100%' }}
-                        size="large"
-                        virtual={false}
-                        onChange={(value) => { selectedPerson = value; }}
-                    >
-                        {assigneeList.map((name, index) => {
-                            const colors = ['#1890ff', '#52c41a', '#eb2f96', '#722ed1', '#fa8c16', '#13c2c2'];
-                            const color = colors[index % colors.length];
-                            return (
-                                <Option key={name} value={name}>
-                                    <Avatar size="small" style={{ backgroundColor: color, marginRight: 8 }}>
-                                        {name[0]}
-                                    </Avatar>
-                                    {name}
-                                </Option>
-                            );
-                        })}
-                    </Select>
-                </div>
-            ),
-            okText: 'Nhận việc',
-            okType: 'primary',
-            cancelText: 'Hủy',
-            onOk: async () => {
-                if (!selectedPerson) {
-                    message.warning('Vui lòng chọn người nhận việc!');
-                    return Promise.reject();
-                }
-                try {
-                    const result = await window.electronAPI.dailyTasks.update(taskId, { assignee: selectedPerson });
-                    if (!result.success) throw new Error(result.error || 'Không thể nhận việc.');
-                    message.success(`✅ ${selectedPerson} đã nhận việc: "${task.title}"`);
-                    loadTasks();
-                } catch (e: any) {
-                    message.error('Lỗi: ' + e.message);
-                }
-            }
-        });
-    };
-
     // Save task
     const handleSaveTask = async () => {
         try {
@@ -1558,8 +1480,12 @@ const DailyTasks = () => {
             const existingAssignment = existingAttachments.assignment || {};
             // Only administrators decide how a task is completed and whether a penalty applies.
             const requiresEvidence = isAdmin ? Boolean(values.evidenceRequired) : Boolean(existingEvidence.required);
-            const selectedAssignmentMode = values.assignmentMode || 'open';
+            const selectedAssignmentMode: 'fixed' | 'daily' = values.assignmentMode === 'daily' ? 'daily' : 'fixed';
             const rotationAssignees = Array.isArray(values.rotationAssignees) ? values.rotationAssignees : [];
+            if (selectedAssignmentMode === 'fixed' && !values.assignee) {
+                message.error('Vui lòng chọn người thực hiện.');
+                return;
+            }
             const hasEvidenceAssignee = selectedAssignmentMode === 'daily'
                 ? rotationAssignees.length >= 2
                 : selectedAssignmentMode === 'fixed' && Boolean(values.assignee);
@@ -1955,8 +1881,8 @@ const DailyTasks = () => {
 
                             {/* Center: Assignee + Verifier */}
                             <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                                {/* Assignee — hoặc nút Nhận việc */}
-                                {task.assignee ? (
+                                {/* Tasks must be assigned by an administrator. */}
+                                {task.assignee && (
                                     <Tooltip title={`Người thực hiện: ${task.assignee}`}>
                                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                                             <span style={{ fontSize: 11, color: '#999', fontWeight: 500 }}>👤</span>
@@ -1973,33 +1899,6 @@ const DailyTasks = () => {
                                             </Avatar>
                                         </div>
                                     </Tooltip>
-                                ) : (
-                                    task.status !== 'completed' && (
-                                        <Tooltip title="Chưa ai nhận — bấm để nhận việc">
-                                            <Button
-                                                type="dashed"
-                                                size="small"
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    handleClaimTask(task.id);
-                                                }}
-                                                style={{
-                                                    borderColor: '#faad14',
-                                                    color: '#faad14',
-                                                    borderRadius: 16,
-                                                    fontSize: 11,
-                                                    fontWeight: 600,
-                                                    padding: '0 10px',
-                                                    height: 28,
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: 4
-                                                }}
-                                            >
-                                                🙋 Nhận việc
-                                            </Button>
-                                        </Tooltip>
-                                    )
                                 )}
 
                                 {/* Verifier (if exists) */}
@@ -2802,6 +2701,30 @@ const DailyTasks = () => {
             ...(completedDailyTasks.length > 0 ? [{ key: 'completed-daily', label: 'Đã hoàn thành', color: '#16a34a', tasks: completedDailyTasks }] : []),
             ...(completedDeadlineTasks.length > 0 ? [{ key: 'completed', label: 'Đã hoàn thành', color: '#16a34a', tasks: completedDeadlineTasks }] : []),
         ].filter(group => group.tasks.length > 0);
+        const getOpenRecurrenceInfo = (task: Task) => {
+            if (task.type !== 'assignment') return null;
+            const assignment = parseAttachments(task.attachments).assignment || {};
+            const recurrenceDays = Number(assignment.recurrenceDays) || 0;
+            if (recurrenceDays < 1) return null;
+            const rootId = String(assignment.recurrenceRootId || task.id);
+            const sequence = Number(assignment.recurrenceSequence) || 1;
+            const openChain = pendingTasks.filter(candidate => {
+                if (candidate.type !== 'assignment') return false;
+                const candidateAssignment = parseAttachments(candidate.attachments).assignment || {};
+                if ((Number(candidateAssignment.recurrenceDays) || 0) < 1) return false;
+                return String(candidateAssignment.recurrenceRootId || candidate.id) === rootId;
+            });
+            if (openChain.length < 2) return null;
+            const latestSequence = Math.max(...openChain.map(candidate => {
+                const candidateAssignment = parseAttachments(candidate.attachments).assignment || {};
+                return Number(candidateAssignment.recurrenceSequence) || 1;
+            }));
+            return {
+                sequence,
+                isCurrent: sequence === latestSequence,
+            };
+        };
+        const hasConcurrentRecurrences = pendingTasks.some(task => Boolean(getOpenRecurrenceInfo(task)));
         const sidebarTaskById = new Map([...selectedDailyTasks, ...selectedAssignments].map(task => [Number(task.id), task]));
         const sidebarEvents = history
             .filter(entry => entry?.timestamp && dayjs(entry.timestamp).format('YYYY-MM-DD') === selectedDateKey)
@@ -2861,6 +2784,7 @@ const DailyTasks = () => {
             const evidencePenaltyRecorded = Boolean(task.evidencePenaltyRecorded);
             const evidencePenaltyAmount = isAssignment ? getAssignmentDeadlinePenalty(task) : evidence.penaltyAmount;
             const nextAssignmentEvidencePenalty = getNextAssignmentEvidencePenalty(task);
+            const recurrenceInfo = getOpenRecurrenceInfo(task);
             return <div
                 key={`${task.type}-${task.id}`}
                 className="daily-task-list-row"
@@ -2874,7 +2798,20 @@ const DailyTasks = () => {
                             : <CheckCircleOutlined style={{ color }} />}
                     </span>
                     <div style={{ minWidth: 0 }}>
-                        <div style={{ color: '#172033', fontWeight: 750, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.title}</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+                            <div style={{ color: '#172033', fontWeight: 750, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {task.title}{recurrenceInfo ? (recurrenceInfo.isCurrent ? ' (mới)' : ' (cũ)') : ''}
+                            </div>
+                            {recurrenceInfo && (
+                                <Tooltip title={recurrenceInfo.isCurrent
+                                    ? 'Kỳ mới được hệ thống tự sinh theo lịch lặp.'
+                                    : 'Kỳ trước vẫn còn vì chưa được hoàn thành.'}>
+                                    <Tag style={{ flexShrink: 0, margin: 0, borderRadius: 999, fontSize: 11, fontWeight: 750, color: recurrenceInfo.isCurrent ? '#047857' : '#b91c1c', background: recurrenceInfo.isCurrent ? '#ecfdf5' : '#fef2f2', borderColor: recurrenceInfo.isCurrent ? '#a7f3d0' : '#fecaca' }}>
+                                        {recurrenceInfo.isCurrent ? 'Kỳ hiện tại' : `Kỳ trước #${recurrenceInfo.sequence}`}
+                                    </Tag>
+                                </Tooltip>
+                            )}
+                        </div>
                         <div style={{ marginTop: 4, color: '#64748b', fontSize: 12, display: 'flex', gap: 6, alignItems: 'center' }}><UserOutlined /> {isAssignment ? getAssignmentRecipients(task).join(', ') : (task.assignee || 'Chưa phân công')}</div>
                     </div>
                 </div>
@@ -2940,6 +2877,11 @@ const DailyTasks = () => {
                     <div className="daily-task-action-guide" role="status">
                         <span><CheckCircleOutlined /> Chọn <strong>Hoàn thành</strong> hoặc <strong>Nộp bằng chứng</strong> ở cuối dòng. Bấm vào nội dung công việc sẽ không tự xác nhận.</span>
                         <Button type="text" size="small" onClick={dismissTaskActionGuide}>Đã hiểu</Button>
+                    </div>
+                )}
+                {hasConcurrentRecurrences && (
+                    <div style={{ padding: '9px 14px', color: '#1d4ed8', background: '#eff6ff', borderBottom: '1px solid #bfdbfe', fontSize: 12.5, fontWeight: 650 }}>
+                        <InfoCircleOutlined /> Công việc lặp lại vẫn tự sinh kỳ mới đúng lịch. Kỳ cũ chưa hoàn thành sẽ tiếp tục hiển thị và tiếp tục bị phạt riêng.
                     </div>
                 )}
                 <div className="daily-task-list-header"><span>Công việc</span><span>Nguồn</span><span>Hạn</span><span>Bằng chứng / phạt</span><span style={{ textAlign: 'right' }}>Thao tác</span></div>
@@ -3607,12 +3549,26 @@ const DailyTasks = () => {
                                 <Form.Item name="assignee" hidden rules={[{ required: true, message: 'Chọn người thực hiện.' }]}><Input /></Form.Item>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, minHeight: 34, alignItems: 'center' }}>
                                     {selectedAssignmentAssignees.map((name: string) => (
-                                        <Tag key={name} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 32, margin: 0, borderRadius: 7, color: '#065f46', background: '#ecfdf5', borderColor: '#bbf7d0', fontSize: 13, fontWeight: 650 }}>
+                                        <Tag
+                                            key={name}
+                                            closable
+                                            onClose={(event) => {
+                                                event.preventDefault();
+                                                if (selectedAssignmentAssignees.length === 1) {
+                                                    message.warning('Bàn giao phải còn ít nhất một người nhận.');
+                                                    return;
+                                                }
+                                                const nextAssignees = selectedAssignmentAssignees.filter((item: string) => item !== name);
+                                                updateAssignmentAssignees(nextAssignees);
+                                                assignmentForm.setFieldsValue({ assignee: nextAssignees[0] });
+                                            }}
+                                            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 32, margin: 0, borderRadius: 7, color: '#065f46', background: '#ecfdf5', borderColor: '#bbf7d0', fontSize: 13, fontWeight: 650 }}
+                                        >
                                             <Avatar size={20} style={{ backgroundColor: getAvatarColor(name), fontSize: 10 }}>{name.slice(0, 1).toUpperCase()}</Avatar>{name}
                                         </Tag>
                                     ))}
                                 </div>
-                                <div style={{ marginTop: 8, color: '#64748b', fontSize: 12 }}>Danh sách người nhận được tạo cùng một lần giao. Muốn đổi người nhận, tạo lại bàn giao để giữ lịch sử và khoản phạt rõ ràng.</div>
+                                <div style={{ marginTop: 8, color: '#64748b', fontSize: 12 }}>Bấm dấu × để gỡ người nhận khỏi bàn giao. Lịch sử các lần bàn giao đã phát sinh vẫn được giữ lại.</div>
                             </>
                         ) : (
                             <Form.Item style={{ marginBottom: 0 }}>
@@ -3879,29 +3835,18 @@ const DailyTasks = () => {
                         ) : null}
                     </Form.Item>
 
-                    <Form.Item name="assigneeFixed" valuePropName="checked" style={{ display: 'none' }}>
-                        <Checkbox onChange={(event) => {
-                            const nextMode = event.target.checked ? 'fixed' : 'open';
-                            setAssignmentMode(nextMode);
-                            taskForm.setFieldsValue({ assignmentMode: nextMode });
-                            if (!event.target.checked) taskForm.setFieldsValue({ assignee: '' });
-                        }}>
-                            Cố định người thực hiện
-                        </Checkbox>
-                    </Form.Item>
                     <div style={{ marginBottom: 10, fontSize: 12, color: '#64748b' }}>
-                        {assignmentMode === 'fixed' ? 'Chỉ người được chọn có thể thực hiện công việc này.' : 'Chọn luân phiên để tự đổi người mỗi ngày, hoặc để trống để nhân viên phù hợp nhận việc sau.'}
+                        {assignmentMode === 'fixed' ? 'Chỉ người được chọn có thể thực hiện công việc này.' : 'Hệ thống tự đổi người thực hiện theo danh sách luân phiên mỗi ngày.'}
                     </div>
                     <Form.Item name="assignmentMode" style={{ marginBottom: 10 }}>
                         <Radio.Group
                             onChange={(event) => {
-                                const mode = event.target.value as 'open' | 'fixed' | 'daily';
+                                const mode = event.target.value as 'fixed' | 'daily';
                                 setAssignmentMode(mode);
                                 if (mode !== 'fixed') taskForm.setFieldsValue({ assignee: '' });
                             }}
                             style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}
                         >
-                            <Radio value="open">Ai phù hợp nhận việc</Radio>
                             <Radio value="fixed">Cố định một người</Radio>
                             <Radio value="daily">Luân phiên theo ngày</Radio>
                         </Radio.Group>
@@ -3925,19 +3870,19 @@ const DailyTasks = () => {
                             </div>
                         </div>
                     )}
-                    {assignmentMode !== 'daily' && <>
+                    {assignmentMode === 'fixed' && <>
                     <Form.Item
                         name="assignee"
-                        label={<span style={{ fontSize: 14, fontWeight: 600 }}>👤 Người thực hiện <span style={{ fontSize: 12, fontWeight: 400, color: '#999' }}>(có thể để trống — nhận việc sau)</span></span>}
+                        label={<span style={{ fontSize: 14, fontWeight: 600 }}>👤 Người thực hiện</span>}
+                        rules={[{ required: true, message: 'Chọn người thực hiện.' }]}
                         style={{ marginBottom: 16 }}
                     >
                         <Select
                             size="large"
-                            placeholder="Để trống = ai rảnh nhận việc"
+                            placeholder="Chọn người thực hiện"
                             optionLabelProp="label"
                             virtual={false}
                             showSearch
-                            allowClear
                             dropdownStyle={{ zIndex: 2000 }}
                             filterOption={(input, option) =>
                                 (option?.label as string || '').toLowerCase().includes(input.toLowerCase())
