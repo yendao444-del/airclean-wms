@@ -10,7 +10,7 @@ import {
     ArrowUpOutlined, ArrowDownOutlined, FireOutlined,
     CalendarOutlined, TrophyOutlined, EditOutlined, DeleteOutlined, PlusOutlined, MinusCircleOutlined, MoreOutlined,
     BarChartOutlined, ShoppingOutlined, InboxOutlined, DollarOutlined,
-    DownOutlined, FilterOutlined, ReloadOutlined, EyeOutlined,
+    DownOutlined, FilterOutlined, ReloadOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import {
@@ -804,29 +804,14 @@ export default function OrdersPage() {
             render: (value) => <Text className="orders-time">{dayjs(value).format('DD/MM/YYYY HH:mm')}</Text>,
         },
         {
-            title: 'Thao tác', key: 'actions', width: 100, fixed: 'right' as const,
+            title: 'Thao tác', key: 'actions', width: 60, fixed: 'right' as const,
             render: (_: any, record: UnifiedOrder) => {
                 const menuItems = getOrderMenuItems(record);
-                const isExpanded = expandedRowKeys.includes(record.id);
+                if (menuItems.length === 0) return null;
                 return (
-                    <Space size={6}>
-                        <Tooltip title={isExpanded ? 'Thu gọn chi tiết' : 'Xem chi tiết'}>
-                            <Button
-                                className="orders-icon-button"
-                                size="small"
-                                icon={<EyeOutlined />}
-                                aria-label={isExpanded ? 'Thu gọn chi tiết' : 'Xem chi tiết'}
-                                onClick={() => setExpandedRowKeys(current =>
-                                    isExpanded ? current.filter(key => key !== record.id) : [...current, record.id]
-                                )}
-                            />
-                        </Tooltip>
-                        {menuItems.length > 0 && (
-                            <Dropdown trigger={['click']} menu={{ items: menuItems }}>
-                                <Button className="orders-icon-button" size="small" icon={<MoreOutlined />} aria-label="Thêm thao tác" />
-                            </Dropdown>
-                        )}
-                    </Space>
+                    <Dropdown trigger={['click']} menu={{ items: menuItems }}>
+                        <Button className="orders-icon-button" size="small" icon={<MoreOutlined />} aria-label="Thêm thao tác" />
+                    </Dropdown>
                 );
             },
         },
@@ -1310,6 +1295,24 @@ export default function OrdersPage() {
                     columns={columns}
                     rowKey="id"
                     size="small"
+                    onRow={(record) => ({
+                        title: 'Nhấp đúp để xem hoặc thu gọn chi tiết đơn hàng',
+                        tabIndex: 0,
+                        onDoubleClick: (event) => {
+                            const target = event.target as HTMLElement;
+                            if (target.closest('button, a, input, label, [role="button"], .ant-checkbox-wrapper, .ant-dropdown-trigger')) return;
+                            setExpandedRowKeys(current => current.includes(record.id)
+                                ? current.filter(key => key !== record.id)
+                                : [...current, record.id]);
+                        },
+                        onKeyDown: (event) => {
+                            if (event.key !== 'Enter' || event.target !== event.currentTarget) return;
+                            setExpandedRowKeys(current => current.includes(record.id)
+                                ? current.filter(key => key !== record.id)
+                                : [...current, record.id]);
+                        },
+                    })}
+                    rowClassName={(record) => expandedRowKeys.includes(record.id) ? 'orders-row-expanded' : 'orders-row-expandable'}
                     rowSelection={{
                         selectedRowKeys,
                         onChange: (keys) => setSelectedRowKeys(keys),
@@ -1320,12 +1323,7 @@ export default function OrdersPage() {
                         expandedRowKeys,
                         onExpandedRowsChange: keys => setExpandedRowKeys([...keys]),
                         showExpandColumn: false,
-                        rowExpandable: (record) => {
-                            try {
-                                const items = JSON.parse(record.items);
-                                return items.length > 1 || record.source === 'pos';
-                            } catch { return false; }
-                        },
+                        rowExpandable: () => true,
                         expandedRowRender: (record) => {
                             let items: any[] = [];
                             try { items = JSON.parse(record.items); } catch { }
