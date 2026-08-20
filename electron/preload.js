@@ -69,6 +69,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     handlingUnits: {
         getWorkspace: () => ipcRenderer.invoke('handlingUnits:getWorkspace'),
+        createUnits: (records) => ipcRenderer.invoke('handlingUnits:createUnits', records),
         saveRegister: (records) => ipcRenderer.invoke('handlingUnits:saveRegister', records),
         unsealUnit: (data) => ipcRenderer.invoke('handlingUnits:unsealUnit', data),
         sealUnit: (data) => ipcRenderer.invoke('handlingUnits:sealUnit', data),
@@ -149,7 +150,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         completeRegularTask: (taskId, payload) => ipcRenderer.invoke('dailyTasks:completeRegularTask', taskId, payload),
         getEvidenceImageUrl: (taskId, storagePath) => ipcRenderer.invoke('dailyTasks:getEvidenceImageUrl', taskId, storagePath),
         getDriveEvidenceImageUrl: (taskId, driveUrl, mimeType) => ipcRenderer.invoke('dailyTasks:getDriveEvidenceImageUrl', taskId, driveUrl, mimeType),
-        listEvidencePenalties: () => ipcRenderer.invoke('dailyTasks:listEvidencePenalties'),
+        listEvidencePenalties: (options) => ipcRenderer.invoke('dailyTasks:listEvidencePenalties', options),
         delete: (id) => ipcRenderer.invoke('dailyTasks:delete', id),
         getStats: (filters) => ipcRenderer.invoke('dailyTasks:stats', filters),
         resetDaily: () => ipcRenderer.invoke('dailyTasks:resetDaily'),
@@ -182,6 +183,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     marketplaceOrders: {
         getAll: (args) => ipcRenderer.invoke('marketplaceOrders:getAll', args),
         delete: (data) => ipcRenderer.invoke('marketplaceOrders:delete', data),
+    },
+    orders: {
+        getUnified: (args) => ipcRenderer.invoke('orders:getUnified', args),
+        getDailyStats: (args) => ipcRenderer.invoke('orders:getDailyStats', args),
+        getProductDetails: (args) => ipcRenderer.invoke('orders:getProductDetails', args),
     },
 
     // Export Orders (XUẤT HÀNG POS)
@@ -239,6 +245,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     inventoryLogs: {
         getAll: (filters) => ipcRenderer.invoke('inventoryLogs:getAll', filters),
         getBySku: (params) => ipcRenderer.invoke('inventoryLogs:getBySku', params),
+        getBySkus: (params) => ipcRenderer.invoke('inventoryLogs:getBySkus', params),
         getStats: (filters) => ipcRenderer.invoke('inventoryLogs:getStats', filters),
         getRefDetail: (params) => ipcRenderer.invoke('inventoryLogs:getRefDetail', params),
     },
@@ -263,7 +270,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         set: (key, value) => ipcRenderer.invoke('appConfig:set', key, value),
     },
     stockCheck: {
-        getSessions: () => ipcRenderer.invoke('stockCheck:getSessions'),
+        getSessions: (options) => ipcRenderer.invoke('stockCheck:getSessions', options),
         ensureDailySession: (data) => ipcRenderer.invoke('stockCheck:ensureDailySession', data),
         createRecheckSession: (data) => ipcRenderer.invoke('stockCheck:createRecheckSession', data),
         adminSaveSessions: (sessions) => ipcRenderer.invoke('stockCheck:adminSaveSessions', sessions),

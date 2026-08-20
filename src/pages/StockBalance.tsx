@@ -176,15 +176,14 @@ const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ p
             const parentSkus = parent.variants.map(v => v.sku);
             const mainSku = parent.sku;
 
-            // Tải log từng SKU song song thay vì load toàn bộ DB về client
+            // Batch all SKUs into a single IPC/database round-trip.
             const skusToFetch = [mainSku, ...parentSkus].filter(Boolean);
-            const results = await Promise.all(
-                skusToFetch.map(sku => (window as any).electronAPI.inventoryLogs.getBySku({ sku, limit: 200 }))
-            );
-
-            const allLogs: InventoryLogItem[] = results
-                .filter(r => r.success)
-                .flatMap(r => r.data as InventoryLogItem[]);
+            const result = await (window as any).electronAPI.inventoryLogs.getBySkus({
+                skus: skusToFetch,
+                limit: 200,
+            });
+            if (!result?.success) throw new Error(result?.error || 'Không thể tải nhật ký');
+            const allLogs: InventoryLogItem[] = Array.isArray(result.data) ? result.data : [];
 
             // Dedup theo id, sort newest first
             const seen = new Set<number>();

@@ -46,17 +46,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
 
             const rememberToken = localStorage.getItem(REMEMBER_TOKEN_KEY);
-            if (rememberToken) {
-                const restored: { success: boolean; data?: User } = await window.electronAPI.users
-                    .restoreSession(rememberToken)
-                    .catch(() => ({ success: false }));
-                if (restored.success && restored.data) {
-                    setUser(restored.data);
-                    sessionStorage.setItem('currentUser', JSON.stringify(restored.data));
-                    return;
-                }
-                localStorage.removeItem(REMEMBER_TOKEN_KEY);
-                sessionStorage.removeItem('currentUser');
+            const restored: { success: boolean; data?: User } = await window.electronAPI.users
+                .restoreSession(rememberToken || undefined)
+                .catch(() => ({ success: false }));
+            // Legacy renderer token is migrated into Electron safeStorage by main.
+            localStorage.removeItem(REMEMBER_TOKEN_KEY);
+            if (restored.success && restored.data) {
+                setUser(restored.data);
+                sessionStorage.setItem('currentUser', JSON.stringify(restored.data));
+                return;
             }
 
             const current: { success: boolean; data?: User } = await window.electronAPI.users
@@ -85,7 +83,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }, [user]);
 
     function doLogout() {
-        const rememberToken = localStorage.getItem(REMEMBER_TOKEN_KEY);
         sessionStorage.removeItem('currentUser');
         // Never leave an admin stock-check snapshot on a shared workstation.
         localStorage.removeItem('stock-check-sessions-v2');
@@ -93,7 +90,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         localStorage.removeItem(REMEMBER_TOKEN_KEY);
         localStorage.removeItem(AUTH_LOGIN_DATE_KEY);
         setUser(null);
-        window.electronAPI.users.logout(rememberToken || undefined).catch(() => {});
+        window.electronAPI.users.logout().catch(() => {});
     }
 
     const login = async (username: string, password: string, rememberMe = true): Promise<{ success: boolean; error?: string }> => {
@@ -112,11 +109,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             sessionStorage.setItem('currentUser', JSON.stringify(userWithoutPassword));
             localStorage.setItem(AUTH_LOGIN_DATE_KEY, todayKey());
 
-            if (result.rememberToken) {
-                localStorage.setItem(REMEMBER_TOKEN_KEY, result.rememberToken);
-            } else {
-                localStorage.removeItem(REMEMBER_TOKEN_KEY);
-            }
+            localStorage.removeItem(REMEMBER_TOKEN_KEY);
             localStorage.removeItem('rememberedUser');
 
             setUser(userWithoutPassword);

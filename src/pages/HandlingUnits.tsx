@@ -42,22 +42,33 @@ import {
   DeleteOutlined,
 } from "@ant-design/icons";
 import { Warehouse2DMap } from "../components/Warehouse2DMap";
-import sealedSackImage from "../assets/warehouse-sack-sealed.png";
-import openedSackImage from "../assets/warehouse-sack-opened.png";
-import plainCartonImage from "../assets/plain-kraft-carton.png";
-import maskPouchImage from "../assets/unbranded-mask-pouch.png";
+import sealedSackImage from "../assets/warehouse-sack-sealed.webp";
+import openedSackImage from "../assets/warehouse-sack-opened.webp";
+import plainCartonImage from "../assets/plain-kraft-carton.webp";
+import maskPouchImage from "../assets/unbranded-mask-pouch.webp";
 import "./HandlingUnits.css";
 
 type CatalogItem = {
+  productId?: number;
+  purchaseOrderId?: number;
+  purchaseItemId?: number;
   sku: string;
   productGroup: string;
   variantName: string;
   color?: string;
+  factory?: string;
   unitName: string;
   stock: number;
 };
 type UnitRow = {
   id: string;
+  productId?: number;
+  purchaseOrderId?: number;
+  purchaseItemId?: number;
+  productGroup?: string;
+  variantName?: string;
+  color?: string;
+  factory?: string;
   receiptCode?: string;
   skuName: string;
   packageType: string;
@@ -68,6 +79,7 @@ type UnitRow = {
   initialPcs: number;
   currentPcs: number;
   note?: string;
+  updatedAt?: string;
 };
 type LocationItem = {
   id: number;
@@ -558,13 +570,27 @@ const emptyWorkspace: Workspace = {
   packagingSpecs: [],
   recentTransactions: [],
 };
+let handlingUnitsWorkspaceCache: Pick<
+  Workspace,
+  "catalog" | "register" | "recentTransactions"
+> | null = null;
 
 export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
-  const [workspace, setWorkspace] = useState(emptyWorkspace);
-  const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(
-    () => Boolean(window.electronAPI?.handlingUnits?.getWorkspace),
+  const [workspace, setWorkspace] = useState(() =>
+    handlingUnitsWorkspaceCache
+      ? { ...emptyWorkspace, ...handlingUnitsWorkspaceCache }
+      : emptyWorkspace,
   );
-  const [selectedSku, setSelectedSku] = useState("");
+  const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(
+    () =>
+      Boolean(
+        window.electronAPI?.handlingUnits?.getWorkspace &&
+          !handlingUnitsWorkspaceCache,
+      ),
+  );
+  const [selectedSku, setSelectedSku] = useState(
+    () => handlingUnitsWorkspaceCache?.catalog[0]?.sku || "",
+  );
   const [search, setSearch] = useState("");
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [detail, setDetail] = useState<UnitRow | null>(null);
@@ -600,6 +626,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [allocationForm] = Form.useForm();
 
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [visibleUnitLimit, setVisibleUnitLimit] = useState(100);
   const [locModalView, setLocModalView] = useState<"map" | "list">("map");
 
   const [selectedLocationCode, setSelectedLocationCode] =
@@ -629,6 +656,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const workspaceLoadRequestRef = useRef(0);
   const workspaceLoadInFlightRef = useRef(false);
   const workspaceReloadQueuedRef = useRef(false);
+  const workspaceResponseSignatureRef = useRef(
+    handlingUnitsWorkspaceCache
+      ? JSON.stringify(handlingUnitsWorkspaceCache)
+      : "",
+  );
   const isSubmittingPickRef = useRef(false);
   const pickRequestIdRef = useRef("");
   const [showFinalCheckModal, setShowFinalCheckModal] = useState(false);
@@ -678,13 +710,18 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           const catalog = Array.isArray(res.data.catalog) ? res.data.catalog : [];
           const register = Array.isArray(res.data.register) ? res.data.register : [];
           const rawData = res.data as any;
+          const recentTransactions = Array.isArray(rawData.recentTransactions)
+            ? rawData.recentTransactions
+            : [];
+          const responseSignature = JSON.stringify({ catalog, register, recentTransactions });
+          handlingUnitsWorkspaceCache = { catalog, register, recentTransactions };
+          if (responseSignature === workspaceResponseSignatureRef.current) return;
+          workspaceResponseSignatureRef.current = responseSignature;
           setWorkspace((prev) => ({
             ...prev,
             catalog,
             register,
-            recentTransactions: Array.isArray(rawData.recentTransactions)
-              ? rawData.recentTransactions
-              : [],
+            recentTransactions,
           }));
           setSelectedSku((current) =>
             catalog.some((item) => item.sku === current)
@@ -711,19 +748,32 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   };
 
   useEffect(() => {
-    loadWorkspace();
+    void loadWorkspace();
     const intervalTimer = setInterval(() => {
-      loadWorkspace();
-    }, 2000);
-    const unsub = window.electronAPI?.handlingUnits?.onChanged?.((evt) => {
-      console.log("⚡ Handling units changed event:", evt);
-      loadWorkspace(true);
+      if (document.visibilityState === "visible") void loadWorkspace();
+    }, 30000);
+    const unsub = window.electronAPI?.handlingUnits?.onChanged?.(() => {
+      void loadWorkspace(true);
     });
     return () => {
       clearInterval(intervalTimer);
       unsub?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (isWorkspaceLoading) return;
+    handlingUnitsWorkspaceCache = {
+      catalog: workspace.catalog,
+      register: workspace.register,
+      recentTransactions: workspace.recentTransactions,
+    };
+  }, [
+    isWorkspaceLoading,
+    workspace.catalog,
+    workspace.register,
+    workspace.recentTransactions,
+  ]);
 
   useEffect(() => {
     if (!showTelegramModal) return;
@@ -778,7 +828,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       message.success(
         `Đã khui kiện ${unit.id} thành công (chuyển sang Đang sử dụng)!`,
       );
-      await loadWorkspace(true);
     } catch (err: any) {
       message.error(err?.message || "Lỗi khui kiện");
     }
@@ -1327,7 +1376,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       setEditingUnit(null);
       editUnitForm.resetFields();
       message.success(`Đã cập nhật kiện ${updatedUnit.id}.`);
-      await loadWorkspace();
     } catch (error: any) {
       if (!error?.errorFields)
         message.error(error?.message || "Không thể cập nhật kiện.");
@@ -1352,6 +1400,50 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       );
     });
   }, [workspace.catalog, search]);
+
+  const unitsBySku = useMemo(() => {
+    const index = new Map<string, UnitRow[]>();
+    workspace.register.forEach((unit) => {
+      const items = index.get(unit.skuName);
+      if (items) items.push(unit);
+      else index.set(unit.skuName, [unit]);
+    });
+    return index;
+  }, [workspace.register]);
+
+  const unitsByLocation = useMemo(() => {
+    const index = new Map<string, UnitRow[]>();
+    workspace.register.forEach((unit) => {
+      const code = unit.location?.zone || "";
+      const items = index.get(code);
+      if (items) items.push(unit);
+      else index.set(code, [unit]);
+    });
+    return index;
+  }, [workspace.register]);
+
+  const openedUnitBySkuAndCategory = useMemo(() => {
+    const index = new Map<string, UnitRow>();
+    workspace.register.forEach((unit) => {
+      if (unit.status !== "Đang sử dụng" && unit.status !== "Chờ kiểm") return;
+      const category = getPackageCategory(unit.packageType);
+      if (category === "LE") return;
+      const key = `${unit.skuName.toUpperCase()}::${category}`;
+      if (!index.has(key)) index.set(key, unit);
+    });
+    return index;
+  }, [workspace.register]);
+
+  const getIndexedConflict = (unit: UnitRow) => {
+    const category = getPackageCategory(unit.packageType);
+    if (category === "LE") return null;
+    const conflict = openedUnitBySkuAndCategory.get(
+      `${unit.skuName.toUpperCase()}::${category}`,
+    );
+    return conflict && conflict.id.toUpperCase() !== unit.id.toUpperCase()
+      ? conflict
+      : null;
+  };
 
   // Nhóm SKU theo productGroup: Cha → Con (màu)
   const skuGroups = useMemo(() => {
@@ -1391,31 +1483,47 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     const found = matchingSkus.find((item) => item.sku === selectedSku);
     return found || matchingSkus[0];
   }, [matchingSkus, selectedSku]);
-  const selectedUnits = workspace.register.filter(
-    (unit) => unit.skuName === selected?.sku,
+  const selectedUnits = useMemo(
+    () => (selected ? unitsBySku.get(selected.sku) || [] : []),
+    [selected, unitsBySku],
   );
-  const selectedAllocated = selectedUnits.reduce(
-    (sum, unit) => sum + unit.currentPcs,
-    0,
+  const selectedStats = useMemo(
+    () =>
+      selectedUnits.reduce(
+        (stats, unit) => {
+          stats.allocated += unit.currentPcs;
+          if (unit.status === "Nguyên niêm phong") stats.sealed += 1;
+          else if (unit.status === "Đang sử dụng") stats.opened += 1;
+          else if (unit.status === "Chờ kiểm") stats.pendingCheck += 1;
+          else if (unit.status === "Đã hết") stats.empty += 1;
+          return stats;
+        },
+        { allocated: 0, sealed: 0, opened: 0, pendingCheck: 0, empty: 0 },
+      ),
+    [selectedUnits],
   );
+  const selectedAllocated = selectedStats.allocated;
   const selectedDifference =
     selectedAllocated - Number(selected?.stock || 0);
-  const sealedCount = selectedUnits.filter(
-    (u) => u.status === "Nguyên niêm phong",
-  ).length;
-  const openedCount = selectedUnits.filter(
-    (u) => u.status === "Đang sử dụng",
-  ).length;
-  const pendingCheckCount = selectedUnits.filter(
-    (u) => u.status === "Chờ kiểm",
-  ).length;
-  const emptyCount = selectedUnits.filter((u) => u.status === "Đã hết").length;
+  const sealedCount = selectedStats.sealed;
+  const openedCount = selectedStats.opened;
+  const pendingCheckCount = selectedStats.pendingCheck;
+  const emptyCount = selectedStats.empty;
 
   const displayedUnits = useMemo(() => {
     if (statusFilter === "all")
       return selectedUnits.filter((u) => u.status !== "Đã hết");
     return selectedUnits.filter((u) => u.status === statusFilter);
   }, [selectedUnits, statusFilter]);
+
+  useEffect(() => {
+    setVisibleUnitLimit(100);
+  }, [selected?.sku, statusFilter]);
+
+  const visibleUnits = useMemo(
+    () => displayedUnits.slice(0, visibleUnitLimit),
+    [displayedUnits, visibleUnitLimit],
+  );
 
   const watchAllocSku = Form.useWatch("sku", allocationForm);
   const watchAllocMethod =
@@ -1436,10 +1544,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
   const currentAllocAllocated = useMemo(() => {
     if (!currentAllocProduct) return 0;
-    return workspace.register
-      .filter((u) => u.skuName === currentAllocProduct.sku)
-      .reduce((sum, u) => sum + u.currentPcs, 0);
-  }, [workspace.register, currentAllocProduct]);
+    return (unitsBySku.get(currentAllocProduct.sku) || []).reduce(
+      (sum, unit) => sum + unit.currentPcs,
+      0,
+    );
+  }, [currentAllocProduct, unitsBySku]);
 
   const currentAllocDifference = useMemo(() => {
     if (!currentAllocProduct) return 0;
@@ -1474,6 +1583,15 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       const note = values.note ? String(values.note).trim() : "";
 
       let created: UnitRow[] = [];
+      const unitIdentity = {
+        productId: targetSku.productId,
+        purchaseOrderId: targetSku.purchaseOrderId,
+        purchaseItemId: targetSku.purchaseItemId,
+        productGroup: targetSku.productGroup,
+        variantName: targetSku.variantName,
+        color: targetSku.color,
+        factory: targetSku.factory,
+      };
       const skuPrefix =
         targetSku.sku
           .replace(/[^A-Za-z0-9]/g, "")
@@ -1499,6 +1617,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         const factor = Math.max(1, Number(values.conversionFactor || 1200));
         created = Array.from({ length: count }, () => {
           return {
+            ...unitIdentity,
             id: nextUnitCode(),
             receiptCode,
             skuName: targetSku.sku,
@@ -1517,6 +1636,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         const factor = Math.max(1, Number(values.conversionFactor || 50));
         created = Array.from({ length: count }, () => {
           return {
+            ...unitIdentity,
             id: nextUnitCode(),
             receiptCode,
             skuName: targetSku.sku,
@@ -1535,6 +1655,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         const qty = Math.max(1, Number(values.looseQty || 1));
         created = [
           {
+            ...unitIdentity,
             id: nextUnitCode(),
             receiptCode,
             skuName: targetSku.sku,
@@ -1553,12 +1674,15 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       const totalPcs = created.reduce((s, u) => s + u.currentPcs, 0);
       const nextRegister = [...workspace.register, ...created];
 
-      if (!window.electronAPI?.handlingUnits?.saveRegister) {
+      const createUnits = window.electronAPI?.handlingUnits?.createUnits;
+      const saveRegister = window.electronAPI?.handlingUnits?.saveRegister;
+      if (!createUnits && !saveRegister) {
         throw new Error("Không kết nối được dịch vụ lưu dữ liệu kiện hàng.");
       }
-      const saveResult = await window.electronAPI.handlingUnits.saveRegister(
-        nextRegister,
-      );
+      const usesIncrementalCreate = Boolean(createUnits);
+      const saveResult = createUnits
+        ? await createUnits(created)
+        : await saveRegister!(nextRegister);
       if (!saveResult?.success) {
         throw new Error(saveResult?.error || "Supabase không lưu được kiện mới.");
       }
@@ -1566,17 +1690,19 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       setWorkspace((previous) => ({
         ...previous,
         register: nextRegister,
-        recentTransactions: [
-          ...created.map((u) => ({
-            id: `TR-${Date.now()}-${u.id}`,
-            unitId: u.id,
-            createdAt: new Date().toISOString(),
-            type: "Nhập kiện",
-            quantity: u.initialPcs,
-            note: `Tạo kiện mới ${u.id} (${u.packageLabel}) tại ${zone}`,
-          })),
-          ...previous.recentTransactions,
-        ],
+        recentTransactions: usesIncrementalCreate
+          ? previous.recentTransactions
+          : [
+              ...created.map((u) => ({
+                id: `TR-${Date.now()}-${u.id}`,
+                unitId: u.id,
+                createdAt: new Date().toISOString(),
+                type: "Nhập kiện",
+                quantity: u.initialPcs,
+                note: `Tạo kiện mới ${u.id} (${u.packageLabel}) tại ${zone}`,
+              })),
+              ...previous.recentTransactions,
+            ],
       }));
 
       message.success(
@@ -1586,7 +1712,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       allocationForm.resetFields();
       setPrintUnits(created);
       setShowPrintModal(true);
-      await loadWorkspace();
     } catch (error: any) {
       if (!error?.errorFields)
         message.error(error?.message || "Không tạo được kiện.");
@@ -1699,8 +1824,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 const groupUnitsCount = group.children.reduce(
                   (acc, c) =>
                     acc +
-                    workspace.register.filter((u) => u.skuName === c.sku)
-                      .length,
+                    (unitsBySku.get(c.sku) || []).length,
                   0,
                 );
                 return (
@@ -1721,9 +1845,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     {isOpen && (
                       <div className="hu-sku-group-children">
                         {group.children.map((item) => {
-                          const units = workspace.register.filter(
-                            (unit) => unit.skuName === item.sku,
-                          );
+                          const unitCount = (unitsBySku.get(item.sku) || [])
+                            .length;
                           const colorInfo = getColorDot(item.color, item.sku);
                           // Each variant is identified by its actual SKU in the catalog.
                           const shortName = item.sku;
@@ -1746,7 +1869,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                 <div className="hu-sku-meta">
                                   <span className="hu-sku-stock">
                                     <b>{fmt(item.stock)}</b> {item.unitName} ·{" "}
-                                    {units.length} kiện
+                                    {unitCount} kiện
                                   </span>
                                 </div>
                               </div>
@@ -1896,7 +2019,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               <div
                 className={`hu-package-grid ${displayedUnits.length <= 2 ? "is-sparse" : ""}`}
               >
-                  {displayedUnits.map((unit) => (
+                  {visibleUnits.map((unit) => (
                     <button
                       type="button"
                       className={`hu-package-card ${unit.status === "Đang sử dụng" ? "opened" : ""} ${unit.status === "Đã hết" ? "empty" : ""}`}
@@ -1960,10 +2083,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                           >
                             {unit.status === "Nguyên niêm phong" &&
                               (() => {
-                                const conflict = getConflictingOpenedUnit(
-                                  unit,
-                                  workspace.register,
-                                );
+                                const conflict = getIndexedConflict(unit);
                                 if (conflict) {
                                   const catLabel =
                                     getPackageCategory(unit.packageType) ===
@@ -2035,6 +2155,16 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     </button>
                   ))}
               </div>
+              {visibleUnits.length < displayedUnits.length && (
+                <Flex justify="center" style={{ padding: "0 0 18px" }}>
+                  <Button
+                    onClick={() => setVisibleUnitLimit((limit) => limit + 100)}
+                  >
+                    Xem thêm{" "}
+                    {Math.min(100, displayedUnits.length - visibleUnits.length)} kiện
+                  </Button>
+                </Flex>
+              )}
             </>
           ) : (
             <Empty description="Không tìm thấy SKU demo" />
@@ -2127,10 +2257,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               </Button>
               {detail.status === "Nguyên niêm phong" &&
                 (() => {
-                  const conflict = getConflictingOpenedUnit(
-                    detail,
-                    workspace.register,
-                  );
+                  const conflict = getIndexedConflict(detail);
                   if (conflict) {
                     const catLabel =
                       getPackageCategory(detail.packageType) === "TAI"
@@ -2468,9 +2595,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               />
               <div className="hu-locations-list">
                 {filteredLocations.map((loc) => {
-                  const unitsInLoc = workspace.register.filter(
-                    (u) => u.location?.zone === loc.code,
-                  );
+                  const unitsInLoc = unitsByLocation.get(loc.code) || [];
                   const totalPcs = unitsInLoc.reduce(
                     (s, u) => s + u.currentPcs,
                     0,
@@ -3458,10 +3583,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   </div>
                   <div
                     className="hu-tg-msg-content"
-                    dangerouslySetInnerHTML={{
-                      __html: msg.text.replace(/\n/g, "<br/>"),
-                    }}
-                  />
+                    style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+                  >
+                    {msg.text}
+                  </div>
                 </div>
               ))}
             </div>

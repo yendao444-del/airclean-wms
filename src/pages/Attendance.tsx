@@ -1,6 +1,4 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
-import html2canvas from 'html2canvas';
-import { jsPDF } from 'jspdf';
 import { PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer, Legend } from 'recharts';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
@@ -143,6 +141,10 @@ interface FineRecord {
     date?: string; // ISO string — ngày tạo phạt
     source?: string; // nguồn tạo phạt
     disabled?: boolean;
+    taskId?: number | string;
+    taskCode?: string;
+    cycle?: number;
+    multiplier?: number;
 }
 
 const ensureFineId = (fine: FineRecord, index = 0): FineRecord => ({
@@ -1308,14 +1310,10 @@ const InlineSchedulePopover = ({
             placement="bottomLeft"
             overlayStyle={{ zIndex: 1050 }}
         >
-            <div onClickCapture={(e) => {
-                e.stopPropagation();
-                setOpen(true);
-            }} onClick={(e) => {
-                e.stopPropagation();
-            }}>
-                {children}
-            </div>
+            {/* Let Popover receive the click directly.  The previous capture
+                handler set `open` before Popover processed the same event,
+                so its controlled state could immediately be toggled closed. */}
+            <span style={{ display: 'block' }}>{children}</span>
         </Popover>
     );
 };
@@ -1437,14 +1435,9 @@ const InlineLeavePopover = ({
             placement="bottomLeft"
             overlayStyle={{ zIndex: 1050 }}
         >
-            <div onClickCapture={(e) => {
-                e.stopPropagation();
-                setOpen(true);
-            }} onClick={(e) => {
-                e.stopPropagation();
-            }}>
-                {children}
-            </div>
+            {/* Keep the trigger event intact so an unpaid-leave pill can open
+                the actions for recording paid leave. */}
+            <span style={{ display: 'block' }}>{children}</span>
         </Popover>
     );
 };
@@ -2663,6 +2656,10 @@ export default function Attendance() {
     const buildPayslipPDF = async (payslipData?: any) => {
         const data = payslipData ?? payslipModal;
         if (!data) return;
+        const [{ default: html2canvas }, { jsPDF }] = await Promise.all([
+            import('html2canvas'),
+            import('jspdf'),
+        ]);
         const source = document.querySelector('.ps-print-view') as HTMLElement;
         if (!source) return;
         const el = source.cloneNode(true) as HTMLElement;
@@ -2736,6 +2733,10 @@ export default function Attendance() {
 
     const handleExportPayslipPDF = async () => {
         if (!payslipModal) return;
+        if (!isPayrollDataReady) {
+            message.info('Dữ liệu lương và các khoản phạt đang tổng hợp. Vui lòng chờ hoàn tất trước khi xuất phiếu lương.');
+            return;
+        }
         setPdfExporting(true);
         try {
             await waitForPaint();
@@ -2751,6 +2752,10 @@ export default function Attendance() {
 
     const handleSendPayslipGmail = async () => {
         if (!payslipModal) return;
+        if (!isPayrollDataReady) {
+            message.info('Dữ liệu lương và các khoản phạt đang tổng hợp. Vui lòng chờ hoàn tất trước khi gửi phiếu lương.');
+            return;
+        }
         const api = (window as any).electronAPI;
         if (!api?.attendance?.sendPayslipEmail) {
             message.error('Chưa có API gửi Gmail. Vui lòng khởi động lại app.');
@@ -2806,6 +2811,10 @@ export default function Attendance() {
     };
 
     const handleBulkSendGmail = async () => {
+        if (!isPayrollDataReady) {
+            message.info('Dữ liệu lương và các khoản phạt đang tổng hợp. Vui lòng chờ hoàn tất trước khi gửi phiếu lương.');
+            return;
+        }
         const api = (window as any).electronAPI;
         if (!api?.attendance?.sendPayslipEmail) {
             message.error('Chưa có API gửi Gmail. Vui lòng khởi động lại app.');
@@ -3027,8 +3036,10 @@ export default function Attendance() {
     const [evidencePenaltyRecords, setEvidencePenaltyRecords] = useState<any[]>([]);
     const [stockCheckSessions, setStockCheckSessions] = useState<any[]>([]);
     const [stockBalanceRecords, setStockBalanceRecords] = useState<any[]>([]);
+    const [fineSourcesReadyKey, setFineSourcesReadyKey] = useState('');
 
     const [isDbLoaded, setIsDbLoaded] = useState(false);
+    const [isBackgroundSyncComplete, setIsBackgroundSyncComplete] = useState(false);
     const [systemUsernames, setSystemUsernames] = useState<string[]>([]);
     const [systemUsers, setSystemUsers] = useState<any[]>([]);
 
@@ -3038,17 +3049,19 @@ export default function Attendance() {
             try {
                 const api = (window as any).electronAPI;
 
-                // Fetch danh sách username hệ thống TRƯỚC để dùng migrate
-                let sysUsernames: string[] = [];
+                // Hai nguồn độc lập được tải song song để rút ngắn thời gian mở trang.
                 let knownUsernames: string[] = [];
+                const [usersRes, rs] = await Promise.all([
+                    api.users.getAll().catch(() => null),
+                    api.appConfig.get('attendanceData'),
+                ]);
                 try {
-                    const usersRes = await api.users.getAll();
-                    if (usersRes.success && usersRes.data) {
+                    if (usersRes?.success && usersRes.data) {
                         setSystemUsers(usersRes.data);
                         knownUsernames = usersRes.data
                             .filter((u: any) => u?.username && u.username.toLowerCase() !== 'admin')
                             .map((u: any) => u.username);
-                        sysUsernames = usersRes.data
+                        const sysUsernames = usersRes.data
                             .filter((u: any) =>
                                 u?.username &&
                                 u.username.toLowerCase() !== 'admin' &&
@@ -3068,13 +3081,6 @@ export default function Attendance() {
                     return matched || uname;
                 };
 
-                if (isAdmin && api.attendance?.reconcileLateFines) {
-                    const reconcileResult = await api.attendance.reconcileLateFines();
-                    if (!reconcileResult?.success) {
-                        console.error('Lỗi đối soát phạt đi muộn:', reconcileResult?.error);
-                    }
-                }
-                const rs = await api.appConfig.get('attendanceData');
                 if (rs && rs.success && rs.data) {
                     const d = rs.data;
                     if (d.config) {
@@ -3098,11 +3104,7 @@ export default function Attendance() {
                     if (d.extraFundTx) setExtraFundTx(d.extraFundTx);
                     if (d.fundAuditLog) setFundAuditLog(d.fundAuditLog);
                     if (d.extraFines) {
-                        const normalized = await normalizeReturnFineDates(api, d.extraFines);
-                        setExtraFines(normalized.fines.map((fine: FineRecord, index: number) => ensureFineId(fine, index)));
-                        if (normalized.changed) {
-                            await api.appConfig.set('attendanceData', { ...d, extraFines: normalized.fines });
-                        }
+                        setExtraFines(d.extraFines.map((fine: FineRecord, index: number) => ensureFineId(fine, index)));
                     }
                     if (d.fineOverrides) setFineOverrides(d.fineOverrides);
                     if (d.fineAuditLog) setFineAuditLog(d.fineAuditLog);
@@ -3119,7 +3121,7 @@ export default function Attendance() {
                 setIsDbLoaded(true);
             }
         };
-        loadData();
+        void loadData();
 
         // Lắng nghe fine mới từ trang Trả hàng
         const handleFineAdded = (e: Event) => {
@@ -3230,7 +3232,70 @@ export default function Attendance() {
         }
     }, []);
 
+    const extraFinesRef = useRef<FineRecord[]>([]);
+    const fineAuditLogStateRef = useRef<any[]>([]);
+    const backgroundSyncPromiseRef = useRef<Promise<void>>(Promise.resolve());
+    useEffect(() => {
+        extraFinesRef.current = extraFines;
+        fineAuditLogStateRef.current = fineAuditLog;
+    }, [extraFines, fineAuditLog]);
+
+    // Bảo trì dữ liệu chạy sau lần render đầu. Không thay đổi logic đối soát;
+    // chỉ không bắt toàn bộ giao diện phải chờ quét lịch sử chấm công.
+    useEffect(() => {
+        if (!isDbLoaded) return;
+        let cancelled = false;
+        setIsBackgroundSyncComplete(false);
+        const syncTask = (async () => {
+            const api = (window as any).electronAPI;
+            try {
+                let dbFines = extraFinesRef.current;
+                let dbAuditLog = fineAuditLogStateRef.current;
+
+                if (isAdmin && api.attendance?.reconcileLateFines) {
+                    const reconcileResult = await api.attendance.reconcileLateFines();
+                    if (!reconcileResult?.success) {
+                        console.error('Lỗi đối soát phạt đi muộn:', reconcileResult?.error);
+                    } else {
+                        const latest = await api.appConfig.get('attendanceData');
+                        if (latest?.success && latest.data) {
+                            dbFines = Array.isArray(latest.data.extraFines) ? latest.data.extraFines : [];
+                            dbAuditLog = Array.isArray(latest.data.fineAuditLog) ? latest.data.fineAuditLog : [];
+                        }
+                    }
+                }
+
+                const normalized = await normalizeReturnFineDates(api, dbFines);
+                if (cancelled) return;
+
+                const localAuditLog = fineAuditLogStateRef.current;
+                const mergedAuditLog = mergeAuditLogs(dbAuditLog, localAuditLog);
+                const normalizedFines = normalized.fines.map((fine: FineRecord, index: number) => ensureFineId(fine, index));
+                const mergedFines = mergeFinesWithDeletes(
+                    normalizedFines,
+                    extraFinesRef.current,
+                    mergedAuditLog,
+                    dbAuditLog,
+                    localAuditLog,
+                );
+                setFineAuditLog(mergedAuditLog);
+                setExtraFines(mergedFines);
+            } catch (err) {
+                console.error('Lỗi đồng bộ nền dữ liệu chấm công:', err);
+            } finally {
+                if (!cancelled) setIsBackgroundSyncComplete(true);
+            }
+        })();
+        backgroundSyncPromiseRef.current = syncTask;
+
+        return () => {
+            cancelled = true;
+        };
+    }, [isAdmin, isDbLoaded]);
+
     const saveAttendanceSnapshot = useCallback(async (snapshot: Record<string, any>) => {
+        // Mọi đường ghi đều xếp sau đối soát để không thể ghi snapshot cũ đè kết quả nền.
+        await backgroundSyncPromiseRef.current;
         const api = (window as any).electronAPI;
         const mergedSnapshot = await mergeAttendanceSnapshotWithDb(snapshot);
         const result = await api.appConfig.set('attendanceData', mergedSnapshot);
@@ -3267,7 +3332,7 @@ export default function Attendance() {
 
     // 2b. Lưu tự động khi có thay đổi state với Debounce
     useEffect(() => {
-        if (!isDbLoaded) return; // Không lưu đè lúc chưa tải xong
+        if (!isDbLoaded || !isBackgroundSyncComplete) return; // Chờ đối soát nền để snapshot cũ không ghi đè DB
         if (employees.length === 0) return; // Chưa có data employees → không ghi đè DB
 
         const snapshot = { config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog };
@@ -3282,7 +3347,7 @@ export default function Attendance() {
 
         const timer = setTimeout(saveData, 500); // Đợi 500ms thao tác cuối rồi mới save
         return () => clearTimeout(timer);
-    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded, saveAttendanceSnapshot]);
+    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded, isBackgroundSyncComplete, saveAttendanceSnapshot]);
 
     // 2c. Flush save khi component unmount (navigate sang tab khác) để tránh mất data
     useEffect(() => {
@@ -3322,7 +3387,7 @@ export default function Attendance() {
 
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);
     const [packingDateRange, setPackingDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
-    const loadPurchasesRef = useRef(false);
+    const fineSourcesRangeKeyRef = useRef('');
 
     const loadPackingPromiseRef = useRef<Promise<PackingOrderLog[]> | null>(null);
     const [packingOrdersLoading, setPackingOrdersLoading] = useState(false);
@@ -3437,57 +3502,47 @@ export default function Attendance() {
     };
 
     // === State cho điểm danh online ===
-    const loadPurchaseVatTracking = async (since?: string) => {
-        if (loadPurchasesRef.current) return;
-        loadPurchasesRef.current = true;
+    const loadPurchaseVatTracking = async (since?: string, requestKey?: string) => {
         try {
             const api = (window as any).electronAPI;
             const result = await api.purchases.getAll({ since, limit: 10000 });
-            if (result?.success && Array.isArray(result.data)) {
-                setPurchaseVatTracking(result.data);
+            if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) {
+                setPurchaseVatTracking(result?.success && Array.isArray(result.data) ? result.data : []);
             }
         } catch (error) {
             console.error('Lỗi tải dữ liệu VAT nhập hàng:', error);
-        } finally {
-            loadPurchasesRef.current = false;
+            if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) setPurchaseVatTracking([]);
         }
     };
 
-    const loadDailyTaskTracking = async () => {
+    const loadDailyTaskTracking = async (requestKey?: string) => {
+        const isCurrentRequest = () => !requestKey || fineSourcesRangeKeyRef.current === requestKey;
         try {
             const api = (window as any).electronAPI;
-            const [result, penaltyResult] = await Promise.all([
+            const [result, penaltyResult, balanceResult, stockCheckResult] = await Promise.all([
                 api.dailyTasks.list({}),
-                api.dailyTasks.listEvidencePenalties(),
+                api.dailyTasks.listEvidencePenalties({
+                    startDate: overviewDateRange[0].format('YYYY-MM-DD'),
+                    endDate: overviewDateRange[1].format('YYYY-MM-DD'),
+                }),
+                Promise.resolve(api.stockBalance?.getAll?.({ limit: 500 })).catch(() => null),
+                isAdmin ? Promise.resolve(api.stockCheck.getSessions({ maintenance: false })).catch(() => null) : Promise.resolve(null),
             ]);
-            if (result?.success && Array.isArray(result.data)) {
-                setDailyTaskTracking(result.data);
-            }
+            if (!isCurrentRequest()) return;
+            setDailyTaskTracking(result?.success && Array.isArray(result.data) ? result.data : []);
             setEvidencePenaltyRecords(penaltyResult?.success && Array.isArray(penaltyResult.data) ? penaltyResult.data : []);
-            try {
-                const balanceResult = await api.stockBalance?.getAll?.({ limit: 500 });
-                if (balanceResult?.success && Array.isArray(balanceResult.data)) {
-                    setStockBalanceRecords(balanceResult.data);
-                } else {
-                    setStockBalanceRecords([]);
-                }
-            } catch {
-                setStockBalanceRecords([]);
-            }
-            try {
-                if (!isAdmin) {
-                    setStockCheckSessions([]);
-                } else {
-                    const stockCheckResult = await api.stockCheck.getSessions();
-                    setStockCheckSessions(stockCheckResult?.success && Array.isArray(stockCheckResult.data)
-                        ? stockCheckResult.data
-                        : []);
-                }
-            } catch {
-                setStockCheckSessions([]);
-            }
+            setStockBalanceRecords(balanceResult?.success && Array.isArray(balanceResult.data) ? balanceResult.data : []);
+            setStockCheckSessions(isAdmin && stockCheckResult?.success && Array.isArray(stockCheckResult.data)
+                ? stockCheckResult.data
+                : []);
         } catch (error) {
             console.error('Lỗi tải dữ liệu deadline công việc:', error);
+            if (isCurrentRequest()) {
+                setDailyTaskTracking([]);
+                setEvidencePenaltyRecords([]);
+                setStockBalanceRecords([]);
+                setStockCheckSessions([]);
+            }
         }
     };
 
@@ -3511,24 +3566,36 @@ export default function Attendance() {
     const selectedMonth = overviewDateRange[0].month() + 1;
     const selectedYear = overviewDateRange[0].year();
 
-    // Reload packing orders khi đổi kỳ
+    const fineSourcesRangeKey = `${overviewDateRange[0].startOf('day').valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}-${isAdmin ? 'admin' : 'user'}`;
+    const areFineSourcesReady = isBackgroundSyncComplete && fineSourcesReadyKey === fineSourcesRangeKey;
+
+    // Tải các nguồn tổng hợp phạt khi mở Tổng quan hoặc Phạt.
     useEffect(() => {
-        if (activeTab !== 'overview') return;
-        loadPackingOrders(overviewDateRange[0].startOf('day').toISOString());
+        if (activeTab !== 'overview' && activeTab !== 'fines') return;
+        if (activeTab === 'overview') {
+            loadPackingOrders(overviewDateRange[0].startOf('day').toISOString());
+        }
+        fineSourcesRangeKeyRef.current = fineSourcesRangeKey;
         // Supporting indicators are not needed for the first overview paint.
         // Yield once so the shell and primary attendance data render first.
         const deferredLoad = window.setTimeout(() => {
-            loadPurchaseVatTracking(overviewDateRange[0].subtract(7, 'day').startOf('day').toISOString());
-            loadDailyTaskTracking();
+            void Promise.all([
+                loadPurchaseVatTracking(overviewDateRange[0].subtract(7, 'day').startOf('day').toISOString(), fineSourcesRangeKey),
+                loadDailyTaskTracking(fineSourcesRangeKey),
+            ]).finally(() => {
+                if (fineSourcesRangeKeyRef.current === fineSourcesRangeKey) {
+                    setFineSourcesReadyKey(fineSourcesRangeKey);
+                }
+            });
         }, 0);
         const taskTrackingTimer = window.setInterval(() => {
-            if (document.visibilityState === 'visible') loadDailyTaskTracking();
+            if (document.visibilityState === 'visible') void loadDailyTaskTracking(fineSourcesRangeKey);
         }, 60 * 1000);
         return () => {
             window.clearTimeout(deferredLoad);
             window.clearInterval(taskTrackingTimer);
         };
-    }, [overviewDateRange, activeTab]);
+    }, [overviewDateRange, activeTab, fineSourcesRangeKey]);
 
     // Gộp finesData gốc + extraFines
     const autoVatOverdueFines = useMemo(() => {
@@ -3720,6 +3787,10 @@ export default function Attendance() {
                 amount: Number(penalty.amount) || 0,
                 date: penaltyAt.toISOString(),
                 source: 'daily_task_evidence_overdue' as any,
+                taskId: penalty.taskId,
+                taskCode: penalty.taskCode,
+                cycle: Number(penalty.cycle) || undefined,
+                multiplier: Number(penalty.multiplier) || undefined,
             }];
         });
     }, [employees, evidencePenaltyRecords, overviewDateRange, systemUsers]);
@@ -3869,7 +3940,8 @@ export default function Attendance() {
             dayjs(lp.end).isSame(overviewDateRange[1], 'day')
         ), [lockedPeriods, overviewDateRange]);
     const overviewAttendanceExpectedKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
-    const overviewAttendanceReady = overviewAttendanceLogsKey === overviewAttendanceExpectedKey;
+    const overviewAttendanceReady = isBackgroundSyncComplete && overviewAttendanceLogsKey === overviewAttendanceExpectedKey;
+    const isPayrollDataReady = overviewAttendanceReady && areFineSourcesReady;
     const employmentEndDates = useMemo(() => Object.fromEntries(
         systemUsers
             .filter((item: any) => item?.employmentStatus === 'resigned' && item?.resignationDate)
@@ -3938,44 +4010,30 @@ export default function Attendance() {
         return { tSal, tPack, tBonus, fundBalance };
     }, [payrollData]);
 
-    // Tự động fetch logs theo tháng được chọn (tab Điểm danh)
+    // Tổng quát và Điểm danh đang dùng cùng kỳ, nên chỉ truy vấn log một lần.
     const fetchMonthLogs = async () => {
-        try {
-            const api = (window as any).electronAPI;
-            if (!api?.attendance) return;
-            const monthStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}`;
-            const res = await api.attendance.getLogs({ month: monthStr });
-            if (res?.success) setLiveAttendanceLogs(res.data);
-        } catch (err) {
-            console.error('Lỗi tải logs tháng:', err);
-        }
-    };
-
-    // Fetch logs cho tháng overview (tab Tổng quát) — tách biệt để không bị mismatch tháng
-    const fetchOverviewLogs = async (overviewMonth: number, overviewYear: number) => {
-        const monthStr = `${overviewYear}-${String(overviewMonth).padStart(2, '0')}`;
+        const monthStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}`;
         try {
             const api = (window as any).electronAPI;
             if (!api?.attendance) {
+                setLiveAttendanceLogs([]);
                 setOverviewAttendanceLogs([]);
                 setOverviewAttendanceLogsKey(monthStr);
                 return;
             }
             const res = await api.attendance.getLogs({ month: monthStr });
-            setOverviewAttendanceLogs(res?.success ? (res.data || []) : []);
+            const logs = res?.success ? (res.data || []) : [];
+            setLiveAttendanceLogs(logs);
+            setOverviewAttendanceLogs(logs);
             setOverviewAttendanceLogsKey(monthStr);
         } catch (err) {
-            console.error('Lỗi tải logs overview tháng:', err);
+            console.error('Lỗi tải logs tháng:', err);
         }
     };
 
     useEffect(() => {
         if (isDbLoaded) fetchMonthLogs();
     }, [selectedYear, selectedMonth, isDbLoaded]);
-
-    useEffect(() => {
-        if (isDbLoaded) fetchOverviewLogs(overviewDateRange[0].month() + 1, overviewDateRange[0].year());
-    }, [overviewDateRange, isDbLoaded]);
 
     const daysInMonth = dayjs(`${selectedYear}-${selectedMonth}-01`).daysInMonth();
 
@@ -4530,6 +4588,10 @@ export default function Attendance() {
     const saveConfig = () => { if (checkLocked()) return; setConfig({ ...tempConfig }); setConfigModalOpen(false); message.success('Đã lưu cấu hình!'); };
 
     const lockPayroll = () => {
+        if (!isPayrollDataReady) {
+            message.info('Đang tổng hợp đầy đủ dữ liệu lương và các khoản phạt. Vui lòng chờ trước khi chốt kỳ.');
+            return;
+        }
         if (isCurrentPeriodLocked) {
             message.warning('Kỳ này đã được chốt rồi!');
             return;
@@ -4604,7 +4666,9 @@ export default function Attendance() {
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={5} align="right" className="att-overview-total-cell">
                                 <span className="att-overview-total-value-fine">
-                                    {totalFines > 0 ? `- ${fmt(totalFines)}` : fmt(0)}
+                                    {areFineSourcesReady
+                                        ? (totalFines > 0 ? `- ${fmt(totalFines)}` : fmt(0))
+                                        : <Tooltip title="Đang tổng hợp các khoản phạt"><SyncOutlined spin /></Tooltip>}
                                 </span>
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={6} align="right" className="att-overview-total-cell-final">
@@ -4614,7 +4678,9 @@ export default function Attendance() {
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={7} align="right" className="att-overview-total-cell-final">
                                 <span className="att-overview-total-money">
-                                    {fmt(totalFinalSalary)}
+                                    {isPayrollDataReady
+                                        ? fmt(totalFinalSalary)
+                                        : <Tooltip title="Đang tổng hợp lương hoàn chỉnh"><SyncOutlined spin /></Tooltip>}
                                 </span>
                             </Table.Summary.Cell>
                             <Table.Summary.Cell index={8} className="att-overview-total-action-cell" />
@@ -4658,7 +4724,9 @@ export default function Attendance() {
                     },
                     {
                         title: 'Phạt', dataIndex: 'myFines', key: 'fine', align: 'right' as const, width: 120,
-                        render: (v: number) => <span className="att-money-red">{v > 0 ? `- ${fmt(v)}` : `${fmt(0)}`}</span>,
+                        render: (v: number) => areFineSourcesReady
+                            ? <span className="att-money-red">{v > 0 ? `- ${fmt(v)}` : `${fmt(0)}`}</span>
+                            : <Tooltip title="Đang tổng hợp các khoản phạt"><SyncOutlined spin style={{ color: '#ff4d4f' }} /></Tooltip>,
                     },
                     {
                         title: 'Nghỉ', dataIndex: 'leaveDeduction', key: 'leaveDeduction', align: 'right' as const, width: 120,
@@ -4670,12 +4738,14 @@ export default function Attendance() {
                     },
                     {
                         title: 'Tổng lương', dataIndex: 'finalSalary', key: 'final', align: 'right' as const, width: 150,
-                        render: (v: number) => <span className="att-money-final">{fmt(v)}</span>,
+                        render: (v: number) => isPayrollDataReady
+                            ? <span className="att-money-final">{fmt(v)}</span>
+                            : <Tooltip title="Đang tổng hợp lương hoàn chỉnh"><SyncOutlined spin style={{ color: '#1677ff' }} /></Tooltip>,
                     },
                     {
                         title: 'Chi tiết', key: 'detail', align: 'center' as const, width: 130, fixed: 'right' as const,
                         render: (_: any, record: any) => (
-                            <Button size="small" icon={<EyeOutlined />} onClick={() => { setPayslipPdfDetailOpen(false); setPayslipModal(record); }}>
+                            <Button size="small" disabled={!isPayrollDataReady} icon={<EyeOutlined />} onClick={() => { setPayslipPdfDetailOpen(false); setPayslipModal(record); }}>
                                 Xem chi tiết
                             </Button>
                         ),
@@ -5235,6 +5305,20 @@ export default function Attendance() {
     // TAB 4: PHẠT
     // ============================================
     const renderFines = () => {
+        if (!areFineSourcesReady) {
+            return (
+                <Card style={{ marginTop: 4 }} bodyStyle={{ padding: '72px 24px' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14 }}>
+                        <Spin size="large" />
+                        <Text strong>Đang tổng hợp đầy đủ các khoản phạt...</Text>
+                        <Text type="secondary" style={{ textAlign: 'center' }}>
+                            Bảng sẽ hiển thị một lần sau khi đối chiếu xong dữ liệu điểm danh, công việc, bằng chứng, VAT và kiểm hàng.
+                        </Text>
+                    </div>
+                </Card>
+            );
+        }
+
         // Gộp phạt gốc + phạt thủ công, đánh dấu nguồn
         const systemFineRow = (fine: FineRecord, key: string) => {
             // Some automatic penalties are reconciled later with a corrected
@@ -5380,6 +5464,27 @@ export default function Attendance() {
             ? ''
             : fineEmployeeOptions.find(option => option.value === fineEmployeeFilter)?.label || '';
         const totalFineAmount = filteredFines.reduce((sum, f) => sum + ((f as any).isWaived ? 0 : f.amount), 0);
+        const getCurrentVatOverdueDays = (fine: any) => {
+            const detail = String(fine?.detail || '');
+            const isVatFine = fine?.source === 'purchase_vat_overdue'
+                || String(fine?.type || '').toLocaleLowerCase('vi-VN').includes('vat')
+                || detail.toLocaleLowerCase('vi-VN').includes('hđ vat');
+            if (!isVatFine) return null;
+
+            const purchaseId = Number(String(fine?.id || '').match(/^vat-overdue-(\d+)/)?.[1]);
+            const purchaseCode = detail.match(/(?:pn[-\s]*)?(\d{6}\s*-\s*\d{3})/i)?.[1]?.replace(/\s+/g, '').toLocaleLowerCase('vi-VN');
+            const purchase = purchaseVatTracking.find(item =>
+                (Number.isFinite(purchaseId) && Number(item.id) === purchaseId)
+                || (purchaseCode && String(item.poNumber || '').replace(/\s+/g, '').toLocaleLowerCase('vi-VN') === purchaseCode)
+            );
+            const purchaseAt = dayjs(purchase?.purchaseDate || purchase?.createdAt);
+            if (purchaseAt.isValid()) {
+                return Math.max(VAT_FIRST_FINE_AFTER_DAYS, dayjs().startOf('day').diff(purchaseAt.startOf('day'), 'day'));
+            }
+
+            const savedDays = Number(detail.match(/quá hạn\s+(\d+)\s+ngày/i)?.[1]);
+            return Number.isFinite(savedDays) ? savedDays : null;
+        };
         const fineDetailCellStyle = {
             minWidth: 0,
             whiteSpace: 'normal',
@@ -5457,12 +5562,19 @@ export default function Attendance() {
                                 render: (t: string) => <Tag color="error" style={{ margin: 0, fontWeight: 700, fontSize: 10, textTransform: 'uppercase', whiteSpace: 'normal', lineHeight: 1.3 }}>{t}</Tag>,
                             },
                             {
-                                title: 'Trạng thái', key: 'status', width: 108,
+                                title: 'Trạng thái', key: 'status', width: 125,
                                 render: (_: unknown, record: any) => record.isWaived ? (
                                     <Tooltip title={record.waiverReason || 'Vi phạm đã được ghi nhận nhưng không khấu trừ lương.'}>
                                         <Tag color="success" style={{ margin: 0, fontWeight: 800, fontSize: 10, whiteSpace: 'normal', lineHeight: 1.3 }}>ĐÃ MIỄN PHẠT</Tag>
                                     </Tooltip>
-                                ) : <Text type="secondary" style={{ fontSize: 12 }}>Đang áp dụng</Text>,
+                                ) : (() => {
+                                    const overdueDays = getCurrentVatOverdueDays(record);
+                                    return overdueDays != null ? (
+                                        <Tag color="error" style={{ margin: 0, fontWeight: 800, fontSize: 10, whiteSpace: 'normal', lineHeight: 1.35 }}>
+                                            QUÁ HẠN {overdueDays} NGÀY
+                                        </Tag>
+                                    ) : <Text type="secondary" style={{ fontSize: 12 }}>Đang áp dụng</Text>;
+                                })(),
                             },
                             {
                                 title: 'Thời gian', dataIndex: 'date', key: 'date', width: 118,
@@ -5546,6 +5658,43 @@ export default function Attendance() {
                                     }
 
                                     // 4. Trễ deadline công việc (Daily Task Overdue)
+                                    const isEvidenceTaskFine = record.source === 'daily_task_evidence_overdue'
+                                        || record.source === 'assignment_evidence_overdue'
+                                        || String(record.id || '').startsWith('dailyTaskEvidencePenalty:')
+                                        || String(record.id || '').startsWith('assignmentEvidencePenalty:');
+                                    if (isEvidenceTaskFine) {
+                                        const taskId = record.taskId
+                                            || String(record.id || '').match(/^(?:dailyTaskEvidencePenalty|assignmentEvidencePenalty):(\d+):/)?.[1];
+                                        const taskCode = record.taskCode
+                                            || (taskId ? `CV-${String(taskId).padStart(4, '0')}` : 'CV-KHÔNG-RÕ');
+                                        const cycle = Number(record.cycle)
+                                            || Number(String(d).match(/lần\s+(\d+)/i)?.[1])
+                                            || 1;
+                                        const multiplier = Number(record.multiplier)
+                                            || Number(String(d).match(/phạt\s+x(\d+)/i)?.[1])
+                                            || cycle;
+                                        const taskTitle = String(d)
+                                            .replace(/\s*-\s*lần\s+\d+\s*:\s*chưa nộp bằng chứng(?:,\s*phạt\s*x\d+)?\s*$/i, '')
+                                            .replace(/\s*-\s*hết ngày chưa nộp bằng chứng\s*$/i, '')
+                                            .trim();
+                                        return (
+                                            <div style={fineDetailCellStyle}>
+                                                <Space size={[6, 4]} wrap>
+                                                    <Text style={{ color: '#595959', fontWeight: 600 }}>{taskTitle || 'Công việc'}</Text>
+                                                    <Tag color="geekblue" style={{ margin: 0, fontWeight: 800, fontFamily: 'monospace', fontSize: 11, border: 'none', background: '#f0f5ff', color: '#1d39c4' }}>
+                                                        <Text copyable={{ text: taskCode }} style={{ color: 'inherit', fontSize: 'inherit', fontWeight: 'inherit', fontFamily: 'inherit' }}>
+                                                            {taskCode}
+                                                        </Text>
+                                                    </Tag>
+                                                </Space>
+                                                <Text type="secondary" style={{ display: 'block', marginTop: 2, fontSize: 11 }}>
+                                                    Chưa nộp bằng chứng · lần {cycle} · mức phạt x{multiplier}
+                                                </Text>
+                                            </div>
+                                        );
+                                    }
+
+                                    // 5. Trễ deadline công việc (Daily Task Overdue)
                                     if (record.source === 'daily_task_overdue' || d.endsWith('quá deadline')) {
                                         const taskTitle = d.replace(/\s*quá deadline\s*$/, '');
                                         return (
@@ -5558,7 +5707,7 @@ export default function Attendance() {
                                         );
                                     }
 
-                                    // 5. Thiếu công việc hàng ngày (Daily Report Missing)
+                                    // 6. Thiếu công việc hàng ngày (Daily Report Missing)
                                     if (record.source === 'daily_report_missing' || d.includes('Không ghi nhận Công việc')) {
                                         const matchDate = d.match(/ngày\s+(\d{2}\/\d{2}\/\d{4})/);
                                         const missingDate = matchDate?.[1];
@@ -5574,7 +5723,7 @@ export default function Attendance() {
                                         );
                                     }
 
-                                    // 6. Thiếu kiểm hàng ngày (Stock Check Missing)
+                                    // 7. Thiếu kiểm hàng ngày (Stock Check Missing)
                                     if (record.source === 'stock_check_missing' || d.includes('Không kiểm hàng')) {
                                         const matchDate = d.match(/ngày\s+(\d{2}\/\d{2}\/\d{4})/);
                                         const missingDate = matchDate?.[1];
@@ -6545,6 +6694,11 @@ export default function Attendance() {
             {/* Page Header */}
             <div className="att-page-header">
                 <Space size={8} wrap style={{ justifyContent: 'flex-end', width: '100%' }}>
+                    {!isBackgroundSyncComplete && (
+                        <Tag color="processing" icon={<SyncOutlined spin />} style={{ margin: 0 }}>
+                            Đang đồng bộ dữ liệu nền
+                        </Tag>
+                    )}
                     {/* Custom Time Range Selector — kiểu Google Analytics */}
                     {(() => {
                         const now = dayjs();
@@ -6679,6 +6833,7 @@ export default function Attendance() {
                             onClick={lockPayroll}
                             type="primary"
                             danger
+                            disabled={!isPayrollDataReady}
                         >
                             Chốt & Khóa
                         </Button>
@@ -6690,7 +6845,7 @@ export default function Attendance() {
                                 icon={<SendOutlined />}
                                 onClick={handleBulkSendGmail}
                                 loading={gmailSending || packingOrdersLoading}
-                                disabled={gmailSending || packingOrdersLoading}
+                                disabled={!isPayrollDataReady || gmailSending || packingOrdersLoading}
                                 style={{ borderRadius: 6, background: '#f6ffed', borderColor: '#b7eb8f', color: '#389e0d' }}
                             />
                         </Tooltip>
@@ -7355,7 +7510,7 @@ export default function Attendance() {
                                                         </Button>
                                                     </Tooltip>
                                                 ) : (
-                                                    <Button loading={gmailSending} onClick={handleSendPayslipGmail}>Gửi Gmail</Button>
+                                                    <Button disabled={!isPayrollDataReady} loading={gmailSending} onClick={handleSendPayslipGmail}>Gửi Gmail</Button>
                                                 );
                                             })() : (
                                                 <Tooltip title="Cần Chốt & Khóa bảng lương trước khi gửi Gmail">
@@ -7363,7 +7518,7 @@ export default function Attendance() {
                                                 </Tooltip>
                                             )}
                                             {isCurrentPeriodLocked ? (
-                                                <Button icon={<FileTextOutlined />} loading={pdfExporting} onClick={handleExportPayslipPDF}>Xuất PDF</Button>
+                                                <Button icon={<FileTextOutlined />} disabled={!isPayrollDataReady} loading={pdfExporting} onClick={handleExportPayslipPDF}>Xuất PDF</Button>
                                             ) : (
                                                 <Tooltip title="Cần Chốt & Khóa bảng lương trước khi xuất PDF">
                                                     <Button icon={<FileTextOutlined />} disabled>Xuất PDF</Button>

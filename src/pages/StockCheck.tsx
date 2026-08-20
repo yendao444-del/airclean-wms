@@ -44,6 +44,9 @@ const DAILY_RANDOM_COUNT = 2;
 const DAILY_PRODUCT_COUNT = 3;
 const DAILY_MIN_SKUS = 12;
 const DAILY_MAX_SKUS = 15;
+// Temporary operating scope: daily sessions only check these two Unicare lines.
+// Full-inventory and recheck sessions are intentionally unaffected.
+const TEMPORARY_UNICARE_DAILY_SCOPE = true;
 const DAILY_VARIANT_PORTION = 3;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -251,9 +254,18 @@ function stableStockCheckHash(value: string): number {
 }
 
 function isMandatoryFullDailyProduct(product: any): boolean {
-    const name = String(product?.name || '').toLocaleUpperCase('vi-VN');
+    const name = String(product?.name || product?.productName || '').toLocaleUpperCase('vi-VN');
     const sku = String(product?.sku || '').toLocaleUpperCase('vi-VN');
     return (name.includes('UNICARE') && name.includes('5D')) || sku.includes('5DUNI');
+}
+
+function isTemporaryUnicareDailyProduct(product: any): boolean {
+    const name = String(product?.name || product?.productName || '').toLocaleUpperCase('vi-VN');
+    const sku = String(product?.sku || '').toLocaleUpperCase('vi-VN');
+    const is5dUnicare = (name.includes('UNICARE') && name.includes('5D')) || sku.includes('5DUNI');
+    const isUvUpfUnicare = (name.includes('UNICARE') && name.includes('UPF') && name.includes('UV'))
+        || sku === '1-UPF';
+    return is5dUnicare || isUvUpfUnicare;
 }
 
 function selectDailyItemsForProduct(product: any, dateKey: string): CheckItem[] {
@@ -278,6 +290,23 @@ function selectDailyItemsForProduct(product: any, dateKey: string): CheckItem[] 
 }
 
 function buildDailyItems(products: any[], dateKey: string, fallbackProducts: any[] = []): CheckItem[] {
+    if (TEMPORARY_UNICARE_DAILY_SCOPE) {
+        const uniqueProducts = new Map<string, any>();
+        [...products, ...fallbackProducts].forEach(product => {
+            const key = String(product?.id ?? product?.sku ?? product?.name ?? '');
+            if (key && isTemporaryUnicareDailyProduct(product) && !uniqueProducts.has(key)) {
+                uniqueProducts.set(key, product);
+            }
+        });
+        const uniqueItems = new Map<string, CheckItem>();
+        [...uniqueProducts.values()].forEach(product => {
+            expandToVariants(product).forEach(item => {
+                if (item.sku && !uniqueItems.has(item.sku)) uniqueItems.set(item.sku, item);
+            });
+        });
+        return [...uniqueItems.values()];
+    }
+
     const selected: CheckItem[] = [];
     const selectedProductKeys = new Set<string>();
     const appendProduct = (product: any) => {
@@ -1091,6 +1120,30 @@ export default function StockCheck() {
 
     const persistSessions = (updated: CheckSession[]) => { setSessions(saveSessions(updated, isAdmin)); };
 
+    // Apply the temporary scope to today's active daily session as well, while
+    // preserving any counts already entered for the allowed Unicare SKUs.
+    useEffect(() => {
+        if (!TEMPORARY_UNICARE_DAILY_SCOPE || !isAdmin || activeTab !== 'daily' || !isToday) return;
+        if (!todaySession || todaySession.status === 'completed' || !contextProducts.length) return;
+
+        const scopedItems = buildDailyItems(contextProducts, todayStr, contextProducts);
+        if (!scopedItems.length) return;
+        const existingBySku = new Map(todaySession.items.map(item => [item.sku, item]));
+        const currentSkus = new Set(todaySession.items.map(item => item.sku));
+        const scopeSkus = new Set(scopedItems.map(item => item.sku));
+        const alreadyScoped = currentSkus.size === scopeSkus.size
+            && [...scopeSkus].every(sku => currentSkus.has(sku));
+        if (alreadyScoped) return;
+
+        const nextItems = scopedItems.map(item => existingBySku.has(item.sku)
+            ? { ...item, ...existingBySku.get(item.sku)! }
+            : item);
+        persistSessions(sessions.map(session => session.id === todaySession.id
+            ? { ...session, items: nextItems, status: 'in_progress', completedAt: undefined }
+            : session));
+        message.info(`Phiên kiểm hôm nay đã được giới hạn còn ${nextItems.length} SKU thuộc 5D Unicare và UV UPF Unicare.`);
+    }, [isAdmin, activeTab, isToday, todaySession, contextProducts, todayStr, sessions]); // eslint-disable-line react-hooks/exhaustive-deps
+
     const productKey = (product: any) => String(product?.id ?? product?.sku ?? product?.name ?? '');
 
     const shuffleProducts = (products: any[]) => [...products].sort(() => Math.random() - 0.5);
@@ -1243,8 +1296,8 @@ export default function StockCheck() {
         }
 
         return {
-            items: [...carriedBySku.values()],
-            source: pendingSessions[0],
+            items: TEMPORARY_UNICARE_DAILY_SCOPE ? [] : [...carriedBySku.values()],
+            source: TEMPORARY_UNICARE_DAILY_SCOPE ? undefined : pendingSessions[0],
             dates: pendingSessions.map(session => session.date),
         };
     };

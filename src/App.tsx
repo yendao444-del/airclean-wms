@@ -623,18 +623,49 @@ function AppContent() {
     );
 }
 
+function SessionUpdateGate({ children }: { children: React.ReactNode }) {
+    const { isAuthenticated } = useAuth();
+    return isAuthenticated ? <ForceUpdateGate>{children}</ForceUpdateGate> : <>{children}</>;
+}
+
+function OfflineQueueSync() {
+    const { isAuthenticated } = useAuth();
+
+    useEffect(() => {
+        if (!isAuthenticated || !window.electronAPI?.offlineQueue?.sync) return;
+        let syncing = false;
+        const flush = async () => {
+            if (syncing || !navigator.onLine) return;
+            syncing = true;
+            try {
+                await window.electronAPI.offlineQueue.sync();
+            } catch {
+                // The main-process queue keeps retry metadata and backoff state.
+            } finally {
+                syncing = false;
+            }
+        };
+        void flush();
+        window.addEventListener('online', flush);
+        return () => window.removeEventListener('online', flush);
+    }, [isAuthenticated]);
+
+    return null;
+}
+
 export default function App() {
     return (
         <ErrorBoundary>
-            <ForceUpdateGate>
-                <AuthProvider>
+            <AuthProvider>
+                <OfflineQueueSync />
+                <SessionUpdateGate>
                     <PageHeaderProvider>
                         <ErrorBoundary>
                             <AppContent />
                         </ErrorBoundary>
                     </PageHeaderProvider>
-                </AuthProvider>
-            </ForceUpdateGate>
+                </SessionUpdateGate>
+            </AuthProvider>
         </ErrorBoundary>
     );
 }

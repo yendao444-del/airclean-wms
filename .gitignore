@@ -10,6 +10,7 @@ release4
 !/RELEASE*.bat
 !/RELEASE*.ps1
 *.zip
+*.sha256
 /src/generated/prisma
 /prisma/dev.db
 nul

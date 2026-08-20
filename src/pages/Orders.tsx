@@ -3,18 +3,26 @@ import { useAuth } from '../contexts/AuthContext';
 import '../App.css';
 import {
     Card, Table, Tag, Typography, Spin, Input, Space, Row, Col, Button, DatePicker,
-    Modal, Form, InputNumber, Popconfirm, Tooltip, Dropdown, App,
+    Modal, Form, InputNumber, Popconfirm, Tooltip, Dropdown, App, Popover,
 } from 'antd';
 import {
     OrderedListOutlined, SearchOutlined, DownloadOutlined,
     ArrowUpOutlined, ArrowDownOutlined, FireOutlined,
     CalendarOutlined, TrophyOutlined, EditOutlined, DeleteOutlined, PlusOutlined, MinusCircleOutlined, MoreOutlined,
+    BarChartOutlined, ShoppingOutlined, InboxOutlined, DollarOutlined,
+    DownOutlined, FilterOutlined, ReloadOutlined, EyeOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
+import {
+    CartesianGrid, Legend, Line, LineChart, ResponsiveContainer,
+    Tooltip as ChartTooltip, XAxis, YAxis,
+} from 'recharts';
 import dayjs, { Dayjs } from 'dayjs';
 import isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
 import isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import * as XLSX from 'xlsx';
+import { isVietnamRestDay } from '../lib/workCalendar';
+import './Orders.css';
 
 dayjs.extend(isSameOrAfter);
 dayjs.extend(isSameOrBefore);
@@ -56,6 +64,8 @@ export default function OrdersPage() {
     const [tmdtPlatformFilter, setTmdtPlatformFilter] = useState<TmdtPlatformFilter>('all');
     const [datePreset, setDatePreset] = useState<DatePreset>('today');
     const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
+    const [chartPreset, setChartPreset] = useState<DatePreset>('month');
+    const [chartCustomRange, setChartCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
 
     // Edit/Delete state
     const [editOrder, setEditOrder] = useState<UnifiedOrder | null>(null);
@@ -63,8 +73,10 @@ export default function OrdersPage() {
     const [editSaving, setEditSaving] = useState(false);
     const [editItems, setEditItems] = useState<any[]>([]);
     const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+    const [expandedRowKeys, setExpandedRowKeys] = useState<React.Key[]>([]);
     const [searchResults, setSearchResults] = useState<UnifiedOrder[] | null>(null);
     const [searchLoading, setSearchLoading] = useState(false);
+    const [chartStats, setChartStats] = useState<Array<{ date: string; revenue: number; orders: number }>>([]);
     const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Product detail modal state
@@ -210,7 +222,7 @@ export default function OrdersPage() {
                         customer: ec.source ? ec.source.toUpperCase() : 'Sàn TMDT',
                         items: JSON.stringify(ec.items || []),
                         totalAmount: ec.total || 0, status: ec.status,
-                        date: ec.updatedAt || ec.createdAt || '',
+                        date: ec.createdAt || ec.updatedAt || '',
                         tracking: ec.trackingNumber || undefined,
                         shipping: ec.note?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
                         notes: ec.note || '', createdBy: ec.userName || '',
@@ -236,6 +248,34 @@ export default function OrdersPage() {
 
     const rangeStartTs = rangeStart.startOf('day').valueOf();
     const rangeEndTs = rangeEnd.endOf('day').valueOf();
+
+    const [chartRangeStart, chartRangeEnd] = useMemo((): [Dayjs, Dayjs] => {
+        const today = dayjs().startOf('day');
+        switch (chartPreset) {
+            case 'today': return [today, today.endOf('day')];
+            case '7days': return [today.subtract(6, 'day'), today.endOf('day')];
+            case '30days': return [today.subtract(29, 'day'), today.endOf('day')];
+            case 'month': return [today.startOf('month'), today.endOf('day')];
+            case 'custom': return chartCustomRange || [today.startOf('month'), today.endOf('day')];
+            default: return [today.startOf('month'), today.endOf('day')];
+        }
+    }, [chartPreset, chartCustomRange]);
+
+    useEffect(() => {
+        let cancelled = false;
+        const api = (window as any).electronAPI;
+        api.orders.getDailyStats({
+            from: chartRangeStart.startOf('day').toISOString(),
+            to: chartRangeEnd.endOf('day').toISOString(),
+            sourceFilter,
+            platformFilter: tmdtPlatformFilter,
+        }).then((result: any) => {
+            if (!cancelled && result.success) setChartStats(result.data || []);
+        }).catch(() => {
+            if (!cancelled) setChartStats([]);
+        });
+        return () => { cancelled = true; };
+    }, [chartRangeStart.valueOf(), chartRangeEnd.valueOf(), sourceFilter, tmdtPlatformFilter]);
 
     const getTmdtPlatform = (order: UnifiedOrder): TmdtPlatformFilter | 'other' => {
         const label = (order.sourceLabel || '').toLowerCase();
@@ -325,7 +365,7 @@ export default function OrdersPage() {
                     items: JSON.stringify(o.items || []),
                     totalAmount: o.total || 0,
                     status: o.status,
-                    date: o.updatedAt || o.createdAt || '',
+                    date: o.createdAt || o.updatedAt || '',
                     tracking: o.tracking || o.trackingNumber || '',
                     shipping: o.note?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
                     notes: o.note || '',
@@ -367,9 +407,10 @@ export default function OrdersPage() {
         const prevStartTs = rangeStart.subtract(periodDays, 'day').startOf('day').valueOf();
         const prevEndTs = rangeStart.subtract(1, 'day').endOf('day').valueOf();
 
+        // Bám theo các đơn đang hiển thị. Prefix TMDT trước đây làm toàn bộ
+        // doanh thu sàn bị loại dù từng dòng vẫn có tổng tiền hợp lệ.
         const isValidRevenue = (o: UnifiedOrder) =>
-            !['cancelled', 'returned', 'refunded'].includes((o.status || '').toLowerCase()) &&
-            !(o.id.startsWith('TMDT-') && !o.id.startsWith('TMDT-EX-'));
+            !['cancelled', 'canceled', 'returned', 'refunded'].includes((o.status || '').toLowerCase());
 
         const prev = orders.filter(o => {
             if (!matchesSourceFilters(o)) return false;
@@ -407,6 +448,33 @@ export default function OrdersPage() {
         if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
         return fmt(n);
     };
+
+    const currentAverage = filteredOrders.length > 0
+        ? Math.round(currentRevenue / filteredOrders.length)
+        : 0;
+    const previousAverage = prevOrders.length > 0
+        ? Math.round(prevRevenue / prevOrders.length)
+        : 0;
+
+    const trendData = useMemo(() => {
+        const dayCount = Math.max(chartRangeEnd.diff(chartRangeStart, 'day') + 1, 1);
+        const points = Array.from({ length: dayCount }, (_, index) => chartRangeStart.add(index, 'day'))
+            .filter(date => !isVietnamRestDay(date))
+            .map(date => ({
+                key: date.format('YYYY-MM-DD'),
+                label: date.format('DD/MM'),
+                revenue: 0,
+                orders: 0,
+            }));
+        const byDate = new Map(points.map(point => [point.key, point]));
+        for (const stat of chartStats) {
+            const point = byDate.get(stat.date);
+            if (!point) continue;
+            point.orders = Number(stat.orders || 0);
+            point.revenue = Number(stat.revenue || 0);
+        }
+        return points.filter(point => point.revenue > 0);
+    }, [chartStats, chartRangeStart.valueOf(), chartRangeEnd.valueOf()]);
 
     const pctChange = (cur: number, prev: number) => {
         if (prev === 0) return null;
@@ -634,103 +702,131 @@ export default function OrdersPage() {
     };
 
     const sourceColors: Record<string, string> = {
-        'POS': '#1890ff', 'Xuất hàng': '#722ed1',
-        'Shopee': '#ee4d2d', 'TikTok': '#000000', 'TMDT': '#13c2c2',
+        POS: '#1677ff',
+        'Xuất hàng': '#d97706',
+        Shopee: '#ee4d2d',
+        TikTok: '#111827',
+        TMDT: '#1677ff',
+    };
+
+    const getStatusMeta = (status: string) => {
+        const normalized = (status || '').toLowerCase();
+        if (['cancelled', 'canceled', 'returned', 'refunded'].includes(normalized)) {
+            return { label: 'Đã hủy', tone: 'cancelled' };
+        }
+        if (['shipping', 'in_transit', 'ready_to_ship', 'delivering'].includes(normalized)) {
+            return { label: 'Đang giao', tone: 'shipping' };
+        }
+        if (['completed', 'delivered', 'success', 'done'].includes(normalized)) {
+            return { label: 'Đã giao', tone: 'completed' };
+        }
+        return { label: 'Chờ xử lý', tone: 'pending' };
+    };
+
+    const getOrderMenuItems = (record: UnifiedOrder) => {
+        const menuItems: any[] = record.source === 'pos'
+            ? [{ key: 'edit', label: 'Sửa đơn', icon: <EditOutlined />, onClick: () => openEdit(record) }]
+            : [];
+        if (isAdmin && (record.source === 'pos' || record.source === 'tmdt')) {
+            if (menuItems.length > 0) menuItems.push({ type: 'divider' });
+            menuItems.push({
+                key: 'delete', label: 'Xóa đơn', icon: <DeleteOutlined />, danger: true,
+                onClick: () => modal.confirm({
+                    title: 'Xóa đơn hàng?',
+                    content: 'Kho sẽ được hoàn lại. Không thể khôi phục!',
+                    okText: 'Xóa', cancelText: 'Hủy', okButtonProps: { danger: true },
+                    onOk: () => handleDelete(record),
+                }),
+            });
+        }
+        return menuItems;
     };
 
     const columns: ColumnsType<UnifiedOrder> = [
         {
-            title: 'Ngày', dataIndex: 'date', key: 'date', width: 105,
-            sorter: (a, b) => dayjs(a.date).unix() - dayjs(b.date).unix(),
-            defaultSortOrder: 'descend',
-            render: (d) => {
-                const p = dayjs(d);
-                return <Text style={{ fontSize: 12 }}>{p.format('HH:mm:ss') !== '00:00:00' ? p.format('DD/MM/YY HH:mm') : p.format('DD/MM/YYYY')}</Text>;
-            },
+            title: 'Mã đơn', dataIndex: 'orderNumber', key: 'orderNumber', width: 150,
+            ellipsis: true,
+            sorter: (a, b) => a.orderNumber.localeCompare(b.orderNumber),
+            render: (value) => <Text className="orders-order-code">{value}</Text>,
         },
         {
-            title: 'Nguồn', dataIndex: 'sourceLabel', key: 'source', width: 80,
-            render: (label) => (
-                <Tag style={{ fontWeight: 600, fontSize: 11, borderRadius: 6, background: sourceColors[label] || '#8c8c8c', color: '#fff', border: 'none' }}>
-                    {label === 'Shopee' ? '🛒' : label === 'TikTok' ? '🎵' : label === 'POS' ? '🏪' : '📦'} {label}
-                </Tag>
+            title: 'Khách hàng', dataIndex: 'customer', key: 'customer', width: 220,
+            ellipsis: true,
+            render: (value, record) => (
+                <div className="orders-customer-cell">
+                    <Text>{value}</Text>
+                    <Text type="secondary">{record.tracking || record.createdBy || 'Không có mã vận đơn'}</Text>
+                </div>
             ),
         },
         {
-            title: 'Mã đơn', dataIndex: 'orderNumber', key: 'orderNumber', width: 145,
-            ellipsis: true, render: (v) => <Text strong style={{ fontSize: 12 }}>{v}</Text>,
+            title: 'Nguồn', dataIndex: 'sourceLabel', key: 'source', width: 110,
+            render: (label, record) => (
+                <Tag className={`orders-source-tag orders-source-tag--${record.source}`}>{label}</Tag>
+            ),
         },
         {
-            title: 'Mã vận đơn', dataIndex: 'tracking', key: 'tracking', width: 130,
-            ellipsis: true,
-            render: (v) => v ? (
-                <Text copyable style={{ fontSize: 12 }}>{v}</Text>
-            ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
-        },
-        {
-            title: 'Sản phẩm', key: 'items', width: 220,
+            title: 'SL', key: 'qty', width: 86, align: 'center',
             render: (_, record) => {
                 let items: any[] = [];
                 try { items = JSON.parse(record.items); } catch { }
-                const firstName = items[0]?.productName || items[0]?.name || '-';
-                const more = items.length > 1 ? ` (+${items.length - 1})` : '';
-                return (
-                    <div style={{ whiteSpace: 'normal', lineHeight: '1.4', fontSize: 12 }}>
-                        {firstName}{more && <Text type="secondary">{more}</Text>}
-                    </div>
+                const totalQty = items.reduce(
+                    (sum: number, item: any) => sum + (item.quantity || item.qty || 1),
+                    0,
                 );
-            },
-        },
-        {
-            title: 'SL', key: 'qty', width: 55, align: 'center',
-            render: (_, record) => {
-                let items: any[] = [];
-                try { items = JSON.parse(record.items); } catch { }
-                const totalQty = items.reduce((s: number, it: any) => s + (it.quantity || it.qty || 1), 0);
                 const skuCount = items.length;
                 return (
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-                        <Text strong>{totalQty}</Text>
-                        {skuCount > 1 && <Tag color="red" style={{ fontSize: 10, fontWeight: 700, lineHeight: '16px', margin: 0 }}>{skuCount} SKU</Tag>}
+                    <div className="orders-quantity-cell">
+                        <Text strong>{totalQty || 1}</Text>
+                        {skuCount > 1 && (
+                            <Tag className="orders-multi-sku-badge">{skuCount} SKU</Tag>
+                        )}
                     </div>
                 );
             },
         },
         {
-            title: 'Tổng tiền', dataIndex: 'totalAmount', key: 'totalAmount', width: 100,
-            align: 'right', sorter: (a, b) => a.totalAmount - b.totalAmount,
-            render: (v) => <Text strong style={{ color: '#00ab56' }}>{fmt(v)}đ</Text>,
+            title: 'Tổng tiền', dataIndex: 'totalAmount', key: 'totalAmount', width: 125,
+            sorter: (a, b) => a.totalAmount - b.totalAmount,
+            render: (value) => <Text className="orders-amount">{fmt(value)} đ</Text>,
         },
         {
-            title: 'Người đóng gói', dataIndex: 'createdBy', key: 'createdBy', width: 100,
-            ellipsis: true,
-            render: (v) => v ? (
-                <Text style={{ fontSize: 12, fontWeight: 500 }}>{v}</Text>
-            ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
+            title: 'Trạng thái', dataIndex: 'status', key: 'status', width: 125,
+            render: (status) => {
+                const meta = getStatusMeta(status);
+                return <Tag className={`orders-status orders-status--${meta.tone}`}>{meta.label}</Tag>;
+            },
         },
         {
-            title: '', key: 'actions', width: 40, fixed: 'right' as const,
+            title: 'Thời gian', dataIndex: 'date', key: 'date', width: 150,
+            sorter: (a, b) => dayjs(a.date).unix() - dayjs(b.date).unix(),
+            defaultSortOrder: 'descend',
+            render: (value) => <Text className="orders-time">{dayjs(value).format('DD/MM/YYYY HH:mm')}</Text>,
+        },
+        {
+            title: 'Thao tác', key: 'actions', width: 100, fixed: 'right' as const,
             render: (_: any, record: UnifiedOrder) => {
-                if (record.source !== 'pos' && record.source !== 'tmdt') return null;
-                const menuItems: any[] = record.source === 'pos'
-                    ? [{ key: 'edit', label: 'Sửa đơn', icon: <EditOutlined />, onClick: () => openEdit(record) }]
-                    : [];
-                if (isAdmin) {
-                    if (menuItems.length > 0) menuItems.push({ type: 'divider' });
-                    menuItems.push({
-                        key: 'delete', label: 'Xóa đơn', icon: <DeleteOutlined />, danger: true,
-                        onClick: () => modal.confirm({
-                            title: 'Xóa đơn hàng?',
-                            content: 'Kho sẽ được hoàn lại. Không thể khôi phục!',
-                            okText: 'Xóa', cancelText: 'Hủy', okButtonProps: { danger: true },
-                            onOk: () => handleDelete(record),
-                        }),
-                    });
-                }
+                const menuItems = getOrderMenuItems(record);
+                const isExpanded = expandedRowKeys.includes(record.id);
                 return (
-                    <Dropdown trigger={['click']} menu={{ items: menuItems }}>
-                        <Button size="small" type="text" icon={<MoreOutlined />} />
-                    </Dropdown>
+                    <Space size={6}>
+                        <Tooltip title={isExpanded ? 'Thu gọn chi tiết' : 'Xem chi tiết'}>
+                            <Button
+                                className="orders-icon-button"
+                                size="small"
+                                icon={<EyeOutlined />}
+                                aria-label={isExpanded ? 'Thu gọn chi tiết' : 'Xem chi tiết'}
+                                onClick={() => setExpandedRowKeys(current =>
+                                    isExpanded ? current.filter(key => key !== record.id) : [...current, record.id]
+                                )}
+                            />
+                        </Tooltip>
+                        {menuItems.length > 0 && (
+                            <Dropdown trigger={['click']} menu={{ items: menuItems }}>
+                                <Button className="orders-icon-button" size="small" icon={<MoreOutlined />} aria-label="Thêm thao tác" />
+                            </Dropdown>
+                        )}
+                    </Space>
                 );
             },
         },
@@ -776,30 +872,215 @@ export default function OrdersPage() {
     const countCurrentRange = (predicate: (order: UnifiedOrder) => boolean) =>
         orders.filter(order => predicate(order) && Date.parse(order.date) >= rangeStartTs && Date.parse(order.date) <= rangeEndTs).length;
 
+    const sourceCounts = {
+        all: countCurrentRange(() => true),
+        tmdt: countCurrentRange(order => order.source === 'tmdt'),
+        pos: countCurrentRange(order => order.source === 'pos'),
+        export: countCurrentRange(order => order.source === 'export'),
+    };
+    const sourceLabels = { all: 'Tất cả', tmdt: 'TMDT', pos: 'Bán hàng', export: 'Xuất hàng' };
+    const sourceMenuItems = (['all', 'tmdt', 'pos', 'export'] as const).map(key => ({
+        key,
+        label: `${sourceLabels[key]} (${sourceCounts[key]})`,
+        onClick: () => setOrderSourceFilter(key),
+    }));
+    const dateLabels: Record<DatePreset, string> = {
+        today: 'Hôm nay',
+        '7days': '7 ngày qua',
+        '30days': '30 ngày',
+        month: 'Tháng này',
+        custom: 'Tùy chọn',
+    };
+    const dateMenuItems = (['today', '7days', '30days', 'month', 'custom'] as DatePreset[]).map(key => ({
+        key,
+        label: dateLabels[key],
+        onClick: () => setDatePreset(key),
+    }));
+
+    const advancedFilters = (
+        <div className="orders-advanced-filters">
+            <Text strong>Khoảng ngày tùy chọn</Text>
+            <RangePicker
+                format="DD/MM/YYYY"
+                value={datePreset === 'custom' && customRange ? customRange : undefined}
+                onChange={(dates) => {
+                    if (dates?.[0] && dates?.[1]) {
+                        setCustomRange([dates[0], dates[1]]);
+                        setDatePreset('custom');
+                    }
+                }}
+                placeholder={['Từ ngày', 'Đến ngày']}
+            />
+            {sourceFilter === 'tmdt' && (
+                <>
+                    <Text strong>Sàn thương mại điện tử</Text>
+                    <Space wrap>
+                        {(['all', 'shopee', 'tiktok'] as TmdtPlatformFilter[]).map(platform => (
+                            <Button
+                                key={platform}
+                                size="small"
+                                type={tmdtPlatformFilter === platform ? 'primary' : 'default'}
+                                onClick={() => setTmdtPlatformFilter(platform)}
+                            >
+                                {platform === 'all' ? 'Tất cả' : platform === 'shopee' ? 'Shopee' : 'TikTok'}
+                            </Button>
+                        ))}
+                    </Space>
+                </>
+            )}
+            <Button
+                size="small"
+                onClick={() => {
+                    setOrderSourceFilter('all');
+                    setDatePreset('today');
+                    setCustomRange(null);
+                }}
+            >
+                Đặt lại bộ lọc
+            </Button>
+        </div>
+    );
+
     return (
-        <div style={{ maxWidth: 1440 }}>
+        <div className="orders-redesign">
             {/* Header */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <Title level={3} style={{ margin: 0, color: '#1a1a2e' }}>
-                    <OrderedListOutlined style={{ marginRight: 8, color: '#1890ff' }} />
-                    Đơn hàng
-                </Title>
-                <Space>
-                    <Input placeholder="Tìm mã đơn, tracking..." prefix={<SearchOutlined />}
+            <div className="orders-page-header">
+                <Title level={2}>Đơn hàng</Title>
+                <Space className="orders-page-actions" size={12}>
+                    <Input className="orders-search" placeholder="Tìm mã đơn, khách hàng, SĐT, mã vận đơn, tracking..." prefix={<SearchOutlined />}
                         value={searchKeyword} onChange={handleSearchChange}
-                        allowClear style={{ width: 200 }} suffix={searchLoading ? <Spin size="small" /> : null}
+                        allowClear suffix={searchLoading ? <Spin size="small" /> : null}
                     />
                     {selectedRowKeys.length > 0 && isAdmin && (
                         <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete}>
                             Xóa ({selectedRowKeys.length})
                         </Button>
                     )}
-                    <Button icon={<DownloadOutlined />} onClick={handleExportExcel}>Xuất Excel</Button>
+                    <Button className="orders-export-button" icon={<DownloadOutlined />} onClick={handleExportExcel}>Xuất Excel</Button>
                 </Space>
             </div>
 
+            <section className="orders-overview" aria-label={`Tổng quan ${periodLabel.toLowerCase()}`}>
+                <div className="orders-section-heading">
+                    <Title level={4}>Tổng quan {periodLabel.toLowerCase()}</Title>
+                    <Text type="secondary">Cập nhật lúc {dayjs().format('HH:mm')} <ReloadOutlined /></Text>
+                </div>
+                <div className="orders-kpi-grid">
+                    <div className="orders-kpi orders-kpi--revenue">
+                        <div className="orders-kpi-icon"><BarChartOutlined /></div>
+                        <div className="orders-kpi-content">
+                            <Text>Doanh số</Text>
+                            <strong>{fmt(currentRevenue)} đ</strong>
+                            {renderChange(currentRevenue, prevRevenue, prevLabel, ' đ')}
+                        </div>
+                    </div>
+                    <div className="orders-kpi orders-kpi--orders">
+                        <div className="orders-kpi-icon"><ShoppingOutlined /></div>
+                        <div className="orders-kpi-content">
+                            <Text>Số đơn hàng</Text>
+                            <strong>{filteredOrders.length}</strong>
+                            {renderChange(filteredOrders.length, prevOrders.length, prevLabel)}
+                        </div>
+                    </div>
+                    <div className="orders-kpi orders-kpi--products">
+                        <div className="orders-kpi-icon"><InboxOutlined /></div>
+                        <div className="orders-kpi-content">
+                            <Text>Số SP bán ra</Text>
+                            <strong>{currentQty}</strong>
+                            {renderChange(currentQty, prevQty, prevLabel)}
+                        </div>
+                    </div>
+                    <div className="orders-kpi orders-kpi--average">
+                        <div className="orders-kpi-icon"><DollarOutlined /></div>
+                        <div className="orders-kpi-content">
+                            <Text>TB / đơn</Text>
+                            <strong>{fmt(currentAverage)} đ</strong>
+                            {renderChange(currentAverage, previousAverage, prevLabel, ' đ')}
+                        </div>
+                    </div>
+                </div>
+                <div className="orders-chart-filters" aria-label="Chọn khoảng thời gian biểu đồ">
+                    <div className="orders-chart-presets">
+                        {([
+                            ['today', 'Hôm nay'],
+                            ['7days', '7 ngày'],
+                            ['30days', '30 ngày'],
+                            ['month', 'Tháng này'],
+                        ] as Array<[DatePreset, string]>).map(([preset, label]) => (
+                            <Button
+                                key={preset}
+                                type="text"
+                                className={chartPreset === preset ? 'is-active' : ''}
+                                onClick={() => setChartPreset(preset)}
+                            >
+                                {label}
+                            </Button>
+                        ))}
+                    </div>
+                    <RangePicker
+                        className="orders-chart-range"
+                        allowClear={false}
+                        format="DD/MM/YYYY"
+                        value={[chartRangeStart, chartRangeEnd]}
+                        onChange={(dates) => {
+                            if (dates?.[0] && dates?.[1]) {
+                                setChartCustomRange([dates[0], dates[1]]);
+                                setChartPreset('custom');
+                            }
+                        }}
+                    />
+                </div>
+                <div className="orders-chart" aria-label={`Biểu đồ doanh thu từ ${chartRangeStart.format('DD/MM/YYYY')} đến ${chartRangeEnd.format('DD/MM/YYYY')}`}>
+                    <div className="orders-chart-heading">
+                        <Text strong>{chartPreset === 'today' ? 'Doanh thu hôm nay' : 'Doanh thu theo ngày'}</Text>
+                        <Text type="secondary">
+                            {chartRangeStart.format('DD/MM/YYYY')} – {chartRangeEnd.format('DD/MM/YYYY')} · Đã loại ngày 0 đ, CN & ngày lễ
+                        </Text>
+                    </div>
+                    <div className="orders-chart-canvas">
+                    <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={trendData} margin={{ top: 12, right: 24, left: 8, bottom: 0 }}>
+                            <CartesianGrid stroke="#e8eee9" strokeDasharray="3 3" vertical={false} />
+                            <XAxis
+                                dataKey="label"
+                                axisLine={false}
+                                tickLine={false}
+                                interval="preserveStartEnd"
+                                minTickGap={28}
+                                tick={{ fill: '#667085', fontSize: 11 }}
+                            />
+                            <YAxis
+                                yAxisId="revenue"
+                                axisLine={false}
+                                tickLine={false}
+                                tickFormatter={value => fmtShort(Number(value))}
+                                tick={{ fill: '#059669', fontSize: 11 }}
+                                width={58}
+                            />
+                            <YAxis
+                                yAxisId="orders"
+                                orientation="right"
+                                axisLine={false}
+                                tickLine={false}
+                                allowDecimals={false}
+                                tick={{ fill: '#1677ff', fontSize: 11 }}
+                                width={38}
+                            />
+                            <ChartTooltip
+                                contentStyle={{ borderRadius: 10, border: '1px solid #e5e7eb', boxShadow: '0 8px 24px rgba(15, 23, 42, 0.08)' }}
+                                formatter={(value: number, name: string) => name === 'Doanh số' ? [`${fmt(value)} đ`, name] : [fmt(value), name]}
+                            />
+                            <Legend iconType="circle" iconSize={7} wrapperStyle={{ fontSize: 12, paddingTop: 6 }} />
+                            <Line yAxisId="revenue" name="Doanh số" type="monotone" dataKey="revenue" stroke="#00ab56" strokeWidth={2.5} dot={{ r: 3, fill: '#00ab56', strokeWidth: 0 }} activeDot={{ r: 5 }} />
+                            <Line yAxisId="orders" name="Đơn hàng" type="monotone" dataKey="orders" stroke="#1677ff" strokeWidth={2.5} dot={{ r: 3, fill: '#1677ff', strokeWidth: 0 }} activeDot={{ r: 5 }} />
+                        </LineChart>
+                    </ResponsiveContainer>
+                    </div>
+                </div>
+            </section>
+
             {/* Source Filter Tabs */}
-            <Card bordered={false} style={{ borderRadius: 12, marginBottom: 16 }} bodyStyle={{ padding: '10px 16px' }}>
+            <Card className="orders-legacy-source-filter" bordered={false}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <Text type="secondary" style={{ fontSize: 12, fontWeight: 600, marginRight: 4 }}>Lọc nguồn:</Text>
                     <button style={sourceTabStyle(sourceFilter === 'all', '#1890ff')} onClick={() => setOrderSourceFilter('all')}>
@@ -852,7 +1133,7 @@ export default function OrdersPage() {
                 )}
             </Card>
             {/* Date Filter Bar */}
-            <Card bordered={false} style={{ borderRadius: 12, marginBottom: 16, padding: 0 }} bodyStyle={{ padding: '12px 16px' }}>
+            <Card className="orders-legacy-date-filter" bordered={false}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <CalendarOutlined style={{ color: '#1890ff', fontSize: 16 }} />
                     <button style={presetBtnStyle(datePreset === 'today')} onClick={() => setDatePreset('today')}>Hôm nay</button>
@@ -880,7 +1161,7 @@ export default function OrdersPage() {
             </Card>
 
             {/* Dữ liệu theo kỳ */}
-            <Card bordered={false} style={{ borderRadius: 12, marginBottom: 16 }} bodyStyle={{ padding: '16px 20px' }}>
+            <Card className="orders-legacy-overview" bordered={false}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                     <Text strong style={{ fontSize: 14 }}>📊 Dữ liệu {periodLabel.toLowerCase()}</Text>
                     <Text type="secondary" style={{ fontSize: 11 }}>Cập nhật lần cuối: {dayjs().format('HH:mm')}</Text>
@@ -931,7 +1212,7 @@ export default function OrdersPage() {
                 ];
                 const rankIcons = ['🥇', '🥈', '🥉'];
                 return (
-                    <Card bordered={false} style={{ borderRadius: 12, marginBottom: 16 }} bodyStyle={{ padding: '16px 20px' }}>
+                    <Card className="orders-legacy-top-products" bordered={false}>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                 <div style={{ width: 30, height: 30, borderRadius: 8, background: 'linear-gradient(135deg, #ff4d4f, #ff7875)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -996,7 +1277,34 @@ export default function OrdersPage() {
             })()}
 
             {/* Table */}
-            <Card bordered={false} style={{ borderRadius: 14 }}>
+            <section className="orders-list-section">
+                <div className="orders-list-heading">
+                    <Title level={4}>Danh sách đơn</Title>
+                    <Text type="secondary">{rangeStart.format('DD/MM/YYYY')} – {rangeEnd.format('DD/MM/YYYY')} · {filteredOrders.length} đơn</Text>
+                </div>
+                <div className="orders-filter-toolbar">
+                    <Space wrap size={10}>
+                        <Dropdown menu={{ items: sourceMenuItems }} trigger={['click']}>
+                            <Button className="orders-filter-button">
+                                <span>Nguồn:</span> <strong>{sourceLabels[sourceFilter]}</strong>
+                                <span className="orders-filter-count">{sourceCounts[sourceFilter]}</span>
+                                <DownOutlined />
+                            </Button>
+                        </Dropdown>
+                        <Dropdown menu={{ items: dateMenuItems }} trigger={['click']}>
+                            <Button className="orders-filter-button" icon={<CalendarOutlined />}>
+                                <strong>{dateLabels[datePreset]}</strong>
+                                {datePreset === 'today' && ` (${rangeStart.format('DD/MM/YYYY')})`}
+                                <DownOutlined />
+                            </Button>
+                        </Dropdown>
+                        <Popover content={advancedFilters} trigger="click" placement="bottomLeft">
+                            <Button className="orders-filter-button" icon={<FilterOutlined />}>Bộ lọc</Button>
+                        </Popover>
+                    </Space>
+                    <Text type="secondary">Cập nhật lúc {dayjs().format('HH:mm')} <ReloadOutlined /></Text>
+                </div>
+                <Card className="orders-table-card" bordered={false}>
                 <Table
                     dataSource={filteredOrders}
                     columns={columns}
@@ -1006,9 +1314,12 @@ export default function OrdersPage() {
                         selectedRowKeys,
                         onChange: (keys) => setSelectedRowKeys(keys),
                     }}
-                    pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `${t} đơn hàng` }}
-                    scroll={{ x: 1150 }}
+                    pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (t, range) => `Hiển thị ${range[0]}–${range[1]} của ${t} đơn` }}
+                    scroll={{ x: 1050 }}
                     expandable={{
+                        expandedRowKeys,
+                        onExpandedRowsChange: keys => setExpandedRowKeys([...keys]),
+                        showExpandColumn: false,
                         rowExpandable: (record) => {
                             try {
                                 const items = JSON.parse(record.items);
@@ -1070,7 +1381,8 @@ export default function OrdersPage() {
                         },
                     }}
                 />
-            </Card>
+                </Card>
+            </section>
 
             {/* Modal Sửa Đơn POS */}
             <Modal
