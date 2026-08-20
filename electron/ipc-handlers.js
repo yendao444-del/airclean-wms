@@ -1,9 +1,43 @@
-const { ipcMain, dialog, shell, app, nativeImage } = require("electron");
+const { ipcMain, dialog, shell, app, nativeImage, safeStorage } = require("electron");
 const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
-// ✅ PRODUCTION CONFIG - Không cần .env nữa
-const config = require("./config");
+// Local config is a development convenience only. Production builds must
+// receive runtime configuration from the environment or a backend service;
+// never package database/service credentials in app.asar.
+let localDevelopmentConfig = {};
+if (!app.isPackaged) {
+  try {
+    localDevelopmentConfig = require("./config");
+  } catch (error) {
+    console.warn("[Config] electron/config.js not found; using environment variables.");
+  }
+}
+const runtimeConfigKeys = [
+  "DATABASE_URL",
+  "DIRECT_URL",
+  "SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "SUPABASE_EVIDENCE_BUCKET",
+  "GDRIVE_FOLDER_ID",
+  "TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_CHAT_ID",
+  "OAUTH_CLIENT_ID",
+  "OAUTH_CLIENT_SECRET",
+  "VAT_TELEGRAM_BOT",
+  "VAT_TELEGRAM_CHAT",
+];
+const config = {
+  APP_NAME: "DBY POS",
+  APP_VERSION: app.getVersion(),
+  ENVIRONMENT: app.isPackaged ? "production" : "development",
+  ...localDevelopmentConfig,
+};
+for (const key of runtimeConfigKeys) {
+  if (typeof process.env[key] === "string" && process.env[key].trim()) {
+    config[key] = process.env[key].trim();
+  }
+}
 const { reconcileLateAttendanceFines } = require("./attendance-fines");
 
 // 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
@@ -14,7 +48,7 @@ try {
   console.error("[OfflineQueue] Init failed:", e.message);
 }
 
-// Set environment variables từ config
+// Set Prisma environment variables from runtime-only configuration.
 const isPostgresUrl = (value) =>
   typeof value === "string" && /^postgres(?:ql)?:\/\//i.test(value.trim());
 // A shell or another local project can leave DATABASE_URL/DIRECT_URL behind.
@@ -25,10 +59,12 @@ const databaseUrl = isPostgresUrl(config.DATABASE_URL)
 const directDatabaseUrl = isPostgresUrl(config.DIRECT_URL)
   ? config.DIRECT_URL
   : databaseUrl || process.env.DIRECT_URL;
-process.env.DATABASE_URL = databaseUrl;
-process.env.DIRECT_URL = directDatabaseUrl;
+if (databaseUrl) process.env.DATABASE_URL = databaseUrl;
+else delete process.env.DATABASE_URL;
+if (directDatabaseUrl) process.env.DIRECT_URL = directDatabaseUrl;
+else delete process.env.DIRECT_URL;
 
-const { PrismaClient } = require("@prisma/client");
+const { PrismaClient, Prisma } = require("@prisma/client");
 const fs = require("fs");
 const https = require("https");
 const http = require("http");
@@ -54,24 +90,26 @@ function readEvidenceStorageConfig(configPath) {
 }
 
 function loadEvidenceStorageConfig() {
-  // Generated from .env by the release scripts and included in each patch.
-  const bundled = readEvidenceStorageConfig(
-    path.join(__dirname, "supabase-storage.json"),
-  );
+  if (app.isPackaged) {
+    // A packaged desktop binary is a public client. Privileged Storage
+    // credentials are intentionally disabled until uploads use a backend.
+    return {
+      url: "",
+      serviceRoleKey: "",
+      bucket:
+        process.env.SUPABASE_EVIDENCE_BUCKET ||
+        config.SUPABASE_EVIDENCE_BUCKET ||
+        "daily-task-evidence",
+    };
+  }
   const fallback = {
-    url:
-      process.env.SUPABASE_URL ||
-      bundled.supabaseUrl ||
-      config.SUPABASE_URL ||
-      "",
+    url: process.env.SUPABASE_URL || config.SUPABASE_URL || "",
     serviceRoleKey:
       process.env.SUPABASE_SERVICE_ROLE_KEY ||
-      bundled.serviceRoleKey ||
       config.SUPABASE_SERVICE_ROLE_KEY ||
       "",
     bucket:
       process.env.SUPABASE_EVIDENCE_BUCKET ||
-      bundled.bucket ||
       config.SUPABASE_EVIDENCE_BUCKET ||
       "daily-task-evidence",
   };
@@ -100,9 +138,26 @@ const evidenceStorage =
     : null;
 const EVIDENCE_BUCKET = evidenceStorageConfig.bucket || "daily-task-evidence";
 const MAX_EVIDENCE_STORAGE_BYTES = 900 * 1024;
+const MAX_BUSINESS_DOCUMENT_BYTES = 15 * 1024 * 1024;
+
+function decodeBusinessDocumentBase64(value) {
+  if (typeof value !== "string" || !value) {
+    throw new Error("Dữ liệu file tải lên không hợp lệ.");
+  }
+  // Reject before decoding to avoid allocating an arbitrarily large Buffer.
+  const maxBase64Length = Math.ceil((MAX_BUSINESS_DOCUMENT_BYTES * 4) / 3) + 16;
+  if (value.length > maxBase64Length) {
+    throw new Error("Mỗi file tải lên không được vượt quá 15 MB.");
+  }
+  const buffer = Buffer.from(value.replace(/^data:[^;]+;base64,/, ""), "base64");
+  if (!buffer.length || buffer.length > MAX_BUSINESS_DOCUMENT_BYTES) {
+    throw new Error("File tải lên rỗng hoặc vượt quá 15 MB.");
+  }
+  return buffer;
+}
 
 function getEvidenceStorageUnavailableMessage() {
-  return `Supabase Storage chưa được cấu hình. Mở file ${getEvidenceStorageConfigPath()} và điền Supabase URL cùng Service Role Key.`;
+  return "Supabase Storage chưa được cấu hình ở runtime. Không đặt Service Role Key trong app hoặc app.asar; hãy chuyển upload qua backend/Edge Function.";
 }
 
 // ========================================
@@ -630,13 +685,22 @@ function getPrismaDirectTx() {
 
 try {
   console.log("🔄 Initializing Prisma Client...");
-  console.log("   🆕 CODE VERSION: 3.0 (Production with embedded config)");
+  console.log("   🆕 CODE VERSION: 3.1 (runtime-only configuration)");
   console.log("   APP:", config.APP_NAME, config.APP_VERSION);
   console.log("   ENVIRONMENT:", config.ENVIRONMENT);
-  console.log(
-    "   DATABASE_URL:",
-    config.DATABASE_URL.split("@")[1] || "Invalid",
-  ); // Chỉ log domain, không log password
+  if (!databaseUrl) {
+    throw new Error(
+      "Thiếu DATABASE_URL runtime. Bản production không còn đóng gói database credential trong app.asar.",
+    );
+  }
+  const databaseHost = (() => {
+    try {
+      return new URL(databaseUrl).hostname;
+    } catch {
+      return "Invalid";
+    }
+  })();
+  console.log("   DATABASE_HOST:", databaseHost);
 
   prisma = new PrismaClient({
     log: ["error", "warn"],
@@ -703,6 +767,12 @@ const PASSWORD_CHANGE_ALLOWED_CHANNELS = new Set([
   "users:getCurrentSession",
   "users:logout",
 ]);
+const PUBLIC_IPC_CHANNELS = new Set([
+  "users:login",
+  "users:logout",
+  "users:getCurrentSession",
+  "users:restoreSession",
+]);
 const SESSION_STATUS_EXEMPT_CHANNELS = new Set([
   "users:login",
   "users:logout",
@@ -716,9 +786,64 @@ const LOGIN_MAX_FAILURES = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
 const TEST_OPERATOR_USERNAME = "test";
 
+function getSecureRememberTokenPath() {
+  return path.join(app.getPath("userData"), "remember-token.bin");
+}
+
+function readSecureRememberToken() {
+  try {
+    const tokenPath = getSecureRememberTokenPath();
+    if (!safeStorage.isEncryptionAvailable() || !fs.existsSync(tokenPath)) return null;
+    return safeStorage.decryptString(fs.readFileSync(tokenPath));
+  } catch (error) {
+    console.warn("[Auth] Không thể đọc remember token đã mã hóa:", error.message);
+    return null;
+  }
+}
+
+function storeSecureRememberToken(token) {
+  if (!token || !safeStorage.isEncryptionAvailable()) return false;
+  const tokenPath = getSecureRememberTokenPath();
+  fs.writeFileSync(tokenPath, safeStorage.encryptString(token), { mode: 0o600 });
+  return true;
+}
+
+function clearSecureRememberToken() {
+  try {
+    fs.rmSync(getSecureRememberTokenPath(), { force: true });
+  } catch {}
+}
+
 const ipcHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, listener) =>
   ipcHandle(channel, async (...args) => {
+    const event = args[0];
+    const senderFrame = event?.senderFrame;
+    const senderUrl = senderFrame?.url || event?.sender?.getURL?.() || "";
+    let trustedSender = false;
+    try {
+      const parsedSenderUrl = new URL(senderUrl);
+      const isMainFrame =
+        !event?.sender?.mainFrame || senderFrame === event.sender.mainFrame;
+      const isTrustedDevOrigin =
+        !app.isPackaged &&
+        parsedSenderUrl.protocol === "http:" &&
+        ["localhost", "127.0.0.1"].includes(parsedSenderUrl.hostname) &&
+        parsedSenderUrl.port === "5173";
+      const isTrustedPackagedPage =
+        parsedSenderUrl.protocol === "file:" &&
+        decodeURIComponent(parsedSenderUrl.pathname)
+          .replace(/\\/g, "/")
+          .toLowerCase()
+          .endsWith("/dist/index.html");
+      trustedSender = isMainFrame && (isTrustedDevOrigin || isTrustedPackagedPage);
+    } catch {}
+    if (!trustedSender) {
+      throw new Error(`IPC sender không hợp lệ cho channel ${channel}`);
+    }
+    if (!PUBLIC_IPC_CHANNELS.has(channel) && !currentSession) {
+      throw new Error("Chưa đăng nhập");
+    }
     // Sessions live in each Electron process. Re-check account status before
     // mutations so an account marked "resigned" by an admin is blocked even
     // when that employee still has an already-open app window.
@@ -867,12 +992,9 @@ function requireRole(...roles) {
   if (!currentSession) {
     throw new Error("Chưa đăng nhập");
   }
-  const canTestAsOperationalRole =
-    isTestOperatorSession() && roles.some((role) => role !== "admin");
   if (
     roles.length > 0 &&
-    !roles.includes(currentSession.role) &&
-    !canTestAsOperationalRole
+    !roles.includes(currentSession.role)
   ) {
     throw new Error(
       `Không có quyền thực hiện thao tác này (yêu cầu: ${roles.join("/")})`,
@@ -1117,6 +1239,9 @@ ipcMain.handle("system:getInfo", async () => {
 // DASHBOARD SUMMARY
 // ========================================
 
+const dashboardSummaryCache = new Map();
+const DASHBOARD_SUMMARY_CACHE_TTL_MS = 30000;
+
 ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
   try {
     requireRole("admin");
@@ -1137,6 +1262,13 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
     const prevTo = toDate(params.prevTo, to);
     const chartFrom = toDate(params.chartFrom, from);
     const chartTo = toDate(params.chartTo, to);
+    const cacheKey = [from, to, prevFrom, prevTo, chartFrom, chartTo]
+      .map((date) => date.toISOString())
+      .join("|");
+    const cached = dashboardSummaryCache.get(cacheKey);
+    if (cached && Date.now() - cached.createdAt < DASHBOARD_SUMMARY_CACHE_TTL_MS) {
+      return { success: true, data: cached.data };
+    }
 
     const parseItems = (value) => {
       try {
@@ -1160,17 +1292,9 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
     const pickPrice = (item) =>
       Number(item?.price ?? item?.unitPrice ?? 0) || 0;
 
-    const [
-      products,
-      exportOrders,
-      ecommerceExports,
-      prevExportSummary,
-      prevEcommerceSummary,
-      chartExportRows,
-      chartEcommerceRows,
-      purchases,
-      recentPurchases,
-    ] = await Promise.all([
+    const salesSources = ["pos", "shopee", "tiktok", "lazada", "tmdt"];
+    const [products, salesRows, previousSales, chartRows, purchases, recentPurchases] =
+      await Promise.all([
       prisma.product.findMany({
         select: {
           sku: true,
@@ -1181,46 +1305,48 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
         },
         where: { status: { not: "inactive" } },
       }),
-      prisma.exportOrder.findMany({
-        where: { exportDate: { gte: from, lte: to } },
-        select: { exportDate: true, totalAmount: true, items: true },
-      }),
-      prisma.ecommerceExport.findMany({
+      prisma.order.findMany({
         where: {
           status: "completed",
-          ecommerceExportDate: { gte: from, lte: to },
+          source: { in: salesSources },
+          createdAt: { gte: from, lte: to },
         },
-        select: { ecommerceExportDate: true, totalAmount: true, items: true },
+        select: {
+          source: true,
+          total: true,
+          createdAt: true,
+          items: {
+            select: {
+              sku: true,
+              productName: true,
+              quantity: true,
+              price: true,
+              cost: true,
+              subtotal: true,
+            },
+          },
+        },
       }),
-      prisma.exportOrder.aggregate({
-        where: { exportDate: { gte: prevFrom, lte: prevTo } },
-        _count: { _all: true },
-        _sum: { totalAmount: true },
-      }),
-      prisma.ecommerceExport.aggregate({
+      prisma.order.groupBy({
+        by: ["source"],
         where: {
           status: "completed",
-          ecommerceExportDate: { gte: prevFrom, lte: prevTo },
+          source: { in: salesSources },
+          createdAt: { gte: prevFrom, lte: prevTo },
         },
         _count: { _all: true },
-        _sum: { totalAmount: true },
+        _sum: { total: true },
       }),
       prisma.$queryRaw`
-                SELECT to_char(date_trunc('day', "exportDate"), 'YYYY-MM-DD') AS day,
-                       COALESCE(SUM("totalAmount"), 0)::float AS revenue
-                FROM "ExportOrder"
-                WHERE "exportDate" >= ${chartFrom} AND "exportDate" <= ${chartTo}
-                GROUP BY 1
-            `,
-      prisma.$queryRaw`
-                SELECT to_char(date_trunc('day', "ecommerceExportDate"), 'YYYY-MM-DD') AS day,
-                       COALESCE(SUM("totalAmount"), 0)::float AS revenue
-                FROM "EcommerceExport"
-                WHERE "status" = 'completed'
-                  AND "ecommerceExportDate" >= ${chartFrom}
-                  AND "ecommerceExportDate" <= ${chartTo}
-                GROUP BY 1
-            `,
+        SELECT to_char(date_trunc('day', "createdAt" AT TIME ZONE 'Asia/Bangkok'), 'YYYY-MM-DD') AS day,
+               COALESCE(SUM("total"), 0)::float AS revenue
+        FROM "Order"
+        WHERE "status" = 'completed'
+          AND "source" IN ('pos', 'shopee', 'tiktok', 'lazada', 'tmdt')
+          AND "createdAt" >= ${chartFrom}
+          AND "createdAt" <= ${chartTo}
+        GROUP BY 1
+      `,
       prisma.purchaseOrder.findMany({
         where: {
           status: { not: "cancelled" },
@@ -1292,56 +1418,48 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
     const dailyRevenueByDate = {};
     const topMap = new Map();
 
-    const addSalesRow = (row, source, date, bucket) => {
-      const amount = Number(row.totalAmount || 0);
+    const addSalesRow = (row, bucket) => {
+      const amount = Number(row.total || 0);
       bucket.revenue += amount;
       bucket.count += 1;
-      if (source === "pos") {
+      if (row.source === "pos") {
         bucket.posRevenue += amount;
         bucket.posCount += 1;
       } else {
         bucket.ecomRevenue += amount;
         bucket.ecomCount += 1;
       }
-      for (const item of parseItems(row.items)) {
+      for (const item of row.items || []) {
         const sku = pickSku(item);
         const qty = pickQty(item);
         const price = pickPrice(item);
         const cost = costMap[sku] ?? Number(item?.cost || 0);
         bucket.cogs += cost * qty;
-        if (dateIn(date, from, to)) {
-          const name = pickName(item);
-          const existing = topMap.get(name) || { name, qty: 0, revenue: 0 };
-          existing.qty += qty || 1;
-          existing.revenue += price * (qty || 1);
-          topMap.set(name, existing);
-        }
+        const name = pickName(item);
+        const existing = topMap.get(name) || { name, qty: 0, revenue: 0 };
+        existing.qty += qty || 1;
+        existing.revenue += Number(item?.subtotal ?? price * (qty || 1));
+        topMap.set(name, existing);
       }
     };
 
-    const salesRows = [
-      ...exportOrders.map((row) => ({
-        row,
-        source: "pos",
-        date: row.exportDate,
-      })),
-      ...ecommerceExports.map((row) => ({
-        row,
-        source: "ecom",
-        date: row.ecommerceExportDate,
-      })),
-    ];
-    for (const { row, source, date } of salesRows) {
-      if (dateIn(date, from, to)) addSalesRow(row, source, date, current);
+    for (const row of salesRows) {
+      addSalesRow(row, current);
     }
-    previous.posRevenue = Number(prevExportSummary._sum?.totalAmount || 0);
-    previous.posCount = Number(prevExportSummary._count?._all || 0);
-    previous.ecomRevenue = Number(prevEcommerceSummary._sum?.totalAmount || 0);
-    previous.ecomCount = Number(prevEcommerceSummary._count?._all || 0);
+    for (const row of previousSales) {
+      const revenue = Number(row._sum?.total || 0);
+      const count = Number(row._count?._all || 0);
+      if (row.source === "pos") {
+        previous.posRevenue += revenue;
+        previous.posCount += count;
+      } else {
+        previous.ecomRevenue += revenue;
+        previous.ecomCount += count;
+      }
+    }
     previous.revenue = previous.posRevenue + previous.ecomRevenue;
     previous.count = previous.posCount + previous.ecomCount;
 
-    const chartRows = [...chartExportRows, ...chartEcommerceRows];
     for (const row of chartRows) {
       const key = String(row.day || "");
       if (key)
@@ -1390,6 +1508,11 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
     console.log(
       `[Perf] dashboard:getSummary sales=${salesRows.length} chart=${chartRows.length} products=${products.length} ms=${Date.now() - startedAt}`,
     );
+    dashboardSummaryCache.set(cacheKey, { createdAt: Date.now(), data });
+    if (dashboardSummaryCache.size > 20) {
+      const oldestKey = dashboardSummaryCache.keys().next().value;
+      if (oldestKey) dashboardSummaryCache.delete(oldestKey);
+    }
     return { success: true, data };
   } catch (error) {
     console.error("dashboard:getSummary error:", error);
@@ -2225,6 +2348,7 @@ ipcMain.handle("categories:getAll", async () => {
 
 ipcMain.handle("categories:create", async (event, data) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) {
       throw new Error("Database chưa được khởi tạo.");
     }
@@ -2251,6 +2375,7 @@ ipcMain.handle("categories:create", async (event, data) => {
 
 ipcMain.handle("categories:update", async (event, id, data) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) {
       throw new Error("Database chưa được khởi tạo.");
     }
@@ -2278,6 +2403,7 @@ ipcMain.handle("categories:update", async (event, id, data) => {
 
 ipcMain.handle("categories:delete", async (event, id) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) {
       throw new Error("Database chưa được khởi tạo.");
     }
@@ -3760,38 +3886,36 @@ async function getSkuStockForOrder(db, sku) {
 ipcMain.handle("posOrder:create", async (event, data) => {
   try {
     if (!prisma) throw new Error("Database chưa được khởi tạo.");
-    console.log("💰 [POS] Creating order...", JSON.stringify(data, null, 2));
-
-    // 1. Generate order number: POS-YYYYMMDD-XXX (unique)
-    const today = new Date();
-    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, "");
-    const prefix = `POS-${dateStr}-`;
-
-    // Find the highest existing order number for today
-    const lastOrder = await prisma.order.findFirst({
-      where: {
-        orderNumber: { startsWith: prefix },
-      },
-      orderBy: { orderNumber: "desc" },
-      select: { orderNumber: true },
-    });
-
-    let nextNum = 1;
-    if (lastOrder && lastOrder.orderNumber) {
-      const lastNumStr = lastOrder.orderNumber.replace(prefix, "");
-      const lastNum = parseInt(lastNumStr, 10);
-      if (!isNaN(lastNum)) nextNum = lastNum + 1;
-    }
-    const orderNumber = `${prefix}${String(nextNum).padStart(3, "0")}`;
-
-    // 2. Calculate totals
-    const rawItems = data.items || [];
-    const items = await Promise.all(
-      rawItems.map(async (item) => ({
-        ...item,
-        cost: await getSkuCostForOrder(prisma, item.sku),
-      })),
+    console.log(
+      `💰 [POS] Creating order with ${Array.isArray(data.items) ? data.items.length : 0} items`,
     );
+
+    const rawItems = data.items || [];
+    if (!Array.isArray(rawItems) || rawItems.length === 0)
+      throw new Error("Đơn hàng chưa có sản phẩm.");
+    const productIds = [
+      ...new Set(rawItems.map((item) => Number(item.productId)).filter(Boolean)),
+    ];
+    const products = await prisma.product.findMany({
+      where: { id: { in: productIds } },
+      select: { id: true, sku: true, cost: true, variants: true },
+    });
+    const productById = new Map(products.map((product) => [product.id, product]));
+    const items = rawItems.map((item) => {
+      const product = productById.get(Number(item.productId));
+      if (!product)
+        throw new Error(`Không tìm thấy sản phẩm cho SKU ${item.sku}.`);
+      let cost = Number(product.cost || 0);
+      if (String(product.sku) !== String(item.sku)) {
+        const variant = parseJsonArray(product.variants).find(
+          (entry) => String(entry?.sku || "") === String(item.sku || ""),
+        );
+        if (!variant)
+          throw new Error(`SKU ${item.sku} không thuộc sản phẩm đã chọn.`);
+        cost = Number(variant.cost ?? product.cost ?? 0) || 0;
+      }
+      return { ...item, cost };
+    });
     const subtotal = items.reduce(
       (sum, item) => sum + item.price * item.qty,
       0,
@@ -3804,8 +3928,6 @@ ipcMain.handle("posOrder:create", async (event, data) => {
     const total = subtotal - discount;
     const profit = total - totalCost;
 
-    // 3. Create Order + OrderItems + Payment in transaction
-    // Lookup userId from userName for createdBy
     let createdByUserId = null;
     if (data.userName) {
       try {
@@ -3825,11 +3947,23 @@ ipcMain.handle("posOrder:create", async (event, data) => {
     const paymentStatus =
       paidAmount >= total ? "paid" : paidAmount > 0 ? "partial" : "unpaid";
 
-    // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
-    const order = await withStockLock(() =>
+    const result = await withStockLock(() =>
       getPrismaDirectTx().$transaction(
         async (tx) => {
-          // Create Order
+          await lockGlobalInventoryMutation(tx);
+          const today = new Date();
+          const dateStr = today.toISOString().slice(0, 10).replace(/-/g, "");
+          const prefix = `POS-${dateStr}-`;
+          const lastOrder = await tx.order.findFirst({
+            where: { orderNumber: { startsWith: prefix } },
+            orderBy: { orderNumber: "desc" },
+            select: { orderNumber: true },
+          });
+          const lastNum = Number(
+            String(lastOrder?.orderNumber || "").replace(prefix, ""),
+          );
+          const orderNumber = `${prefix}${String(Number.isFinite(lastNum) ? lastNum + 1 : 1).padStart(3, "0")}`;
+
           const newOrder = await tx.order.create({
             data: {
               orderNumber,
@@ -3847,10 +3981,8 @@ ipcMain.handle("posOrder:create", async (event, data) => {
             },
           });
 
-          // Create OrderItems
-          for (const item of items) {
-            await tx.orderItem.create({
-              data: {
+          await tx.orderItem.createMany({
+            data: items.map((item) => ({
                 orderId: newOrder.id,
                 productId: item.productId,
                 sku: item.sku,
@@ -3860,9 +3992,8 @@ ipcMain.handle("posOrder:create", async (event, data) => {
                 price: item.price,
                 cost: item.cost,
                 subtotal: item.price * item.qty,
-              },
-            });
-          }
+              })),
+          });
 
           // Create Payment
           await tx.payment.create({
@@ -3874,26 +4005,28 @@ ipcMain.handle("posOrder:create", async (event, data) => {
             },
           });
 
-          // 4. Deduct stock and log inside transaction (atomic)
+          const stockUpdates = [];
           for (const item of items) {
             try {
-              const availableStock = await getSkuStockForOrder(tx, item.sku);
-              if (availableStock < Number(item.qty || 0)) {
-                throw new Error("Không đủ hàng trong kho");
-              }
-              await updateProductStockInTx(tx, item.sku, -item.qty, {
+              const stockResult = await updateProductStockInTx(
+                tx,
+                item.sku,
+                -item.qty,
+                {
                 type: "pos_sale",
                 referenceType: "POS",
                 reference: orderNumber,
                 note: `Bán POS: ${item.name} x${item.qty}`,
                 createdBy: createdByUserId,
-              });
+                },
+              );
+              stockUpdates.push({ sku: item.sku, ...stockResult });
             } catch (stockErr) {
               throw new Error(`Lỗi kho SKU ${item.sku}: ${stockErr.message}`);
             }
           }
 
-          return newOrder;
+          return { order: newOrder, orderNumber, stockUpdates };
         },
         { timeout: 30000, maxWait: 10000 },
       ),
@@ -3903,9 +4036,10 @@ ipcMain.handle("posOrder:create", async (event, data) => {
       items.map((item) => item.sku),
       {
         referenceType: "POS",
-        reference: orderNumber,
+        reference: result.orderNumber,
       },
     );
+    dashboardSummaryCache.clear();
 
     // 5. Activity Log
     try {
@@ -3913,11 +4047,11 @@ ipcMain.handle("posOrder:create", async (event, data) => {
         data: {
           module: "sales",
           action: "CREATE",
-          description: `Bán hàng POS: ${orderNumber} - ${items.length} SP - ${new Intl.NumberFormat("vi-VN").format(total)}đ (${data.paymentMethod || "cash"})`,
+          description: `Bán hàng POS: ${result.orderNumber} - ${items.length} SP - ${new Intl.NumberFormat("vi-VN").format(total)}đ (${data.paymentMethod || "cash"})`,
           userName: data.userName || "System",
           severity: "INFO",
           details: JSON.stringify({
-            orderNumber,
+            orderNumber: result.orderNumber,
             itemCount: items.length,
             total,
             profit,
@@ -3929,8 +4063,15 @@ ipcMain.handle("posOrder:create", async (event, data) => {
       console.error("  ⚠️ Activity log failed:", logErr.message);
     }
 
-    console.log(`✅ [POS] Order created: ${orderNumber}, Total: ${total}`);
-    return { success: true, data: { ...order, orderNumber } };
+    console.log(`✅ [POS] Order created: ${result.orderNumber}, Total: ${total}`);
+    return {
+      success: true,
+      data: {
+        ...result.order,
+        orderNumber: result.orderNumber,
+        stockUpdates: result.stockUpdates,
+      },
+    };
   } catch (error) {
     console.error("❌ [POS] Create order error:", error.message);
     return { success: false, error: error.message };
@@ -3978,7 +4119,11 @@ ipcMain.handle("posOrder:getAll", async (event, filters = {}) => {
       delete where.createdAt;
       where.OR = [
         { orderNumber: { contains: filters.search, mode: "insensitive" } },
-        { customerName: { contains: filters.search, mode: "insensitive" } },
+        {
+          customer: {
+            name: { contains: trimmedSearch, mode: "insensitive" },
+          },
+        },
         { trackingNumber: { contains: filters.search, mode: "insensitive" } },
         ...(numericId ? [{ id: numericId }] : []),
       ];
@@ -5042,10 +5187,21 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
 
-    const [products, purchases, packagingStore, dbRegister] =
-      await Promise.all([
+    const isPilotUnicareProduct = (name) => {
+      const normalized = String(name || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/đ/g, "d")
+        .toLowerCase();
+      return normalized.includes("5d unicare") || normalized.includes("unicare upf uv");
+    };
+
+    const [productCandidates, dbRegister, txCfg] = await Promise.all([
         prisma.product.findMany({
-          where: { status: "active" },
+          where: {
+            status: "active",
+            name: { contains: "UNICARE", mode: "insensitive" },
+          },
           select: {
             id: true,
             name: true,
@@ -5055,36 +5211,6 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
             variants: true,
           },
         }),
-        prisma.purchaseOrder.findMany({
-          where: { status: { not: "cancelled" } },
-          orderBy: { createdAt: "asc" },
-          select: {
-            id: true,
-            poNumber: true,
-            createdAt: true,
-            supplier: { select: { name: true } },
-            items: {
-              select: {
-                id: true,
-                productId: true,
-                quantity: true,
-                color: true,
-                variantSku: true,
-                product: {
-                  select: {
-                    id: true,
-                    name: true,
-                    sku: true,
-                    unit: true,
-                    stock: true,
-                    variants: true,
-                  },
-                },
-              },
-            },
-          },
-        }),
-        getPurchaseItemPackaging(),
         (async () => {
           try {
             return await prisma.handlingUnit.findMany({
@@ -5098,96 +5224,37 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
             return [];
           }
         })(),
+        prisma.appConfig.findUnique({
+          where: { key: "handlingUnitsTransactionsJson" },
+          select: { value: true },
+        }),
       ]);
 
+    const products = productCandidates.filter((product) =>
+      isPilotUnicareProduct(product.name),
+    );
     const catalog = new Map();
-    purchases.forEach((purchase) => {
-      const byLine = packagingStore[String(purchase.id)]?.byLineKey || {};
-      // Prisma always returns an array here, but legacy imports may
-      // return a partial purchase object. A broken line must not take
-      // down the entire warehouse workspace.
-      (Array.isArray(purchase.items) ? purchase.items : []).forEach((item) => {
-        const sku = String(item.variantSku || item.product?.sku || "").trim();
-        if (!sku || !item.product) return;
-        const packaging =
-          byLine[getPurchaseItemCompanyKey({ ...item, id: null })] || {};
-        const rawLevels = Array.isArray(packaging.packagingLevels)
-          ? packaging.packagingLevels
-          : [];
-        const levels = rawLevels
-          .map((level) => ({
-            id: String(level?.id || ""),
-            name: String(level?.name || "").trim(),
-            factor: Math.max(1, Number(level?.factor || 1)),
-          }))
-          .filter((level) => level.id && level.name);
-        const base =
-          levels.find(
-            (level) =>
-              level.id === "lo" ||
-              level.name.toLocaleLowerCase("vi-VN") === "lẻ",
-          ) || levels.find((level) => level.factor === 1);
-        if (base) base.factor = 1;
-        else
-          levels.unshift({
-            id: "lo",
-            name: item.product.unit || "Lẻ",
-            factor: 1,
-          });
-        if (levels.length < 2 || !levels.some((level) => level.factor > 1))
-          return;
-
-        let stock = Number(item.product.stock || 0);
-        if (item.variantSku) {
-          const variant = parseJsonArray(item.product.variants).find(
-            (entry) => String(entry?.sku || "") === String(item.variantSku),
-          );
-          stock = Number(variant?.stock || 0);
-        }
-        catalog.set(sku, {
-          sku,
-          productId: item.productId,
-          purchaseOrderId: purchase.id,
-          purchaseItemId: item.id,
-          productGroup: item.product.name || "Sản phẩm",
-          variantName: `${item.product.name || "Sản phẩm"}${item.color ? ` - ${item.color}` : ""}`,
-          color: item.color || "",
-          unitName: item.product.unit || "Lẻ",
-          factory: purchase.supplier?.name || "Nhà cung cấp",
-          levels,
-          stock: Math.max(0, stock),
-          purchaseNumber: purchase.poNumber || `PN-${purchase.id}`,
-        });
-      });
-    });
 
     // Pilot scope: use the live Product catalogue, limited to the two
     // UNICARE families agreed for the handling-units rollout.
-    const isPilotUnicareProduct = (name) => {
-      const normalized = String(name || "")
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/đ/g, "d")
-        .toLowerCase();
-      return normalized.includes("5d unicare") || normalized.includes("unicare upf uv");
-    };
-    products.filter((product) => isPilotUnicareProduct(product.name)).forEach((product) => {
+    products.forEach((product) => {
       const variants = parseJsonArray(product.variants);
-      const entries = variants.length > 0 ? variants : [{ sku: product.sku, stock: product.stock }];
+      const entries =
+        variants.length > 0
+          ? variants
+          : [{ sku: product.sku, stock: product.stock }];
       entries.forEach((variant) => {
         const sku = String(variant?.sku || product.sku || "").trim();
         if (!sku) return;
-        const existing = catalog.get(sku);
         catalog.set(sku, {
-          ...existing,
           sku,
           productId: product.id,
           productGroup: product.name,
           variantName: `${product.name}${variant?.color ? ` - ${variant.color}` : ""}`,
-          color: variant?.color || existing?.color || "",
+          color: variant?.color || "",
           unitName: product.unit || "Lẻ",
           stock: Math.max(0, Number(variant?.stock ?? product.stock ?? 0)),
-          levels: existing?.levels || [{ id: "lo", name: product.unit || "Lẻ", factor: 1 }],
+          levels: [{ id: "lo", name: product.unit || "Lẻ", factor: 1 }],
         });
       });
     });
@@ -5236,9 +5303,6 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
 
     let recentTransactions = [];
     try {
-      const txCfg = await prisma.appConfig.findUnique({
-        where: { key: "handlingUnitsTransactionsJson" },
-      });
       if (txCfg?.value) {
         recentTransactions = JSON.parse(txCfg.value);
       }
@@ -5379,10 +5443,134 @@ ipcMain.handle("handlingUnits:saveRegister", async (_event, records = []) => {
         });
       }
     });
+    broadcastHandlingUnitsChanged("REGISTER_SAVED", { count: register.length });
     return { success: true, data: register };
   } catch (error) {
     console.error("Save handling units register error:", error);
     return { success: false, error: error.message };
+  }
+});
+
+// Create only the new rows. This avoids rewriting the complete register when
+// the warehouse adds one batch of handling units.
+ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Prisma not available");
+    if (!Array.isArray(records) || records.length === 0)
+      throw new Error("Danh sách kiện mới không hợp lệ.");
+    if (records.length > 500)
+      throw new Error("Mỗi lần chỉ được tạo tối đa 500 kiện.");
+
+    const units = records
+      .map((item) => ({
+        code: String(item?.id || item?.code || "").trim().toUpperCase(),
+        productId: Number(item?.productId || 0) || null,
+        purchaseOrderId: Number(item?.purchaseOrderId || 0) || null,
+        purchaseItemId: Number(item?.purchaseItemId || 0) || null,
+        sku: String(item?.skuName || item?.sku || "").trim(),
+        color: String(item?.color || "").trim() || null,
+        packagingName: String(item?.packageType || "Kiện").trim() || "Kiện",
+        baseUnit: String(item?.unitName || "Cái").trim() || "Cái",
+        initialQuantity: Math.max(0, Math.floor(Number(item?.initialPcs || 0))),
+        remainingQuantity: Math.max(0, Math.floor(Number(item?.currentPcs || 0))),
+        status:
+          item?.status === "Đang sử dụng"
+            ? "opened"
+            : item?.status === "Chờ kiểm"
+              ? "pending_check"
+              : item?.status === "Đã hết"
+                ? "empty"
+                : "sealed",
+        location: normalizeHandlingLocation(item?.location),
+        note: String(item?.note || "").trim(),
+      }))
+      .filter((item) => item.code && item.sku && item.initialQuantity > 0);
+
+    if (units.length !== records.length)
+      throw new Error("Có kiện thiếu mã, SKU hoặc số lượng ban đầu.");
+    if (new Set(units.map((item) => item.code)).size !== units.length)
+      throw new Error("Mã kiện bị trùng trong lô tạo mới.");
+    units.forEach((item) => {
+      if (item.remainingQuantity > item.initialQuantity) {
+        throw new Error(
+          `Số dư kiện ${item.code} không thể lớn hơn tồn ban đầu.`,
+        );
+      }
+    });
+
+    const productIdBySku = new Map();
+    units.forEach((item) => {
+      if (item.productId) productIdBySku.set(item.sku, item.productId);
+    });
+    const indexProducts = (rows) => {
+      rows.forEach((product) => {
+        productIdBySku.set(String(product.sku || ""), product.id);
+        parseJsonArray(product.variants).forEach((variant) => {
+          const sku = String(variant?.sku || "").trim();
+          if (sku) productIdBySku.set(sku, product.id);
+        });
+      });
+    };
+    if (units.some((item) => !productIdBySku.has(item.sku))) {
+      const products = await prisma.product.findMany({
+        select: { id: true, sku: true, variants: true },
+      });
+      indexProducts(products);
+    }
+
+    const createRows = units.map((item) => {
+      const productId = productIdBySku.get(item.sku);
+      if (!productId)
+        throw new Error(`Không xác định được sản phẩm cho SKU ${item.sku}.`);
+      return {
+        code: item.code,
+        productId,
+        purchaseOrderId: item.purchaseOrderId,
+        purchaseItemId: item.purchaseItemId,
+        sku: item.sku,
+        color: item.color,
+        packagingName: item.packagingName,
+        baseUnit: item.baseUnit,
+        conversionFactor: Math.max(1, item.initialQuantity),
+        initialQuantity: item.initialQuantity,
+        remainingQuantity: item.remainingQuantity,
+        status: item.status,
+        zone: JSON.stringify(item.location),
+      };
+    });
+
+    await prisma.$transaction(async (tx) => {
+      await tx.handlingUnit.createMany({ data: createRows });
+      await appendHandlingUnitsTransactions(
+        tx,
+        units.map((item) => ({
+          unitId: item.code,
+          type: "Nhập kiện",
+          quantity: item.initialQuantity,
+          remaining: item.remainingQuantity,
+          actor: currentSession?.username || "Renderer",
+          note:
+            item.note ||
+            `Tạo kiện mới ${item.code} tại ${toHandlingUnitLocationCode(item.location)}`,
+        })),
+      );
+    });
+
+    broadcastHandlingUnitsChanged("UNITS_CREATED", {
+      count: createRows.length,
+      codes: createRows.map((item) => item.code),
+    });
+    return { success: true, data: records };
+  } catch (error) {
+    console.error("Create handling units error:", error);
+    return {
+      success: false,
+      error:
+        error?.code === "P2002"
+          ? "Một hoặc nhiều mã kiện đã tồn tại. Vui lòng tải lại danh sách và thử lại."
+          : error.message,
+    };
   }
 });
 
@@ -6478,29 +6666,36 @@ function normalizeHandlingPickDestination(value) {
   return HANDLING_PICK_DESTINATIONS[key] ? key : "PACKING";
 }
 
-async function appendHandlingUnitsTransaction(tx, entry) {
+async function appendHandlingUnitsTransactions(tx, entries) {
   try {
     const key = "handlingUnitsTransactionsJson";
     const config = await tx.appConfig.findUnique({ where: { key } });
     let items = [];
     try {
-      items = Array.isArray(JSON.parse(config?.value || "[]"))
-        ? JSON.parse(config.value)
-        : [];
+      const parsed = JSON.parse(config?.value || "[]");
+      items = Array.isArray(parsed) ? parsed : [];
     } catch {}
-    items.unshift({
-      id: `HU-TX-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      createdAt: new Date().toISOString(),
-      ...entry,
-    });
+    const createdAt = new Date().toISOString();
+    const nextItems = (Array.isArray(entries) ? entries : []).map(
+      (entry, index) => ({
+        id: `HU-TX-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`,
+        createdAt,
+        ...entry,
+      }),
+    );
+    items = [...nextItems, ...items].slice(0, 500);
     await tx.appConfig.upsert({
       where: { key },
-      create: { key, value: JSON.stringify(items.slice(0, 500)) },
-      update: { value: JSON.stringify(items.slice(0, 500)) },
+      create: { key, value: JSON.stringify(items) },
+      update: { value: JSON.stringify(items) },
     });
   } catch (error) {
     console.warn("Could not persist handling-unit history:", error.message);
   }
+}
+
+async function appendHandlingUnitsTransaction(tx, entry) {
+  return appendHandlingUnitsTransactions(tx, [entry]);
 }
 
 async function executeRutHang(
@@ -8222,7 +8417,7 @@ ipcMain.handle(
         const localFileName = `VAT_GROUP_${vatGroupId}_${Date.now()}${suffix}.${ext}`;
         const localPath = path.join(vatDir, localFileName);
 
-        const fileBuffer = Buffer.from(b64, "base64");
+        const fileBuffer = decodeBusinessDocumentBase64(b64);
         fs.writeFileSync(localPath, fileBuffer);
         localPaths.push(localPath);
         savedBuffers.push(fileBuffer);
@@ -8477,7 +8672,7 @@ ipcMain.handle("purchases:create", async (event, data) => {
         drive,
         receiptFolderId,
         `Phiếu_Nhập_${supplier.name}_${uploadReference}${suffix}.${ext}`,
-        Buffer.from(file.fileBase64, "base64"),
+        decodeBusinessDocumentBase64(file.fileBase64),
         ext === "pdf" ? "application/pdf" : "image/jpeg",
       );
       if (!uploaded?.fileId || !uploaded?.webViewLink) {
@@ -9326,7 +9521,7 @@ ipcMain.handle(
             .pop() || "jpg";
         const localFileName = `VAT_PO${purchaseId}_${safeCompany}_${Date.now()}_${index + 1}.${ext}`;
         const localPath = path.join(vatDir, localFileName);
-        const fileBuffer = Buffer.from(file.fileBase64 || "", "base64");
+        const fileBuffer = decodeBusinessDocumentBase64(file.fileBase64);
         fs.writeFileSync(localPath, fileBuffer);
         localPaths.push(localPath);
 
@@ -9509,7 +9704,7 @@ ipcMain.handle(
         const localFileName = `VAT_PO${purchaseId}_${Date.now()}${suffix}.${ext}`;
         const localPath = path.join(vatDir, localFileName);
 
-        const fileBuffer = Buffer.from(b64, "base64");
+        const fileBuffer = decodeBusinessDocumentBase64(b64);
         fs.writeFileSync(localPath, fileBuffer);
         console.log(
           `📁 Saved VAT invoice [${i + 1}/${filesList.length}]: ${localPath}`,
@@ -9713,7 +9908,7 @@ ipcMain.handle(
         const { fileBase64: b64, fileName: fn } = filesList[i];
         const ext = (fn || "jpg").split(".").pop() || "jpg";
         const suffix = filesList.length > 1 ? `_${i + 1}` : "";
-        const fileBuffer = Buffer.from(b64, "base64");
+        const fileBuffer = decodeBusinessDocumentBase64(b64);
         try {
           const driveFileName = `Phiếu_Nhập_${purchase.supplier?.name || "NCC"}_PO${purchaseId}${suffix}.${ext}`;
           const result = await uploadToDrive(
@@ -11529,6 +11724,39 @@ ipcMain.handle(
 
 const AdmZip = require("adm-zip");
 
+function validateBackupArchive(zip) {
+  let totalUncompressedBytes = 0;
+  for (const entry of zip.getEntries()) {
+    const normalizedName = String(entry.entryName || "").replace(/\\/g, "/");
+    const segments = normalizedName.split("/").filter(Boolean);
+    if (!normalizedName || normalizedName.startsWith("/") || segments.includes("..")) {
+      throw new Error(`Backup chứa đường dẫn không an toàn: ${normalizedName}`);
+    }
+    totalUncompressedBytes += Number(entry.header?.size || 0);
+    if (totalUncompressedBytes > 2 * 1024 * 1024 * 1024) {
+      throw new Error("Backup sau giải nén vượt quá giới hạn 2 GB.");
+    }
+  }
+}
+
+function isAllowedBackupPath(backupPath) {
+  if (typeof backupPath !== "string" || path.extname(backupPath).toLowerCase() !== ".zip") return false;
+  try {
+    const resolvedFile = fs.realpathSync(backupPath).toLowerCase();
+    const allowedRoots = [
+      "G:\\QUAN LY BAN HANG\\apps\\BACKUP",
+      path.join(__dirname, "..", "..", "Backups"),
+      path.join(app.getPath("userData"), "Backups"),
+    ];
+    return allowedRoots.some((root) => {
+      const resolvedRoot = path.resolve(root).toLowerCase();
+      return resolvedFile.startsWith(`${resolvedRoot}${path.sep}`);
+    });
+  } catch {
+    return false;
+  }
+}
+
 // Backup toàn bộ folder desktop thành ZIP
 ipcMain.handle("system:backup", async () => {
   try {
@@ -11674,7 +11902,11 @@ ipcMain.handle("system:restore", async (event, backupPath) => {
     requireRole("admin");
     console.log("🔄 Starting restore from:", backupPath);
 
-    if (!fs.existsSync(backupPath)) {
+    if (
+      !fs.existsSync(backupPath) ||
+      !fs.statSync(backupPath).isFile() ||
+      !isAllowedBackupPath(backupPath)
+    ) {
       return { success: false, error: "File backup không tồn tại!" };
     }
 
@@ -11683,6 +11915,7 @@ ipcMain.handle("system:restore", async (event, backupPath) => {
 
     // Sử dụng adm-zip để giải nén
     const zip = new AdmZip(backupPath);
+    validateBackupArchive(zip);
 
     // Tạo backup tạm của database trước khi restore
     const dbPath = path.join(restoreDir, "prisma", "dev.db");
@@ -11720,13 +11953,14 @@ ipcMain.handle("system:inspectBackup", async (event, backupPath) => {
     requireRole("admin");
     console.log("🔍 Inspecting backup:", backupPath);
 
-    if (!fs.existsSync(backupPath)) {
+    if (!fs.existsSync(backupPath) || !isAllowedBackupPath(backupPath)) {
       return { success: false, error: "File backup không tồn tại!" };
     }
 
     // Lấy thông tin file
     const stats = fs.statSync(backupPath);
     const zip = new AdmZip(backupPath);
+    validateBackupArchive(zip);
     const entries = zip.getEntries();
 
     // Phân loại entries
@@ -11859,7 +12093,7 @@ ipcMain.handle("system:browseAndRestore", async () => {
 ipcMain.handle("system:deleteBackup", async (event, backupPath) => {
   try {
     requireRole("admin");
-    if (!fs.existsSync(backupPath)) {
+    if (!fs.existsSync(backupPath) || !isAllowedBackupPath(backupPath)) {
       return { success: false, error: "File backup không tồn tại!" };
     }
 
@@ -11880,6 +12114,8 @@ ipcMain.handle("system:deleteBackup", async (event, backupPath) => {
 const MAX_EVIDENCE_IMAGES = 5;
 const TASK_PENALTY_KEY_PREFIX = "dailyTaskEvidencePenalty:";
 const ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX = "assignmentEvidencePenalty:";
+const getDailyTaskReferenceCode = (taskId) =>
+  `CV-${String(taskId ?? "").padStart(4, "0")}`;
 const DAILY_TASK_REST_DAY_HOLIDAYS = new Set([
   "01-01",
   "04-30",
@@ -12037,7 +12273,7 @@ function getTaskRecipients(
   return task?.assignee ? [String(task.assignee).trim()] : [];
 }
 
-async function getActiveTaskRecipients(recipients) {
+async function getActiveTaskRecipients(recipients, knownActiveUsers) {
   const values = [
     ...new Set(
       (recipients || [])
@@ -12046,13 +12282,15 @@ async function getActiveTaskRecipients(recipients) {
     ),
   ];
   if (values.length === 0) return [];
-  const activeUsers = await prisma.user.findMany({
-    where: {
-      status: "active",
-      OR: [{ username: { in: values } }, { fullName: { in: values } }],
-    },
-    select: { username: true, fullName: true },
-  });
+  const activeUsers = Array.isArray(knownActiveUsers)
+    ? knownActiveUsers
+    : await prisma.user.findMany({
+        where: {
+          status: "active",
+          OR: [{ username: { in: values } }, { fullName: { in: values } }],
+        },
+        select: { username: true, fullName: true },
+      });
   return values.filter((value) =>
     activeUsers.some((user) => matchesUserIdentity(value, user)),
   );
@@ -12328,12 +12566,16 @@ async function getRecentEvidenceVisualHashes() {
   return hashes.filter(Boolean);
 }
 
-async function createEvidencePenaltyIfDue(task, now = new Date()) {
+async function createEvidencePenaltyIfDue(
+  task,
+  now = new Date(),
+  knownActiveUsers,
+) {
   const attachments = parseTaskAttachments(task.attachments);
   const evidence = attachments.evidence || {};
   if (!evidence.required) return null;
   if (task.type === "assignment")
-    return createAssignmentEvidencePenaltyIfDue(task, now);
+    return createAssignmentEvidencePenaltyIfDue(task, now, knownActiveUsers);
   if (!task.assignee || !isFixedAssignee(attachments)) return null;
 
   const dueAt = new Date(task.dueDate);
@@ -12364,6 +12606,7 @@ async function createEvidencePenaltyIfDue(task, now = new Date()) {
   const dueKey = dueAt.toISOString();
   const recipients = await getActiveTaskRecipients(
     getTaskRecipients(task, attachments),
+    knownActiveUsers,
   );
   if (recipients.length === 0) return [];
   const totalFine = Number(evidence.penaltyAmount) || 30000;
@@ -12379,6 +12622,7 @@ async function createEvidencePenaltyIfDue(task, now = new Date()) {
     const penalty = {
       id: key,
       taskId: task.id,
+      taskCode: getDailyTaskReferenceCode(task.id),
       assignee,
       amount: baseFine + (index < remainder ? 1 : 0),
       dueAt: dueAt.toISOString(),
@@ -12554,7 +12798,11 @@ async function repairLegacyAssignmentPenaltySchedule(
   }
 }
 
-async function createAssignmentEvidencePenaltyIfDue(task, now = new Date()) {
+async function createAssignmentEvidencePenaltyIfDue(
+  task,
+  now = new Date(),
+  knownActiveUsers,
+) {
   const attachments = parseTaskAttachments(task.attachments);
   const evidence = attachments.evidence || {};
   if (task.type !== "assignment" || !evidence.required) return null;
@@ -12575,6 +12823,7 @@ async function createAssignmentEvidencePenaltyIfDue(task, now = new Date()) {
   if (Number.isNaN(dueAt.getTime())) return null;
   const recipients = await getActiveTaskRecipients(
     getTaskRecipients(task, attachments),
+    knownActiveUsers,
   );
   if (recipients.length === 0) return [];
   const scheduleAnchor = getAssignmentPenaltyScheduleAnchor(task, dueAt);
@@ -12611,6 +12860,7 @@ async function createAssignmentEvidencePenaltyIfDue(task, now = new Date()) {
       const penalty = {
         id: key,
         taskId: task.id,
+        taskCode: getDailyTaskReferenceCode(task.id),
         assignee,
         amount: finePerRecipient,
         dueAt: dueKey,
@@ -12651,25 +12901,35 @@ function reconcileEvidencePenalties() {
   if (evidencePenaltyReconcilePromise) return evidencePenaltyReconcilePromise;
   evidencePenaltyReconcilePromise = (async () => {
     await cleanupPrematureDailyEvidencePenalties();
-    const tasks = await prisma.dailyTask.findMany({
-      // Completed rows are included deliberately: old clients could mark a
-      // proof-required task complete without uploading an image.
-      where: { attachments: { not: null } },
-      // Penalty reconciliation only needs these fields. Avoid sending full
-      // task descriptions and metadata across the database connection.
-      select: {
-        id: true,
-        title: true,
-        assignee: true,
-        dueDate: true,
-        status: true,
-        type: true,
-        attachments: true,
-      },
-    });
+    const [tasks, activeUsers] = await Promise.all([
+      prisma.dailyTask.findMany({
+        // Completed rows are included deliberately: old clients could mark a
+        // proof-required task complete without uploading an image.
+        where: { attachments: { not: null } },
+        // Penalty reconciliation only needs these fields. Avoid sending full
+        // task descriptions and metadata across the database connection.
+        select: {
+          id: true,
+          title: true,
+          assignee: true,
+          dueDate: true,
+          status: true,
+          type: true,
+          attachments: true,
+        },
+      }),
+      prisma.user.findMany({
+        where: { status: "active" },
+        select: { username: true, fullName: true },
+      }),
+    ]);
     const created = [];
     for (const task of tasks) {
-      const penalties = await createEvidencePenaltyIfDue(task);
+      const penalties = await createEvidencePenaltyIfDue(
+        task,
+        new Date(),
+        activeUsers,
+      );
       if (Array.isArray(penalties)) created.push(...penalties);
     }
     return created;
@@ -12679,17 +12939,32 @@ function reconcileEvidencePenalties() {
   });
 }
 
-async function reconcileSnapshotEvidencePenalties(now = new Date()) {
+async function reconcileSnapshotEvidencePenalties(now = new Date(), range = {}) {
   const today = getLocalDateKey(now);
   await cleanupPrematureDailyEvidencePenalties();
-  const [snapshotRows, existingPenaltyRows] = await Promise.all([
+  const startDate = /^\d{4}-\d{2}-\d{2}$/.test(String(range.startDate || ""))
+    ? String(range.startDate)
+    : "";
+  const endDate = /^\d{4}-\d{2}-\d{2}$/.test(String(range.endDate || ""))
+    ? String(range.endDate)
+    : "";
+  const snapshotKeyFilter = {
+    startsWith: "dailyTasksSnapshot:",
+    ...(startDate ? { gte: `dailyTasksSnapshot:${startDate}` } : {}),
+    ...(endDate ? { lte: `dailyTasksSnapshot:${endDate}` } : {}),
+  };
+  const [snapshotRows, existingPenaltyRows, activeUsers] = await Promise.all([
     prisma.appConfig.findMany({
-      where: { key: { startsWith: "dailyTasksSnapshot:" } },
+      where: { key: snapshotKeyFilter },
       select: { key: true, value: true },
     }),
     prisma.appConfig.findMany({
       where: { key: { startsWith: TASK_PENALTY_KEY_PREFIX } },
       select: { key: true },
+    }),
+    prisma.user.findMany({
+      where: { status: "active" },
+      select: { username: true, fullName: true },
     }),
   ]);
   const existingPenaltyKeys = new Set(
@@ -12721,7 +12996,11 @@ async function reconcileSnapshotEvidencePenalties(now = new Date()) {
         );
         if (expectedKeys.every((key) => existingPenaltyKeys.has(key))) continue;
       }
-      const penalties = await createEvidencePenaltyIfDue(task, now);
+      const penalties = await createEvidencePenaltyIfDue(
+        task,
+        now,
+        activeUsers,
+      );
       if (Array.isArray(penalties)) {
         created.push(...penalties);
         penalties.forEach((penalty) => existingPenaltyKeys.add(penalty.id));
@@ -13307,11 +13586,14 @@ ipcMain.handle(
   },
 );
 
-ipcMain.handle("dailyTasks:listEvidencePenalties", async () => {
+ipcMain.handle("dailyTasks:listEvidencePenalties", async (_event, options = {}) => {
   try {
     requireRole();
     await reconcileEvidencePenalties();
-    await reconcileSnapshotEvidencePenalties();
+    await reconcileSnapshotEvidencePenalties(new Date(), {
+      startDate: options.startDate,
+      endDate: options.endDate,
+    });
     const rows = await prisma.appConfig.findMany({
       where: {
         OR: [
@@ -14979,16 +15261,36 @@ ipcMain.handle("shell:openExternal", async (event, url) => {
       return { success: false, error: "Invalid URL" };
     }
 
-    // Validate URL format
-    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return { success: false, error: "Invalid URL" };
+    }
+    const host = parsed.hostname.toLowerCase();
+    const private172 = host.match(/^172\.(\d{1,3})\./);
+    const isPrivateHost =
+      host === "localhost" ||
+      host === "::1" ||
+      host.endsWith(".local") ||
+      /^127\./.test(host) ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      (private172 && Number(private172[1]) >= 16 && Number(private172[1]) <= 31);
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.username ||
+      parsed.password ||
+      isPrivateHost
+    ) {
       return {
         success: false,
-        error: "URL must start with http:// or https://",
+        error: "Chỉ được mở URL HTTPS công khai, không chứa thông tin đăng nhập",
       };
     }
 
-    await shell.openExternal(url);
-    console.log(`✅ Opened external URL: ${url}`);
+    await shell.openExternal(parsed.toString());
+    console.log(`✅ Opened external URL: ${parsed.origin}`);
     return { success: true };
   } catch (error) {
     console.error("❌ Error opening external URL:", error);
@@ -15762,7 +16064,11 @@ ipcMain.handle("ecommerceExports:update", async (event, id, data) => {
         error.message,
       );
       try {
-        offlineQueue.enqueue("ecommerceExports:update", { id, data });
+        offlineQueue.enqueue("ecommerceExports:update", {
+          id,
+          data,
+          queuedByUserId: currentSession.id,
+        });
         return {
           success: true,
           queued: true,
@@ -16181,6 +16487,443 @@ ipcMain.handle("ecommerceExports:bulkCancel", async (event, ids) => {
   }
 });
 
+const ORDER_MARKETPLACE_SOURCES = ["shopee", "tiktok", "lazada", "tmdt"];
+
+function getUnifiedOrderRange(args, previous = false) {
+  return {
+    gte: new Date(previous ? args.prevFrom : args.from),
+    lte: new Date(previous ? args.prevTo : args.to),
+  };
+}
+
+function getUnifiedOrderSourceCondition(args, ignoreSource = false) {
+  const sourceFilter = ignoreSource ? "all" : args.sourceFilter || "all";
+  const platformFilter = args.platformFilter || "all";
+  if (sourceFilter === "pos") {
+    return { source: "pos", status: { not: "cancelled" } };
+  }
+  if (sourceFilter === "tmdt") {
+    return {
+      source: {
+        in:
+          platformFilter === "all"
+            ? ORDER_MARKETPLACE_SOURCES
+            : [platformFilter],
+      },
+      status: "completed",
+    };
+  }
+  if (sourceFilter === "export") return null;
+  return {
+    OR: [
+      { source: "pos", status: { not: "cancelled" } },
+      { source: { in: ORDER_MARKETPLACE_SOURCES }, status: "completed" },
+    ],
+  };
+}
+
+function buildUnifiedOrderWhere(args, previous = false, ignoreSource = false) {
+  const sourceCondition = getUnifiedOrderSourceCondition(args, ignoreSource);
+  if (!sourceCondition) return null;
+  const AND = [{ createdAt: getUnifiedOrderRange(args, previous) }, sourceCondition];
+  const search = String(args.search || "").trim();
+  if (search) {
+    const syntheticIdMatch = search.match(/^#?(?:POS|TMDT)-(\d+)$/i);
+    const numericId = syntheticIdMatch ? Number(syntheticIdMatch[1]) : null;
+    AND.push({
+      OR: [
+        { orderNumber: { contains: search, mode: "insensitive" } },
+        { trackingNumber: { contains: search, mode: "insensitive" } },
+        { customer: { name: { contains: search, mode: "insensitive" } } },
+        ...(numericId ? [{ id: numericId }] : []),
+      ],
+    });
+  }
+  return { AND };
+}
+
+function buildUnifiedExportWhere(args, previous = false, ignoreSource = false) {
+  if (!ignoreSource && !["all", "export"].includes(args.sourceFilter || "all")) {
+    return null;
+  }
+  const AND = [{ exportDate: getUnifiedOrderRange(args, previous) }];
+  const search = String(args.search || "").trim();
+  if (search) {
+    const syntheticIdMatch = search.match(/^#?(?:XH|EX)-(\d+)$/i);
+    const numericId = syntheticIdMatch ? Number(syntheticIdMatch[1]) : null;
+    AND.push({
+      OR: [
+        { customer: { contains: search, mode: "insensitive" } },
+        { notes: { contains: search, mode: "insensitive" } },
+        ...(numericId ? [{ id: numericId }] : []),
+      ],
+    });
+  }
+  return { AND };
+}
+
+const unifiedOrderSelect = {
+  id: true,
+  orderNumber: true,
+  source: true,
+  status: true,
+  total: true,
+  note: true,
+  trackingNumber: true,
+  createdAt: true,
+  customer: { select: { name: true } },
+  user: { select: { username: true, fullName: true } },
+  items: {
+    select: {
+      productId: true,
+      productName: true,
+      sku: true,
+      variant: true,
+      quantity: true,
+      price: true,
+      cost: true,
+      subtotal: true,
+    },
+  },
+};
+
+function mapUnifiedDatabaseOrder(order) {
+  const marketplace = ORDER_MARKETPLACE_SOURCES.includes(order.source);
+  return {
+    id: `${marketplace ? "TMDT" : "POS"}-${order.id}`,
+    originalId: order.id,
+    source: marketplace ? "tmdt" : "pos",
+    sourceLabel:
+      order.source === "tiktok"
+        ? "TikTok"
+        : order.source === "shopee"
+          ? "Shopee"
+          : order.source === "lazada"
+            ? "Lazada"
+            : marketplace
+              ? "TMDT"
+              : "POS",
+    orderNumber: order.orderNumber || `#${marketplace ? "TMDT" : "POS"}-${order.id}`,
+    customer: marketplace
+      ? String(order.source || "TMDT").toUpperCase()
+      : order.customer?.name || "Khách lẻ",
+    items: JSON.stringify(
+      order.items.map((item) => ({
+        productId: item.productId,
+        productName: item.productName,
+        variantSku: item.sku,
+        variant: item.variant,
+        quantity: item.quantity,
+        unitPrice: item.price,
+        cost: item.cost || 0,
+        total: item.subtotal,
+      })),
+    ),
+    totalAmount: order.total || 0,
+    status: order.status,
+    date: order.createdAt.toISOString(),
+    tracking: order.trackingNumber || undefined,
+    shipping: order.note?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
+    notes: order.note || "",
+    createdBy: order.user?.username || order.user?.fullName || "",
+  };
+}
+
+function parseExportItems(items) {
+  try {
+    return Array.isArray(items) ? items : JSON.parse(items || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function mapUnifiedExportOrder(order) {
+  return {
+    id: `EX-${order.id}`,
+    originalId: order.id,
+    source: "export",
+    sourceLabel: "Xuất hàng",
+    orderNumber: `#XH-${order.id}`,
+    customer: order.customer || "Khách lẻ",
+    items: JSON.stringify(parseExportItems(order.items)),
+    totalAmount: order.totalAmount || 0,
+    status: order.status || "completed",
+    date: order.exportDate.toISOString(),
+    notes: order.notes || "",
+    createdBy: order.createdBy || "",
+  };
+}
+
+async function getUnifiedPeriodStats(args, previous = false) {
+  const orderWhere = buildUnifiedOrderWhere(args, previous);
+  const exportWhere = buildUnifiedExportWhere(args, previous);
+  const [orderAggregate, itemAggregate, exportRows] = await Promise.all([
+    orderWhere
+      ? prisma.order.aggregate({ where: orderWhere, _count: true, _sum: { total: true } })
+      : null,
+    orderWhere
+      ? prisma.orderItem.aggregate({
+          where: { order: orderWhere },
+          _sum: { quantity: true },
+        })
+      : null,
+    exportWhere
+      ? prisma.exportOrder.findMany({
+          where: exportWhere,
+          select: { totalAmount: true, items: true },
+        })
+      : [],
+  ]);
+  const exportQty = exportRows.reduce(
+    (sum, row) =>
+      sum +
+      parseExportItems(row.items).reduce(
+        (itemSum, item) => itemSum + Number(item.quantity || item.qty || 1),
+        0,
+      ),
+    0,
+  );
+  return {
+    orderCount: Number(orderAggregate?._count || 0) + exportRows.length,
+    revenue:
+      Number(orderAggregate?._sum?.total || 0) +
+      exportRows.reduce((sum, row) => sum + Number(row.totalAmount || 0), 0),
+    quantity: Number(itemAggregate?._sum?.quantity || 0) + exportQty,
+  };
+}
+
+ipcMain.handle("orders:getUnified", async (event, args = {}) => {
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Database chưa được khởi tạo.");
+    const page = Math.max(1, Number(args.page) || 1);
+    const requestedPageSize = Math.max(1, Number(args.pageSize) || 20);
+    const pageSize = args.exportAll ? 50000 : Math.min(requestedPageSize, 200);
+    const orderWhere = buildUnifiedOrderWhere(args);
+    const exportWhere = buildUnifiedExportWhere(args);
+    const allOrderWhere = buildUnifiedOrderWhere(args, false, true);
+    const allExportWhere = buildUnifiedExportWhere(args, false, true);
+
+    const [orderCount, exportCount, current, previous, sourceGroups, allExportCount] =
+      await Promise.all([
+        orderWhere ? prisma.order.count({ where: orderWhere }) : 0,
+        exportWhere ? prisma.exportOrder.count({ where: exportWhere }) : 0,
+        getUnifiedPeriodStats(args),
+        getUnifiedPeriodStats(args, true),
+        prisma.order.groupBy({
+          by: ["source"],
+          where: allOrderWhere,
+          _count: true,
+        }),
+        allExportWhere ? prisma.exportOrder.count({ where: allExportWhere }) : 0,
+      ]);
+
+    const total = orderCount + exportCount;
+    const offset = args.exportAll ? 0 : (page - 1) * pageSize;
+    const orderSkip = args.exportAll ? 0 : Math.max(0, offset - exportCount);
+    const orderTake = args.exportAll
+      ? orderCount
+      : Math.min(orderCount - orderSkip, pageSize + exportCount);
+    const [databaseOrders, exportOrders] = await Promise.all([
+      orderWhere && orderTake > 0
+        ? prisma.order.findMany({
+            where: orderWhere,
+            select: unifiedOrderSelect,
+            orderBy: { createdAt: "desc" },
+            skip: orderSkip,
+            take: orderTake,
+          })
+        : [],
+      exportWhere
+        ? prisma.exportOrder.findMany({
+            where: exportWhere,
+            orderBy: { exportDate: "desc" },
+            ...(args.exportAll ? {} : { take: exportCount }),
+          })
+        : [],
+    ]);
+    const merged = [
+      ...databaseOrders.map(mapUnifiedDatabaseOrder),
+      ...exportOrders.map(mapUnifiedExportOrder),
+    ].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+    const sliceStart = args.exportAll ? 0 : offset - orderSkip;
+    const rows = args.exportAll ? merged : merged.slice(sliceStart, sliceStart + pageSize);
+
+    const topOrderRows = orderWhere
+      ? await prisma.orderItem.groupBy({
+          by: ["productName"],
+          where: { order: orderWhere },
+          _sum: { quantity: true, subtotal: true },
+          orderBy: { _sum: { quantity: "desc" } },
+          take: 20,
+        })
+      : [];
+    const topProductMap = new Map(
+      topOrderRows.map((row) => [
+        row.productName,
+        {
+          name: row.productName,
+          qty: Number(row._sum.quantity || 0),
+          revenue: Number(row._sum.subtotal || 0),
+        },
+      ]),
+    );
+    if (exportWhere) {
+      const exportItems = await prisma.exportOrder.findMany({
+        where: exportWhere,
+        select: { items: true },
+      });
+      for (const row of exportItems) {
+        for (const item of parseExportItems(row.items)) {
+          const name = item.productName || item.name || "N/A";
+          const qty = Number(item.quantity || item.qty || 1);
+          const revenue = Number(
+            item.total || item.subtotal || (item.unitPrice || item.price || 0) * qty,
+          );
+          const product = topProductMap.get(name) || { name, qty: 0, revenue: 0 };
+          product.qty += qty;
+          product.revenue += revenue;
+          topProductMap.set(name, product);
+        }
+      }
+    }
+    const sourceCounts = { all: 0, pos: 0, tmdt: 0, export: allExportCount, shopee: 0, tiktok: 0 };
+    for (const group of sourceGroups) {
+      const count = Number(group._count || 0);
+      if (group.source === "pos") sourceCounts.pos += count;
+      else if (ORDER_MARKETPLACE_SOURCES.includes(group.source)) sourceCounts.tmdt += count;
+      if (group.source === "shopee") sourceCounts.shopee += count;
+      if (group.source === "tiktok") sourceCounts.tiktok += count;
+    }
+    sourceCounts.all = sourceCounts.pos + sourceCounts.tmdt + sourceCounts.export;
+
+    return {
+      success: true,
+      data: {
+        rows,
+        total,
+        current,
+        previous,
+        sourceCounts,
+        topProducts: [...topProductMap.values()]
+          .sort((a, b) => b.qty - a.qty)
+          .slice(0, 10),
+      },
+    };
+  } catch (error) {
+    console.error("orders:getUnified error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("orders:getDailyStats", async (event, args = {}) => {
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Database chưa được khởi tạo.");
+
+    const from = new Date(args.from);
+    const to = new Date(args.to);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) {
+      throw new Error("Khoảng ngày biểu đồ không hợp lệ.");
+    }
+
+    const queryArgs = {
+      from: from.toISOString(),
+      to: to.toISOString(),
+      sourceFilter: args.sourceFilter || "all",
+      platformFilter: args.platformFilter || "all",
+    };
+    const orderWhere = buildUnifiedOrderWhere(queryArgs);
+    const exportWhere = buildUnifiedExportWhere(queryArgs);
+    const [orderRows, exportRows] = await Promise.all([
+      orderWhere
+        ? prisma.order.findMany({
+            where: orderWhere,
+            select: { createdAt: true, total: true },
+            orderBy: { createdAt: "asc" },
+          })
+        : [],
+      exportWhere
+        ? prisma.exportOrder.findMany({
+            where: exportWhere,
+            select: { exportDate: true, totalAmount: true },
+            orderBy: { exportDate: "asc" },
+          })
+        : [],
+    ]);
+
+    const daily = new Map();
+    const add = (date, total) => {
+      const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+      const point = daily.get(key) || { date: key, revenue: 0, orders: 0 };
+      point.revenue += Number(total || 0);
+      point.orders += 1;
+      daily.set(key, point);
+    };
+    for (const row of orderRows) add(row.createdAt, row.total);
+    for (const row of exportRows) add(row.exportDate, row.totalAmount);
+
+    return { success: true, data: [...daily.values()] };
+  } catch (error) {
+    console.error("orders:getDailyStats error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("orders:getProductDetails", async (event, args = {}) => {
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Database chưa được khởi tạo.");
+    const productName = String(args.productName || "");
+    const orderWhere = buildUnifiedOrderWhere(args);
+    const exportWhere = buildUnifiedExportWhere(args);
+    const [orderItems, exportOrders] = await Promise.all([
+      orderWhere
+        ? prisma.orderItem.findMany({
+            where: { productName, order: orderWhere },
+            include: { order: { select: unifiedOrderSelect } },
+            take: 1000,
+          })
+        : [],
+      exportWhere
+        ? prisma.exportOrder.findMany({ where: exportWhere, take: 1000 })
+        : [],
+    ]);
+    const details = orderItems.map((item) => ({
+      order: mapUnifiedDatabaseOrder(item.order),
+      totalQty: item.quantity,
+      totalRev: item.subtotal,
+      unitPrice: item.price,
+    }));
+    for (const exportOrder of exportOrders) {
+      const matched = parseExportItems(exportOrder.items).filter(
+        (item) => (item.productName || item.name || "N/A") === productName,
+      );
+      if (!matched.length) continue;
+      details.push({
+        order: mapUnifiedExportOrder(exportOrder),
+        totalQty: matched.reduce(
+          (sum, item) => sum + Number(item.quantity || item.qty || 1),
+          0,
+        ),
+        totalRev: matched.reduce((sum, item) => {
+          const qty = Number(item.quantity || item.qty || 1);
+          return (
+            sum +
+            Number(item.total || item.subtotal || (item.unitPrice || item.price || 0) * qty)
+          );
+        }, 0),
+        unitPrice: Number(matched[0].unitPrice || matched[0].price || 0),
+      });
+    }
+    details.sort((a, b) => Date.parse(b.order.date) - Date.parse(a.order.date));
+    return { success: true, data: details };
+  } catch (error) {
+    console.error("orders:getProductDetails error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle(
   "marketplaceOrders:getAll",
   async (event, { since, search, limit } = {}) => {
@@ -16197,7 +16940,11 @@ ipcMain.handle(
       if (search)
         where.OR = [
           { orderNumber: { contains: search, mode: "insensitive" } },
-          { customerName: { contains: search, mode: "insensitive" } },
+          {
+            customer: {
+              name: { contains: trimmedSearch, mode: "insensitive" },
+            },
+          },
           { trackingNumber: { contains: search, mode: "insensitive" } },
           ...(numericId ? [{ id: numericId }] : []),
         ];
@@ -17133,6 +17880,56 @@ ipcMain.handle(
   },
 );
 
+// Batch endpoint: one round-trip and one SQL query for multiple product cards.
+ipcMain.handle(
+  "inventoryLogs:getBySkus",
+  async (event, { skus, limit = 100 } = {}) => {
+    try {
+      requireInventoryLedgerReadAccess();
+      if (!prisma) throw new Error("Prisma not available");
+      const normalizedSkus = [
+        ...new Set(
+          (Array.isArray(skus) ? skus : [])
+            .map((sku) => String(sku || "").trim())
+            .filter(Boolean),
+        ),
+      ].slice(0, 100);
+      if (normalizedSkus.length === 0) return { success: true, data: [] };
+      const safeLimit = Math.min(500, Math.max(1, Number(limit) || 100));
+      const logs = await prisma.$queryRaw`
+        SELECT ranked."id", ranked."productId", ranked."sku",
+               ranked."productName", ranked."variantColor", ranked."type",
+               ranked."referenceType", ranked."reference", ranked."quantity",
+               ranked."oldStock", ranked."newStock", ranked."note",
+               ranked."createdAt", ranked."createdBy",
+               account."username" AS "userName"
+        FROM (
+          SELECT ledger.*,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY ledger."sku"
+                   ORDER BY ledger."createdAt" DESC
+                 ) AS row_num
+          FROM "InventoryLog" AS ledger
+          WHERE ledger."sku" IN (${Prisma.join(normalizedSkus)})
+        ) AS ranked
+        LEFT JOIN "User" AS account ON account."id" = ranked."createdBy"
+        WHERE ranked.row_num <= ${safeLimit}
+        ORDER BY ranked."createdAt" DESC
+      `;
+      return {
+        success: true,
+        data: logs.map((log) => ({
+          ...log,
+          createdAt: log.createdAt.toISOString(),
+        })),
+      };
+    } catch (error) {
+      console.error("❌ Get inventory logs by SKUs error:", error);
+      return { success: false, error: error.message };
+    }
+  },
+);
+
 // Lấy chi tiết chứng từ gốc từ inventory log (click Mã CT)
 ipcMain.handle(
   "inventoryLogs:getRefDetail",
@@ -17166,19 +17963,23 @@ ipcMain.handle(
               ? JSON.parse(doc.items)
               : doc.items || [];
         } catch {}
-        // Với mỗi item là combo, load combo definition để biết components
-        const itemsWithCombo = await Promise.all(
-          items.map(async (item) => {
-            const sku = item.variantSku || item.sku || "";
-            console.log(`[getRefDetail] item sku: "${sku}"`);
-            if (!sku) return item;
-            const combo = await prisma.comboProduct.findUnique({
-              where: { sku },
-            });
-            console.log(
-              `[getRefDetail] combo found for "${sku}":`,
-              combo ? `YES - items: ${combo.items}` : "NO",
-            );
+        const itemSkus = [
+          ...new Set(
+            items
+              .map((item) => String(item.variantSku || item.sku || "").trim())
+              .filter(Boolean),
+          ),
+        ];
+        const combos = itemSkus.length
+          ? await prisma.comboProduct.findMany({
+              where: { sku: { in: itemSkus } },
+              select: { sku: true, items: true },
+            })
+          : [];
+        const comboBySku = new Map(combos.map((combo) => [combo.sku, combo]));
+        const itemsWithCombo = items.map((item) => {
+            const sku = String(item.variantSku || item.sku || "").trim();
+            const combo = comboBySku.get(sku);
             if (!combo) return item;
             let comboComponents = [];
             try {
@@ -17187,13 +17988,8 @@ ipcMain.handle(
                   ? JSON.parse(combo.items)
                   : combo.items || [];
             } catch {}
-            console.log(
-              `[getRefDetail] comboComponents for "${sku}":`,
-              JSON.stringify(comboComponents),
-            );
             return { ...item, comboComponents };
-          }),
-        );
+          });
         return {
           success: true,
           type: "TMDT",
@@ -18537,39 +19333,47 @@ ipcMain.handle("stockCheck:balanceItems", async (event, payload = {}) => {
   }
 });
 
-ipcMain.handle("stockCheck:getSessions", async () => {
+ipcMain.handle("stockCheck:getSessions", async (_event, options = {}) => {
   try {
     requireRole("admin", "manager");
-    const sessions = await getPrismaDirectTx().$transaction(
-      async (tx) => {
-        await lockStockCheckSessions(tx);
-        const record = await tx.appConfig.findUnique({
-          where: { key: "stockCheckSessionsV2" },
-        });
-        const storedSessions = parseStockCheckSessionsFromConfig(record);
-        const carried = createDailyCarryOverSession(storedSessions);
-        const repaired = repairTodayCarryOverCounts(carried.sessions);
-        const exempted = applySameDayFullCheckExemptions(repaired.sessions);
-        const normalizedScope = normalizeUntouchedDailyStockCheckScope(
-          exempted.sessions,
-        );
-        const toppedUp = await topUpTodayDailyStockCheckProducts(
-          normalizedScope.sessions,
-          tx,
-        );
-        if (
-          carried.changed ||
-          repaired.changed ||
-          exempted.changed ||
-          normalizedScope.changed ||
-          toppedUp.changed
-        ) {
-          await writeStockCheckSessions(toppedUp.sessions, tx);
-        }
-        return toppedUp.sessions;
-      },
-      { timeout: 30000, maxWait: 10000 },
-    );
+    let sessions;
+    if (options.maintenance === false) {
+      const record = await prisma.appConfig.findUnique({
+        where: { key: "stockCheckSessionsV2" },
+      });
+      sessions = parseStockCheckSessionsFromConfig(record);
+    } else {
+      sessions = await getPrismaDirectTx().$transaction(
+        async (tx) => {
+          await lockStockCheckSessions(tx);
+          const record = await tx.appConfig.findUnique({
+            where: { key: "stockCheckSessionsV2" },
+          });
+          const storedSessions = parseStockCheckSessionsFromConfig(record);
+          const carried = createDailyCarryOverSession(storedSessions);
+          const repaired = repairTodayCarryOverCounts(carried.sessions);
+          const exempted = applySameDayFullCheckExemptions(repaired.sessions);
+          const normalizedScope = normalizeUntouchedDailyStockCheckScope(
+            exempted.sessions,
+          );
+          const toppedUp = await topUpTodayDailyStockCheckProducts(
+            normalizedScope.sessions,
+            tx,
+          );
+          if (
+            carried.changed ||
+            repaired.changed ||
+            exempted.changed ||
+            normalizedScope.changed ||
+            toppedUp.changed
+          ) {
+            await writeStockCheckSessions(toppedUp.sessions, tx);
+          }
+          return toppedUp.sessions;
+        },
+        { timeout: 30000, maxWait: 10000 },
+      );
+    }
     const isAdmin = isPrivilegedStockCheckSession();
     const visibleSessions =
       isAdmin || isTestOperatorSession()
@@ -19784,7 +20588,7 @@ ipcMain.handle("users:create", async (event, data) => {
     });
     return {
       success: true,
-      data: { ...user, isActive: user.status === "active" },
+      data: sanitizeUserForClient(user),
     };
   } catch (error) {
     console.error("❌ Create user error:", error);
@@ -19922,7 +20726,7 @@ ipcMain.handle("users:update", async (event, id, data) => {
     });
     return {
       success: true,
-      data: { ...user, isActive: user.status === "active" },
+      data: sanitizeUserForClient(user),
     };
   } catch (error) {
     console.error("❌ Update user error:", error);
@@ -20054,10 +20858,11 @@ ipcMain.handle(
         rememberMe && user.role === "admin"
           ? await issueRememberToken(user.id)
           : null;
+      if (rememberToken) storeSecureRememberToken(rememberToken);
+      else clearSecureRememberToken();
       return {
         success: true,
         data: sanitizeUserForClient(user),
-        rememberToken,
       };
     } catch (error) {
       console.error("❌ Login error:", error);
@@ -20067,7 +20872,9 @@ ipcMain.handle(
 );
 
 ipcMain.handle("users:logout", async (event, rememberToken) => {
-  await revokeRememberToken(rememberToken).catch(() => {});
+  const tokenToRevoke = readSecureRememberToken() || rememberToken;
+  await revokeRememberToken(tokenToRevoke).catch(() => {});
+  clearSecureRememberToken();
   if (currentSession?.id) {
     await prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NULL WHERE id = ${currentSession.id}`.catch(
       () => {},
@@ -20103,14 +20910,15 @@ ipcMain.handle("users:getCurrentSession", async () => {
 // Restore session khi auto-login từ remember token đã cấp sau login password thành công
 ipcMain.handle("users:restoreSession", async (event, rememberToken) => {
   try {
+    const tokenToRestore = readSecureRememberToken() || rememberToken;
     if (
       !prisma ||
-      typeof rememberToken !== "string" ||
-      rememberToken.length < 32
+      typeof tokenToRestore !== "string" ||
+      tokenToRestore.length < 32
     )
       return { success: false };
     const now = Date.now();
-    const tokenHash = hashRememberToken(rememberToken);
+    const tokenHash = hashRememberToken(tokenToRestore);
     const tokens = await readRememberTokens();
     const validTokens = tokens.filter(
       (t) => t && t.expiresAt && new Date(t.expiresAt).getTime() > now,
@@ -20131,6 +20939,7 @@ ipcMain.handle("users:restoreSession", async (event, rememberToken) => {
       role: user.role,
       mustChangePassword: isPasswordRotationRequired(user),
     };
+    storeSecureRememberToken(tokenToRestore);
     prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(
       () => {},
     );
@@ -20177,6 +20986,7 @@ ipcMain.handle("users:ensureAdmin", async () => {
 
 ipcMain.handle("dailyExpenses:getAll", async (event, filters) => {
   try {
+    requireRole("admin");
     if (!prisma) throw new Error("Prisma not available");
     const where = {};
     if (filters?.startDate && filters?.endDate) {
@@ -20202,6 +21012,7 @@ ipcMain.handle("dailyExpenses:getAll", async (event, filters) => {
 
 ipcMain.handle("dailyExpenses:upsert", async (event, data) => {
   try {
+    requireRole("admin");
     if (!prisma) throw new Error("Prisma not available");
     const dateObj = new Date(data.date);
     // Normalize to start of day UTC
@@ -20216,7 +21027,7 @@ ipcMain.handle("dailyExpenses:upsert", async (event, data) => {
       returnCost: data.returnCost || 0,
       otherExpense: data.otherExpense || 0,
       otherNote: data.otherNote || null,
-      createdBy: data.createdBy || null,
+      createdBy: currentSession.id,
     };
 
     const record = await prisma.dailyExpense.upsert({
@@ -20237,6 +21048,7 @@ ipcMain.handle("dailyExpenses:upsert", async (event, data) => {
 
 ipcMain.handle("dailyExpenses:delete", async (event, id) => {
   try {
+    requireRole("admin");
     if (!prisma) throw new Error("Prisma not available");
     await prisma.dailyExpense.delete({ where: { id } });
     console.log(`✅ Deleted daily expense #${id}`);
@@ -20830,6 +21642,7 @@ async function downloadMisaInvoicePDF(transactionId) {
 
 ipcMain.handle("misa:getConfig", async () => {
   try {
+    requireRole("admin");
     if (!prisma) throw new Error("Database not initialized");
     const record = await prisma.appConfig.findUnique({
       where: { key: "misaConfig" },
@@ -20844,6 +21657,7 @@ ipcMain.handle("misa:getConfig", async () => {
 
 ipcMain.handle("misa:saveConfig", async (event, config) => {
   try {
+    requireRole("admin");
     if (!prisma) throw new Error("Database not initialized");
     // Nếu password rỗng hoặc là masked → giữ nguyên password cũ (đã mã hóa)
     if (!config.password || config.password === "••••••••") {
@@ -20882,6 +21696,7 @@ ipcMain.handle("misa:saveConfig", async (event, config) => {
 
 ipcMain.handle("misa:testConnection", async () => {
   try {
+    requireRole("admin");
     const token = await getMisaToken();
     return { success: true, data: { tokenLength: token.length } };
   } catch (error) {
@@ -23244,13 +24059,18 @@ ipcMain.handle("offlineQueue:sync", async () => {
   for (const item of items) {
     try {
       if (item.type === "ecommerceExports:update") {
+        if (
+          item.payload.queuedByUserId != null &&
+          Number(item.payload.queuedByUserId) !== Number(currentSession.id)
+        ) {
+          throw new Error("Queue item thuộc phiên người dùng khác");
+        }
         await execEcommerceExportUpdate(item.payload.id, item.payload.data);
         offlineQueue.remove(item._filename);
         synced++;
         console.log("[OfflineQueue] Synced:", item._filename);
       } else {
-        // Unknown type  b� qua, x�a � kh�ng b� loop
-        offlineQueue.remove(item._filename);
+        throw new Error(`Loại queue không được hỗ trợ: ${item.type}`);
       }
     } catch (err) {
       failed++;
@@ -23261,7 +24081,7 @@ ipcMain.handle("offlineQueue:sync", async () => {
         ":",
         err.message,
       );
-      // Kh�ng x�a file  gi� l�i � retry l�n sau
+      offlineQueue.markFailure(item._filename, err.message);
     }
   }
 

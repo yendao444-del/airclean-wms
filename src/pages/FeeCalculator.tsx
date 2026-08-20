@@ -50,37 +50,39 @@ type Category = { id: string; name: string; feeRate: number; description: string
 
 // Keep the same identifiers used by BusinessReport so both modules share one fee configuration.
 const DEFAULT_SHOPEE_FEES: Fee[] = [
-    { id: 'troGia', name: 'Trợ giá (Đồng Tài Trợ)', type: 'percent', value: 4.5, icon: '🎁', color: '#ef5b5b', enabled: true },
-    { id: 'phiCoDinh', name: 'Phí cố định', type: 'percent', value: 12.5, icon: '💳', color: '#2488e8', enabled: true, required: true },
-    { id: 'piShip', name: 'Phí dịch vụ PiShip', type: 'fixed', value: 1620, icon: '🚚', color: '#16a34a', enabled: true },
-    { id: 'phiDichVu', name: 'Phí dịch vụ', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', enabled: true },
-    { id: 'phiThanhToan', name: 'Phí thanh toán', type: 'percent', value: 4.69, icon: '💰', color: '#f59e0b', enabled: true },
-    { id: 'thueGTGT', name: 'Thuế GTGT', type: 'percent', value: 0.96, icon: '🏛️', color: '#db2777', enabled: true },
-    { id: 'thueTNCN', name: 'Thuế TNCN', type: 'percent', value: 0.48, icon: '📊', color: '#0891b2', enabled: true },
-    { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#16a34a', enabled: false },
+    { id: 'phiCoDinh', name: 'Phí cố định (Hoa hồng sàn theo Ngành hàng)', type: 'percent', value: 12, icon: '💳', color: '#2563eb', required: true, enabled: true },
+    { id: 'phiThanhToan', name: 'Phí xử lý giao dịch (Phí thanh toán 6%)', type: 'percent', value: 6, icon: '💰', color: '#ea580c', required: true, enabled: true },
+    { id: 'phiHaTang', name: 'Phí hạ tầng sàn Shopee (3.000đ/đơn)', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', required: true, enabled: true },
+    { id: 'thueGTGT', name: 'Thuế GTGT (Khấu trừ cá nhân 0.96%)', type: 'percent', value: 0.96, icon: '🏛️', color: '#db2777', enabled: true },
+    { id: 'thueTNCN', name: 'Thuế TNCN (Khấu trừ cá nhân 0.54%)', type: 'percent', value: 0.54, icon: '📊', color: '#0891b2', enabled: true },
+    { id: 'piShip', name: 'Phí dịch vụ vận chuyển PiShip (2.700đ/đơn)', type: 'fixed', value: 2700, icon: '📦', color: '#059669', enabled: true },
+    { id: 'freeshipXtra', name: 'Gói Freeship Xtra / Freeship Xtra Plus (8%)', type: 'percent', value: 8, icon: '🚚', color: '#16a34a', enabled: false },
+    { id: 'voucherXtra', name: 'Gói Voucher Xtra (Mã giảm giá/Live/Video 5.5%)', type: 'percent', value: 5.5, icon: '🎁', color: '#f59e0b', enabled: false },
+    { id: 'shopeeLive', name: 'Gói Shopee Live / Livestream Extra (4%)', type: 'percent', value: 4, icon: '📹', color: '#ec4899', enabled: false },
 ];
 const DEFAULT_TIKTOK_FEES: Fee[] = [
-    { id: 'phiGiaoDich', name: 'Phí giao dịch', type: 'percent', value: 5, icon: '💰', color: '#f59e0b', enabled: true },
-    { id: 'phiHoaHong', name: 'Phí hoa hồng TikTok Shop', type: 'percent', value: 10.31, icon: '💳', color: '#2488e8', enabled: true, required: true },
-    { id: 'phiXuLyDon', name: 'Phí xử lý đơn hàng', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', enabled: true },
+    { id: 'phiGiaoDich', name: 'Phí giao dịch TikTok Shop (6%)', type: 'percent', value: 6, icon: '💰', color: '#ea580c', enabled: true, required: true },
+    { id: 'phiHoaHong', name: 'Phí hoa hồng TikTok Shop', type: 'percent', value: 14, icon: '💳', color: '#2563eb', enabled: true, required: true },
+    { id: 'phiXuLyDon', name: 'Phí xử lý đơn hàng', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', enabled: true, required: true },
     { id: 'thueGTGT', name: 'Thuế GTGT (TikTok khấu trừ)', type: 'percent', value: 1, icon: '🏛️', color: '#db2777', enabled: true },
     { id: 'thueTNCN', name: 'Thuế TNCN (TikTok khấu trừ)', type: 'percent', value: 0.5, icon: '📊', color: '#0891b2', enabled: true },
-    { id: 'affiliate', name: 'Hoa hồng liên kết', type: 'percent', value: 15, icon: '🤝', color: '#16a34a', enabled: false },
+    { id: 'affiliate', name: 'Hoa hồng liên kết', type: 'percent', value: 15, icon: '🤝', color: '#16a34a', enabled: true },
 ];
 const CATEGORIES: Record<Platform, Category[]> = {
     shopee: [
-        { id: 'sp-health', name: 'Sức khỏe & Sắc đẹp', feeRate: 12, description: 'Khẩu trang, TPCN, y tế, skincare, trang điểm' },
+        { id: 'sp-beauty', name: 'Mỹ phẩm & Sắc đẹp', feeRate: 17, description: 'Skincare, makeup, son môi, nước hoa, chăm sóc cơ thể' },
+        { id: 'sp-health', name: 'Sức khỏe & Y tế (Khẩu trang, TPCN)', feeRate: 15.5, description: 'Khẩu trang, thực phẩm chức năng, thiết bị y tế, dược mỹ phẩm' },
+        { id: 'sp-pets', name: 'Thú cưng & Phụ kiện', feeRate: 14, description: 'Thức ăn chó mèo, phụ kiện, đồ chơi, chuồng nệm thú cưng' },
         { id: 'sp-fashion', name: 'Thời trang & Phụ kiện', feeRate: 12.5, description: 'Quần áo, giày dép, túi xách' },
         { id: 'sp-home', name: 'Nhà cửa & Đời sống', feeRate: 12, description: 'Đồ bếp, nội thất, chăn ga gối nệm' },
-        { id: 'sp-baby', name: 'Mẹ & Bé', feeRate: 12, description: 'Tã bỉm, sữa, đồ chơi, quần áo trẻ em' },
-        { id: 'sp-electronic', name: 'Thiết bị điện tử & Phụ kiện', feeRate: 8.5, description: 'Điện thoại, tai nghe, cáp sạc, phụ kiện máy tính' },
-        { id: 'sp-appliance', name: 'Thiết bị điện gia dụng', feeRate: 9, description: 'Nồi chiên, quạt, máy hút bụi, tủ lạnh' },
-        { id: 'sp-groceries', name: 'Bách hóa online & Thực phẩm', feeRate: 10, description: 'Đồ ăn vặt, bánh kẹo, gia vị, đồ uống' },
         { id: 'sp-sports', name: 'Thể thao & Du lịch', feeRate: 11, description: 'Dụng cụ thể thao, vali, lều trại, đồ tập' },
+        { id: 'sp-baby', name: 'Mẹ & Bé', feeRate: 10.5, description: 'Tã bỉm, sữa, đồ chơi, quần áo trẻ em, bình sữa' },
+        { id: 'sp-groceries', name: 'Bách hóa online & Thực phẩm', feeRate: 10, description: 'Đồ ăn vặt, bánh kẹo, gia vị, đồ uống khô' },
         { id: 'sp-books', name: 'Sách & Văn phòng phẩm', feeRate: 10, description: 'Sách, truyện, bút, sổ tay, dụng cụ học tập' },
         { id: 'sp-auto', name: 'Ô tô, Xe máy & Xe đạp', feeRate: 9.5, description: 'Phụ tùng, nón bảo hiểm, đồ chơi xe, dầu nhớt' },
-        { id: 'sp-pets', name: 'Thú cưng', feeRate: 11, description: 'Thức ăn, phụ kiện và đồ chơi thú cưng' },
-        { id: 'sp-other', name: 'Ngành hàng khác', feeRate: 12, description: 'Tự thiết lập mức phí phù hợp' },
+        { id: 'sp-appliance', name: 'Thiết bị điện gia dụng', feeRate: 9, description: 'Nồi chiên, quạt, máy hút bụi, tủ lạnh, máy giặt' },
+        { id: 'sp-electronics', name: 'Thiết bị điện tử & Phụ kiện', feeRate: 8.5, description: 'Điện thoại, tai nghe, cáp sạc, phụ kiện máy tính' },
+        { id: 'sp-other', name: 'Ngành hàng khác / Tùy chỉnh', feeRate: 12, description: 'Các sản phẩm khác không thuộc danh mục trên' },
     ],
     tiktok: [
         { id: 'tt-health', name: 'Thực phẩm chức năng & Sức khỏe', feeRate: 12, description: 'Vitamin, TPCN, khẩu trang, thiết bị y tế' },
@@ -88,12 +90,12 @@ const CATEGORIES: Record<Platform, Category[]> = {
         { id: 'tt-fashion-women', name: 'Thời trang nữ', feeRate: 12, description: 'Đầm, áo, quần và trang phục nữ' },
         { id: 'tt-fashion-men', name: 'Thời trang nam', feeRate: 12, description: 'Áo thun, sơ mi, quần jeans, vest nam' },
         { id: 'tt-personal-care', name: 'Chăm sóc cá nhân & Giặt giũ', feeRate: 10, description: 'Dầu gội, sữa tắm, nước giặt' },
-        { id: 'tt-electronic', name: 'Điện thoại & Máy tính bảng', feeRate: 6, description: 'Smartphone, tablet, smartwatch' },
-        { id: 'tt-accessories', name: 'Phụ kiện công nghệ', feeRate: 10, description: 'Tai nghe, sạc dự phòng, ốp lưng, cáp sạc' },
+        { id: 'tt-electronics', name: 'Điện thoại & Máy tính bảng', feeRate: 6, description: 'Smartphone, tablet, smartwatch' },
+        { id: 'tt-tech-accessories', name: 'Phụ kiện công nghệ', feeRate: 10, description: 'Tai nghe, sạc dự phòng, ốp lưng, cáp sạc' },
         { id: 'tt-home', name: 'Nhà cửa & Đời sống', feeRate: 10, description: 'Đồ gia dụng, trang trí' },
         { id: 'tt-baby', name: 'Mẹ & Bé', feeRate: 10, description: 'Sữa, tã, đồ dùng em bé, thời trang trẻ em' },
         { id: 'tt-food', name: 'Thực phẩm & Đồ uống', feeRate: 10, description: 'Đồ ăn vặt, trà, cà phê, bánh kẹo' },
-        { id: 'tt-other', name: 'Ngành hàng khác', feeRate: 14, description: 'Mức mặc định TikTok Shop' },
+        { id: 'tt-other', name: 'Ngành hàng khác / Tùy chỉnh', feeRate: 14, description: 'Mức mặc định TikTok Shop cho nhà bán hàng tiêu chuẩn' },
     ],
 };
 const DEFAULT_OPERATING_FEES: OperatingFee[] = [
@@ -108,11 +110,36 @@ const DEFAULT_OPERATING_FEES: OperatingFee[] = [
 ];
 
 const numberFormat = (value: number) => new Intl.NumberFormat('vi-VN').format(Math.round(value || 0));
-const normalizeFees = (fees: Fee[], defaults: Fee[]) => fees.map((fee) => ({
-    ...fee,
-    enabled: fee.enabled ?? true,
-    required: fee.required ?? defaults.find((item) => item.id === fee.id)?.required ?? false,
-}));
+const FEE_POLICY_VERSION = 20260815;
+const normalizeFees = (fees: Fee[], defaults: Fee[]) => {
+    const savedById = new Map(fees.map((fee) => [fee.id, fee]));
+    return defaults.map((defaultFee) => ({
+        ...defaultFee,
+        ...(savedById.get(defaultFee.id) || {}),
+        name: defaultFee.name,
+        type: defaultFee.type,
+        icon: defaultFee.icon,
+        color: defaultFee.color,
+        required: defaultFee.required ?? false,
+        enabled: defaultFee.required ? true : (savedById.get(defaultFee.id)?.enabled ?? defaultFee.enabled ?? true),
+    }));
+};
+const migrateCategoryId = (platform: Platform, id: string | undefined) => {
+    const aliases: Record<string, string> = {
+        'sp-electronic': 'sp-electronics',
+        'tt-electronic': 'tt-electronics',
+        'tt-accessories': 'tt-tech-accessories',
+    };
+    const migrated = aliases[String(id || '')] || id;
+    return CATEGORIES[platform].some((category) => category.id === migrated)
+        ? String(migrated)
+        : platform === 'shopee' ? 'sp-home' : 'tt-other';
+};
+const applyCategoryRate = (fees: Fee[], platform: Platform, categoryId: string) => {
+    const category = CATEGORIES[platform].find((item) => item.id === categoryId);
+    const commissionId = platform === 'shopee' ? 'phiCoDinh' : 'phiHoaHong';
+    return category ? fees.map((fee) => fee.id === commissionId ? { ...fee, value: category.feeRate } : fee) : fees;
+};
 
 export default function FeeCalculator() {
     const [loaded, setLoaded] = useState(false);
@@ -123,7 +150,7 @@ export default function FeeCalculator() {
     const [purchaseCost, setPurchaseCost] = useState(0);
     const [vatRate, setVatRate] = useState(8);
     const [vatEnabled, setVatEnabled] = useState(false);
-    const [categoryId, setCategoryId] = useState<Record<Platform, string>>({ shopee: 'sp-health', tiktok: 'tt-health' });
+    const [categoryId, setCategoryId] = useState<Record<Platform, string>>({ shopee: 'sp-home', tiktok: 'tt-other' });
     const [operatingEnabled, setOperatingEnabled] = useState(false);
     const [operatingFees, setOperatingFees] = useState<OperatingFee[]>(DEFAULT_OPERATING_FEES);
     const [monthlyFixedCost, setMonthlyFixedCost] = useState(5000000);
@@ -140,10 +167,38 @@ export default function FeeCalculator() {
                     window.electronAPI.appConfig.get('tiktok_fees_v3'),
                     window.electronAPI.appConfig.get('calculator_inputs_v2'),
                 ]);
-                if (shopeeRes.success && Array.isArray(shopeeRes.data)) setShopeeFees(normalizeFees(shopeeRes.data, DEFAULT_SHOPEE_FEES));
-                if (tiktokRes.success && Array.isArray(tiktokRes.data)) setTiktokFees(normalizeFees(tiktokRes.data, DEFAULT_TIKTOK_FEES));
+                const saved = inputRes.success && inputRes.data ? inputRes.data : {};
+                const migratedCategories = {
+                    shopee: migrateCategoryId('shopee', saved.categories?.shopee),
+                    tiktok: migrateCategoryId('tiktok', saved.categories?.tiktok),
+                };
+                const hasCurrentPolicy = saved.feePolicyVersion === FEE_POLICY_VERSION;
+                const nextShopeeFees = applyCategoryRate(
+                    hasCurrentPolicy && shopeeRes.success && Array.isArray(shopeeRes.data)
+                        ? normalizeFees(shopeeRes.data, DEFAULT_SHOPEE_FEES)
+                        : DEFAULT_SHOPEE_FEES,
+                    'shopee',
+                    migratedCategories.shopee,
+                );
+                const nextTiktokFees = applyCategoryRate(
+                    hasCurrentPolicy && tiktokRes.success && Array.isArray(tiktokRes.data)
+                        ? normalizeFees(tiktokRes.data, DEFAULT_TIKTOK_FEES)
+                        : DEFAULT_TIKTOK_FEES,
+                    'tiktok',
+                    migratedCategories.tiktok,
+                );
+                setShopeeFees(nextShopeeFees);
+                setTiktokFees(nextTiktokFees);
+                setCategoryId(migratedCategories);
+
+                if (!hasCurrentPolicy) {
+                    await Promise.all([
+                        window.electronAPI.appConfig.set('shopee_fees_v3', nextShopeeFees),
+                        window.electronAPI.appConfig.set('tiktok_fees_v3', nextTiktokFees),
+                    ]);
+                }
+
                 if (inputRes.success && inputRes.data) {
-                    const saved = inputRes.data;
                     // 149.999đ was the previous demo default, not a real business value.
                     const savedRevenue = saved.doanhThu ?? saved.revenue;
                     setRevenue(saved.revenueDefaultVersion === 2 ? (savedRevenue ?? 0) : (savedRevenue === 149999 ? 0 : (savedRevenue ?? 0)));
@@ -151,7 +206,6 @@ export default function FeeCalculator() {
                     setVatRate(saved.vatRate ?? 8);
                     setVatEnabled(saved.vatEnabled ?? false);
                     setPlatform(saved.platform === 'tiktok' ? 'tiktok' : 'shopee');
-                    setCategoryId({ shopee: saved.categories?.shopee ?? 'sp-health', tiktok: saved.categories?.tiktok ?? 'tt-health' });
                     setOperatingEnabled(saved.operatingEnabled ?? false);
                     if (Array.isArray(saved.operatingFees)) setOperatingFees(saved.operatingFees);
                     setMonthlyFixedCost(saved.monthlyFixedCost ?? 5000000);
@@ -185,6 +239,7 @@ export default function FeeCalculator() {
             giaNhap: purchaseCost,
             vatRate,
             vatEnabled,
+            feePolicyVersion: FEE_POLICY_VERSION,
             platform,
             categories: categoryId,
             operatingEnabled,

@@ -38,6 +38,13 @@ function requireUpdateAdmin() {
     requireRoleGuard('admin');
 }
 
+function requireUpdateSession() {
+    if (!requireRoleGuard) {
+        throw new Error('Không thể xác thực phiên đăng nhập cho cập nhật');
+    }
+    requireRoleGuard();
+}
+
 // GitHub repository info
 const GITHUB_OWNER = 'yendao444-del';
 const GITHUB_REPO = 'airclean-wms';
@@ -437,8 +444,7 @@ function sha256File(filePath) {
 
 async function verifyChecksumIfAvailable(zipPath, zipAsset, checksumAsset) {
     if (!checksumAsset) {
-        console.warn('⚠️ Release chưa có SHA256 asset; bỏ qua checksum để giữ tương thích update hiện tại');
-        return;
+        throw new Error(`Release ${zipAsset.name} thiếu SHA256; từ chối cài đặt không được xác minh`);
     }
     const checksumText = await downloadText(checksumAsset.browser_download_url);
     const expected = (checksumText.match(/[a-fA-F0-9]{64}/) || [])[0]?.toLowerCase();
@@ -463,6 +469,11 @@ async function installTrustedUpdate({ downloadUrl, trustedAsset, checksumAsset, 
         console.log('   URL:', downloadUrl);
         if (!trustedAsset) {
             throw new Error('Thiếu asset cập nhật hợp lệ');
+        }
+        const maxArchiveBytes = 1024 * 1024 * 1024;
+        const archiveBytes = Number(trustedAsset.size);
+        if (!Number.isFinite(archiveBytes) || archiveBytes <= 0 || archiveBytes > maxArchiveBytes) {
+            throw new Error('Kích thước gói cập nhật không hợp lệ hoặc vượt quá 1 GB');
         }
         console.log('   Trusted asset:', trustedAsset.name);
 
@@ -505,6 +516,18 @@ async function installTrustedUpdate({ downloadUrl, trustedAsset, checksumAsset, 
         const AdmZip = require('adm-zip');
         const zip = new AdmZip(zipPath);
         fs.mkdirSync(extractDir, { recursive: true });
+        let totalUncompressedBytes = 0;
+        for (const entry of zip.getEntries()) {
+            const normalizedName = String(entry.entryName || '').replace(/\\/g, '/');
+            const pathSegments = normalizedName.split('/').filter(Boolean);
+            if (!normalizedName || normalizedName.startsWith('/') || pathSegments.includes('..')) {
+                throw new Error(`ZIP chứa đường dẫn không an toàn: ${normalizedName}`);
+            }
+            totalUncompressedBytes += Number(entry.header?.size || 0);
+            if (totalUncompressedBytes > 2 * 1024 * 1024 * 1024) {
+                throw new Error('Nội dung ZIP sau giải nén vượt quá 2 GB');
+            }
+        }
         zip.extractAllTo(extractDir, true);
         console.log('✅ Giải nén xong');
         sendToRenderer('update:step', { step: 'installing', message: 'Đang cài đặt...' });
@@ -677,6 +700,7 @@ exit
 
 ipcMain.handle('update:download', async (event, downloadUrl) => {
     try {
+        requireUpdateSession();
         const { asset: trustedAsset, checksumAsset } = await assertTrustedDownloadUrl(downloadUrl);
         return await installTrustedUpdate({
             downloadUrl,
@@ -727,6 +751,7 @@ ipcMain.handle('update:getCurrentVersion', async () => {
  * Restart app
  */
 ipcMain.handle('update:restart', async () => {
+    requireUpdateSession();
     app.relaunch();
     app.exit(0);
 });

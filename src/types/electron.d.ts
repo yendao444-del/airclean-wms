@@ -210,6 +210,23 @@ export interface ElectronAPI {
       chartTo: string;
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
   };
+  orders: {
+    getUnified: (args: any) => Promise<{
+      success: boolean;
+      data?: any;
+      error?: string;
+    }>;
+    getDailyStats: (args: any) => Promise<{
+      success: boolean;
+      data?: Array<{ date: string; revenue: number; orders: number }>;
+      error?: string;
+    }>;
+    getProductDetails: (args: any) => Promise<{
+      success: boolean;
+      data?: any[];
+      error?: string;
+    }>;
+  };
   purchases: {
     getAll: (filters?: {
       since?: string;
@@ -292,9 +309,12 @@ export interface ElectronAPI {
   handlingUnits: {
     getWorkspace: () => Promise<{
       success: boolean;
-      data?: { catalog: any[]; register: any[] };
+      data?: { catalog: any[]; register: any[]; recentTransactions?: any[] };
       error?: string;
     }>;
+    createUnits: (
+      records: any[],
+    ) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     saveRegister: (
       records: any[],
     ) => Promise<{ success: boolean; data?: any[]; error?: string }>;
@@ -511,7 +531,10 @@ export interface ElectronAPI {
       driveUrl: string,
       mimeType?: string,
     ) => Promise<{ success: boolean; data?: { url: string }; error?: string }>;
-    listEvidencePenalties: () => Promise<{
+    listEvidencePenalties: (options?: {
+      startDate?: string;
+      endDate?: string;
+    }) => Promise<{
       success: boolean;
       data?: any[];
       error?: string;
@@ -717,6 +740,16 @@ export interface ElectronAPI {
   inventory: {
     manualAdjust: (data: StockMutationPayload) => Promise<StockMutationResult>;
   };
+  offlineQueue: {
+    status: () => Promise<{ success: boolean; pendingCount: number }>;
+    sync: () => Promise<{
+      success: boolean;
+      synced: number;
+      failed: number;
+      remaining?: number;
+      errors?: Array<{ file: string; error: string }>;
+    }>;
+  };
   inventoryLogs: {
     getAll: (filters?: {
       sku?: string;
@@ -729,6 +762,10 @@ export interface ElectronAPI {
     }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     getBySku: (params: {
       sku: string;
+      limit?: number;
+    }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    getBySkus: (params: {
+      skus: string[];
       limit?: number;
     }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
   };
@@ -770,7 +807,7 @@ export interface ElectronAPI {
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
   };
   stockCheck: {
-    getSessions: () => Promise<{
+    getSessions: (options?: { maintenance?: boolean }) => Promise<{
       success: boolean;
       data?: any[];
       error?: string;
@@ -930,7 +967,7 @@ export interface ElectronAPI {
     }>;
     logout: (rememberToken?: string) => Promise<{ success: boolean }>;
     restoreSession: (
-      rememberToken: string,
+      rememberToken?: string,
     ) => Promise<{ success: boolean; data?: any }>;
     getCurrentSession: () => Promise<{ success: boolean; data?: any }>;
     ensureAdmin: () => Promise<{ success: boolean; error?: string }>;

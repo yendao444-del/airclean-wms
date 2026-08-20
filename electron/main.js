@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, shell, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -147,7 +147,7 @@ const EDIT_MENU_TEMPLATE = [
 const VIEW_MENU_TEMPLATE = [
     { role: 'reload' },
     { role: 'forceReload' },
-    { role: 'toggleDevTools' },
+    ...(!app.isPackaged ? [{ role: 'toggleDevTools' }] : []),
     { type: 'separator' },
     { role: 'zoomIn' },
     { role: 'zoomOut' },
@@ -156,8 +156,82 @@ const VIEW_MENU_TEMPLATE = [
     { role: 'togglefullscreen' },
 ];
 
+function isTrustedAppUrl(rawUrl) {
+    try {
+        const parsed = new URL(rawUrl);
+        const isTrustedFilePage = parsed.protocol === 'file:' &&
+            decodeURIComponent(parsed.pathname)
+                .replace(/\\/g, '/')
+                .toLowerCase()
+                .endsWith('/dist/index.html');
+        if (!app.isPackaged) {
+            const isTrustedDevServer = parsed.protocol === 'http:' &&
+                ['localhost', '127.0.0.1'].includes(parsed.hostname) &&
+                parsed.port === '5173';
+            return isTrustedDevServer || isTrustedFilePage;
+        }
+        return isTrustedFilePage;
+    } catch {
+        return false;
+    }
+}
+
+function isSafeExternalUrl(rawUrl) {
+    try {
+        const parsed = new URL(rawUrl);
+        if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return false;
+        const host = parsed.hostname.toLowerCase();
+        if (host === 'localhost' || host === '::1' || host.endsWith('.local')) return false;
+        if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)) return false;
+        const private172 = host.match(/^172\.(\d{1,3})\./);
+        if (private172 && Number(private172[1]) >= 16 && Number(private172[1]) <= 31) return false;
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function configureSessionSecurity() {
+    // Vite injects an inline React Refresh preamble in development. Blocking it
+    // makes @vitejs/plugin-react abort before React can mount, leaving #root empty.
+    // Keep production strict: packaged builds never receive unsafe-inline/eval.
+    const developmentScriptSources = app.isPackaged ? '' : " 'unsafe-inline' 'unsafe-eval'";
+    const csp = [
+        "default-src 'self'",
+        `script-src 'self'${developmentScriptSources}`,
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src 'self' data: https://fonts.gstatic.com",
+        "img-src 'self' data: blob: https:",
+        "media-src 'self' data: blob:",
+        "connect-src 'self' http://127.0.0.1:* http://localhost:* https://api.github.com https://github.com https://*.supabase.co ws://localhost:5173",
+        "frame-src 'self' data: blob: https://drive.google.com https://docs.google.com",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+    ].join('; ');
+    const urls = app.isPackaged
+        ? ['file://*/*']
+        : ['file://*/*', 'http://localhost:5173/*', 'http://127.0.0.1:5173/*'];
+    session.defaultSession.webRequest.onHeadersReceived({ urls }, (details, callback) => {
+        callback({
+            responseHeaders: {
+                ...details.responseHeaders,
+                'Content-Security-Policy': [csp],
+            },
+        });
+    });
+    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+        const requestingUrl = details?.requestingUrl || webContents.getURL();
+        const allowed = isTrustedAppUrl(requestingUrl) && ['media', 'notifications'].includes(permission);
+        callback(allowed);
+    });
+}
+
 // Popup native context menu khi click Edit/View từ React
 ipcMain.handle('menu:popup', (event, menuName) => {
+    if (!isTrustedAppUrl(event.senderFrame?.url || event.sender.getURL())) {
+        throw new Error('IPC sender không hợp lệ');
+    }
     const win = BrowserWindow.fromWebContents(event.sender);
     const template = menuName === 'edit' ? EDIT_MENU_TEMPLATE : VIEW_MENU_TEMPLATE;
     const contextMenu = Menu.buildFromTemplate(template);
@@ -183,10 +257,12 @@ function createWindow() {
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
-            sandbox: false,
+            sandbox: true,
+            webSecurity: true,
+            devTools: !app.isPackaged,
             preload: path.join(__dirname, 'preload.js'),
             autoplayPolicy: 'no-user-gesture-required',
-            backgroundThrottling: false,
+            backgroundThrottling: true,
         },
         title: 'DBY POS',
         icon: app.isPackaged
@@ -204,6 +280,16 @@ function createWindow() {
             symbolColor: '#374151',
             height: 40,
         });
+    });
+
+    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+        if (isSafeExternalUrl(url)) void shell.openExternal(url);
+        return { action: 'deny' };
+    });
+    mainWindow.webContents.on('will-navigate', (event, url) => {
+        if (isTrustedAppUrl(url)) return;
+        event.preventDefault();
+        if (isSafeExternalUrl(url)) void shell.openExternal(url);
     });
 
     // Native menu is hidden, so Electron does not wire reload shortcuts for us.
@@ -258,6 +344,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+    configureSessionSecurity();
     // Tạo cửa sổ TRƯỚC để luôn hiển thị app
     createWindow();
     // NOTE: Python service được quản lý bởi ipc-handlers.js (ensureFaceService)

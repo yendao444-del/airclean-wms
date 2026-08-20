@@ -46,15 +46,6 @@ if errorlevel 1 (
 echo [OK] package.json updated to v!NEW_VERSION!
 echo.
 
-echo [1.5/4] Prepare Supabase Storage configuration...
-node scripts\prepare-supabase-storage-config.cjs
-if errorlevel 1 (
-    echo [ERROR] Cannot prepare Supabase Storage configuration.
-    pause
-    exit /b 1
-)
-echo.
-
 echo [2/4] Build Vite...
 echo ----------------------------------------
 call npx vite build
@@ -125,6 +116,10 @@ for %%F in ("!PATCH_ZIP_PATH!") do (
     set /a FILE_SIZE_MB=!FILE_SIZE! / 1048576
 )
 echo [OK] Created !PATCH_ZIP! (~!FILE_SIZE_MB! MB)
+set CHECKSUM_FILE=!PATCH_ZIP_PATH!.sha256
+powershell -NoProfile -Command "$zip='!PATCH_ZIP_PATH!'; $hash=(Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower(); Set-Content -NoNewline -LiteralPath '!CHECKSUM_FILE!' -Value ($hash + '  ' + [IO.Path]::GetFileName($zip))"
+if errorlevel 1 ( echo [ERROR] Cannot create SHA256 checksum. & pause & exit /b 1 )
+if not exist "!CHECKSUM_FILE!" ( echo [ERROR] SHA256 checksum is missing. & pause & exit /b 1 )
 echo.
 
 echo [4/4] Git and GitHub release...
@@ -149,7 +144,7 @@ if !PUSH_EXIT! neq 0 (
 echo [OK] Git push completed.
 
 echo Dang upload !PATCH_ZIP! len GitHub... (file ~!FILE_SIZE_MB! MB, co the mat 2-5 phut)
-gh release create v!NEW_VERSION! "!PATCH_ZIP_PATH!" --title "DBY POS v!NEW_VERSION! (PATCH)" --notes "!NOTES!"
+gh release create v!NEW_VERSION! "!PATCH_ZIP_PATH!" "!CHECKSUM_FILE!" --title "DBY POS v!NEW_VERSION! (PATCH)" --notes "!NOTES!"
 set GH_EXIT=!errorlevel!
 if !GH_EXIT! neq 0 (
     echo [ERROR] GitHub release creation failed.
@@ -160,6 +155,7 @@ echo [OK] GitHub release created.
 
 :: Xóa zip sau khi upload thành công
 if exist "!PATCH_ZIP_PATH!" del /Q "!PATCH_ZIP_PATH!" && echo [OK] Da xoa zip sau khi upload.
+if exist "!CHECKSUM_FILE!" del /Q "!CHECKSUM_FILE!"
 echo.
 
 echo ============================================

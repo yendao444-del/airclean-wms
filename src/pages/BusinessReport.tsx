@@ -17,7 +17,9 @@ import {
     EyeOutlined,
     CloseOutlined,
     ReloadOutlined,
+    DownloadOutlined,
 } from '@ant-design/icons';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip as ReTooltip } from 'recharts';
 import dayjs, { Dayjs } from 'dayjs';
 import isBetween from 'dayjs/plugin/isBetween';
 dayjs.extend(isBetween);
@@ -50,28 +52,87 @@ const DEFAULT_CONFIG = {
 
 type PNLConfig = typeof DEFAULT_CONFIG;
 
-// Default fees riêng cho từng sàn (T3/2026)
-// Shopee: theo screenshot thực tế đơn hàng Seller Center
-// TikTok: theo phi_san_2026.md
+// Keep these fallbacks aligned with Tools > Platform fees.
 const DEFAULT_SHOPEE_FEES = [
-    { id: 'troGia', name: 'Trợ giá (Đồng Tài Trợ)', type: 'percent', value: 4.50, icon: '🎁', color: '#ff4d4f' },
-    { id: 'phiCoDinh', name: 'Phí cố định', type: 'percent', value: 12.50, icon: '💳', color: '#1890ff' },
-    { id: 'piShip', name: 'Phí dịch vụ PiShip', type: 'fixed', value: 1620, icon: '🚚', color: '#52c41a' },
-    { id: 'phiDichVu', name: 'Phí Dịch Vụ', type: 'fixed', value: 3000, icon: '⚙️', color: '#722ed1' },
-    { id: 'phiThanhToan', name: 'Phí thanh toán', type: 'percent', value: 4.69, icon: '💰', color: '#fa8c16' },
-    { id: 'thueGTGT', name: 'Thuế GTGT', type: 'percent', value: 0.96, icon: '🏛️', color: '#eb2f96' },
-    { id: 'thueTNCN', name: 'Thuế TNCN', type: 'percent', value: 0.48, icon: '📊', color: '#13c2c2' },
-    { id: 'affiliate', name: 'Hoa hồng Affiliate/CTV', type: 'percent', value: 0, icon: '🤝', color: '#52c41a' },
+    { id: 'phiCoDinh', name: 'Phí cố định (Hoa hồng sàn theo Ngành hàng)', type: 'percent', value: 12, icon: '💳', color: '#2563eb', required: true, enabled: true },
+    { id: 'phiThanhToan', name: 'Phí xử lý giao dịch (Phí thanh toán 6%)', type: 'percent', value: 6, icon: '💰', color: '#ea580c', required: true, enabled: true },
+    { id: 'phiHaTang', name: 'Phí hạ tầng sàn Shopee (3.000đ/đơn)', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', required: true, enabled: true },
+    { id: 'thueGTGT', name: 'Thuế GTGT (Khấu trừ cá nhân 0.96%)', type: 'percent', value: 0.96, icon: '🏛️', color: '#db2777', enabled: true },
+    { id: 'thueTNCN', name: 'Thuế TNCN (Khấu trừ cá nhân 0.54%)', type: 'percent', value: 0.54, icon: '📊', color: '#0891b2', enabled: true },
+    { id: 'piShip', name: 'Phí dịch vụ vận chuyển PiShip (2.700đ/đơn)', type: 'fixed', value: 2700, icon: '📦', color: '#059669', enabled: true },
+    { id: 'freeshipXtra', name: 'Gói Freeship Xtra / Freeship Xtra Plus (8%)', type: 'percent', value: 8, icon: '🚚', color: '#16a34a', enabled: false },
+    { id: 'voucherXtra', name: 'Gói Voucher Xtra (Mã giảm giá/Live/Video 5.5%)', type: 'percent', value: 5.5, icon: '🎁', color: '#f59e0b', enabled: false },
+    { id: 'shopeeLive', name: 'Gói Shopee Live / Livestream Extra (4%)', type: 'percent', value: 4, icon: '📹', color: '#ec4899', enabled: false },
 ];
 
 const DEFAULT_TIKTOK_FEES = [
-    { id: 'phiGiaoDich', name: 'Phí giao dịch', type: 'percent', value: 5.00, icon: '💰', color: '#fa8c16' },
-    { id: 'phiHoaHong', name: 'Phí hoa hồng TikTok Shop', type: 'percent', value: 10.31, icon: '💳', color: '#1890ff' },
-    { id: 'phiXuLyDon', name: 'Phí xử lý đơn hàng', type: 'fixed', value: 3000, icon: '⚙️', color: '#722ed1' },
-    { id: 'thueGTGT', name: 'Thuế GTGT (TikTok khấu trừ)', type: 'percent', value: 1.00, icon: '🏛️', color: '#eb2f96' },
-    { id: 'thueTNCN', name: 'Thuế TNCN (TikTok khấu trừ)', type: 'percent', value: 0.50, icon: '📊', color: '#13c2c2' },
-    { id: 'affiliate', name: 'Hoa hồng liên kết', type: 'percent', value: 15.00, icon: '🤝', color: '#52c41a' },
+    { id: 'phiGiaoDich', name: 'Phí giao dịch TikTok Shop (6%)', type: 'percent', value: 6, icon: '💰', color: '#ea580c', required: true, enabled: true },
+    { id: 'phiHoaHong', name: 'Phí hoa hồng TikTok Shop', type: 'percent', value: 14, icon: '💳', color: '#2563eb', required: true, enabled: true },
+    { id: 'phiXuLyDon', name: 'Phí xử lý đơn hàng', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', required: true, enabled: true },
+    { id: 'thueGTGT', name: 'Thuế GTGT (TikTok khấu trừ)', type: 'percent', value: 1, icon: '🏛️', color: '#db2777', enabled: true },
+    { id: 'thueTNCN', name: 'Thuế TNCN (TikTok khấu trừ)', type: 'percent', value: 0.5, icon: '📊', color: '#0891b2', enabled: true },
+    { id: 'affiliate', name: 'Hoa hồng liên kết', type: 'percent', value: 15, icon: '🤝', color: '#16a34a', enabled: true },
 ];
+
+const FEE_POLICY_VERSION = 20260815;
+const PLATFORM_CATEGORY_RATES: Record<'shopee' | 'tiktok', Record<string, number>> = {
+    shopee: {
+        'sp-beauty': 17,
+        'sp-health': 15.5,
+        'sp-pets': 14,
+        'sp-fashion': 12.5,
+        'sp-home': 12,
+        'sp-sports': 11,
+        'sp-baby': 10.5,
+        'sp-groceries': 10,
+        'sp-books': 10,
+        'sp-auto': 9.5,
+        'sp-appliance': 9,
+        'sp-electronics': 8.5,
+        'sp-other': 12,
+    },
+    tiktok: {
+        'tt-health': 12,
+        'tt-beauty': 12,
+        'tt-fashion-women': 12,
+        'tt-fashion-men': 12,
+        'tt-personal-care': 10,
+        'tt-electronics': 6,
+        'tt-tech-accessories': 10,
+        'tt-home': 10,
+        'tt-baby': 10,
+        'tt-food': 10,
+        'tt-other': 14,
+    },
+};
+const normalizePlatformFees = (savedFees: any[], defaults: any[]) => {
+    const savedById = new Map((Array.isArray(savedFees) ? savedFees : []).map((fee: any) => [fee.id, fee]));
+    return defaults.map((defaultFee: any) => ({
+        ...defaultFee,
+        ...(savedById.get(defaultFee.id) || {}),
+        name: defaultFee.name,
+        type: defaultFee.type,
+        icon: defaultFee.icon,
+        color: defaultFee.color,
+        required: defaultFee.required ?? false,
+        enabled: defaultFee.required ? true : (savedById.get(defaultFee.id)?.enabled ?? defaultFee.enabled ?? true),
+    }));
+};
+const getPlatformCategoryId = (platform: 'shopee' | 'tiktok', value: unknown) => {
+    const aliases: Record<string, string> = {
+        'sp-electronic': 'sp-electronics',
+        'tt-electronic': 'tt-electronics',
+        'tt-accessories': 'tt-tech-accessories',
+    };
+    const id = aliases[String(value || '')] || String(value || '');
+    if (PLATFORM_CATEGORY_RATES[platform][id] !== undefined) return id;
+    return platform === 'shopee' ? 'sp-home' : 'tt-other';
+};
+const applyPlatformCategoryRate = (fees: any[], platform: 'shopee' | 'tiktok', categoryId: string) => {
+    const commissionId = platform === 'shopee' ? 'phiCoDinh' : 'phiHoaHong';
+    const rate = PLATFORM_CATEGORY_RATES[platform][categoryId];
+    return fees.map((fee: any) => fee.id === commissionId ? { ...fee, value: rate } : fee);
+};
 
 // ============================================
 // COMPONENT
@@ -571,7 +632,7 @@ export default function BusinessReportPage() {
 
     const [loading, setLoading] = useState(true);
     const [refreshToken, setRefreshToken] = useState(0);
-    const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs().startOf('day'), dayjs().endOf('day')]);
+    const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs().startOf('month'), dayjs().endOf('day')]);
     const [viewMode, setViewMode] = useState<'range' | 'daily'>('range');
     const [selectedDate, setSelectedDate] = useState<Dayjs>(dayjs());
 
@@ -657,7 +718,7 @@ export default function BusinessReportPage() {
             // Fetch data + config song song trong 1 round duy nhất
             // Products/combos dùng cache nếu đã có — chúng ít thay đổi theo ngày
             const needProducts = !productsCacheRef.current;
-            const [expRes, ecomRes, refRes, purRes, deRes, cfgRes, shopeeFeesRes, tiktokFeesRes, prodRes, comboRes] = await Promise.all([
+            const [expRes, ecomRes, refRes, purRes, deRes, cfgRes, shopeeFeesRes, tiktokFeesRes, calculatorInputsRes, prodRes, comboRes] = await Promise.all([
                 window.electronAPI.exportOrders.getAll({ since }),
                 window.electronAPI.ecommerceExports.getAll({ since, until, limit: ecommerceLimit, statusIn: ['completed'], sinceField: 'updatedAt' }),
                 window.electronAPI.refunds.getAll({ since }),
@@ -666,6 +727,7 @@ export default function BusinessReportPage() {
                 window.electronAPI.appConfig.get(CONFIG_KEY_PNL),
                 window.electronAPI.appConfig.get('shopee_fees_v3'),
                 window.electronAPI.appConfig.get('tiktok_fees_v3'),
+                window.electronAPI.appConfig.get('calculator_inputs_v2'),
                 needProducts ? window.electronAPI.products.getAll() : Promise.resolve(null),
                 needProducts ? window.electronAPI.combos.getAll() : Promise.resolve(null),
             ]);
@@ -681,18 +743,39 @@ export default function BusinessReportPage() {
                 setConfig({ ...DEFAULT_CONFIG, ...cfgRes.data });
             }
 
-            // Phí sàn Shopee
-            if (shopeeFeesRes.success && shopeeFeesRes.data && Array.isArray(shopeeFeesRes.data)) {
-                setShopeeFeeConfig(shopeeFeesRes.data);
-            } else {
-                await window.electronAPI.appConfig.set('shopee_fees_v3', DEFAULT_SHOPEE_FEES);
-            }
+            const calculatorInputs = calculatorInputsRes.success && calculatorInputsRes.data
+                ? calculatorInputsRes.data
+                : {};
+            const shopeeCategoryId = getPlatformCategoryId('shopee', calculatorInputs.categories?.shopee);
+            const tiktokCategoryId = getPlatformCategoryId('tiktok', calculatorInputs.categories?.tiktok);
+            const hasCurrentFeePolicy = calculatorInputs.feePolicyVersion === FEE_POLICY_VERSION;
+            const nextShopeeFees = applyPlatformCategoryRate(
+                hasCurrentFeePolicy
+                    ? normalizePlatformFees(shopeeFeesRes.data, DEFAULT_SHOPEE_FEES)
+                    : DEFAULT_SHOPEE_FEES,
+                'shopee',
+                shopeeCategoryId,
+            );
+            const nextTiktokFees = applyPlatformCategoryRate(
+                hasCurrentFeePolicy
+                    ? normalizePlatformFees(tiktokFeesRes.data, DEFAULT_TIKTOK_FEES)
+                    : DEFAULT_TIKTOK_FEES,
+                'tiktok',
+                tiktokCategoryId,
+            );
+            setShopeeFeeConfig(nextShopeeFees);
+            setTiktokFeeConfig(nextTiktokFees);
 
-            // Phí sàn TikTok
-            if (tiktokFeesRes.success && tiktokFeesRes.data && Array.isArray(tiktokFeesRes.data)) {
-                setTiktokFeeConfig(tiktokFeesRes.data);
-            } else {
-                await window.electronAPI.appConfig.set('tiktok_fees_v3', DEFAULT_TIKTOK_FEES);
+            if (!hasCurrentFeePolicy) {
+                await Promise.all([
+                    window.electronAPI.appConfig.set('shopee_fees_v3', nextShopeeFees),
+                    window.electronAPI.appConfig.set('tiktok_fees_v3', nextTiktokFees),
+                    window.electronAPI.appConfig.set('calculator_inputs_v2', {
+                        ...calculatorInputs,
+                        feePolicyVersion: FEE_POLICY_VERSION,
+                        categories: { shopee: shopeeCategoryId, tiktok: tiktokCategoryId },
+                    }),
+                ]);
             }
 
             // Build / dùng cache cost map
@@ -974,6 +1057,26 @@ export default function BusinessReportPage() {
             totalOrders, numDays,
         };
     }, [filteredExports, filteredEcom, filteredRefunds, filteredDailyExpenses, config, numDays, filteredPurchases, getPurchaseCost, shopeeFeeConfig, tiktokFeeConfig, costMap]);
+
+    const dailyTrendData = useMemo(() => {
+        const { start, end } = getDateFilter();
+        const days = Math.min(end.diff(start, 'day') + 1, 14);
+        const chartStart = end.subtract(days - 1, 'day').startOf('day');
+
+        return Array.from({ length: days }, (_, index) => {
+            const date = chartStart.add(index, 'day');
+            const dateKey = date.format('YYYY-MM-DD');
+            const revenue = [
+                ...filteredExports.filter(item => dayjs(item.exportDate).format('YYYY-MM-DD') === dateKey),
+                ...filteredEcom.filter(item => dayjs(item.updatedAt || item.ecommerceExportDate).format('YYYY-MM-DD') === dateKey),
+            ].reduce((sum, item) => sum + (item.totalAmount || 0), 0);
+            const expenses = filteredDailyExpenses
+                .filter(item => dayjs(item.date).format('YYYY-MM-DD') === dateKey)
+                .reduce((sum, item) => sum + (item.shopeeAds || 0) + (item.tiktokAds || 0) + (item.shippingCost || 0) + (item.returnCost || 0) + (item.otherExpense || 0), 0);
+
+            return { date: date.format('DD/MM'), revenue, expenses };
+        });
+    }, [getDateFilter, filteredExports, filteredEcom, filteredDailyExpenses]);
 
     // ============================================
     // SAVE CONFIG
@@ -1533,25 +1636,25 @@ export default function BusinessReportPage() {
             {/* === TAB 1: P&L === */}
             {activeTab === 'pnl' && <>
 
+            <div className="pnl-redesign">
             {/* === HEADER === */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+            <div className="pnl-page-header">
                 <div>
-                    <Title level={3} style={{ margin: 0 }}>📊 Báo cáo Kinh doanh (P&L)</Title>
-                    <Text type="secondary">Phân tích chi tiết lãi/lỗ theo doanh thu, chi phí, phí sàn</Text>
+                    <Title level={2} style={{ margin: 0 }}>Báo cáo Kinh doanh (P&amp;L)</Title>
+                    <Text type="secondary">Theo dõi lợi nhuận và ưu tiên các khoản cần xử lý trong kỳ</Text>
                 </div>
                 <Space>
+                    <Button icon={<DownloadOutlined />} onClick={() => window.print()}>Xuất báo cáo</Button>
                     <Button icon={<SettingOutlined />} onClick={() => {
                         form.setFieldsValue(config);
                         setConfigModalOpen(true);
-                    }}>
-                        Cấu hình
-                    </Button>
+                    }}>Cấu hình</Button>
                 </Space>
             </div>
 
             {/* === DATE CONTROLS === */}
-            <Card size="small" style={{ marginBottom: 16 }}>
-                <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div className="pnl-filter-bar">
+                <div className="pnl-filter-controls">
                     <Space>
                         <Button
                             type={viewMode === 'range' ? 'primary' : 'default'}
@@ -1594,73 +1697,45 @@ export default function BusinessReportPage() {
                         <CalendarOutlined /> {numDays} ngày | {pnl.totalOrders} đơn
                     </Text>
                 </div>
-            </Card>
+            </div>
 
-            {/* === SUMMARY CARDS === */}
-            <Row gutter={16} style={{ marginBottom: 16 }}>
-                <Col span={6}>
-                    <Card style={{ borderTop: '3px solid #00ab56' }}>
-                        <Statistic
-                            title={<span>💰 Doanh thu thuần</span>}
-                            value={pnl.netRevenue}
-                            precision={0}
-                            suffix="đ"
-                            formatter={(val) => fmt(Number(val))}
-                            valueStyle={{ color: '#00ab56', fontSize: 22, fontWeight: 800 }}
-                        />
-                    </Card>
-                </Col>
-                <Col span={6}>
-                    <Card style={{ borderTop: '3px solid #f5222d' }}>
-                        <Statistic
-                            title={<span>📉 Tổng chi phí</span>}
-                            value={pnl.totalCost}
-                            precision={0}
-                            suffix="đ"
-                            formatter={(val) => fmt(Number(val))}
-                            valueStyle={{ color: '#f5222d', fontSize: 22, fontWeight: 800 }}
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                            Chiếm {pct(pnl.totalCost)}% doanh thu
-                        </Text>
-                    </Card>
-                </Col>
-                <Col span={6}>
-                    <Card style={{ borderTop: `3px solid ${pnl.netProfit >= 0 ? '#1890ff' : '#f5222d'}` }}>
-                        <Statistic
-                            title={<span>🎯 Lợi nhuận ròng</span>}
-                            value={pnl.netProfit}
-                            precision={0}
-                            suffix="đ"
-                            formatter={(val) => fmt(Number(val))}
-                            valueStyle={{ color: pnl.netProfit >= 0 ? '#1890ff' : '#f5222d', fontSize: 22, fontWeight: 800 }}
-                            prefix={pnl.netProfit >= 0 ? <RiseOutlined /> : <FallOutlined />}
-                        />
-                    </Card>
-                </Col>
-                <Col span={6}>
-                    <Card style={{ borderTop: '3px solid #13c2c2' }}>
-                        <Statistic
-                            title={<span>📈 Biên lợi nhuận</span>}
-                            value={pnl.netMargin}
-                            precision={1}
-                            suffix="%"
-                            valueStyle={{ color: '#13c2c2', fontSize: 22, fontWeight: 800 }}
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                            Gross margin: {pnl.grossMargin.toFixed(1)}%
-                        </Text>
-                    </Card>
-                </Col>
-            </Row>
+            <div className="pnl-priority-grid">
+                <section className={`pnl-net-hero ${pnl.netProfit >= 0 ? 'is-profit' : 'is-loss'}`}>
+                    <div className="pnl-hero-kicker"><FallOutlined /> Lợi nhuận ròng</div>
+                    <div className="pnl-hero-amount">{pnl.netProfit < 0 ? '−' : ''}{fmt(Math.abs(pnl.netProfit))} đ</div>
+                    <div className="pnl-hero-badge">{pnl.netMargin.toFixed(1)}% doanh thu</div>
+                    <p>{pnl.netProfit >= 0 ? 'Kỳ này đang có lãi sau tất cả chi phí.' : 'Chi phí vận hành đang vượt lợi nhuận gộp.'}</p>
+                </section>
+                <section className="pnl-cost-chart">
+                    <div className="pnl-chart-heading"><div><strong>Xu hướng doanh thu &amp; chi phí</strong><Text type="secondary">14 ngày gần nhất trong kỳ đã chọn</Text></div><Text className="pnl-total-cost">{numDays} ngày</Text></div>
+                    <div className="pnl-line-legend"><span><i className="revenue" />Doanh thu</span><span><i className="expense" />Chi phí phát sinh</span></div>
+                    <div className="pnl-line-chart">
+                        <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={dailyTrendData} margin={{ top: 6, right: 6, left: -18, bottom: 0 }}>
+                                <CartesianGrid stroke="#edf1f3" vertical={false} />
+                                <XAxis dataKey="date" tickLine={false} axisLine={false} tick={{ fill: '#7a8894', fontSize: 11 }} />
+                                <YAxis tickLine={false} axisLine={false} tick={{ fill: '#7a8894', fontSize: 11 }} tickFormatter={(value: number) => fmtShort(value)} width={42} />
+                                <ReTooltip formatter={(value: number) => `${fmt(value)} đ`} labelFormatter={(label: string) => `Ngày ${label}`} />
+                                <Line type="monotone" dataKey="revenue" name="Doanh thu" stroke="#00a859" strokeWidth={3} dot={{ r: 3, fill: '#00a859', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 5 }} />
+                                <Line type="monotone" dataKey="expenses" name="Chi phí phát sinh" stroke="#ef6b62" strokeWidth={2.5} dot={{ r: 3, fill: '#ef6b62', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 5 }} />
+                            </LineChart>
+                        </ResponsiveContainer>
+                    </div>
+                </section>
+            </div>
 
-            {/* === P&L TABLE (FLAT - no expand) === */}
-            <Card
-                title={<span><BarChartOutlined /> Bảng Kết quả Kinh doanh (P&L)</span>}
-                size="small"
-                style={{ marginBottom: 16 }}
-            >
+            <section className="pnl-metric-strip">
+                <div><span>Doanh thu thuần</span><strong className="positive">{fmt(pnl.netRevenue)} đ</strong></div>
+                <div><span>Giá vốn hàng bán (COGS)</span><strong>{fmt(pnl.totalCOGS)} đ</strong></div>
+                <div><span>Lợi nhuận gộp</span><strong className="positive">{fmt(pnl.grossProfit)} đ <small>{pnl.grossMargin.toFixed(1)}%</small></strong></div>
+                <div><span>Tổng chi phí</span><strong className="negative">{fmt(pnl.totalCost)} đ <small>{pct(pnl.totalCost)}%</small></strong></div>
+            </section>
+
+            {/* === P&L TABLE === */}
+            <section className="pnl-detail-section">
+                <div className="pnl-detail-heading"><div><strong>Chi tiết theo khoản</strong><Text type="secondary">Bấm vào hạng mục hoặc số tiền có gạch chân để xem sâu</Text></div><Text type="secondary"><BarChartOutlined /> Dữ liệu theo kỳ đã chọn</Text></div>
                 <Table
+                    className="pnl-detail-table"
                     dataSource={visiblePnlRows}
                     pagination={false}
                     size="small"
@@ -1788,9 +1863,17 @@ export default function BusinessReportPage() {
                                 );
                             },
                         },
+                        {
+                            title: 'So với kỳ trước',
+                            key: 'comparison',
+                            width: 150,
+                            align: 'center' as const,
+                            render: (_: unknown, r: any) => r.isTotal ? <Text type="secondary">Cần đối chiếu</Text> : <Text type="secondary">—</Text>,
+                        },
                     ]}
                 />
-            </Card>
+            </section>
+            </div>
 
 
 
@@ -2040,11 +2123,49 @@ export default function BusinessReportPage() {
 
             {/* === INLINE STYLE for table rows === */}
             <style>{`
+                .pnl-redesign { color: #152536; }
+                .pnl-page-header { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 18px; }
+                .pnl-page-header .ant-typography { display: block; }
+                .pnl-page-header h2.ant-typography { font-size: 24px; letter-spacing: -0.35px; color: #152536; }
+                .pnl-filter-bar { margin-bottom: 18px; padding: 12px 14px; background: #fff; border: 1px solid #e8edf0; border-radius: 10px; }
+                .pnl-filter-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+                .pnl-filter-bar .ant-btn-primary { background: #00a859; border-color: #00a859; }
+                .pnl-priority-grid { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(480px, 1fr); gap: 16px; margin-bottom: 16px; }
+                .pnl-net-hero, .pnl-cost-chart, .pnl-detail-section { background: #fff; border: 1px solid #e7ecef; border-radius: 12px; }
+                .pnl-net-hero { min-height: 210px; padding: 24px; position: relative; overflow: hidden; }
+                .pnl-net-hero.is-loss { border-color: #ffccc7; background: #fffafa; }
+                .pnl-net-hero.is-profit { border-color: #b7eb8f; background: #f6ffed; }
+                .pnl-hero-kicker { display: flex; align-items: center; gap: 9px; font-size: 16px; font-weight: 650; color: #273847; }
+                .pnl-hero-amount { margin: 14px 0 8px; font-size: clamp(30px, 3vw, 46px); line-height: 1; letter-spacing: -1.4px; font-weight: 800; font-variant-numeric: tabular-nums; }
+                .is-loss .pnl-hero-amount { color: #e53935; } .is-profit .pnl-hero-amount { color: #00a859; }
+                .pnl-hero-badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 13px; font-weight: 700; color: #d9363e; background: #fff1f0; }
+                .is-profit .pnl-hero-badge { color: #237804; background: #f6ffed; }
+                .pnl-net-hero p { margin: 18px 0 0; color: #607080; font-size: 14px; }
+                .pnl-cost-chart { padding: 18px 20px 14px; min-height: 210px; }
+                .pnl-chart-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+                .pnl-chart-heading strong, .pnl-chart-heading .ant-typography { display: block; } .pnl-chart-heading strong { font-size: 16px; } .pnl-chart-heading .ant-typography { font-size: 12px; margin-top: 2px; }
+                .pnl-total-cost { color: #e53935 !important; font-size: 15px !important; font-weight: 750; white-space: nowrap; }
+                .pnl-line-legend { display: flex; align-items: center; gap: 16px; margin-top: 10px; color: #617280; font-size: 12px; }
+                .pnl-line-legend span { display: inline-flex; align-items: center; gap: 6px; } .pnl-line-legend i { display: inline-block; width: 18px; height: 3px; border-radius: 2px; } .pnl-line-legend .revenue { background: #00a859; } .pnl-line-legend .expense { background: #ef6b62; }
+                .pnl-line-chart { height: 142px; margin-top: 4px; }
+                .pnl-metric-strip { display: grid; grid-template-columns: repeat(4, 1fr); margin-bottom: 16px; padding: 16px 10px; background: #fff; border: 1px solid #e7ecef; border-radius: 12px; }
+                .pnl-metric-strip > div { min-width: 0; padding: 0 20px; border-right: 1px solid #edf0f2; } .pnl-metric-strip > div:last-child { border-right: none; }
+                .pnl-metric-strip span, .pnl-metric-strip strong { display: block; } .pnl-metric-strip span { margin-bottom: 6px; color: #71808e; font-size: 13px; }
+                .pnl-metric-strip strong { color: #243442; font-size: 21px; line-height: 1.2; font-variant-numeric: tabular-nums; } .pnl-metric-strip strong.positive { color: #00a859; } .pnl-metric-strip strong.negative { color: #e53935; }
+                .pnl-metric-strip small { margin-left: 4px; font-size: 13px; font-weight: 700; }
+                .pnl-detail-section { overflow: hidden; margin-bottom: 16px; }
+                .pnl-detail-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 18px 20px 14px; border-bottom: 1px solid #e9eef1; }
+                .pnl-detail-heading strong, .pnl-detail-heading .ant-typography { display: block; } .pnl-detail-heading strong { font-size: 17px; } .pnl-detail-heading .ant-typography { font-size: 12px; margin-top: 2px; }
+                .pnl-detail-table .ant-table { border-radius: 0; } .pnl-detail-table .ant-table-thead > tr > th { background: #fbfcfc; color: #627382; font-size: 12px; font-weight: 700; border-bottom: 1px solid #e6ecef; padding: 11px 16px; }
+                .pnl-detail-table .ant-table-tbody > tr > td { padding: 12px 16px; border-bottom-color: #edf1f3; }
+                .pnl-detail-table .ant-table-tbody > tr:hover > td { background: #f8fcfa !important; }
                 .pnl-row-total td    { border-top: 3px double #1a1a2e !important; border-bottom: 3px double #1a1a2e !important; background: #f6ffed !important; }
                 .pnl-row-subtotal td { background: #e6f7ff !important; }
                 .pnl-row-group td    { background: #f0f5ff !important; border-bottom: 2px solid #d6e4ff !important; }
                 .pnl-row-parent td   { background: #fafafa !important; }
                 .pnl-row-child td    { border-bottom: 1px solid #f9f9f9 !important; }
+                @media (max-width: 1100px) { .pnl-priority-grid { grid-template-columns: 1fr; } .pnl-metric-strip { grid-template-columns: repeat(2, 1fr); gap: 16px 0; } .pnl-metric-strip > div:nth-child(2) { border-right: none; } }
+                @media (max-width: 680px) { .pnl-page-header, .pnl-detail-heading { align-items: flex-start; flex-direction: column; } .pnl-metric-strip { grid-template-columns: 1fr; } .pnl-metric-strip > div { border-right: none; padding: 0 12px; } .pnl-line-chart { height: 165px; } }
             `}</style>
             </>}
         </div>

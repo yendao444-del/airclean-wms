@@ -36,9 +36,6 @@ export default defineConfig({
             output: {
                 // Manual chunks for better caching
                 manualChunks: {
-                    // Core React libraries
-                    'vendor-react': ['react', 'react-dom'],
-
                     // Ant Design UI library (largest dependency)
                     'vendor-antd': ['antd', '@ant-design/icons'],
 

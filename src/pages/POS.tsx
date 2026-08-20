@@ -1,7 +1,17 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Modal, InputNumber, message } from 'antd';
+import {
+    BarcodeOutlined, CloseOutlined, DeleteOutlined, FileTextOutlined,
+    MinusOutlined, PlusOutlined, ReloadOutlined, SearchOutlined,
+    ShoppingCartOutlined, UserOutlined,
+} from '@ant-design/icons';
 import type { Product, Category } from '../types/electron';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
+import plainCartonImage from '../assets/plain-kraft-carton.webp';
+import maskBoxBlue from '../assets/pos-catalog/mask-box-blue.png';
+import maskBoxPink from '../assets/pos-catalog/mask-box-pink.png';
+import maskBoxMint from '../assets/pos-catalog/mask-box-mint.png';
+import maskBoxLocPhat from '../assets/pos-catalog/mask-box-loc-phat.png';
 import './POS.css';
 
 // === Types ===
@@ -54,6 +64,41 @@ const CATEGORY_EMOJI: Record<string, string> = {
 };
 
 const normalize = (s: string) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd');
+
+const getProductImage = (product: Product): string => {
+    const name = normalize(product.name);
+    if (name.includes('5d loc phat')) return maskBoxLocPhat;
+
+    if (product.images) {
+        try {
+            const parsed = JSON.parse(product.images);
+            if (Array.isArray(parsed) && typeof parsed[0] === 'string') return parsed[0];
+            if (typeof parsed === 'string') return parsed;
+        } catch {
+            if (product.images.trim()) return product.images;
+        }
+    }
+
+    const isMask = ['khau trang', 'kf94', 'n95', 'medical mask', 'medicalmask', 'upf', '5d', '6d', '9a']
+        .some(keyword => name.includes(keyword));
+    if (!isMask) return plainCartonImage;
+
+    if (name.includes('kf94') || name.includes('ami')) return maskBoxPink;
+    if (name.includes('3d') || name.includes('seiko') || name.includes('nami')) return maskBoxMint;
+    return maskBoxBlue;
+};
+
+const getProductImageLabel = (product: Product): string => {
+    const normalizedName = normalize(product.name);
+    if (normalizedName.includes('5d loc phat') || product.images) return '';
+
+    return product.name
+        .replace(/^khẩu\s*trang\s*/i, '')
+        .replace(/^khau\s*trang\s*/i, '')
+        .replace(/xuất\s*khẩu/i, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+};
 
 // Ánh xạ tên sản phẩm → emoji (ưu tiên cao hơn danh mục)
 const PRODUCT_NAME_EMOJI: Array<{ keywords: string[]; emoji: string }> = [
@@ -111,12 +156,14 @@ const getTotalStock = (product: Product): number => {
     return product.stock || 0;
 };
 
+let posCatalogCache: { products: Product[]; categories: Category[] } | null = null;
+
 // === Component ===
 export default function POSPage() {
     const currentUser = useCurrentUser();
-    const [products, setProducts] = useState<Product[]>([]);
-    const [categories, setCategories] = useState<Category[]>([]);
-    const [loading, setLoading] = useState(true);
+    const [products, setProducts] = useState<Product[]>(() => posCatalogCache?.products || []);
+    const [categories, setCategories] = useState<Category[]>(() => posCatalogCache?.categories || []);
+    const [loading, setLoading] = useState(() => !posCatalogCache);
     const [searchText, setSearchText] = useState('');
     const [selectedCategory, setSelectedCategory] = useState<number | null>(null);
 
@@ -134,6 +181,7 @@ export default function POSPage() {
     const [payAmount, setPayAmount] = useState<number>(0);
     const [paying, setPaying] = useState(false);
     const payInputRef = useRef<HTMLInputElement>(null);
+    const suppressStockRefreshUntilRef = useRef(0);
 
     // Đảm bảo payAmount luôn = subtotal khi modal thanh toán mở
     useEffect(() => {
@@ -144,11 +192,23 @@ export default function POSPage() {
 
     // === Load Data ===
     useEffect(() => {
-        loadData();
+        void loadData(Boolean(posCatalogCache));
+        let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+        const unsubscribe = window.electronAPI.products.onStockChanged?.(() => {
+            if (Date.now() < suppressStockRefreshUntilRef.current) return;
+            if (refreshTimer) clearTimeout(refreshTimer);
+            refreshTimer = setTimeout(() => {
+                if (document.visibilityState === 'visible') void loadData(true);
+            }, 250);
+        });
+        return () => {
+            if (refreshTimer) clearTimeout(refreshTimer);
+            unsubscribe?.();
+        };
     }, []);
 
-    const loadData = async () => {
-        setLoading(true);
+    const loadData = async (silent = false) => {
+        if (!silent) setLoading(true);
         try {
             const [productsRes, categoriesRes] = await Promise.all([
                 (window.electronAPI.products.getCatalogForSale?.() || window.electronAPI.products.getAll()),
@@ -156,18 +216,39 @@ export default function POSPage() {
             ]);
             if (productsRes.success && productsRes.data) {
                 // Only active products
-                setProducts(productsRes.data.filter(p => p.status === 'active'));
+                const activeProducts = productsRes.data.filter(p => p.status === 'active');
+                setProducts(activeProducts);
+                posCatalogCache = {
+                    products: activeProducts,
+                    categories: categoriesRes.success && categoriesRes.data
+                        ? categoriesRes.data
+                        : posCatalogCache?.categories || [],
+                };
             }
             if (categoriesRes.success && categoriesRes.data) {
                 setCategories(categoriesRes.data);
+                posCatalogCache = {
+                    products: productsRes.success && productsRes.data
+                        ? productsRes.data.filter(p => p.status === 'active')
+                        : posCatalogCache?.products || [],
+                    categories: categoriesRes.data,
+                };
             }
         } catch (err) {
             console.error('POS load error:', err);
             message.error('Không thể tải dữ liệu sản phẩm');
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
+
+    useEffect(() => {
+        if (!posCatalogCache) posCatalogCache = { products, categories };
+        else {
+            posCatalogCache.products = products;
+            posCatalogCache.categories = categories;
+        }
+    }, [products, categories]);
 
     // === Active Tab Helpers ===
     const activeTab = useMemo(() =>
@@ -210,6 +291,33 @@ export default function POSPage() {
         }
         return result;
     }, [products, selectedCategory, searchText]);
+
+    const categoryCounts = useMemo(() => {
+        const counts = new Map<number, number>();
+        products.forEach(product => {
+            if (product.categoryId != null) {
+                counts.set(product.categoryId, (counts.get(product.categoryId) || 0) + 1);
+            }
+        });
+        return counts;
+    }, [products]);
+
+    const productMeta = useMemo(() => {
+        const index = new Map<number, { variants: ProductVariant[]; totalStock: number; hasStock: boolean }>();
+        products.forEach(product => {
+            const variants = parseVariants(product);
+            index.set(product.id, {
+                variants,
+                totalStock: variants.length > 0
+                    ? variants.reduce((sum, variant) => sum + Number(variant.stock || 0), 0)
+                    : Number(product.stock || 0),
+                hasStock: variants.length > 0
+                    ? variants.some(variant => typeof variant.stock === 'number')
+                    : typeof product.stock === 'number',
+            });
+        });
+        return index;
+    }, [products]);
 
     // === Cart Operations ===
     const handleProductClick = (product: Product) => {
@@ -322,6 +430,7 @@ export default function POSPage() {
     const doConfirmPayment = async () => {
         if (paying) return;
         setPaying(true);
+        suppressStockRefreshUntilRef.current = Date.now() + 5000;
         try {
             const result = await window.electronAPI.posOrder.create({
                 items: activeTab.cart.map(item => ({
@@ -343,13 +452,37 @@ export default function POSPage() {
 
             if (result.success) {
                 message.success(`✅ Thanh toán thành công! Mã đơn: ${result.data?.orderNumber || ''}`);
+                const updates = new Map<string, number>(
+                    (result.data?.stockUpdates || []).map((item: any) => [String(item.sku), Number(item.newStock)]),
+                );
+                if (updates.size > 0) {
+                    setProducts(previous => previous.map(product => {
+                        if (updates.has(product.sku)) {
+                            return { ...product, stock: updates.get(product.sku) };
+                        }
+                        const variants = parseVariants(product);
+                        let changed = false;
+                        const nextVariants = variants.map(variant => {
+                            if (!updates.has(variant.sku)) return variant;
+                            changed = true;
+                            return { ...variant, stock: updates.get(variant.sku) };
+                        });
+                        if (!changed) return product;
+                        return {
+                            ...product,
+                            variants: JSON.stringify(nextVariants),
+                            stock: nextVariants.reduce((sum, variant) => sum + Number(variant.stock || 0), 0),
+                        };
+                    }));
+                }
                 updateActiveTab({ cart: [], note: '', customer: '' });
                 setPaymentModal(false);
-                loadData();
             } else {
+                suppressStockRefreshUntilRef.current = 0;
                 message.error(`Lỗi: ${result.error}`);
             }
         } catch (err) {
+            suppressStockRefreshUntilRef.current = 0;
             message.error('Lỗi khi xử lý thanh toán');
             console.error('Payment error:', err);
         } finally {
@@ -366,9 +499,8 @@ export default function POSPage() {
     };
 
     // === Stock class ===
-    const stockClass = (product: Product) => {
-        if (!hasStockDetails(product)) return (product as any).available === false ? 'out' : '';
-        const total = getTotalStock(product);
+    const stockClass = (product: Product, total: number, hasStock: boolean) => {
+        if (!hasStock) return (product as any).available === false ? 'out' : '';
         if (total <= 0) return 'out';
         if (total <= (product.minStock || 10)) return 'low';
         return '';
@@ -384,14 +516,14 @@ export default function POSPage() {
                         className={`pos-tab ${tab.id === activeTabId ? 'active' : ''}`}
                         onClick={() => setActiveTabId(tab.id)}
                     >
-                        📋 {tab.name}
-                        {tab.cart.length > 0 && <span style={{ fontSize: 10, opacity: 0.7 }}>({tab.cart.length})</span>}
+                        <FileTextOutlined /> {tab.name}
+                        {tab.cart.length > 0 && <span className="pos-tab-count">{tab.cart.length}</span>}
                         {tabs.length > 1 && (
-                            <span className="pos-tab-close" onClick={e => { e.stopPropagation(); closeTab(tab.id); }}>×</span>
+                            <span className="pos-tab-close" onClick={e => { e.stopPropagation(); closeTab(tab.id); }}><CloseOutlined /></span>
                         )}
                     </div>
                 ))}
-                <div className="pos-tab-add" onClick={addTab} title="Thêm hóa đơn mới">+</div>
+                <div className="pos-tab-add" onClick={addTab} title="Thêm hóa đơn mới"><PlusOutlined /></div>
             </div>
 
             {/* === MAIN BODY === */}
@@ -401,11 +533,12 @@ export default function POSPage() {
                     <div className="pos-search-bar">
                         <input
                             className="pos-search-input"
-                            placeholder="🔍 Tìm sản phẩm theo tên, SKU, barcode..."
+                            placeholder="Tìm sản phẩm theo tên, SKU, barcode..."
                             value={searchText}
                             onChange={e => setSearchText(e.target.value)}
                         />
-                        <button className="pos-btn-scan">📷 Scan</button>
+                        <SearchOutlined className="pos-search-icon" />
+                        <button className="pos-btn-scan"><BarcodeOutlined /> Quét mã <kbd>F7</kbd></button>
                     </div>
 
                     <div className="pos-category-bar">
@@ -414,7 +547,7 @@ export default function POSPage() {
                             Tất cả ({products.length})
                         </div>
                         {categories.map(cat => {
-                            const count = products.filter(p => p.categoryId === cat.id).length;
+                            const count = categoryCounts.get(cat.id) || 0;
                             if (count === 0) return null;
                             return (
                                 <div key={cat.id}
@@ -435,14 +568,20 @@ export default function POSPage() {
                                 Không tìm thấy sản phẩm nào
                             </div>
                         ) : filteredProducts.map(p => {
-                            const variants = parseVariants(p);
-                            const { emoji, isEmoji } = getProductEmoji(p, categories);
+                            const meta = productMeta.get(p.id) || {
+                                variants: [],
+                                totalStock: Number(p.stock || 0),
+                                hasStock: typeof p.stock === 'number',
+                            };
+                            const variants = meta.variants;
+                            const imageLabel = getProductImageLabel(p);
                             return (
                                 <div key={p.id} className="pos-product-card" onClick={() => handleProductClick(p)}>
-                                    <span className={`pos-product-stock ${stockClass(p)}`}>{hasStockDetails(p) ? getTotalStock(p) : ((p as any).available === false ? 'Hết' : 'Còn')}</span>
+                                    <span className={`pos-product-stock ${stockClass(p, meta.totalStock, meta.hasStock)}`}>{meta.hasStock ? meta.totalStock : ((p as any).available === false ? 'Hết' : 'Còn')}</span>
                                     {p.isCombo && <span className="pos-combo-tag">COMBO</span>}
-                                    <div className="pos-product-img" style={{ background: getColor(p.id), fontSize: isEmoji ? 38 : 24, textShadow: isEmoji ? 'none' : '0 1px 3px rgba(0,0,0,0.25)' }}>
-                                        {emoji}
+                                    <div className="pos-product-image-wrap">
+                                        <img className="pos-product-img" src={getProductImage(p)} alt="" />
+                                        {imageLabel && <span className="pos-product-image-label">{imageLabel}</span>}
                                     </div>
                                     <div className="pos-product-name">{p.name}</div>
                                     <div className="pos-product-price">
@@ -487,7 +626,7 @@ export default function POSPage() {
                 {/* === RIGHT: Cart === */}
                 <div className="pos-right">
                     <div className="pos-customer">
-                        <span style={{ fontSize: 18 }}>👤</span>
+                        <UserOutlined className="pos-customer-icon" />
                         <input className="pos-customer-input"
                             placeholder="Tìm hoặc thêm khách hàng (F4)"
                             value={activeTab.customer}
@@ -512,7 +651,7 @@ export default function POSPage() {
                             <div key={item.key} className="pos-cart-item">
                                 <div className="pos-item-info">
                                     <div className="pos-item-name">{item.name}</div>
-                                    {item.variant && <div className="pos-item-variant">🏷️ {item.variant}</div>}
+                                    {item.variant && <div className="pos-item-variant">{item.variant}</div>}
                                     <div className="pos-item-price">{fmt(item.price)}đ</div>
                                 </div>
                                 <div className="pos-item-qty">
@@ -520,7 +659,7 @@ export default function POSPage() {
                                         onChange={e => updateQty(item.key, parseInt(e.target.value) || 1)} />
                                 </div>
                                 <div className="pos-item-total">{fmt(item.price * item.qty)}đ</div>
-                                <div className="pos-item-remove" onClick={() => removeFromCart(item.key)}>×</div>
+                                <div className="pos-item-remove" onClick={() => removeFromCart(item.key)}><CloseOutlined /></div>
                             </div>
                         ))}
                     </div>
@@ -545,14 +684,13 @@ export default function POSPage() {
                     </div>
 
                     <div className="pos-quick-actions">
-                        <button onClick={() => loadData()}>🔄 Tải lại</button>
-                        <button onClick={clearCart}>🗑️ Xóa giỏ</button>
+                        <button onClick={() => loadData()}><ReloadOutlined /> Tải lại</button>
+                        <button onClick={clearCart}><DeleteOutlined /> Xóa giỏ</button>
                     </div>
 
                     <div className="pos-payment-actions">
-                        <button className="pos-btn-pay cash" onClick={() => openPayment('cash')}>💵 Tiền mặt</button>
-                        <button className="pos-btn-pay bank" onClick={() => openPayment('bank')}>🏦 Chuyển khoản</button>
-                        <button className="pos-btn-pay other">⋯</button>
+                        <button className="pos-btn-pay cash" onClick={() => openPayment('cash')}><ShoppingCartOutlined /> Thanh toán <kbd>F12</kbd></button>
+                        <button className="pos-btn-pay bank" onClick={() => openPayment('bank')}>Chuyển khoản</button>
                     </div>
                 </div>
             </div>

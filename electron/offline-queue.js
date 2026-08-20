@@ -36,8 +36,11 @@ function init(userDataPath) {
  */
 function enqueue(type, payload) {
     if (!queueDir) throw new Error('[OfflineQueue] Not initialized');
+    if (type !== 'ecommerceExports:update') throw new Error('[OfflineQueue] Unsupported operation');
+    if (!payload || typeof payload !== 'object') throw new Error('[OfflineQueue] Invalid payload');
 
-    // Dedup: nếu đã có item cùng type + id → bỏ qua (tránh double-scan)
+    // Coalesce repeated updates: retain the newest payload instead of silently
+    // dropping it, while preserving the original queue position.
     const existingId = payload.id;
     if (existingId) {
         const existing = fs.readdirSync(queueDir)
@@ -49,15 +52,39 @@ function enqueue(type, payload) {
                 } catch { return false; }
             });
         if (existing) {
-            console.log(`[OfflineQueue] Dedup: ${type} id=${existingId} already queued`);
+            const finalPath = path.join(queueDir, existing);
+            const previous = JSON.parse(fs.readFileSync(finalPath, 'utf8'));
+            const next = {
+                ...previous,
+                payload,
+                updatedAt: new Date().toISOString(),
+                attempts: 0,
+                lastError: null,
+                nextAttemptAt: null,
+            };
+            const tmpPath = `${finalPath}.tmp`;
+            fs.writeFileSync(tmpPath, JSON.stringify(next, null, 2), 'utf8');
+            fs.renameSync(tmpPath, finalPath);
+            console.log(`[OfflineQueue] Coalesced latest update: ${type} id=${existingId}`);
             return existing;
         }
     }
 
     const ts = Date.now();
-    const safeId = String(existingId || Math.random().toString(36).slice(2));
+    const safeId = String(existingId || Math.random().toString(36).slice(2))
+        .replace(/[^A-Za-z0-9_-]/g, '_')
+        .slice(0, 80);
     const filename = `${ts}_${safeId}.json`;
-    const item = { type, payload, createdAt: new Date().toISOString() };
+    const item = {
+        type,
+        payload,
+        idempotencyKey: cryptoRandomId(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        attempts: 0,
+        lastError: null,
+        nextAttemptAt: null,
+    };
 
     const tmpPath   = path.join(queueDir, filename + '.tmp');
     const finalPath = path.join(queueDir, filename);
@@ -85,7 +112,7 @@ function dequeueAll() {
                     return { ...JSON.parse(raw), _filename: f };
                 } catch { return null; }
             })
-            .filter(Boolean);
+            .filter(item => item && (!item.nextAttemptAt || new Date(item.nextAttemptAt).getTime() <= Date.now()));
     } catch { return []; }
 }
 
@@ -93,7 +120,31 @@ function dequeueAll() {
  * Xóa item đã sync thành công
  */
 function remove(filename) {
+    if (typeof filename !== 'string' || path.basename(filename) !== filename || !filename.endsWith('.json')) return;
     try { fs.unlinkSync(path.join(queueDir, filename)); } catch {}
+}
+
+function markFailure(filename, errorMessage) {
+    if (typeof filename !== 'string' || path.basename(filename) !== filename || !filename.endsWith('.json')) return;
+    const finalPath = path.join(queueDir, filename);
+    try {
+        const item = JSON.parse(fs.readFileSync(finalPath, 'utf8'));
+        const attempts = Math.min(20, Number(item.attempts || 0) + 1);
+        const delayMs = Math.min(30 * 60 * 1000, 1000 * (2 ** Math.min(attempts, 10)));
+        const next = {
+            ...item,
+            attempts,
+            lastError: String(errorMessage || 'Unknown sync error').slice(0, 500),
+            nextAttemptAt: new Date(Date.now() + delayMs).toISOString(),
+        };
+        const tmpPath = `${finalPath}.tmp`;
+        fs.writeFileSync(tmpPath, JSON.stringify(next, null, 2), 'utf8');
+        fs.renameSync(tmpPath, finalPath);
+    } catch {}
+}
+
+function cryptoRandomId() {
+    return require('crypto').randomUUID();
 }
 
 /**
@@ -106,4 +157,4 @@ function count() {
     } catch { return 0; }
 }
 
-module.exports = { init, enqueue, dequeueAll, remove, count };
+module.exports = { init, enqueue, dequeueAll, remove, markFailure, count };

@@ -25,11 +25,6 @@ echo.
 :: Cập nhật package.json
 node scripts\release-version.cjs set !NEW_VERSION! >nul
 
-echo [0.5/7] Prepare Supabase Storage configuration...
-node scripts\prepare-supabase-storage-config.cjs
-if errorlevel 1 ( echo Cannot prepare Supabase Storage configuration & pause & exit /b 1 )
-echo.
-
 echo [1/6] Regenerate Prisma Client...
 echo ----------------------------------------
 :: Kill Electron/Node neu dang chay (tranh lock file DLL)
@@ -128,6 +123,10 @@ rmdir /S /Q "_full_temp" 2>nul
 if not exist "DBYPOS-v!NEW_VERSION!.zip" ( echo ❌ Nen zip that bai! & pause & exit /b 1 )
 for %%F in ("DBYPOS-v!NEW_VERSION!.zip") do set /a FILE_SIZE_MB=%%~zF / 1048576
 echo ✅ Nen thanh cong: DBYPOS-v!NEW_VERSION!.zip (~!FILE_SIZE_MB! MB)
+set CHECKSUM_FILE=%CD%\DBYPOS-v!NEW_VERSION!.zip.sha256
+powershell -NoProfile -Command "$zip='%CD%\DBYPOS-v!NEW_VERSION!.zip'; $hash=(Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower(); Set-Content -NoNewline -LiteralPath '!CHECKSUM_FILE!' -Value ($hash + '  ' + [IO.Path]::GetFileName($zip))"
+if errorlevel 1 ( echo [LOI] Khong tao duoc SHA256! & pause & exit /b 1 )
+if not exist "!CHECKSUM_FILE!" ( echo [LOI] Thieu file SHA256! & pause & exit /b 1 )
 echo.
 
 echo [7/7] Git commit + Push + GitHub Release...
@@ -144,7 +143,7 @@ echo [OK] Push len GitHub thanh cong!
 set CURRENT_DIR=%CD%
 echo.
 echo Dang tao GitHub Release...
-gh release create v!NEW_VERSION! "%CURRENT_DIR%\DBYPOS-v!NEW_VERSION!.zip" --title "DBY POS v!NEW_VERSION!" --notes "!NOTES!" > _gh_out.txt 2>&1
+gh release create v!NEW_VERSION! "%CURRENT_DIR%\DBYPOS-v!NEW_VERSION!.zip" "!CHECKSUM_FILE!" --title "DBY POS v!NEW_VERSION!" --notes "!NOTES!" > _gh_out.txt 2>&1
 set GH_EXIT=!errorlevel!
 type _gh_out.txt
 del _gh_out.txt >nul 2>&1
