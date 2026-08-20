@@ -5196,7 +5196,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
       return normalized.includes("5d unicare") || normalized.includes("unicare upf uv");
     };
 
-    const [productCandidates, dbRegister, txCfg] = await Promise.all([
+    const [productCandidates, dbRegister, txCfg, withdrawalMarkers] = await Promise.all([
         prisma.product.findMany({
           where: {
             status: "active",
@@ -5227,6 +5227,10 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
         prisma.appConfig.findUnique({
           where: { key: "handlingUnitsTransactionsJson" },
           select: { value: true },
+        }),
+        prisma.appConfig.findMany({
+          where: { key: { startsWith: "handlingUnitWithdrawal:" } },
+          select: { key: true },
         }),
       ]);
 
@@ -5309,6 +5313,35 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
     } catch (txErr) {
       console.warn("Load transactions error:", txErr.message);
     }
+    const withdrawalCodes = new Set(
+      (Array.isArray(withdrawalMarkers) ? withdrawalMarkers : []).map((row) =>
+        String(row.key || "").slice("handlingUnitWithdrawal:".length).trim().toUpperCase(),
+      ),
+    );
+    (Array.isArray(recentTransactions) ? recentTransactions : []).forEach((item) => {
+      const isWithdrawal = Number(item?.quantity) < 0 ||
+        /rút hàng|rút\s+\d+|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho/i.test(
+          `${item?.type || ""} ${item?.note || ""}`,
+        );
+      if (isWithdrawal && item?.unitId) {
+        withdrawalCodes.add(String(item.unitId).trim().toUpperCase());
+      }
+    });
+    // Backfill durable, per-unit markers for history written by older builds.
+    // createMany + skipDuplicates keeps this safe when several clients load together.
+    if (withdrawalCodes.size > 0) {
+      await prisma.appConfig.createMany({
+        data: [...withdrawalCodes].map((code) => ({
+          key: `handlingUnitWithdrawal:${code}`,
+          value: new Date().toISOString(),
+        })),
+        skipDuplicates: true,
+      });
+    }
+    register = register.map((unit) => ({
+      ...unit,
+      hasWithdrawalHistory: withdrawalCodes.has(String(unit.id).toUpperCase()),
+    }));
 
     return {
       success: true,
@@ -6587,6 +6620,15 @@ async function executeKhuiKien(code, actor = "Telegram Bot") {
           where: { code: normalizedCode },
           data: { status: "opened", updatedAt: new Date() },
         });
+        await appendHandlingUnitsTransaction(tx, {
+          unitId: normalizedCode,
+          sku: unit.sku,
+          type: "Khui kiện",
+          quantity: 0,
+          remaining: unit.remainingQuantity,
+          actor,
+          note: "Đã khui",
+        });
         return updated;
       });
       if (res) {
@@ -6627,6 +6669,17 @@ async function executeKhuiKien(code, actor = "Telegram Bot") {
   target.updatedAt = new Date();
   list[idx] = target;
   await saveHandlingUnitsToStore(list);
+  if (prisma) {
+    await appendHandlingUnitsTransaction(prisma, {
+      unitId: normalizedCode,
+      sku: target.sku || target.skuName,
+      type: "Khui kiện",
+      quantity: 0,
+      remaining: target.remainingQuantity ?? target.currentPcs ?? 0,
+      actor,
+      note: "Đã khui",
+    });
+  }
 
   broadcastHandlingUnitsChanged("UNSEAL", {
     code: normalizedCode,
@@ -6664,6 +6717,34 @@ function normalizeHandlingPickDestination(value) {
     .trim()
     .toUpperCase();
   return HANDLING_PICK_DESTINATIONS[key] ? key : "PACKING";
+}
+
+const HANDLING_UNIT_WITHDRAWAL_HISTORY_PREFIX = "handlingUnitWithdrawal:";
+
+async function getHandlingUnitWithdrawalCodes(tx) {
+  const rows = await tx.appConfig.findMany({
+    where: { key: { startsWith: HANDLING_UNIT_WITHDRAWAL_HISTORY_PREFIX } },
+    select: { key: true },
+  });
+  return new Set(
+    rows.map((row) =>
+      String(row.key || "")
+        .slice(HANDLING_UNIT_WITHDRAWAL_HISTORY_PREFIX.length)
+        .trim()
+        .toUpperCase(),
+    ),
+  );
+}
+
+async function markHandlingUnitWithdrawal(tx, code) {
+  const normalizedCode = String(code || "").trim().toUpperCase();
+  if (!normalizedCode) return;
+  const key = `${HANDLING_UNIT_WITHDRAWAL_HISTORY_PREFIX}${normalizedCode}`;
+  await tx.appConfig.upsert({
+    where: { key },
+    create: { key, value: new Date().toISOString() },
+    update: { value: new Date().toISOString() },
+  });
 }
 
 async function appendHandlingUnitsTransactions(tx, entries) {
@@ -6766,6 +6847,7 @@ async function executeRutHang(
           actor,
           note: `Rút ${qty} ${unit.baseUnit} sang ${destinationMeta.label}${note ? ` · ${note}` : ""}${nextRemaining === 0 ? " · Kiện đã hết hàng" : ""}`,
         });
+        await markHandlingUnitWithdrawal(tx, normalizedCode);
 
         broadcastHandlingUnitsChanged("PICK", {
           code: normalizedCode,
@@ -6849,6 +6931,7 @@ async function executeRutHang(
         actor,
         note: `Rút ${qty} ${target.baseUnit || target.unitName || "Gói"} sang ${destinationMeta.label}${note ? ` · ${note}` : ""}${nextRemaining === 0 ? " · Kiện đã hết hàng" : ""}`,
       });
+      await markHandlingUnitWithdrawal(prisma, normalizedCode);
     } catch {}
   }
 
@@ -7788,6 +7871,29 @@ ipcMain.handle("handlingUnits:deleteUnit", async (_event, payload = {}) => {
     const deleted = await prisma.$transaction(async (tx) => {
       const unit = await tx.handlingUnit.findUnique({ where: { code } });
       if (!unit) throw new Error(`Không tìm thấy kiện [${code}].`);
+      if (currentSession?.role !== "admin") {
+        const withdrawalCodes = await getHandlingUnitWithdrawalCodes(tx);
+        let hasWithdrawalHistory = withdrawalCodes.has(code);
+        if (!hasWithdrawalHistory) {
+          const historyConfig = await tx.appConfig.findUnique({
+            where: { key: "handlingUnitsTransactionsJson" },
+            select: { value: true },
+          });
+          hasWithdrawalHistory = parseJsonArray(historyConfig?.value).some(
+            (item) =>
+              String(item?.unitId || "").trim().toUpperCase() === code &&
+              (Number(item?.quantity) < 0 ||
+                /rút hàng|rút\s+\d+|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho/i.test(
+                  `${item?.type || ""} ${item?.note || ""}`,
+                )),
+          );
+        }
+        if (hasWithdrawalHistory) {
+          throw new Error(
+            `Kiện [${code}] đã có lịch sử rút hàng. Chỉ tài khoản admin mới được phép xóa.`,
+          );
+        }
+      }
       if (Number(unit.remainingQuantity) !== Number(unit.initialQuantity)) {
         throw new Error(
           `Không thể xóa kiện [${code}] vì đã phát sinh rút hoặc điều chỉnh số lượng.`,

@@ -5781,7 +5781,7 @@ export default function Attendance() {
                     />
                 </Card>
 
-                {fineAuditLog.length > 0 && (
+                {isAdmin && fineAuditLog.length > 0 && (
                     <Card
                         bodyStyle={{ padding: 0 }}
                         style={{ borderTop: '3px solid #faad14', marginTop: 16 }}

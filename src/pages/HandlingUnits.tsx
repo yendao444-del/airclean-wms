@@ -12,6 +12,7 @@ import {
   Radio,
   Segmented,
   Select,
+  Table,
   Tag,
   Tooltip,
   Typography,
@@ -40,8 +41,11 @@ import {
   CompassOutlined,
   EditOutlined,
   DeleteOutlined,
+  HistoryOutlined,
+  ExclamationCircleFilled,
 } from "@ant-design/icons";
 import { Warehouse2DMap } from "../components/Warehouse2DMap";
+import { useAuth } from "../contexts/AuthContext";
 import sealedSackImage from "../assets/warehouse-sack-sealed.webp";
 import openedSackImage from "../assets/warehouse-sack-opened.webp";
 import plainCartonImage from "../assets/plain-kraft-carton.webp";
@@ -80,6 +84,7 @@ type UnitRow = {
   currentPcs: number;
   note?: string;
   updatedAt?: string;
+  hasWithdrawalHistory?: boolean;
 };
 type LocationItem = {
   id: number;
@@ -173,13 +178,22 @@ const imageFor = (unit?: UnitRow) => {
 const locationFor = (unit: UnitRow) =>
   [unit.location?.zone, unit.location?.rack].filter(Boolean).join(" · ") ||
   "Chưa phân khu";
+const isWithdrawalTransaction = (item: any) =>
+  Number(item?.quantity) < 0 ||
+  /rút hàng|rút\s+\d+|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho/i.test(
+    `${item?.type || ""} ${item?.note || ""}`,
+  );
+const historyDescriptionFor = (item: any) =>
+  isWithdrawalTransaction(item) ? "Đã rút" : item?.note || item?.destination || "--";
 const statusFor = (status: string) =>
   status === "Nguyên niêm phong" ? (
     <Tag color="green">Đã niêm phong</Tag>
   ) : status === "Đang sử dụng" ? (
     <Tag color="orange">Đang mở</Tag>
   ) : status === "Chờ kiểm" ? (
-    <Tag color="gold">Chờ kiểm</Tag>
+    <Tag className="hu-pending-status-tag" icon={<ExclamationCircleFilled />}>
+      Chờ kiểm
+    </Tag>
   ) : (
     <Tag>Đã hết hàng</Tag>
   );
@@ -261,6 +275,29 @@ const normalizeSearch = (text: string) =>
     .replace(/đ/g, "d")
     .replace(/Đ/g, "d")
     .trim();
+
+const historyActionMeta = (type?: string) => {
+  const value = String(type || "Hoạt động khác");
+  if (/nhập kiện|tạo kiện/i.test(value)) return { label: value, color: "green" };
+  if (/lấy hàng|rút hàng|chuyển/i.test(value)) return { label: value, color: "blue" };
+  if (/khui|mở/i.test(value)) return { label: value, color: "orange" };
+  if (/đóng|niêm phong/i.test(value)) return { label: value, color: "cyan" };
+  if (/kiểm|điều chỉnh/i.test(value)) return { label: value, color: "gold" };
+  if (/xóa/i.test(value)) return { label: value, color: "red" };
+  return { label: value, color: "default" };
+};
+
+const formatHistoryTime = (value?: string) => {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) return "--";
+  return date.toLocaleString("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+};
 
 // Product groups come from the catalog with this generic category prefix.
 // Keep it in the stored data, but omit it from the SKU browser label.
@@ -576,6 +613,8 @@ let handlingUnitsWorkspaceCache: Pick<
 > | null = null;
 
 export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
   const [workspace, setWorkspace] = useState(() =>
     handlingUnitsWorkspaceCache
       ? { ...emptyWorkspace, ...handlingUnitsWorkspaceCache }
@@ -627,6 +666,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [visibleUnitLimit, setVisibleUnitLimit] = useState(100);
+  const [historySearch, setHistorySearch] = useState("");
+  const [historyType, setHistoryType] = useState("all");
+  const [historyFromDate, setHistoryFromDate] = useState("");
+  const [historyToDate, setHistoryToDate] = useState("");
   const [locModalView, setLocModalView] = useState<"map" | "list">("map");
 
   const [selectedLocationCode, setSelectedLocationCode] =
@@ -814,10 +857,13 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           {
             id: `TR-${Date.now()}`,
             unitId: unit.id,
+            sku: unit.skuName,
             createdAt: new Date().toISOString(),
             type: "Khui kiện",
-            quantity: unit.currentPcs,
-            note: `Mở niêm phong kiện ${unit.id} để bắt đầu xuất lẻ`,
+            quantity: 0,
+            remaining: unit.currentPcs,
+            actor: user?.username || "Hệ thống",
+            note: "Đã khui",
           },
           ...prev.recentTransactions,
         ],
@@ -870,20 +916,31 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     }
   };
 
+  const unitHasWithdrawalHistory = (unit: UnitRow) =>
+    Boolean(unit.hasWithdrawalHistory) || workspace.recentTransactions.some(
+      (item) =>
+        String(item?.unitId || "").toUpperCase() === unit.id.toUpperCase() &&
+        isWithdrawalTransaction(item),
+    );
+
   const handleDeleteUnit = (unit: UnitRow) => {
     const hasQuantityChanges = unit.currentPcs !== unit.initialPcs;
+    const hasWithdrawalHistory = unitHasWithdrawalHistory(unit);
+    const lockedForNonAdmin = !isAdmin && hasWithdrawalHistory;
     Modal.confirm({
       title: `Xóa kiện ${unit.id}?`,
       icon: <DeleteOutlined style={{ color: "#dc2626" }} />,
-      content: hasQuantityChanges
+      content: lockedForNonAdmin
+        ? "Kiện đã có lịch sử rút hàng. Chỉ tài khoản admin mới có quyền xóa kiện này."
+        : hasQuantityChanges
         ? "Kiện đã phát sinh biến động số lượng nên không thể xóa. Hãy giữ kiện để bảo toàn lịch sử kho."
         : "Kiện sẽ bị xóa khỏi danh sách quản lý. Thao tác này vẫn được ghi lại trong lịch sử hệ thống.",
       okText: "Xóa kiện",
-      okButtonProps: { danger: true, disabled: hasQuantityChanges },
+      okButtonProps: { danger: true, disabled: hasQuantityChanges || lockedForNonAdmin },
       cancelText: "Hủy",
       centered: true,
       async onOk() {
-        if (hasQuantityChanges) return;
+        if (hasQuantityChanges || lockedForNonAdmin) return;
         setDeletingUnitCode(unit.id);
         try {
           const result = await window.electronAPI?.handlingUnits?.deleteUnit({
@@ -1525,6 +1582,33 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     [displayedUnits, visibleUnitLimit],
   );
 
+  const historyTypes = useMemo(
+    () =>
+      [...new Set(workspace.recentTransactions.map((item) => String(item.type || "Hoạt động khác")))].sort(),
+    [workspace.recentTransactions],
+  );
+  const globalHistory = useMemo(() => {
+    const term = normalizeSearch(historySearch);
+    const fromTime = historyFromDate ? new Date(`${historyFromDate}T00:00:00`).getTime() : 0;
+    const toTime = historyToDate ? new Date(`${historyToDate}T23:59:59.999`).getTime() : Number.POSITIVE_INFINITY;
+    return workspace.recentTransactions
+      .filter((item) => {
+        const createdAt = new Date(item.createdAt || 0).getTime();
+        const content = normalizeSearch(
+          [item.unitId, item.sku, item.type, item.note, item.actor, item.destination]
+            .filter(Boolean)
+            .join(" "),
+        );
+        return (
+          (!term || content.includes(term)) &&
+          (historyType === "all" || item.type === historyType) &&
+          createdAt >= fromTime &&
+          createdAt <= toTime
+        );
+      })
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  }, [workspace.recentTransactions, historySearch, historyType, historyFromDate, historyToDate]);
+
   const watchAllocSku = Form.useWatch("sku", allocationForm);
   const watchAllocMethod =
     Form.useWatch("packageMethod", allocationForm) || "TAI";
@@ -1997,10 +2081,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     {pendingCheckCount > 0 && (
                       <button
                         type="button"
-                        className={`hu-filter-tab ${statusFilter === "Chờ kiểm" ? "active" : ""}`}
+                        className={`hu-filter-tab pending-check ${statusFilter === "Chờ kiểm" ? "active" : ""}`}
                         onClick={() => setStatusFilter("Chờ kiểm")}
                       >
-                        🟡 Chờ kiểm ({pendingCheckCount})
+                        <ExclamationCircleFilled /> Chờ kiểm
+                        <span className="hu-pending-count">{pendingCheckCount}</span>
                       </button>
                     )}
                     {emptyCount > 0 && (
@@ -2019,10 +2104,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               <div
                 className={`hu-package-grid ${displayedUnits.length <= 2 ? "is-sparse" : ""}`}
               >
-                  {visibleUnits.map((unit) => (
+                  {visibleUnits.map((unit) => {
+                    const deleteLocked = !isAdmin && unitHasWithdrawalHistory(unit);
+                    return (
                     <button
                       type="button"
-                      className={`hu-package-card ${unit.status === "Đang sử dụng" ? "opened" : ""} ${unit.status === "Đã hết" ? "empty" : ""}`}
+                      className={`hu-package-card ${unit.status === "Đang sử dụng" ? "opened" : ""} ${unit.status === "Chờ kiểm" ? "pending-check" : ""} ${unit.status === "Đã hết" ? "empty" : ""}`}
                       key={unit.id}
                       onClick={() => setDetail(unit)}
                     >
@@ -2035,11 +2122,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                         </div>
                         <div className="hu-card-header-actions">
                           {statusFor(unit.status)}
-                          <Tooltip title="Xóa kiện">
+                          <Tooltip title={deleteLocked ? "Kiện đã có lịch sử rút hàng — chỉ admin được xóa" : "Xóa kiện"}>
                             <button
                               type="button"
                               className="hu-card-delete-icon"
-                              disabled={deletingUnitCode === unit.id}
+                              disabled={deletingUnitCode === unit.id || deleteLocked}
                               aria-label={`Xóa kiện ${unit.id}`}
                               onClick={(event) => {
                                 event.stopPropagation();
@@ -2125,7 +2212,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                               })()}
                             {unit.status === "Đang sử dụng" && (
                               <button
-                                className="hu-action-btn pick"
+                                className="hu-action-btn final-check"
                                 onClick={() => handlePickUnit(unit)}
                               >
                                 <ShoppingCartOutlined /> Rút hàng
@@ -2153,7 +2240,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                         </button>
                       </footer>
                     </button>
-                  ))}
+                    );
+                  })}
               </div>
               {visibleUnits.length < displayedUnits.length && (
                 <Flex justify="center" style={{ padding: "0 0 18px" }}>
@@ -2165,6 +2253,112 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   </Button>
                 </Flex>
               )}
+              <section className="hu-global-history" aria-labelledby="hu-global-history-title">
+                <header className="hu-global-history-header">
+                  <div>
+                    <Typography.Title level={5} id="hu-global-history-title">
+                      <HistoryOutlined /> Lịch sử hoạt động chung
+                    </Typography.Title>
+                    <Typography.Text type="secondary">
+                      Tra cứu tất cả thao tác nhập, khui, rút, chuyển và kiểm kiện.
+                    </Typography.Text>
+                  </div>
+                  <Tag color="blue" style={{ margin: 0 }}>
+                    {globalHistory.length} hoạt động
+                  </Tag>
+                </header>
+                <div className="hu-global-history-filters">
+                  <Input
+                    allowClear
+                    prefix={<SearchOutlined />}
+                    value={historySearch}
+                    onChange={(event) => setHistorySearch(event.target.value)}
+                    placeholder="Tìm mã kiện, SKU, ghi chú..."
+                  />
+                  <Select
+                    value={historyType}
+                    onChange={setHistoryType}
+                    options={[
+                      { value: "all", label: "Tất cả thao tác" },
+                      ...historyTypes.map((type) => ({ value: type, label: type })),
+                    ]}
+                  />
+                  <Input
+                    aria-label="Từ ngày"
+                    type="date"
+                    value={historyFromDate}
+                    onChange={(event) => setHistoryFromDate(event.target.value)}
+                  />
+                  <Input
+                    aria-label="Đến ngày"
+                    type="date"
+                    value={historyToDate}
+                    onChange={(event) => setHistoryToDate(event.target.value)}
+                  />
+                </div>
+                <Table
+                  className="hu-global-history-table"
+                  rowKey={(item) => item.id || `${item.unitId}-${item.createdAt}`}
+                  size="middle"
+                  dataSource={globalHistory}
+                  locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Chưa có hoạt động phù hợp" /> }}
+                  pagination={{
+                    pageSize: 8,
+                    size: "small",
+                    showSizeChanger: false,
+                    showTotal: (total) => `Tổng ${total} hoạt động`,
+                  }}
+                  columns={[
+                    {
+                      title: "Thời gian",
+                      dataIndex: "createdAt",
+                      width: 155,
+                      render: (value) => <span className="hu-history-time">{formatHistoryTime(value)}</span>,
+                    },
+                    {
+                      title: "Kiện hàng",
+                      dataIndex: "unitId",
+                      width: 145,
+                      render: (value) => {
+                        const unit = workspace.register.find(
+                          (item) => item.id?.toUpperCase() === String(value || "").toUpperCase(),
+                        );
+                        return unit ? (
+                          <Button type="link" className="hu-history-unit-link" onClick={() => setDetail(unit)}>
+                            {value}
+                          </Button>
+                        ) : (
+                          <span>{value || "--"}</span>
+                        );
+                      },
+                    },
+                    { title: "SKU", dataIndex: "sku", width: 150, render: (value, item) => value || workspace.register.find((unit) => unit.id === item.unitId)?.skuName || "--" },
+                    {
+                      title: "Thao tác",
+                      dataIndex: "type",
+                      width: 180,
+                      render: (value) => {
+                        const meta = historyActionMeta(value);
+                        return <Tag color={meta.color}>{meta.label}</Tag>;
+                      },
+                    },
+                    {
+                      title: "SL thay đổi",
+                      dataIndex: "quantity",
+                      align: "right" as const,
+                      width: 115,
+                      render: (value) => <b className={Number(value) < 0 ? "is-negative" : "is-positive"}>{fmtSigned(Number(value || 0))}</b>,
+                    },
+                    {
+                      title: "Diễn giải",
+                      dataIndex: "note",
+                      ellipsis: true,
+                      render: (_value, item) => historyDescriptionFor(item),
+                    },
+                    { title: "Người thao tác", dataIndex: "actor", width: 135, render: (value) => value || "Hệ thống" },
+                  ]}
+                />
+              </section>
             </>
           ) : (
             <Empty description="Không tìm thấy SKU demo" />
@@ -2464,7 +2658,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                             <span className="hu-ledger-balance">
                               {fmt(item.balanceAfter)}
                             </span>
-                            <span>{item.note || "—"}</span>
+                            <span>{historyDescriptionFor(item)}</span>
                           </div>
                         );
                       })
