@@ -22,6 +22,8 @@ const runtimeConfigKeys = [
   "GDRIVE_FOLDER_ID",
   "TELEGRAM_BOT_TOKEN",
   "TELEGRAM_CHAT_ID",
+  "TELEGRAM_WMS_BOT_TOKEN",
+  "TELEGRAM_WMS_NODE_PRIORITY",
   "OAUTH_CLIENT_ID",
   "OAUTH_CLIENT_SECRET",
   "VAT_TELEGRAM_BOT",
@@ -6346,12 +6348,28 @@ ipcMain.handle("handlingUnits:updateUnit", async (_event, payload = {}) => {
 // ────────────────────────────────────────────────────────────────────────────
 // TELEGRAM BOT SERVICE — QUẢN LÝ KIỆN HÀNG WMS (@quanlykienhang_bot)
 // ────────────────────────────────────────────────────────────────────────────
-// Keep the bot credential outside source so revoking a leaked token is immediate.
-const TELEGRAM_WMS_BOT_TOKEN = process.env.TELEGRAM_WMS_BOT_TOKEN || "";
+// Production packages embed only the WMS bot token in a generated, ignored
+// runtime module. Environment configuration still overrides it for emergency
+// rotation without rebuilding the app.
+let bundledTelegramWmsBotToken = "";
+try {
+  bundledTelegramWmsBotToken = String(require("./wms-bot-runtime") || "").trim();
+} catch {}
+const TELEGRAM_WMS_BOT_TOKEN =
+  config.TELEGRAM_WMS_BOT_TOKEN || bundledTelegramWmsBotToken;
 const TELEGRAM_WMS_DEFAULT_CHAT = "1397184795";
 const TELEGRAM_WMS_GROUP_CONFIG_KEY = "telegramWmsGroupConfig";
 const TELEGRAM_WMS_LEASE_KEY = "telegramWmsPollingLease";
-const TELEGRAM_WMS_LEASE_DURATION_MS = 75 * 1000;
+const TELEGRAM_WMS_OFFSET_KEY = "telegramWmsLastUpdateId";
+const TELEGRAM_WMS_LEASE_DURATION_MS = 20 * 1000;
+const TELEGRAM_WMS_NODE_PRIORITY = Number.isFinite(
+  Number(config.TELEGRAM_WMS_NODE_PRIORITY),
+)
+  ? Number(config.TELEGRAM_WMS_NODE_PRIORITY)
+  : app.isPackaged
+    ? 100
+    : 10;
+const TELEGRAM_WMS_NODE_ROLE = app.isPackaged ? "production" : "development";
 const TELEGRAM_WMS_INSTANCE_ID = `${os.hostname()}:${process.pid}:${crypto.randomBytes(4).toString("hex")}`;
 let telegramWmsBotRunning = false;
 let telegramWmsIsLeaseOwner = false;
@@ -6361,6 +6379,7 @@ let telegramWmsPollRequest = null;
 let telegramWmsPollTimer = null;
 let telegramWmsLastPollAt = null;
 let telegramWmsLastError = null;
+let telegramWmsOffsetLoaded = false;
 let telegramWmsGroupChatId = null;
 let telegramWmsGroupTitle = "";
 let telegramWmsGroupConfigLoaded = false;
@@ -6388,6 +6407,8 @@ async function tryAcquireTelegramWmsLease() {
         const nextLease = {
           ownerId: TELEGRAM_WMS_INSTANCE_ID,
           ownerLabel: `${os.hostname()} (PID ${process.pid})`,
+          ownerRole: TELEGRAM_WMS_NODE_ROLE,
+          priority: TELEGRAM_WMS_NODE_PRIORITY,
           expiresAt: new Date(
             dbNow + TELEGRAM_WMS_LEASE_DURATION_MS,
           ).toISOString(),
@@ -6416,10 +6437,62 @@ async function tryAcquireTelegramWmsLease() {
         const isCurrentOwner = currentLease.ownerId === TELEGRAM_WMS_INSTANCE_ID;
         const isExpired = !Number.isFinite(expiresAt) || expiresAt <= dbNow;
 
+        // A higher-priority node asks the current owner to yield on its next
+        // lease renewal. This avoids two desktop clients polling Telegram at
+        // the same time while still allowing production to take over from dev.
+        const candidateSeenAt = Date.parse(
+          String(currentLease.candidateSeenAt || ""),
+        );
+        const candidateIsAlive =
+          Number.isFinite(candidateSeenAt) &&
+          candidateSeenAt > dbNow - TELEGRAM_WMS_LEASE_DURATION_MS;
+        const candidatePriority = candidateIsAlive
+          ? Number(currentLease.candidatePriority || 0)
+          : 0;
+
+        if (
+          isCurrentOwner &&
+          candidateIsAlive &&
+          candidatePriority > TELEGRAM_WMS_NODE_PRIORITY
+        ) {
+          telegramWmsLeaseOwnerLabel = String(
+            currentLease.candidateLabel || "máy production",
+          );
+          await tx.appConfig.update({
+            where: { key: TELEGRAM_WMS_LEASE_KEY },
+            data: {
+              value: JSON.stringify({
+                ...currentLease,
+                expiresAt: new Date(0).toISOString(),
+              }),
+            },
+          });
+          return false;
+        }
+
         if (!isCurrentOwner && !isExpired) {
           telegramWmsLeaseOwnerLabel = String(
             currentLease.ownerLabel || currentLease.ownerId || "máy khác",
           );
+          const currentPriority = Number(currentLease.priority || 0);
+          const shouldRequestHandoff =
+            TELEGRAM_WMS_NODE_PRIORITY > currentPriority &&
+            TELEGRAM_WMS_NODE_PRIORITY >= candidatePriority;
+          if (shouldRequestHandoff) {
+            await tx.appConfig.update({
+              where: { key: TELEGRAM_WMS_LEASE_KEY },
+              data: {
+                value: JSON.stringify({
+                  ...currentLease,
+                  candidateOwnerId: TELEGRAM_WMS_INSTANCE_ID,
+                  candidateLabel: nextLease.ownerLabel,
+                  candidateRole: TELEGRAM_WMS_NODE_ROLE,
+                  candidatePriority: TELEGRAM_WMS_NODE_PRIORITY,
+                  candidateSeenAt: new Date(dbNow).toISOString(),
+                }),
+              },
+            });
+          }
           return false;
         }
 
@@ -6463,6 +6536,73 @@ async function releaseTelegramWmsLease() {
   } catch (error) {
     console.warn("[TelegramWMS] Release lease error:", error.message);
   }
+}
+
+async function loadTelegramWmsOffset() {
+  if (!prisma) return telegramWmsLastUpdateId;
+  try {
+    const row = await prisma.appConfig.findUnique({
+      where: { key: TELEGRAM_WMS_OFFSET_KEY },
+      select: { value: true },
+    });
+    const storedOffset = Math.max(0, Math.floor(Number(row?.value || 0)));
+    telegramWmsLastUpdateId = Math.max(
+      telegramWmsLastUpdateId,
+      storedOffset,
+    );
+    telegramWmsOffsetLoaded = true;
+  } catch (error) {
+    telegramWmsLastError = `Không thể tải Telegram offset: ${error.message}`;
+    console.warn("[TelegramWMS] Load offset error:", error.message);
+  }
+  return telegramWmsLastUpdateId;
+}
+
+async function saveTelegramWmsOffset(nextOffset) {
+  const normalizedOffset = Math.max(0, Math.floor(Number(nextOffset || 0)));
+  telegramWmsLastUpdateId = Math.max(
+    telegramWmsLastUpdateId,
+    normalizedOffset,
+  );
+  if (!prisma) return telegramWmsLastUpdateId;
+  try {
+    const storedOffset = await prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw`
+        SELECT "value"
+        FROM "AppConfig"
+        WHERE "key" = ${TELEGRAM_WMS_OFFSET_KEY}
+        FOR UPDATE
+      `;
+      const currentRow = Array.isArray(rows) ? rows[0] : null;
+      const currentOffset = Math.max(
+        0,
+        Math.floor(Number(currentRow?.value || 0)),
+      );
+      const finalOffset = Math.max(currentOffset, normalizedOffset);
+      if (currentRow) {
+        await tx.appConfig.update({
+          where: { key: TELEGRAM_WMS_OFFSET_KEY },
+          data: { value: String(finalOffset) },
+        });
+      } else {
+        await tx.appConfig.create({
+          data: {
+            key: TELEGRAM_WMS_OFFSET_KEY,
+            value: String(finalOffset),
+          },
+        });
+      }
+      return finalOffset;
+    });
+    telegramWmsLastUpdateId = Math.max(
+      telegramWmsLastUpdateId,
+      storedOffset,
+    );
+  } catch (error) {
+    telegramWmsLastError = `Không thể lưu Telegram offset: ${error.message}`;
+    console.warn("[TelegramWMS] Save offset error:", error.message);
+  }
+  return telegramWmsLastUpdateId;
 }
 
 function telegramWmsActorKey(chatId, userId) {
@@ -6894,15 +7034,43 @@ async function saveHandlingUnitsToStore(units) {
   }
 }
 
-async function executeKhuiKien(code, actor = "Telegram Bot") {
+function buildTelegramWmsOperationKey(updateId, action, code) {
+  const normalizedUpdateId = Math.max(0, Math.floor(Number(updateId || 0)));
+  if (!normalizedUpdateId) return "";
+  const safeAction = String(action || "operation").replace(/[^a-z0-9_-]/gi, "");
+  const safeCode = String(code || "").trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+  return `telegramWmsOperation:${normalizedUpdateId}:${safeAction}:${safeCode}`;
+}
+
+async function executeKhuiKien(
+  code,
+  actor = "Telegram Bot",
+  telegramUpdateId = null,
+) {
   const normalizedCode = String(code || "")
     .trim()
     .toUpperCase();
   if (!normalizedCode) throw new Error("Vui lòng cung cấp mã kiện.");
+  const operationKey = buildTelegramWmsOperationKey(
+    telegramUpdateId,
+    "unseal",
+    normalizedCode,
+  );
 
   if (prisma) {
     try {
       const res = await prisma.$transaction(async (tx) => {
+        if (operationKey) {
+          const completed = await tx.appConfig.findUnique({
+            where: { key: operationKey },
+          });
+          if (completed) {
+            const existingUnit = await tx.handlingUnit.findUnique({
+              where: { code: normalizedCode },
+            });
+            if (existingUnit) return existingUnit;
+          }
+        }
         const unit = await tx.handlingUnit.findUnique({
           where: { code: normalizedCode },
         });
@@ -6927,6 +7095,18 @@ async function executeKhuiKien(code, actor = "Telegram Bot") {
           actor,
           note: "Đã khui",
         });
+        if (operationKey) {
+          await tx.appConfig.create({
+            data: {
+              key: operationKey,
+              value: JSON.stringify({
+                action: "unseal",
+                code: normalizedCode,
+                completedAt: new Date().toISOString(),
+              }),
+            },
+          });
+        }
         return updated;
       });
       if (res) {
@@ -6944,6 +7124,12 @@ async function executeKhuiKien(code, actor = "Telegram Bot") {
         dbErr.message.includes("chờ kiểm")
       )
         throw dbErr;
+      if (dbErr?.code === "P2002" && operationKey) {
+        const existingUnit = await prisma.handlingUnit.findUnique({
+          where: { code: normalizedCode },
+        });
+        if (existingUnit) return existingUnit;
+      }
     }
   }
 
@@ -7083,6 +7269,7 @@ async function executeRutHang(
   actor = "Telegram Bot",
   note = "",
   destination = "PACKING",
+  telegramUpdateId = null,
 ) {
   const normalizedCode = String(code || "")
     .trim()
@@ -7092,10 +7279,35 @@ async function executeRutHang(
   const destinationMeta = HANDLING_PICK_DESTINATIONS[destinationCode];
   if (!normalizedCode || qty <= 0)
     throw new Error("Vui lòng nhập mã kiện và số lượng cần rút hợp lệ.");
+  const operationKey = buildTelegramWmsOperationKey(
+    telegramUpdateId,
+    "pick",
+    normalizedCode,
+  );
 
   if (prisma) {
     try {
       const res = await prisma.$transaction(async (tx) => {
+        if (operationKey) {
+          const completed = await tx.appConfig.findUnique({
+            where: { key: operationKey },
+          });
+          if (completed) {
+            try {
+              const savedResult = JSON.parse(completed.value || "{}");
+              const existingUnit = await tx.handlingUnit.findUnique({
+                where: { code: normalizedCode },
+              });
+              if (existingUnit) {
+                return {
+                  ...savedResult,
+                  unit: existingUnit,
+                  duplicate: true,
+                };
+              }
+            } catch {}
+          }
+        }
         const unit = await tx.handlingUnit.findUnique({
           where: { code: normalizedCode },
         });
@@ -7147,6 +7359,26 @@ async function executeRutHang(
         });
         await markHandlingUnitWithdrawal(tx, normalizedCode);
 
+        const operationResult = {
+          picked: qty,
+          remaining: nextRemaining,
+          destination: destinationCode,
+          destinationPcs,
+          packingAreaPcs:
+            destinationCode === "PACKING" ? destinationPcs : 0,
+        };
+        if (operationKey) {
+          await tx.appConfig.create({
+            data: {
+              key: operationKey,
+              value: JSON.stringify({
+                ...operationResult,
+                completedAt: new Date().toISOString(),
+              }),
+            },
+          });
+        }
+
         broadcastHandlingUnitsChanged("PICK", {
           code: normalizedCode,
           quantity: qty,
@@ -7157,11 +7389,7 @@ async function executeRutHang(
         });
         return {
           unit: updated,
-          picked: qty,
-          remaining: nextRemaining,
-          destination: destinationCode,
-          destinationPcs,
-          packingAreaPcs: destinationCode === "PACKING" ? destinationPcs : 0,
+          ...operationResult,
         };
       });
       if (res) return res;
@@ -7171,6 +7399,16 @@ async function executeRutHang(
         dbErr.message.includes("lớn hơn tồn")
       )
         throw dbErr;
+      if (dbErr?.code === "P2002" && operationKey) {
+        const [completed, existingUnit] = await Promise.all([
+          prisma.appConfig.findUnique({ where: { key: operationKey } }),
+          prisma.handlingUnit.findUnique({ where: { code: normalizedCode } }),
+        ]);
+        if (completed && existingUnit) {
+          const savedResult = JSON.parse(completed.value || "{}");
+          return { ...savedResult, unit: existingUnit, duplicate: true };
+        }
+      }
     }
   }
 
@@ -7466,7 +7704,7 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
   }
 }
 
-async function handleTelegramWmsCallbackQuery(callbackQuery) {
+async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = null) {
   if (!callbackQuery || !callbackQuery.data) return;
   const chatId = callbackQuery.message?.chat?.id;
   const messageId = callbackQuery.message?.message_id;
@@ -7529,7 +7767,14 @@ async function handleTelegramWmsCallbackQuery(callbackQuery) {
       return;
     }
     try {
-      const res = await executeRutHang(code, qty, actor);
+      const res = await executeRutHang(
+        code,
+        qty,
+        actor,
+        "",
+        "PACKING",
+        telegramUpdateId,
+      );
       await answerTelegramCallbackQuery(queryId, `✅ Đã rút ${qty} sản phẩm!`);
       const resHtml = buildTelegramWmsPickResult(code, res, actorLabel);
 
@@ -7548,7 +7793,7 @@ async function handleTelegramWmsCallbackQuery(callbackQuery) {
   if (data.startsWith("unseal_unit:")) {
     const code = data.split(":")[1];
     try {
-      const unit = await executeKhuiKien(code, actor);
+      const unit = await executeKhuiKien(code, actor, telegramUpdateId);
       await answerTelegramCallbackQuery(queryId, `✅ Đã khui kiện ${code}!`);
       const resHtml =
         `✅ <b>KHUI KIỆN 1 CHẠM THÀNH CÔNG!</b>\n\n` +
@@ -7622,7 +7867,7 @@ async function handleTelegramWmsCallbackQuery(callbackQuery) {
   await answerTelegramCallbackQuery(queryId);
 }
 
-async function handleTelegramWmsIncomingMessage(message) {
+async function handleTelegramWmsIncomingMessage(message, telegramUpdateId = null) {
   if (!message || !message.text) return;
   const chatId = message.chat.id;
   const text = message.text.trim();
@@ -7734,7 +7979,14 @@ async function handleTelegramWmsIncomingMessage(message) {
       ? `@${message.from.username}`
       : message.from?.first_name || "Nhân viên kho";
     try {
-      const res = await executeRutHang(pendingCustomPick.code, qty, actor);
+      const res = await executeRutHang(
+        pendingCustomPick.code,
+        qty,
+        actor,
+        "",
+        "PACKING",
+        telegramUpdateId,
+      );
       telegramWmsPendingCustomPicks.delete(actorKey);
       await sendTelegramWmsMessage(
         chatId,
@@ -7830,6 +8082,7 @@ async function handleTelegramWmsIncomingMessage(message) {
           const unit = await executeKhuiKien(
             code,
             `Telegram QR: ${message.from?.username || message.from?.first_name || chatId}`,
+            telegramUpdateId,
           );
           let zoneName = unit.zone;
           try {
@@ -7877,6 +8130,9 @@ async function handleTelegramWmsIncomingMessage(message) {
             code,
             qty,
             `Telegram QR: ${message.from?.username || message.from?.first_name || chatId}`,
+            "",
+            "PACKING",
+            telegramUpdateId,
           );
           const resHtml =
             `📷 <b>ĐÃ QUÉT MÃ QR & RÚT HÀNG THÀNH CÔNG!</b>\n\n` +
@@ -7933,6 +8189,9 @@ async function handleTelegramWmsIncomingMessage(message) {
         code,
         qty,
         `Telegram: ${message.from?.username || message.from?.first_name || chatId}`,
+        "",
+        "PACKING",
+        telegramUpdateId,
       );
       const resHtml =
         `🚀 <b>RÚT HÀNG SANG KHU ĐÓNG GÓI THÀNH CÔNG!</b>\n\n` +
@@ -7965,6 +8224,7 @@ async function handleTelegramWmsIncomingMessage(message) {
       const unit = await executeKhuiKien(
         code,
         `Telegram: ${message.from?.username || message.from?.first_name || chatId}`,
+        telegramUpdateId,
       );
       const resHtml =
         `✅ <b>KHUI KIỆN THÀNH CÔNG!</b>\n\n` +
@@ -8018,7 +8278,8 @@ function startTelegramWmsPolling() {
           console.warn("[TelegramWMS] Lost polling ownership.");
         }
         telegramWmsIsLeaseOwner = false;
-        scheduleNextPoll(5000);
+        telegramWmsOffsetLoaded = false;
+        scheduleNextPoll(3000);
         return;
       }
       if (!telegramWmsIsLeaseOwner) {
@@ -8027,14 +8288,17 @@ function startTelegramWmsPolling() {
         );
       }
       telegramWmsIsLeaseOwner = true;
+      if (!telegramWmsOffsetLoaded) {
+        await loadTelegramWmsOffset();
+      }
 
-      const path = `/bot${TELEGRAM_WMS_BOT_TOKEN}/getUpdates?offset=${telegramWmsLastUpdateId}&timeout=25`;
+      const path = `/bot${TELEGRAM_WMS_BOT_TOKEN}/getUpdates?offset=${telegramWmsLastUpdateId}&timeout=8`;
       telegramWmsPollRequest = https.request(
         {
           hostname: "api.telegram.org",
           path,
           method: "GET",
-          timeout: 30000,
+          timeout: 13000,
         },
         (res) => {
           let body = "";
@@ -8047,12 +8311,18 @@ function startTelegramWmsPolling() {
                 telegramWmsLastPollAt = new Date().toISOString();
                 telegramWmsLastError = null;
                 for (const update of json.result) {
-                  telegramWmsLastUpdateId = update.update_id + 1;
                   if (update.callback_query) {
-                    await handleTelegramWmsCallbackQuery(update.callback_query);
+                    await handleTelegramWmsCallbackQuery(
+                      update.callback_query,
+                      update.update_id,
+                    );
                   } else if (update.message) {
-                    await handleTelegramWmsIncomingMessage(update.message);
+                    await handleTelegramWmsIncomingMessage(
+                      update.message,
+                      update.update_id,
+                    );
                   }
+                  await saveTelegramWmsOffset(update.update_id + 1);
                 }
               } else {
                 telegramWmsLastError =
@@ -8066,7 +8336,7 @@ function startTelegramWmsPolling() {
               telegramWmsLastError = e.message;
               console.warn("[TelegramWMS] Parse update error:", e.message);
             }
-            scheduleNextPoll(telegramWmsLastError ? 5000 : 500);
+            scheduleNextPoll(telegramWmsLastError ? 3000 : 300);
           });
         },
       );
@@ -8075,7 +8345,7 @@ function startTelegramWmsPolling() {
         if (!telegramWmsBotRunning) return;
         telegramWmsLastError = error.message;
         console.warn("[TelegramWMS] Polling request error:", error.message);
-        scheduleNextPoll(5000);
+        scheduleNextPoll(3000);
       });
       telegramWmsPollRequest.on("timeout", () => {
         telegramWmsPollRequest?.destroy();
@@ -8085,7 +8355,7 @@ function startTelegramWmsPolling() {
       telegramWmsPollRequest = null;
       telegramWmsLastError = err.message;
       console.warn("[TelegramWMS] Polling loop error:", err.message);
-      scheduleNextPoll(5000);
+      scheduleNextPoll(3000);
     }
   };
 
@@ -8102,6 +8372,7 @@ function stopTelegramWmsPolling() {
   }
   void releaseTelegramWmsLease();
   telegramWmsIsLeaseOwner = false;
+  telegramWmsOffsetLoaded = false;
 }
 
 // Electron is the single polling owner so inbound commands use the same live
@@ -8643,6 +8914,11 @@ ipcMain.handle("handlingUnits:getTelegramStatus", async () => {
       isRunning: telegramWmsBotRunning,
       isPollingOwner: telegramWmsIsLeaseOwner,
       pollingOwner: telegramWmsLeaseOwnerLabel,
+      nodeLabel: `${os.hostname()} (PID ${process.pid})`,
+      nodeRole: TELEGRAM_WMS_NODE_ROLE,
+      nodePriority: TELEGRAM_WMS_NODE_PRIORITY,
+      tokenConfigured: Boolean(TELEGRAM_WMS_BOT_TOKEN),
+      takeoverTimeoutSeconds: Math.ceil(TELEGRAM_WMS_LEASE_DURATION_MS / 1000),
       botUsername: "quanlykienhang_bot",
       defaultChatId: TELEGRAM_WMS_DEFAULT_CHAT,
       groupChatId: groupConfig.chatId,

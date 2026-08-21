@@ -35,6 +35,7 @@ dev.db
 electron/gdrive-credentials.json
 electron/gdrive-token.json
 electron/supabase-storage.json
+electron/wms-bot-runtime.js
 
 # SQLite databases (không commit dữ liệu thật)
 prisma/*.db
