@@ -399,6 +399,11 @@ export interface ElectronAPI {
         isRunning: boolean;
         isPollingOwner: boolean;
         pollingOwner: string;
+        nodeLabel: string;
+        nodeRole: "production" | "development";
+        nodePriority: number;
+        tokenConfigured: boolean;
+        takeoverTimeoutSeconds: number;
         botUsername: string;
         defaultChatId: string;
         groupChatId: string | null;

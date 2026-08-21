@@ -116,6 +116,11 @@ type TelegramStatus = {
   isRunning: boolean;
   isPollingOwner: boolean;
   pollingOwner: string;
+  nodeLabel: string;
+  nodeRole: "production" | "development";
+  nodePriority: number;
+  tokenConfigured: boolean;
+  takeoverTimeoutSeconds: number;
   botUsername: string;
   groupChatId: string | null;
   groupTitle: string;
@@ -986,12 +991,21 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
   useEffect(() => {
     if (!showTelegramModal) return;
-    window.electronAPI?.handlingUnits
-      ?.getTelegramStatus?.()
-      .then((res) => {
-        if (res?.success && res.data) setTelegramStatus(res.data);
-      })
-      .catch((err) => console.warn("Load Telegram status error:", err));
+    let active = true;
+    const loadStatus = () => {
+      window.electronAPI?.handlingUnits
+        ?.getTelegramStatus?.()
+        .then((res) => {
+          if (active && res?.success && res.data) setTelegramStatus(res.data);
+        })
+        .catch((err) => console.warn("Load Telegram status error:", err));
+    };
+    loadStatus();
+    const timer = window.setInterval(loadStatus, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
   }, [showTelegramModal]);
 
   const handleUnsealUnit = async (unit: UnitRow) => {
@@ -4896,6 +4910,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             <Typography.Text style={{ fontSize: 12 }}>
               Máy xử lý Telegram: <b>{telegramStatus?.pollingOwner || "Đang xác định"}</b>
               {telegramStatus?.isPollingOwner ? " · Máy này đang giữ quyền bot" : " · Máy này đang ở chế độ chờ"}
+            </Typography.Text>
+            <Typography.Text type="secondary" style={{ display: "block", marginTop: 4, fontSize: 11 }}>
+              Node hiện tại: <b>{telegramStatus?.nodeRole === "production" ? "Production" : "Development"}</b>
+              {telegramStatus ? ` · Ưu tiên ${telegramStatus.nodePriority}` : ""}
+              {telegramStatus?.tokenConfigured ? " · Đã cấu hình token" : " · Chưa có token Telegram WMS"}
+              {telegramStatus ? ` · Tự chuyển node sau tối đa khoảng ${telegramStatus.takeoverTimeoutSeconds + 3} giây khi mất kết nối đột ngột` : ""}
             </Typography.Text>
           </div>
 
