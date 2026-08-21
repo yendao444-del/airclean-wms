@@ -75,6 +75,14 @@ mkdir "!PATCH_TEMP!\resources\app\node_modules\@supabase"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\iceberg-js"
 mkdir "!PATCH_TEMP!\resources\app\node_modules\tslib"
 
+call node scripts\prepare-google-oauth-config.js
+if errorlevel 1 (
+    echo    [ERROR] Khong tao duoc google-oauth-config.json cho ban production.
+    echo            Kiem tra OAUTH_CLIENT_ID/OAUTH_CLIENT_SECRET roi chay lai.
+    pause
+    exit /b 1
+)
+
 if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
     copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
     echo    [OK] Auto-copy gdrive-token.json moi nhat tu AppData vao electron/
@@ -86,6 +94,11 @@ if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
 )
 xcopy "dist\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 xcopy "electron\*" "!PATCH_TEMP!\resources\app\electron\" /E /I /Y /Q >nul 2>&1
+:: Patch desktop chi can google-oauth-config.json da tao o tren. Khong phat
+:: hanh config dev co database/service credentials cho may nhan vien.
+del /Q "!PATCH_TEMP!\resources\app\electron\config.js" 2>nul
+del /Q "!PATCH_TEMP!\resources\app\electron\supabase-storage.json" 2>nul
+del /Q "!PATCH_TEMP!\resources\app\electron\gdrive-credentials.json" 2>nul
 xcopy "node_modules\@supabase\*" "!PATCH_TEMP!\resources\app\node_modules\@supabase\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\iceberg-js\*" "!PATCH_TEMP!\resources\app\node_modules\iceberg-js\" /E /I /Y /Q >nul 2>&1
 xcopy "node_modules\tslib\*" "!PATCH_TEMP!\resources\app\node_modules\tslib\" /E /I /Y /Q >nul 2>&1
