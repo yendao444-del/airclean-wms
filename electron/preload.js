@@ -76,6 +76,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         pickUnit: (data) => ipcRenderer.invoke('handlingUnits:pickUnit', data),
         requestFinalCheck: (data) => ipcRenderer.invoke('handlingUnits:requestFinalCheck', data),
         finalizePick: (data) => ipcRenderer.invoke('handlingUnits:finalizePick', data),
+        finalizeShiftCheck: (data) => ipcRenderer.invoke('handlingUnits:finalizeShiftCheck', data),
         moveUnit: (data) => ipcRenderer.invoke('handlingUnits:move', data),
         updateUnit: (data) => ipcRenderer.invoke('handlingUnits:updateUnit', data),
         deleteUnit: (data) => ipcRenderer.invoke('handlingUnits:deleteUnit', data),

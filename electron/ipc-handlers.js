@@ -891,7 +891,7 @@ function isPasswordRotationRequired(user) {
 
 function getDriveAuthMessage(error) {
   if (isGoogleReauthError(error)) {
-    return "Google Drive đã hết hạn hoặc bị thu hồi quyền. Vui lòng đăng nhập lại Google Drive rồi tải lại file.";
+    return "Phiên Google Drive trên máy này đã hết hạn hoặc không còn hợp lệ. Vui lòng kết nối lại Google Drive rồi tải lại file; nếu bạn không có quyền cấu hình, hãy liên hệ admin.";
   }
   return error?.message || "Không thể kết nối Google Drive.";
 }
@@ -904,7 +904,11 @@ async function ensureDriveReady() {
   if (!drive) {
     driveLastErrorMessage =
       "Chưa có phiên đăng nhập Google Drive hợp lệ. Vui lòng đăng nhập lại Google Drive.";
-    return { success: false, error: driveLastErrorMessage };
+    return {
+      success: false,
+      error: driveLastErrorMessage,
+      reauthRequired: true,
+    };
   }
   try {
     await drive.about.get({ fields: "user(permissionId)" });
@@ -917,7 +921,11 @@ async function ensureDriveReady() {
       "[Drive] Authentication check failed:",
       error?.message || error,
     );
-    return { success: false, error: driveLastErrorMessage };
+    return {
+      success: false,
+      error: driveLastErrorMessage,
+      reauthRequired: isGoogleReauthError(error),
+    };
   }
 }
 
@@ -926,12 +934,14 @@ let evidenceDriveFolderId = null;
 
 // Evidence must remain available for audit, so it lives in Drive rather than
 // the short-retention object store used by the temporary image flow.
-async function getOrCreateEvidenceDriveFolder() {
+async function getOrCreateEvidenceDriveFolder(readyDrive = null) {
   if (evidenceDriveFolderId) return evidenceDriveFolderId;
-  const driveStatus = await ensureDriveReady();
-  if (!driveStatus.success) throw new Error(driveStatus.error);
-
-  const { drive } = driveStatus;
+  let drive = readyDrive;
+  if (!drive) {
+    const driveStatus = await ensureDriveReady();
+    if (!driveStatus.success) throw new Error(driveStatus.error);
+    drive = driveStatus.drive;
+  }
   const search = await drive.files.list({
     q: `name='${EVIDENCE_DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
     fields: "files(id)",
@@ -949,6 +959,50 @@ async function getOrCreateEvidenceDriveFolder() {
   });
   evidenceDriveFolderId = folder.data.id;
   return evidenceDriveFolderId;
+}
+
+async function getEvidenceDriveContext() {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const driveStatus = await ensureDriveReady();
+    if (!driveStatus.success) {
+      lastError = new Error(driveStatus.error);
+      lastError.reauthRequired = Boolean(driveStatus.reauthRequired);
+      if (!driveStatus.reauthRequired || attempt > 0) throw lastError;
+      resetDriveClient();
+      evidenceDriveFolderId = null;
+      continue;
+    }
+    try {
+      const folderId = await getOrCreateEvidenceDriveFolder(driveStatus.drive);
+      return { drive: driveStatus.drive, folderId };
+    } catch (error) {
+      lastError = error;
+      if (!isGoogleReauthError(error) || attempt > 0) throw error;
+      resetDriveClient();
+      evidenceDriveFolderId = null;
+    }
+  }
+  throw lastError || new Error("Không thể kết nối Google Drive.");
+}
+
+async function uploadPrivateEvidenceToDrive(
+  drive,
+  folderId,
+  fileName,
+  content,
+  mimeType,
+) {
+  const { Readable } = require("stream");
+  const body = new Readable();
+  body.push(Buffer.isBuffer(content) ? content : Buffer.from(content));
+  body.push(null);
+  const file = await drive.files.create({
+    requestBody: { name: fileName, parents: [folderId] },
+    media: { mimeType, body },
+    fields: "id, webViewLink",
+  });
+  return { fileId: file.data.id, webViewLink: file.data.webViewLink };
 }
 
 function assertStrongPassword(password) {
@@ -8173,6 +8227,170 @@ ipcMain.handle("handlingUnits:finalizePick", async (_event, payload = {}) => {
   }
 });
 
+const isHandlingUnitWithdrawalHistory = (item) =>
+  /chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho|chuyển khu kiểm hàng|lấy hàng|rút hàng/i.test(
+    String(item?.type || ""),
+  );
+
+const isHandlingUnitCompletedCheckHistory = (item) =>
+  /kiểm cuối ca|kiểm khớp - chốt hết kiện|kiểm lệch - cập nhật tồn thực tế/i.test(
+    String(item?.type || ""),
+  );
+
+const toLocalDayKey = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) => {
+  const idempotencyKey = String(payload.idempotencyKey || "").trim();
+  const requestKey = idempotencyKey ? `shift-check:${idempotencyKey}` : null;
+  if (requestKey && handlingUnitPickRequests.has(requestKey)) {
+    return { success: true, data: { duplicate: true } };
+  }
+  if (requestKey) handlingUnitPickRequests.add(requestKey);
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    if (items.length === 0 || items.length > 100) {
+      throw new Error("Danh sách kiểm cuối ca không hợp lệ.");
+    }
+
+    const normalizedItems = items.map((item) => ({
+      code: String(item?.code || "").trim().toUpperCase(),
+      expectedQuantity: Math.max(0, Math.floor(Number(item?.expectedQuantity))),
+      actualQuantity: Math.max(0, Math.floor(Number(item?.actualQuantity))),
+      reason: String(item?.reason || "").trim(),
+      note: String(item?.note || "").trim(),
+    }));
+    if (
+      normalizedItems.some(
+        (item) =>
+          !item.code ||
+          !Number.isFinite(item.expectedQuantity) ||
+          !Number.isFinite(item.actualQuantity),
+      )
+    ) {
+      throw new Error("Số lượng kiểm cuối ca không hợp lệ.");
+    }
+    if (new Set(normalizedItems.map((item) => item.code)).size !== normalizedItems.length) {
+      throw new Error("Danh sách kiểm có mã kiện bị trùng.");
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const historyConfig = await tx.appConfig.findUnique({
+        where: { key: "handlingUnitsTransactionsJson" },
+        select: { value: true },
+      });
+      let history = [];
+      try {
+        const parsed = JSON.parse(historyConfig?.value || "[]");
+        history = Array.isArray(parsed) ? parsed : [];
+      } catch {}
+      const todayKey = toLocalDayKey(new Date());
+      const checked = [];
+      const historyEntries = [];
+
+      for (const item of normalizedItems) {
+        const unit = await tx.handlingUnit.findUnique({ where: { code: item.code } });
+        if (!unit) throw new Error(`Không tìm thấy kiện [${item.code}].`);
+        if (Number(unit.remainingQuantity) !== item.expectedQuantity) {
+          throw new Error(
+            `Tồn kiện [${item.code}] vừa thay đổi từ ${item.expectedQuantity} thành ${unit.remainingQuantity}. Vui lòng tải lại và kiểm lại.`,
+          );
+        }
+        if (item.actualQuantity > Number(unit.initialQuantity)) {
+          throw new Error(
+            `Tồn thực tế kiện [${item.code}] không thể lớn hơn số lượng ban đầu ${unit.initialQuantity}.`,
+          );
+        }
+
+        const unitHistory = history.filter(
+          (entry) => String(entry?.unitId || "").trim().toUpperCase() === item.code,
+        );
+        const latestWithdrawalAt = unitHistory
+          .filter(
+            (entry) =>
+              isHandlingUnitWithdrawalHistory(entry) &&
+              toLocalDayKey(entry.createdAt) === todayKey,
+          )
+          .reduce((latest, entry) => Math.max(latest, new Date(entry.createdAt).getTime() || 0), 0);
+        const latestCheckAt = unitHistory
+          .filter(isHandlingUnitCompletedCheckHistory)
+          .reduce((latest, entry) => Math.max(latest, new Date(entry.createdAt).getTime() || 0), 0);
+        if (!latestWithdrawalAt || latestCheckAt >= latestWithdrawalAt) {
+          throw new Error(`Kiện [${item.code}] không có lượt rút mới cần kiểm trong hôm nay.`);
+        }
+
+        const variance = item.actualQuantity - item.expectedQuantity;
+        if (variance !== 0 && !item.reason) {
+          throw new Error(`Vui lòng chọn lý do chênh lệch cho kiện [${item.code}].`);
+        }
+        if (variance !== 0 && item.reason === "Khác" && !item.note) {
+          throw new Error(`Vui lòng nhập ghi chú cho lý do khác của kiện [${item.code}].`);
+        }
+
+        const nextStatus = item.actualQuantity === 0 ? "empty" : "opened";
+        const updated = await tx.handlingUnit.update({
+          where: { code: item.code },
+          data: {
+            remainingQuantity: item.actualQuantity,
+            status: nextStatus,
+            updatedAt: new Date(),
+          },
+        });
+        historyEntries.push({
+          unitId: item.code,
+          sku: unit.sku,
+          type: variance === 0 ? "Kiểm cuối ca - khớp" : "Kiểm cuối ca - điều chỉnh",
+          quantity: variance,
+          remaining: item.actualQuantity,
+          expectedQuantity: item.expectedQuantity,
+          actualQuantity: item.actualQuantity,
+          variance,
+          actor: currentSession?.username || "Renderer",
+          reason: variance === 0 ? "Kiểm khớp" : item.reason,
+          note: [
+            `Tồn dự kiến ${item.expectedQuantity}; thực tế ${item.actualQuantity}; chênh lệch ${variance > 0 ? "+" : ""}${variance}`,
+            item.reason,
+            item.note,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+        });
+        checked.push({
+          code: item.code,
+          expectedQuantity: item.expectedQuantity,
+          actualQuantity: item.actualQuantity,
+          variance,
+          status: nextStatus,
+          unit: updated,
+        });
+      }
+
+      await appendHandlingUnitsTransactions(tx, historyEntries);
+      return checked;
+    });
+
+    broadcastHandlingUnitsChanged("SHIFT_CHECK", {
+      codes: result.map((item) => item.code),
+      checkedCount: result.length,
+      actor: currentSession?.username || "Renderer",
+    });
+    return { success: true, data: { items: result } };
+  } catch (error) {
+    console.error("Finalize handling-unit shift check error:", error);
+    return { success: false, error: error.message };
+  } finally {
+    if (requestKey) handlingUnitPickRequests.delete(requestKey);
+  }
+});
+
 ipcMain.handle("handlingUnits:getTelegramStatus", async () => {
   const groupConfig = await loadTelegramWmsGroupConfig();
   return {
@@ -9410,6 +9628,7 @@ async function getOrCreateImportReceiptDriveFolder() {
     );
     return importReceiptDriveFolderId;
   } catch (err) {
+    driveLastErrorMessage = getDriveAuthMessage(err);
     console.error("❌ Import Receipt Drive folder error:", err.message);
     return null;
   }
@@ -10000,7 +10219,13 @@ ipcMain.handle(
       const driveUrls = [];
       const driveFileIds = [];
       const driveStatus = await ensureDriveReady();
-      if (!driveStatus.success) throw new Error(driveStatus.error);
+      if (!driveStatus.success) {
+        return {
+          success: false,
+          error: driveStatus.error,
+          reauthRequired: Boolean(driveStatus.reauthRequired),
+        };
+      }
       const drive = driveStatus.drive;
       const folderId = await getOrCreateImportReceiptDriveFolder();
       if (!folderId)
@@ -13248,10 +13473,6 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
   const uploadedDriveFileIds = [];
   const imageRegistryKeys = [];
   try {
-    const driveStatus = await ensureDriveReady();
-    if (!driveStatus.success) throw new Error(driveStatus.error);
-    const evidenceFolderId = await getOrCreateEvidenceDriveFolder();
-    const drive = driveStatus.drive;
     const actor = await getCurrentActor();
     const task = await prisma.dailyTask.findUnique({
       where: { id: Number(payload?.taskId) },
@@ -13286,6 +13507,10 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
         `Chỉ được nộp tối đa ${MAX_EVIDENCE_IMAGES} ảnh bằng chứng.`,
       );
     }
+
+    const evidenceDrive = await getEvidenceDriveContext();
+    const drive = evidenceDrive.drive;
+    const evidenceFolderId = evidenceDrive.folderId;
 
     const existingEvidenceHashes = await prisma.appConfig.findMany({
       where: { key: { startsWith: "dailyEvidenceHash:" } },
@@ -13360,7 +13585,7 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
             ? "webp"
             : "jpg";
       const driveFileName = `BANGCHUNG_TASK-${task.id}_${new Date().toISOString().replace(/[:.]/g, "-")}_${hash.slice(0, 12)}.${ext}`;
-      const uploaded = await uploadToDrive(
+      const uploaded = await uploadPrivateEvidenceToDrive(
         drive,
         evidenceFolderId,
         driveFileName,
@@ -13434,7 +13659,13 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
         prisma.appConfig.delete({ where: { key } }).catch(() => {}),
       ),
     );
-    return { success: false, error: error.message };
+    const reauthRequired =
+      Boolean(error?.reauthRequired) || isGoogleReauthError(error);
+    const errorMessage = reauthRequired
+      ? getDriveAuthMessage(error)
+      : error?.message || "Không thể gửi bằng chứng.";
+    console.error("Submit daily-task evidence error:", errorMessage);
+    return { success: false, error: errorMessage, reauthRequired };
   }
 });
 
@@ -23336,6 +23567,8 @@ function isGoogleReauthError(err) {
   return parts.some(
     (value) =>
       value.includes("invalid_grant") ||
+      value.includes("invalid_request") ||
+      value.includes("invalid_client") ||
       value.includes("token has been expired or revoked"),
   );
 }

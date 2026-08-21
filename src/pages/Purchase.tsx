@@ -1692,7 +1692,15 @@ export default function PurchasePage() {
                 setDetailModalRecord(current => current?.id === importReceiptPurchaseId ? { ...current, ...receiptPatch } : current);
                 await loadPurchases();
             } else {
-                message.error(result.error || 'Lỗi upload Phiếu Nhập');
+                if (result.reauthRequired) {
+                    Modal.error({
+                        title: 'Cần kết nối lại Google Drive',
+                        content: result.error || 'Phiên Google Drive trên máy này không còn hợp lệ. Vui lòng liên hệ admin để kết nối lại rồi thử tải phiếu lần nữa.',
+                        okText: 'Đã hiểu',
+                    });
+                } else {
+                    message.error(result.error || 'Lỗi upload Phiếu Nhập');
+                }
                 const receiptPatch = { importReceiptStatus: 'pending', importReceiptFile: null, importReceiptDriveUrl: null };
                 setPurchases(current => current.map(item => item.id === importReceiptPurchaseId ? { ...item, ...receiptPatch } : item));
                 setDetailModalRecord(current => current?.id === importReceiptPurchaseId ? { ...current, ...receiptPatch } : current);
