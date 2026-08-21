@@ -239,9 +239,32 @@ const GDRIVE_FOLDER_ID = config.GDRIVE_FOLDER_ID;
 const TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID;
 
-// OAuth2 Client credentials
-const OAUTH_CLIENT_ID = config.OAUTH_CLIENT_ID;
-const OAUTH_CLIENT_SECRET = config.OAUTH_CLIENT_SECRET;
+// OAuth client credentials for an installed desktop app are not confidential,
+// but the rest of electron/config.js is. Production therefore reads a small
+// generated file instead of loading the database/service configuration bundle.
+function loadPackagedGoogleOAuthConfig() {
+  try {
+    const oauthConfigPath = path.join(__dirname, "google-oauth-config.json");
+    if (!fs.existsSync(oauthConfigPath)) return {};
+    const parsed = JSON.parse(fs.readFileSync(oauthConfigPath, "utf8"));
+    return {
+      clientId: String(parsed?.clientId || "").trim(),
+      clientSecret: String(parsed?.clientSecret || "").trim(),
+    };
+  } catch (error) {
+    console.error(
+      "[Drive] Cannot read packaged Google OAuth config:",
+      error?.message || error,
+    );
+    return {};
+  }
+}
+
+const packagedGoogleOAuthConfig = loadPackagedGoogleOAuthConfig();
+const OAUTH_CLIENT_ID =
+  config.OAUTH_CLIENT_ID || packagedGoogleOAuthConfig.clientId;
+const OAUTH_CLIENT_SECRET =
+  config.OAUTH_CLIENT_SECRET || packagedGoogleOAuthConfig.clientSecret;
 
 // Google Drive auth (OAuth2 — dùng storage của user, không bị quota limit)
 let driveClient = null;
@@ -291,6 +314,13 @@ function ensureGoogleTokenPath() {
 
 function getDriveClient() {
   try {
+    if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET) {
+      driveLastErrorMessage =
+        "Bản cài đặt đang thiếu cấu hình Google OAuth. Vui lòng cập nhật ứng dụng hoặc liên hệ admin.";
+      console.error("[Drive] Missing packaged Google OAuth configuration.");
+      driveClient = null;
+      return null;
+    }
     const tokenPath = ensureGoogleTokenPath();
     if (!fs.existsSync(tokenPath)) {
       console.warn("[Drive] Token not found:", tokenPath);
@@ -947,11 +977,12 @@ async function ensureDriveReady() {
   let drive = getDriveClient();
   if (!drive) {
     driveLastErrorMessage =
+      driveLastErrorMessage ||
       "Chưa có phiên đăng nhập Google Drive hợp lệ. Vui lòng đăng nhập lại Google Drive.";
     return {
       success: false,
       error: driveLastErrorMessage,
-      reauthRequired: true,
+      reauthRequired: Boolean(OAUTH_CLIENT_ID && OAUTH_CLIENT_SECRET),
     };
   }
   try {

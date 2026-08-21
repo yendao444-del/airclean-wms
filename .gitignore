@@ -34,6 +34,7 @@ dev.db
 
 electron/gdrive-credentials.json
 electron/gdrive-token.json
+electron/google-oauth-config.json
 electron/supabase-storage.json
 electron/wms-bot-runtime.js
 
