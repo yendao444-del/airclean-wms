@@ -342,6 +342,16 @@ export interface ElectronAPI {
       note?: string;
       idempotencyKey?: string;
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
+    finalizeShiftCheck: (data: {
+      items: Array<{
+        code: string;
+        expectedQuantity: number;
+        actualQuantity: number;
+        reason?: string;
+        note?: string;
+      }>;
+      idempotencyKey?: string;
+    }) => Promise<{ success: boolean; data?: any; error?: string }>;
     moveUnit: (data: {
       code: string;
       location: any;
@@ -510,7 +520,12 @@ export interface ElectronAPI {
     }>;
     submitEvidence: (
       payload: any,
-    ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    ) => Promise<{
+      success: boolean;
+      data?: any;
+      error?: string;
+      reauthRequired?: boolean;
+    }>;
     reviewEvidence: (
       taskId: number,
       approved: boolean,

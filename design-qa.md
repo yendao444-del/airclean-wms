@@ -91,3 +91,53 @@ final result: blocked
 4. Resolve any P0–P2 visual differences before changing this result.
 
 final result: blocked
+
+---
+
+# Design QA — Tạo kiện nhanh
+
+## Comparison target
+
+- Source visual truth: `C:\Users\Admin\.codex\generated_images\01a01d53-8e7c-75e2-91bb-7bda4574ef6f\exec-e89b817c-c61a-4618-84e2-bff2f94f57c5.png`
+- Intended viewport: desktop `1440 x 1024` CSS px, density 1.
+- Intended state: Tạo kiện nhanh open; left scanner and load list; right receipt in smallest unit `gói`.
+
+## Implementation evidence
+
+- Local app: `http://127.0.0.1:4173`
+- Browser-rendered state reached: login screen (`AIRCLEAN CORP.`), not the Handling Units route.
+- The current local browser session is not authenticated, so the implementation screen cannot be captured at the same route/state without a user-provided authenticated session.
+- Static verification: `npm run build` passed on 2026-08-21. This validates TypeScript and production compilation only; it is not visual proof.
+
+## Findings
+
+- [P1] Browser visual comparison is unavailable.
+  - Location: local application route before Handling Units.
+  - Evidence: the browser rendered the login form instead of the selected `Tạo kiện nhanh` design state.
+  - Impact: layout, typography, responsive behavior, scan focus, and the receipt panel cannot be visually compared to the source mockup.
+  - Fix: open the authenticated desktop/local session that can access **Quản lý kiện hàng**, then capture the modal at `1440 x 1024` after scanning at least one QR code.
+
+## Required fidelity surfaces
+
+- Fonts and typography: blocked pending authenticated browser capture.
+- Spacing and layout rhythm: blocked pending authenticated browser capture.
+- Colors and visual tokens: blocked pending authenticated browser capture.
+- Image quality and asset fidelity: no new raster product assets are used in this screen; iconography uses the project’s Ant Design icon library. Visual comparison remains blocked.
+- Copy and content: code includes the selected-flow labels, including `Quét QR kiện hàng`, `tải`, `gói`, `Phiếu nhập kho`, and `Tải phiếu nhập kho`; visual comparison remains blocked.
+
+## Primary interactions implemented
+
+- Open **Tạo kiện nhanh** from Quản lý kiện hàng.
+- Scan/type a QR code and press Enter to add a physical load to the temporary list.
+- Edit the number of `tải`; the UI recalculates the total number of `gói`.
+- Remove a line or clear the temporary scan list.
+- Select a receipt file for the staged upload state.
+
+## Implementation checklist
+
+1. Authenticate the local preview with an account allowed to open Quản lý kiện hàng.
+2. Open Tạo kiện nhanh, scan a representative QR code, and verify `1 tải = 1.200 gói` plus receipt totals.
+3. Capture the same viewport/state as the source image.
+4. Run a visual comparison and resolve any P0/P1/P2 differences before changing this result to `passed`.
+
+final result: blocked

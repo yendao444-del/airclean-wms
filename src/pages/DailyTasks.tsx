@@ -1732,7 +1732,18 @@ const DailyTasks = () => {
                         taskId: task.id,
                         images: images.map(({ name, mimeType, data }) => ({ name, mimeType, data })),
                     });
-                    if (!result.success) throw new Error(result.error || 'Không thể lưu bằng chứng');
+                    if (!result.success) {
+                        if (result.reauthRequired) {
+                            Modal.error({
+                                title: 'Cần kết nối lại Google Drive',
+                                content: result.error || 'Phiên Google Drive trên máy này đã hết hạn. Vui lòng liên hệ admin để kết nối lại rồi gửi bằng chứng.',
+                                okText: 'Đã hiểu',
+                            });
+                        }
+                        const submitError: any = new Error(result.error || 'Không thể lưu bằng chứng');
+                        submitError.alreadyPresented = Boolean(result.reauthRequired);
+                        throw submitError;
+                    }
                     await loadTasks();
                     if (activeTab === 'history' || activeTab === 'triage') await loadHistory();
                     const uploadedBytes = images.reduce((total, image) => total + image.size, 0);
@@ -1742,7 +1753,11 @@ const DailyTasks = () => {
                         duration: 5,
                     });
                 } catch (error: any) {
-                    message.error({ key: 'evidence-upload', content: error.message || 'Không thể gửi bằng chứng.', duration: 5 });
+                    if (error?.alreadyPresented) {
+                        message.destroy('evidence-upload');
+                    } else {
+                        message.error({ key: 'evidence-upload', content: error.message || 'Không thể gửi bằng chứng.', duration: 5 });
+                    }
                     return Promise.reject(error);
                 }
             }

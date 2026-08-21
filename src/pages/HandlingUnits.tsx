@@ -86,6 +86,14 @@ type UnitRow = {
   updatedAt?: string;
   hasWithdrawalHistory?: boolean;
 };
+type QuickScanLine = {
+  id: string;
+  qrCode: string;
+  sku: string;
+  productName: string;
+  loads: number;
+  conversionFactor: number;
+};
 type LocationItem = {
   id: number;
   code: string;
@@ -111,6 +119,17 @@ type Workspace = {
   packagingSpecs: any[];
   locations: LocationItem[];
   recentTransactions: any[];
+};
+type ShiftCheckCandidate = {
+  unit: UnitRow;
+  withdrawnQuantity: number;
+  withdrawalCount: number;
+  lastWithdrawalAt: number;
+};
+type ShiftCheckDraft = {
+  actualQuantity: number | null;
+  reason: string;
+  note: string;
 };
 
 const ALLOCATION_ZONE_CODE_BY_MAP_KEY: Record<string, string> = {
@@ -179,10 +198,11 @@ const locationFor = (unit: UnitRow) =>
   [unit.location?.zone, unit.location?.rack].filter(Boolean).join(" · ") ||
   "Chưa phân khu";
 const isWithdrawalTransaction = (item: any) =>
-  Number(item?.quantity) < 0 ||
-  /rút hàng|rút\s+\d+|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho/i.test(
-    `${item?.type || ""} ${item?.note || ""}`,
-  );
+  !/kiểm cuối ca|kiểm khớp|kiểm lệch/i.test(String(item?.type || "")) &&
+  (Number(item?.quantity) < 0 ||
+    /rút hàng|rút\s+\d+|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho/i.test(
+      `${item?.type || ""} ${item?.note || ""}`,
+    ));
 const historyDescriptionFor = (item: any) =>
   isWithdrawalTransaction(item) ? "Đã rút" : item?.note || item?.destination || "--";
 const statusFor = (status: string) =>
@@ -298,6 +318,28 @@ const formatHistoryTime = (value?: string) => {
     minute: "2-digit",
   });
 };
+
+const localDayKey = (value: string | number | Date) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const isCompletedCheckTransaction = (item: any) =>
+  /kiểm cuối ca|kiểm khớp - chốt hết kiện|kiểm lệch - cập nhật tồn thực tế/i.test(
+    String(item?.type || ""),
+  );
+
+const SHIFT_CHECK_REASONS = [
+  "Xuất hàng chưa ghi nhận",
+  "Trả hàng chưa ghi nhận",
+  "Sai số kiểm đếm trước đó",
+  "Hư hỏng / thất thoát",
+  "Khác",
+];
 
 // Product groups come from the catalog with this generic category prefix.
 // Keep it in the stored data, but omit it from the SKU browser label.
@@ -663,6 +705,49 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [showAllocation, setShowAllocation] = useState(false);
   const [isAllocating, setIsAllocating] = useState(false);
   const [allocationForm] = Form.useForm();
+  const [showQuickCreate, setShowQuickCreate] = useState(false);
+  const [quickScanValue, setQuickScanValue] = useState("");
+  const [quickScanLines, setQuickScanLines] = useState<QuickScanLine[]>([]);
+  const [quickLastCode, setQuickLastCode] = useState("");
+  const [quickScanError, setQuickScanError] = useState("");
+  const [quickReceiptFileName, setQuickReceiptFileName] = useState("");
+  const quickScanInputRef = useRef<any>(null);
+  const quickReceiptInputRef = useRef<HTMLInputElement>(null);
+  const quickSuccessSoundRef = useRef<HTMLAudioElement | null>(null);
+  const quickFailSoundRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    const successSound = new Audio("./sounds/ting.wav");
+    const failSound = new Audio("./sounds/alert_louder.wav");
+    successSound.preload = "auto";
+    failSound.preload = "auto";
+    successSound.volume = 1;
+    failSound.volume = 1;
+    quickSuccessSoundRef.current = successSound;
+    quickFailSoundRef.current = failSound;
+    return () => {
+      quickSuccessSoundRef.current = null;
+      quickFailSoundRef.current = null;
+    };
+  }, []);
+
+  const playQuickScanSound = (type: "success" | "fail") => {
+    const source =
+      type === "success"
+        ? quickSuccessSoundRef.current
+        : quickFailSoundRef.current;
+    if (!source) return;
+    try {
+      const sound = source.cloneNode() as HTMLAudioElement;
+      sound.volume = 1;
+      sound.currentTime = 0;
+      void sound.play().catch((error) => {
+        console.warn("Không phát được âm báo quét QR:", error);
+      });
+    } catch (error) {
+      console.warn("Không khởi tạo được âm báo quét QR:", error);
+    }
+  };
 
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [visibleUnitLimit, setVisibleUnitLimit] = useState(100);
@@ -712,6 +797,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [isFinalizingCheck, setIsFinalizingCheck] = useState(false);
   const isFinalizingCheckRef = useRef(false);
   const finalPickVerification = Form.useWatch("finalVerification", finalCheckForm);
+  const [showShiftCheckModal, setShowShiftCheckModal] = useState(false);
+  const [shiftCheckDrafts, setShiftCheckDrafts] = useState<
+    Record<string, ShiftCheckDraft>
+  >({});
+  const [isSubmittingShiftCheck, setIsSubmittingShiftCheck] = useState(false);
+  const shiftCheckRequestIdRef = useRef("");
 
   // Telegram Bot modal & Interactive Chatbox
   const [showTelegramModal, setShowTelegramModal] = useState(false);
@@ -1609,6 +1700,153 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
   }, [workspace.recentTransactions, historySearch, historyType, historyFromDate, historyToDate]);
 
+  const shiftCheckCandidates = useMemo<ShiftCheckCandidate[]>(() => {
+    const todayKey = localDayKey(new Date());
+    return workspace.register
+      .map((unit) => {
+        const history = workspace.recentTransactions.filter(
+          (item) =>
+            String(item?.unitId || "").trim().toUpperCase() ===
+            unit.id.trim().toUpperCase(),
+        );
+        const latestCompletedCheck = history
+          .filter(isCompletedCheckTransaction)
+          .reduce(
+            (latest, item) =>
+              Math.max(latest, new Date(item.createdAt || 0).getTime() || 0),
+            0,
+          );
+        const withdrawals = history.filter((item) => {
+          const createdAt = new Date(item.createdAt || 0).getTime() || 0;
+          return (
+            isWithdrawalTransaction(item) &&
+            localDayKey(item.createdAt) === todayKey &&
+            createdAt > latestCompletedCheck
+          );
+        });
+        if (withdrawals.length === 0) return null;
+        return {
+          unit,
+          withdrawalCount: withdrawals.length,
+          withdrawnQuantity: withdrawals.reduce(
+            (total, item) => total + Math.abs(Number(item.quantity || 0)),
+            0,
+          ),
+          lastWithdrawalAt: withdrawals.reduce(
+            (latest, item) =>
+              Math.max(latest, new Date(item.createdAt || 0).getTime() || 0),
+            0,
+          ),
+        };
+      })
+      .filter((item): item is ShiftCheckCandidate => Boolean(item))
+      .sort((a, b) => b.lastWithdrawalAt - a.lastWithdrawalAt);
+  }, [workspace.register, workspace.recentTransactions]);
+
+  const openShiftCheck = () => {
+    if (shiftCheckCandidates.length === 0) {
+      message.info("Hôm nay không có kiện nào phát sinh rút hàng cần kiểm.");
+      return;
+    }
+    setShiftCheckDrafts(
+      Object.fromEntries(
+        shiftCheckCandidates.map(({ unit }) => [
+          unit.id,
+          { actualQuantity: unit.currentPcs, reason: "", note: "" },
+        ]),
+      ),
+    );
+    shiftCheckRequestIdRef.current = `HU-SHIFT-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    setShowShiftCheckModal(true);
+  };
+
+  const updateShiftCheckDraft = (
+    code: string,
+    patch: Partial<ShiftCheckDraft>,
+  ) => {
+    setShiftCheckDrafts((previous) => ({
+      ...previous,
+      [code]: { ...previous[code], ...patch },
+    }));
+  };
+
+  const submitShiftCheck = async () => {
+    if (isSubmittingShiftCheck) return;
+    try {
+      const items = shiftCheckCandidates.map(({ unit }) => {
+        const draft = shiftCheckDrafts[unit.id];
+        if (draft?.actualQuantity === null || draft?.actualQuantity === undefined) {
+          throw new Error(`Hãy nhập tồn thực tế của kiện ${unit.id}.`);
+        }
+        const actualQuantity = Number(draft?.actualQuantity);
+        if (!Number.isFinite(actualQuantity) || actualQuantity < 0) {
+          throw new Error(`Hãy nhập tồn thực tế của kiện ${unit.id}.`);
+        }
+        if (actualQuantity > unit.initialPcs) {
+          throw new Error(
+            `Tồn thực tế kiện ${unit.id} không thể lớn hơn ${fmt(unit.initialPcs)}.`,
+          );
+        }
+        const variance = actualQuantity - unit.currentPcs;
+        if (variance !== 0 && !draft?.reason) {
+          throw new Error(`Hãy chọn lý do chênh lệch của kiện ${unit.id}.`);
+        }
+        if (variance !== 0 && draft.reason === "Khác" && !draft.note.trim()) {
+          throw new Error(`Hãy nhập ghi chú cho kiện ${unit.id}.`);
+        }
+        return {
+          code: unit.id,
+          expectedQuantity: unit.currentPcs,
+          actualQuantity,
+          reason: draft?.reason || "",
+          note: draft?.note || "",
+        };
+      });
+
+      setIsSubmittingShiftCheck(true);
+      const response = await window.electronAPI?.handlingUnits?.finalizeShiftCheck({
+        items,
+        idempotencyKey: shiftCheckRequestIdRef.current,
+      });
+      if (!response?.success) {
+        throw new Error(response?.error || "Không thể hoàn tất kiểm cuối ca.");
+      }
+      if (response.data?.duplicate) return;
+      const resultByCode = new Map(
+        (response.data?.items || []).map((item: any) => [item.code, item]),
+      );
+      setWorkspace((previous) => ({
+        ...previous,
+        register: previous.register.map((unit) => {
+          const result: any = resultByCode.get(unit.id);
+          if (!result) return unit;
+          return {
+            ...unit,
+            currentPcs: result.actualQuantity,
+            status: result.actualQuantity === 0 ? "Đã hết" : "Đang sử dụng",
+          };
+        }),
+      }));
+      const varianceCount = items.filter(
+        (item) => item.actualQuantity !== item.expectedQuantity,
+      ).length;
+      message.success(
+        varianceCount > 0
+          ? `Đã kiểm ${items.length} kiện; ghi nhận ${varianceCount} kiện chênh lệch.`
+          : `Đã kiểm khớp ${items.length} kiện cuối ca.`,
+      );
+      setShowShiftCheckModal(false);
+      setShiftCheckDrafts({});
+      void loadWorkspace(true);
+    } catch (error: any) {
+      message.error(error?.message || "Không thể hoàn tất kiểm cuối ca.");
+    } finally {
+      setIsSubmittingShiftCheck(false);
+    }
+  };
+
   const watchAllocSku = Form.useWatch("sku", allocationForm);
   const watchAllocMethod =
     Form.useWatch("packageMethod", allocationForm) || "TAI";
@@ -1820,6 +2058,103 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     });
     setShowAllocation(true);
   };
+
+  const openQuickCreate = () => {
+    setQuickScanValue("");
+    setQuickScanLines([]);
+    setQuickLastCode("");
+    setQuickScanError("");
+    setQuickReceiptFileName("");
+    setShowQuickCreate(true);
+    window.setTimeout(() => quickScanInputRef.current?.focus?.(), 120);
+  };
+
+  const addQuickScan = () => {
+    const code = quickScanValue.trim();
+    if (!code) return;
+    if (quickScanLines.some((line) => line.qrCode.toLowerCase() === code.toLowerCase())) {
+      setQuickScanError("Mã QR này đã có trong danh sách tạm.");
+      playQuickScanSound("fail");
+      setQuickScanValue("");
+      quickScanInputRef.current?.focus?.();
+      return;
+    }
+    const registeredUnit = workspace.register.find(
+      (unit) => unit.id.trim().toUpperCase() === code.toUpperCase(),
+    );
+    if (!registeredUnit) {
+      setQuickScanError(
+        `Mã QR “${code}” không hợp lệ hoặc chưa được đăng ký trong hệ thống.`,
+      );
+      playQuickScanSound("fail");
+      setQuickLastCode("");
+      setQuickScanValue("");
+      quickScanInputRef.current?.focus?.();
+      return;
+    }
+    if (!["Chưa nhập kho", "Chờ nhập"].includes(registeredUnit.status)) {
+      setQuickScanError(
+        `Mã kiện ${registeredUnit.id} đã được nhập kho, không thể nhập lại.`,
+      );
+      playQuickScanSound("fail");
+      setQuickLastCode("");
+      setQuickScanValue("");
+      quickScanInputRef.current?.focus?.();
+      return;
+    }
+    const product = workspace.catalog.find(
+      (item) => item.sku === registeredUnit.skuName,
+    );
+    if (!product) {
+      setQuickScanError(
+        `Mã QR ${registeredUnit.id} chưa được gán SKU hợp lệ.`,
+      );
+      playQuickScanSound("fail");
+      return;
+    }
+    const spec = workspace.packagingSpecs.find((item) => item.sku === product.sku);
+    const rawFactor = Number(
+      registeredUnit.initialPcs || spec?.conversionFactor || 0,
+    );
+    if (!Number.isFinite(rawFactor) || rawFactor <= 0) {
+      setQuickScanError(
+        `Mã QR ${registeredUnit.id} chưa có quy cách quy đổi.`,
+      );
+      playQuickScanSound("fail");
+      return;
+    }
+    const factor = Math.floor(rawFactor);
+    setQuickScanLines((previous) => [
+      ...previous,
+      {
+        id: `${code}-${Date.now()}`,
+        qrCode: code,
+        sku: product.sku,
+        productName: product.variantName,
+        loads: 1,
+        conversionFactor: factor,
+      },
+    ]);
+    setQuickScanError("");
+    setQuickLastCode(code);
+    setQuickScanValue("");
+    playQuickScanSound("success");
+    window.setTimeout(() => quickScanInputRef.current?.focus?.(), 0);
+  };
+
+  const quickLoadTotal = quickScanLines.reduce((total, line) => total + line.loads, 0);
+  const quickPieceTotal = quickScanLines.reduce(
+    (total, line) => total + line.loads * line.conversionFactor,
+    0,
+  );
+  const quickReceiptRows = Array.from(
+    quickScanLines.reduce((map, line) => {
+      const current = map.get(line.sku) || { ...line, loads: 0 };
+      current.loads += line.loads;
+      map.set(line.sku, current);
+      return map;
+    }, new Map<string, QuickScanLine>()).values(),
+  );
 
   if (isWorkspaceLoading) {
     return (
@@ -2040,6 +2375,32 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     onClick={() => setShowLocations(true)}
                   >
                     Khu vực
+                  </Button>
+                  <Tooltip
+                    title={
+                      shiftCheckCandidates.length === 0
+                        ? "Không có kiện phát sinh rút hàng cần kiểm hôm nay"
+                        : `${shiftCheckCandidates.length} kiện đã phát sinh rút hàng và chưa kiểm cuối ca`
+                    }
+                  >
+                    <Button
+                      icon={<CheckCircleOutlined />}
+                      className="hu-btn-shift-check"
+                      disabled={shiftCheckCandidates.length === 0}
+                      onClick={openShiftCheck}
+                    >
+                      Kiểm cuối ca
+                      <span className="hu-shift-check-count">
+                        {shiftCheckCandidates.length}
+                      </span>
+                    </Button>
+                  </Tooltip>
+                  <Button
+                    icon={<QrcodeOutlined />}
+                    className="hu-btn-quick-create"
+                    onClick={openQuickCreate}
+                  >
+                    Tạo kiện nhanh
                   </Button>
                   <Button
                     type="primary"
@@ -3175,6 +3536,180 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
       <Modal
         title={
+          <div className="hu-shift-check-title">
+            <span className="hu-shift-check-title-icon">
+              <CheckCircleOutlined />
+            </span>
+            <div>
+              <b>Kiểm cuối ca</b>
+              <small>
+                Chỉ gồm các kiện đã phát sinh rút hàng hôm nay và chưa kiểm
+              </small>
+            </div>
+          </div>
+        }
+        open={showShiftCheckModal}
+        onCancel={() => {
+          if (isSubmittingShiftCheck) return;
+          setShowShiftCheckModal(false);
+          setShiftCheckDrafts({});
+        }}
+        onOk={submitShiftCheck}
+        okText={`Hoàn tất kiểm ${shiftCheckCandidates.length} kiện`}
+        cancelText="Để kiểm sau"
+        confirmLoading={isSubmittingShiftCheck}
+        closable={!isSubmittingShiftCheck}
+        maskClosable={!isSubmittingShiftCheck}
+        cancelButtonProps={{ disabled: isSubmittingShiftCheck }}
+        centered
+        width={1180}
+        destroyOnHidden
+        className="hu-shift-check-modal"
+      >
+        <Alert
+          type="info"
+          showIcon
+          message="Nhập số lượng đếm thực tế trong từng kiện"
+          description="Nếu thực tế khác tồn dự kiến, hệ thống sẽ yêu cầu lý do và ghi một giao dịch điều chỉnh riêng vào lịch sử."
+          style={{ marginBottom: 14 }}
+        />
+        <Table
+          rowKey={(item) => item.unit.id}
+          dataSource={shiftCheckCandidates}
+          size="small"
+          pagination={false}
+          scroll={{ x: 1050, y: 480 }}
+          locale={{ emptyText: "Không còn kiện nào cần kiểm" }}
+          columns={[
+            {
+              title: "Kiện / SKU",
+              width: 190,
+              fixed: "left",
+              render: (_, item) => (
+                <div className="hu-shift-unit-cell">
+                  <b>{item.unit.id}</b>
+                  <small>{item.unit.skuName}</small>
+                </div>
+              ),
+            },
+            {
+              title: "Phát sinh rút",
+              width: 140,
+              render: (_, item) => (
+                <div className="hu-shift-withdrawal-cell">
+                  <b>-{fmt(item.withdrawnQuantity)} {item.unit.unitName}</b>
+                  <small>
+                    {item.withdrawalCount} lần · {formatHistoryTime(new Date(item.lastWithdrawalAt).toISOString())}
+                  </small>
+                </div>
+              ),
+            },
+            {
+              title: "Tồn dự kiến",
+              width: 105,
+              align: "right" as const,
+              render: (_, item) => (
+                <b>{fmt(item.unit.currentPcs)}</b>
+              ),
+            },
+            {
+              title: "Đếm thực tế",
+              width: 135,
+              render: (_, item) => (
+                <InputNumber
+                  min={0}
+                  max={item.unit.initialPcs}
+                  precision={0}
+                  value={shiftCheckDrafts[item.unit.id]?.actualQuantity}
+                  onChange={(value) =>
+                    updateShiftCheckDraft(item.unit.id, {
+                      actualQuantity: value,
+                      ...(Number(value) === item.unit.currentPcs
+                        ? { reason: "", note: "" }
+                        : {}),
+                    })
+                  }
+                  addonAfter={item.unit.unitName}
+                  style={{ width: "100%" }}
+                />
+              ),
+            },
+            {
+              title: "Chênh lệch",
+              width: 105,
+              align: "center" as const,
+              render: (_, item) => {
+                const actual = shiftCheckDrafts[item.unit.id]?.actualQuantity;
+                if (actual === null || actual === undefined) return <Tag>--</Tag>;
+                const variance = Number(actual) - item.unit.currentPcs;
+                return (
+                  <Tag color={variance === 0 ? "green" : variance > 0 ? "blue" : "red"}>
+                    {variance === 0 ? "Khớp" : fmtSigned(variance)}
+                  </Tag>
+                );
+              },
+            },
+            {
+              title: "Lý do chênh lệch",
+              width: 195,
+              render: (_, item) => {
+                const actual = shiftCheckDrafts[item.unit.id]?.actualQuantity;
+                const hasVariance =
+                  actual !== null &&
+                  actual !== undefined &&
+                  Number(actual) !== item.unit.currentPcs;
+                return (
+                  <Select
+                    allowClear
+                    disabled={!hasVariance}
+                    value={shiftCheckDrafts[item.unit.id]?.reason || undefined}
+                    placeholder={hasVariance ? "Chọn lý do" : "Không cần"}
+                    onChange={(value) =>
+                      updateShiftCheckDraft(item.unit.id, { reason: value || "" })
+                    }
+                    options={SHIFT_CHECK_REASONS.map((reason) => ({
+                      value: reason,
+                      label: reason,
+                    }))}
+                    style={{ width: "100%" }}
+                  />
+                );
+              },
+            },
+            {
+              title: "Ghi chú",
+              width: 190,
+              render: (_, item) => {
+                const actual = shiftCheckDrafts[item.unit.id]?.actualQuantity;
+                const hasVariance =
+                  actual !== null &&
+                  actual !== undefined &&
+                  Number(actual) !== item.unit.currentPcs;
+                return (
+                  <Input
+                    allowClear
+                    disabled={!hasVariance}
+                    value={shiftCheckDrafts[item.unit.id]?.note}
+                    placeholder={
+                      shiftCheckDrafts[item.unit.id]?.reason === "Khác"
+                        ? "Bắt buộc nhập"
+                        : "Ghi chú thêm"
+                    }
+                    onChange={(event) =>
+                      updateShiftCheckDraft(item.unit.id, {
+                        note: event.target.value,
+                      })
+                    }
+                  />
+                );
+              },
+            },
+          ]}
+        />
+      </Modal>
+
+      <Modal
+        title={
           checkingUnit ? (
             <div className="hu-final-check-title">
               <span className="hu-final-check-title-icon">
@@ -3356,6 +3891,82 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             </Form.Item>
           </Form>
         )}
+      </Modal>
+      <Modal
+        open={showQuickCreate}
+        onCancel={() => setShowQuickCreate(false)}
+        footer={null}
+        width={1180}
+        destroyOnHidden
+        className="hu-quick-create-modal"
+        title={<div className="hu-quick-modal-title"><QrcodeOutlined /> <span>Tạo kiện nhanh</span><small>Quét QR theo tải, phiếu nhập tự quy đổi về gói</small></div>}
+      >
+        <div className="hu-quick-create">
+          <section className="hu-quick-scan-workspace">
+            <div className="hu-quick-scan-head">
+              <div>
+                <h3>Quét QR kiện hàng</h3>
+                <p>Quy cách đã được thiết lập sẵn theo SKU; chỉ kiểm lại số tải khi cần.</p>
+              </div>
+              <span className="hu-quick-ready"><i /> Sẵn sàng quét</span>
+            </div>
+            <Input
+              ref={quickScanInputRef}
+              className="hu-quick-scan-input"
+              prefix={<QrcodeOutlined />}
+              placeholder="Quét QR kiện hàng"
+              value={quickScanValue}
+              onChange={(event) => {
+                setQuickScanValue(event.target.value);
+                if (quickScanError) setQuickScanError("");
+              }}
+              onPressEnter={addQuickScan}
+              suffix={<Button type="link" onClick={addQuickScan}>Thêm</Button>}
+            />
+            {quickScanError && (
+              <Alert
+                className="hu-quick-scan-error"
+                type="error"
+                showIcon
+                message={quickScanError}
+              />
+            )}
+            {quickLastCode && (
+              <div className="hu-quick-last-scan">
+                <CheckCircleOutlined /> Đã quét: <b>{quickLastCode}</b>
+              </div>
+            )}
+            <div className="hu-quick-list-head">
+              <b>Danh sách kiện hàng đã quét ({quickLoadTotal} tải)</b>
+              <Button size="small" danger icon={<DeleteOutlined />} onClick={() => setQuickScanLines([])} disabled={!quickScanLines.length}>Xóa tất cả</Button>
+            </div>
+            <div className="hu-quick-lines" aria-live="polite">
+              {quickScanLines.length ? quickScanLines.map((line) => (
+                <div className="hu-quick-line" key={line.id}>
+                  <span className="hu-quick-qr"><QrcodeOutlined /></span>
+                  <div className="hu-quick-product"><b>{line.productName}</b><small>{line.sku} · {line.qrCode}</small></div>
+                  <InputNumber min={1} precision={0} value={line.loads} addonAfter="tải" onChange={(value) => setQuickScanLines((previous) => previous.map((item) => item.id === line.id ? { ...item, loads: Math.max(1, Number(value || 1)) } : item))} />
+                  <span className="hu-quick-equals">=</span>
+                  <b className="hu-quick-conversion">{fmt(line.loads * line.conversionFactor)} gói</b>
+                  <Button type="text" danger icon={<DeleteOutlined />} onClick={() => setQuickScanLines((previous) => previous.filter((item) => item.id !== line.id))} aria-label={`Xóa ${line.qrCode}`} />
+                </div>
+              )) : (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Quét QR để bắt đầu tạo kiện" className="hu-quick-empty" />
+              )}
+            </div>
+            <div className="hu-quick-total"><InboxOutlined /><span>Tạm nhập kho:</span><b>{quickLoadTotal} tải</b><i>=</i><strong>{fmt(quickPieceTotal)} gói</strong></div>
+          </section>
+          <aside className="hu-quick-receipt">
+            <div className="hu-quick-receipt-head"><h3>Phiếu nhập kho</h3><span>Đơn vị nhập: <b>gói</b></span></div>
+            <dl className="hu-quick-receipt-meta"><div><dt>Nhà cung cấp</dt><dd>CÔNG TY TNHH DƯỢC PHẨM UNICARE <Tag color="green">Tự động</Tag></dd></div><div><dt>Mã phiếu nhập</dt><dd>PNK-200826-001</dd></div><div><dt>Ngày nhập</dt><dd>20/08/2026 · 14:33</dd></div></dl>
+            <div className="hu-quick-receipt-table"><div className="hu-quick-receipt-table-head"><span>Sản phẩm</span><span>ĐVT</span><span>Số lượng</span></div>{quickReceiptRows.length ? quickReceiptRows.map((line) => <div className="hu-quick-receipt-table-row" key={line.sku}><span>{line.productName}</span><span>gói</span><b>{fmt(line.loads * line.conversionFactor)}</b></div>) : <div className="hu-quick-receipt-placeholder">Chưa có sản phẩm quét</div>}<div className="hu-quick-receipt-grand"><span>Tổng cộng</span><b>{fmt(quickPieceTotal)} gói</b></div></div>
+            <input ref={quickReceiptInputRef} type="file" accept=".pdf,.jpg,.jpeg,.png" hidden onChange={(event) => setQuickReceiptFileName(event.target.files?.[0]?.name || "")} />
+            <button type="button" className="hu-quick-upload" onClick={() => quickReceiptInputRef.current?.click()}><InboxOutlined /><b>Tải phiếu nhập kho</b><small>Kéo thả file hoặc bấm để chọn file</small></button>
+            {quickReceiptFileName && <div className="hu-quick-file"><CheckCircleOutlined /> {quickReceiptFileName}<span>Đã nhận</span></div>}
+            <div className="hu-quick-vat"><b>VAT theo công ty</b><div><span>Tổng tiền hàng (chưa VAT)</span><strong>—</strong></div><div><span>VAT</span><strong>Chưa nhập</strong></div></div>
+          </aside>
+        </div>
+        <footer className="hu-quick-footer"><span>Phiếu nhập và tồn kho sẽ ghi nhận theo đơn vị nhỏ nhất: <b>gói</b>.</span><div><Button onClick={() => setShowQuickCreate(false)}>Hủy</Button><Button type="primary" icon={<CheckCircleOutlined />} disabled={!quickScanLines.length} onClick={() => message.info("Demo đã sẵn sàng. Bước xác nhận phiếu nhập chính thức sẽ được nối khi hoàn tất API atomic của phase tiếp theo.")}>Xác nhận nhập & tạo kiện</Button></div></footer>
       </Modal>
       {/* MODAL TẠO KIỆN HÀNG MỚI */}
       <Modal
