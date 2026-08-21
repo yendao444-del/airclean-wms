@@ -82,14 +82,17 @@ mkdir "_full_temp\resources\app\node_modules\@supabase"
 mkdir "_full_temp\resources\app\node_modules\iceberg-js"
 mkdir "_full_temp\resources\app\node_modules\tslib"
 
-:: Auto-copy Google token truoc khi dong goi (neu chua co trong electron/)
-if not exist "electron\gdrive-token.json" (
-    if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
-        copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
-        echo    [OK] Auto-copy gdrive-token.json tu AppData vao electron/
-    ) else (
+:: Luon dong goi token moi nhat tu AppData. Neu chi copy khi file dich chua
+:: ton tai, mot token cu trong electron/ se tiep tuc bi phat hanh cho nhan vien.
+if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
+    copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
+    echo    [OK] Auto-copy gdrive-token.json moi nhat tu AppData vao electron/
+) else (
+    if not exist "electron\gdrive-token.json" (
         echo    [!] CANH BAO: Khong co gdrive-token.json - Google Drive upload se THAT BAI tren production!
         echo        Chay reauth-gdrive.bat truoc khi build.
+    ) else (
+        echo    [!] Khong co token AppData, dang dung token hien co trong electron/.
     )
 )
 

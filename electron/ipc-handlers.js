@@ -345,6 +345,48 @@ function resetDriveClient() {
   console.log("[Drive] Client reset - se tai khoi tao voi token moi nhat");
 }
 
+// A staff machine can retain a revoked token in userData even after receiving
+// an update that contains a newer admin-authorized token. File mtimes are not a
+// reliable authority after ZIP extraction, so recover from the bundled token
+// only after Google has positively rejected the machine-local credentials.
+function restoreBundledGoogleTokenAfterAuthFailure() {
+  try {
+    const tokenPath = getGoogleTokenPath();
+    const bundledPath = getLegacyGoogleTokenPath();
+    if (!fs.existsSync(bundledPath)) return false;
+
+    const bundledTokens = JSON.parse(fs.readFileSync(bundledPath, "utf8"));
+    if (!bundledTokens?.refresh_token) {
+      console.warn("[Drive] Bundled recovery token has no refresh_token.");
+      return false;
+    }
+
+    const localTokens = fs.existsSync(tokenPath)
+      ? JSON.parse(fs.readFileSync(tokenPath, "utf8"))
+      : null;
+    if (
+      localTokens?.refresh_token &&
+      localTokens.refresh_token === bundledTokens.refresh_token
+    ) {
+      return false;
+    }
+
+    fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
+    fs.copyFileSync(bundledPath, tokenPath);
+    resetDriveClient();
+    console.warn(
+      "[Drive] Replaced rejected machine-local token with bundled update token.",
+    );
+    return true;
+  } catch (error) {
+    console.error(
+      "[Drive] Failed to restore bundled recovery token:",
+      error?.message || error,
+    );
+    return false;
+  }
+}
+
 // Tìm hoặc tạo subfolder theo tháng: HDDT-AIRCLEAN/2026-03/
 async function getOrCreateMonthFolder(drive, parentFolderId, monthStr) {
   try {
@@ -902,7 +944,7 @@ function getDriveAuthMessage(error) {
 // Verify it before accepting documents, otherwise another machine may show a
 // fake “uploaded” state for a file it cannot ever open.
 async function ensureDriveReady() {
-  const drive = getDriveClient();
+  let drive = getDriveClient();
   if (!drive) {
     driveLastErrorMessage =
       "Chưa có phiên đăng nhập Google Drive hợp lệ. Vui lòng đăng nhập lại Google Drive.";
@@ -916,7 +958,28 @@ async function ensureDriveReady() {
     await drive.about.get({ fields: "user(permissionId)" });
     driveLastErrorMessage = "";
     return { success: true, drive };
-  } catch (error) {
+  } catch (initialError) {
+    let error = initialError;
+    if (
+      isGoogleReauthError(initialError) &&
+      restoreBundledGoogleTokenAfterAuthFailure()
+    ) {
+      try {
+        drive = getDriveClient();
+        if (drive) {
+          await drive.about.get({ fields: "user(permissionId)" });
+          driveLastErrorMessage = "";
+          console.log("[Drive] Bundled token recovery succeeded.");
+          return { success: true, drive };
+        }
+      } catch (recoveryError) {
+        error = recoveryError;
+        console.error(
+          "[Drive] Bundled token recovery was rejected:",
+          recoveryError?.message || recoveryError,
+        );
+      }
+    }
     resetDriveClient();
     driveLastErrorMessage = getDriveAuthMessage(error);
     console.error(
