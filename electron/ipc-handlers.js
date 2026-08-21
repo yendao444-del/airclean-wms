@@ -4649,9 +4649,9 @@ function getVatFineStageForDate(purchaseDate, now, policyStart) {
   return stage;
 }
 
-async function getPurchaseItemCompanies() {
-  if (!prisma) return {};
-  const config = await prisma.appConfig.findUnique({
+async function getPurchaseItemCompanies(client = prisma) {
+  if (!client) return {};
+  const config = await client.appConfig.findUnique({
     where: { key: PURCHASE_ITEM_COMPANIES_KEY },
   });
   if (!config?.value) return {};
@@ -4663,9 +4663,9 @@ async function getPurchaseItemCompanies() {
   }
 }
 
-async function savePurchaseItemCompanies(companies) {
-  if (!prisma) throw new Error("Prisma not available");
-  await prisma.appConfig.upsert({
+async function savePurchaseItemCompanies(companies, client = prisma) {
+  if (!client) throw new Error("Prisma not available");
+  await client.appConfig.upsert({
     where: { key: PURCHASE_ITEM_COMPANIES_KEY },
     update: { value: JSON.stringify(companies) },
     create: {
@@ -5241,20 +5241,18 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
 
-    const isPilotUnicareProduct = (name) => {
-      const normalized = String(name || "")
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/đ/g, "d")
-        .toLowerCase();
-      return normalized.includes("5d unicare") || normalized.includes("unicare upf uv");
-    };
-
-    const [productCandidates, dbRegister, txCfg, withdrawalMarkers] = await Promise.all([
+    const [
+      productCandidates,
+      dbRegister,
+      txCfg,
+      withdrawalMarkers,
+      packagingSpecsCfg,
+      qrLabelsCfg,
+      suppliers,
+    ] = await Promise.all([
         prisma.product.findMany({
           where: {
             status: "active",
-            name: { contains: "UNICARE", mode: "insensitive" },
           },
           select: {
             id: true,
@@ -5262,6 +5260,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
             sku: true,
             unit: true,
             stock: true,
+            cost: true,
             variants: true,
           },
         }),
@@ -5286,15 +5285,33 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
           where: { key: { startsWith: "handlingUnitWithdrawal:" } },
           select: { key: true },
         }),
+        prisma.appConfig.findUnique({
+          where: { key: "handlingUnitPackagingSpecsJson" },
+          select: { value: true },
+        }),
+        prisma.appConfig.findUnique({
+          where: { key: "handlingUnitQrLabelsJson" },
+          select: { value: true },
+        }),
+        prisma.supplier.findMany({
+          where: { status: "active" },
+          select: { id: true, code: true, name: true },
+          orderBy: { name: "asc" },
+        }),
       ]);
 
-    const products = productCandidates.filter((product) =>
-      isPilotUnicareProduct(product.name),
-    );
+    const products = productCandidates;
+    const packagingSpecs = parseJsonArray(packagingSpecsCfg?.value)
+      .filter((item) => item?.status !== "retired")
+      .sort((a, b) => String(a?.sku || "").localeCompare(String(b?.sku || "")));
+    const qrLabels = parseJsonArray(qrLabelsCfg?.value)
+      .filter((item) => ["issued", "printed", "scanning"].includes(item?.status))
+      .slice(-300)
+      .reverse();
     const catalog = new Map();
 
-    // Pilot scope: use the live Product catalogue, limited to the two
-    // UNICARE families agreed for the handling-units rollout.
+    // Use the live Product catalogue. QR labels resolve against their exact
+    // SKU, so one SKU can carry several independently configured formats.
     products.forEach((product) => {
       const variants = parseJsonArray(product.variants);
       const entries =
@@ -5312,6 +5329,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
           color: variant?.color || "",
           unitName: product.unit || "Lẻ",
           stock: Math.max(0, Number(variant?.stock ?? product.stock ?? 0)),
+          cost: Math.max(0, Number(variant?.cost ?? product.cost ?? 0)),
           levels: [{ id: "lo", name: product.unit || "Lẻ", factor: 1 }],
         });
       });
@@ -5351,14 +5369,6 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
       note: "",
       updatedAt: row.updatedAt,
     }));
-    // The pilot workspace must not surface handling units outside its catalog.
-    const pilotSkuSet = new Set(
-      [...catalog.values()]
-        .filter((item) => isPilotUnicareProduct(item.productGroup))
-        .map((item) => item.sku),
-    );
-    register = register.filter((unit) => pilotSkuSet.has(unit.skuName));
-
     let recentTransactions = [];
     try {
       if (txCfg?.value) {
@@ -5400,10 +5410,11 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
     return {
       success: true,
       data: {
-        catalog: [...catalog.values()].filter((item) =>
-          isPilotUnicareProduct(item.productGroup),
-        ),
+        catalog: [...catalog.values()],
         register: register,
+        packagingSpecs: packagingSpecs,
+        qrLabels,
+        suppliers,
         recentTransactions: Array.isArray(recentTransactions)
           ? recentTransactions
           : [],
@@ -5677,7 +5688,7 @@ function handlingUnitsFoundationError(error) {
 async function requireHandlingUnitsFoundation() {
   if (!prisma) throw new Error("Prisma not available");
   try {
-    await prisma.packagingSpec.findFirst({ select: { id: true } });
+    await prisma.handlingUnit.findFirst({ select: { id: true } });
   } catch (error) {
     if (handlingUnitsFoundationError(error)) {
       throw new Error(
@@ -5686,6 +5697,25 @@ async function requireHandlingUnitsFoundation() {
     }
     throw error;
   }
+}
+
+const HANDLING_PACKAGING_SPECS_KEY = "handlingUnitPackagingSpecsJson";
+const HANDLING_QR_LABELS_KEY = "handlingUnitQrLabelsJson";
+
+async function readHandlingConfigArray(client, key) {
+  const row = await client.appConfig.findUnique({
+    where: { key },
+    select: { value: true },
+  });
+  return parseJsonArray(row?.value);
+}
+
+async function writeHandlingConfigArray(client, key, value) {
+  return client.appConfig.upsert({
+    where: { key },
+    update: { value: JSON.stringify(value) },
+    create: { key, value: JSON.stringify(value) },
+  });
 }
 
 function normalizeHandlingLocation(input = {}) {
@@ -5801,47 +5831,42 @@ ipcMain.handle(
       }
       const spec = await prisma.$transaction(async (tx) => {
         const product = await resolveProductForHandlingSku(tx, sku);
-        const previous = await tx.packagingSpec.findFirst({
-          where: { sku },
-          orderBy: { version: "desc" },
+        const specs = await readHandlingConfigArray(tx, HANDLING_PACKAGING_SPECS_KEY);
+        const exact = specs.find(
+          (item) =>
+            item?.status === "active" &&
+            item?.sku === sku &&
+            item?.name === name &&
+            item?.baseUnit === baseUnit &&
+            Number(item?.conversionFactor) === conversionFactor,
+        );
+        if (exact) return exact;
+        const now = new Date().toISOString();
+        const versions = specs
+          .filter((item) => item?.sku === sku && item?.name === name)
+          .map((item) => Number(item?.version || 0));
+        specs.forEach((item) => {
+          if (item?.sku === sku && item?.name === name && item?.status === "active") {
+            item.status = "retired";
+            item.retiredAt = now;
+          }
         });
-        if (
-          previous &&
-          previous.status === "active" &&
-          previous.name === name &&
-          previous.baseUnit === baseUnit &&
-          previous.conversionFactor === conversionFactor
-        ) {
-          return previous;
-        }
-        if (previous?.status === "active") {
-          await tx.packagingSpec.update({
-            where: { id: previous.id },
-            data: { status: "retired", retiredAt: new Date() },
-          });
-        }
-        const created = await tx.packagingSpec.create({
-          data: {
-            sku,
-            productId: product.productId,
-            name,
-            baseUnit,
-            conversionFactor,
-            version: Number(previous?.version || 0) + 1,
-            status: "active",
-            note: String(payload.note || "").trim() || null,
-            createdBy: currentSession?.id || null,
-          },
-        });
-        await tx.handlingUnitAudit.create({
-          data: {
-            entityType: "packaging_spec",
-            entityId: String(created.id),
-            action: "CREATE_VERSION",
-            after: JSON.stringify(created),
-            actorId: currentSession?.id || null,
-          },
-        });
+        const created = {
+          id: Date.now(),
+          productId: product.productId,
+          sku,
+          name,
+          baseUnit,
+          conversionFactor,
+          version: Math.max(0, ...versions) + 1,
+          status: "active",
+          note: String(payload.note || "").trim() || null,
+          createdBy: currentSession?.id || null,
+          createdAt: now,
+          retiredAt: null,
+        };
+        specs.push(created);
+        await writeHandlingConfigArray(tx, HANDLING_PACKAGING_SPECS_KEY, specs);
         return created;
       });
       return { success: true, data: spec };
@@ -5851,6 +5876,225 @@ ipcMain.handle(
     }
   },
 );
+
+// Issue pre-printed QR labels. A label is only an identity + packaging rule;
+// it never increases stock and cannot be treated as a received handling unit.
+ipcMain.handle("handlingUnits:issueQrLabels", async (_event, payload = {}) => {
+  try {
+    requireRole("admin", "manager");
+    await requireHandlingUnitsFoundation();
+    const sku = String(payload.sku || "").trim();
+    const packagingName = String(payload.packagingName || "").trim();
+    const baseUnit = String(payload.baseUnit || "").trim() || "Gói";
+    const conversionFactor = Math.floor(Number(payload.conversionFactor || 0));
+    const quantity = Math.floor(Number(payload.quantity || 0));
+    const requestedSupplierId = Number(payload.supplierId || 0) || null;
+    if (!sku || !packagingName || conversionFactor <= 0 || quantity <= 0) {
+      throw new Error("Cần chọn SKU, dạng kiện, quy đổi và số tem hợp lệ.");
+    }
+    if (!["Tải", "Thùng", "Lẻ"].includes(packagingName)) {
+      throw new Error("Dạng kiện chỉ được chọn: Tải, Thùng hoặc Lẻ.");
+    }
+    if (quantity > 500) throw new Error("Mỗi lần chỉ được phát hành tối đa 500 tem.");
+
+    const result = await prisma.$transaction(async (tx) => {
+      const product = await resolveProductForHandlingSku(tx, sku);
+      const specs = await readHandlingConfigArray(tx, HANDLING_PACKAGING_SPECS_KEY);
+      const registry = await readHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY);
+      let supplier = null;
+      if (requestedSupplierId) {
+        supplier = await tx.supplier.findFirst({
+          where: { id: requestedSupplierId, status: "active" },
+          select: { id: true, name: true },
+        });
+        if (!supplier) throw new Error("Nhà cung cấp không hợp lệ hoặc đã ngừng dùng.");
+      } else {
+        const remembered = [...specs]
+          .reverse()
+          .find((item) => item?.sku === sku && item?.supplierId);
+        if (remembered?.supplierId) {
+          supplier = await tx.supplier.findFirst({
+            where: { id: Number(remembered.supplierId), status: "active" },
+            select: { id: true, name: true },
+          });
+        }
+      }
+      let spec = specs.find(
+        (item) =>
+          item?.status === "active" &&
+          item?.sku === sku &&
+          item?.name === packagingName &&
+          item?.baseUnit === baseUnit &&
+          Number(item?.conversionFactor) === conversionFactor,
+      );
+      if (!spec) {
+        const versions = specs
+          .filter((item) => item?.sku === sku && item?.name === packagingName)
+          .map((item) => Number(item?.version || 0));
+        spec = {
+          id: Date.now(),
+          productId: product.productId,
+          sku,
+          name: packagingName,
+          baseUnit,
+          conversionFactor,
+          version: Math.max(0, ...versions) + 1,
+          status: "active",
+          createdBy: currentSession?.id || null,
+          createdAt: new Date().toISOString(),
+        };
+        specs.push(spec);
+      }
+      if (supplier) {
+        spec.supplierId = supplier.id;
+        spec.supplierName = supplier.name;
+      }
+      const issuedAt = new Date().toISOString();
+      spec.lastUsedAt = issuedAt;
+      const batchCode = `LBL-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+      const labels = [];
+      for (let index = 1; index <= quantity; index += 1) {
+        const code = `${batchCode}-${String(index).padStart(3, "0")}`;
+        labels.push({
+          id: code,
+          code,
+          productId: product.productId,
+          sku,
+          packagingSpecId: spec.id,
+          packagingName: spec.name,
+          baseUnit: spec.baseUnit,
+          conversionFactor: spec.conversionFactor,
+          supplierId: supplier?.id || null,
+          supplierName: supplier?.name || "",
+          status: "issued",
+          batchCode,
+          issuedBy: currentSession?.id || null,
+          issuedAt,
+        });
+      }
+      registry.push(...labels);
+      await writeHandlingConfigArray(tx, HANDLING_PACKAGING_SPECS_KEY, specs);
+      await writeHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY, registry);
+      return { batchCode, labels, supplierName: supplier?.name || "" };
+    });
+    broadcastHandlingUnitsChanged("QR_LABELS_ISSUED", { batchCode: result.batchCode, count: result.labels.length });
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("Issue QR labels error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("handlingUnits:resolveQrLabel", async (_event, code) => {
+  try {
+    requireRole("admin", "manager");
+    await requireHandlingUnitsFoundation();
+    const normalizedCode = String(code || "").trim().toUpperCase();
+    if (!normalizedCode) throw new Error("Mã QR trống.");
+    const registry = await readHandlingConfigArray(prisma, HANDLING_QR_LABELS_KEY);
+    const label = registry.find(
+      (item) => String(item?.code || "").trim().toUpperCase() === normalizedCode,
+    );
+    if (!label) throw new Error("Mã QR không hợp lệ hoặc chưa được phát hành.");
+    if (!["issued", "printed"].includes(label.status)) {
+      throw new Error(
+        label.status === "received"
+          ? "Mã QR này đã nhập kho, không thể dùng lại."
+          : "Mã QR này không còn khả dụng.",
+      );
+    }
+    return {
+      success: true,
+      data: label,
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("handlingUnits:markQrLabelsPrinted", async (_event, codes = []) => {
+  try {
+    requireRole("admin", "manager");
+    const normalizedCodes = [...new Set(
+      (Array.isArray(codes) ? codes : [])
+        .map((code) => String(code || "").trim().toUpperCase())
+        .filter(Boolean),
+    )];
+    if (!normalizedCodes.length) throw new Error("Chưa có tem QR để xác nhận in.");
+    const updated = await prisma.$transaction(async (tx) => {
+      const registry = await readHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY);
+      const wanted = new Set(normalizedCodes);
+      let count = 0;
+      registry.forEach((label) => {
+        if (wanted.has(String(label?.code || "").toUpperCase()) && label.status === "issued") {
+          label.status = "printed";
+          label.printedAt = new Date().toISOString();
+          count += 1;
+        }
+      });
+      await writeHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY, registry);
+      return count;
+    });
+    broadcastHandlingUnitsChanged("QR_LABELS_PRINTED", { count: updated });
+    return { success: true, data: { count: updated } };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// A QR label becomes unavailable only after its physical handling unit has
+// been persisted.  Keeping this as a separate, explicit transition prevents
+// a scan from being treated as stock before the receiving flow succeeds.
+ipcMain.handle("handlingUnits:markQrLabelsReceived", async (_event, codes = []) => {
+  try {
+    requireRole("admin", "manager");
+    await requireHandlingUnitsFoundation();
+    const normalizedCodes = [...new Set(
+      (Array.isArray(codes) ? codes : [])
+        .map((code) => String(code || "").trim().toUpperCase())
+        .filter(Boolean),
+    )];
+    if (!normalizedCodes.length) throw new Error("Chưa có tem QR cần ghi nhận nhập kho.");
+
+    const result = await prisma.$transaction(async (tx) => {
+      const registry = await readHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY);
+      const wanted = new Set(normalizedCodes);
+      const labels = registry.filter((label) => wanted.has(String(label?.code || "").trim().toUpperCase()));
+      if (labels.length !== normalizedCodes.length) {
+        throw new Error("Có tem QR không tồn tại trong sổ tem.");
+      }
+      const unavailable = labels.find((label) => !["issued", "printed"].includes(label.status));
+      if (unavailable) {
+        throw new Error(`Tem ${unavailable.code} đã được nhập kho hoặc không còn khả dụng.`);
+      }
+      const physicalUnits = await tx.handlingUnit.findMany({
+        where: { code: { in: normalizedCodes } },
+        select: { code: true, purchaseOrderId: true },
+      });
+      if (physicalUnits.length !== normalizedCodes.length) {
+        throw new Error("Không tìm thấy đủ kiện vật lý tương ứng để chốt nhập kho.");
+      }
+      const unitByCode = new Map(physicalUnits.map((unit) => [unit.code, unit]));
+      const receivedAt = new Date().toISOString();
+      registry.forEach((label) => {
+        const code = String(label?.code || "").trim().toUpperCase();
+        if (!wanted.has(code)) return;
+        const unit = unitByCode.get(code);
+        label.status = "received";
+        label.receivedAt = receivedAt;
+        label.handlingUnitCode = code;
+        label.purchaseOrderId = unit?.purchaseOrderId || null;
+      });
+      await writeHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY, registry);
+      return { count: labels.length, codes: normalizedCodes };
+    });
+    broadcastHandlingUnitsChanged("QR_LABELS_RECEIVED", result);
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("Mark QR labels received error:", error);
+    return { success: false, error: error.message };
+  }
+});
 
 ipcMain.handle("handlingUnits:allocate", async (_event, payload = {}) => {
   try {
@@ -9104,6 +9348,25 @@ ipcMain.handle("purchases:create", async (event, data) => {
             });
           }
 
+          // Company grouping is part of the purchase itself. Persist it in
+          // the same transaction so a quick receiving cannot create stock
+          // while losing the VAT-by-company split used by Nhập hàng.
+          const purchaseItemCompanies = await getPurchaseItemCompanies(tx);
+          const savedItems = [...(newOrder.items || [])].sort(
+            (a, b) => Number(a.id) - Number(b.id),
+          );
+          purchaseItemCompanies[String(newOrder.id)] = {
+            byItemId: Object.fromEntries(
+              savedItems
+                .map((savedItem, index) => [
+                  getPurchaseItemCompanyKey(savedItem),
+                  String(items[index]?.companyGroup || "").trim(),
+                ])
+                .filter(([, company]) => company),
+            ),
+          };
+          await savePurchaseItemCompanies(purchaseItemCompanies, tx);
+
           return newOrder;
         },
         { timeout: 60000, maxWait: 10000 },
@@ -9118,27 +9381,6 @@ ipcMain.handle("purchases:create", async (event, data) => {
       },
     );
 
-    // PurchaseItem has no free-text company column. Persist the explicitly
-    // selected group per receipt line in AppConfig and return it on reads.
-    try {
-      const purchaseItemCompanies = await getPurchaseItemCompanies();
-      const savedItems = [...(purchase.items || [])].sort(
-        (a, b) => Number(a.id) - Number(b.id),
-      );
-      purchaseItemCompanies[String(purchase.id)] = {
-        byItemId: Object.fromEntries(
-          savedItems
-            .map((savedItem, index) => [
-              getPurchaseItemCompanyKey(savedItem),
-              String(items[index]?.companyGroup || "").trim(),
-            ])
-            .filter(([, company]) => company),
-        ),
-      };
-      await savePurchaseItemCompanies(purchaseItemCompanies);
-    } catch (companyError) {
-      console.error("Could not save purchase item companies:", companyError);
-    }
     try {
       await savePurchaseItemPackaging(purchase.id, items);
     } catch (packagingError) {

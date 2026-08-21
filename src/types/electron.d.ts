@@ -309,12 +309,36 @@ export interface ElectronAPI {
   handlingUnits: {
     getWorkspace: () => Promise<{
       success: boolean;
-      data?: { catalog: any[]; register: any[]; recentTransactions?: any[] };
+      data?: {
+        catalog: any[];
+        register: any[];
+        packagingSpecs?: any[];
+        qrLabels?: any[];
+        suppliers?: any[];
+        recentTransactions?: any[];
+      };
       error?: string;
     }>;
     createUnits: (
       records: any[],
     ) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    issueQrLabels: (data: {
+      sku: string;
+      packagingName: string;
+      baseUnit: string;
+      conversionFactor: number;
+      quantity: number;
+      supplierId?: number;
+    }) => Promise<{ success: boolean; data?: any; error?: string }>;
+    resolveQrLabel: (
+      code: string,
+    ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    markQrLabelsPrinted: (
+      codes: string[],
+    ) => Promise<{ success: boolean; data?: { count: number }; error?: string }>;
+    markQrLabelsReceived: (
+      codes: string[],
+    ) => Promise<{ success: boolean; data?: { count: number; codes: string[] }; error?: string }>;
     saveRegister: (
       records: any[],
     ) => Promise<{ success: boolean; data?: any[]; error?: string }>;
