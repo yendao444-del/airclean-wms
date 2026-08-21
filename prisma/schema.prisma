@@ -64,6 +64,9 @@ model Product {
   orderItems     OrderItem[]
   purchaseItems  PurchaseItem[]
   inventoryLogs  InventoryLog[]
+  packagingSpecs PackagingSpec[]
+  productSuppliers ProductSupplier[]
+  handlingUnitLabels HandlingUnitLabel[]
 }
 
 // ========================================
@@ -158,6 +161,79 @@ model Supplier {
   updatedAt     DateTime        @updatedAt
   
   purchaseOrders PurchaseOrder[]
+  productSuppliers ProductSupplier[]
+  handlingUnitLabels HandlingUnitLabel[]
+}
+
+// Versioned packaging rules. A SKU can have many active forms such as tải,
+// thùng, bao or lốc; each form converts to the SKU base inventory unit.
+model PackagingSpec {
+  id               Int      @id @default(autoincrement())
+  productId        Int
+  product          Product  @relation(fields: [productId], references: [id])
+  sku              String
+  name             String
+  baseUnit         String
+  conversionFactor Int
+  version          Int      @default(1)
+  status           String   @default("active") // active | retired
+  note             String?
+  createdBy        Int?
+  createdAt        DateTime @default(now())
+  retiredAt        DateTime?
+
+  labels HandlingUnitLabel[]
+
+  @@index([sku, status])
+  @@index([productId, status])
+}
+
+// Default sourcing per SKU/variant. It is intentionally separate from the QR
+// label so a future receiving batch can use another valid supplier.
+model ProductSupplier {
+  id                Int      @id @default(autoincrement())
+  productId         Int
+  product           Product  @relation(fields: [productId], references: [id])
+  variantSku        String?
+  supplierId        Int
+  supplier          Supplier @relation(fields: [supplierId], references: [id])
+  isDefault         Boolean  @default(false)
+  lastPurchasePrice Float?
+  status            String   @default("active")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([productId, variantSku, supplierId])
+  @@index([variantSku, status])
+  @@index([supplierId, status])
+}
+
+// Pre-printed physical QR labels. A label is not inventory until quick
+// receiving confirms it; then it is linked to the real HandlingUnit.
+model HandlingUnitLabel {
+  id               Int      @id @default(autoincrement())
+  code             String   @unique
+  productId        Int
+  product          Product  @relation(fields: [productId], references: [id])
+  sku              String
+  packagingSpecId  Int
+  packagingSpec    PackagingSpec @relation(fields: [packagingSpecId], references: [id])
+  packagingName    String
+  baseUnit         String
+  conversionFactor Int
+  supplierId       Int?
+  supplier         Supplier? @relation(fields: [supplierId], references: [id])
+  status           String   @default("printed") // printed | scanning | received | cancelled
+  batchCode        String
+  issuedBy         Int?
+  issuedAt         DateTime @default(now())
+  receivedAt       DateTime?
+  cancelledAt      DateTime?
+  handlingUnitCode String?
+
+  @@index([sku, status])
+  @@index([batchCode])
+  @@index([supplierId, status])
 }
 
 // Physical package ledger. Product stock stays the financial inventory total;

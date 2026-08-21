@@ -421,3 +421,22 @@ Command này phải:
 - Không thể dùng kiện nháp/chưa có Phiếu nhập kho để rút hàng hoặc làm lệch tồn.
 - Tổng tồn tăng đúng một lần sau khi lô được xác nhận.
 - Phiếu tạo từ Tạo kiện nhanh có đầy đủ khả năng xem, sửa theo quyền, upload chứng từ và quản lý VAT như phiếu tạo từ màn hình Nhập hàng.
+
+### 8.11. Bổ sung đã chốt — QR theo nhiều định dạng kiện
+
+- **Không được mặc định mọi QR là tải hoặc dùng hệ số 1.200 gói.** `1 tải = 1.200 gói` chỉ là một ví dụ quy cách.
+- Một SKU có thể đồng thời có nhiều định dạng kiện, ví dụ: tải, thùng carton, bao, lốc, hộp hoặc gói lẻ. Mỗi định dạng có hệ số quy đổi riêng về đơn vị tồn nhỏ nhất.
+- Thêm tab quản trị **Thiết lập & In QR** trong Quản lý kiện hàng; chỉ admin/manager được phát hành hoặc hủy tem.
+- Khi phát hành tem, user chọn: SKU/phân loại, tên định dạng kiện, hệ số quy đổi, số tem cần in và nhà cung cấp mặc định (nếu SKU có nhiều nguồn).
+- Mỗi tem được lưu độc lập với: mã QR duy nhất, SKU, quy cách/version, đơn vị cơ sở, hệ số quy đổi, nguồn cung cấp mặc định, trạng thái và thông tin lô in.
+- Trạng thái tem: `Đã in/chưa nhập`, `Đang quét`, `Đã nhập`, `Hủy`. Mã đã nhập hoặc đã hủy không được tái sử dụng.
+- Tạo kiện nhanh chỉ tra cứu QR đã phát hành trong sổ tem; QR lạ phải báo lỗi và phát âm thanh thất bại. Không được suy đoán SKU, quy cách, nhà cung cấp hoặc số lượng từ mã quét.
+- Khi QR hợp lệ được quét, giao diện hiển thị đúng tên **kiện** thực tế (ví dụ 1 thùng, 1 tải), đồng thời phiếu nhập cộng đúng số lượng theo đơn vị cơ sở (ví dụ 240 gói, 1.200 gói).
+- Nhà cung cấp trên phiếu chỉ hiển thị sau khi có QR hợp lệ và lấy từ cấu hình nguồn nhập/SKU. Khi chưa có QR hợp lệ, phải hiển thị `Chưa xác định`, không dùng dữ liệu mẫu hay viết cứng.
+
+### 8.12. Cơ chế lưu trữ tương thích khi triển khai
+
+- Database vận hành hiện tại dùng PostgreSQL nhưng lịch sử migration cũ vẫn mang provider SQLite và tài khoản ứng dụng không có quyền tạo bảng trong schema `public`.
+- Trong giai đoạn tương thích, danh sách quy cách và sổ tem QR được lưu bền vững bằng hai khóa `AppConfig`: `handlingUnitPackagingSpecsJson` và `handlingUnitQrLabelsJson`.
+- Backend vẫn là nguồn xác thực duy nhất: mã lạ không được ánh xạ, tem đã dùng/hủy không được tái sử dụng, SKU và hệ số quy đổi luôn lấy từ bản ghi tem.
+- Khi tài khoản triển khai được cấp quyền migration, chuyển hai registry trên sang các bảng `PackagingSpec`, `ProductSupplier`, `HandlingUnitLabel` bằng migration dữ liệu một lần. Luồng giao diện và nội dung QR không thay đổi.

@@ -70,6 +70,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     handlingUnits: {
         getWorkspace: () => ipcRenderer.invoke('handlingUnits:getWorkspace'),
         createUnits: (records) => ipcRenderer.invoke('handlingUnits:createUnits', records),
+        issueQrLabels: (data) => ipcRenderer.invoke('handlingUnits:issueQrLabels', data),
+        resolveQrLabel: (code) => ipcRenderer.invoke('handlingUnits:resolveQrLabel', code),
+        markQrLabelsPrinted: (codes) => ipcRenderer.invoke('handlingUnits:markQrLabelsPrinted', codes),
+        markQrLabelsReceived: (codes) => ipcRenderer.invoke('handlingUnits:markQrLabelsReceived', codes),
         saveRegister: (records) => ipcRenderer.invoke('handlingUnits:saveRegister', records),
         unsealUnit: (data) => ipcRenderer.invoke('handlingUnits:unsealUnit', data),
         sealUnit: (data) => ipcRenderer.invoke('handlingUnits:sealUnit', data),
