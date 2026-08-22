@@ -83,6 +83,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
+call node scripts\embed-wms-token.js
+if errorlevel 1 (
+    echo    [ERROR] Khong dong goi duoc Telegram WMS bot token.
+    echo            Kiem tra TELEGRAM_WMS_BOT_TOKEN trong .env roi chay lai.
+    pause
+    exit /b 1
+)
+
 if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
     copy /Y "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" "electron\gdrive-token.json" >nul 2>&1
     echo    [OK] Auto-copy gdrive-token.json moi nhat tu AppData vao electron/

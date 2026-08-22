@@ -725,12 +725,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     const pageWidth = isA6 ? "100mm" : "70mm";
     const pageHeight = isA6 ? "150mm" : "100mm";
     const pagePadding = isA6 ? "4mm" : "3mm";
-    const pageSize = `${pageWidth} ${pageHeight}`;
     const printStyle = document.createElement("style");
     printStyle.id = "hu-label-page-size";
     printStyle.media = "print";
     printStyle.textContent = `
-      @page { size: ${pageSize} portrait !important; margin: 0 !important; }
+      @page { size: ${pageWidth} ${pageHeight} !important; margin: 0 !important; }
       @media print {
         html, body { width: ${pageWidth} !important; min-width: ${pageWidth} !important; margin: 0 !important; padding: 0 !important; }
         body.hu-label-printing .hu-print-preview-wrapper { width: ${pageWidth} !important; min-width: ${pageWidth} !important; margin: 0 !important; padding: 0 !important; }
@@ -1170,6 +1169,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       }
       const isFinalPick = qty === pickingUnit.currentPcs;
       const actualQty = qty;
+      let telegramWarning = "";
       if (window.electronAPI?.handlingUnits?.pickUnit) {
         const res = await window.electronAPI.handlingUnits.pickUnit({
           code: pickingUnit.id,
@@ -1180,6 +1180,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         });
         if (!res.success) throw new Error(res.error || "Lỗi rút hàng.");
         if (res.data?.duplicate) return;
+        if (res.data?.telegramNotified === false) {
+          telegramWarning =
+            res.data?.telegramError || "Không gửi được thông báo Telegram.";
+        }
       }
       const remaining = pickingUnit.currentPcs - qty;
       const nextStatus = isFinalPick ? "Chờ kiểm" : "Đang sử dụng";
@@ -1213,6 +1217,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           ? `Kiện ${pickingUnit.id} đã chuyển sang Chờ kiểm. Hãy mở tại tab Chờ kiểm để chốt số thực tế.`
           : `Đã chuyển ${fmt(qty)} ${pickingUnit.unitName} sang ${destinationMeta.label}.`,
       );
+      if (telegramWarning) {
+        message.warning(
+          `Đã ghi nhận rút hàng nhưng Telegram chưa nhận thông báo: ${telegramWarning}`,
+          8,
+        );
+      }
       setShowPickModal(false);
       setPickingUnit(null);
       pickForm.resetFields();

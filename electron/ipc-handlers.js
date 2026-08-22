@@ -6872,9 +6872,57 @@ async function sendTelegramWmsMessage(chatId, text, replyMarkup = null) {
       console.warn("[TelegramWMS] Send error:", err.message);
       resolve(null);
     });
+    req.on("timeout", () => {
+      req.destroy(new Error("Telegram API timeout"));
+    });
     req.write(data);
     req.end();
   });
+}
+
+async function notifyTelegramWmsPickFromDesktop({
+  code,
+  result,
+  actor,
+  note = "",
+  destination = "PACKING",
+}) {
+  if (!TELEGRAM_WMS_BOT_TOKEN) {
+    return { ok: false, error: "Bản cài đặt chưa có token Telegram WMS." };
+  }
+
+  const destinationCode = normalizeHandlingPickDestination(destination);
+  const destinationMeta = HANDLING_PICK_DESTINATIONS[destinationCode];
+  const escapeHtml = (value) =>
+    String(value || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  const normalizedCode = String(code || "").trim().toUpperCase();
+  const messageText = [
+    buildTelegramWmsPickResult(normalizedCode, result, actor),
+    `📍 <b>Chuyển tới:</b> ${escapeHtml(destinationMeta.label)}`,
+    note ? `📝 <b>Ghi chú:</b> ${escapeHtml(note)}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const response = await sendTelegramWmsMessage(
+    null,
+    messageText,
+    buildTelegramWmsPostPickKeyboard(normalizedCode, result.remaining),
+  );
+  if (!response?.ok) {
+    const error =
+      String(response?.description || "").trim() ||
+      "Không kết nối được Telegram API.";
+    telegramWmsLastError = `Gửi thông báo rút hàng thất bại: ${error}`;
+    console.warn("[TelegramWMS] Desktop pick notification failed:", error);
+    return { ok: false, error };
+  }
+
+  telegramWmsLastError = null;
+  return { ok: true };
 }
 
 function answerTelegramCallbackQuery(callbackQueryId, text = null) {
@@ -8636,14 +8684,29 @@ ipcMain.handle("handlingUnits:pickUnit", async (_event, payload = {}) => {
     const quantity = Number(payload.quantity || 0);
     const note = String(payload.note || "").trim();
     const destination = normalizeHandlingPickDestination(payload.destination);
+    const actor = currentSession?.username || "Renderer";
     const result = await executeRutHang(
       code,
       quantity,
-      currentSession?.username || "Renderer",
+      actor,
       note,
       destination,
     );
-    return { success: true, data: result };
+    const telegram = await notifyTelegramWmsPickFromDesktop({
+      code,
+      result,
+      actor,
+      note,
+      destination,
+    });
+    return {
+      success: true,
+      data: {
+        ...result,
+        telegramNotified: telegram.ok,
+        telegramError: telegram.ok ? null : telegram.error,
+      },
+    };
   } catch (error) {
     console.error("Pick handling unit error:", error);
     return { success: false, error: error.message };
