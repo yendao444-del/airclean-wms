@@ -2101,12 +2101,12 @@
     page-break-after: auto;
   }
   .hu-print-label.a6 {
-    width: 105mm;
-    height: 148mm;
+    width: 100mm;
+    height: 150mm;
   }
   .hu-print-label.a7 {
-    width: 74mm;
-    height: 105mm;
+    width: 70mm;
+    height: 100mm;
     padding: 4mm;
   }
 }
