@@ -3,6 +3,22 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 
+// The packaged app can be started by an updater/launcher whose stdout and
+// stderr pipes are closed immediately afterwards. Any later console.* call
+// would otherwise emit an unhandled EPIPE and Electron would show a fatal
+// "JavaScript error occurred in the main process" dialog.
+function installBrokenPipeGuard(stream) {
+    if (!stream || typeof stream.on !== 'function') return;
+    stream.on('error', (error) => {
+        if (error?.code === 'EPIPE') return;
+        // Preserve the normal crash behaviour for genuine stream failures.
+        setImmediate(() => { throw error; });
+    });
+}
+
+installBrokenPipeGuard(process.stdout);
+installBrokenPipeGuard(process.stderr);
+
 // ✅ FIX: Electron v40 resolve module từ node_modules/electron/dist/resources/app/
 // → tất cả require() (prisma, xlsx, bcryptjs...) đều fail vì tìm sai thư mục
 // Monkey-patch Module._resolveFilename để fallback về project root thật
