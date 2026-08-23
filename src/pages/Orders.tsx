@@ -20,7 +20,6 @@ import {
 import dayjs, { Dayjs } from 'dayjs';
 import isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
 import isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
-import * as XLSX from 'xlsx';
 import { isVietnamRestDay } from '../lib/workCalendar';
 import './Orders.css';
 
@@ -50,16 +49,41 @@ interface UnifiedOrder {
 type DatePreset = 'today' | '7days' | '30days' | 'month' | 'custom';
 type TmdtPlatformFilter = 'all' | 'shopee' | 'tiktok';
 
-// Cache tồn tại xuyên suốt session — hiển thị ngay khi quay lại tab
-let _ordersCache: UnifiedOrder[] = [];
+interface OrdersPageCacheEntry {
+    rows: UnifiedOrder[];
+    total: number;
+    current: { orderCount: number; revenue: number; quantity: number };
+    previous: { orderCount: number; revenue: number; quantity: number };
+    sourceCounts: { all: number; tmdt: number; pos: number; export: number; shopee: number; tiktok: number };
+}
+
+const ordersPageCache = new Map<string, OrdersPageCacheEntry>();
+
+const getDefaultOrdersCacheKey = () => JSON.stringify({
+    from: dayjs().startOf('day').toISOString(),
+    to: dayjs().endOf('day').toISOString(),
+    sourceFilter: 'all',
+    platformFilter: 'all',
+    search: '',
+    page: 1,
+    pageSize: 10,
+});
 
 export default function OrdersPage() {
     const { message, modal } = App.useApp();
     const { user } = useAuth();
     const isAdmin = user?.role === 'admin';
-    const [orders, setOrders] = useState<UnifiedOrder[]>(_ordersCache);
+    const initialCache = ordersPageCache.get(getDefaultOrdersCacheKey());
+    const [orders, setOrders] = useState<UnifiedOrder[]>(initialCache?.rows || []);
     const [loading, setLoading] = useState(false);
+    const [totalOrders, setTotalOrders] = useState(initialCache?.total || 0);
+    const [currentPage, setCurrentPage] = useState(1);
+    const [pageSize, setPageSize] = useState(10);
+    const [currentStats, setCurrentStats] = useState(initialCache?.current || { orderCount: 0, revenue: 0, quantity: 0 });
+    const [previousStats, setPreviousStats] = useState(initialCache?.previous || { orderCount: 0, revenue: 0, quantity: 0 });
+    const [sourceCounts, setSourceCounts] = useState(initialCache?.sourceCounts || { all: 0, tmdt: 0, pos: 0, export: 0, shopee: 0, tiktok: 0 });
     const [searchKeyword, setSearchKeyword] = useState('');
+    const [searchQuery, setSearchQuery] = useState('');
     const [sourceFilter, setSourceFilter] = useState<'all' | 'pos' | 'export' | 'tmdt'>('all');
     const [tmdtPlatformFilter, setTmdtPlatformFilter] = useState<TmdtPlatformFilter>('all');
     const [datePreset, setDatePreset] = useState<DatePreset>('today');
@@ -74,28 +98,26 @@ export default function OrdersPage() {
     const [editItems, setEditItems] = useState<any[]>([]);
     const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
     const [expandedRowKeys, setExpandedRowKeys] = useState<React.Key[]>([]);
-    const [searchResults, setSearchResults] = useState<UnifiedOrder[] | null>(null);
     const [searchLoading, setSearchLoading] = useState(false);
+    const [exportLoading, setExportLoading] = useState(false);
     const [chartStats, setChartStats] = useState<Array<{ date: string; revenue: number; orders: number }>>([]);
     const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-    // Product detail modal state
-    const [productDetailName, setProductDetailName] = useState<string | null>(null);
+    const lastOrderRowClickRef = useRef<{ orderId: string; timestamp: number } | null>(null);
 
     // Ref để interval luôn gọi version loadAllOrders mới nhất (tránh stale closure)
     const loadAllOrdersRef = useRef<((silent?: boolean) => Promise<void>) | undefined>(undefined);
-    const hasAutoSwitchedRef = useRef(false);
+    const ordersRequestIdRef = useRef(0);
 
     useEffect(() => {
         loadAllOrdersRef.current = loadAllOrders;
     });
 
     useEffect(() => {
-        loadAllOrders();
+        void loadAllOrders();
         if (datePreset !== 'today') return;
         const interval = setInterval(() => { if (document.visibilityState === 'visible') void loadAllOrdersRef.current?.(true); }, 300000);
         return () => clearInterval(interval);
-    }, [datePreset, customRange]);
+    }, [datePreset, customRange, sourceFilter, tmdtPlatformFilter, currentPage, pageSize, searchQuery]);
 
     useEffect(() => {
         return () => {
@@ -103,138 +125,7 @@ export default function OrdersPage() {
         };
     }, []);
 
-    const getSince = () => {
-        const today = dayjs().startOf('day');
-        // Tải gấp đôi khoảng thời gian để có đủ data so sánh kỳ trước
-        switch (datePreset) {
-            case 'today': return today.subtract(2, 'day').toISOString();
-            case '7days': return today.subtract(14, 'day').toISOString();
-            case '30days': return today.subtract(60, 'day').toISOString();
-            case 'month': return today.subtract(2, 'month').startOf('month').toISOString();
-            case 'custom': {
-                if (customRange) {
-                    const days = customRange[1].diff(customRange[0], 'day') + 1;
-                    return customRange[0].subtract(days, 'day').toISOString();
-                }
-                return today.subtract(60, 'day').toISOString();
-            }
-            default: return today.subtract(2, 'day').toISOString();
-        }
-    };
-
-    const getUntil = () => {
-        switch (datePreset) {
-            case 'month': return dayjs().endOf('month').toISOString();
-            case 'custom': return customRange ? customRange[1].endOf('day').toISOString() : dayjs().endOf('day').toISOString();
-            default: return dayjs().endOf('day').toISOString();
-        }
-    };
-
-    const getEcommerceFetchLimit = () => {
-        const days = Math.max(dayjs(getUntil()).diff(dayjs(getSince()), 'day') + 1, 1);
-        return Math.min(Math.max(days * 100, 500), 3000);
-    };
-
-    const loadAllOrders = async (silent = false) => {
-        const forcesilent = silent || _ordersCache.length > 0;
-        if (!forcesilent) setLoading(true);
-
-        const api = (window as any).electronAPI;
-        const since = getSince();
-        const until = getUntil();
-        const accumulated: UnifiedOrder[] = silent ? [..._ordersCache] : [];
-        const seenIds = new Set(accumulated.map(o => o.id));
-        let pending = 3;
-
-        const flush = (newItems: UnifiedOrder[]) => {
-            let changed = false;
-            for (const item of newItems) {
-                if (!seenIds.has(item.id)) { seenIds.add(item.id); accumulated.push(item); changed = true; }
-            }
-            if (changed) {
-                accumulated.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
-                _ordersCache = [...accumulated];
-                setOrders([...accumulated]);
-            }
-            pending--;
-            if (pending === 0) {
-                if (!forcesilent) setLoading(false);
-                if (!silent && !hasAutoSwitchedRef.current && datePreset === 'today' && accumulated.length > 0) {
-                    const today = dayjs().startOf('day');
-                    if (!accumulated.some(o => o.date && dayjs(o.date).isSame(today, 'day'))) {
-                        const latestDate = dayjs(accumulated[0].date).startOf('day');
-                        setCustomRange([latestDate, latestDate.endOf('day')]);
-                        setDatePreset('custom');
-                    }
-                    hasAutoSwitchedRef.current = true;
-                }
-            }
-        };
-
-        api.posOrder.getAll({ startDate: since }).then((posRes: any) => {
-            const items: UnifiedOrder[] = [];
-            if (posRes.success && posRes.data) {
-                for (const po of posRes.data) {
-                    const poItems = (po.items || []).map((it: any) => ({
-                        productId: it.productId, productName: it.productName || it.name,
-                        variantSku: it.sku, variant: it.variant || null,
-                        quantity: it.quantity || it.qty, unitPrice: it.price,
-                        cost: it.cost || 0, total: it.subtotal || (it.price * (it.quantity || it.qty)),
-                    }));
-                    items.push({
-                        id: `POS-${po.id}`, originalId: po.id, source: 'pos', sourceLabel: 'POS',
-                        orderNumber: po.orderNumber || `#POS-${po.id}`,
-                        customer: po.customer?.name || po.customerName || 'Khách lẻ',
-                        items: JSON.stringify(poItems), totalAmount: po.total || 0,
-                        status: po.status || 'completed', date: po.createdAt || '', notes: po.note || '',
-                        createdBy: po.userName || '',
-                    });
-                }
-            }
-            flush(items);
-        }).catch(() => flush([]));
-
-        api.exportOrders.getAll({ since }).then((exRes: any) => {
-            const items: UnifiedOrder[] = [];
-            if (exRes.success && exRes.data) {
-                for (const ex of exRes.data) {
-                    items.push({
-                        id: `EX-${ex.id}`, originalId: ex.id, source: 'export', sourceLabel: 'Xuất hàng',
-                        orderNumber: `#XH-${ex.id}`, customer: ex.customer || 'Khách lẻ',
-                        items: typeof ex.items === 'string' ? ex.items : JSON.stringify(ex.items || []),
-                        totalAmount: ex.totalAmount || 0,
-                        status: ex.status || 'completed', date: ex.createdAt || ex.exportDate || '',
-                        notes: ex.notes || '', createdBy: ex.createdBy || '',
-                    });
-                }
-            }
-            flush(items);
-        }).catch(() => flush([]));
-
-        api.marketplaceOrders.getAll({ since }).then((mktRes: any) => {
-            const items: UnifiedOrder[] = [];
-            if (mktRes.success && mktRes.data) {
-                for (const ec of mktRes.data) {
-                    items.push({
-                        id: `TMDT-${ec.id}`, originalId: ec.id, source: 'tmdt',
-                        sourceLabel: ec.source === 'tiktok' ? 'TikTok' : ec.source === 'shopee' ? 'Shopee' : ec.source === 'lazada' ? 'Lazada' : 'TMDT',
-                        orderNumber: ec.orderNumber || `#TMDT-${ec.id}`,
-                        customer: ec.source ? ec.source.toUpperCase() : 'Sàn TMDT',
-                        items: JSON.stringify(ec.items || []),
-                        totalAmount: ec.total || 0, status: ec.status,
-                        date: ec.createdAt || ec.updatedAt || '',
-                        tracking: ec.trackingNumber || undefined,
-                        shipping: ec.note?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
-                        notes: ec.note || '', createdBy: ec.userName || '',
-                    });
-                }
-            }
-            flush(items);
-        }).catch(() => flush([]));
-
-    };
-    // === Date range logic ===
-    const [rangeStart, rangeEnd] = useMemo((): [Dayjs, Dayjs] => {
+    const getCurrentRange = (): [Dayjs, Dayjs] => {
         const today = dayjs().startOf('day');
         switch (datePreset) {
             case 'today': return [today, dayjs().endOf('day')];
@@ -244,7 +135,86 @@ export default function OrdersPage() {
             case 'custom': return customRange || [today, dayjs().endOf('day')];
             default: return [today, dayjs().endOf('day')];
         }
-    }, [datePreset, customRange]);
+    };
+
+    const buildUnifiedArgs = (overrides: Record<string, any> = {}) => {
+        const [from, to] = getCurrentRange();
+        const periodDays = to.startOf('day').diff(from.startOf('day'), 'day') + 1;
+        return {
+            from: from.startOf('day').toISOString(),
+            to: to.endOf('day').toISOString(),
+            prevFrom: from.subtract(periodDays, 'day').startOf('day').toISOString(),
+            prevTo: from.subtract(1, 'day').endOf('day').toISOString(),
+            sourceFilter,
+            platformFilter: tmdtPlatformFilter,
+            search: searchQuery,
+            page: currentPage,
+            pageSize,
+            includeTopProducts: false,
+            ...overrides,
+        };
+    };
+
+    const getOrdersCacheKey = (args: Record<string, any>) => JSON.stringify({
+        from: args.from,
+        to: args.to,
+        sourceFilter: args.sourceFilter,
+        platformFilter: args.platformFilter,
+        search: args.search,
+        page: args.page,
+        pageSize: args.pageSize,
+    });
+
+    const loadAllOrders = async (silent = false) => {
+        const requestId = ++ordersRequestIdRef.current;
+        const args = buildUnifiedArgs();
+        const cacheKey = getOrdersCacheKey(args);
+        const cached = ordersPageCache.get(cacheKey);
+        if (cached) {
+            setLoading(false);
+            setOrders(cached.rows);
+            setTotalOrders(cached.total);
+            setCurrentStats(cached.current);
+            setPreviousStats(cached.previous);
+            setSourceCounts(cached.sourceCounts);
+        } else if (!silent) {
+            setLoading(true);
+        }
+        const api = (window as any).electronAPI;
+        try {
+            const result = await api.orders.getUnified(args);
+            if (requestId !== ordersRequestIdRef.current) return;
+            if (!result?.success) throw new Error(result?.error || 'Không tải được danh sách đơn hàng.');
+            const data = result.data || {};
+            const cacheEntry: OrdersPageCacheEntry = {
+                rows: Array.isArray(data.rows) ? data.rows : [],
+                total: Number(data.total || 0),
+                current: data.current || { orderCount: 0, revenue: 0, quantity: 0 },
+                previous: data.previous || { orderCount: 0, revenue: 0, quantity: 0 },
+                sourceCounts: data.sourceCounts || { all: 0, tmdt: 0, pos: 0, export: 0, shopee: 0, tiktok: 0 },
+            };
+            ordersPageCache.set(cacheKey, cacheEntry);
+            if (ordersPageCache.size > 12) {
+                ordersPageCache.delete(ordersPageCache.keys().next().value!);
+            }
+            setOrders(cacheEntry.rows);
+            setTotalOrders(cacheEntry.total);
+            setCurrentStats(cacheEntry.current);
+            setPreviousStats(cacheEntry.previous);
+            setSourceCounts(cacheEntry.sourceCounts);
+        } catch (error: any) {
+            if (requestId === ordersRequestIdRef.current) {
+                message.error(error?.message || 'Không tải được danh sách đơn hàng.');
+            }
+        } finally {
+            if (requestId === ordersRequestIdRef.current) {
+                setLoading(false);
+                setSearchLoading(false);
+            }
+        }
+    };
+    // === Date range logic ===
+    const [rangeStart, rangeEnd] = useMemo(() => getCurrentRange(), [datePreset, customRange]);
 
     const rangeStartTs = rangeStart.startOf('day').valueOf();
     const rangeEndTs = rangeEnd.endOf('day').valueOf();
@@ -294,6 +264,7 @@ export default function OrdersPage() {
     };
 
     const setOrderSourceFilter = (nextSource: 'all' | 'pos' | 'export' | 'tmdt') => {
+        setCurrentPage(1);
         setSourceFilter(nextSource);
         if (nextSource !== 'tmdt') setTmdtPlatformFilter('all');
     };
@@ -303,139 +274,28 @@ export default function OrdersPage() {
         setSearchKeyword(kw);
         if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
         if (kw.trim().length < 2) {
-            setSearchResults(null);
+            setSearchQuery('');
+            setSearchLoading(false);
+            setCurrentPage(1);
             return;
         }
-        searchTimerRef.current = setTimeout(async () => {
-            setSearchLoading(true);
-            try {
-                const api = (window as any).electronAPI;
-                const s = kw.trim();
-                const [posRes, exRes, mktRes] = await Promise.all([
-                    api.posOrder.getAll({ search: s }),
-                    api.exportOrders.getAll({ search: s }),
-                    api.marketplaceOrders.getAll({ search: s }),
-                ]);
-                const unified: UnifiedOrder[] = [];
-                if (posRes.success) posRes.data?.forEach((o: any) => unified.push({
-                    id: `POS-${o.id}`,
-                    originalId: o.id,
-                    source: 'pos',
-                    sourceLabel: 'POS',
-                    orderNumber: o.orderNumber || `#POS-${o.id}`,
-                    customer: o.customer?.name || o.customerName || 'Khách lẻ',
-                    items: JSON.stringify((o.items || []).map((it: any) => ({
-                        productId: it.productId,
-                        productName: it.productName || it.name,
-                        variantSku: it.sku,
-                        variant: it.variant || null,
-                        quantity: it.quantity || it.qty,
-                        unitPrice: it.price,
-                        cost: it.cost || 0,
-                        total: it.subtotal || (it.price * (it.quantity || it.qty)),
-                    }))),
-                    totalAmount: o.total || 0,
-                    status: o.status || 'completed',
-                    date: o.createdAt || '',
-                    tracking: o.tracking || '',
-                    notes: o.note || '',
-                    createdBy: o.userName || '',
-                }));
-                if (exRes.success) exRes.data?.forEach((o: any) => unified.push({
-                    id: `EX-${o.id}`,
-                    originalId: o.id,
-                    source: 'export',
-                    sourceLabel: 'Xuất hàng',
-                    orderNumber: o.orderNumber || `#XH-${o.id}`,
-                    customer: o.customer || 'Khách lẻ',
-                    items: typeof o.items === 'string' ? o.items : JSON.stringify(o.items || []),
-                    totalAmount: o.totalAmount || 0,
-                    status: o.status || 'completed',
-                    date: o.createdAt || o.exportDate || '',
-                    notes: o.notes || '',
-                    createdBy: o.createdBy || '',
-                }));
-                if (mktRes.success) mktRes.data?.forEach((o: any) => unified.push({
-                    id: `TMDT-${o.id}`,
-                    originalId: o.id,
-                    source: 'tmdt',
-                    sourceLabel: o.source === 'tiktok' ? 'TikTok' : o.source === 'shopee' ? 'Shopee' : o.source === 'lazada' ? 'Lazada' : 'TMDT',
-                    orderNumber: o.orderNumber || `#TMDT-${o.id}`,
-                    customer: o.source ? o.source.toUpperCase() : 'Sàn TMDT',
-                    items: JSON.stringify(o.items || []),
-                    totalAmount: o.total || 0,
-                    status: o.status,
-                    date: o.createdAt || o.updatedAt || '',
-                    tracking: o.tracking || o.trackingNumber || '',
-                    shipping: o.note?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
-                    notes: o.note || '',
-                    createdBy: o.userName || '',
-                }));
-                unified.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
-                setSearchResults(unified);
-            } finally {
+        setSearchLoading(true);
+        searchTimerRef.current = setTimeout(() => {
+            setCurrentPage(1);
+            const nextQuery = kw.trim();
+            if (nextQuery === searchQuery) {
                 setSearchLoading(false);
+                return;
             }
+            setSearchQuery(nextQuery);
         }, 400);
     };
 
-    // Filtered orders
-    const filteredOrders = useMemo(() => {
-        const kw = searchKeyword.trim().toLowerCase();
-        const base = searchResults ?? orders;
-        return base.filter(order => {
-            if (!matchesSourceFilters(order)) return false;
-            if (kw) {
-                return (
-                    order.orderNumber.toLowerCase().includes(kw) ||
-                    order.customer.toLowerCase().includes(kw) ||
-                    (order.tracking || '').toLowerCase().includes(kw) ||
-                    order.sourceLabel.toLowerCase().includes(kw)
-                );
-            }
-            if (!searchResults) {
-                const ts = Date.parse(order.date);
-                if (ts < rangeStartTs || ts > rangeEndTs) return false;
-            }
-            return true;
-        });
-    }, [searchResults, orders, searchKeyword, sourceFilter, tmdtPlatformFilter, rangeStartTs, rangeEndTs]);
-
-    // === Stats: current period vs previous period ===
-    const { prevOrders, currentRevenue, prevRevenue, currentQty, prevQty } = useMemo(() => {
-        const periodDays = rangeEnd.diff(rangeStart, 'day') + 1;
-        const prevStartTs = rangeStart.subtract(periodDays, 'day').startOf('day').valueOf();
-        const prevEndTs = rangeStart.subtract(1, 'day').endOf('day').valueOf();
-
-        // Bám theo các đơn đang hiển thị. Prefix TMDT trước đây làm toàn bộ
-        // doanh thu sàn bị loại dù từng dòng vẫn có tổng tiền hợp lệ.
-        const isValidRevenue = (o: UnifiedOrder) =>
-            !['cancelled', 'canceled', 'returned', 'refunded'].includes((o.status || '').toLowerCase());
-
-        const prev = orders.filter(o => {
-            if (!matchesSourceFilters(o)) return false;
-            const ts = Date.parse(o.date);
-            return ts >= prevStartTs && ts <= prevEndTs;
-        });
-
-        let curRevenue = 0, prvRevenue = 0, curQty = 0, prvQty = 0;
-        for (const o of filteredOrders) {
-            if (isValidRevenue(o)) curRevenue += o.totalAmount || 0;
-            try {
-                const items: any[] = JSON.parse(o.items);
-                curQty += items.reduce((s: number, it: any) => s + (it.quantity || it.qty || 1), 0);
-            } catch { curQty += 1; }
-        }
-        for (const o of prev) {
-            if (isValidRevenue(o)) prvRevenue += o.totalAmount || 0;
-            try {
-                const items: any[] = JSON.parse(o.items);
-                prvQty += items.reduce((s: number, it: any) => s + (it.quantity || it.qty || 1), 0);
-            } catch { prvQty += 1; }
-        }
-
-        return { prevOrders: prev, currentRevenue: curRevenue, prevRevenue: prvRevenue, currentQty: curQty, prevQty: prvQty };
-    }, [orders, filteredOrders, rangeStart, rangeEnd, sourceFilter, tmdtPlatformFilter]);
+    const filteredOrders = orders;
+    const currentRevenue = Number(currentStats.revenue || 0);
+    const prevRevenue = Number(previousStats.revenue || 0);
+    const currentQty = Number(currentStats.quantity || 0);
+    const prevQty = Number(previousStats.quantity || 0);
 
     const periodLabel = datePreset === 'today' ? 'Hôm nay' : datePreset === '7days' ? '7 ngày qua' :
         datePreset === '30days' ? '30 ngày' : datePreset === 'month' ? 'Tháng này' : 'Kỳ chọn';
@@ -449,11 +309,11 @@ export default function OrdersPage() {
         return fmt(n);
     };
 
-    const currentAverage = filteredOrders.length > 0
-        ? Math.round(currentRevenue / filteredOrders.length)
+    const currentAverage = currentStats.orderCount > 0
+        ? Math.round(currentRevenue / currentStats.orderCount)
         : 0;
-    const previousAverage = prevOrders.length > 0
-        ? Math.round(prevRevenue / prevOrders.length)
+    const previousAverage = previousStats.orderCount > 0
+        ? Math.round(prevRevenue / previousStats.orderCount)
         : 0;
 
     const trendData = useMemo(() => {
@@ -494,43 +354,6 @@ export default function OrdersPage() {
             </div>
         );
     };
-
-    // === Top products ===
-    const topProducts = useMemo(() => {
-        const productMap: Record<string, { name: string; qty: number; revenue: number }> = {};
-        for (const order of filteredOrders) {
-            let items: any[] = [];
-            try { items = JSON.parse(order.items); } catch { }
-            for (const it of items) {
-                const name = it.productName || it.name || 'N/A';
-                const qty = it.quantity || it.qty || 1;
-                const rev = it.total || it.subtotal || (it.unitPrice || it.price || 0) * qty;
-                if (!productMap[name]) productMap[name] = { name, qty: 0, revenue: 0 };
-                productMap[name].qty += qty;
-                productMap[name].revenue += rev;
-            }
-        }
-        return Object.values(productMap)
-            .sort((a, b) => b.qty - a.qty)
-            .slice(0, 10);
-    }, [filteredOrders]);
-
-    // === Orders containing a specific product (for product detail modal) ===
-    const productDetailOrders = useMemo(() => {
-        if (!productDetailName) return [];
-        return filteredOrders
-            .map(order => {
-                let items: any[] = [];
-                try { items = JSON.parse(order.items); } catch { }
-                const matched = items.filter(it => (it.productName || it.name || 'N/A') === productDetailName);
-                if (matched.length === 0) return null;
-                const totalQty = matched.reduce((s: number, it: any) => s + (it.quantity || it.qty || 1), 0);
-                const totalRev = matched.reduce((s: number, it: any) => s + (it.total || it.subtotal || (it.unitPrice || it.price || 0) * (it.quantity || it.qty || 1)), 0);
-                const unitPrice = matched[0]?.unitPrice || matched[0]?.price || 0;
-                return { order, totalQty, totalRev, unitPrice };
-            })
-            .filter(Boolean) as { order: UnifiedOrder; totalQty: number; totalRev: number; unitPrice: number }[];
-    }, [productDetailName, filteredOrders]);
 
     const openEdit = (record: UnifiedOrder) => {
         setEditItems([]); // clear state cũ trước khi load đơn mới
@@ -681,10 +504,19 @@ export default function OrdersPage() {
     };
 
     // Export Excel
-    const handleExportExcel = () => {
-        if (filteredOrders.length === 0) { message.warning('Không có dữ liệu!'); return; }
+    const handleExportExcel = async () => {
+        setExportLoading(true);
         try {
-            const data = filteredOrders.map((o, i) => {
+            const api = (window as any).electronAPI;
+            const result = await api.orders.getUnified(buildUnifiedArgs({ page: 1, exportAll: true }));
+            if (!result?.success) throw new Error(result?.error || 'Không tải được dữ liệu xuất Excel.');
+            const exportOrders: UnifiedOrder[] = Array.isArray(result.data?.rows) ? result.data.rows : [];
+            if (exportOrders.length === 0) {
+                message.warning('Không có dữ liệu!');
+                return;
+            }
+            const XLSX = await import('xlsx');
+            const data = exportOrders.map((o, i) => {
                 let items: any[] = [];
                 try { items = JSON.parse(o.items); } catch { }
                 return {
@@ -697,16 +529,12 @@ export default function OrdersPage() {
             const wb = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(wb, ws, 'Đơn hàng');
             XLSX.writeFile(wb, `DonHang_${dayjs().format('YYYYMMDD_HHmmss')}.xlsx`);
-            message.success(`✅ Đã xuất ${filteredOrders.length} đơn!`);
-        } catch { message.error('Lỗi xuất Excel!'); }
-    };
-
-    const sourceColors: Record<string, string> = {
-        POS: '#1677ff',
-        'Xuất hàng': '#d97706',
-        Shopee: '#ee4d2d',
-        TikTok: '#111827',
-        TMDT: '#1677ff',
+            message.success(`✅ Đã xuất ${exportOrders.length} đơn!`);
+        } catch (error: any) {
+            message.error(error?.message || 'Lỗi xuất Excel!');
+        } finally {
+            setExportLoading(false);
+        }
     };
 
     const getStatusMeta = (status: string) => {
@@ -740,6 +568,37 @@ export default function OrdersPage() {
             });
         }
         return menuItems;
+    };
+
+    const toggleOrderDetails = (orderId: string) => {
+        setExpandedRowKeys(current => current.includes(orderId)
+            ? current.filter(key => key !== orderId)
+            : [...current, orderId]);
+    };
+
+    const handleOrderRowClick = (record: UnifiedOrder, event: React.MouseEvent<HTMLElement>) => {
+        const target = event.target as HTMLElement;
+        const isInteractiveTarget = target.closest(
+            'button, a, input, label, [role="button"], .ant-checkbox-wrapper, .ant-dropdown-trigger',
+        );
+        if (isInteractiveTarget) {
+            lastOrderRowClickRef.current = null;
+            return;
+        }
+
+        const timestamp = performance.now();
+        const previousClick = lastOrderRowClickRef.current;
+        const isDoubleClick = previousClick?.orderId === record.id
+            && timestamp - previousClick.timestamp <= 600;
+
+        if (isDoubleClick) {
+            event.preventDefault();
+            lastOrderRowClickRef.current = null;
+            toggleOrderDetails(record.id);
+            return;
+        }
+
+        lastOrderRowClickRef.current = { orderId: record.id, timestamp };
     };
 
     const columns: ColumnsType<UnifiedOrder> = [
@@ -817,52 +676,22 @@ export default function OrdersPage() {
         },
     ];
 
-    if (loading) {
+    if (loading && orders.length === 0 && totalOrders === 0) {
         return <div className="page-loading-center"><Spin size="large" /></div>;
     }
 
-    const presetBtnStyle = (active: boolean) => ({
-        padding: '4px 14px', fontSize: 12, fontWeight: active ? 700 : 500,
-        borderRadius: 6, cursor: 'pointer' as const, border: 'none',
-        background: active ? '#1890ff' : '#f0f0f0',
-        color: active ? '#fff' : '#595959',
-        transition: 'all 0.2s',
-    });
-
-    const sourceTabStyle = (active: boolean, color: string) => ({
-        padding: '6px 16px', fontSize: 12, fontWeight: active ? 700 : 500,
-        borderRadius: 8, cursor: 'pointer' as const,
-        border: active ? `2px solid ${color}` : '2px solid transparent',
-        background: active ? `${color}12` : '#f5f5f5',
-        color: active ? color : '#595959',
-        transition: 'all 0.25s ease',
-        display: 'inline-flex', alignItems: 'center', gap: 6,
-    });
-
-    const tmdtPlatformStyle = (active: boolean, color: string) => ({
-        padding: '4px 12px',
-        fontSize: 12,
-        fontWeight: active ? 700 : 500,
-        borderRadius: 999,
-        cursor: 'pointer' as const,
-        border: active ? `1px solid ${color}` : '1px solid #d9d9d9',
-        background: active ? color : '#fff',
-        color: active ? '#fff' : '#595959',
-        transition: 'all 0.2s ease',
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 6,
-    });
-
-    const countCurrentRange = (predicate: (order: UnifiedOrder) => boolean) =>
-        orders.filter(order => predicate(order) && Date.parse(order.date) >= rangeStartTs && Date.parse(order.date) <= rangeEndTs).length;
-
-    const sourceCounts = {
-        all: countCurrentRange(() => true),
-        tmdt: countCurrentRange(order => order.source === 'tmdt'),
-        pos: countCurrentRange(order => order.source === 'pos'),
-        export: countCurrentRange(order => order.source === 'export'),
-    };
+    // Các khai báo dưới đây chỉ phục vụ khối giao diện cũ đã ngừng mount.
+    // Nhánh `false` giúp bundler loại toàn bộ khối khỏi mã production.
+    const presetBtnStyle = (_active: boolean) => ({});
+    const sourceTabStyle = (_active: boolean, _color: string) => ({});
+    const tmdtPlatformStyle = (_active: boolean, _color: string) => ({});
+    const countCurrentRange = (_predicate: (order: UnifiedOrder) => boolean) => 0;
+    const prevOrders: UnifiedOrder[] = [];
+    const topProducts: Array<{ name: string; qty: number; revenue: number }> = [];
+    const productDetailName: string | null = null;
+    const setProductDetailName = (_value: string | null) => undefined;
+    const productDetailOrders: Array<{ order: UnifiedOrder; totalQty: number; totalRev: number; unitPrice: number }> = [];
+    const sourceColors: Record<string, string> = {};
     const sourceLabels = { all: 'Tất cả', tmdt: 'TMDT', pos: 'Bán hàng', export: 'Xuất hàng' };
     const sourceMenuItems = (['all', 'tmdt', 'pos', 'export'] as const).map(key => ({
         key,
@@ -879,7 +708,10 @@ export default function OrdersPage() {
     const dateMenuItems = (['today', '7days', '30days', 'month', 'custom'] as DatePreset[]).map(key => ({
         key,
         label: dateLabels[key],
-        onClick: () => setDatePreset(key),
+        onClick: () => {
+            setCurrentPage(1);
+            setDatePreset(key);
+        },
     }));
 
     const advancedFilters = (
@@ -890,6 +722,7 @@ export default function OrdersPage() {
                 value={datePreset === 'custom' && customRange ? customRange : undefined}
                 onChange={(dates) => {
                     if (dates?.[0] && dates?.[1]) {
+                        setCurrentPage(1);
                         setCustomRange([dates[0], dates[1]]);
                         setDatePreset('custom');
                     }
@@ -905,7 +738,10 @@ export default function OrdersPage() {
                                 key={platform}
                                 size="small"
                                 type={tmdtPlatformFilter === platform ? 'primary' : 'default'}
-                                onClick={() => setTmdtPlatformFilter(platform)}
+                                onClick={() => {
+                                    setCurrentPage(1);
+                                    setTmdtPlatformFilter(platform);
+                                }}
                             >
                                 {platform === 'all' ? 'Tất cả' : platform === 'shopee' ? 'Shopee' : 'TikTok'}
                             </Button>
@@ -917,6 +753,7 @@ export default function OrdersPage() {
                 size="small"
                 onClick={() => {
                     setOrderSourceFilter('all');
+                    setCurrentPage(1);
                     setDatePreset('today');
                     setCustomRange(null);
                 }}
@@ -941,7 +778,7 @@ export default function OrdersPage() {
                             Xóa ({selectedRowKeys.length})
                         </Button>
                     )}
-                    <Button className="orders-export-button" icon={<DownloadOutlined />} onClick={handleExportExcel}>Xuất Excel</Button>
+                    <Button className="orders-export-button" icon={<DownloadOutlined />} loading={exportLoading} onClick={handleExportExcel}>Xuất Excel</Button>
                 </Space>
             </div>
 
@@ -963,8 +800,8 @@ export default function OrdersPage() {
                         <div className="orders-kpi-icon"><ShoppingOutlined /></div>
                         <div className="orders-kpi-content">
                             <Text>Số đơn hàng</Text>
-                            <strong>{filteredOrders.length}</strong>
-                            {renderChange(filteredOrders.length, prevOrders.length, prevLabel)}
+                            <strong>{currentStats.orderCount}</strong>
+                            {renderChange(currentStats.orderCount, previousStats.orderCount, prevLabel)}
                         </div>
                     </div>
                     <div className="orders-kpi orders-kpi--products">
@@ -1064,6 +901,8 @@ export default function OrdersPage() {
                 </div>
             </section>
 
+            {false && <>
+            {/* Legacy layout retained temporarily for reference, but no longer mounted. */}
             {/* Source Filter Tabs */}
             <Card className="orders-legacy-source-filter" bordered={false}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -1261,11 +1100,13 @@ export default function OrdersPage() {
                 );
             })()}
 
+            </>}
+
             {/* Table */}
             <section className="orders-list-section">
                 <div className="orders-list-heading">
                     <Title level={4}>Danh sách đơn</Title>
-                    <Text type="secondary">{rangeStart.format('DD/MM/YYYY')} – {rangeEnd.format('DD/MM/YYYY')} · {filteredOrders.length} đơn</Text>
+                    <Text type="secondary">{rangeStart.format('DD/MM/YYYY')} – {rangeEnd.format('DD/MM/YYYY')} · {totalOrders} đơn</Text>
                 </div>
                 <div className="orders-filter-toolbar">
                     <Space wrap size={10}>
@@ -1298,18 +1139,10 @@ export default function OrdersPage() {
                     onRow={(record) => ({
                         title: 'Nhấp đúp để xem hoặc thu gọn chi tiết đơn hàng',
                         tabIndex: 0,
-                        onDoubleClick: (event) => {
-                            const target = event.target as HTMLElement;
-                            if (target.closest('button, a, input, label, [role="button"], .ant-checkbox-wrapper, .ant-dropdown-trigger')) return;
-                            setExpandedRowKeys(current => current.includes(record.id)
-                                ? current.filter(key => key !== record.id)
-                                : [...current, record.id]);
-                        },
+                        onClick: (event) => handleOrderRowClick(record, event),
                         onKeyDown: (event) => {
                             if (event.key !== 'Enter' || event.target !== event.currentTarget) return;
-                            setExpandedRowKeys(current => current.includes(record.id)
-                                ? current.filter(key => key !== record.id)
-                                : [...current, record.id]);
+                            toggleOrderDetails(record.id);
                         },
                     })}
                     rowClassName={(record) => expandedRowKeys.includes(record.id) ? 'orders-row-expanded' : 'orders-row-expandable'}
@@ -1317,7 +1150,24 @@ export default function OrdersPage() {
                         selectedRowKeys,
                         onChange: (keys) => setSelectedRowKeys(keys),
                     }}
-                    pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (t, range) => `Hiển thị ${range[0]}–${range[1]} của ${t} đơn` }}
+                    loading={loading}
+                    pagination={{
+                        current: currentPage,
+                        pageSize,
+                        total: totalOrders,
+                        showSizeChanger: true,
+                        onChange: (nextPage, nextPageSize) => {
+                            setExpandedRowKeys([]);
+                            setSelectedRowKeys([]);
+                            if (nextPageSize !== pageSize) {
+                                setPageSize(nextPageSize);
+                                setCurrentPage(1);
+                            } else {
+                                setCurrentPage(nextPage);
+                            }
+                        },
+                        showTotal: (total, range) => `Hiển thị ${range[0]}–${range[1]} của ${total} đơn`,
+                    }}
                     scroll={{ x: 1050 }}
                     expandable={{
                         expandedRowKeys,
@@ -1496,7 +1346,8 @@ export default function OrdersPage() {
                 </div>
             </Modal>
 
-            {/* Modal Chi tiết sản phẩm - Đơn hàng chứa SP */}
+            {false && <>
+            {/* Legacy product-detail modal: no longer mounted. */}
             <Modal
                 title={
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1611,6 +1462,7 @@ export default function OrdersPage() {
                     </div>
                 )}
             </Modal>
+            </>}
         </div>
     );
 }

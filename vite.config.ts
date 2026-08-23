@@ -36,9 +36,6 @@ export default defineConfig({
             output: {
                 // Manual chunks for better caching
                 manualChunks: {
-                    // Ant Design UI library (largest dependency)
-                    'vendor-antd': ['antd', '@ant-design/icons'],
-
                     // Charts & visualization (if used)
                     'vendor-charts': ['recharts'],
 

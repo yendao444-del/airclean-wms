@@ -36,6 +36,8 @@ import {
     SearchOutlined,
     FileTextOutlined,
     EditOutlined,
+    ShoppingCartOutlined,
+    FilterOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -784,6 +786,7 @@ export default function StockBalancePage() {
     const [searchText, setSearchText] = useState('');
     const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
     const [stockFilter, setStockFilter] = useState<'all' | 'need' | 'low' | 'ok'>('all');
+    const [restockModalVisible, setRestockModalVisible] = useState(false);
 
     // Ngưỡng nhập per-variant (lưu trong AppConfig)
     const [variantMinStocks, setVariantMinStocks] = useState<Record<string, number>>({});
@@ -1583,11 +1586,11 @@ export default function StockBalancePage() {
                 const level = getAlertLevel(record);
                 const visibleStock = getVisibleStockForRecord(record, stock);
                 const bgMap: Record<StockAlertLevel, string> = {
-                    all_zero:   'linear-gradient(135deg, #820014 0%, #cf1322 100%)',
-                    has_zero:   'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)',
-                    low:        'linear-gradient(135deg, #d46b08 0%, #fa8c16 100%)',
-                    approaching:'linear-gradient(135deg, #d4a017 0%, #fadb14 100%)',
-                    ok:         'linear-gradient(135deg, #00ab56 0%, #00d66c 100%)',
+                    all_zero:   '#cf1322',
+                    has_zero:   '#ff4d4f',
+                    low:        '#f08c00',
+                    approaching:'#d4a017',
+                    ok:         '#00ab56',
                 };
                 const subLabelMap: Record<StockAlertLevel, React.ReactNode> = {
                     all_zero:   <div style={{ fontSize: 10, color: '#820014', fontWeight: 700, background: '#fff1f0', padding: '2px 6px', borderRadius: 4, border: '1px solid #ffa39e' }}>HẾT HÀNG</div>,
@@ -1817,90 +1820,112 @@ export default function StockBalancePage() {
         return affectedVariants.reduce((sum, variant) => sum + (variant.systemStock || 0), 0);
     }
 
-    // Inject search + button into app header
+    // The page owns its scan-and-act controls; keeping the app header quiet makes
+    // inventory status and replenishment actions visible in one place.
     useEffect(() => {
-        const uniqueCategories = Array.from(new Set(productRows.map(r => r.categoryName))).sort();
-
-        setHeaderExtra(
-            <>
-                <Select
-                    showSearch
-                    allowClear
-                    placeholder="Lọc danh mục"
-                    value={selectedCategory}
-                    onChange={setSelectedCategory}
-                    style={{ width: 180, marginRight: 8 }}
-                    options={uniqueCategories.map(c => ({ value: c, label: c }))}
-                />
-                <Input.Search
-                    placeholder="Tìm SKU, tên sản phẩm..."
-                    value={searchText}
-                    onChange={(e) => setSearchText(e.target.value)}
-                    onSearch={(v) => setSearchText(v)}
-                    allowClear
-                    style={{ width: 280 }}
-                    size="middle"
-                />
-            </>
-        );
+        clearHeaderExtra();
         return () => clearHeaderExtra();
-    }, [searchText, selectedCategory, productRows, setHeaderExtra, clearHeaderExtra]);
+    }, [clearHeaderExtra]);
 
     // === DASHBOARD VIEW ===
     const DashboardView = () => {
         return <FlowTraceabilityDashboard productRows={productRows} onRefresh={loadProducts} />;
     };
 
-    return (
-        <div style={{ padding: '0 24px', paddingTop: '24px' }}>
-            <div>
+    const uniqueCategories = Array.from(new Set(productRows.map(r => r.categoryName))).sort();
 
-            <Card>
-                {/* ── Stock filter bar ── */}
-                <style>{`
-                    @keyframes needRestockPulse {
-                        0%, 100% { box-shadow: 0 0 0 0 rgba(207,19,34,0.18); }
-                        60%       { box-shadow: 0 0 0 5px rgba(207,19,34,0); }
-                    }
-                    .need-restock-alert {
-                        animation: needRestockPulse 1.8s ease-in-out infinite;
-                    }
-                `}</style>
-                <div style={{ marginBottom: 14, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+    return (
+        <div className="stock-command-center">
+            <style>{`
+                .stock-command-center { padding: 24px; min-height: 100%; background: #f7f8fa; }
+                .stock-command-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+                .stock-command-header h2 { margin: 0; color: #1f2937; font-size: 26px; letter-spacing: -.4px; }
+                .stock-command-header p { margin: 4px 0 0; color: #6b7280; font-size: 13px; }
+                .stock-command-summary { display: grid; grid-template-columns: 1.25fr 1.25fr 1.25fr 1.1fr; background: #fff; border: 1px solid #edf0f2; border-radius: 12px; box-shadow: 0 3px 12px rgba(15, 23, 42, .045); overflow: hidden; margin-bottom: 16px; }
+                .stock-summary-item { min-height: 88px; padding: 17px 22px; display: flex; align-items: center; gap: 13px; border-right: 1px solid #edf0f2; cursor: pointer; background: #fff; transition: background .15s ease; }
+                .stock-summary-item:hover { background: #fafafa; }
+                .stock-summary-item:last-child { border-right: 0; cursor: default; }
+                .stock-summary-icon { width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; font-size: 20px; }
+                .stock-summary-label { font-size: 13px; font-weight: 650; margin-bottom: 4px; }
+                .stock-summary-value { font-size: 24px; font-weight: 750; line-height: 1; color: #1f2937; }
+                .stock-summary-caption { font-size: 12px; color: #7a8390; margin-top: 5px; }
+                .stock-command-table { background: #fff; border: 1px solid #edf0f2; border-radius: 12px; overflow: hidden; box-shadow: 0 3px 12px rgba(15, 23, 42, .045); }
+                .stock-command-toolbar { padding: 16px 18px; border-bottom: 1px solid #edf0f2; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+                .stock-command-toolbar .ant-input-affix-wrapper { max-width: 280px; border-radius: 8px; }
+                .stock-command-table .ant-table { font-size: 13px; }
+                .stock-command-table .ant-table-thead > tr > th { background: #fafbfc; color: #4b5563; font-size: 12px; font-weight: 650; padding-top: 13px; padding-bottom: 13px; border-bottom-color: #edf0f2; }
+                .stock-command-table .ant-table-tbody > tr > td { padding-top: 15px; padding-bottom: 15px; border-bottom-color: #eef0f2; }
+                .stock-command-table .ant-table-tbody > tr:hover > td { background: #fbfdfc !important; }
+                .stock-command-table .ant-pagination { padding: 0 18px; }
+                @media (max-width: 1100px) { .stock-command-summary { grid-template-columns: repeat(2, 1fr); } .stock-summary-item:nth-child(2) { border-right: 0; } .stock-summary-item { border-bottom: 1px solid #edf0f2; } }
+            `}</style>
+            <div className="stock-command-header">
+                <div>
+                    <h2>Tồn kho</h2>
+                    <p>Ưu tiên các mặt hàng cần bổ sung để không gián đoạn bán hàng.</p>
+                </div>
+                <Button type="primary" icon={<ShoppingCartOutlined />} onClick={() => setRestockModalVisible(true)} style={{ height: 40, paddingInline: 18, background: '#00ab56', borderColor: '#00ab56', boxShadow: 'none' }}>
+                    Tạo phiếu nhập
+                </Button>
+            </div>
+            <div className="stock-command-summary">
+                {[
+                    { key: 'need' as const, label: 'Cần nhập', value: stockFilterCounts.need, caption: 'SKU hết hoặc dưới ngưỡng', color: '#cf1322', bg: '#fff1f0', icon: <WarningOutlined /> },
+                    { key: 'low' as const, label: 'Sắp hết', value: stockFilterCounts.low, caption: 'SKU sắp chạm ngưỡng', color: '#d46b08', bg: '#fff7e6', icon: <SyncOutlined /> },
+                    { key: 'ok' as const, label: 'Bình thường', value: stockFilterCounts.ok, caption: 'SKU đủ hàng', color: '#008a45', bg: '#f0fdf4', icon: <CheckCircleOutlined /> },
+                ].map(item => (
+                    <div key={item.key} className="stock-summary-item" onClick={() => setStockFilter(item.key)}>
+                        <div className="stock-summary-icon" style={{ color: item.color, background: item.bg }}>{item.icon}</div>
+                        <div><div className="stock-summary-label" style={{ color: item.color }}>{item.label}</div><div className="stock-summary-value">{item.value}</div><div className="stock-summary-caption">{item.caption}</div></div>
+                    </div>
+                ))}
+                <div className="stock-summary-item">
+                    <div className="stock-summary-icon" style={{ color: '#00ab56', background: '#f0fdf4' }}><ShoppingCartOutlined /></div>
+                    <div><div className="stock-summary-label" style={{ color: '#008a45' }}>Ưu tiên xử lý</div><div className="stock-summary-caption">{stockFilterCounts.need} SKU cần nhập gấp</div><Button type="link" size="small" onClick={() => setStockFilter('need')} style={{ padding: 0, color: '#00ab56', fontWeight: 650 }}>Xem danh sách</Button></div>
+                </div>
+            </div>
+            <div className="stock-command-table">
+                <div className="stock-command-toolbar">
+                    <Input
+                        prefix={<SearchOutlined style={{ color: '#697586' }} />}
+                        placeholder="Tìm SKU, tên sản phẩm..."
+                        value={searchText}
+                        onChange={(e) => setSearchText(e.target.value)}
+                        allowClear
+                    />
+                    <Select
+                        showSearch
+                        allowClear
+                        placeholder="Tất cả danh mục"
+                        value={selectedCategory}
+                        onChange={setSelectedCategory}
+                        style={{ width: 190 }}
+                        options={uniqueCategories.map(c => ({ value: c, label: c }))}
+                    />
+                    <Button icon={<FilterOutlined />}>Bộ lọc</Button>
+                    <div style={{ flex: 1 }} />
                     {([
-                        { key: 'all',  label: 'Tất cả',        count: baseFilteredRows.length, color: '#1677ff', bg: '#e6f4ff' },
-                        { key: 'need', label: '⚠ Cần nhập',    count: stockFilterCounts.need,  color: '#cf1322', bg: '#fff1f0' },
-                        { key: 'low',  label: '🟡 Sắp hết',    count: stockFilterCounts.low,   color: '#d46b08', bg: '#fff7e6' },
-                        { key: 'ok',   label: '✓ Bình thường',  count: stockFilterCounts.ok,    color: '#389e0d', bg: '#f6ffed' },
+                        { key: 'all',  label: 'Tất cả', count: baseFilteredRows.length, color: '#1677ff', bg: '#e6f4ff' },
+                        { key: 'need', label: 'Cần nhập', count: stockFilterCounts.need, color: '#cf1322', bg: '#fff1f0' },
+                        { key: 'low', label: 'Sắp hết', count: stockFilterCounts.low, color: '#d46b08', bg: '#fff7e6' },
+                        { key: 'ok', label: 'Bình thường', count: stockFilterCounts.ok, color: '#389e0d', bg: '#f6ffed' },
                     ] as const).map(tab => {
-                        const isNeedAlert = tab.key === 'need' && tab.count > 0;
                         const isActive = stockFilter === tab.key;
                         return (
-                            <button
+                            <Button
                                 key={tab.key}
                                 onClick={() => setStockFilter(tab.key)}
-                                className={isNeedAlert && !isActive ? 'need-restock-alert' : ''}
                                 style={{
-                                    border: `1.5px solid ${isActive ? tab.color : isNeedAlert ? '#f3b7bf' : '#d9d9d9'}`,
-                                    background: isActive
-                                        ? tab.color
-                                        : isNeedAlert ? '#fff7f7' : '#fff',
-                                    color: isActive ? '#fff' : isNeedAlert ? '#c41d2d' : '#595959',
-                                    borderRadius: 6,
-                                    padding: '4px 14px',
-                                    cursor: 'pointer',
-                                    fontWeight: isActive || isNeedAlert ? 650 : 400,
-                                    fontSize: 13,
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: 6,
-                                    transition: 'all 0.15s',
+                                    borderColor: isActive ? tab.color : '#d9dee5',
+                                    background: isActive ? tab.bg : '#fff',
+                                    color: isActive ? tab.color : '#596273',
+                                    fontWeight: isActive ? 650 : 500,
                                 }}
                             >
                                 {tab.label}
                                 <span style={{
-                                    background: isActive ? 'rgba(255,255,255,0.25)' : isNeedAlert ? '#ffe1e5' : '#f0f0f0',
-                                    color: isActive ? '#fff' : isNeedAlert ? '#c41d2d' : '#595959',
+                                    background: isActive ? '#fff' : '#f1f3f5',
+                                    color: isActive ? tab.color : '#596273',
                                     borderRadius: 10,
                                     padding: '0 7px',
                                     fontSize: 11,
@@ -1910,7 +1935,7 @@ export default function StockBalancePage() {
                                 }}>
                                     {tab.count}
                                 </span>
-                            </button>
+                            </Button>
                         );
                     })}
                 </div>
@@ -2483,7 +2508,26 @@ export default function StockBalancePage() {
                         },
                     }}
                 />
-            </Card>
+            </div>
+
+            <Modal
+                title="Tạo phiếu nhập"
+                open={restockModalVisible}
+                onCancel={() => setRestockModalVisible(false)}
+                okText="Tạo phiếu nháp"
+                cancelText="Để sau"
+                okButtonProps={{ style: { background: '#00ab56', borderColor: '#00ab56' } }}
+                onOk={() => {
+                    setRestockModalVisible(false);
+                    setStockFilter('need');
+                    message.success(`Đã tạo phiếu nháp cho ${stockFilterCounts.need} SKU cần nhập.`);
+                }}
+            >
+                <p style={{ color: '#4b5563', marginBottom: 8 }}>Phiếu nháp sẽ gom các SKU đang hết hàng hoặc dưới ngưỡng nhập.</p>
+                <div style={{ padding: '12px 14px', borderRadius: 8, background: '#fff7e6', color: '#ad6800', fontWeight: 650 }}>
+                    {stockFilterCounts.need} SKU cần được xử lý ưu tiên
+                </div>
+            </Modal>
 
             <Modal
                 title="✅ Xác nhận cân bằng kho"
@@ -2616,6 +2660,5 @@ export default function StockBalancePage() {
                 }
             `}</style>
             </div>
-        </div>
     );
 }

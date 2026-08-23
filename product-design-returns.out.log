@@ -1,0 +1,32 @@
+
+> quan-ly-ban-hang-desktop@1.0.384 dev
+> vite --host 127.0.0.1 --port 4173 --strictPort
+
+
+  VITE v7.3.1  ready in 234 ms
+
+  ➜  Local:   http://127.0.0.1:4173/
+  ➜  press h + enter to show help
+5:43:37 PM [vite] (client) page reload carrier-complaints-tauri/index.html
+5:43:37 PM [vite] changed tsconfig file detected: G:/QUAN LY BAN HANG/desktop-FIXDEBUG/carrier-complaints-tauri/tsconfig.json - Clearing cache and forcing full-reload to ensure TypeScript is compiled with updated config values.
+5:57:08 PM [vite] (client) hmr update /src/components/GlobalTaskAlerts.tsx
+5:58:44 PM [vite] (client) hmr update /src/components/GlobalTaskAlerts.tsx
+6:01:13 PM [vite] (client) page reload carrier-complaints-tauri/dist/index.html
+6:01:15 PM [vite] (client) page reload carrier-complaints-tauri/dist/index.html
+6:01:17 PM [vite] (client) page reload carrier-complaints-tauri/dist/index.html
+6:08:16 PM [vite] (client) page reload carrier-complaints-tauri/dist/index.html
+6:08:18 PM [vite] (client) page reload carrier-complaints-tauri/dist/index.html
+6:08:18 PM [vite] (client) page reload carrier-complaints-tauri/dist/index.html
+6:13:01 PM [vite] (client) page reload carrier-complaints-tauri/dist/index.html
+6:13:03 PM [vite] (client) page reload carrier-complaints-tauri/dist/index.html
+6:15:09 PM [vite] (client) page reload carrier-complaints-tauri/dist/index.html
+6:15:12 PM [vite] (client) page reload carrier-complaints-tauri/dist/index.html
+6:15:12 PM [vite] (client) page reload carrier-complaints-tauri/dist/index.html
+6:16:45 PM [vite] (client) page reload carrier-complaints-tauri/src-tauri/target/release/build/carrier-complaints-tauri-728d3aa055b5dbe4/out/tauri-codegen-assets/880816a4a564e530ea65a891fa7e5e1ef0d2735528dd779c5ede87fd6ad65eba.html
+6:17:43 PM [vite] (client) page reload carrier-complaints-tauri/dist/index.html
+6:17:46 PM [vite] (client) page reload carrier-complaints-tauri/dist/index.html
+6:35:37 PM [vite] (client) hmr update /src/App.tsx
+1:28:55 AM [vite] (client) hmr update /src/App.tsx
+1:28:55 AM [vite] (client) hmr update /src/App.tsx
+1:33:14 AM [vite] (client) page reload _patch_temp/resources/app/dist/index.html
+1:33:42 AM [vite] (client) page reload _patch_temp/resources/app/dist/index.html

@@ -81,11 +81,13 @@
     background: #fff;
     border-radius: 10px;
     border: 1px solid #f0f0f0;
-    overflow: hidden
+    overflow-x: auto;
+    overflow-y: hidden
 }
 
 .sales-table {
     width: 100%;
+    min-width: 860px;
     border-collapse: collapse
 }
 
@@ -218,11 +220,13 @@
 }
 
 .order-detail-items {
-    margin-bottom: 16px
+    margin-bottom: 16px;
+    overflow-x: auto
 }
 
 .order-detail-items table {
     width: 100%;
+    min-width: 560px;
     border-collapse: collapse
 }
 
@@ -254,4 +258,39 @@
     font-size: 20px;
     font-weight: 800;
     color: #00ab56
+}
+
+@media (max-width: 900px) {
+    .sales-history {
+        padding: 16px
+    }
+
+    .sales-header {
+        align-items: flex-start
+    }
+
+    .sales-filters {
+        width: 100%
+    }
+
+    .sales-filters > * {
+        flex: 1 1 180px
+    }
+
+    .order-detail-header,
+    .order-detail-summary {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 6px
+    }
+}
+
+@media (max-width: 560px) {
+    .sales-history {
+        padding: 12px
+    }
+
+    .sales-stats {
+        grid-template-columns: 1fr
+    }
 }

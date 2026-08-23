@@ -155,6 +155,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
         completeRegularTask: (taskId, payload) => ipcRenderer.invoke('dailyTasks:completeRegularTask', taskId, payload),
         getEvidenceImageUrl: (taskId, storagePath) => ipcRenderer.invoke('dailyTasks:getEvidenceImageUrl', taskId, storagePath),
         getDriveEvidenceImageUrl: (taskId, driveUrl, mimeType) => ipcRenderer.invoke('dailyTasks:getDriveEvidenceImageUrl', taskId, driveUrl, mimeType),
+        getDriveEvidenceImageUrls: (taskId, images, requestId) => ipcRenderer.invoke('dailyTasks:getDriveEvidenceImageUrls', taskId, images, requestId),
+        onDriveEvidenceImageLoaded: (callback) => {
+            const handler = (_event, data) => callback(data);
+            ipcRenderer.on('dailyTasks:driveEvidenceImageLoaded', handler);
+            return () => ipcRenderer.removeListener('dailyTasks:driveEvidenceImageLoaded', handler);
+        },
         listEvidencePenalties: (options) => ipcRenderer.invoke('dailyTasks:listEvidencePenalties', options),
         delete: (id) => ipcRenderer.invoke('dailyTasks:delete', id),
         getStats: (filters) => ipcRenderer.invoke('dailyTasks:stats', filters),
@@ -185,12 +191,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
             return () => ipcRenderer.removeAllListeners('ecommerceExport:newFile');
         },
     },
+    carrierComplaints: {
+        getConfig: () => ipcRenderer.invoke('carrierComplaints:getConfig'),
+        saveConfig: (config) => ipcRenderer.invoke('carrierComplaints:saveConfig', config),
+        reconcile: (data) => ipcRenderer.invoke('carrierComplaints:reconcile', data),
+        getHistory: () => ipcRenderer.invoke('carrierComplaints:getHistory'),
+        send: (data) => ipcRenderer.invoke('carrierComplaints:send', data),
+    },
     marketplaceOrders: {
         getAll: (args) => ipcRenderer.invoke('marketplaceOrders:getAll', args),
         delete: (data) => ipcRenderer.invoke('marketplaceOrders:delete', data),
     },
     orders: {
         getUnified: (args) => ipcRenderer.invoke('orders:getUnified', args),
+        getSummary: (args) => ipcRenderer.invoke('orders:getSummary', args),
         getDailyStats: (args) => ipcRenderer.invoke('orders:getDailyStats', args),
         getProductDetails: (args) => ipcRenderer.invoke('orders:getProductDetails', args),
     },

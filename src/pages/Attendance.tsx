@@ -300,6 +300,17 @@ interface PurchaseVatTracking {
     vatRequiredCompanies?: string[];
 }
 
+interface ReturnOverdueTracking {
+    id: number;
+    complaintCode?: string;
+    returnCode?: string;
+    orderNumber?: string;
+    complaintDate?: string;
+    returnDate?: string;
+    status?: string;
+    packer?: string;
+}
+
 interface BonusRecord {
     id: string;
     empId: number;
@@ -609,6 +620,35 @@ const VAT_FIRST_FINE_AFTER_DAYS = 5;
 // 10/08 is the final submission day. The first automatic VAT fine may only
 // be created from 00:00 on 11/08.
 const VAT_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-11T00:00:00');
+const RETURN_OVERDUE_FINE_FIRST_AMOUNT = 30000;
+const RETURN_OVERDUE_FINE_DAILY_INCREMENT = 10000;
+const RETURN_FIRST_FINE_AFTER_DAYS = 8;
+const RETURN_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-24T00:00:00');
+const RETURN_LEGACY_GRACE_NOTICE_AT = dayjs('2026-08-23T00:00:00');
+const RETURN_LEGACY_FIRST_FINE_AT = dayjs('2026-08-27T00:00:00');
+const RETURN_OVERDUE_RESPONSIBLE_USERNAME = 'nguyendinhtoan';
+
+const isLegacyReturnOverdueAtRollout = (returnAt: dayjs.Dayjs) =>
+    returnAt.isBefore(RETURN_FINE_POLICY_EFFECTIVE_AT, 'day')
+    && !returnAt.startOf('day').add(5, 'day').isAfter(RETURN_LEGACY_GRACE_NOTICE_AT);
+
+const getReturnFineDate = (returnAt: dayjs.Dayjs, stage: number) => {
+    const firstFineAt = isLegacyReturnOverdueAtRollout(returnAt)
+        ? RETURN_LEGACY_FIRST_FINE_AT
+        : returnAt.startOf('day').add(RETURN_FIRST_FINE_AFTER_DAYS, 'day');
+    return firstFineAt.add(Math.max(0, stage - 1), 'day');
+};
+
+const getReturnFineStage = (returnAt: dayjs.Dayjs, now = dayjs()) => {
+    const isNewPolicyReturn = !returnAt.isBefore(RETURN_FINE_POLICY_EFFECTIVE_AT, 'day');
+    if (!isNewPolicyReturn && !isLegacyReturnOverdueAtRollout(returnAt)) return 0;
+    const firstFineAt = getReturnFineDate(returnAt, 1);
+    if (now.isBefore(firstFineAt)) return 0;
+    return now.startOf('day').diff(firstFineAt.startOf('day'), 'day') + 1;
+};
+
+const getReturnFineAmount = (stage: number) =>
+    RETURN_OVERDUE_FINE_FIRST_AMOUNT + (Math.max(1, stage) - 1) * RETURN_OVERDUE_FINE_DAILY_INCREMENT;
 
 // Sunday is not a VAT penalty day. The 5-day grace period remains unchanged;
 // if a fine date lands on Sunday it moves to the next chargeable day, and the
@@ -3032,6 +3072,7 @@ export default function Attendance() {
         results: { name: string; success: boolean; error?: string }[];
     } | null>(null);
     const [purchaseVatTracking, setPurchaseVatTracking] = useState<PurchaseVatTracking[]>([]);
+    const [returnOverdueTracking, setReturnOverdueTracking] = useState<ReturnOverdueTracking[]>([]);
     const [dailyTaskTracking, setDailyTaskTracking] = useState<any[]>([]);
     const [evidencePenaltyRecords, setEvidencePenaltyRecords] = useState<any[]>([]);
     const [stockCheckSessions, setStockCheckSessions] = useState<any[]>([]);
@@ -3515,6 +3556,19 @@ export default function Attendance() {
         }
     };
 
+    const loadReturnOverdueTracking = async (requestKey?: string) => {
+        try {
+            const api = (window as any).electronAPI;
+            const result = await api.returns.getAll();
+            if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) {
+                setReturnOverdueTracking(result?.success && Array.isArray(result.data) ? result.data : []);
+            }
+        } catch (error) {
+            console.error('Lỗi tải dữ liệu trả hàng quá hạn:', error);
+            if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) setReturnOverdueTracking([]);
+        }
+    };
+
     const loadDailyTaskTracking = async (requestKey?: string) => {
         const isCurrentRequest = () => !requestKey || fineSourcesRangeKeyRef.current === requestKey;
         try {
@@ -3581,6 +3635,7 @@ export default function Attendance() {
         const deferredLoad = window.setTimeout(() => {
             void Promise.all([
                 loadPurchaseVatTracking(overviewDateRange[0].subtract(7, 'day').startOf('day').toISOString(), fineSourcesRangeKey),
+                loadReturnOverdueTracking(fineSourcesRangeKey),
                 loadDailyTaskTracking(fineSourcesRangeKey),
             ]).finally(() => {
                 if (fineSourcesRangeKeyRef.current === fineSourcesRangeKey) {
@@ -3717,6 +3772,68 @@ export default function Attendance() {
         setFineAuditLog(nextAuditLog);
         void persistAttendanceSnapshotNow({ extraFines: nextFines, fineAuditLog: nextAuditLog });
     }, [isAdmin, isDbLoaded, employees.length, autoVatOverdueFines, extraFines, fineAuditLog, persistAttendanceSnapshotNow]);
+
+    const autoReturnOverdueFines = useMemo(() => {
+        return returnOverdueTracking.flatMap((record) => {
+            const status = normalizeAttendanceText(record.status || '');
+            if (['completed', 'complete', 'hoan thanh'].includes(status)) return [];
+
+            const returnAt = dayjs(record.complaintDate || record.returnDate);
+            if (!returnAt.isValid()) return [];
+            const fineStage = getReturnFineStage(returnAt);
+            if (fineStage === 0) return [];
+
+            const employee = employees.find(emp =>
+                normalizeAttendanceText(emp.username) === normalizeAttendanceText(RETURN_OVERDUE_RESPONSIBLE_USERNAME)
+            );
+            if (!employee) return [];
+            const complaintCode = record.complaintCode || record.returnCode || `#${record.id}`;
+
+            return Array.from({ length: fineStage }, (_, index) => {
+                const stage = index + 1;
+                const penaltyDate = getReturnFineDate(returnAt, stage);
+                return {
+                    id: `return-overdue-${record.id}-stage-${stage}`,
+                    empId: employee.id,
+                    type: 'Trả hàng quá hạn',
+                    detail: `Phiếu ${complaintCode}${record.orderNumber ? ` - đơn ${record.orderNumber}` : ''} quá 7 ngày chưa Hoàn thành - phạt lần ${stage}`,
+                    amount: getReturnFineAmount(stage),
+                    date: penaltyDate.toISOString(),
+                    source: 'returns_overdue' as any,
+                };
+            }).filter(fine => inOverviewRange(fine.date));
+        });
+    }, [employees, returnOverdueTracking, overviewDateRange]);
+
+    // Mỗi ngày trễ là một khoản phạt lịch sử riêng. Khi phiếu hoàn thành,
+    // hệ thống dừng tạo khoản mới nhưng không xóa các khoản đã phát sinh.
+    useEffect(() => {
+        if (!isAdmin || !isDbLoaded || employees.length === 0 || autoReturnOverdueFines.length === 0) return;
+        const existingIds = new Set(extraFines
+            .filter(fine => fine.source === 'returns_overdue')
+            .map(fine => fine.id)
+            .filter(Boolean));
+        const deletedIds = new Set(getDeletedFineKeys(fineAuditLog));
+        const missing = autoReturnOverdueFines.filter(fine => fine.id && !existingIds.has(fine.id) && !deletedIds.has(fine.id));
+        if (missing.length === 0) return;
+
+        const now = new Date().toLocaleString('vi-VN');
+        const actor = fineAuditActorRef.current;
+        const auditEntries: FineAuditLog[] = missing.map(fine => ({
+            id: `flog-return-overdue-${fine.id}`,
+            action: 'create',
+            timestamp: now,
+            changedBy: actor.username,
+            changedByName: actor.displayName,
+            after: fine,
+            note: `Tự động ghi nhận phạt Trả hàng quá hạn: ${fine.detail}`,
+        }));
+        const nextFines = [...extraFines, ...missing];
+        const nextAuditLog = [...fineAuditLog, ...auditEntries];
+        setExtraFines(nextFines);
+        setFineAuditLog(nextAuditLog);
+        void persistAttendanceSnapshotNow({ extraFines: nextFines, fineAuditLog: nextAuditLog });
+    }, [isAdmin, isDbLoaded, employees.length, autoReturnOverdueFines, extraFines, fineAuditLog, persistAttendanceSnapshotNow]);
 
     const autoDeadlineOverdueFines = useMemo(() => {
         const officialEmployees = employees.filter(emp => emp.type === 'Official');
@@ -3879,7 +3996,11 @@ export default function Attendance() {
                 .filter(fine => fine.source === 'purchase_vat_overdue' && (!fine.date || !dayjs(fine.date).isBefore(VAT_FINE_POLICY_EFFECTIVE_AT)))
                 .map(fine => fine.id)
                 .filter(Boolean));
-            const rows = [...finesData, ...extraFines, ...autoVatOverdueFines.filter(fine => !fine.id || !persistedVatIds.has(fine.id)), ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoStockCheckMissingFines]
+            const persistedReturnIds = new Set(extraFines
+                .filter(fine => fine.source === 'returns_overdue')
+                .map(fine => fine.id)
+                .filter(Boolean));
+            const rows = [...finesData, ...extraFines, ...autoVatOverdueFines.filter(fine => !fine.id || !persistedVatIds.has(fine.id)), ...autoReturnOverdueFines.filter(fine => !fine.id || !persistedReturnIds.has(fine.id)), ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoStockCheckMissingFines]
                 .map(applyFineOverride)
                 .filter(f => !getFineRecordKeys(f).some(key => deletedFineKeys.has(key)))
                 // Auto VAT fines made before the approved rollout are invalid;
@@ -3911,7 +4032,7 @@ export default function Attendance() {
             result.push(...vatRows.values());
             return result;
         },
-        [extraFines, autoVatOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoStockCheckMissingFines, applyFineOverride]
+        [extraFines, autoVatOverdueFines, autoReturnOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoStockCheckMissingFines, applyFineOverride]
     );
 
     // Helper: lọc theo overviewDateRange
@@ -5466,6 +5587,16 @@ export default function Attendance() {
         const totalFineAmount = filteredFines.reduce((sum, f) => sum + ((f as any).isWaived ? 0 : f.amount), 0);
         const getCurrentVatOverdueDays = (fine: any) => {
             const detail = String(fine?.detail || '');
+            if (fine?.source === 'returns_overdue') {
+                const returnId = Number(String(fine?.id || '').match(/^return-overdue-(\d+)/)?.[1]);
+                const trackedReturn = returnOverdueTracking.find(item => Number(item.id) === returnId);
+                const returnAt = dayjs(trackedReturn?.complaintDate || trackedReturn?.returnDate);
+                if (returnAt.isValid()) {
+                    return Math.max(1, getReturnFineStage(returnAt));
+                }
+                const stage = Number(String(fine?.id || '').match(/-stage-(\d+)$/)?.[1]);
+                return Number.isFinite(stage) ? stage : 1;
+            }
             const isVatFine = fine?.source === 'purchase_vat_overdue'
                 || String(fine?.type || '').toLocaleLowerCase('vi-VN').includes('vat')
                 || detail.toLocaleLowerCase('vi-VN').includes('hđ vat');
@@ -5592,7 +5723,25 @@ export default function Attendance() {
                             {
                                 title: 'Chi tiết', dataIndex: 'detail', key: 'detail',
                                 render: (d: string, record: any) => {
-                                    // 1. Phạt Trả hàng (Returns)
+                                    // 1. Phạt xử lý Trả hàng quá hạn
+                                    if (record.source === 'returns_overdue') {
+                                        const code = String(d).match(/^Phiếu\s+(.+?)(?:\s+-\s+đơn\s+|\s+quá 7 ngày)/i)?.[1] || '-';
+                                        const orderNumber = String(d).match(/\s+-\s+đơn\s+(.+?)\s+quá 7 ngày/i)?.[1];
+                                        const fineStage = String(d).match(/phạt lần\s+(\d+)/i)?.[1] || '1';
+                                        return (
+                                            <div style={fineDetailCellStyle}>
+                                                <Space size={[4, 4]} wrap>
+                                                    <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ xử lý Trả hàng · phạt lần {fineStage}</Text>
+                                                    <Tag color="volcano" style={{ margin: 0, fontWeight: 700, fontFamily: 'monospace', fontSize: 11 }}>
+                                                        {code}
+                                                    </Tag>
+                                                </Space>
+                                                {orderNumber && <Text type="secondary" style={{ display: 'block', marginTop: 2, fontSize: 11 }}>Mã đơn: {orderNumber}</Text>}
+                                            </div>
+                                        );
+                                    }
+
+                                    // 2. Phạt Trả hàng do đóng gói sai (Returns)
                                     if (record.source === 'returns') {
                                         const match = String(d).match(/Mã phiếu:\s*([^)]+)/);
                                         const code = match?.[1]?.trim();
@@ -5610,7 +5759,7 @@ export default function Attendance() {
                                         }
                                     }
 
-                                    // 2. Phạt Đi muộn (Attendance)
+                                    // 3. Phạt Đi muộn (Attendance)
                                     const lateMatch = String(d).match(/^Đi muộn ca (sáng|chiều) (\d+) phút \(Mức (Nhẹ|TB|Nặng)\)/);
                                     if (record.source === 'attendance' && lateMatch) {
                                         const [, ca, minutes, level] = lateMatch;
@@ -5630,7 +5779,7 @@ export default function Attendance() {
                                         );
                                     }
 
-                                    // 3. Phạt VAT quá hạn (Purchase VAT Overdue)
+                                    // 4. Phạt VAT quá hạn (Purchase VAT Overdue)
                                     if (record.source === 'purchase_vat_overdue' || d.includes('chưa cập nhật HĐ VAT')) {
                                         const cleanText = d.replace(/\s*quá 5 ngày chưa cập nhật HĐ VAT\s*$/, '');
                                         const poCode = cleanText.replace(/^Phiếu\s+/, '');
@@ -5657,7 +5806,7 @@ export default function Attendance() {
                                         );
                                     }
 
-                                    // 4. Trễ deadline công việc (Daily Task Overdue)
+                                    // 5. Trễ deadline công việc (Daily Task Overdue)
                                     const isEvidenceTaskFine = record.source === 'daily_task_evidence_overdue'
                                         || record.source === 'assignment_evidence_overdue'
                                         || String(record.id || '').startsWith('dailyTaskEvidencePenalty:')

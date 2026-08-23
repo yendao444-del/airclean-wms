@@ -200,6 +200,7 @@ export default function HeaderTaskTicker({ onNavigate }: HeaderTaskTickerProps) 
 
     return (
         <div
+            className="app-header-ticker"
             ref={containerRef}
             onClick={() => onNavigate?.(current.navTo)}
             onMouseEnter={() => { pausedRef.current = true; }}

@@ -216,6 +216,11 @@ export interface ElectronAPI {
       data?: any;
       error?: string;
     }>;
+    getSummary: (args: any) => Promise<{
+      success: boolean;
+      data?: any;
+      error?: string;
+    }>;
     getDailyStats: (args: any) => Promise<{
       success: boolean;
       data?: Array<{ date: string; revenue: number; orders: number }>;
@@ -230,6 +235,7 @@ export interface ElectronAPI {
   purchases: {
     getAll: (filters?: {
       since?: string;
+      limit?: number;
     }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     getVatAlertSummary: () => Promise<{
       success: boolean;
@@ -575,6 +581,33 @@ export interface ElectronAPI {
       driveUrl: string,
       mimeType?: string,
     ) => Promise<{ success: boolean; data?: { url: string }; error?: string }>;
+    getDriveEvidenceImageUrls: (
+      taskId: number,
+      images: Array<{ driveUrl: string; mimeType?: string }>,
+      requestId?: string,
+    ) => Promise<{
+      success: boolean;
+      data?: {
+        results: Array<{
+          driveUrl: string;
+          success: boolean;
+          data?: { url: string };
+          error?: string;
+        }>;
+      };
+      error?: string;
+    }>;
+    onDriveEvidenceImageLoaded: (
+      callback: (data: {
+        requestId: string;
+        result: {
+          driveUrl: string;
+          success: boolean;
+          data?: { url: string };
+          error?: string;
+        };
+      }) => void,
+    ) => () => void;
     listEvidencePenalties: (options?: {
       startDate?: string;
       endDate?: string;
@@ -673,6 +706,13 @@ export interface ElectronAPI {
     onNewFile: (
       callback: (data: { name: string; base64: string; path: string }) => void,
     ) => () => void;
+  };
+  carrierComplaints: {
+    getConfig: () => Promise<{ success: boolean; data?: any; error?: string }>;
+    saveConfig: (config: any) => Promise<{ success: boolean; data?: any; error?: string }>;
+    reconcile: (data: { orders: any[] }) => Promise<{ success: boolean; data?: any; error?: string }>;
+    getHistory: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    send: (data: any) => Promise<{ success: boolean; data?: any; message?: string; error?: string; reauthRequired?: boolean }>;
   };
   marketplaceOrders: {
     getAll: (filters?: {

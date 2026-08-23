@@ -1392,7 +1392,11 @@ export default function EInvoicePage() {
                                 <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Password MISA *</Text>
                                 <Input.Password placeholder="Đã lưu — nhập lại nếu cần đổi"
                                     value={misaConfigForm.password} onChange={(e) => setMisaConfigForm({ ...misaConfigForm, password: e.target.value })} />
-                                <div style={{ fontSize: 11, color: '#52c41a', marginTop: 2 }}>🔒 Password đã lưu trong DB. Để trống = giữ nguyên.</div>
+                                <div style={{ fontSize: 11, color: misaConfigForm.hasPassword ? '#52c41a' : '#fa8c16', marginTop: 2 }}>
+                                    {misaConfigForm.hasPassword
+                                        ? '🔒 Password được mã hóa riêng trên máy này. Để trống = giữ nguyên.'
+                                        : '⚠️ Máy này chưa lưu password MISA; cần nhập một lần.'}
+                                </div>
                             </div>
                         </Col>
                     </Row>
