@@ -35,6 +35,7 @@ const VAT_OVERDUE_FINE_STAGE_INCREMENT = 10000;
 // 10/08 remains a full submission day. The policy takes effect from
 // 00:00 on 11/08 and never creates retroactive fines.
 const VAT_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-11T00:00:00');
+const INITIAL_PURCHASE_HISTORY_LIMIT = 100;
 
 const addVatChargeableDays = (start: dayjs.Dayjs, count: number) => {
     let cursor = start.startOf('day');
@@ -414,6 +415,8 @@ export default function PurchasePage() {
     const [activeTab, setActiveTab] = useState('list');
     const [historyLogs, setHistoryLogs] = useState<any[]>([]);
     const [historyLoading, setHistoryLoading] = useState(false);
+    const [historyFullyLoaded, setHistoryFullyLoaded] = useState(false);
+    const [personalVatPenaltyAlerts, setPersonalVatPenaltyAlerts] = useState<any[]>([]);
 
     // ⏳ State cho loading data (suppliers & products)
     const [loadingData, setLoadingData] = useState(false);
@@ -597,7 +600,9 @@ export default function PurchasePage() {
     const vatFileInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
-        loadPurchases();
+        // Render the most recent receipts first. Full history remains available
+        // on demand, so opening this screen no longer waits for every old line.
+        loadPurchases({ limit: INITIAL_PURCHASE_HISTORY_LIMIT });
         loadSuppliers();
         loadGoodsCompanies();
         loadProducts();
@@ -644,13 +649,19 @@ export default function PurchasePage() {
         }
     }, [activeTab]);
 
-    const loadPurchases = async () => {
+    const loadPurchases = async ({ limit, loadAll = false }: { limit?: number; loadAll?: boolean } = {}) => {
         setLoading(true);
         try {
-            // Lịch sử nhập hàng phải hiển thị toàn bộ dữ liệu, không giới hạn 90 ngày.
-            const result = await window.electronAPI.purchases.getAll({});
+            const effectiveLimit = loadAll
+                ? undefined
+                : (limit ?? (historyFullyLoaded ? undefined : INITIAL_PURCHASE_HISTORY_LIMIT));
+            const result = await (window.electronAPI.purchases.getAll as any)(
+                effectiveLimit ? { limit: effectiveLimit } : {},
+            );
             if (result.success && result.data) {
                 setPurchases(result.data);
+                setHistoryFullyLoaded(effectiveLimit === undefined || result.data.length < effectiveLimit);
+                void loadVatPenaltyAlerts();
             } else {
                 message.error(result.error || 'Lỗi khi tải dữ liệu');
             }
@@ -658,6 +669,19 @@ export default function PurchasePage() {
             message.error('Lỗi khi tải dữ liệu');
         } finally {
             setLoading(false);
+        }
+    };
+
+    const loadVatPenaltyAlerts = async () => {
+        try {
+            const api = window.electronAPI?.purchases as any;
+            if (!api?.getMyVatPenaltyAlerts) return;
+            const result = await api.getMyVatPenaltyAlerts();
+            if (result?.success && Array.isArray(result.data)) {
+                setPersonalVatPenaltyAlerts(result.data);
+            }
+        } catch (error) {
+            console.warn('Không thể tải cảnh báo phạt VAT:', error);
         }
     };
 
@@ -2264,22 +2288,16 @@ export default function PurchasePage() {
     };
 
     const personalVatPenalties = useMemo(() => {
-        const username = String(user?.username || '').trim().toLocaleLowerCase('vi-VN');
-        if (!username) return [];
-        const now = dayjs();
-        return purchases.filter(purchase => {
-            if (String(purchase.createdBy || '').trim().toLocaleLowerCase('vi-VN') !== username) return false;
-            const vatStatus = String(purchase.vatInvoiceStatus || 'pending').toLowerCase();
-            const hasVat = purchase.vatGroupId ? !!purchase.vatGroupHasVat : ['uploaded', 'verified'].includes(vatStatus);
-            const purchaseDate = dayjs(purchase.purchaseDate || purchase.createdAt);
-            const firstFineAt = purchaseDate.isValid() ? getVatFirstFineAt(purchaseDate) : null;
-            return purchaseDate.isValid()
-                && !!firstFineAt
-                && firstFineAt.isBefore(now)
-                && !hasVat
-                && !['thht', 'no_vat'].includes(vatStatus);
+        const latestByPurchase = new Map<string, any>();
+        personalVatPenaltyAlerts.forEach(alert => {
+            const key = String(alert.poNumber || alert.id || '');
+            const current = latestByPurchase.get(key);
+            if (!current || Number(alert.fineStage || 0) > Number(current.fineStage || 0)) {
+                latestByPurchase.set(key, alert);
+            }
         });
-    }, [purchases, user?.username]);
+        return [...latestByPurchase.values()];
+    }, [personalVatPenaltyAlerts]);
 
     return (
         <div>
@@ -2364,11 +2382,7 @@ export default function PurchasePage() {
                     showIcon
                     style={{ marginBottom: 16, borderRadius: 8 }}
                     message={`Đã ghi nhận phạt HĐ VAT: ${personalVatPenalties.length} phiếu quá hạn`}
-                    description={`Bạn bị ghi nhận ${new Intl.NumberFormat('vi-VN').format(personalVatPenalties.reduce((total, item) => {
-                        const purchaseAt = dayjs(item.purchaseDate || item.createdAt);
-                        const stage = purchaseAt.isValid() ? getVatFineStage(purchaseAt) : 0;
-                        return total + Array.from({ length: stage }, (_, index) => getVatFineAmount(index + 1)).reduce((sum, amount) => sum + amount, 0);
-                    }, 0))} đ vào Bảng công. Phiếu: ${personalVatPenalties.slice(0, 3).map(item => item.poNumber || `#${item.id}`).join(', ')}${personalVatPenalties.length > 3 ? '…' : ''}.`}
+                    description={`Bạn bị ghi nhận ${new Intl.NumberFormat('vi-VN').format(personalVatPenaltyAlerts.reduce((total, item) => total + Number(item.fineAmount || 0), 0))} đ vào Bảng công. Phiếu: ${personalVatPenalties.slice(0, 3).map(item => item.poNumber || `#${item.id}`).join(', ')}${personalVatPenalties.length > 3 ? '…' : ''}.`}
                     action={<Button danger size="small" onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'attendance' }))}>Xem bảng công</Button>}
                 />
             )}
@@ -2410,8 +2424,24 @@ export default function PurchasePage() {
                             pagination={{
                                 pageSize: 10,
                                 showSizeChanger: true,
-                                showTotal: (total) => `Hiển thị ${total}/${purchases.length} phiếu`,
+                                showTotal: (total) => historyFullyLoaded
+                                    ? `Hiển thị ${total} phiếu`
+                                    : `Hiển thị ${total} phiếu gần nhất`,
                             }}
+                            footer={!historyFullyLoaded ? () => (
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                                    <span style={{ color: '#64748b', fontSize: 13 }}>
+                                        Đang hiển thị {purchases.length} phiếu gần nhất để màn hình mở nhanh hơn.
+                                    </span>
+                                    <Button
+                                        icon={<HistoryOutlined />}
+                                        loading={loading}
+                                        onClick={() => loadPurchases({ loadAll: true })}
+                                    >
+                                        Tải toàn bộ lịch sử
+                                    </Button>
+                                </div>
+                            ) : undefined}
                         />
                     </Card>
                 );

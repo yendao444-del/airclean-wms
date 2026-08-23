@@ -95,6 +95,7 @@ type UnitRow = {
 type QuickScanLine = {
   id: string;
   qrCode: string;
+  source?: "QR" | "MANUAL";
   sku: string;
   productName: string;
   loads: number;
@@ -104,6 +105,7 @@ type QuickScanLine = {
   supplierName: string;
   supplierId?: number | null;
 };
+type QuickReceiptRow = QuickScanLine & { quantity: number };
 type LocationItem = {
   id: number;
   code: string;
@@ -774,6 +776,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [issuedQrLabels, setIssuedQrLabels] = useState<any[]>([]);
   const [qrSetupForm] = Form.useForm();
   const [quickScanLines, setQuickScanLines] = useState<QuickScanLine[]>([]);
+  const [quickManualSku, setQuickManualSku] = useState<string>();
+  const [quickManualQuantity, setQuickManualQuantity] = useState<number>();
+  const [quickManualSupplierId, setQuickManualSupplierId] = useState<number>();
   const [quickLastCode, setQuickLastCode] = useState("");
   const [quickScanError, setQuickScanError] = useState("");
   const [quickReceiptFileName, setQuickReceiptFileName] = useState("");
@@ -899,7 +904,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const loadWorkspace = async (prioritizeFreshData = false) => {
     if (workspaceLoadInFlightRef.current) {
       if (prioritizeFreshData) {
-        workspaceLoadRequestRef.current += 1;
         workspaceReloadQueuedRef.current = true;
       }
       return;
@@ -964,7 +968,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     void loadWorkspace();
     const intervalTimer = setInterval(() => {
       if (document.visibilityState === "visible") void loadWorkspace();
-    }, 30000);
+    }, 120000);
     const unsub = window.electronAPI?.handlingUnits?.onChanged?.(() => {
       void loadWorkspace(true);
     });
@@ -1000,7 +1004,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         .catch((err) => console.warn("Load Telegram status error:", err));
     };
     loadStatus();
-    const timer = window.setInterval(loadStatus, 3000);
+    const timer = window.setInterval(loadStatus, 10000);
     return () => {
       active = false;
       window.clearInterval(timer);
@@ -1860,15 +1864,25 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
   }, [workspace.recentTransactions, historySearch, historyType, historyFromDate, historyToDate]);
 
+  // Index history once instead of re-scanning every transaction for every
+  // handling unit when calculating the end-of-shift checklist.
+  const transactionsByUnitId = useMemo(() => {
+    const index = new Map<string, any[]>();
+    workspace.recentTransactions.forEach((transaction) => {
+      const code = String(transaction?.unitId || "").trim().toUpperCase();
+      if (!code) return;
+      const entries = index.get(code);
+      if (entries) entries.push(transaction);
+      else index.set(code, [transaction]);
+    });
+    return index;
+  }, [workspace.recentTransactions]);
+
   const shiftCheckCandidates = useMemo<ShiftCheckCandidate[]>(() => {
     const todayKey = localDayKey(new Date());
     return workspace.register
       .map((unit) => {
-        const history = workspace.recentTransactions.filter(
-          (item) =>
-            String(item?.unitId || "").trim().toUpperCase() ===
-            unit.id.trim().toUpperCase(),
-        );
+        const history = transactionsByUnitId.get(unit.id.trim().toUpperCase()) || [];
         const latestCompletedCheck = history
           .filter(isCompletedCheckTransaction)
           .reduce(
@@ -1901,7 +1915,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       })
       .filter((item): item is ShiftCheckCandidate => Boolean(item))
       .sort((a, b) => b.lastWithdrawalAt - a.lastWithdrawalAt);
-  }, [workspace.register, workspace.recentTransactions]);
+  }, [workspace.register, transactionsByUnitId]);
 
   const openShiftCheck = () => {
     if (shiftCheckCandidates.length === 0) {
@@ -2221,6 +2235,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
   const openQuickCreate = () => {
     setQuickScanLines([]);
+    setQuickManualSku(undefined);
+    setQuickManualQuantity(undefined);
+    setQuickManualSupplierId(undefined);
     setQuickLastCode("");
     setQuickScanError("");
     setQuickReceiptFileName("");
@@ -2358,6 +2375,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       {
         id: `${label.code}-${Date.now()}`,
         qrCode: label.code,
+        source: "QR",
         sku: product.sku,
         productName: product.variantName,
         loads: 1,
@@ -2380,18 +2398,72 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     window.setTimeout(() => quickScanInputRef.current?.focus?.(), 0);
   };
 
-  const quickLoadTotal = quickScanLines.reduce((total, line) => total + line.loads, 0);
+  const addQuickManualLine = () => {
+    const product = workspace.catalog.find((item) => item.sku === quickManualSku);
+    const supplier = workspace.suppliers.find(
+      (item: any) => Number(item.id) === Number(quickManualSupplierId),
+    );
+    const quantity = Math.floor(Number(quickManualQuantity || 0));
+    if (!product) {
+      message.error("Vui lòng chọn SKU hàng nhập thủ công.");
+      return;
+    }
+    if (quantity <= 0) {
+      message.error("Số lượng hàng thủ công phải lớn hơn 0.");
+      return;
+    }
+    if (!supplier) {
+      message.error("Vui lòng chọn nhà cung cấp cho hàng nhập thủ công.");
+      return;
+    }
+    setQuickScanLines((previous) => [
+      ...previous,
+      {
+        id: `MANUAL-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        qrCode: "",
+        source: "MANUAL",
+        sku: product.sku,
+        productName: product.variantName,
+        loads: 1,
+        conversionFactor: quantity,
+        packagingName: "Hàng lẻ",
+        baseUnit: product.unitName || "đơn vị",
+        supplierName: supplier.name,
+        supplierId: Number(supplier.id),
+      },
+    ]);
+    setQuickPriceBySku((previous) =>
+      previous[product.sku] !== undefined
+        ? previous
+        : { ...previous, [product.sku]: Number(product.cost || 0) },
+    );
+    setQuickManualSku(undefined);
+    setQuickManualQuantity(undefined);
+    message.success(`Đã thêm ${fmt(quantity)} ${product.unitName || "đơn vị"} ${product.variantName}.`);
+  };
+
+  const quickQrLines = quickScanLines.filter((line) => line.source !== "MANUAL");
+  const quickManualLines = quickScanLines.filter((line) => line.source === "MANUAL");
+  const quickLineQuantity = (line: QuickScanLine) => line.loads * line.conversionFactor;
+  const quickLoadTotal = quickQrLines.reduce((total, line) => total + line.loads, 0);
   const quickPieceTotal = quickScanLines.reduce(
-    (total, line) => total + line.loads * line.conversionFactor,
+    (total, line) => total + quickLineQuantity(line),
     0,
   );
+  const quickManualSummary = Array.from(
+    quickManualLines.reduce((map, line) => {
+      map.set(line.baseUnit, (map.get(line.baseUnit) || 0) + quickLineQuantity(line));
+      return map;
+    }, new Map<string, number>()),
+  ).map(([unitName, quantity]) => `${fmt(quantity)} ${unitName}`).join(" + ");
   const quickReceiptRows = Array.from(
     quickScanLines.reduce((map, line) => {
-      const current = map.get(line.sku) || { ...line, loads: 0 };
-      current.loads += line.loads;
-      map.set(line.sku, current);
+      const key = `${line.supplierId || "none"}:${line.sku}`;
+      const current = map.get(key);
+      if (current) current.quantity += quickLineQuantity(line);
+      else map.set(key, { ...line, quantity: quickLineQuantity(line) });
       return map;
-    }, new Map<string, QuickScanLine>()).values(),
+    }, new Map<string, QuickReceiptRow>()).values(),
   );
   const quickSupplierNames = Array.from(
     new Set(quickScanLines.map((line) => line.supplierName).filter(Boolean)),
@@ -2426,13 +2498,13 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       rows.push(line);
       groups.set(companyName, rows);
       return groups;
-    }, new Map<string, QuickScanLine[]>()),
+    }, new Map<string, QuickReceiptRow[]>()),
   )
     .map(([companyName, rows]) => ({
       companyName,
       rows,
       total: rows.reduce(
-        (sum, line) => sum + line.loads * line.conversionFactor * Number(quickPriceBySku[line.sku] || 0),
+        (sum, line) => sum + line.quantity * Number(quickPriceBySku[line.sku] || 0),
         0,
       ),
     }))
@@ -2454,13 +2526,19 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       if (!result?.success) throw new Error(result?.error || "Không thể lưu công ty hàng hóa.");
       const refreshed = await window.electronAPI?.goodsCompanies?.getAll?.();
       if (refreshed?.success) setQuickGoodsCompanies(refreshed.data || []);
+      const selectedCompany = quickGoodsCompanies.find(
+        (company) => String(company.id) === String(companyId),
+      );
+      message.success(
+        `Đã ghi nhớ công ty ${selectedCompany?.name || "hàng hóa"} cho SKU ${sku}.`,
+      );
     } catch (error: any) {
       setQuickCompanyIdBySku((previous) => ({ ...previous, [sku]: previousCompanyId }));
       message.error(error?.message || "Không thể lưu công ty hàng hóa.");
     }
   };
   const quickReceiptTotal = quickReceiptRows.reduce(
-    (total, line) => total + line.loads * line.conversionFactor * Number(quickPriceBySku[line.sku] || 0),
+    (total, line) => total + line.quantity * Number(quickPriceBySku[line.sku] || 0),
     0,
   );
   const quickFileToBase64 = (file: File) => new Promise<{ fileBase64: string; fileName: string }>((resolve, reject) => {
@@ -2472,7 +2550,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
   const confirmQuickReceiving = async () => {
     if (!quickScanLines.length || !quickReceiptFile) {
-      message.error("Cần quét ít nhất một kiện và tải Phiếu nhập kho.");
+      message.error("Cần thêm ít nhất một mặt hàng và tải Phiếu nhập kho.");
       return;
     }
     const missingCompany = quickReceiptRows.find((line) => !quickCompanyForSku(line.sku));
@@ -2488,7 +2566,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     const supplierGroups = new Map<number, QuickScanLine[]>();
     for (const line of quickScanLines) {
       if (!line.supplierId) {
-        message.error(`Kiện ${line.qrCode} chưa có nhà cung cấp từ QR.`);
+        message.error(
+          line.source === "MANUAL"
+            ? `Hàng thủ công ${line.sku} chưa chọn nhà cung cấp.`
+            : `Kiện ${line.qrCode} chưa có nhà cung cấp từ QR.`,
+        );
         return;
       }
       const group = supplierGroups.get(line.supplierId) || [];
@@ -2500,15 +2582,16 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       const receiptFile = await quickFileToBase64(quickReceiptFile);
       const createdPurchases: Array<{ id: number; lines: QuickScanLine[]; data: any }> = [];
       for (const [supplierId, lines] of supplierGroups) {
-        const bySku = new Map<string, QuickScanLine>();
+        const bySku = new Map<string, QuickReceiptRow>();
         lines.forEach((line) => {
           const saved = bySku.get(line.sku);
-          bySku.set(line.sku, saved ? { ...saved, loads: saved.loads + line.loads } : { ...line });
+          if (saved) saved.quantity += quickLineQuantity(line);
+          else bySku.set(line.sku, { ...line, quantity: quickLineQuantity(line) });
         });
         const items = [...bySku.values()].map((line) => {
           const product = workspace.catalog.find((item) => item.sku === line.sku);
           if (!product?.productId) throw new Error(`Không tìm thấy sản phẩm cho SKU ${line.sku}.`);
-          const quantity = line.loads * line.conversionFactor;
+          const quantity = line.quantity;
           const unitPrice = Number(quickPriceBySku[line.sku]);
           return {
             productId: product.productId,
@@ -2528,39 +2611,47 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           purchaseDate: new Date().toISOString(),
           items: JSON.stringify(items),
           totalAmount,
-          notes: "Tạo từ Quản lý kiện hàng · Tạo kiện nhanh",
+          notes: quickManualLines.length
+            ? "Tạo từ Quản lý kiện hàng · Nhập nhanh có hàng thủ công không QR"
+            : "Tạo từ Quản lý kiện hàng · Tạo kiện nhanh",
           importReceiptFiles: [receiptFile],
         });
         if (!created?.success || !created.data?.id) throw new Error(created?.error || "Không thể tạo Phiếu nhập kho.");
         createdPurchases.push({ id: created.data.id, lines, data: created.data });
       }
-      const units = createdPurchases.flatMap((purchase) => purchase.lines.map((line) => {
-        const product = workspace.catalog.find((item) => item.sku === line.sku);
-        const purchaseItem = purchase.data?.items?.find((item: any) => String(item.variantSku || "") === line.sku || Number(item.productId) === Number(product?.productId));
-        if (!product?.productId || !purchaseItem?.id) {
-          throw new Error(`Không thể liên kết kiện ${line.qrCode} với dòng Phiếu nhập kho.`);
-        }
-        return {
-          id: line.qrCode,
-          productId: product.productId,
-          purchaseOrderId: purchase.id,
-          purchaseItemId: purchaseItem.id,
-          skuName: line.sku,
-          color: product.color || null,
-          packageType: line.packagingName,
-          unitName: line.baseUnit,
-          initialPcs: line.conversionFactor,
-          currentPcs: line.conversionFactor,
-          status: "Nguyên niêm phong",
-          location: { zone: "Chưa phân khu" },
-          note: `Nhập nhanh từ tem QR ${line.qrCode}`,
-        };
-      }));
-      const createdUnits = await window.electronAPI?.handlingUnits?.createUnits(units);
-      if (!createdUnits?.success) throw new Error(createdUnits?.error || "Không thể tạo kiện vật lý từ tem QR.");
-      const receivedLabels = await window.electronAPI?.handlingUnits?.markQrLabelsReceived(units.map((unit) => unit.id));
-      if (!receivedLabels?.success) throw new Error(receivedLabels?.error || "Không thể chốt trạng thái tem QR đã nhập kho.");
-      message.success(`Đã tạo ${createdPurchases.length} Phiếu nhập kho, ${units.length} kiện và đồng bộ chứng từ Google Drive.`);
+      const units = createdPurchases.flatMap((purchase) => purchase.lines
+        .filter((line) => line.source !== "MANUAL")
+        .map((line) => {
+          const product = workspace.catalog.find((item) => item.sku === line.sku);
+          const purchaseItem = purchase.data?.items?.find((item: any) => String(item.variantSku || "") === line.sku || Number(item.productId) === Number(product?.productId));
+          if (!product?.productId || !purchaseItem?.id) {
+            throw new Error(`Không thể liên kết kiện ${line.qrCode} với dòng Phiếu nhập kho.`);
+          }
+          return {
+            id: line.qrCode,
+            productId: product.productId,
+            purchaseOrderId: purchase.id,
+            purchaseItemId: purchaseItem.id,
+            skuName: line.sku,
+            color: product.color || null,
+            packageType: line.packagingName,
+            unitName: line.baseUnit,
+            initialPcs: line.conversionFactor,
+            currentPcs: line.conversionFactor,
+            status: "Nguyên niêm phong",
+            location: { zone: "Chưa phân khu" },
+            note: `Nhập nhanh từ tem QR ${line.qrCode}`,
+          };
+        }));
+      if (units.length) {
+        const createdUnits = await window.electronAPI?.handlingUnits?.createUnits(units);
+        if (!createdUnits?.success) throw new Error(createdUnits?.error || "Không thể tạo kiện vật lý từ tem QR.");
+        const receivedLabels = await window.electronAPI?.handlingUnits?.markQrLabelsReceived(units.map((unit) => unit.id));
+        if (!receivedLabels?.success) throw new Error(receivedLabels?.error || "Không thể chốt trạng thái tem QR đã nhập kho.");
+      }
+      message.success(
+        `Đã tạo ${createdPurchases.length} Phiếu nhập kho${units.length ? `, ${units.length} kiện` : ""}${quickManualLines.length ? ` và ${quickManualLines.length} dòng hàng thủ công` : ""}; chứng từ đã đồng bộ Google Drive.`,
+      );
       setShowQuickCreate(false);
       void loadWorkspace(true);
     } catch (error: any) {
@@ -4403,7 +4494,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         width={1180}
         destroyOnHidden
         className="hu-quick-create-modal"
-        title={<div className="hu-quick-modal-title"><QrcodeOutlined /> <span>Tạo kiện nhanh</span><small>Quét QR theo kiện, phiếu nhập tự quy đổi về đơn vị cơ sở</small></div>}
+        title={<div className="hu-quick-modal-title"><QrcodeOutlined /> <span>Nhập kho nhanh</span><small>Quét hàng nguyên kiện hoặc thêm thủ công cho hàng lẻ</small></div>}
       >
         <div className="hu-quick-create">
           <section className="hu-quick-scan-workspace">
@@ -4439,25 +4530,64 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 <CheckCircleOutlined /> Đã quét: <b>{quickLastCode}</b>
               </div>
             )}
+            <div className="hu-quick-manual-entry">
+              <div className="hu-quick-manual-title">
+                <div><PlusOutlined /><span><b>Thêm hàng lẻ</b><small>Nhập trực tiếp theo số lượng thực tế</small></span></div>
+              </div>
+              <div className="hu-quick-manual-fields">
+                <Select
+                  showSearch
+                  optionFilterProp="label"
+                  value={quickManualSku}
+                  placeholder="Chọn SKU hàng lẻ"
+                  options={workspace.catalog.map((item) => ({
+                    value: item.sku,
+                    label: `${item.sku} · ${item.variantName} (${item.unitName})`,
+                  }))}
+                  onChange={(sku) => setQuickManualSku(sku)}
+                />
+                <InputNumber
+                  min={1}
+                  precision={0}
+                  value={quickManualQuantity}
+                  placeholder="Số lượng"
+                  addonAfter={workspace.catalog.find((item) => item.sku === quickManualSku)?.unitName || "ĐVT"}
+                  onChange={(value) => setQuickManualQuantity(Number(value || 0) || undefined)}
+                  onPressEnter={addQuickManualLine}
+                />
+                <Select
+                  showSearch
+                  optionFilterProp="label"
+                  value={quickManualSupplierId}
+                  placeholder="Nhà cung cấp"
+                  options={workspace.suppliers.map((supplier: any) => ({
+                    value: Number(supplier.id),
+                    label: supplier.name,
+                  }))}
+                  onChange={(supplierId) => setQuickManualSupplierId(Number(supplierId))}
+                />
+                <Button type="primary" icon={<PlusOutlined />} onClick={addQuickManualLine}>Thêm</Button>
+              </div>
+            </div>
             <div className="hu-quick-list-head">
-              <b>Danh sách kiện hàng đã quét ({quickLoadTotal} kiện)</b>
+              <b>Danh sách hàng nhập ({quickLoadTotal} kiện · {quickManualLines.length} dòng thủ công)</b>
               <Button size="small" danger icon={<DeleteOutlined />} onClick={() => setQuickScanLines([])} disabled={!quickScanLines.length}>Xóa tất cả</Button>
             </div>
             <div className="hu-quick-lines" aria-live="polite">
               {quickScanLines.length ? quickScanLines.map((line) => (
-                <div className="hu-quick-line" key={line.id}>
-                  <span className="hu-quick-qr"><QrcodeOutlined /></span>
-                  <div className="hu-quick-product"><b>{line.productName}</b><small>{line.sku} · {line.packagingName} · 1 {line.packagingName} = {fmt(line.conversionFactor)} {line.baseUnit}</small></div>
-                  <span className="hu-quick-fixed-load">1 kiện</span>
-                  <span className="hu-quick-equals">=</span>
+                <div className={`hu-quick-line ${line.source === "MANUAL" ? "is-manual" : ""}`} key={line.id}>
+                  <span className="hu-quick-qr">{line.source === "MANUAL" ? <PlusOutlined /> : <QrcodeOutlined />}</span>
+                  <div className="hu-quick-product"><b>{line.productName}</b><small>{line.source === "MANUAL" ? `${line.sku} · Hàng lẻ · ${line.supplierName}` : `${line.sku} · ${line.packagingName} · 1 ${line.packagingName} = ${fmt(line.conversionFactor)} ${line.baseUnit}`}</small></div>
+                  {line.source !== "MANUAL" && <span className="hu-quick-fixed-load">1 kiện</span>}
+                  {line.source !== "MANUAL" && <span className="hu-quick-equals">=</span>}
                   <b className="hu-quick-conversion">{fmt(line.conversionFactor)} {line.baseUnit}</b>
-                  <Button type="text" danger icon={<DeleteOutlined />} onClick={() => setQuickScanLines((previous) => previous.filter((item) => item.id !== line.id))} aria-label={`Xóa ${line.qrCode}`} />
+                  <Button type="text" danger icon={<DeleteOutlined />} onClick={() => setQuickScanLines((previous) => previous.filter((item) => item.id !== line.id))} aria-label={`Xóa ${line.qrCode || line.sku}`} />
                 </div>
               )) : (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Quét QR để bắt đầu tạo kiện" className="hu-quick-empty" />
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Quét QR hoặc thêm hàng thủ công để bắt đầu" className="hu-quick-empty" />
               )}
             </div>
-            <div className="hu-quick-total"><InboxOutlined /><span>Tạm nhập kho:</span><b>{quickLoadTotal} kiện</b><i>=</i><strong>{fmt(quickPieceTotal)} {quickBaseUnit}</strong></div>
+            <div className="hu-quick-total"><InboxOutlined /><span>Tạm nhập kho:</span>{quickLoadTotal > 0 && <b>{quickLoadTotal} kiện</b>}{quickLoadTotal > 0 && quickManualLines.length > 0 && <i>+</i>}{quickManualLines.length > 0 && <strong>{quickManualSummary} hàng lẻ</strong>}{quickManualLines.length === 0 && quickLoadTotal > 0 && <><i>=</i><strong>{fmt(quickPieceTotal)} {quickBaseUnit}</strong></>}</div>
           </section>
           <aside className="hu-quick-receipt">
             <div className="hu-quick-receipt-head"><h3>Phiếu nhập kho</h3><span>Đơn vị nhập: <b>{quickBaseUnit}</b></span></div>
@@ -4466,8 +4596,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 <dt>Nhà cung cấp</dt>
                 <dd>
                   <span>{quickSupplierNames.length === 0 ? "Chưa xác định" : quickSupplierNames.length === 1 ? quickSupplierNames[0] : "Nhiều nhà cung cấp — sẽ tách phiếu"}</span>
-                  {quickSupplierNames.length === 1 && <Tag color="green">Từ QR</Tag>}
-                  <Button type="link" size="small" onClick={() => message.info("Nhà cung cấp được xác định từ tem QR. Khi cần điều chỉnh, thực hiện tại luồng Nhập hàng.")}>Đổi</Button>
+                  {quickSupplierNames.length === 1 && <Tag color={quickManualLines.length ? "gold" : "green"}>{quickManualLines.length ? (quickQrLines.length ? "QR + thủ công" : "Thủ công") : "Từ QR"}</Tag>}
+                  {quickQrLines.length > 0 && <Button type="link" size="small" onClick={() => message.info("Nhà cung cấp của kiện được xác định từ tem quét. Hàng lẻ chọn nhà cung cấp ngay khi thêm thủ công.")}>Đổi</Button>}
                 </dd>
               </div>
               <div><dt>Mã phiếu nhập</dt><dd>Tự tạo khi xác nhận</dd></div>
@@ -4497,14 +4627,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                               showSearch
                               optionFilterProp="label"
                               status="error"
-                              placeholder="Chọn công ty"
+                              placeholder="Chọn lần đầu · sẽ ghi nhớ"
                               options={quickGoodsCompanies.map((company) => ({ value: String(company.id), label: company.name }))}
                               onChange={(companyId) => void changeQuickSkuCompany(line.sku, companyId)}
                             />
                           )}
                         </div>
                         <span>{line.baseUnit}</span>
-                        <b>{fmt(line.loads * line.conversionFactor)}</b>
+                        <b>{fmt(line.quantity)}</b>
                         <InputNumber min={0} precision={0} value={quickPriceBySku[line.sku]} placeholder="Giá" addonAfter="đ" onChange={(value) => setQuickPriceBySku((previous) => ({ ...previous, [line.sku]: Number(value || 0) }))} />
                       </div>
                     ))}
@@ -4519,7 +4649,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             {quickReceiptFileName && <div className="hu-quick-file"><CheckCircleOutlined /> {quickReceiptFileName}<span>Sẽ upload Google Drive</span></div>}
           </aside>
         </div>
-        <footer className="hu-quick-footer"><span>Phiếu nhập và chứng từ Drive sẽ được ghi nhận theo đơn vị nhỏ nhất: <b>{quickBaseUnit}</b>.</span><div><Button onClick={() => setShowQuickCreate(false)}>Hủy</Button><Button type="primary" icon={<CheckCircleOutlined />} disabled={!quickScanLines.length || isQuickConfirming} loading={isQuickConfirming} onClick={confirmQuickReceiving}>Xác nhận nhập & tạo kiện</Button></div></footer>
+        <footer className="hu-quick-footer"><span>Hàng lẻ được ghi nhận trực tiếp vào <b>tồn kho và thẻ kho</b>, không tạo kiện.</span><div><Button onClick={() => setShowQuickCreate(false)}>Hủy</Button><Button type="primary" icon={<CheckCircleOutlined />} disabled={!quickScanLines.length || isQuickConfirming} loading={isQuickConfirming} onClick={confirmQuickReceiving}>{quickManualLines.length ? "Xác nhận nhập kho" : "Xác nhận nhập & tạo kiện"}</Button></div></footer>
       </Modal>
       {/* MODAL TẠO KIỆN HÀNG MỚI */}
       <Modal

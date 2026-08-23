@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, shell, session } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, shell, session, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -258,11 +258,15 @@ function createWindow() {
     // Ẩn native menu bar — Edit/View được đưa vào React header
     Menu.setApplicationMenu(null);
 
+    const { width: workWidth, height: workHeight } = screen.getPrimaryDisplay().workAreaSize;
+    const defaultWidth = Math.max(760, Math.min(1400, Math.round(workWidth * 0.82)));
+    const defaultHeight = Math.max(560, Math.min(900, Math.round(workHeight * 0.84)));
+
     mainWindow = new BrowserWindow({
-        width: 1400,
-        height: 900,
-        minWidth: 1200,
-        minHeight: 700,
+        width: defaultWidth,
+        height: defaultHeight,
+        minWidth: 760,
+        minHeight: 560,
         show: false,
         titleBarStyle: 'hidden',
         titleBarOverlay: {
@@ -287,9 +291,9 @@ function createWindow() {
         backgroundColor: '#ffffff',
     });
 
-    // Show full màn hình ngay khi render xong, không flash cửa sổ nhỏ
+    // Open as a centered resizable window; users can maximize when needed.
     mainWindow.once('ready-to-show', () => {
-        mainWindow.maximize();
+        mainWindow.center();
         mainWindow.show();
         mainWindow.setTitleBarOverlay({
             color: '#ffffff',

@@ -376,6 +376,176 @@
     border-radius: 7px;
 }
 
+/* The page responds to its actual content width after the Electron sidebar,
+   which is more reliable than viewport-only breakpoints. */
+.daily-tasks-page {
+    container: daily-tasks / inline-size;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+.daily-tasks-hero-row,
+.daily-tasks-title-tools,
+.daily-tasks-main-grid,
+.daily-tasks-list-panel,
+.daily-tasks-history-panel {
+    min-width: 0;
+}
+
+.daily-tasks-hero-row {
+    gap: 16px;
+}
+
+.daily-tasks-title-tools {
+    flex: 1 1 590px;
+}
+
+.daily-tasks-date-nav {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+}
+
+.daily-tasks-stats {
+    flex: 0 1 auto;
+}
+
+.daily-tasks-tabs {
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: thin;
+}
+
+.daily-tasks-tab-group {
+    display: flex !important;
+    width: max-content;
+    min-width: 100%;
+}
+
+@container daily-tasks (max-width: 1350px) {
+    .daily-tasks-hero-row {
+        flex-wrap: wrap;
+    }
+
+    .daily-tasks-title-tools {
+        flex-basis: 100%;
+    }
+}
+
+@container daily-tasks (max-width: 1400px) {
+    .daily-tasks-main-grid {
+        grid-template-columns: minmax(0, 1fr) !important;
+    }
+
+    .daily-tasks-history-panel > div:last-child {
+        max-height: 360px !important;
+    }
+}
+
+@container daily-tasks (max-width: 1100px) {
+    .daily-tasks-panel-header {
+        align-items: flex-start !important;
+        flex-wrap: wrap;
+    }
+
+    .daily-task-list-header {
+        display: none;
+    }
+
+    .daily-task-list-row {
+        grid-template-columns: minmax(0, 1fr) auto !important;
+        gap: 10px 12px;
+        padding: 14px;
+    }
+
+    .daily-task-list-row > :first-child,
+    .daily-task-list-row > :nth-child(4),
+    .daily-task-list-row > :nth-child(5) {
+        grid-column: 1 / -1;
+    }
+
+    .daily-task-list-row > :nth-child(3) {
+        text-align: right;
+    }
+
+    .daily-task-evidence-summary {
+        overflow: visible;
+        text-overflow: clip;
+        white-space: normal;
+    }
+
+    .daily-task-row-actions {
+        justify-content: flex-start;
+    }
+}
+
+@container daily-tasks (max-width: 950px) {
+    .daily-tasks-title-tools {
+        align-items: flex-start !important;
+        flex-direction: column;
+        gap: 12px !important;
+    }
+
+    .daily-tasks-date-nav {
+        width: 100%;
+    }
+
+    .daily-tasks-stats {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .daily-tasks-add-button {
+        flex: 1 1 220px;
+    }
+}
+
+@container daily-tasks (max-width: 620px) {
+    .daily-tasks-hero .ant-card-body {
+        padding: 14px !important;
+    }
+
+    .daily-tasks-title-tools h1 {
+        font-size: 20px !important;
+    }
+
+    .daily-tasks-stats {
+        flex-wrap: wrap;
+        gap: 10px !important;
+    }
+
+    .daily-tasks-stats > .ant-space-item:has(.ant-divider) {
+        display: none;
+    }
+
+    .daily-tasks-tab-group .ant-radio-button-wrapper {
+        margin-left: 0 !important;
+        padding-inline: 16px !important;
+    }
+
+    .daily-task-action-guide {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .daily-task-list-row {
+        grid-template-columns: 1fr !important;
+    }
+
+    .daily-task-list-row > * {
+        grid-column: 1 !important;
+        text-align: left !important;
+    }
+}
+
+@media (max-width: 768px) {
+    .daily-tasks-page {
+        padding: 12px !important;
+    }
+}
+
 @media (max-width: 1280px) {
     .daily-task-list-header,
     .daily-task-list-row {

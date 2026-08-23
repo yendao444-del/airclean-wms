@@ -17,8 +17,38 @@ import {
     Dropdown,
     Tabs,
     Spin,
+    Tooltip,
+    Avatar,
+    Alert,
 } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, UploadOutlined, FormOutlined, FileExcelOutlined, MoreOutlined, SettingOutlined, BarcodeOutlined, ScanOutlined, SearchOutlined } from '@ant-design/icons';
+import {
+    PlusOutlined,
+    EditOutlined,
+    DeleteOutlined,
+    ReloadOutlined,
+    UploadOutlined,
+    FormOutlined,
+    FileExcelOutlined,
+    MoreOutlined,
+    SettingOutlined,
+    BarcodeOutlined,
+    ScanOutlined,
+    SearchOutlined,
+    SyncOutlined,
+    ClockCircleOutlined,
+    CustomerServiceOutlined,
+    CheckCircleOutlined,
+    FilterOutlined,
+    UserAddOutlined,
+    SwapOutlined,
+    CommentOutlined,
+    DownloadOutlined,
+    CloseOutlined,
+    InboxOutlined,
+    HistoryOutlined,
+    EyeOutlined,
+    CalendarOutlined,
+} from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import type { MenuProps } from 'antd';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
@@ -26,10 +56,16 @@ import { useAuth } from '../contexts/AuthContext';
 import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
 import * as XLSX from 'xlsx';
+import './Returns.css';
 
 dayjs.extend(customParseFormat);
 
 const { Title, Text } = Typography;
+const { RangePicker } = DatePicker;
+
+const RETURN_SLA_HOURS = 5 * 24;
+const RETURN_POLICY_NOTICE_START = dayjs('2026-08-23T00:00:00');
+const RETURN_POLICY_NOTICE_END = RETURN_POLICY_NOTICE_START.add(7, 'day');
 
 const parseReturnDate = (value: any) => {
     if (!value) return dayjs('');
@@ -144,6 +180,11 @@ export default function ReturnsPage() {
 
     // ✨ State tìm kiếm
     const [searchText, setSearchText] = useState('');
+    const [statusFilter, setStatusFilter] = useState<string>('all');
+    const [faultFilter, setFaultFilter] = useState<string>('all');
+    const [packerFilter, setPackerFilter] = useState<string>('all');
+    const [slaFilter, setSlaFilter] = useState<'all' | 'overdue'>('all');
+    const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
 
     // ✨ State cho collapse/expand logs
     const [collapsedLogs, setCollapsedLogs] = useState<Record<number, boolean>>({});
@@ -808,18 +849,147 @@ export default function ReturnsPage() {
         return false;
     };
 
+    const getReturnSla = (record: Return) => {
+        if (isFinalStatus(record.status) || record.status === 'completed') {
+            return { label: 'Đã hoàn tất', tone: 'done', overdue: false };
+        }
+
+        const complaintAt = parseReturnDate(record.complaintDate);
+        if (!complaintAt.isValid()) return { label: 'Chưa có hạn', tone: 'neutral', overdue: false };
+
+        const remainingHours = RETURN_SLA_HOURS - dayjs().diff(complaintAt, 'hour');
+        if (remainingHours < 0) {
+            const overdueDays = Math.max(1, Math.ceil(Math.abs(remainingHours) / 24));
+            return { label: `Quá hạn ${overdueDays} ngày`, tone: 'danger', overdue: true };
+        }
+        if (remainingHours <= 8) return { label: `Còn ${Math.max(1, remainingHours)}h`, tone: 'warning', overdue: false };
+        if (remainingHours <= 24) return { label: 'Còn 1 ngày', tone: 'warning', overdue: false };
+        return { label: `Còn ${Math.ceil(remainingHours / 24)} ngày`, tone: 'success', overdue: false };
+    };
+
+    const handleBulkPackerChange = async (packer: string) => {
+        if (!selectedRowKeys.length) return;
+        try {
+            await Promise.all(selectedRowKeys.map(id => window.electronAPI.returns.update(id, { packer })));
+            setReturns(prev => prev.map(item => selectedRowKeys.includes(item.id) ? { ...item, packer } : item));
+            message.success(`Đã gán nhân viên cho ${selectedRowKeys.length} phiếu`);
+        } catch {
+            message.error('Không thể gán nhân viên cho các phiếu đã chọn');
+            await loadReturns(true);
+        }
+    };
+
+    const handleBulkStatusChange = async (status: string) => {
+        if (!selectedRowKeys.length) return;
+        const selected = returns.filter(item => selectedRowKeys.includes(item.id));
+        if (status === 'completed' && selected.some(item => !item.packer)) {
+            message.warning('Một số phiếu chưa có nhân viên đóng gói');
+            return;
+        }
+        try {
+            await Promise.all(selectedRowKeys.map(id => window.electronAPI.returns.update(id, { status })));
+            await loadReturns(true);
+            setSelectedRowKeys([]);
+            message.success('Đã cập nhật trạng thái hàng loạt');
+        } catch {
+            message.error('Không thể cập nhật trạng thái hàng loạt');
+        }
+    };
+
+    const handleExportDisplayed = () => {
+        const rows = displayedReturns.map(item => ({
+            'Mã KN': item.complaintCode,
+            'Đơn hàng': item.orderNumber,
+            'Ngày': dayjs(item.complaintDate).format('DD/MM/YYYY'),
+            'Sản phẩm': item.productName,
+            'Lý do': item.reason,
+            'Nhân viên đóng gói': item.packer || '',
+            'Lỗi do': item.faultParty === 'customer' ? 'Khách hàng' : 'Kho',
+            'Trạng thái': statusList.find(status => status.value === item.status)?.label || item.status,
+        }));
+        const worksheet = XLSX.utils.json_to_sheet(rows);
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, 'Tra hang');
+        XLSX.writeFile(workbook, `tra-hang-${dayjs().format('YYYY-MM-DD')}.xlsx`);
+    };
+
+    const clearReturnFilters = () => {
+        setSearchText('');
+        setStatusFilter('all');
+        setFaultFilter('all');
+        setPackerFilter('all');
+        setSlaFilter('all');
+        setDateRange(null);
+    };
+
+    const parseProcessLogs = (record: Return): ProcessLog[] => {
+        try {
+            return record.processNotes ? JSON.parse(record.processNotes) : [];
+        } catch {
+            return [];
+        }
+    };
+
+    const handleQuickNoteAdd = async (record: Return) => {
+        const quickNote = quickNotes[record.id] || '';
+        if (!quickNote.trim()) {
+            message.warning('Vui lòng nhập nội dung ghi chú');
+            return;
+        }
+        const updatedLogs = [
+            ...parseProcessLogs(record),
+            {
+                timestamp: dayjs().format('DD/MM HH[h]mm'),
+                note: quickNote.trim(),
+                createdBy: currentUser || undefined,
+            },
+        ];
+        try {
+            await window.electronAPI.returns.update(record.id, { notes: JSON.stringify(updatedLogs) });
+            setQuickNotes(prev => ({ ...prev, [record.id]: '' }));
+            setShowInputRows(prev => ({ ...prev, [record.id]: false }));
+            await loadReturns(true);
+            message.success('Đã thêm ghi chú');
+        } catch {
+            message.error('Không thể lưu ghi chú');
+        }
+    };
+
+    const returnAvatarColors = ['#00a85a', '#f59e0b', '#7c5ce7', '#1677ff', '#ef6a6a', '#0891b2'];
+
+    const getInitials = (name?: string) => {
+        const value = String(name || '?').trim();
+        const parts = value.split(/\s+/).filter(Boolean);
+        return (parts.length > 1 ? `${parts[0][0]}${parts[parts.length - 1][0]}` : value.slice(0, 2)).toUpperCase();
+    };
+
+    const getAvatarColor = (name?: string) => {
+        const hash = String(name || '').split('').reduce((total, character) => total + character.charCodeAt(0), 0);
+        return returnAvatarColors[hash % returnAvatarColors.length];
+    };
+
+    const getStatusTone = (statusValue: string) => {
+        const config = statusList.find(item => item.value === statusValue);
+        const source = `${statusValue} ${config?.label || ''} ${config?.color || ''}`.toLowerCase();
+        if (config?.isFinal || /complete|completed|hoàn|green/.test(source)) return 'success';
+        if (/cskh|chờ|wait|purple|geekblue/.test(source)) return 'waiting';
+        if (/reject|cancel|hủy|red/.test(source)) return 'danger';
+        if (/new|mới|default|gray|grey/.test(source)) return 'neutral';
+        return 'processing';
+    };
+
     const columns: ColumnsType<Return> = [
         {
-            title: 'Thông tin đơn hàng',
+            title: 'Mã KN / Đơn hàng / Sản phẩm',
             key: 'info',
-            width: 320,
+            width: 360,
             render: (_, record) => {
                 return (
-                    <div style={{ lineHeight: 1.7, fontSize: 12 }}>
+                    <div className="returns-order-cell" style={{ lineHeight: 1.7, fontSize: 12 }}>
                         <div style={{ display: 'flex', gap: 12, marginBottom: 4 }}>
                             <div>
                                 <Text type="secondary" style={{ fontSize: 11 }}>Mã KN:</Text>
-                                <div><Tag color="orange" style={{ fontSize: 11 }}>{record.complaintCode}</Tag></div>
+                                <div><Tag className="returns-complaint-code" bordered={false}>{record.complaintCode}</Tag></div>
                             </div>
                             <div>
                                 <Text type="secondary" style={{ fontSize: 11 }}>Ngày:</Text>
@@ -899,7 +1069,7 @@ export default function ReturnsPage() {
                 const displayLogs = isExpanded ? logs : logs.slice(-2);
 
                 return (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div className="returns-note-cell">
                         {logs.length === 0 && !showInput && (
                             <Text type="secondary" italic style={{ fontSize: 12 }}>
                                 Chưa có ghi chú
@@ -907,21 +1077,12 @@ export default function ReturnsPage() {
                         )}
 
                         {displayLogs.map((log, index) => (
-                            <div
-                                key={index}
-                                style={{
-                                    padding: '4px 8px',
-                                    background: '#f5f5f5',
-                                    borderRadius: 4,
-                                    fontSize: 12,
-                                    lineHeight: 1.5,
-                                }}
-                            >
-                                <Tag color="blue" style={{ fontSize: 10, marginRight: 4 }}>
+                            <div key={index} className="returns-note-entry">
+                                <Tag className="returns-note-time" bordered={false}>
                                     {log.timestamp}
                                 </Tag>
                                 {log.createdBy && (
-                                    <Tag color="geekblue" style={{ fontSize: 10, marginRight: 4 }}>
+                                    <Tag className="returns-note-user" bordered={false}>
                                         @{log.createdBy}
                                     </Tag>
                                 )}
@@ -970,7 +1131,7 @@ export default function ReturnsPage() {
                             </div>
                         ) : (
                             <Button
-                                type="dashed"
+                                type="text"
                                 size="small"
                                 icon={<PlusOutlined />}
                                 onClick={() => setShowInputRows(prev => ({ ...prev, [record.id]: true }))}
@@ -984,7 +1145,7 @@ export default function ReturnsPage() {
             },
         },
         {
-            title: 'Nhân viên đóng gói',
+            title: 'NV đóng gói',
             dataIndex: 'packer',
             key: 'packer',
             width: 170,
@@ -994,6 +1155,7 @@ export default function ReturnsPage() {
 
                 return (
                     <Select
+                        className="returns-packer-select"
                         value={packer || undefined}
                         placeholder="Chọn nhân viên..."
                         disabled={isInHistory}
@@ -1011,10 +1173,22 @@ export default function ReturnsPage() {
                         allowClear
                         showSearch
                         optionFilterProp="label"
+                        labelRender={({ value }) => {
+                            if (!value) return <span>Chọn nhân viên</span>;
+                            const username = String(value);
+                            const employee = employees.find(emp => emp.username === username);
+                            const displayName = employee?.displayName || employee?.name || username;
+                            return (
+                                <span className="returns-person-value">
+                                    <Avatar size={20} style={{ backgroundColor: getAvatarColor(username) }}>{getInitials(username)}</Avatar>
+                                    <span>{displayName}</span>
+                                </span>
+                            );
+                        }}
                     >
                         {employees.map((emp) => (
-                            <Select.Option key={emp.username} value={emp.username} label={`👤 ${emp.displayName || emp.username}`}>
-                                <span>👤 {emp.displayName || emp.username}</span>
+                            <Select.Option key={emp.username} value={emp.username} label={emp.displayName || emp.username}>
+                                <Space size={8}><Avatar size={20} style={{ backgroundColor: getAvatarColor(emp.username) }}>{getInitials(emp.username)}</Avatar>{emp.displayName || emp.username}</Space>
                             </Select.Option>
                         ))}
                     </Select>
@@ -1030,10 +1204,12 @@ export default function ReturnsPage() {
                 const isCompleted = !isAdmin && (record.status === 'completed' || isFinalStatus(record.status));
                 return (
                     <Select
+                        className="returns-fault-select"
                         value={faultParty === 'customer' ? 'customer' : 'warehouse'}
                         size="small"
                         style={{ width: '100%' }}
                         disabled={isCompleted}
+                        labelRender={({ value, label }) => <span className={`returns-fault-chip returns-fault-chip--${value}`}>{label}</span>}
                         onChange={async (value) => {
                             // Optimistic update: cập nhật UI ngay lập tức
                             const updated = returns.map(r =>
@@ -1061,8 +1237,8 @@ export default function ReturnsPage() {
                             }
                         }}
                     >
-                        <Select.Option value="warehouse">Lỗi do kho</Select.Option>
-                        <Select.Option value="customer">Lỗi do khách hàng</Select.Option>
+                        <Select.Option value="warehouse" label="Lỗi do kho">Lỗi do kho</Select.Option>
+                        <Select.Option value="customer" label="Lỗi do khách hàng">Lỗi do khách hàng</Select.Option>
                     </Select>
                 );
             },
@@ -1086,6 +1262,7 @@ export default function ReturnsPage() {
 
                 return (
                     <Select
+                        className="returns-status-select"
                         value={status}
                         disabled={isInHistory}
                         onChange={async (newStatus) => {
@@ -1140,6 +1317,9 @@ export default function ReturnsPage() {
                         style={{ width: '100%' }}
                         size="small"
                         optionLabelProp="label"
+                        labelRender={({ value, label }) => (
+                            <span className={`returns-status-chip returns-status-chip--${getStatusTone(String(value))}`}>{label}</span>
+                        )}
                         dropdownRender={(menu) => (
                             <>
                                 {menu}
@@ -1235,9 +1415,18 @@ export default function ReturnsPage() {
             },
         },
         {
+            title: 'Hạn xử lý',
+            key: 'sla',
+            width: 120,
+            render: (_, record) => {
+                const sla = getReturnSla(record);
+                return <span className={`returns-sla returns-sla--${sla.tone}`}>{sla.label}</span>;
+            },
+        },
+        {
             title: '',
             key: 'actions',
-            width: 90,
+            width: 58,
             fixed: 'right',
             render: (_, record) => {
                 // Check if in history tab and completed
@@ -1265,13 +1454,7 @@ export default function ReturnsPage() {
                     });
                 }
 
-                return (
-                    <Dropdown menu={{ items }} trigger={['click']}>
-                        <Button icon={<MoreOutlined />} size="small">
-                            Xem thêm
-                        </Button>
-                    </Dropdown>
-                );
+                return <Dropdown menu={{ items }} trigger={['click']}><Button aria-label="Xem thêm" icon={<MoreOutlined />} size="small" /></Dropdown>;
             },
         },
     ];
@@ -1283,155 +1466,175 @@ export default function ReturnsPage() {
     // ✨ Search filter
     const matchSearch = (r: Return) => {
         const q = searchText.trim().toLowerCase();
-        if (!q) return true;
-        return (
+        const matchesText = !q || (
             (r.complaintCode || '').toLowerCase().includes(q) ||
             (r.orderNumber || '').toLowerCase().includes(q) ||
             (r.productName || '').toLowerCase().includes(q) ||
             (r.reason || '').toLowerCase().includes(q) ||
             (r.packer || '').toLowerCase().includes(q)
         );
+        const matchesStatus = statusFilter === 'all' || r.status === statusFilter;
+        const matchesFault = faultFilter === 'all' || (r.faultParty || 'warehouse') === faultFilter;
+        const matchesPacker = packerFilter === 'all' || r.packer === packerFilter;
+        const matchesSla = slaFilter === 'all' || getReturnSla(r).overdue;
+        const complaintDate = parseReturnDate(r.complaintDate);
+        const matchesDate = !dateRange || (
+            complaintDate.isValid() &&
+            !complaintDate.isBefore(dateRange[0].startOf('day')) &&
+            !complaintDate.isAfter(dateRange[1].endOf('day'))
+        );
+        return matchesText && matchesStatus && matchesFault && matchesPacker && matchesSla && matchesDate;
     };
     const filteredActive = activeReturns.filter(matchSearch);
     const filteredHistory = historyReturns.filter(matchSearch);
 
     // Determine which data to show based on active tab
     const displayedReturns = activeTab === 'active' ? filteredActive : filteredHistory;
+    const overdueCount = activeReturns.filter(item => getReturnSla(item).overdue).length;
+    const waitingStatus = statusList.find(status => /wait|cho|chờ|support|cskh/i.test(`${status.value} ${status.label}`));
+    const waitingCount = waitingStatus ? activeReturns.filter(item => item.status === waitingStatus.value).length : 0;
+    const completedToday = historyReturns.filter(item => parseReturnDate(item.complaintDate).isSame(dayjs(), 'day')).length;
+    const hasActiveFilters = Boolean(searchText.trim()) || statusFilter !== 'all' || faultFilter !== 'all' || packerFilter !== 'all' || slaFilter !== 'all' || Boolean(dateRange);
+
+    const renderReturnsTable = (data: Return[], allowSelection = true) => (
+        <Table
+            className="returns-table"
+            columns={columns}
+            dataSource={data}
+            rowKey="id"
+            loading={loading}
+            size="middle"
+            sticky
+            scroll={{ x: 1510 }}
+            rowSelection={allowSelection ? {
+                selectedRowKeys,
+                onChange: selectedKeys => setSelectedRowKeys(selectedKeys as number[]),
+                columnWidth: 48,
+                getCheckboxProps: record => ({ name: record.complaintCode }),
+            } : undefined}
+            rowClassName={(record, index) => [
+                'returns-table-row',
+                activeTab === 'active' && index % 2 === 0 ? 'returns-table-row--tinted' : '',
+                getReturnSla(record).overdue ? 'returns-table-row--overdue' : '',
+                `returns-table-row--${getStatusTone(record.status)}`,
+            ].filter(Boolean).join(' ')}
+            pagination={{
+                defaultPageSize: 20,
+                pageSizeOptions: [10, 20, 50],
+                showSizeChanger: true,
+                showTotal: total => `Hiển thị ${Math.min(total, 20)} / ${total} phiếu`,
+            }}
+        />
+    );
 
     return (
-        <Spin spinning={importLoading} tip="⏳ Đang xử lý..." size="large">
-            <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-                    <Title level={2} style={{ color: '#262626', margin: 0 }}>
-                        🔄 Trả hàng
-                        {selectedRowKeys.length > 0 && (
-                            <span style={{ fontSize: 14, fontWeight: 400, color: '#ff4d4f', marginLeft: 12 }}>
-                                ({selectedRowKeys.length} phiếu đã chọn)
-                            </span>
-                        )}
-                    </Title>
-                    <Space>
-                        {selectedRowKeys.length > 0 && (
-                            <Button
-                                danger
-                                icon={<DeleteOutlined />}
-                                onClick={handleBulkDelete}
-                                size="large"
-                            >
-                                Xóa đã chọn ({selectedRowKeys.length})
-                            </Button>
-                        )}
-                        <Button
-                            icon={<ReloadOutlined />}
-                            onClick={() => loadReturns()}
-                            loading={loading}
-                        >
-                            Tải lại
-                        </Button>
-                        <Button type="primary" danger icon={<PlusOutlined />} size="large" onClick={handleAdd}>
-                            Tạo phiếu trả
-                        </Button>
-                    </Space>
+        <Spin spinning={importLoading} tip="Đang xử lý..." size="large">
+            <div className="returns-page">
+                {!dayjs().isBefore(RETURN_POLICY_NOTICE_START) && dayjs().isBefore(RETURN_POLICY_NOTICE_END) && (
+                    <Alert
+                        className="returns-policy-alert"
+                        type="warning"
+                        showIcon
+                        message="Quy định xử lý trả hàng mới áp dụng từ 24/08/2026"
+                        description="Hạn xử lý theo dõi trên bảng là 5 ngày. Phiếu phát sinh từ 24/08 nếu quá 7 ngày chưa Hoàn thành sẽ phạt tài khoản nguyendinhtoan từ 30.000đ/đơn và tăng thêm 10.000đ mỗi ngày. Các phiếu cũ đã quá hạn được gia hạn xử lý hết ngày 26/08; từ 27/08 nếu chưa Hoàn thành sẽ áp dụng mức phạt tương tự."
+                    />
+                )}
+                <div className="returns-page-heading">
+                    <div className="returns-page-title">
+                        <span className="returns-title-icon"><SyncOutlined /></span>
+                        <div>
+                            <Title level={2}>Trả hàng</Title>
+                            <Text type="secondary">Theo dõi, phân công và xử lý khiếu nại trả hàng</Text>
+                        </div>
+                    </div>
+                    <div className="returns-heading-actions">
+                        <Tooltip title="Làm mới dữ liệu">
+                            <Button icon={<ReloadOutlined />} onClick={() => loadReturns()} loading={loading}>Tải lại</Button>
+                        </Tooltip>
+                        <Button icon={<FileExcelOutlined />} onClick={handleExportDisplayed}>Xuất Excel</Button>
+                        <Button type="primary" icon={<PlusOutlined />} size="large" onClick={handleAdd}>Tạo phiếu trả</Button>
+                    </div>
                 </div>
 
-                <Card>
-                    <div style={{ marginBottom: 16 }}>
-                        <Input.Search
-                            placeholder="Tìm theo mã KN, mã đơn, sản phẩm, lý do, nhân viên..."
+                <div className="returns-stat-grid">
+                    <button type="button" className="returns-stat-card returns-stat-card--green" onClick={() => { setActiveTab('active'); setSlaFilter('all'); }}>
+                        <span className="returns-stat-icon"><SyncOutlined /></span>
+                        <span><small>Đang xử lý</small><strong>{activeReturns.length}</strong></span>
+                    </button>
+                    <button type="button" className="returns-stat-card returns-stat-card--red" onClick={() => { setActiveTab('active'); setSlaFilter('overdue'); }}>
+                        <span className="returns-stat-icon"><ClockCircleOutlined /></span>
+                        <span><small>Quá hạn</small><strong>{overdueCount}</strong></span>
+                    </button>
+                    <button type="button" className="returns-stat-card returns-stat-card--blue" onClick={() => { setActiveTab('active'); if (waitingStatus) setStatusFilter(waitingStatus.value); }}>
+                        <span className="returns-stat-icon"><CustomerServiceOutlined /></span>
+                        <span><small>Chờ CSKH</small><strong>{waitingCount}</strong></span>
+                    </button>
+                    <button type="button" className="returns-stat-card returns-stat-card--green" onClick={() => { setActiveTab('history'); setDateRange([dayjs().startOf('day'), dayjs().endOf('day')]); }}>
+                        <span className="returns-stat-icon"><CheckCircleOutlined /></span>
+                        <span><small>Hoàn tất hôm nay</small><strong>{completedToday}</strong></span>
+                    </button>
+                </div>
+
+                <Card className="returns-workspace" bordered={false}>
+                    <div className="returns-filter-bar">
+                        <Input
+                            className="returns-search"
+                            placeholder="Tìm mã KN, mã đơn, sản phẩm, lý do, nhân viên..."
                             allowClear
-                            size="large"
-                            prefix={<SearchOutlined style={{ color: '#bfbfbf' }} />}
+                            prefix={<SearchOutlined />}
                             value={searchText}
-                            onChange={e => setSearchText(e.target.value)}
-                            style={{ maxWidth: 520 }}
+                            onChange={event => setSearchText(event.target.value)}
                         />
-                        {searchText.trim() && (
-                            <Text type="secondary" style={{ marginLeft: 12, fontSize: 13 }}>
-                                Tìm thấy <b>{filteredActive.length + filteredHistory.length}</b> kết quả
-                            </Text>
-                        )}
+                        <RangePicker
+                            className="returns-date-filter"
+                            value={dateRange}
+                            format="DD/MM/YYYY"
+                            placeholder={['Từ ngày', 'Đến ngày']}
+                            prefix={<CalendarOutlined />}
+                            onChange={value => setDateRange(value ? [value[0]!, value[1]!] : null)}
+                        />
+                        <Select className="returns-filter" value={statusFilter} onChange={setStatusFilter} options={[
+                            { value: 'all', label: 'Tất cả trạng thái' },
+                            ...statusList.map(status => ({ value: status.value, label: status.label })),
+                        ]} />
+                        <Select className="returns-filter" value={faultFilter} onChange={setFaultFilter} options={[
+                            { value: 'all', label: 'Tất cả lỗi do' },
+                            { value: 'warehouse', label: 'Lỗi do kho' },
+                            { value: 'customer', label: 'Lỗi do khách hàng' },
+                        ]} />
+                        <Select className="returns-filter" value={packerFilter} onChange={setPackerFilter} options={[
+                            { value: 'all', label: 'Tất cả nhân viên' },
+                            ...employees.map(employee => ({ value: employee.username, label: employee.displayName || employee.username })),
+                        ]} />
+                        <Button type="primary" icon={<FilterOutlined />}>Lọc</Button>
+                        {hasActiveFilters && <Button type="text" onClick={clearReturnFilters}>Xóa lọc</Button>}
                     </div>
+
                     <Tabs
+                        className="returns-tabs"
                         activeKey={activeTab}
-                        onChange={(key) => {
-                            setActiveTab(key as 'active' | 'history');
-                            setSelectedRowKeys([]); // Clear selection when switching tabs
-                        }}
+                        onChange={key => { setActiveTab(key as 'active' | 'history'); setSelectedRowKeys([]); }}
                         items={[
-                            {
-                                key: 'active',
-                                label: (
-                                    <span style={{ fontSize: 14, fontWeight: 600 }}>
-                                        📦 Đang xử lý ({filteredActive.length}{searchText.trim() && filteredActive.length !== activeReturns.length ? `/${activeReturns.length}` : ''})
-                                    </span>
-                                ),
-                                children: (
-                                    <Table
-                                        columns={columns}
-                                        dataSource={filteredActive}
-                                        rowKey="id"
-                                        loading={loading}
-                                        scroll={{ x: 1400 }}
-                                        rowSelection={{
-                                            selectedRowKeys,
-                                            onChange: (selectedKeys) => {
-                                                setSelectedRowKeys(selectedKeys as number[]);
-                                            },
-                                            columnWidth: 50,
-                                            getCheckboxProps: (record) => ({
-                                                name: record.complaintCode,
-                                            }),
-                                        }}
-                                        rowClassName={(record) => {
-                                            return record.status ? `status-row-${record.status}` : '';
-                                        }}
-                                        pagination={{
-                                            pageSize: 25,
-                                            showSizeChanger: true,
-                                            showTotal: (total) => `Tổng ${total} phiếu`,
-                                        }}
-                                    />
-                                ),
-                            },
-                            {
-                                key: 'history',
-                                label: (
-                                    <span style={{ fontSize: 14, fontWeight: 600 }}>
-                                        📜 Lịch sử ({filteredHistory.length}{searchText.trim() && filteredHistory.length !== historyReturns.length ? `/${historyReturns.length}` : ''})
-                                    </span>
-                                ),
-                                children: (
-                                    <Table
-                                        columns={columns}
-                                        dataSource={filteredHistory}
-                                        rowKey="id"
-                                        loading={loading}
-                                        scroll={{ x: 1400 }}
-                                        rowSelection={
-                                            currentUser?.toLowerCase() === 'admin' ? {
-                                                selectedRowKeys,
-                                                onChange: (selectedKeys) => {
-                                                    setSelectedRowKeys(selectedKeys as number[]);
-                                                },
-                                                columnWidth: 50,
-                                                getCheckboxProps: (record) => ({
-                                                    name: record.complaintCode,
-                                                }),
-                                            } : undefined
-                                        }
-                                        rowClassName={(record) => {
-                                            return record.status ? `status-row-${record.status}` : '';
-                                        }}
-                                        pagination={{
-                                            pageSize: 25,
-                                            showSizeChanger: true,
-                                            showTotal: (total) => `Tổng ${total} phiếu (Đã hoàn thành)`,
-                                        }}
-                                    />
-                                ),
-                            },
+                            { key: 'active', label: <span><InboxOutlined /> Đang xử lý ({filteredActive.length})</span>, children: renderReturnsTable(filteredActive) },
+                            { key: 'history', label: <span><HistoryOutlined /> Lịch sử ({filteredHistory.length})</span>, children: renderReturnsTable(filteredHistory, currentUser?.toLowerCase() === 'admin') },
                         ]}
                     />
+
+                    {selectedRowKeys.length > 0 && (
+                        <div className="returns-bulk-bar">
+                            <strong>Đã chọn {selectedRowKeys.length} phiếu</strong>
+                            <Dropdown menu={{ items: employees.map(employee => ({ key: employee.username, label: employee.displayName || employee.username, onClick: () => handleBulkPackerChange(employee.username) })) }}>
+                                <Button icon={<UserAddOutlined />}>Gán nhân viên</Button>
+                            </Dropdown>
+                            <Dropdown menu={{ items: statusList.map(status => ({ key: status.value, label: status.label, onClick: () => handleBulkStatusChange(status.value) })) }}>
+                                <Button icon={<SwapOutlined />}>Đổi trạng thái</Button>
+                            </Dropdown>
+                            <Button icon={<CommentOutlined />} onClick={() => setShowInputRows(prev => ({ ...prev, ...Object.fromEntries(selectedRowKeys.map(id => [id, true])) }))}>Thêm ghi chú</Button>
+                            <Button icon={<DownloadOutlined />} onClick={handleExportDisplayed}>Xuất danh sách</Button>
+                            <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete}>Xóa</Button>
+                            <Button type="text" className="returns-bulk-close" icon={<CloseOutlined />} onClick={() => setSelectedRowKeys([])} aria-label="Bỏ chọn" />
+                        </div>
+                    )}
                 </Card>
 
                 {/* Method Selection Modal */}

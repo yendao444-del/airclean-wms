@@ -30,6 +30,7 @@ import {
     AuditOutlined,
     WalletOutlined,
     ApartmentOutlined,
+    SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import viVN from 'antd/locale/vi_VN';
@@ -61,6 +62,7 @@ const SupplierDebtPage = lazy(() => import('./pages/SupplierDebt'));
 const ReturnsPage = lazy(() => import('./pages/Returns'));
 const RefundsPage = lazy(() => import('./pages/Refunds'));
 const EcommerceExportPage = lazy(() => import('./pages/EcommerceExport'));
+const CarrierComplaintsPage = lazy(() => import('./pages/CarrierComplaints'));
 const EInvoicePage = lazy(() => import('./pages/EInvoice'));
 const POSPage = lazy(() => import('./pages/POS'));
 const SalesHistoryPage = lazy(() => import('./pages/SalesHistory'));
@@ -112,7 +114,7 @@ function AppContent() {
     const { user, logout } = useAuth();
     const { getAccessibleMenuKeys, hasPermission } = usePermissions();
     const [selectedKey, setSelectedKey] = useState('dashboard');
-    const [collapsed, setCollapsed] = useState(true);
+    const [collapsed, setCollapsed] = useState(false);
     const previousAccessiblePageRef = useRef('dashboard');
     const roleLabel = user?.role === 'admin' ? 'Quản trị viên' : user?.role === 'manager' ? 'Quản lý' : 'Nhân viên';
     const profileLabel = user?.fullName?.trim().toLocaleLowerCase('vi-VN') === roleLabel.toLocaleLowerCase('vi-VN')
@@ -281,6 +283,9 @@ function AppContent() {
         if (accessibleKeys.includes('ecommerce-export')) {
             ecommerceChildren.push(createMenuItem('Xuất hàng TMDT', 'ecommerce-export', <SendOutlined />));
         }
+        if (accessibleKeys.includes('carrier-complaints')) {
+            ecommerceChildren.push(createMenuItem('Khiếu nại DVVC', 'carrier-complaints', <SafetyCertificateOutlined />));
+        }
         if (accessibleKeys.includes('einvoice')) {
             ecommerceChildren.push(createMenuItem('Xuất HĐĐT', 'einvoice', <FileTextOutlined />));
         }
@@ -317,12 +322,13 @@ function AppContent() {
 
     const menuItems = buildMenuItems();
 
-    // Responsive: Auto collapse sidebar khi window nhỏ
+    // Keep the navigation rail compact while preserving the user's desktop choice.
     useEffect(() => {
         const handleResize = () => {
-            if (window.innerWidth < 1024) {
+            const compact = window.innerWidth < 1024;
+            if (compact) {
                 setCollapsed(true);
-            } else if (window.innerWidth >= 1280) {
+            } else {
                 setCollapsed(false);
             }
         };
@@ -374,6 +380,8 @@ function AppContent() {
                 return withAppData(<RefundsPage />);
             case 'ecommerce-export':
                 return <EcommerceExportPage />;
+            case 'carrier-complaints':
+                return <CarrierComplaintsPage />;
             case 'einvoice':
                 return <EInvoicePage />;
             case 'orders':
@@ -420,7 +428,6 @@ function AppContent() {
     // Handling units is a warehouse workspace, not another cramped POS page.
     // It keeps the Electron title bar/session but owns the complete app area.
     const isHandlingUnitsWorkspace = selectedKey === 'handling-units';
-
     return (
         <ConfigProvider
             locale={viVN}
@@ -437,7 +444,7 @@ function AppContent() {
             <AntAppProvider>
                 <GlobalTaskAlerts />
                 {/* ── Custom Title Bar ── */}
-                <div style={{
+                <div className="app-titlebar" style={{
                     height: 40,
                     background: '#ffffff',
                     borderBottom: '1px solid #f0f0f0',
@@ -454,9 +461,9 @@ function AppContent() {
                     userSelect: 'none',
                 } as React.CSSProperties}>
                     <img src="./logo_navbar.png" style={{ height: 22, width: 22, objectFit: 'contain', pointerEvents: 'none', flexShrink: 0 }} />
-                    <span style={{ fontSize: 13, fontWeight: 400, color: '#595959', pointerEvents: 'none' }}>DBY Software POS</span>
+                    <span className="app-titlebar-name" style={{ fontSize: 13, fontWeight: 400, color: '#595959', pointerEvents: 'none' }}>DBY Software POS</span>
                     <div style={{ flex: 1 }} />
-                    <div style={{ WebkitAppRegion: 'no-drag', display: 'flex', alignItems: 'center', gap: 6 } as React.CSSProperties}>
+                    <div className="app-titlebar-actions" style={{ WebkitAppRegion: 'no-drag', display: 'flex', alignItems: 'center', gap: 6 } as React.CSSProperties}>
                         {([
                             { key: 'order-picking', icon: <ScanOutlined style={{ fontSize: 16 }} />, label: 'Nhặt hàng' },
                             { key: 'stock-check', icon: <AuditOutlined style={{ fontSize: 16 }} />, label: 'Kiểm hàng' },
@@ -528,13 +535,13 @@ function AppContent() {
                         </Dropdown>
                     </div>
                 </div>
-                <Layout style={{ minHeight: '100vh', background: '#f0f2f5', paddingTop: 40 }}>
+                <Layout className="app-shell" style={{ minHeight: '100vh', background: '#f0f2f5', paddingTop: 40 }}>
                     {!isHandlingUnitsWorkspace && <Sider
+                        className="app-sidebar"
                         collapsible
                         collapsed={collapsed}
                         onCollapse={setCollapsed}
                         width={260}
-                        breakpoint="lg"
                         collapsedWidth={80}
                         style={{
                             overflow: 'auto',
@@ -557,8 +564,12 @@ function AppContent() {
                         />
                     </Sider>}
 
-                    <Layout style={{ marginLeft: isHandlingUnitsWorkspace ? 0 : (collapsed ? 80 : 260), transition: 'all 0.2s' }}>
+                    <Layout
+                        className={`app-main-layout${isHandlingUnitsWorkspace ? ' app-main-layout--workspace' : collapsed ? ' app-main-layout--collapsed' : ''}`}
+                        style={{ transition: 'all 0.2s' }}
+                    >
                         {!isHandlingUnitsWorkspace && selectedKey !== 'daily-tasks' && <Header
+                            className="app-page-header"
                             style={{
                                 padding: '0 24px',
                                 background: '#fff',
@@ -578,7 +589,7 @@ function AppContent() {
                                 </Title>
                             )}
                             {headerExtra && (
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: hideHeaderTitle ? 0 : 16, flex: 1 }}>
+                                <div className="app-page-header-extra" style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: hideHeaderTitle ? 0 : 16, flex: 1 }}>
                                     {headerExtra}
                                 </div>
                             )}
@@ -586,11 +597,12 @@ function AppContent() {
                         </Header>}
 
                         <Content
+                            className={`app-content app-content--${selectedKey}`}
                             style={{
-                                margin: (selectedKey === 'pos' || isHandlingUnitsWorkspace) ? 0 : 24,
+                                margin: (selectedKey === 'pos' || selectedKey === 'daily-tasks' || isHandlingUnitsWorkspace) ? 0 : 24,
                                 padding: 0,
                                 minHeight: 280,
-                                maxHeight: (selectedKey === 'pos' || isHandlingUnitsWorkspace) ? 'calc(100vh - 40px)' : 'calc(100vh - 112px)',
+                                maxHeight: (selectedKey === 'pos' || selectedKey === 'daily-tasks' || isHandlingUnitsWorkspace) ? 'calc(100vh - 40px)' : 'calc(100vh - 112px)',
                                 overflowY: selectedKey === 'pos' ? 'hidden' : 'auto',
                                 overflowX: 'auto',
                             }}

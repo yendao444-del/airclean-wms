@@ -2675,9 +2675,22 @@
 .hu-quick-last-scan { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 10px 12px; color: #26714d; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; font-size: 12px; }
 .hu-quick-last-scan .anticon { color: #16a34a; font-size: 16px; }
 .hu-quick-list-head { align-items: center; margin: 22px 0 9px; color: #304037; font-size: 13px; }
+.hu-quick-manual-entry { margin-top: 14px; padding: 12px; background: #fffbeb; border: 1px solid #f6d98f; border-radius: 10px; }
+.hu-quick-manual-title, .hu-quick-manual-title > div { display: flex; align-items: center; }
+.hu-quick-manual-title { justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.hu-quick-manual-title > div { gap: 8px; color: #a16207; }
+.hu-quick-manual-title > div > .anticon { display: grid; width: 27px; height: 27px; place-items: center; color: #fff; background: #d99a13; border-radius: 8px; }
+.hu-quick-manual-title span, .hu-quick-manual-title b, .hu-quick-manual-title small { display: block; }
+.hu-quick-manual-title b { color: #6e4b08; font-size: 12px; }
+.hu-quick-manual-title small { margin-top: 1px; color: #9a7a3c; font-size: 10px; }
+.hu-quick-manual-fields { display: grid; grid-template-columns: minmax(190px, 1.3fr) minmax(135px, .75fr) minmax(170px, 1fr) auto; align-items: center; gap: 8px; }
+.hu-quick-manual-fields .ant-select, .hu-quick-manual-fields .ant-input-number { width: 100%; }
+.hu-quick-manual-fields .ant-btn-primary { background: #d99a13; border-color: #d99a13; box-shadow: none; }
 .hu-quick-lines { min-height: 250px; max-height: 310px; overflow-y: auto; border: 1px solid #e1e9e4; border-radius: 10px; }
 .hu-quick-line { display: grid; grid-template-columns: 42px minmax(0, 1fr) 112px 15px 100px 30px; align-items: center; gap: 10px; min-height: 72px; padding: 10px 14px; border-bottom: 1px solid #edf1ef; }
 .hu-quick-line:last-child { border-bottom: 0; }
+.hu-quick-line.is-manual { grid-template-columns: 42px minmax(0, 1fr) 100px 30px; background: #fffdf5; }
+.hu-quick-line.is-manual .hu-quick-qr { color: #b77908; background: #fff3cd; border-color: #f5d981; }
 .hu-quick-qr { display: grid; width: 36px; height: 36px; place-items: center; color: #07844d; background: #effbf4; border: 1px solid #ccefd9; border-radius: 8px; font-size: 21px; }
 .hu-quick-product { min-width: 0; }
 .hu-quick-product b, .hu-quick-product small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2775,6 +2788,7 @@
   .hu-qr-setup-grid { grid-template-columns: 1fr; }
   .hu-quick-create { grid-template-columns: 1fr; }
   .hu-quick-receipt { border-top: 1px solid #e5ece8; border-left: 0; }
+  .hu-quick-manual-fields { grid-template-columns: 1fr 1fr; }
   .hu-quick-footer { align-items: flex-start; flex-direction: column; }
 }
 

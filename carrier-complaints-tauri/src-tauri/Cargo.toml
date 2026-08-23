@@ -1,0 +1,32 @@
+[package]
+name = "carrier-complaints-tauri"
+version = "0.1.0"
+description = "Ứng dụng khiếu nại đơn vị vận chuyển độc lập của DBY"
+authors = ["DBY Software"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "carrier_complaints_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+calamine = "0.36.1"
+csv = "1.4.0"
+chrono = { version = "0.4.45", features = ["serde"] }
+uuid = { version = "1.25.0", features = ["v4", "serde"] }
+lettre = { version = "0.11.23", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+tauri-plugin-dialog = "2"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "sqlite", "chrono", "derive"] }
+unicode-normalization = "0.1"

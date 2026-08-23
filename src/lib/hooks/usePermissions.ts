@@ -14,7 +14,7 @@ export function usePermissions() {
     // remaining non-admin. Backend authorization still blocks admin-only APIs.
     const testMenuKeys = [
         'pos', 'orders', 'fee-calculator', 'products', 'purchase',
-        'supplier-debt', 'export', 'returns', 'refunds', 'ecommerce-export',
+        'supplier-debt', 'export', 'returns', 'refunds', 'ecommerce-export', 'carrier-complaints',
         'einvoice', 'stock-balance', 'stock-check', 'combos', 'order-picking',
         'handling-units',
         'daily-tasks', 'business-report', 'reports', 'history', 'settings', 'attendance',

@@ -272,40 +272,52 @@ let driveClientTokenMtime = 0;
 let driveLastErrorMessage = "";
 
 function getGoogleTokenPath() {
-  return path.join(app.getPath("userData"), "gdrive-token.json");
+  return path.join(app.getPath("userData"), "gdrive-token.bin");
 }
 
 function getLegacyGoogleTokenPath() {
   return path.join(__dirname, "gdrive-token.json");
 }
 
+function getLegacyLocalGoogleTokenPath() {
+  return path.join(app.getPath("userData"), "gdrive-token.json");
+}
+
+function readGoogleTokens(tokenPath = getGoogleTokenPath()) {
+  const raw = fs.readFileSync(tokenPath);
+  const serialized = tokenPath.toLowerCase().endsWith(".bin")
+    ? safeStorage.decryptString(raw)
+    : raw.toString("utf8");
+  return JSON.parse(serialized);
+}
+
+function writeGoogleTokens(tokens, tokenPath = getGoogleTokenPath()) {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error("Windows safeStorage chưa sẵn sàng; không thể lưu Google token an toàn.");
+  }
+  fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
+  fs.writeFileSync(
+    tokenPath,
+    safeStorage.encryptString(JSON.stringify(tokens)),
+    { mode: 0o600 },
+  );
+}
+
 function ensureGoogleTokenPath() {
   const tokenPath = getGoogleTokenPath();
-  const legacyPath = getLegacyGoogleTokenPath();
+  if (fs.existsSync(tokenPath)) return tokenPath;
 
-  const appDataExists = fs.existsSync(tokenPath);
-  const legacyExists = fs.existsSync(legacyPath);
-
-  // Nếu token bundle mới hơn token AppData → dùng token bundle (deploy mới)
-  if (appDataExists && legacyExists) {
-    const appDataMtime = fs.statSync(tokenPath).mtimeMs;
-    const legacyMtime = fs.statSync(legacyPath).mtimeMs;
-    if (legacyMtime > appDataMtime) {
-      fs.copyFileSync(legacyPath, tokenPath);
-      console.log("[Drive] Token bundle moi hon AppData - cap nhat token moi.");
+  for (const legacyPath of [
+    getLegacyLocalGoogleTokenPath(),
+    getLegacyGoogleTokenPath(),
+  ]) {
+    if (!fs.existsSync(legacyPath)) continue;
+    const tokens = readGoogleTokens(legacyPath);
+    writeGoogleTokens(tokens, tokenPath);
+    if (legacyPath === getLegacyLocalGoogleTokenPath()) {
+      fs.rmSync(legacyPath, { force: true });
     }
-    return tokenPath;
-  }
-
-  if (appDataExists) return tokenPath;
-
-  if (legacyExists) {
-    fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
-    fs.copyFileSync(legacyPath, tokenPath);
-    console.warn(
-      "[Drive] Migrated Google token from app source to userData. Remove legacy token before building:",
-      legacyPath,
-    );
+    console.warn("[Drive] Migrated legacy Google token to Windows safeStorage.");
     return tokenPath;
   }
 
@@ -337,7 +349,7 @@ function getDriveClient() {
       driveClient = null;
     }
     const { google } = require("googleapis");
-    const tokens = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
+    const tokens = readGoogleTokens(tokenPath);
     const oauth2Client = new google.auth.OAuth2(
       OAUTH_CLIENT_ID,
       OAUTH_CLIENT_SECRET,
@@ -345,9 +357,9 @@ function getDriveClient() {
     oauth2Client.setCredentials(tokens);
     oauth2Client.on("tokens", (newTokens) => {
       try {
-        const saved = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
+        const saved = readGoogleTokens(tokenPath);
         const updated = { ...saved, ...newTokens };
-        fs.writeFileSync(tokenPath, JSON.stringify(updated, null, 2));
+        writeGoogleTokens(updated, tokenPath);
         driveClientTokenMtime = fs.statSync(tokenPath).mtimeMs;
         console.log("[Drive] Token refreshed & saved");
       } catch (saveErr) {
@@ -385,15 +397,13 @@ function restoreBundledGoogleTokenAfterAuthFailure() {
     const bundledPath = getLegacyGoogleTokenPath();
     if (!fs.existsSync(bundledPath)) return false;
 
-    const bundledTokens = JSON.parse(fs.readFileSync(bundledPath, "utf8"));
+    const bundledTokens = readGoogleTokens(bundledPath);
     if (!bundledTokens?.refresh_token) {
       console.warn("[Drive] Bundled recovery token has no refresh_token.");
       return false;
     }
 
-    const localTokens = fs.existsSync(tokenPath)
-      ? JSON.parse(fs.readFileSync(tokenPath, "utf8"))
-      : null;
+    const localTokens = fs.existsSync(tokenPath) ? readGoogleTokens(tokenPath) : null;
     if (
       localTokens?.refresh_token &&
       localTokens.refresh_token === bundledTokens.refresh_token
@@ -401,8 +411,7 @@ function restoreBundledGoogleTokenAfterAuthFailure() {
       return false;
     }
 
-    fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
-    fs.copyFileSync(bundledPath, tokenPath);
+    writeGoogleTokens(bundledTokens, tokenPath);
     resetDriveClient();
     console.warn(
       "[Drive] Replaced rejected machine-local token with bundled update token.",
@@ -738,6 +747,137 @@ async function backupInvoiceToCloudAndTelegram(order, invoiceNumber, taxCode) {
 let prisma;
 let prismaDirectTx; // Dùng DIRECT_URL cho transactions nặng (bypass PgBouncer)
 
+const RUNTIME_INDEX_MIGRATION_KEY =
+  "runtimeMigration:20260823210000:addPurchaseEinvoiceOrderIndexes";
+const RUNTIME_INDEX_MIGRATION_STALE_MS = 15 * 60 * 1000;
+const RUNTIME_INDEX_STATEMENTS = [
+  'CREATE INDEX CONCURRENTLY IF NOT EXISTS "PurchaseOrder_status_createdAt_idx" ON "PurchaseOrder"("status", "createdAt")',
+  'CREATE INDEX CONCURRENTLY IF NOT EXISTS "PurchaseOrder_supplierId_createdAt_idx" ON "PurchaseOrder"("supplierId", "createdAt")',
+  'CREATE INDEX CONCURRENTLY IF NOT EXISTS "PurchaseOrder_createdAt_idx" ON "PurchaseOrder"("createdAt")',
+  'CREATE INDEX CONCURRENTLY IF NOT EXISTS "PurchaseItem_purchaseOrderId_idx" ON "PurchaseItem"("purchaseOrderId")',
+  'CREATE INDEX CONCURRENTLY IF NOT EXISTS "PurchaseItem_productId_idx" ON "PurchaseItem"("productId")',
+  'CREATE INDEX CONCURRENTLY IF NOT EXISTS "PurchaseItem_variantSku_idx" ON "PurchaseItem"("variantSku")',
+  'CREATE INDEX CONCURRENTLY IF NOT EXISTS "EInvoice_createdAt_idx" ON "EInvoice"("createdAt")',
+  'CREATE INDEX CONCURRENTLY IF NOT EXISTS "EInvoice_status_createdAt_idx" ON "EInvoice"("status", "createdAt")',
+  'CREATE INDEX CONCURRENTLY IF NOT EXISTS "Order_source_createdAt_idx" ON "Order"("source", "createdAt")',
+  'CREATE INDEX CONCURRENTLY IF NOT EXISTS "Order_source_status_createdAt_idx" ON "Order"("source", "status", "createdAt")',
+  'CREATE INDEX CONCURRENTLY IF NOT EXISTS "Order_createdAt_idx" ON "Order"("createdAt")',
+  'CREATE INDEX CONCURRENTLY IF NOT EXISTS "OrderItem_orderId_idx" ON "OrderItem"("orderId")',
+];
+const RUNTIME_INDEX_NAMES = [
+  "PurchaseOrder_status_createdAt_idx",
+  "PurchaseOrder_supplierId_createdAt_idx",
+  "PurchaseOrder_createdAt_idx",
+  "PurchaseItem_purchaseOrderId_idx",
+  "PurchaseItem_productId_idx",
+  "PurchaseItem_variantSku_idx",
+  "EInvoice_createdAt_idx",
+  "EInvoice_status_createdAt_idx",
+  "Order_source_createdAt_idx",
+  "Order_source_status_createdAt_idx",
+  "Order_createdAt_idx",
+  "OrderItem_orderId_idx",
+];
+
+function parseRuntimeMigrationState(value) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function claimRuntimeIndexMigration() {
+  return prisma.$transaction(
+    async (tx) => {
+      // pg_advisory_xact_lock returns PostgreSQL `void`; $queryRaw attempts to
+      // deserialize that value and Prisma rejects it. $executeRaw intentionally
+      // ignores the result while still acquiring the transaction-scoped lock.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${RUNTIME_INDEX_MIGRATION_KEY}))`;
+      const record = await tx.appConfig.findUnique({
+        where: { key: RUNTIME_INDEX_MIGRATION_KEY },
+      });
+      const state = parseRuntimeMigrationState(record?.value);
+      if (state.status === "done") return false;
+      const startedAt = Date.parse(state.startedAt || "");
+      if (
+        state.status === "running" &&
+        Number.isFinite(startedAt) &&
+        Date.now() - startedAt < RUNTIME_INDEX_MIGRATION_STALE_MS
+      ) {
+        return false;
+      }
+      const runningState = {
+        status: "running",
+        startedAt: new Date().toISOString(),
+        appVersion: app.getVersion(),
+        processId: process.pid,
+      };
+      await tx.appConfig.upsert({
+        where: { key: RUNTIME_INDEX_MIGRATION_KEY },
+        create: {
+          key: RUNTIME_INDEX_MIGRATION_KEY,
+          value: JSON.stringify(runningState),
+        },
+        update: { value: JSON.stringify(runningState) },
+      });
+      return true;
+    },
+    { isolationLevel: "Serializable", timeout: 10_000, maxWait: 10_000 },
+  );
+}
+
+async function ensureRuntimePerformanceIndexes() {
+  if (!(await claimRuntimeIndexMigration())) return;
+  try {
+    const migrationClient = getPrismaDirectTx();
+    const indexNameList = RUNTIME_INDEX_NAMES.map((name) => `'${name}'`).join(",");
+    const invalidIndexes = await migrationClient.$queryRawUnsafe(
+      `SELECT cls.relname AS name
+       FROM pg_index idx
+       JOIN pg_class cls ON cls.oid = idx.indexrelid
+       WHERE idx.indisvalid = false AND cls.relname IN (${indexNameList})`,
+    );
+    for (const row of invalidIndexes) {
+      if (!RUNTIME_INDEX_NAMES.includes(row.name)) continue;
+      await migrationClient.$executeRawUnsafe(
+        `DROP INDEX CONCURRENTLY IF EXISTS "${row.name}"`,
+      );
+    }
+    for (const statement of RUNTIME_INDEX_STATEMENTS) {
+      // CONCURRENTLY keeps production reads/writes available while the index
+      // is built. Statements intentionally run outside a transaction.
+      await migrationClient.$executeRawUnsafe(statement);
+    }
+    await prisma.appConfig.update({
+      where: { key: RUNTIME_INDEX_MIGRATION_KEY },
+      data: {
+        value: JSON.stringify({
+          status: "done",
+          completedAt: new Date().toISOString(),
+          appVersion: app.getVersion(),
+        }),
+      },
+    });
+    console.log("✅ Runtime database indexes are ready.");
+  } catch (error) {
+    await prisma.appConfig
+      .update({
+        where: { key: RUNTIME_INDEX_MIGRATION_KEY },
+        data: {
+          value: JSON.stringify({
+            status: "failed",
+            failedAt: new Date().toISOString(),
+            error: String(error?.message || error).slice(0, 500),
+          }),
+        },
+      })
+      .catch(() => {});
+    console.error("⚠️ Runtime index migration failed; will retry next launch:", error.message);
+  }
+}
+
 // ⚡ LAZY INIT — chỉ tạo khi lần đầu cần (tiết kiệm ~500ms startup)
 function getPrismaDirectTx() {
   if (!prismaDirectTx) {
@@ -791,6 +931,12 @@ try {
     .$connect()
     .then(() => {
       console.log("✅ Connected to Supabase PostgreSQL");
+      // Keep startup reads responsive; index maintenance is background-only.
+      const indexTimer = setTimeout(
+        () => void ensureRuntimePerformanceIndexes(),
+        30_000,
+      );
+      indexTimer.unref?.();
     })
     .catch((err) => {
       console.error("❌ CRITICAL: Database connection failed!");
@@ -832,6 +978,9 @@ try {
 // SESSION STORE - Backend role enforcement
 // ========================================
 let currentSession = null; // { id, username, role }
+const SESSION_STATUS_CACHE_TTL_MS = 10_000;
+let sessionStatusCache = { userId: null, status: null, checkedAt: 0 };
+let sessionStatusCheckInFlight = null;
 const REMEMBER_TOKENS_KEY = "authRememberTokensV1";
 const REMEMBER_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PASSWORD_ROTATION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -888,6 +1037,42 @@ function clearSecureRememberToken() {
   } catch {}
 }
 
+function cacheSessionStatus(user) {
+  sessionStatusCache = {
+    userId: user?.id || null,
+    status: user?.status || null,
+    checkedAt: user?.id ? Date.now() : 0,
+  };
+}
+
+async function getSessionStatusUser(userId) {
+  const now = Date.now();
+  if (
+    sessionStatusCache.userId === userId &&
+    now - sessionStatusCache.checkedAt < SESSION_STATUS_CACHE_TTL_MS
+  ) {
+    return { id: userId, status: sessionStatusCache.status };
+  }
+  if (sessionStatusCheckInFlight?.userId === userId) {
+    return sessionStatusCheckInFlight.promise;
+  }
+
+  let checkPromise;
+  checkPromise = prisma.user
+    .findUnique({ where: { id: userId }, select: { id: true, status: true } })
+    .then((user) => {
+      if (currentSession?.id === userId) cacheSessionStatus(user);
+      return user;
+    })
+    .finally(() => {
+      if (sessionStatusCheckInFlight?.promise === checkPromise) {
+        sessionStatusCheckInFlight = null;
+      }
+    });
+  sessionStatusCheckInFlight = { userId, promise: checkPromise };
+  return checkPromise;
+}
+
 const ipcHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, listener) =>
   ipcHandle(channel, async (...args) => {
@@ -926,13 +1111,11 @@ ipcMain.handle = (channel, listener) =>
       !SESSION_STATUS_EXEMPT_CHANNELS.has(channel) &&
       prisma
     ) {
-      const sessionUser = await prisma.user.findUnique({
-        where: { id: currentSession.id },
-        select: { status: true },
-      });
+      const sessionUser = await getSessionStatusUser(currentSession.id);
       if (!sessionUser || sessionUser.status !== "active") {
         const resigned = sessionUser?.status === "resigned";
         currentSession = null;
+        sessionStatusCache = { userId: null, status: null, checkedAt: 0 };
         throw new Error(
           resigned
             ? "Tài khoản đã nghỉ việc và không còn quyền sử dụng hệ thống."
@@ -1390,6 +1573,7 @@ ipcMain.handle("system:getInfo", async () => {
 // ========================================
 
 const dashboardSummaryCache = new Map();
+const dashboardSummaryInFlight = new Map();
 const DASHBOARD_SUMMARY_CACHE_TTL_MS = 30000;
 
 ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
@@ -1430,100 +1614,133 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
       }
     };
     const dateIn = (date, start, end) => date >= start && date <= end;
-    const dayKey = (date) => {
-      const d = new Date(date);
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    };
-    const pickSku = (item) =>
-      item?.sku || item?.variantSku || item?.productSku || "";
-    const pickName = (item) =>
-      item?.productName || item?.name || item?.product || "N/A";
-    const pickQty = (item) => Number(item?.quantity ?? item?.qty ?? 0) || 0;
-    const pickPrice = (item) =>
-      Number(item?.price ?? item?.unitPrice ?? 0) || 0;
+    let queryPromise = dashboardSummaryInFlight.get(cacheKey);
+    if (!queryPromise) {
+      queryPromise = prisma.$queryRaw`
+        WITH current_orders AS MATERIALIZED (
+          SELECT "id", "source", "total"
+          FROM "Order"
+          WHERE "status" = 'completed'
+            AND "source" IN ('pos', 'shopee', 'tiktok', 'lazada', 'tmdt')
+            AND "createdAt" >= ${from}
+            AND "createdAt" <= ${to}
+        ),
+        previous_orders AS MATERIALIZED (
+          SELECT "source", "total"
+          FROM "Order"
+          WHERE "status" = 'completed'
+            AND "source" IN ('pos', 'shopee', 'tiktok', 'lazada', 'tmdt')
+            AND "createdAt" >= ${prevFrom}
+            AND "createdAt" <= ${prevTo}
+        )
+        SELECT
+          COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+              'sku', product."sku",
+              'stock', product."stock",
+              'minStock', product."minStock",
+              'cost', product."cost",
+              'variants', product."variants"
+            ))
+            FROM "Product" product
+            WHERE product."status" <> 'inactive'
+          ), '[]'::jsonb) AS "products",
+          COALESCE((
+            SELECT jsonb_agg(to_jsonb(stats))
+            FROM (
+              SELECT "source", COUNT(*)::int AS "count",
+                     COALESCE(SUM("total"), 0)::float AS "revenue"
+              FROM current_orders
+              GROUP BY "source"
+            ) stats
+          ), '[]'::jsonb) AS "currentSales",
+          COALESCE((
+            SELECT jsonb_agg(to_jsonb(stats))
+            FROM (
+              SELECT "source", COUNT(*)::int AS "count",
+                     COALESCE(SUM("total"), 0)::float AS "revenue"
+              FROM previous_orders
+              GROUP BY "source"
+            ) stats
+          ), '[]'::jsonb) AS "previousSales",
+          COALESCE((
+            SELECT jsonb_agg(to_jsonb(items))
+            FROM (
+              SELECT item."sku", item."productName" AS "name",
+                     SUM(item."quantity")::float AS "actualQty",
+                     SUM(CASE WHEN item."quantity" = 0 THEN 1 ELSE item."quantity" END)::float AS "qty",
+                     COALESCE(SUM(item."subtotal"), 0)::float AS "revenue",
+                     COALESCE(SUM(item."cost" * item."quantity"), 0)::float AS "itemCogs"
+              FROM current_orders orders
+              JOIN "OrderItem" item ON item."orderId" = orders."id"
+              GROUP BY item."sku", item."productName"
+            ) items
+          ), '[]'::jsonb) AS "itemTotals",
+          COALESCE((
+            SELECT jsonb_agg(to_jsonb(days))
+            FROM (
+              SELECT to_char(date_trunc('day', "createdAt" AT TIME ZONE 'Asia/Bangkok'), 'YYYY-MM-DD') AS "day",
+                     COALESCE(SUM("total"), 0)::float AS "revenue"
+              FROM "Order"
+              WHERE "status" = 'completed'
+                AND "source" IN ('pos', 'shopee', 'tiktok', 'lazada', 'tmdt')
+                AND "createdAt" >= ${chartFrom}
+                AND "createdAt" <= ${chartTo}
+              GROUP BY 1
+              ORDER BY 1
+            ) days
+          ), '[]'::jsonb) AS "chartRows",
+          COALESCE((
+            SELECT jsonb_agg(to_jsonb(purchases))
+            FROM (
+              SELECT purchase."id", purchase."total",
+                     to_char(purchase."createdAt", 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
+                     CASE WHEN purchase."receivedAt" IS NULL THEN NULL
+                          ELSE to_char(purchase."receivedAt", 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS "receivedAt",
+                     supplier."name" AS "supplierName"
+              FROM "PurchaseOrder" purchase
+              JOIN "Supplier" supplier ON supplier."id" = purchase."supplierId"
+              WHERE purchase."status" <> 'cancelled'
+                AND purchase."createdAt" >= ${from}
+                AND purchase."createdAt" <= ${to}
+              ORDER BY purchase."createdAt" DESC
+            ) purchases
+          ), '[]'::jsonb) AS "purchases",
+          COALESCE((
+            SELECT jsonb_agg(to_jsonb(purchases))
+            FROM (
+              SELECT purchase."id", purchase."total",
+                     to_char(purchase."createdAt", 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
+                     CASE WHEN purchase."receivedAt" IS NULL THEN NULL
+                          ELSE to_char(purchase."receivedAt", 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS "receivedAt",
+                     supplier."name" AS "supplierName"
+              FROM "PurchaseOrder" purchase
+              JOIN "Supplier" supplier ON supplier."id" = purchase."supplierId"
+              WHERE purchase."status" <> 'cancelled'
+              ORDER BY purchase."createdAt" DESC
+              LIMIT 4
+            ) purchases
+          ), '[]'::jsonb) AS "recentPurchases"
+      `;
+      dashboardSummaryInFlight.set(cacheKey, queryPromise);
+      void queryPromise
+        .finally(() => {
+          if (dashboardSummaryInFlight.get(cacheKey) === queryPromise) {
+            dashboardSummaryInFlight.delete(cacheKey);
+          }
+        })
+        .catch(() => {});
+    }
 
-    const salesSources = ["pos", "shopee", "tiktok", "lazada", "tmdt"];
-    const [products, salesRows, previousSales, chartRows, purchases, recentPurchases] =
-      await Promise.all([
-      prisma.product.findMany({
-        select: {
-          sku: true,
-          stock: true,
-          minStock: true,
-          cost: true,
-          variants: true,
-        },
-        where: { status: { not: "inactive" } },
-      }),
-      prisma.order.findMany({
-        where: {
-          status: "completed",
-          source: { in: salesSources },
-          createdAt: { gte: from, lte: to },
-        },
-        select: {
-          source: true,
-          total: true,
-          createdAt: true,
-          items: {
-            select: {
-              sku: true,
-              productName: true,
-              quantity: true,
-              price: true,
-              cost: true,
-              subtotal: true,
-            },
-          },
-        },
-      }),
-      prisma.order.groupBy({
-        by: ["source"],
-        where: {
-          status: "completed",
-          source: { in: salesSources },
-          createdAt: { gte: prevFrom, lte: prevTo },
-        },
-        _count: { _all: true },
-        _sum: { total: true },
-      }),
-      prisma.$queryRaw`
-        SELECT to_char(date_trunc('day', "createdAt" AT TIME ZONE 'Asia/Bangkok'), 'YYYY-MM-DD') AS day,
-               COALESCE(SUM("total"), 0)::float AS revenue
-        FROM "Order"
-        WHERE "status" = 'completed'
-          AND "source" IN ('pos', 'shopee', 'tiktok', 'lazada', 'tmdt')
-          AND "createdAt" >= ${chartFrom}
-          AND "createdAt" <= ${chartTo}
-        GROUP BY 1
-      `,
-      prisma.purchaseOrder.findMany({
-        where: {
-          status: { not: "cancelled" },
-          createdAt: { gte: from, lte: to },
-        },
-        select: {
-          id: true,
-          total: true,
-          createdAt: true,
-          receivedAt: true,
-          supplier: { select: { name: true } },
-        },
-        orderBy: { createdAt: "desc" },
-      }),
-      prisma.purchaseOrder.findMany({
-        where: { status: { not: "cancelled" } },
-        select: {
-          id: true,
-          total: true,
-          createdAt: true,
-          receivedAt: true,
-          supplier: { select: { name: true } },
-        },
-        orderBy: { createdAt: "desc" },
-        take: 4,
-      }),
-    ]);
+    const dashboardRows = await queryPromise;
+    const salesSummary = dashboardRows[0] || {};
+    const products = salesSummary.products || [];
+    const currentSales = salesSummary.currentSales || [];
+    const previousSales = salesSummary.previousSales || [];
+    const itemTotals = salesSummary.itemTotals || [];
+    const chartRows = salesSummary.chartRows || [];
+    const purchases = salesSummary.purchases || [];
+    const recentPurchases = salesSummary.recentPurchases || [];
 
     const costMap = {};
     let totalStock = 0;
@@ -1568,47 +1785,40 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
     const dailyRevenueByDate = {};
     const topMap = new Map();
 
-    const addSalesRow = (row, bucket) => {
-      const amount = Number(row.total || 0);
+    const addSalesSummary = (row, bucket) => {
+      const amount = Number(row.revenue || 0);
+      const count = Number(row.count || 0);
       bucket.revenue += amount;
-      bucket.count += 1;
+      bucket.count += count;
       if (row.source === "pos") {
         bucket.posRevenue += amount;
-        bucket.posCount += 1;
+        bucket.posCount += count;
       } else {
         bucket.ecomRevenue += amount;
-        bucket.ecomCount += 1;
-      }
-      for (const item of row.items || []) {
-        const sku = pickSku(item);
-        const qty = pickQty(item);
-        const price = pickPrice(item);
-        const cost = costMap[sku] ?? Number(item?.cost || 0);
-        bucket.cogs += cost * qty;
-        const name = pickName(item);
-        const existing = topMap.get(name) || { name, qty: 0, revenue: 0 };
-        existing.qty += qty || 1;
-        existing.revenue += Number(item?.subtotal ?? price * (qty || 1));
-        topMap.set(name, existing);
+        bucket.ecomCount += count;
       }
     };
 
-    for (const row of salesRows) {
-      addSalesRow(row, current);
+    for (const row of currentSales) {
+      addSalesSummary(row, current);
     }
     for (const row of previousSales) {
-      const revenue = Number(row._sum?.total || 0);
-      const count = Number(row._count?._all || 0);
-      if (row.source === "pos") {
-        previous.posRevenue += revenue;
-        previous.posCount += count;
-      } else {
-        previous.ecomRevenue += revenue;
-        previous.ecomCount += count;
-      }
+      addSalesSummary(row, previous);
     }
-    previous.revenue = previous.posRevenue + previous.ecomRevenue;
-    previous.count = previous.posCount + previous.ecomCount;
+    for (const item of itemTotals) {
+      const sku = String(item.sku || "");
+      const actualQty = Number(item.actualQty || 0);
+      const qty = Number(item.qty || 0);
+      current.cogs +=
+        costMap[sku] != null
+          ? Number(costMap[sku]) * actualQty
+          : Number(item.itemCogs || 0);
+      const name = String(item.name || "N/A");
+      const existing = topMap.get(name) || { name, qty: 0, revenue: 0 };
+      existing.qty += qty;
+      existing.revenue += Number(item.revenue || 0);
+      topMap.set(name, existing);
+    }
 
     for (const row of chartRows) {
       const key = String(row.day || "");
@@ -1618,7 +1828,7 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
     }
 
     const rangePurchases = purchases.filter((p) =>
-      dateIn(p.receivedAt || p.createdAt, from, to),
+      dateIn(new Date(p.receivedAt || p.createdAt), from, to),
     );
     const purchaseAmount = rangePurchases.reduce(
       (sum, p) => sum + Number(p.total || 0),
@@ -1626,10 +1836,10 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
     );
     const formatPurchase = (p) => ({
       id: p.id,
-      supplierName: p.supplier?.name || "",
+      supplierName: p.supplierName || "",
       totalAmount: p.total || 0,
-      purchaseDate: (p.receivedAt || p.createdAt).toISOString(),
-      createdAt: p.createdAt.toISOString(),
+      purchaseDate: new Date(p.receivedAt || p.createdAt).toISOString(),
+      createdAt: new Date(p.createdAt).toISOString(),
     });
 
     const data = {
@@ -1656,7 +1866,7 @@ ipcMain.handle("dashboard:getSummary", async (event, params = {}) => {
     };
 
     console.log(
-      `[Perf] dashboard:getSummary sales=${salesRows.length} chart=${chartRows.length} products=${products.length} ms=${Date.now() - startedAt}`,
+      `[Perf] dashboard:getSummary sales=${current.count} items=${itemTotals.length} chart=${chartRows.length} products=${products.length} ms=${Date.now() - startedAt}`,
     );
     dashboardSummaryCache.set(cacheKey, { createdAt: Date.now(), data });
     if (dashboardSummaryCache.size > 20) {
@@ -2804,6 +3014,43 @@ function savePickupLog(logFilePath, history) {
   XLSX.writeFile(wb, logFilePath);
 }
 
+const APPROVED_FOLDER_SCOPES_PATH = () =>
+  path.join(app.getPath("userData"), "approved-folder-scopes.json");
+
+function readApprovedFolderScopes() {
+  try {
+    return JSON.parse(fs.readFileSync(APPROVED_FOLDER_SCOPES_PATH(), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function rememberApprovedFolder(scope, folderPath) {
+  const resolved = path.resolve(String(folderPath || ""));
+  const scopes = readApprovedFolderScopes();
+  scopes[scope] = resolved;
+  fs.mkdirSync(path.dirname(APPROVED_FOLDER_SCOPES_PATH()), { recursive: true });
+  fs.writeFileSync(
+    APPROVED_FOLDER_SCOPES_PATH(),
+    JSON.stringify(scopes, null, 2),
+    { mode: 0o600 },
+  );
+  return resolved;
+}
+
+function requireApprovedFolder(scope, folderPath) {
+  const approvedValue = String(readApprovedFolderScopes()[scope] || "").trim();
+  if (!folderPath || !approvedValue) {
+    throw new Error("Thư mục chưa được người dùng cấp quyền. Vui lòng chọn lại thư mục.");
+  }
+  const resolved = path.resolve(String(folderPath || ""));
+  const approved = path.resolve(approvedValue);
+  if (resolved !== approved) {
+    throw new Error("Thư mục chưa được người dùng cấp quyền. Vui lòng chọn lại thư mục.");
+  }
+  return resolved;
+}
+
 // Chọn thư mục
 ipcMain.handle("pickup:selectFolder", async () => {
   try {
@@ -2814,7 +3061,7 @@ ipcMain.handle("pickup:selectFolder", async () => {
     if (result.canceled || result.filePaths.length === 0) {
       return { success: false, error: "Không có thư mục được chọn" };
     }
-    return { success: true, data: result.filePaths[0] };
+    return { success: true, data: rememberApprovedFolder("pickup", result.filePaths[0]) };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -2823,6 +3070,7 @@ ipcMain.handle("pickup:selectFolder", async () => {
 // Tải dữ liệu từ thư mục
 ipcMain.handle("pickup:loadData", async (event, folderPath) => {
   try {
+    folderPath = requireApprovedFolder("pickup", folderPath);
     if (!folderPath || !fs.existsSync(folderPath)) {
       return { success: false, error: "Thư mục không tồn tại" };
     }
@@ -3082,7 +3330,7 @@ ipcMain.handle("pickup:selectAndWatch", async () => {
       return { success: false, error: "Không có thư mục được chọn" };
     }
 
-    const folderPath = result.filePaths[0];
+    const folderPath = rememberApprovedFolder("pickup", result.filePaths[0]);
 
     // Lấy danh sách file hiện có
     const existingFiles = fs.readdirSync(folderPath).filter((f) => {
@@ -3175,20 +3423,28 @@ ipcMain.handle("pickup:stopWatch", async () => {
 // Đọc tất cả file Excel trong thư mục (trả về base64, không mở dialog)
 ipcMain.handle("pickup:readFolderFiles", async (event, folderPath) => {
   try {
+    folderPath = requireApprovedFolder("pickup", folderPath);
     if (!folderPath || !fs.existsSync(folderPath)) {
       return { success: false, error: "Thư mục không tồn tại" };
     }
 
-    const excelFiles = fs.readdirSync(folderPath).filter((f) => {
+    const excelFiles = (await fs.promises.readdir(folderPath)).filter((f) => {
       const ext = path.extname(f).toLowerCase();
       return [".xlsx", ".xls", ".csv"].includes(ext) && !f.startsWith("~$");
     });
+    if (excelFiles.length > 200) {
+      return { success: false, error: "Thư mục có quá 200 file; vui lòng chia nhỏ trước khi nhập." };
+    }
 
     const files = [];
     for (const filename of excelFiles) {
       try {
         const filePath = path.join(folderPath, filename);
-        const buffer = fs.readFileSync(filePath);
+        const stat = await fs.promises.stat(filePath);
+        if (stat.size > 50 * 1024 * 1024) {
+          throw new Error("File vượt quá giới hạn 50 MB");
+        }
+        const buffer = await fs.promises.readFile(filePath);
         files.push({
           name: filename,
           base64: buffer.toString("base64"),
@@ -3210,6 +3466,7 @@ ipcMain.handle("pickup:readFolderFiles", async (event, folderPath) => {
 // Bắt đầu theo dõi trực tiếp (không dialog — dùng khi auto-restore)
 ipcMain.handle("pickup:startWatch", async (event, folderPath) => {
   try {
+    folderPath = requireApprovedFolder("pickup", folderPath);
     if (!folderPath || !fs.existsSync(folderPath)) {
       return { success: false, error: "Thư mục không tồn tại" };
     }
@@ -4033,6 +4290,58 @@ async function getSkuStockForOrder(db, sku) {
   return 0;
 }
 
+async function normalizePosOrderItems(db, rawItems, { allowPriceOverride = false } = {}) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > 500) {
+    throw new Error("Danh sách sản phẩm của đơn hàng không hợp lệ.");
+  }
+  const productIds = [
+    ...new Set(rawItems.map((item) => Number(item.productId)).filter(Boolean)),
+  ];
+  const products = await db.product.findMany({
+    where: { id: { in: productIds }, status: "active" },
+    select: { id: true, name: true, sku: true, price: true, cost: true, variants: true },
+  });
+  const productById = new Map(products.map((product) => [product.id, product]));
+
+  return rawItems.map((item) => {
+    const product = productById.get(Number(item.productId));
+    if (!product) throw new Error(`Không tìm thấy sản phẩm đang hoạt động cho SKU ${item.sku}.`);
+    const sku = String(item.sku || "").trim();
+    const qty = Number(item.qty);
+    if (!sku || !Number.isInteger(qty) || qty <= 0 || qty > 1_000_000) {
+      throw new Error(`Số lượng không hợp lệ cho SKU ${sku || "không xác định"}.`);
+    }
+
+    let canonicalPrice = Number(product.price || 0);
+    let cost = Number(product.cost || 0);
+    let variantName = item.variant || null;
+    if (String(product.sku) !== sku) {
+      const variant = parseJsonArray(product.variants).find(
+        (entry) => String(entry?.sku || "") === sku,
+      );
+      if (!variant) throw new Error(`SKU ${sku} không thuộc sản phẩm đã chọn.`);
+      canonicalPrice = Number(variant.price ?? product.price ?? 0) || 0;
+      cost = Number(variant.cost ?? product.cost ?? 0) || 0;
+      variantName = variant.color || item.variant || null;
+    }
+
+    const requestedPrice = Number(item.price);
+    const price = allowPriceOverride ? requestedPrice : canonicalPrice;
+    if (!Number.isFinite(price) || price < 0 || price > 1_000_000_000_000) {
+      throw new Error(`Giá bán không hợp lệ cho SKU ${sku}.`);
+    }
+    return {
+      productId: product.id,
+      sku,
+      name: product.name,
+      variant: variantName,
+      qty,
+      price,
+      cost,
+    };
+  });
+}
+
 ipcMain.handle("posOrder:create", async (event, data) => {
   try {
     if (!prisma) throw new Error("Database chưa được khởi tạo.");
@@ -4043,28 +4352,8 @@ ipcMain.handle("posOrder:create", async (event, data) => {
     const rawItems = data.items || [];
     if (!Array.isArray(rawItems) || rawItems.length === 0)
       throw new Error("Đơn hàng chưa có sản phẩm.");
-    const productIds = [
-      ...new Set(rawItems.map((item) => Number(item.productId)).filter(Boolean)),
-    ];
-    const products = await prisma.product.findMany({
-      where: { id: { in: productIds } },
-      select: { id: true, sku: true, cost: true, variants: true },
-    });
-    const productById = new Map(products.map((product) => [product.id, product]));
-    const items = rawItems.map((item) => {
-      const product = productById.get(Number(item.productId));
-      if (!product)
-        throw new Error(`Không tìm thấy sản phẩm cho SKU ${item.sku}.`);
-      let cost = Number(product.cost || 0);
-      if (String(product.sku) !== String(item.sku)) {
-        const variant = parseJsonArray(product.variants).find(
-          (entry) => String(entry?.sku || "") === String(item.sku || ""),
-        );
-        if (!variant)
-          throw new Error(`SKU ${item.sku} không thuộc sản phẩm đã chọn.`);
-        cost = Number(variant.cost ?? product.cost ?? 0) || 0;
-      }
-      return { ...item, cost };
+    const items = await normalizePosOrderItems(prisma, rawItems, {
+      allowPriceOverride: ["admin", "manager"].includes(currentSession?.role),
     });
     const subtotal = items.reduce(
       (sum, item) => sum + item.price * item.qty,
@@ -4074,26 +4363,19 @@ ipcMain.handle("posOrder:create", async (event, data) => {
       (sum, item) => sum + item.cost * item.qty,
       0,
     );
-    const discount = data.discount || 0;
+    const discount = Number(data.discount || 0);
+    if (!Number.isFinite(discount) || discount < 0 || discount > subtotal) {
+      throw new Error("Giảm giá không hợp lệ.");
+    }
     const total = subtotal - discount;
     const profit = total - totalCost;
 
-    let createdByUserId = null;
-    if (data.userName) {
-      try {
-        const user = await prisma.user.findFirst({
-          where: {
-            OR: [{ username: data.userName }, { fullName: data.userName }],
-          },
-          select: { id: true },
-        });
-        if (user) createdByUserId = user.id;
-      } catch (e) {
-        console.log("  ⚠️ Could not find user:", data.userName);
-      }
-    }
+    const createdByUserId = currentSession?.id || null;
 
-    const paidAmount = data.paidAmount || 0;
+    const paidAmount = Number(data.paidAmount == null ? total : data.paidAmount);
+    if (!Number.isFinite(paidAmount) || paidAmount < 0 || paidAmount > 1_000_000_000_000) {
+      throw new Error("Số tiền thanh toán không hợp lệ.");
+    }
     const paymentStatus =
       paidAmount >= total ? "paid" : paidAmount > 0 ? "partial" : "unpaid";
 
@@ -4150,7 +4432,7 @@ ipcMain.handle("posOrder:create", async (event, data) => {
             data: {
               orderId: newOrder.id,
               method: data.paymentMethod || "cash",
-              amount: data.paidAmount || total,
+              amount: paidAmount,
               note: data.paymentNote || null,
             },
           });
@@ -4345,6 +4627,7 @@ ipcMain.handle(
   "posOrder:update",
   async (event, { id, note, discount, items, paymentMethod, userName }) => {
     try {
+      requireRole("admin", "manager");
       if (!prisma) throw new Error("Database chưa được khởi tạo.");
 
       // Lấy đơn cũ
@@ -4357,21 +4640,20 @@ ipcMain.handle(
         throw new Error("Đơn hàng đã hủy, không thể sửa.");
 
       // Tính lại tổng tiền
+      items = await normalizePosOrderItems(prisma, items, {
+        allowPriceOverride: true,
+      });
       const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
-      const disc = discount ?? 0;
+      const disc = Number(discount ?? 0);
+      if (!Number.isFinite(disc) || disc < 0 || disc > subtotal) {
+        throw new Error("Giảm giá không hợp lệ.");
+      }
       const total = subtotal - disc;
       const totalCost = items.reduce((s, it) => s + (it.cost || 0) * it.qty, 0);
       const profit = total - totalCost;
 
       // Resolve user ID before transaction to avoid tx.user.findUnique inside tx
-      let resolvedCreatedById = null;
-      if (userName) {
-        const resolvedUser = await prisma.user.findFirst({
-          where: { OR: [{ username: userName }, { fullName: userName }] },
-          select: { id: true },
-        });
-        resolvedCreatedById = resolvedUser ? resolvedUser.id : null;
-      }
+      const resolvedCreatedById = currentSession?.id || null;
 
       // 🔒 StockMutex: serialize stock operations — tránh race condition Thẻ Kho
       await withStockLock(() =>
@@ -4461,6 +4743,7 @@ ipcMain.handle("posOrder:delete", async (event, { id, userName }) => {
     `🗑️ [DELETE] posOrder:delete called, id=${id}, type=${typeof id}`,
   );
   try {
+    requireRole("admin", "manager");
     if (!prisma) throw new Error("Database chưa được khởi tạo.");
 
     const order = await prisma.order.findUnique({
@@ -4998,6 +5281,20 @@ ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
       ...(Number.isFinite(Number(limit)) ? { take: Number(limit) } : {}),
     });
 
+    const goodsCompanyByProductId = new Map();
+    goodsCompanies.forEach((company) => {
+      (Array.isArray(company.productIds) ? company.productIds : []).forEach(
+        (productId) =>
+          goodsCompanyByProductId.set(Number(productId), company),
+      );
+    });
+    const vatGroupByPurchaseId = new Map();
+    Object.values(vatGroups || {}).forEach((group) => {
+      (Array.isArray(group?.purchaseIds) ? group.purchaseIds : []).forEach(
+        (purchaseId) => vatGroupByPurchaseId.set(Number(purchaseId), group),
+      );
+    });
+
     // One-time-compatible VAT migration: older receipts stored VAT at
     // receipt level, while the new UI reads it per goods company. Build
     // the current companies from the immutable purchase line + current
@@ -5018,13 +5315,7 @@ ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
                   getPurchaseItemCompanyKey({ ...item, id: null })
                 ];
               if (explicit) return repairLegacyCompanyName(explicit);
-              const matched = goodsCompanies.find(
-                (company) =>
-                  Array.isArray(company.productIds) &&
-                  company.productIds
-                    .map(Number)
-                    .includes(Number(item.productId)),
-              );
+              const matched = goodsCompanyByProductId.get(Number(item.productId));
               return matched ? repairLegacyCompanyName(matched.name) : "";
             })
             .filter(Boolean),
@@ -5033,12 +5324,7 @@ ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
       if (currentCompanies.length === 0) return;
 
       const fileMeta = vatFileMeta[String(p.id)] || {};
-      const group =
-        Object.values(vatGroups || {}).find(
-          (entry) =>
-            Array.isArray(entry?.purchaseIds) &&
-            entry.purchaseIds.map(Number).includes(Number(p.id)),
-        ) || null;
+      const group = vatGroupByPurchaseId.get(Number(p.id)) || null;
       const hasLegacyVat =
         ["uploaded", "verified"].includes(
           String(p.vatInvoiceStatus || "").toLowerCase(),
@@ -5172,11 +5458,7 @@ ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
         const explicitCompany =
           companyByItemId[getPurchaseItemCompanyKey(item)] ||
           companyByItem[getPurchaseItemCompanyKey({ ...item, id: null })];
-        const catalogCompany = goodsCompanies.find(
-          (company) =>
-            Array.isArray(company.productIds) &&
-            company.productIds.map(Number).includes(Number(item.productId)),
-        );
+        const catalogCompany = goodsCompanyByProductId.get(Number(item.productId));
         return {
           productId: item.productId,
           productName: item.product.name,
@@ -5473,11 +5755,12 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
     } catch (txErr) {
       console.warn("Load transactions error:", txErr.message);
     }
-    const withdrawalCodes = new Set(
+    const persistedWithdrawalCodes = new Set(
       (Array.isArray(withdrawalMarkers) ? withdrawalMarkers : []).map((row) =>
         String(row.key || "").slice("handlingUnitWithdrawal:".length).trim().toUpperCase(),
       ),
     );
+    const withdrawalCodes = new Set(persistedWithdrawalCodes);
     (Array.isArray(recentTransactions) ? recentTransactions : []).forEach((item) => {
       const isWithdrawal = Number(item?.quantity) < 0 ||
         /rút hàng|rút\s+\d+|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho/i.test(
@@ -5488,15 +5771,23 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
       }
     });
     // Backfill durable, per-unit markers for history written by older builds.
-    // createMany + skipDuplicates keeps this safe when several clients load together.
-    if (withdrawalCodes.size > 0) {
-      await prisma.appConfig.createMany({
-        data: [...withdrawalCodes].map((code) => ({
-          key: `handlingUnitWithdrawal:${code}`,
-          value: new Date().toISOString(),
-        })),
-        skipDuplicates: true,
-      });
+    // This is maintenance only: never make opening the workspace wait for a
+    // database write. createMany + skipDuplicates keeps concurrent clients safe.
+    const missingWithdrawalCodes = [...withdrawalCodes].filter(
+      (code) => !persistedWithdrawalCodes.has(code),
+    );
+    if (missingWithdrawalCodes.length > 0) {
+      void prisma.appConfig
+        .createMany({
+          data: missingWithdrawalCodes.map((code) => ({
+            key: `handlingUnitWithdrawal:${code}`,
+            value: new Date().toISOString(),
+          })),
+          skipDuplicates: true,
+        })
+        .catch((error) =>
+          console.warn("Could not backfill handling-unit withdrawal markers:", error.message),
+        );
     }
     register = register.map((unit) => ({
       ...unit,
@@ -7376,6 +7667,9 @@ async function markHandlingUnitWithdrawal(tx, code) {
 async function appendHandlingUnitsTransactions(tx, entries) {
   try {
     const key = "handlingUnitsTransactionsJson";
+    // AppConfig là một JSON dùng chung giữa nhiều máy. Advisory transaction
+    // lock ngăn hai node cùng đọc bản cũ rồi ghi đè lịch sử của nhau.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
     const config = await tx.appConfig.findUnique({ where: { key } });
     let items = [];
     try {
@@ -9091,6 +9385,7 @@ ipcMain.handle(
   "handlingUnits:sendTelegramTest",
   async (_event, payload = {}) => {
     try {
+      requireRole("admin", "manager");
       const text = String(payload.text || "Test message từ hệ thống POS");
       const chatId = payload.chatId || null;
       const res = await sendTelegramWmsMessage(chatId, text);
@@ -9293,6 +9588,7 @@ ipcMain.handle(
   "purchases:createVatGroup",
   async (event, { purchaseIds = [], note = "" } = {}) => {
     try {
+      requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
       requireRole("admin", "manager", "staff");
 
@@ -9563,6 +9859,7 @@ ipcMain.handle(
   "purchases:removeVatGroup",
   async (event, { purchaseId } = {}) => {
     try {
+      requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
       requireRole("admin", "manager", "staff");
       const targetId = Number(purchaseId);
@@ -10412,7 +10709,7 @@ async function sendVatEmail(invoiceData) {
       console.warn("⚠️ No OAuth2 token — skip email");
       return { success: false };
     }
-    const tokens = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
+    const tokens = readGoogleTokens(tokenPath);
     const oauth2Client = new google.auth.OAuth2(
       OAUTH_CLIENT_ID,
       OAUTH_CLIENT_SECRET,
@@ -10616,6 +10913,7 @@ ipcMain.handle(
   "purchases:deleteCompanyVATInvoice",
   async (event, { purchaseId, companyGroup }) => {
     try {
+      requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
       requireRole("admin", "manager", "staff");
       const id = String(purchaseId || "").trim();
@@ -10660,6 +10958,7 @@ ipcMain.handle(
     },
   ) => {
     try {
+      requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
       const vatFileMeta = await getPurchaseVatFileMeta();
 
@@ -10875,6 +11174,7 @@ ipcMain.handle(
   "purchases:uploadImportReceipt",
   async (event, { purchaseId, files = [], fileBase64, fileName }) => {
     try {
+      requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
 
       // 1. Lấy thông tin phiếu nhập
@@ -10986,6 +11286,7 @@ ipcMain.handle(
 // Xóa Phiếu Nhập Kho
 ipcMain.handle("purchases:deleteImportReceipt", async (event, purchaseId) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const purchase = await prisma.purchaseOrder.findUnique({
       where: { id: purchaseId },
@@ -11020,6 +11321,7 @@ ipcMain.handle("purchases:deleteImportReceipt", async (event, purchaseId) => {
 // Xóa HĐ VAT của phiếu nhập (đơn lẻ, không thuộc nhóm gộp)
 ipcMain.handle("purchases:deleteVatInvoice", async (event, purchaseId) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const purchase = await prisma.purchaseOrder.findUnique({
       where: { id: purchaseId },
@@ -11063,6 +11365,7 @@ ipcMain.handle(
   "purchases:markAsThht",
   async (event, { purchaseId, revert }) => {
     try {
+      requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
       requireRole("admin", "manager", "staff");
       await prisma.purchaseOrder.update({
@@ -11085,6 +11388,7 @@ ipcMain.handle(
 // 👁️ Đọc file HĐ VAT local → trả về base64 data URL để hiển thị trong app
 ipcMain.handle("purchases:getVATFileData", async (event, { purchaseId }) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const purchase = await prisma.purchaseOrder.findUnique({
       where: { id: purchaseId },
@@ -11144,8 +11448,8 @@ ipcMain.handle(
 
 const GOODS_COMPANIES_CONFIG_KEY = "goodsCompanies";
 
-async function readGoodsCompanies() {
-  const config = await prisma.appConfig.findUnique({
+async function readGoodsCompanies(client = prisma) {
+  const config = await client.appConfig.findUnique({
     where: { key: GOODS_COMPANIES_CONFIG_KEY },
   });
   try {
@@ -11165,8 +11469,8 @@ async function readGoodsCompanies() {
   }
 }
 
-async function writeGoodsCompanies(companies) {
-  await prisma.appConfig.upsert({
+async function writeGoodsCompanies(companies, client = prisma) {
+  await client.appConfig.upsert({
     where: { key: GOODS_COMPANIES_CONFIG_KEY },
     create: {
       key: GOODS_COMPANIES_CONFIG_KEY,
@@ -11174,6 +11478,16 @@ async function writeGoodsCompanies(companies) {
     },
     update: { value: JSON.stringify(companies) },
   });
+}
+
+async function withGoodsCompaniesWriteLock(callback) {
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${GOODS_COMPANIES_CONFIG_KEY}))`;
+      return callback(tx);
+    },
+    { isolationLevel: "Serializable", timeout: 10_000, maxWait: 10_000 },
+  );
 }
 
 // Goods companies / product brands. Persisted in AppConfig so it works with
@@ -11196,6 +11510,7 @@ ipcMain.handle(
   "purchases:getImportReceiptPreviewData",
   async (event, { purchaseId }) => {
     try {
+      requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
       const purchase = await prisma.purchaseOrder.findUnique({
         where: { id: Number(purchaseId) },
@@ -11223,27 +11538,30 @@ ipcMain.handle(
 
 ipcMain.handle("goodsCompanies:create", async (event, data) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const name = String(data?.name || "").trim();
     if (!name)
       return { success: false, error: "Tên công ty không được để trống." };
-    const companies = await readGoodsCompanies();
-    if (
-      companies.some(
-        (company) =>
-          String(company.name).toLocaleLowerCase("vi") ===
-          name.toLocaleLowerCase("vi"),
-      )
-    ) {
-      return { success: false, error: "Tên công ty đã tồn tại." };
-    }
-    const company = {
-      id: `goods-company-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      name,
-    };
-    companies.push(company);
-    await writeGoodsCompanies(companies);
-    return { success: true, data: company };
+    return await withGoodsCompaniesWriteLock(async (tx) => {
+      const companies = await readGoodsCompanies(tx);
+      if (
+        companies.some(
+          (company) =>
+            String(company.name).toLocaleLowerCase("vi") ===
+            name.toLocaleLowerCase("vi"),
+        )
+      ) {
+        return { success: false, error: "Tên công ty đã tồn tại." };
+      }
+      const company = {
+        id: `goods-company-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        name,
+      };
+      companies.push(company);
+      await writeGoodsCompanies(companies, tx);
+      return { success: true, data: company };
+    });
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -11251,27 +11569,30 @@ ipcMain.handle("goodsCompanies:create", async (event, data) => {
 
 ipcMain.handle("goodsCompanies:update", async (event, id, data) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const name = String(data?.name || "").trim();
     if (!name)
       return { success: false, error: "Tên công ty không được để trống." };
-    const companies = await readGoodsCompanies();
-    const company = companies.find((entry) => entry.id === id);
-    if (!company)
-      return { success: false, error: "Không tìm thấy công ty hàng hóa." };
-    if (
-      companies.some(
-        (entry) =>
-          entry.id !== id &&
-          String(entry.name).toLocaleLowerCase("vi") ===
-            name.toLocaleLowerCase("vi"),
-      )
-    ) {
-      return { success: false, error: "Tên công ty đã tồn tại." };
-    }
-    company.name = name;
-    await writeGoodsCompanies(companies);
-    return { success: true, data: company };
+    return await withGoodsCompaniesWriteLock(async (tx) => {
+      const companies = await readGoodsCompanies(tx);
+      const company = companies.find((entry) => entry.id === id);
+      if (!company)
+        return { success: false, error: "Không tìm thấy công ty hàng hóa." };
+      if (
+        companies.some(
+          (entry) =>
+            entry.id !== id &&
+            String(entry.name).toLocaleLowerCase("vi") ===
+              name.toLocaleLowerCase("vi"),
+        )
+      ) {
+        return { success: false, error: "Tên công ty đã tồn tại." };
+      }
+      company.name = name;
+      await writeGoodsCompanies(companies, tx);
+      return { success: true, data: company };
+    });
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -11279,13 +11600,16 @@ ipcMain.handle("goodsCompanies:update", async (event, id, data) => {
 
 ipcMain.handle("goodsCompanies:delete", async (event, id) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
-    const companies = await readGoodsCompanies();
-    const nextCompanies = companies.filter((company) => company.id !== id);
-    if (nextCompanies.length === companies.length)
-      return { success: false, error: "Không tìm thấy công ty hàng hóa." };
-    await writeGoodsCompanies(nextCompanies);
-    return { success: true };
+    return await withGoodsCompaniesWriteLock(async (tx) => {
+      const companies = await readGoodsCompanies(tx);
+      const nextCompanies = companies.filter((company) => company.id !== id);
+      if (nextCompanies.length === companies.length)
+        return { success: false, error: "Không tìm thấy công ty hàng hóa." };
+      await writeGoodsCompanies(nextCompanies, tx);
+      return { success: true };
+    });
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -11298,38 +11622,41 @@ ipcMain.handle(
   "goodsCompanies:setProductCompany",
   async (event, { productId, companyId }) => {
     try {
+      requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
       const normalizedProductId = Number(productId);
       if (!Number.isInteger(normalizedProductId) || normalizedProductId <= 0) {
         return { success: false, error: "Sản phẩm không hợp lệ." };
       }
 
-      const companies = await readGoodsCompanies();
-      let selectedCompany = null;
-      if (companyId) {
-        selectedCompany = companies.find((company) => company.id === companyId);
-        if (!selectedCompany)
-          return { success: false, error: "Không tìm thấy công ty hàng hóa." };
-      }
+      return await withGoodsCompaniesWriteLock(async (tx) => {
+        const companies = await readGoodsCompanies(tx);
+        let selectedCompany = null;
+        if (companyId) {
+          selectedCompany = companies.find((company) => company.id === companyId);
+          if (!selectedCompany)
+            return { success: false, error: "Không tìm thấy công ty hàng hóa." };
+        }
 
-      const nextCompanies = companies.map((company) => {
-        const productIds = Array.isArray(company.productIds)
-          ? company.productIds.map(Number).filter(Number.isInteger)
-          : [];
-        const withoutProduct = productIds.filter(
-          (id) => id !== normalizedProductId,
-        );
-        return company.id === companyId
-          ? { ...company, productIds: [...withoutProduct, normalizedProductId] }
-          : { ...company, productIds: withoutProduct };
+        const nextCompanies = companies.map((company) => {
+          const productIds = Array.isArray(company.productIds)
+            ? company.productIds.map(Number).filter(Number.isInteger)
+            : [];
+          const withoutProduct = productIds.filter(
+            (id) => id !== normalizedProductId,
+          );
+          return company.id === companyId
+            ? { ...company, productIds: [...withoutProduct, normalizedProductId] }
+            : { ...company, productIds: withoutProduct };
+        });
+        await writeGoodsCompanies(nextCompanies, tx);
+        return {
+          success: true,
+          data: selectedCompany
+            ? { companyId: selectedCompany.id, companyName: selectedCompany.name }
+            : null,
+        };
       });
-      await writeGoodsCompanies(nextCompanies);
-      return {
-        success: true,
-        data: selectedCompany
-          ? { companyId: selectedCompany.id, companyName: selectedCompany.name }
-          : null,
-      };
     } catch (error) {
       return { success: false, error: error.message };
     }
@@ -11355,6 +11682,7 @@ ipcMain.handle("suppliers:getAll", async () => {
 // Create supplier
 ipcMain.handle("suppliers:create", async (event, data) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
 
     const supplier = await prisma.supplier.create({
@@ -11386,6 +11714,7 @@ ipcMain.handle("suppliers:create", async (event, data) => {
 // Update supplier
 ipcMain.handle("suppliers:update", async (event, id, data) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
 
     const supplier = await prisma.supplier.update({
@@ -11418,6 +11747,7 @@ ipcMain.handle("suppliers:update", async (event, id, data) => {
 // Delete supplier
 ipcMain.handle("suppliers:delete", async (event, id) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
 
     // Kiểm tra xem có phiếu nhập nào đang dùng supplier này không
@@ -12142,6 +12472,7 @@ ipcMain.handle("users:updateProfile", async (event, data = {}) => {
 // future selection lists.
 ipcMain.handle("suppliers:deactivate", async (event, id) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const supplier = await prisma.supplier.update({
       where: { id: Number(id) },
@@ -12162,6 +12493,7 @@ ipcMain.handle("suppliers:deactivate", async (event, id) => {
 
 ipcMain.handle("suppliers:reactivate", async (event, id) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const supplier = await prisma.supplier.update({
       where: { id: Number(id) },
@@ -14549,47 +14881,158 @@ ipcMain.handle(
 // Google Drive webView/webContent links are not image URLs and private files
 // cannot be rendered by <img> without the OAuth session. Fetch the file through
 // the authenticated Drive client and return a short-lived data URL instead.
+const DRIVE_EVIDENCE_FETCH_TIMEOUT_MS = 10000;
+
+function isRetryableDriveDownloadError(error) {
+  if (isGoogleReauthError(error)) return false;
+  const status = Number(error?.code || error?.response?.status || 0);
+  return !status || status === 408 || status === 429 || status >= 500;
+}
+
+async function downloadDriveEvidenceImage(drive, fileId, mimeType) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await drive.files.get(
+        { fileId, alt: "media" },
+        {
+          responseType: "arraybuffer",
+          timeout: DRIVE_EVIDENCE_FETCH_TIMEOUT_MS,
+        },
+      );
+      const buffer = Buffer.from(response.data);
+      if (!buffer.length || buffer.length > 8 * 1024 * 1024) {
+        throw new Error("Ảnh bằng chứng không hợp lệ hoặc quá lớn.");
+      }
+      return `data:${mimeType};base64,${buffer.toString("base64")}`;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0 && isRetryableDriveDownloadError(error)) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        continue;
+      }
+      break;
+    }
+  }
+  if (lastError?.code === "ECONNABORTED") {
+    throw new Error("Tải ảnh bằng chứng quá lâu. Vui lòng thử lại.");
+  }
+  throw lastError || new Error("Không thể tải ảnh bằng chứng.");
+}
+
+function getDriveEvidenceMimeType(mimeType) {
+  const allowedMimeTypes = new Set([
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+  ]);
+  return allowedMimeTypes.has(mimeType) ? mimeType : "image/jpeg";
+}
+
+async function getDailyTaskEvidenceAccess(taskId) {
+  const actor = await getCurrentActor();
+  const task = await prisma.dailyTask.findUnique({
+    where: { id: Number(taskId) },
+  });
+  if (!task) throw new Error("Không tìm thấy công việc.");
+  if (
+    actor.role !== "admin" &&
+    !isTestOperatorActor(actor) &&
+    !actorOwnsTask(actor, task)
+  ) {
+    throw new Error("Bạn không có quyền xem bằng chứng này.");
+  }
+  return task;
+}
+
+// Fetch all Drive evidence for one task through one authenticated session. This
+// avoids validating OAuth and querying the same task once per image.
+ipcMain.handle(
+  "dailyTasks:getDriveEvidenceImageUrls",
+  async (event, taskId, requestedImages = [], requestId = "") => {
+    try {
+      const task = await getDailyTaskEvidenceAccess(taskId);
+      const driveStatus = await ensureDriveReady();
+      if (!driveStatus.success) throw new Error(driveStatus.error);
+      const currentEvidence = getSubmittedEvidenceImages(
+        parseTaskAttachments(task.attachments)?.evidence,
+      );
+      const currentUrls = new Set(
+        currentEvidence.map((image) => image?.driveUrl).filter(Boolean),
+      );
+      const images = Array.isArray(requestedImages)
+        ? requestedImages.slice(0, MAX_EVIDENCE_IMAGES)
+        : [];
+      // Completed/archived work can keep its evidence only in the audit
+      // history, so load that list once for the entire preview request.
+      const requestedUrls = images.map((image) => image?.driveUrl).filter(Boolean);
+      if (requestedUrls.some((driveUrl) => !currentUrls.has(driveUrl))) {
+        const historyConfig = await prisma.appConfig.findUnique({
+          where: { key: "dailyTasksHistory" },
+        });
+        const history = historyConfig ? JSON.parse(historyConfig.value) : [];
+        history
+          .filter((entry) => Number(entry?.taskId) === task.id)
+          .flatMap((entry) => getSubmittedEvidenceImages(entry?.evidence))
+          .forEach((image) => {
+            if (image?.driveUrl) currentUrls.add(image.driveUrl);
+          });
+      }
+      const publishResult = (result) => {
+        if (!requestId || event.sender.isDestroyed()) return;
+        event.sender.send("dailyTasks:driveEvidenceImageLoaded", {
+          requestId,
+          result,
+        });
+      };
+      const results = await Promise.all(
+        images.map(async (image) => {
+          const driveUrl = String(image?.driveUrl || "");
+          try {
+            if (!currentUrls.has(driveUrl)) {
+              throw new Error("Không tìm thấy ảnh bằng chứng trong công việc.");
+            }
+            const fileId = driveUrl.match(/[-\w]{25,}/)?.[0];
+            if (!fileId) throw new Error("Liên kết Google Drive không hợp lệ.");
+            const mimeType = getDriveEvidenceMimeType(image?.mimeType);
+            const url = await downloadDriveEvidenceImage(
+              driveStatus.drive,
+              fileId,
+              mimeType,
+            );
+            const result = { driveUrl, success: true, data: { url } };
+            publishResult(result);
+            return result;
+          } catch (error) {
+            console.error("Drive evidence image error:", error);
+            const result = { driveUrl, success: false, error: error.message };
+            publishResult(result);
+            return result;
+          }
+        }),
+      );
+      return { success: true, data: { results } };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  },
+);
+
 ipcMain.handle(
   "dailyTasks:getDriveEvidenceImageUrl",
   async (_event, taskId, driveUrl, mimeType = "image/jpeg") => {
     try {
-      const actor = await getCurrentActor();
+      const task = await getDailyTaskEvidenceAccess(taskId);
       const driveStatus = await ensureDriveReady();
       if (!driveStatus.success) throw new Error(driveStatus.error);
       const drive = driveStatus.drive;
-      const task = await prisma.dailyTask.findUnique({
-        where: { id: Number(taskId) },
-      });
-      if (!task) throw new Error("Không tìm thấy công việc.");
-      if (
-        actor.role !== "admin" &&
-        !isTestOperatorActor(actor) &&
-        !actorOwnsTask(actor, task)
-      ) {
-        throw new Error("Bạn không có quyền xem bằng chứng này.");
-      }
       const fileId = String(driveUrl || "").match(/[-\w]{25,}/)?.[0];
       if (!fileId) throw new Error("Liên kết Google Drive không hợp lệ.");
-      const allowedMimeTypes = new Set([
-        "image/jpeg",
-        "image/png",
-        "image/webp",
-      ]);
-      const contentType = allowedMimeTypes.has(mimeType)
-        ? mimeType
-        : "image/jpeg";
-      const response = await drive.files.get(
-        { fileId, alt: "media" },
-        { responseType: "arraybuffer" },
-      );
-      const buffer = Buffer.from(response.data);
-      if (!buffer.length || buffer.length > 8 * 1024 * 1024)
-        throw new Error("Ảnh bằng chứng không hợp lệ hoặc quá lớn.");
+      const contentType = getDriveEvidenceMimeType(mimeType);
+      const url = await downloadDriveEvidenceImage(drive, fileId, contentType);
       return {
         success: true,
-        data: {
-          url: `data:${contentType};base64,${buffer.toString("base64")}`,
-        },
+        data: { url },
       };
     } catch (error) {
       console.error("Drive evidence image error:", error);
@@ -16019,7 +16462,10 @@ ipcMain.handle("ecommerceExport:selectAndWatch", async () => {
       return { success: false, error: "Không có thư mục được chọn" };
     }
 
-    const folderPath = result.filePaths[0];
+    const folderPath = rememberApprovedFolder(
+      "ecommerceExport",
+      result.filePaths[0],
+    );
 
     // Lấy danh sách file hiện có
     const existingFiles = fs.readdirSync(folderPath).filter((f) => {
@@ -16105,6 +16551,7 @@ ipcMain.handle("ecommerceExport:selectAndWatch", async () => {
 // Bắt đầu theo dõi trực tiếp (không dialog — dùng khi auto-restore)
 ipcMain.handle("ecommerceExport:startWatch", async (event, folderPath) => {
   try {
+    folderPath = requireApprovedFolder("ecommerceExport", folderPath);
     if (!folderPath || !fs.existsSync(folderPath)) {
       return { success: false, error: "Thư mục không tồn tại" };
     }
@@ -16210,7 +16657,10 @@ ipcMain.handle("ecommerceExport:selectFolder", async () => {
       return { success: false, error: "Khong co thu muc duoc chon" };
     }
 
-    return { success: true, data: result.filePaths[0] };
+    return {
+      success: true,
+      data: rememberApprovedFolder("ecommerceExport", result.filePaths[0]),
+    };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -16219,18 +16669,23 @@ ipcMain.handle("ecommerceExport:selectFolder", async () => {
 // Đọc tất cả file Excel từ thư mục
 ipcMain.handle("ecommerceExport:loadExcelFiles", async (event, folderPath) => {
   try {
+    folderPath = requireApprovedFolder("ecommerceExport", folderPath);
     if (!folderPath || !fs.existsSync(folderPath)) {
       return { success: false, error: "Thư mục không tồn tại" };
     }
 
     // Đọc tất cả file trong thư mục
-    const files = fs.readdirSync(folderPath);
+    const files = await fs.promises.readdir(folderPath);
 
     // Lọc chỉ lấy file Excel (.xlsx, .xls)
     const excelFiles = files.filter((file) => {
       const ext = path.extname(file).toLowerCase();
       return ext === ".xlsx" || ext === ".xls";
     });
+
+    if (excelFiles.length > 200) {
+      return { success: false, error: "Thư mục có quá 200 file; vui lòng chia nhỏ trước khi nhập." };
+    }
 
     if (excelFiles.length === 0) {
       return {
@@ -16244,7 +16699,11 @@ ipcMain.handle("ecommerceExport:loadExcelFiles", async (event, folderPath) => {
     for (const fileName of excelFiles) {
       const filePath = path.join(folderPath, fileName);
       try {
-        const fileBuffer = fs.readFileSync(filePath);
+        const stat = await fs.promises.stat(filePath);
+        if (stat.size > 50 * 1024 * 1024) {
+          throw new Error("File vượt quá giới hạn 50 MB");
+        }
+        const fileBuffer = await fs.promises.readFile(filePath);
         // Convert buffer to base64 để gửi qua IPC
         const base64Data = fileBuffer.toString("base64");
         filesData.push({
@@ -16263,6 +16722,326 @@ ipcMain.handle("ecommerceExport:loadExcelFiles", async (event, folderPath) => {
     return { success: false, error: error.message };
   }
 });
+
+// ==================== KHIẾU NẠI ĐƠN VỊ VẬN CHUYỂN ====================
+// Lưu riêng trong userData; không ghi vào dữ liệu Bàn giao TMĐT.
+// Verified 2026-08-23 from official carrier contact/terms channels.
+// Stored user overrides are merged last and always win.
+const VERIFIED_CARRIER_COMPLAINT_RECIPIENTS = Object.freeze({
+  SPX: "cskh@spx.vn",
+  JNT: "cskh@jtexpress.vn",
+  GHN: "cskh@ghn.vn",
+  GHTK: "cskh@ghtk.vn",
+  VTP: "cskh@viettelpost.com.vn",
+  VNPOST: "cskh@vnpost.vn",
+  BEST: "cskh@best-inc.com",
+  NINJA: "support_vn@ninjavan.co",
+});
+
+const carrierComplaintConfig = (overrides = {}) => ({
+  recipients: {
+    ...VERIFIED_CARRIER_COMPLAINT_RECIPIENTS,
+    ...(overrides || {}),
+  },
+});
+
+const carrierComplaintStorePath = () =>
+  path.join(app.getPath("userData"), "carrier-complaints.json");
+
+function readCarrierComplaintStore() {
+  const empty = { version: 1, config: carrierComplaintConfig(), batches: [] };
+  try {
+    const file = carrierComplaintStorePath();
+    if (!fs.existsSync(file)) return empty;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    return {
+      version: 1,
+      config: carrierComplaintConfig(parsed?.config?.recipients),
+      batches: Array.isArray(parsed?.batches) ? parsed.batches : [],
+    };
+  } catch (error) {
+    console.error("[CarrierComplaint] Read error:", error.message);
+    return empty;
+  }
+}
+
+function writeCarrierComplaintStore(store) {
+  const file = carrierComplaintStorePath();
+  const temp = `${file}.tmp`;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(temp, JSON.stringify(store, null, 2), "utf8");
+  fs.renameSync(temp, file);
+}
+
+const normalizeComplaintKey = (value) =>
+  String(value || "").trim().toLowerCase();
+const complaintOrderKeys = (order) => [
+  `order:${normalizeComplaintKey(order.platform)}:${normalizeComplaintKey(order.orderId)}`,
+  `tracking:${normalizeComplaintKey(order.trackingNumber)}`,
+];
+
+async function findPickedComplaintKeys(orders) {
+  const orderIds = [
+    ...new Set(orders.map((row) => String(row.orderId || "").trim()).filter(Boolean)),
+  ];
+  const trackingNumbers = [
+    ...new Set(
+      orders.map((row) => String(row.trackingNumber || "").trim()).filter(Boolean),
+    ),
+  ];
+  if (!orderIds.length && !trackingNumbers.length) return new Set();
+
+  const [marketplaceOrders, completedExports] = await Promise.all([
+    prisma.order.findMany({
+      where: {
+        source: { in: ["tiktok", "shopee", "lazada", "tmdt"] },
+        OR: [
+          ...(orderIds.length ? [{ orderNumber: { in: orderIds } }] : []),
+          ...(trackingNumbers.length
+            ? [{ trackingNumber: { in: trackingNumbers } }]
+            : []),
+        ],
+      },
+      select: { orderNumber: true, trackingNumber: true },
+    }),
+    prisma.ecommerceExport.findMany({
+      where: {
+        status: "completed",
+        OR: [
+          ...(orderIds.length
+            ? [
+                { orderNumber: { in: orderIds } },
+                { ecommerceExportCode: { in: orderIds } },
+              ]
+            : []),
+          ...(trackingNumbers.length
+            ? [
+                { orderNumber: { in: trackingNumbers } },
+                { ecommerceExportCode: { in: trackingNumbers } },
+              ]
+            : []),
+        ],
+      },
+      select: { orderNumber: true, ecommerceExportCode: true },
+    }),
+  ]);
+
+  return new Set(
+    [
+      ...marketplaceOrders.flatMap((row) => [row.orderNumber, row.trackingNumber]),
+      ...completedExports.flatMap((row) => [row.orderNumber, row.ecommerceExportCode]),
+    ]
+      .map(normalizeComplaintKey)
+      .filter(Boolean),
+  );
+}
+
+function complaintLockedKeys(store) {
+  const lockedStatuses = new Set(["sending", "sent", "unknown_result"]);
+  return new Set(
+    store.batches
+      .filter((batch) => lockedStatuses.has(batch.status))
+      .flatMap((batch) => (batch.orders || []).flatMap(complaintOrderKeys)),
+  );
+}
+
+function classifyCarrierComplaintOrders(orders, pickedKeys, duplicateKeys) {
+  const eligible = [];
+  const excluded = [];
+  for (const raw of orders) {
+    const order = {
+      orderId: String(raw.orderId || "").trim(),
+      trackingNumber: String(raw.trackingNumber || "").trim(),
+      platform: String(raw.platform || "").trim(),
+      carrierCode: String(raw.carrierCode || "").trim().toUpperCase(),
+      carrierName: String(raw.carrierName || "").trim(),
+      sourceFile: String(raw.sourceFile || "").trim(),
+    };
+    let reasonCode = "";
+    let reason = "";
+    if (!order.orderId || !order.trackingNumber || !order.platform) {
+      reasonCode = "NEEDS_REVIEW";
+      reason = "Thiếu mã đơn, mã vận đơn hoặc nguồn đơn";
+    } else if (!order.carrierCode || order.carrierCode === "UNKNOWN") {
+      reasonCode = "NEEDS_REVIEW";
+      reason = "Không nhận diện được đơn vị vận chuyển";
+    } else if (
+      pickedKeys.has(normalizeComplaintKey(order.orderId)) ||
+      pickedKeys.has(normalizeComplaintKey(order.trackingNumber))
+    ) {
+      reasonCode = "ALREADY_PICKED";
+      reason = "Đơn đã có trong Đơn hàng hoặc Bàn giao TMĐT đã hoàn tất";
+    } else if (complaintOrderKeys(order).some((key) => duplicateKeys.has(key))) {
+      reasonCode = "DUPLICATE_COMPLAINT";
+      reason = "Mã đơn hoặc mã vận đơn đã được khiếu nại";
+    }
+    if (reasonCode) excluded.push({ order, reasonCode, reason });
+    else eligible.push(order);
+  }
+  return { eligible, excluded };
+}
+
+ipcMain.handle("carrierComplaints:getConfig", async () => {
+  requireRole();
+  const store = readCarrierComplaintStore();
+  return { success: true, data: store.config };
+});
+
+ipcMain.handle("carrierComplaints:saveConfig", async (_event, config = {}) => {
+  try {
+    requireRole("admin", "manager");
+    const recipients = {};
+    for (const [code, email] of Object.entries(config.recipients || {})) {
+      const value = String(email || "").trim();
+      if (value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+        throw new Error(`Email ${code} không hợp lệ`);
+      }
+      recipients[String(code).toUpperCase()] = value;
+    }
+    const store = readCarrierComplaintStore();
+    store.config = { recipients };
+    writeCarrierComplaintStore(store);
+    return { success: true, data: store.config };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle(
+  "carrierComplaints:reconcile",
+  async (_event, { orders = [] } = {}) => {
+    try {
+      requireRole();
+      if (!Array.isArray(orders) || !orders.length)
+        throw new Error("Không có đơn hợp lệ để đối soát");
+      if (orders.length > 3000)
+        throw new Error("Mỗi lần chỉ đối soát tối đa 3.000 đơn");
+      const store = readCarrierComplaintStore();
+      const pickedKeys = await findPickedComplaintKeys(orders);
+      const result = classifyCarrierComplaintOrders(
+        orders,
+        pickedKeys,
+        complaintLockedKeys(store),
+      );
+      return { success: true, data: { ...result, config: store.config } };
+    } catch (error) {
+      console.error("[CarrierComplaint] Reconcile error:", error.message);
+      return { success: false, error: error.message };
+    }
+  },
+);
+
+ipcMain.handle("carrierComplaints:getHistory", async () => {
+  requireRole();
+  const store = readCarrierComplaintStore();
+  return { success: true, data: [...store.batches].reverse().slice(0, 100) };
+});
+
+ipcMain.handle(
+  "carrierComplaints:send",
+  async (
+    _event,
+    { carrierCode, warehouse = "Kho 01", cutoff = "18:30", orders = [] } = {},
+  ) => {
+    const code = String(carrierCode || "").trim().toUpperCase();
+    let batchId = "";
+    try {
+      requireRole("admin", "manager");
+      if (!code || !Array.isArray(orders) || !orders.length)
+        throw new Error("Lô khiếu nại không hợp lệ");
+      if (
+        orders.some(
+          (order) => String(order.carrierCode || "").toUpperCase() !== code,
+        )
+      )
+        throw new Error("Lô chứa nhiều đơn vị vận chuyển");
+
+      const store = readCarrierComplaintStore();
+      const recipient = String(store.config?.recipients?.[code] || "").trim();
+      if (!recipient)
+        throw new Error(`Chưa cấu hình email tiếp nhận đã xác minh cho ${code}`);
+
+      const pickedKeys = await findPickedComplaintKeys(orders);
+      const checked = classifyCarrierComplaintOrders(
+        orders,
+        pickedKeys,
+        complaintLockedKeys(store),
+      );
+      if (checked.excluded.length)
+        throw new Error(
+          `Đã dừng gửi: ${checked.excluded.length} đơn vừa bị loại khi đối soát lại`,
+        );
+
+      const now = new Date();
+      batchId = `KN-${code}-${now.toISOString().slice(0, 10).replace(/-/g, "")}-${require("crypto").randomUUID().slice(0, 8).toUpperCase()}`;
+      const subject = `[${batchId}] Khiếu nại đơn chưa được lấy tại ${warehouse}`;
+      const rows = orders
+        .map(
+          (order, index) =>
+            `${index + 1}. ${order.trackingNumber} — ${order.platform} — mã đơn ${order.orderId}`,
+        )
+        .join("<br/>");
+      const html = `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;color:#172033"><p>Kính gửi ${code},</p><p>${warehouse} đã chuẩn bị bàn giao các đơn dưới đây. Đến ${cutoff}, các đơn vẫn chưa được cập nhật trạng thái lấy hàng. Vui lòng kiểm tra và hỗ trợ điều phối lấy hàng.</p><p><strong>Mã tham chiếu:</strong> ${batchId}</p><p>${rows}</p><p>Trân trọng,<br/>DBY Software POS</p></div>`;
+
+      const batch = {
+        id: batchId,
+        carrierCode: code,
+        recipient,
+        warehouse,
+        cutoff,
+        subject,
+        status: "sending",
+        orders,
+        createdAt: now.toISOString(),
+      };
+      store.batches.push(batch);
+      writeCarrierComplaintStore(store);
+
+      const sent = await sendGmailSimpleMessage({ to: recipient, subject, html });
+      const latest = readCarrierComplaintStore();
+      const target = latest.batches.find((item) => item.id === batchId);
+      if (!sent.success) {
+        if (target) {
+          target.status = sent.reauthRequired ? "failed" : "unknown_result";
+          target.error = sent.error || "Gửi Gmail thất bại";
+          target.updatedAt = new Date().toISOString();
+          writeCarrierComplaintStore(latest);
+        }
+        return sent;
+      }
+      if (target) {
+        target.status = "sent";
+        target.gmailMessageId = sent.data?.id || "";
+        target.sentAt = new Date().toISOString();
+        writeCarrierComplaintStore(latest);
+      }
+      return {
+        success: true,
+        data: target || batch,
+        message: `Đã gửi ${orders.length} đơn tới ${code}`,
+      };
+    } catch (error) {
+      console.error("[CarrierComplaint] Send error:", error.message);
+      if (batchId) {
+        try {
+          const latest = readCarrierComplaintStore();
+          const target = latest.batches.find(
+            (item) => item.id === batchId && item.status === "sending",
+          );
+          if (target) {
+            target.status = "unknown_result";
+            target.error = error.message || "Không xác định được kết quả gửi";
+            target.updatedAt = new Date().toISOString();
+            writeCarrierComplaintStore(latest);
+          }
+        } catch (storeError) {
+          console.error("[CarrierComplaint] Cannot persist send error:", storeError.message);
+        }
+      }
+      return { success: false, error: error.message, batchId };
+    }
+  },
+);
 
 // ========================================
 // SHELL - Open External Links
@@ -17666,42 +18445,196 @@ function mapUnifiedExportOrder(order) {
   };
 }
 
-async function getUnifiedPeriodStats(args, previous = false) {
-  const orderWhere = buildUnifiedOrderWhere(args, previous);
-  const exportWhere = buildUnifiedExportWhere(args, previous);
-  const [orderAggregate, itemAggregate, exportRows] = await Promise.all([
-    orderWhere
-      ? prisma.order.aggregate({ where: orderWhere, _count: true, _sum: { total: true } })
-      : null,
-    orderWhere
-      ? prisma.orderItem.aggregate({
-          where: { order: orderWhere },
-          _sum: { quantity: true },
-        })
-      : null,
-    exportWhere
-      ? prisma.exportOrder.findMany({
-          where: exportWhere,
-          select: { totalAmount: true, items: true },
-        })
-      : [],
-  ]);
-  const exportQty = exportRows.reduce(
-    (sum, row) =>
-      sum +
-      parseExportItems(row.items).reduce(
-        (itemSum, item) => itemSum + Number(item.quantity || item.qty || 1),
-        0,
-      ),
-    0,
-  );
-  return {
-    orderCount: Number(orderAggregate?._count || 0) + exportRows.length,
-    revenue:
-      Number(orderAggregate?._sum?.total || 0) +
-      exportRows.reduce((sum, row) => sum + Number(row.totalAmount || 0), 0),
-    quantity: Number(itemAggregate?._sum?.quantity || 0) + exportQty,
-  };
+function getUnifiedOrderSqlSourceCondition(args, ignoreSource = false) {
+  const sourceFilter = ignoreSource ? "all" : args.sourceFilter || "all";
+  const platformFilter = args.platformFilter || "all";
+  if (sourceFilter === "pos") {
+    return Prisma.sql`o."source" = 'pos' AND o."status" <> 'cancelled'`;
+  }
+  if (sourceFilter === "tmdt") {
+    const sources = platformFilter === "all" ? ORDER_MARKETPLACE_SOURCES : [platformFilter];
+    return Prisma.sql`o."source" IN (${Prisma.join(sources)}) AND o."status" = 'completed'`;
+  }
+  if (sourceFilter === "export") return null;
+  return Prisma.sql`((o."source" = 'pos' AND o."status" <> 'cancelled') OR (o."source" IN (${Prisma.join(
+    ORDER_MARKETPLACE_SOURCES,
+  )}) AND o."status" = 'completed'))`;
+}
+
+function buildUnifiedOrderSqlCondition(args, previous = false, ignoreSource = false) {
+  const sourceCondition = getUnifiedOrderSqlSourceCondition(args, ignoreSource);
+  if (!sourceCondition) return null;
+  const range = getUnifiedOrderRange(args, previous);
+  const parts = [
+    Prisma.sql`o."createdAt" >= ${range.gte}`,
+    Prisma.sql`o."createdAt" <= ${range.lte}`,
+    sourceCondition,
+  ];
+  const search = String(args.search || "").trim();
+  if (search) {
+    const pattern = `%${search}%`;
+    const syntheticIdMatch = search.match(/^#?(?:POS|TMDT)-(\d+)$/i);
+    const numericId = syntheticIdMatch ? Number(syntheticIdMatch[1]) : null;
+    parts.push(Prisma.sql`(
+      o."orderNumber" ILIKE ${pattern}
+      OR o."trackingNumber" ILIKE ${pattern}
+      OR c."name" ILIKE ${pattern}
+      ${numericId ? Prisma.sql`OR o."id" = ${numericId}` : Prisma.empty}
+    )`);
+  }
+  return Prisma.sql`${Prisma.join(parts, " AND ")}`;
+}
+
+function buildUnifiedExportSqlCondition(args, previous = false, ignoreSource = false) {
+  if (!ignoreSource && !["all", "export"].includes(args.sourceFilter || "all")) return null;
+  const range = getUnifiedOrderRange(args, previous);
+  const parts = [
+    Prisma.sql`e."exportDate" >= ${range.gte}`,
+    Prisma.sql`e."exportDate" <= ${range.lte}`,
+  ];
+  const search = String(args.search || "").trim();
+  if (search) {
+    const pattern = `%${search}%`;
+    const syntheticIdMatch = search.match(/^#?(?:XH|EX)-(\d+)$/i);
+    const numericId = syntheticIdMatch ? Number(syntheticIdMatch[1]) : null;
+    parts.push(Prisma.sql`(
+      e."customer" ILIKE ${pattern}
+      OR e."notes" ILIKE ${pattern}
+      ${numericId ? Prisma.sql`OR e."id" = ${numericId}` : Prisma.empty}
+    )`);
+  }
+  return Prisma.sql`${Prisma.join(parts, " AND ")}`;
+}
+
+function buildUnifiedPageQuery(args, page, pageSize) {
+  const branches = [];
+  const orderCondition = buildUnifiedOrderSqlCondition(args);
+  const exportCondition = buildUnifiedExportSqlCondition(args);
+  if (orderCondition) {
+    branches.push(Prisma.sql`
+      SELECT
+        CONCAT(CASE WHEN o."source" IN (${Prisma.join(ORDER_MARKETPLACE_SOURCES)}) THEN 'TMDT-' ELSE 'POS-' END, o."id") AS "id",
+        o."id" AS "originalId",
+        CASE WHEN o."source" IN (${Prisma.join(ORDER_MARKETPLACE_SOURCES)}) THEN 'tmdt' ELSE 'pos' END AS "source",
+        CASE
+          WHEN o."source" = 'tiktok' THEN 'TikTok'
+          WHEN o."source" = 'shopee' THEN 'Shopee'
+          WHEN o."source" = 'lazada' THEN 'Lazada'
+          WHEN o."source" IN (${Prisma.join(ORDER_MARKETPLACE_SOURCES)}) THEN 'TMDT'
+          ELSE 'POS'
+        END AS "sourceLabel",
+        COALESCE(o."orderNumber", CONCAT('#', CASE WHEN o."source" IN (${Prisma.join(ORDER_MARKETPLACE_SOURCES)}) THEN 'TMDT-' ELSE 'POS-' END, o."id")) AS "orderNumber",
+        CASE WHEN o."source" IN (${Prisma.join(ORDER_MARKETPLACE_SOURCES)}) THEN UPPER(o."source") ELSE COALESCE(c."name", 'Khách lẻ') END AS "customer",
+        COALESCE((
+          SELECT jsonb_agg(jsonb_build_object(
+            'productId', oi."productId",
+            'productName', oi."productName",
+            'variantSku', oi."sku",
+            'variant', oi."variant",
+            'quantity', oi."quantity",
+            'unitPrice', oi."price",
+            'cost', oi."cost",
+            'total', oi."subtotal"
+          ) ORDER BY oi."id")
+          FROM "OrderItem" oi
+          WHERE oi."orderId" = o."id"
+        ), '[]'::jsonb)::text AS "items",
+        o."total"::double precision AS "totalAmount",
+        o."status" AS "status",
+        o."createdAt" AS "date",
+        o."trackingNumber" AS "tracking",
+        substring(o."note" from 'Shipping: ([^|]+)') AS "shipping",
+        COALESCE(o."note", '') AS "notes",
+        COALESCE(u."username", u."fullName", '') AS "createdBy",
+        o."createdAt" AS "_sortDate"
+      FROM "Order" o
+      LEFT JOIN "Customer" c ON c."id" = o."customerId"
+      LEFT JOIN "User" u ON u."id" = o."createdBy"
+      WHERE ${orderCondition}
+    `);
+  }
+  if (exportCondition) {
+    branches.push(Prisma.sql`
+      SELECT
+        CONCAT('EX-', e."id") AS "id",
+        e."id" AS "originalId",
+        'export'::text AS "source",
+        'Xuất hàng'::text AS "sourceLabel",
+        CONCAT('#XH-', e."id") AS "orderNumber",
+        COALESCE(e."customer", 'Khách lẻ') AS "customer",
+        COALESCE(e."items", '[]') AS "items",
+        e."totalAmount"::double precision AS "totalAmount",
+        COALESCE(e."status", 'completed') AS "status",
+        e."exportDate" AS "date",
+        NULL::text AS "tracking",
+        NULL::text AS "shipping",
+        COALESCE(e."notes", '') AS "notes",
+        COALESCE(e."createdBy", '') AS "createdBy",
+        e."exportDate" AS "_sortDate"
+      FROM "ExportOrder" e
+      WHERE ${exportCondition}
+    `);
+  }
+  const offset = args.exportAll ? 0 : (page - 1) * pageSize;
+  const take = args.exportAll ? 50000 : pageSize;
+  return Prisma.sql`
+    WITH unified AS MATERIALIZED (
+      ${Prisma.join(branches, " UNION ALL ")}
+    ), paged AS (
+      SELECT * FROM unified
+      ORDER BY "_sortDate" DESC
+      LIMIT ${take} OFFSET ${offset}
+    )
+    SELECT jsonb_build_object(
+      'total', (SELECT COUNT(*)::integer FROM unified),
+      'rows', COALESCE((
+        SELECT jsonb_agg(to_jsonb(paged) - '_sortDate' ORDER BY "_sortDate" DESC)
+        FROM paged
+      ), '[]'::jsonb)
+    ) AS "result"
+  `;
+}
+
+function buildUnifiedOrderStatsQuery(args) {
+  const currentCondition = buildUnifiedOrderSqlCondition(args);
+  const previousCondition = buildUnifiedOrderSqlCondition(args, true);
+  const allCurrentCondition = buildUnifiedOrderSqlCondition(args, false, true);
+  const falseCondition = Prisma.sql`FALSE`;
+  return Prisma.sql`
+    WITH item_qty AS MATERIALIZED (
+      SELECT "orderId", SUM("quantity")::double precision AS "quantity"
+      FROM "OrderItem"
+      GROUP BY "orderId"
+    ), current_filtered AS (
+      SELECT o."id", o."total"::double precision AS "total", COALESCE(iq."quantity", 0) AS "quantity"
+      FROM "Order" o
+      LEFT JOIN "Customer" c ON c."id" = o."customerId"
+      LEFT JOIN item_qty iq ON iq."orderId" = o."id"
+      WHERE ${currentCondition || falseCondition}
+    ), previous_filtered AS (
+      SELECT o."id", o."total"::double precision AS "total", COALESCE(iq."quantity", 0) AS "quantity"
+      FROM "Order" o
+      LEFT JOIN "Customer" c ON c."id" = o."customerId"
+      LEFT JOIN item_qty iq ON iq."orderId" = o."id"
+      WHERE ${previousCondition || falseCondition}
+    ), current_all AS (
+      SELECT o."source"
+      FROM "Order" o
+      LEFT JOIN "Customer" c ON c."id" = o."customerId"
+      WHERE ${allCurrentCondition || falseCondition}
+    )
+    SELECT
+      (SELECT COUNT(*)::integer FROM current_filtered) AS "currentOrderCount",
+      COALESCE((SELECT SUM("total") FROM current_filtered), 0)::double precision AS "currentRevenue",
+      COALESCE((SELECT SUM("quantity") FROM current_filtered), 0)::double precision AS "currentQuantity",
+      (SELECT COUNT(*)::integer FROM previous_filtered) AS "previousOrderCount",
+      COALESCE((SELECT SUM("total") FROM previous_filtered), 0)::double precision AS "previousRevenue",
+      COALESCE((SELECT SUM("quantity") FROM previous_filtered), 0)::double precision AS "previousQuantity",
+      (SELECT COUNT(*)::integer FROM current_all WHERE "source" = 'pos') AS "posCount",
+      (SELECT COUNT(*)::integer FROM current_all WHERE "source" IN (${Prisma.join(ORDER_MARKETPLACE_SOURCES)})) AS "tmdtCount",
+      (SELECT COUNT(*)::integer FROM current_all WHERE "source" = 'shopee') AS "shopeeCount",
+      (SELECT COUNT(*)::integer FROM current_all WHERE "source" = 'tiktok') AS "tiktokCount"
+  `;
 }
 
 ipcMain.handle("orders:getUnified", async (event, args = {}) => {
@@ -17711,119 +18644,91 @@ ipcMain.handle("orders:getUnified", async (event, args = {}) => {
     const page = Math.max(1, Number(args.page) || 1);
     const requestedPageSize = Math.max(1, Number(args.pageSize) || 20);
     const pageSize = args.exportAll ? 50000 : Math.min(requestedPageSize, 200);
-    const orderWhere = buildUnifiedOrderWhere(args);
-    const exportWhere = buildUnifiedExportWhere(args);
-    const allOrderWhere = buildUnifiedOrderWhere(args, false, true);
-    const allExportWhere = buildUnifiedExportWhere(args, false, true);
-
-    const [orderCount, exportCount, current, previous, sourceGroups, allExportCount] =
-      await Promise.all([
-        orderWhere ? prisma.order.count({ where: orderWhere }) : 0,
-        exportWhere ? prisma.exportOrder.count({ where: exportWhere }) : 0,
-        getUnifiedPeriodStats(args),
-        getUnifiedPeriodStats(args, true),
-        prisma.order.groupBy({
-          by: ["source"],
-          where: allOrderWhere,
-          _count: true,
-        }),
-        allExportWhere ? prisma.exportOrder.count({ where: allExportWhere }) : 0,
-      ]);
-
-    const total = orderCount + exportCount;
-    const offset = args.exportAll ? 0 : (page - 1) * pageSize;
-    const orderSkip = args.exportAll ? 0 : Math.max(0, offset - exportCount);
-    const orderTake = args.exportAll
-      ? orderCount
-      : Math.min(orderCount - orderSkip, pageSize + exportCount);
-    const [databaseOrders, exportOrders] = await Promise.all([
-      orderWhere && orderTake > 0
-        ? prisma.order.findMany({
-            where: orderWhere,
-            select: unifiedOrderSelect,
-            orderBy: { createdAt: "desc" },
-            skip: orderSkip,
-            take: orderTake,
-          })
-        : [],
-      exportWhere
-        ? prisma.exportOrder.findMany({
-            where: exportWhere,
-            orderBy: { exportDate: "desc" },
-            ...(args.exportAll ? {} : { take: exportCount }),
-          })
-        : [],
-    ]);
-    const merged = [
-      ...databaseOrders.map(mapUnifiedDatabaseOrder),
-      ...exportOrders.map(mapUnifiedExportOrder),
-    ].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
-    const sliceStart = args.exportAll ? 0 : offset - orderSkip;
-    const rows = args.exportAll ? merged : merged.slice(sliceStart, sliceStart + pageSize);
-
-    const topOrderRows = orderWhere
-      ? await prisma.orderItem.groupBy({
-          by: ["productName"],
-          where: { order: orderWhere },
-          _sum: { quantity: true, subtotal: true },
-          orderBy: { _sum: { quantity: "desc" } },
-          take: 20,
-        })
-      : [];
-    const topProductMap = new Map(
-      topOrderRows.map((row) => [
-        row.productName,
-        {
-          name: row.productName,
-          qty: Number(row._sum.quantity || 0),
-          revenue: Number(row._sum.subtotal || 0),
-        },
-      ]),
-    );
-    if (exportWhere) {
-      const exportItems = await prisma.exportOrder.findMany({
-        where: exportWhere,
-        select: { items: true },
-      });
-      for (const row of exportItems) {
-        for (const item of parseExportItems(row.items)) {
-          const name = item.productName || item.name || "N/A";
-          const qty = Number(item.quantity || item.qty || 1);
-          const revenue = Number(
-            item.total || item.subtotal || (item.unitPrice || item.price || 0) * qty,
-          );
-          const product = topProductMap.get(name) || { name, qty: 0, revenue: 0 };
-          product.qty += qty;
-          product.revenue += revenue;
-          topProductMap.set(name, product);
-        }
-      }
-    }
-    const sourceCounts = { all: 0, pos: 0, tmdt: 0, export: allExportCount, shopee: 0, tiktok: 0 };
-    for (const group of sourceGroups) {
-      const count = Number(group._count || 0);
-      if (group.source === "pos") sourceCounts.pos += count;
-      else if (ORDER_MARKETPLACE_SOURCES.includes(group.source)) sourceCounts.tmdt += count;
-      if (group.source === "shopee") sourceCounts.shopee += count;
-      if (group.source === "tiktok") sourceCounts.tiktok += count;
-    }
-    sourceCounts.all = sourceCounts.pos + sourceCounts.tmdt + sourceCounts.export;
+    const resultRows = await prisma.$queryRaw(buildUnifiedPageQuery(args, page, pageSize));
+    const result = resultRows[0]?.result || { rows: [], total: 0 };
 
     return {
       success: true,
       data: {
-        rows,
-        total,
-        current,
-        previous,
-        sourceCounts,
-        topProducts: [...topProductMap.values()]
-          .sort((a, b) => b.qty - a.qty)
-          .slice(0, 10),
+        rows: Array.isArray(result.rows) ? result.rows : [],
+        total: Number(result.total || 0),
       },
     };
   } catch (error) {
     console.error("orders:getUnified error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("orders:getSummary", async (event, args = {}) => {
+  try {
+    requireRole("admin", "manager", "staff");
+    if (!prisma) throw new Error("Database chưa được khởi tạo.");
+    const exportWhere = buildUnifiedExportWhere(
+      { ...args, from: args.prevFrom, to: args.to, sourceFilter: "all" },
+      false,
+      true,
+    );
+    const [orderStatsRows, exportRows] = await Promise.all([
+      prisma.$queryRaw(buildUnifiedOrderStatsQuery(args)),
+      exportWhere
+        ? prisma.exportOrder.findMany({
+            where: exportWhere,
+            select: { exportDate: true, totalAmount: true, items: true },
+          })
+        : [],
+    ]);
+    const stats = orderStatsRows[0] || {};
+    const current = {
+      orderCount: Number(stats.currentOrderCount || 0),
+      revenue: Number(stats.currentRevenue || 0),
+      quantity: Number(stats.currentQuantity || 0),
+    };
+    const previous = {
+      orderCount: Number(stats.previousOrderCount || 0),
+      revenue: Number(stats.previousRevenue || 0),
+      quantity: Number(stats.previousQuantity || 0),
+    };
+    const sourceCounts = {
+      all: 0,
+      pos: Number(stats.posCount || 0),
+      tmdt: Number(stats.tmdtCount || 0),
+      export: 0,
+      shopee: Number(stats.shopeeCount || 0),
+      tiktok: Number(stats.tiktokCount || 0),
+    };
+    const includeFilteredExports = ["all", "export"].includes(args.sourceFilter || "all");
+    const currentFrom = new Date(args.from).getTime();
+    const currentTo = new Date(args.to).getTime();
+    const previousFrom = new Date(args.prevFrom).getTime();
+    const previousTo = new Date(args.prevTo).getTime();
+    for (const row of exportRows) {
+      const timestamp = row.exportDate.getTime();
+      const quantity = parseExportItems(row.items).reduce(
+        (sum, item) => sum + Number(item.quantity || item.qty || 1),
+        0,
+      );
+      if (timestamp >= currentFrom && timestamp <= currentTo) {
+        sourceCounts.export += 1;
+        if (includeFilteredExports) {
+          current.orderCount += 1;
+          current.revenue += Number(row.totalAmount || 0);
+          current.quantity += quantity;
+        }
+      } else if (
+        includeFilteredExports &&
+        timestamp >= previousFrom &&
+        timestamp <= previousTo
+      ) {
+        previous.orderCount += 1;
+        previous.revenue += Number(row.totalAmount || 0);
+        previous.quantity += quantity;
+      }
+    }
+    sourceCounts.all = sourceCounts.pos + sourceCounts.tmdt + sourceCounts.export;
+    return { success: true, data: { current, previous, sourceCounts } };
+  } catch (error) {
+    console.error("orders:getSummary error:", error);
     return { success: false, error: error.message };
   }
 });
@@ -17839,43 +18744,53 @@ ipcMain.handle("orders:getDailyStats", async (event, args = {}) => {
       throw new Error("Khoảng ngày biểu đồ không hợp lệ.");
     }
 
-    const queryArgs = {
-      from: from.toISOString(),
-      to: to.toISOString(),
-      sourceFilter: args.sourceFilter || "all",
-      platformFilter: args.platformFilter || "all",
-    };
-    const orderWhere = buildUnifiedOrderWhere(queryArgs);
-    const exportWhere = buildUnifiedExportWhere(queryArgs);
-    const [orderRows, exportRows] = await Promise.all([
-      orderWhere
-        ? prisma.order.findMany({
-            where: orderWhere,
-            select: { createdAt: true, total: true },
-            orderBy: { createdAt: "asc" },
-          })
-        : [],
-      exportWhere
-        ? prisma.exportOrder.findMany({
-            where: exportWhere,
-            select: { exportDate: true, totalAmount: true },
-            orderBy: { exportDate: "asc" },
-          })
-        : [],
-    ]);
+    const sourceFilter = args.sourceFilter || "all";
+    const platformFilter = args.platformFilter || "all";
+    const includeOrders = sourceFilter !== "export";
+    const includeExports = sourceFilter === "all" || sourceFilter === "export";
+    const orderSourceCondition = sourceFilter === "pos"
+      ? Prisma.sql`"source" = 'pos' AND "status" <> 'cancelled'`
+      : sourceFilter === "tmdt"
+        ? Prisma.sql`"source" IN (${Prisma.join(
+            platformFilter === "all" ? ORDER_MARKETPLACE_SOURCES : [platformFilter],
+          )}) AND "status" = 'completed'`
+        : Prisma.sql`(("source" = 'pos' AND "status" <> 'cancelled') OR ("source" IN (${Prisma.join(
+            ORDER_MARKETPLACE_SOURCES,
+          )}) AND "status" = 'completed'))`;
 
-    const daily = new Map();
-    const add = (date, total) => {
-      const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-      const point = daily.get(key) || { date: key, revenue: 0, orders: 0 };
-      point.revenue += Number(total || 0);
-      point.orders += 1;
-      daily.set(key, point);
-    };
-    for (const row of orderRows) add(row.createdAt, row.total);
-    for (const row of exportRows) add(row.exportDate, row.totalAmount);
+    // Aggregate inside PostgreSQL so the renderer never receives thousands of
+    // raw orders merely to draw a few daily chart points.
+    const branches = [];
+    if (includeOrders) {
+      branches.push(Prisma.sql`
+        SELECT
+          TO_CHAR(("createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Bangkok')::date, 'YYYY-MM-DD') AS "date",
+          "total"::double precision AS "revenue"
+        FROM "Order"
+        WHERE "createdAt" >= ${from} AND "createdAt" <= ${to}
+          AND ${orderSourceCondition}
+      `);
+    }
+    if (includeExports) {
+      branches.push(Prisma.sql`
+        SELECT
+          TO_CHAR(("exportDate" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Bangkok')::date, 'YYYY-MM-DD') AS "date",
+          "totalAmount"::double precision AS "revenue"
+        FROM "ExportOrder"
+        WHERE "exportDate" >= ${from} AND "exportDate" <= ${to}
+      `);
+    }
+    const rows = await prisma.$queryRaw(Prisma.sql`
+      SELECT
+        "date",
+        SUM("revenue")::double precision AS "revenue",
+        COUNT(*)::integer AS "orders"
+      FROM (${Prisma.join(branches, " UNION ALL ")}) AS daily_orders
+      GROUP BY "date"
+      ORDER BY "date"
+    `);
 
-    return { success: true, data: [...daily.values()] };
+    return { success: true, data: rows };
   } catch (error) {
     console.error("orders:getDailyStats error:", error);
     return { success: false, error: error.message };
@@ -18347,6 +19262,7 @@ ipcMain.handle("returns:delete", async (event, id) => {
 
 ipcMain.handle("returns:bulkCreate", async (event, records) => {
   try {
+    requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     console.log(`📦 returns:bulkCreate called with ${records.length} records`);
     const created = [];
@@ -21856,6 +22772,7 @@ ipcMain.handle(
         role: user.role,
         mustChangePassword: isPasswordRotationRequired(user),
       };
+      cacheSessionStatus(user);
       prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(
         () => {},
       );
@@ -21893,6 +22810,7 @@ ipcMain.handle("users:logout", async (event, rememberToken) => {
     );
   }
   currentSession = null;
+  cacheSessionStatus(null);
   return { success: true };
 });
 
@@ -21913,6 +22831,7 @@ ipcMain.handle("users:getCurrentSession", async () => {
       role: user.role,
       mustChangePassword: isPasswordRotationRequired(user),
     };
+    cacheSessionStatus(user);
     return { success: true, data: sanitizeUserForClient(user) };
   } catch {
     return { success: false };
@@ -21951,6 +22870,7 @@ ipcMain.handle("users:restoreSession", async (event, rememberToken) => {
       role: user.role,
       mustChangePassword: isPasswordRotationRequired(user),
     };
+    cacheSessionStatus(user);
     storeSecureRememberToken(tokenToRestore);
     prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(
       () => {},
@@ -22176,11 +23096,7 @@ const { v4: uuidv4 } = (() => {
 // Cache token MISA
 let misaTokenCache = { token: null, expiresAt: 0 };
 
-// Mã hóa / giải mã password đơn giản (obfuscation)
-function encodeSecret(plain) {
-  if (!plain) return "";
-  return Buffer.from(plain).toString("base64");
-}
+// Decoder chỉ giữ lại để di trú bản cũ từng lưu password bằng Base64.
 function decodeSecret(encoded) {
   if (!encoded) return "";
   try {
@@ -22188,6 +23104,34 @@ function decodeSecret(encoded) {
   } catch {
     return encoded;
   }
+}
+
+function getMisaSecretPath() {
+  return path.join(app.getPath("userData"), "misa-password.bin");
+}
+
+function readLocalMisaPassword() {
+  const secretPath = getMisaSecretPath();
+  if (!safeStorage.isEncryptionAvailable() || !fs.existsSync(secretPath)) {
+    return "";
+  }
+  try {
+    return safeStorage.decryptString(fs.readFileSync(secretPath));
+  } catch (error) {
+    console.error("Không giải mã được mật khẩu MISA trên máy này:", error.message);
+    return "";
+  }
+}
+
+function writeLocalMisaPassword(password) {
+  const normalized = String(password || "").trim();
+  if (!normalized) throw new Error("Mật khẩu MISA không được để trống.");
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error("Windows safeStorage chưa sẵn sàng; không thể lưu mật khẩu MISA an toàn.");
+  }
+  const secretPath = getMisaSecretPath();
+  fs.mkdirSync(path.dirname(secretPath), { recursive: true });
+  fs.writeFileSync(secretPath, safeStorage.encryptString(normalized), { mode: 0o600 });
 }
 function maskString(str, showChars = 3) {
   if (!str || str.length <= showChars) return "***";
@@ -22205,10 +23149,22 @@ async function getMisaConfig() {
       "Chưa cấu hình MISA meInvoice! Vào ⚙️ Cấu hình để thiết lập.",
     );
   const config = JSON.parse(configRecord.value);
-  // Giải mã password nếu đã mã hóa
+  let localPassword = readLocalMisaPassword();
+  // Tự di trú cấu hình cũ: giải mã Base64 một lần, lưu bằng Windows
+  // safeStorage và xóa secret khỏi DB dùng chung.
   if (config.password) {
-    config.password = decodeSecret(config.password);
+    const legacyPassword = decodeSecret(config.password);
+    if (!localPassword && legacyPassword) {
+      writeLocalMisaPassword(legacyPassword);
+      localPassword = legacyPassword;
+    }
+    delete config.password;
+    await prisma.appConfig.update({
+      where: { key: "misaConfig" },
+      data: { value: JSON.stringify(config) },
+    });
   }
+  config.password = localPassword;
   if (
     !config.appid ||
     !config.taxcode ||
@@ -22273,10 +23229,7 @@ async function getMisaToken() {
     }
 
     const responseText = await response.text();
-    console.log(
-      `🔑 MISA Response from ${tokenUrl} (${response.status}):`,
-      responseText.substring(0, 800),
-    );
+    console.log(`🔑 MISA response status from ${tokenUrl}: ${response.status}`);
 
     let result;
     try {
@@ -22660,8 +23613,22 @@ ipcMain.handle("misa:getConfig", async () => {
       where: { key: "misaConfig" },
     });
     const config = record?.value ? JSON.parse(record.value) : {};
-    // Không trả password ra frontend
-    return { success: true, data: { ...config, password: "" } }; // Không trả password, frontend tự hiện placeholder
+    if (config.password) {
+      const legacyPassword = decodeSecret(config.password);
+      if (!readLocalMisaPassword() && legacyPassword) {
+        writeLocalMisaPassword(legacyPassword);
+      }
+      delete config.password;
+      await prisma.appConfig.update({
+        where: { key: "misaConfig" },
+        data: { value: JSON.stringify(config) },
+      });
+    }
+    delete config.password;
+    return {
+      success: true,
+      data: { ...config, password: "", hasPassword: Boolean(readLocalMisaPassword()) },
+    };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -22671,29 +23638,23 @@ ipcMain.handle("misa:saveConfig", async (event, config) => {
   try {
     requireRole("admin");
     if (!prisma) throw new Error("Database not initialized");
-    // Nếu password rỗng hoặc là masked → giữ nguyên password cũ (đã mã hóa)
-    if (!config.password || config.password === "••••••••") {
-      const existing = await prisma.appConfig.findUnique({
-        where: { key: "misaConfig" },
-      });
-      if (existing?.value) {
-        const old = JSON.parse(existing.value);
-        config.password = old.password; // Giữ nguyên password đã mã hóa
-      }
-    } else {
-      // Mã hóa password mới trước khi lưu
-      config.password = encodeSecret(config.password);
+    const nextConfig = { ...config };
+    const submittedPassword = String(nextConfig.password || "").trim();
+    if (submittedPassword && submittedPassword !== "••••••••") {
+      writeLocalMisaPassword(submittedPassword);
+    } else if (!readLocalMisaPassword()) {
+      throw new Error("Máy này chưa có mật khẩu MISA. Vui lòng nhập mật khẩu một lần.");
     }
+    delete nextConfig.password;
+    delete nextConfig.hasPassword;
     await prisma.appConfig.upsert({
       where: { key: "misaConfig" },
-      update: { value: JSON.stringify(config) },
-      create: { key: "misaConfig", value: JSON.stringify(config) },
+      update: { value: JSON.stringify(nextConfig) },
+      create: { key: "misaConfig", value: JSON.stringify(nextConfig) },
     });
     // Clear token cache khi đổi config
     invalidateMisaToken();
-    console.log(
-      `✅ MISA config saved (password length: ${config.password?.length || 0})`,
-    );
+    console.log("✅ MISA config saved; password protected by Windows safeStorage.");
     void logActivity({
       module: "einvoice",
       action: "UPDATE",
@@ -22719,6 +23680,7 @@ ipcMain.handle("misa:testConnection", async () => {
 // Lấy danh sách mẫu HĐ — Tài liệu Mục 3
 ipcMain.handle("misa:getTemplates", async () => {
   try {
+    requireRole("admin");
     const config = await getMisaConfig();
     const token = await getMisaToken();
     const baseUrl =
@@ -22802,6 +23764,7 @@ ipcMain.handle("misa:getTemplates", async () => {
 // Xem nháp HĐ (unpublishview) — Tài liệu Mục 4 — KHÔNG phát hành, chỉ xem
 ipcMain.handle("misa:previewInvoice", async (event, invoiceData) => {
   try {
+    requireRole("admin");
     const config = await getMisaConfig();
     const token = await getMisaToken();
     const baseUrl =
@@ -22847,6 +23810,7 @@ ipcMain.handle("misa:previewInvoice", async (event, invoiceData) => {
 
 ipcMain.handle("misa:downloadPDF", async (event, transactionId) => {
   try {
+    requireRole("admin");
     const base64PDF = await downloadMisaInvoicePDF(transactionId);
     // Cho user chọn nơi lưu
     const result = await dialog.showSaveDialog({
@@ -22871,6 +23835,7 @@ ipcMain.handle("misa:downloadPDF", async (event, transactionId) => {
 // Lấy tất cả đơn HĐĐT
 ipcMain.handle("einvoice:getAll", async (event, { limit } = {}) => {
   try {
+    requireRole("admin");
     if (!prisma) throw new Error("Database not initialized");
     const records = await prisma.eInvoice.findMany({
       orderBy: { createdAt: "desc" },
@@ -22893,6 +23858,7 @@ ipcMain.handle("einvoice:getAll", async (event, { limit } = {}) => {
 // Import hàng loạt — chống trùng orderId ở tầng DB
 ipcMain.handle("einvoice:bulkImport", async (event, orders) => {
   try {
+    requireRole("admin");
     if (!prisma) throw new Error("Database not initialized");
     if (!Array.isArray(orders) || orders.length === 0) {
       return { success: false, error: "Không có đơn hàng để import" };
@@ -22957,6 +23923,7 @@ ipcMain.handle("einvoice:bulkImport", async (event, orders) => {
 // Xem nháp HĐ từ đơn hàng thật — gọi unpublishview, KHÔNG phát hành
 ipcMain.handle("einvoice:previewDraft", async (event, orderId) => {
   try {
+    requireRole("admin");
     if (!prisma) throw new Error("Database not initialized");
     const misaConfig = await getMisaConfig();
     const token = await getMisaToken();
@@ -23027,6 +23994,7 @@ ipcMain.handle("einvoice:previewDraft", async (event, orderId) => {
 // Xuất HĐĐT — gọi MISA meInvoice API thật (SignType=2 — HSM ký tự động)
 ipcMain.handle("einvoice:issueInvoices", async (event, orderIds) => {
   try {
+    requireRole("admin");
     if (!prisma) throw new Error("Database not initialized");
     if (!Array.isArray(orderIds) || orderIds.length === 0) {
       return { success: false, error: "Không có đơn nào để xuất" };
@@ -23232,6 +24200,7 @@ ipcMain.handle("einvoice:issueInvoices", async (event, orderIds) => {
 // Thống kê
 ipcMain.handle("einvoice:getStats", async () => {
   try {
+    requireRole("admin");
     if (!prisma) throw new Error("Database not initialized");
 
     // 🚀 Gộp thành 2 queries thay vì 5 + ÁP DỤNG BỘ LỌC 3 NGÀY CHỐNG ĐẾM TRÀN RÁC (842 bills cũ)
@@ -23279,6 +24248,7 @@ ipcMain.handle("einvoice:getStats", async () => {
 // Xuất Excel báo cáo
 ipcMain.handle("einvoice:exportExcel", async (event, filters) => {
   try {
+    requireRole("admin");
     if (!prisma) throw new Error("Database not initialized");
 
     const where = {};
@@ -23442,6 +24412,7 @@ ipcMain.handle("einvoice:deleteAll", async () => {
 // ============================================================
 ipcMain.handle("einvoice:getOriginalInvoice", async (event, orderId) => {
   try {
+    requireRole("admin");
     if (!prisma) throw new Error("Database not initialized");
     const invoice = await prisma.eInvoice.findFirst({
       where: { orderId, status: "issued" },
@@ -23504,6 +24475,7 @@ ipcMain.handle(
   "einvoice:adjustInvoice",
   async (event, { orderId, adjustmentType, reason, partialItems }) => {
     try {
+      requireRole("admin");
       if (!prisma) throw new Error("Database not initialized");
 
       // Tìm HĐ gốc (issued HOẶC adjusted — đã điều chỉnh 1 phần vẫn cho tiếp)
@@ -23660,6 +24632,7 @@ ipcMain.handle(
 // Lấy chuỗi chain HĐ điều chỉnh
 ipcMain.handle("einvoice:getInvoiceChain", async (event, orderId) => {
   try {
+    requireRole("admin");
     if (!prisma) throw new Error("Database not initialized");
     const orig = await prisma.eInvoice.findFirst({
       where: { orderId, adjustmentType: null },
@@ -24248,6 +25221,71 @@ function isGoogleReauthError(err) {
   );
 }
 
+async function sendGmailSimpleMessage({ to, subject, html }) {
+  const tokenPath = ensureGoogleTokenPath();
+  if (!fs.existsSync(tokenPath)) {
+    return {
+      success: false,
+      reauthRequired: true,
+      error: "Chưa đăng nhập Google để gửi Gmail.",
+    };
+  }
+  const tokens = readGoogleTokens(tokenPath);
+  if (
+    !String(tokens.scope || "").includes(
+      "https://www.googleapis.com/auth/gmail.send",
+    )
+  ) {
+    return {
+      success: false,
+      reauthRequired: true,
+      error: "Tài khoản Google chưa được cấp quyền gửi Gmail.",
+    };
+  }
+
+  const { google } = require("googleapis");
+  const oauth2Client = new google.auth.OAuth2(OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET);
+  oauth2Client.setCredentials(tokens);
+  oauth2Client.on("tokens", (newTokens) => {
+    try {
+      const saved = readGoogleTokens(tokenPath);
+      writeGoogleTokens({ ...saved, ...newTokens }, tokenPath);
+    } catch (error) {
+      console.error("[CarrierComplaint] Save Google token error:", error.message);
+    }
+  });
+
+  const sender = "yendao444@gmail.com";
+  const raw = [
+    `From: ${encodeMailHeader("DBY Software POS")} <${sender}>`,
+    `To: ${to}`,
+    `Subject: ${encodeMailHeader(subject)}`,
+    "MIME-Version: 1.0",
+    'Content-Type: text/html; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    Buffer.from(html || "", "utf8").toString("base64"),
+  ].join("\r\n");
+
+  try {
+    const gmail = google.gmail({ version: "v1", auth: oauth2Client });
+    const sent = await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw: toBase64Url(raw) },
+    });
+    return { success: true, data: { id: sent.data.id } };
+  } catch (error) {
+    if (isGoogleReauthError(error)) {
+      return {
+        success: false,
+        reauthRequired: true,
+        error: "Token Google đã hết hạn hoặc bị thu hồi. Vui lòng đăng nhập lại.",
+      };
+    }
+    throw error;
+  }
+}
+
 async function sendGmailWithAttachment({
   to,
   subject,
@@ -24264,7 +25302,7 @@ async function sendGmailWithAttachment({
     };
   }
 
-  const tokens = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
+  const tokens = readGoogleTokens(tokenPath);
   const scope = String(tokens.scope || "");
   if (!scope.includes("https://www.googleapis.com/auth/gmail.send")) {
     return {
@@ -24283,11 +25321,8 @@ async function sendGmailWithAttachment({
   oauth2Client.setCredentials(tokens);
   oauth2Client.on("tokens", (newTokens) => {
     try {
-      const saved = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
-      fs.writeFileSync(
-        tokenPath,
-        JSON.stringify({ ...saved, ...newTokens }, null, 2),
-      );
+      const saved = readGoogleTokens(tokenPath);
+      writeGoogleTokens({ ...saved, ...newTokens }, tokenPath);
     } catch (err) {
       console.error("[Gmail] Failed to save refreshed token:", err.message);
     }
@@ -24345,6 +25380,7 @@ ipcMain.handle(
   "attendance:sendPayslipEmail",
   async (event, { to, employeeName, period, fileName, pdfBase64 } = {}) => {
     try {
+      requireRole("admin");
       if (!to || !pdfBase64) throw new Error("Thiếu email nhận hoặc file PDF");
 
       const companyName = "AIRCLEAN CORP.";
@@ -24390,6 +25426,7 @@ ipcMain.handle(
   "attendance:savePayslipPDF",
   async (event, { fileName, pdfBase64 } = {}) => {
     try {
+      requireRole("admin");
       if (!fileName || !pdfBase64)
         throw new Error("Thiếu tên file hoặc dữ liệu PDF");
       const safeFileName =
@@ -24421,6 +25458,30 @@ ipcMain.handle(
     }
   },
 );
+
+function normalizeFaceProfileId(value) {
+  const faceId = String(value || "").trim();
+  if (
+    !faceId ||
+    faceId.length > 128 ||
+    faceId === "." ||
+    faceId === ".." ||
+    /[\\/\0-\x1f]/.test(faceId)
+  ) {
+    throw new Error("Mã khuôn mặt không hợp lệ.");
+  }
+  return faceId;
+}
+
+function getFaceProfileDirectory(faceId) {
+  const facesRoot = path.resolve(app.getPath("userData"), "faces");
+  const resolved = path.resolve(facesRoot, normalizeFaceProfileId(faceId));
+  const rootPrefix = `${facesRoot}${path.sep}`;
+  if (!resolved.startsWith(rootPrefix)) {
+    throw new Error("Đường dẫn hồ sơ khuôn mặt không hợp lệ.");
+  }
+  return resolved;
+}
 
 ipcMain.handle("attendance:status", async () => {
   const exePath = path.join(
@@ -24637,6 +25698,8 @@ ipcMain.handle(
   "attendance:register",
   async (event, { face_id, user_name, user_id, images }) => {
     try {
+      requireRole("admin");
+      face_id = normalizeFaceProfileId(face_id);
       await ensureFaceService();
       resetFaceServiceIdleTimer();
       const result = await faceServiceFetch("/register", {
@@ -24911,6 +25974,7 @@ ipcMain.handle("attendance:reconcileLateFines", async () => {
 // Kiểm tra toàn bộ profiles — so sánh DB, disk, Python memory
 // Trả về danh sách profiles ở từng nơi và highlight mismatch
 ipcMain.handle("attendance:verifyAll", async () => {
+  requireRole("admin");
   const result = {
     db: [],
     disk: [],
@@ -24978,6 +26042,7 @@ ipcMain.handle("attendance:verifyAll", async () => {
 // Lấy danh sách profiles khuôn mặt
 ipcMain.handle("attendance:getProfiles", async () => {
   try {
+    requireRole("admin");
     const profiles = await prisma.faceProfile.findMany({
       where: { isActive: true },
     });
@@ -24989,6 +26054,8 @@ ipcMain.handle("attendance:getProfiles", async () => {
 
 // Xóa profile khuôn mặt
 ipcMain.handle("attendance:deleteProfile", async (event, { face_id }) => {
+  requireRole("admin");
+  face_id = normalizeFaceProfileId(face_id);
   // Xóa Python encodings qua service
   try {
     await faceServiceFetch(`/profile/${encodeURIComponent(face_id)}`, {
@@ -25002,7 +26069,7 @@ ipcMain.handle("attendance:deleteProfile", async (event, { face_id }) => {
     // Fallback: service offline → xóa folder ảnh trực tiếp bằng fs
     // Tránh trường hợp DB xóa thành công nhưng ảnh vẫn còn trên disk
     try {
-      const facesDir = path.join(app.getPath("userData"), "faces", face_id);
+      const facesDir = getFaceProfileDirectory(face_id);
       if (fs.existsSync(facesDir)) {
         fs.rmSync(facesDir, { recursive: true, force: true });
         console.log("[attendance] Deleted face folder directly:", facesDir);
@@ -25031,7 +26098,7 @@ ipcMain.handle("attendance:deleteProfile", async (event, { face_id }) => {
     verify.db = dbRecord === null; // true = không còn record active
   } catch (_) {}
   try {
-    const facesDir = path.join(app.getPath("userData"), "faces", face_id);
+    const facesDir = getFaceProfileDirectory(face_id);
     verify.disk = !fs.existsSync(facesDir); // true = folder đã bị xóa
   } catch (_) {}
   try {

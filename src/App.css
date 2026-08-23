@@ -3,6 +3,79 @@
     height: 100%;
 }
 
+/* ============= RESPONSIVE APPLICATION SHELL ============= */
+.app-shell,
+.app-main-layout,
+.app-content,
+.app-content > * {
+    min-width: 0;
+}
+
+.app-main-layout {
+    margin-left: 260px;
+}
+
+.app-main-layout--collapsed {
+    margin-left: 80px;
+}
+
+.app-main-layout--workspace {
+    margin-left: 0;
+}
+
+.app-content {
+    width: auto;
+    max-width: 100%;
+}
+
+.app-content .ant-card,
+.app-content .ant-row,
+.app-content .ant-col,
+.app-content .ant-tabs,
+.app-content .ant-tabs-content-holder,
+.app-content .ant-tabs-tabpane,
+.app-content .ant-form,
+.app-content .ant-descriptions,
+.app-content .ant-list {
+    min-width: 0;
+    max-width: 100%;
+}
+
+/* Wide data stays readable and scrolls inside its own module instead of
+   expanding the entire Electron window. */
+.app-content .ant-table-wrapper {
+    width: 100%;
+    max-width: 100%;
+    overflow: hidden;
+}
+
+.app-content .ant-table-content,
+.app-content .ant-table-body {
+    max-width: 100%;
+    overflow-x: auto !important;
+}
+
+.app-content .ant-tabs-nav-wrap,
+.app-content .ant-segmented-group {
+    min-width: 0;
+    overflow-x: auto;
+}
+
+.app-content img,
+.app-content video,
+.app-content canvas {
+    max-width: 100%;
+}
+
+.ant-modal {
+    max-width: calc(100vw - 32px);
+}
+
+.ant-modal-content,
+.ant-drawer-content {
+    max-width: 100%;
+}
+
 /* Full-screen centered loading overlay — dùng cho các page load lần đầu */
 .page-loading-center {
     position: fixed;
@@ -317,55 +390,112 @@ button:focus-visible {
 
 /* ============= RESPONSIVE UTILITIES ============= */
 
-/* Tablet và nhỏ hơn */
+/* Windowed desktop / tablet */
 @media (max-width: 1024px) {
+    .app-sidebar.ant-layout-sider-collapsed {
+        flex: 0 0 68px !important;
+        width: 68px !important;
+        min-width: 68px !important;
+        max-width: 68px !important;
+    }
 
-    /* Giảm margin cho Content */
-    .ant-layout-content {
+    .app-main-layout--collapsed {
+        margin-left: 68px;
+    }
+
+    .app-main-layout--workspace {
+        margin-left: 0;
+    }
+
+    .app-content:not(.app-content--pos):not(.app-content--daily-tasks):not(.app-content--handling-units) {
         margin: 16px !important;
     }
 
-    /* Giảm padding cho header */
-    .ant-layout-header {
+    .app-page-header {
         padding: 0 16px !important;
     }
 
-    /* Đảm bảo table có thể scroll */
-    .ant-table-wrapper {
-        overflow-x: auto;
+    .app-page-header h4.ant-typography {
+        max-width: 34vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 }
 
-/* Mobile */
+/* Narrow Electron window */
 @media (max-width: 768px) {
+    .app-sidebar.ant-layout-sider-collapsed {
+        flex-basis: 60px !important;
+        width: 60px !important;
+        min-width: 60px !important;
+        max-width: 60px !important;
+    }
 
-    /* Giảm margin Content xuống còn 12px */
-    .ant-layout-content {
+    .app-main-layout--collapsed {
+        margin-left: 60px;
+    }
+
+    .app-main-layout--workspace {
+        margin-left: 0;
+    }
+
+    .app-content:not(.app-content--pos):not(.app-content--daily-tasks):not(.app-content--handling-units) {
         margin: 12px !important;
     }
 
-    /* Compact header */
-    .ant-layout-header {
+    .app-page-header {
         padding: 0 12px !important;
     }
 
-    /* Responsive table */
-    .ant-table {
+    .app-page-header h4.ant-typography,
+    .app-header-ticker {
+        display: none !important;
+    }
+
+    .app-page-header-extra {
+        margin-left: 0 !important;
+        overflow-x: auto;
+    }
+
+    .app-titlebar {
+        padding-left: 8px !important;
+    }
+
+    .app-titlebar-name {
+        max-width: 120px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .app-content .ant-table {
         font-size: 13px;
     }
 
-    .ant-table-thead>tr>th {
+    .app-content .ant-table-thead>tr>th {
         padding: 8px !important;
     }
 
-    .ant-table-tbody>tr>td {
+    .app-content .ant-table-tbody>tr>td {
         padding: 8px !important;
+    }
+
+    .ant-modal {
+        top: 16px;
+        margin: 0 auto;
+        padding-bottom: 16px;
+    }
+
+    .ant-modal-body {
+        max-height: calc(100dvh - 150px);
+        overflow-y: auto;
     }
 }
 
-/* Extra small mobile */
+/* Extra narrow window */
 @media (max-width: 480px) {
-    .ant-layout-content {
+    .app-content:not(.app-content--pos):not(.app-content--daily-tasks):not(.app-content--handling-units) {
         margin: 8px !important;
     }
 

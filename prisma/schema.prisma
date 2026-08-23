@@ -293,6 +293,10 @@ model PurchaseOrder {
   importReceiptStatus   String    @default("pending") // pending | uploaded
   
   items      PurchaseItem[]
+
+  @@index([status, createdAt])
+  @@index([supplierId, createdAt])
+  @@index([createdAt])
 }
 
 model PurchaseItem {
@@ -311,6 +315,10 @@ model PurchaseItem {
   color           String?  // Màu sắc nếu có
   
   createdAt       DateTime @default(now())
+
+  @@index([purchaseOrderId])
+  @@index([productId])
+  @@index([variantSku])
 }
 
 // ========================================
@@ -397,6 +405,8 @@ model OrderItem {
   subtotal    Float
   
   createdAt   DateTime @default(now())
+
+  @@index([orderId])
 }
 
 model Payment {
@@ -765,6 +775,8 @@ model EInvoice {
   @@index([invoiceDate])
   @@index([batchId])
   @@index([refInvoiceId])
+  @@index([createdAt])
+  @@index([status, createdAt])
 }
 
 // ========================================

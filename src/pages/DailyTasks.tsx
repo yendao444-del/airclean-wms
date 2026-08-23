@@ -2164,14 +2164,22 @@ const DailyTasks = () => {
         const cacheImageUrl = (key: string, url: string) => {
             const cache = evidenceImageUrlCacheRef.current;
             cache.delete(key);
-            cache.set(key, { url, expiresAt: Date.now() + 4 * 60 * 1000 });
-            while (cache.size > 10) {
+            // Drive previews are data URLs and do not expire; Supabase URLs do.
+            cache.set(key, {
+                url,
+                expiresAt: Date.now() + (url.startsWith('data:') ? 30 : 4) * 60 * 1000,
+            });
+            while (cache.size > 50) {
                 const oldestKey = cache.keys().next().value;
                 if (!oldestKey) break;
                 cache.delete(oldestKey);
             }
         };
-        const renderEvidence = (images: Array<EvidenceImage & { url: string }>, loading: boolean, failed = false) => (
+        const renderEvidence = (
+            images: Array<EvidenceImage & { url: string }>,
+            loading: boolean,
+            errors: string[] = [],
+        ) => (
             <div>
                 <p style={{ marginBottom: 8 }}><strong>{task.title}</strong></p>
                 {images.length > 0 && (
@@ -2183,6 +2191,7 @@ const DailyTasks = () => {
                                     alt={`Bằng chứng ${index + 1}`}
                                     loading="lazy"
                                     decoding="async"
+                                    onError={() => message.warning(`Không thể hiển thị ảnh: ${image.name || `Bằng chứng ${index + 1}`}`)}
                                     style={{ display: 'block', width: '100%', height: 520, objectFit: 'contain', borderRadius: 8, background: '#f8fafc' }}
                                 />
                             </a>
@@ -2194,9 +2203,11 @@ const DailyTasks = () => {
                         Đang tải ảnh bằng chứng…
                     </div>
                 )}
-                {!loading && failed && images.length === 0 && (
+                {!loading && errors.length > 0 && (
                     <div style={{ minHeight: 180, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#dc2626' }}>
-                        Không thể tải ảnh bằng chứng.
+                        {errors.length === submittedImages.length
+                            ? errors[0] || 'Không thể tải ảnh bằng chứng.'
+                            : `${errors.length} ảnh không thể tải. Vui lòng thử lại.`}
                     </div>
                 )}
                 {!loading && submittedImages.length === 0 && 'Nhân viên chưa nộp bằng chứng.'}
@@ -2208,33 +2219,94 @@ const DailyTasks = () => {
             const url = getCachedImageUrl(imageKey(image));
             return url ? [{ ...image, url }] : [];
         });
+        const loadedByKey = new Map(cachedImages.map(image => [imageKey(image), image]));
+        const failedByKey = new Map<string, string>();
+        let modalActive = true;
+        const updateModal = (loading: boolean) => {
+            if (!modalActive) return;
+            const images = submittedImages.flatMap(image => {
+                const loaded = loadedByKey.get(imageKey(image));
+                return loaded ? [loaded] : [];
+            });
+            modal.update({
+                content: renderEvidence(images, loading, Array.from(failedByKey.values())),
+            });
+        };
+        const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const unsubscribeDriveProgress = window.electronAPI.dailyTasks.onDriveEvidenceImageLoaded(({ requestId: responseId, result }) => {
+            if (responseId !== requestId || !modalActive) return;
+            const image = submittedImages.find(item => item.driveUrl === result.driveUrl);
+            if (!image) return;
+            const key = imageKey(image);
+            if (result.success && result.data?.url) {
+                cacheImageUrl(key, result.data.url);
+                loadedByKey.set(key, { ...image, url: result.data.url });
+                failedByKey.delete(key);
+            } else {
+                failedByKey.set(key, result.error || 'Không thể tải ảnh bằng chứng.');
+            }
+            updateModal(loadedByKey.size + failedByKey.size < submittedImages.length);
+        });
         const modal = Modal.info({
             title: 'Bằng chứng công việc',
             width: 980,
             content: renderEvidence(cachedImages, cachedImages.length < submittedImages.length),
             okText: 'Đóng',
+            afterClose: () => {
+                modalActive = false;
+                unsubscribeDriveProgress();
+            },
         });
         if (submittedImages.length === 0 || cachedImages.length === submittedImages.length) return;
 
-        const imageResults = await Promise.all(submittedImages.map(async image => {
+        const missingImages = submittedImages.filter(image => !getCachedImageUrl(imageKey(image)));
+        const driveImages = missingImages.filter(image => Boolean(image.driveUrl));
+        const legacyImages = missingImages.filter(image => !image.driveUrl && Boolean(image.storagePath));
+        const driveRequest = driveImages.length > 0
+            ? window.electronAPI.dailyTasks.getDriveEvidenceImageUrls(
+                task.id,
+                driveImages.map(image => ({ driveUrl: image.driveUrl!, mimeType: image.mimeType })),
+                requestId,
+            )
+            : Promise.resolve(null);
+        const legacyRequests = legacyImages.map(async image => {
             const key = imageKey(image);
-            const cachedUrl = getCachedImageUrl(key);
-            if (cachedUrl) return { ...image, url: cachedUrl };
-            if (image.driveUrl) {
-                const result = await window.electronAPI.dailyTasks.getDriveEvidenceImageUrl(task.id, image.driveUrl, image.mimeType);
-                if (!result.success || !result.data?.url) return null;
-                cacheImageUrl(key, result.data.url);
-                return { ...image, url: result.data.url };
-            }
-            if (!image.storagePath) return null;
             const result = await window.electronAPI.dailyTasks.getEvidenceImageUrl(task.id, image.storagePath);
-            if (!result.success || !result.data?.url) return null;
-            cacheImageUrl(key, result.data.url);
-            return { ...image, url: result.data.url };
-        }));
-        const availableImages = imageResults.filter((image): image is EvidenceImage & { url: string } => Boolean(image));
-        modal.update({ content: renderEvidence(availableImages, false, availableImages.length === 0) });
-        if (availableImages.length === 0) message.error('Không thể tải ảnh bằng chứng.');
+            if (result.success && result.data?.url) {
+                cacheImageUrl(key, result.data.url);
+                loadedByKey.set(key, { ...image, url: result.data.url });
+            } else {
+                failedByKey.set(key, result.error || 'Không thể tải ảnh bằng chứng.');
+            }
+            updateModal(loadedByKey.size + failedByKey.size < submittedImages.length);
+        });
+        const [driveResult] = await Promise.all([
+            driveRequest,
+            Promise.allSettled(legacyRequests),
+        ]);
+        if (driveResult?.success && driveResult.data?.results) {
+            driveResult.data.results.forEach(result => {
+                const image = driveImages.find(item => item.driveUrl === result.driveUrl);
+                if (!image) return;
+                const key = imageKey(image);
+                if (result.success && result.data?.url) {
+                    cacheImageUrl(key, result.data.url);
+                    loadedByKey.set(key, { ...image, url: result.data.url });
+                    failedByKey.delete(key);
+                } else {
+                    failedByKey.set(key, result.error || 'Không thể tải ảnh bằng chứng.');
+                }
+            });
+        } else if (driveResult && !driveResult.success) {
+            driveImages.forEach(image => failedByKey.set(
+                imageKey(image),
+                driveResult.error || 'Không thể tải ảnh bằng chứng.',
+            ));
+        }
+        updateModal(false);
+        if (loadedByKey.size === 0 && failedByKey.size > 0) {
+            message.error(Array.from(failedByKey.values())[0] || 'Không thể tải ảnh bằng chứng.');
+        }
     };
 
     const OperationalTaskCard = ({ task, lane }: { task: Task; lane: 'today' | 'evidence' | 'review' }) => {
@@ -2876,9 +2948,9 @@ const DailyTasks = () => {
             </div>;
         };
 
-        return <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 370px', gap: 16, alignItems: 'start' }}>
-            <section style={{ background: '#fff', border: '1px solid #dbe3ec', borderRadius: 8, overflow: 'hidden' }}>
-                <div style={{ padding: '16px 18px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+        return <div className="daily-tasks-main-grid" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 370px', gap: 16, alignItems: 'start' }}>
+            <section className="daily-tasks-list-panel" style={{ background: '#fff', border: '1px solid #dbe3ec', borderRadius: 8, overflow: 'hidden' }}>
+                <div className="daily-tasks-panel-header" style={{ padding: '16px 18px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
                     <div><h2 style={{ margin: 0, color: '#172033', fontSize: 18, fontWeight: 800 }}>{scope === 'all' ? (isCurrentWorkDate ? 'Cần xử lý hôm nay' : `Công việc ngày ${selectedWorkDate.format('DD/MM/YYYY')}`) : scope === 'daily' ? 'Hàng ngày' : 'Bàn giao'}</h2><span style={{ color: '#64748b', fontSize: 13 }}>{scope === 'daily' ? `${completedDailyTasks.length} đã hoàn thành · ${pendingTasks.length} đang mở` : scope === 'deadline' && deadlineViewFilter === 'completed' ? `${completedDeadlineCount} công việc đã hoàn thành` : `${pendingTasks.length} công việc đang mở`}</span></div>
                     {scope === 'deadline' ? (
                         <Space size={6} wrap>
@@ -2903,7 +2975,7 @@ const DailyTasks = () => {
                 {groups.map(group => <div key={group.key}><div style={{ padding: '9px 14px', background: group.key === 'overdue' ? '#fef2f2' : group.key === 'evidence' ? '#fff7ed' : '#f8fafc', color: group.color, fontSize: 13, fontWeight: 800 }}>{group.label} ({group.tasks.length})</div>{group.tasks.map(task => renderRow(task, group.color))}</div>)}
                 {groups.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={isCurrentWorkDate ? 'Không có công việc cần xử lý' : 'Chưa có dữ liệu công việc cho ngày này'} style={{ padding: 60 }} />}
             </section>
-            <aside style={{ background: '#fff', border: '1px solid #dbe3ec', borderRadius: 8, overflow: 'hidden' }}>
+            <aside className="daily-tasks-history-panel" style={{ background: '#fff', border: '1px solid #dbe3ec', borderRadius: 8, overflow: 'hidden' }}>
                 <div style={{ padding: '16px 18px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div>
                         <h2 style={{ margin: 0, fontSize: 17, color: '#172033' }}><HistoryOutlined style={{ color: '#059669' }} /> Lịch sử</h2>
@@ -2939,7 +3011,7 @@ const DailyTasks = () => {
     };
 
     return (
-        <div style={{ padding: 24, backgroundColor: '#f0f2f5', minHeight: '100vh' }}>
+        <div className="daily-tasks-page" style={{ padding: 24, backgroundColor: '#f0f2f5', minHeight: '100%' }}>
             {false && <Alert
                 type="warning"
                 showIcon
@@ -2954,16 +3026,16 @@ const DailyTasks = () => {
             />}
 
             {/* Header Stats */}
-            <Card style={{
+            <Card className="daily-tasks-hero" style={{
                 marginBottom: 12,
                 borderRadius: 8,
                 boxShadow: 'none',
                 border: '1px solid #e2e8f0'
             }} styles={{ body: { padding: '14px 18px' } }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
+                <div className="daily-tasks-hero-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div className="daily-tasks-title-tools" style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
                         <h1 style={{ margin: 0, color: '#172033', fontSize: 22, fontWeight: 800 }}>Công việc hàng ngày</h1>
-                        <div style={{ display: 'inline-flex', alignItems: 'center', height: 38, padding: 3, gap: 3, border: '1px solid #dbe3ec', borderRadius: 8, background: '#f8fafc' }}>
+                        <div className="daily-tasks-date-nav" style={{ display: 'inline-flex', alignItems: 'center', height: 38, padding: 3, gap: 3, border: '1px solid #dbe3ec', borderRadius: 8, background: '#f8fafc' }}>
                             <Tooltip title="Ngày trước">
                                 <Button
                                     type="text"
@@ -3007,7 +3079,7 @@ const DailyTasks = () => {
                         </div>
                     </div>
 
-                    <Space size={18}>
+                    <Space className="daily-tasks-stats" size={18}>
                         <div style={{ textAlign: 'center' }}>
                             <div style={{ fontSize: 22, fontWeight: 'bold', color: '#16a34a' }}>
                                 {completedTasks}
@@ -3051,6 +3123,7 @@ const DailyTasks = () => {
                     </Space>
 
                     {isAdmin && <Button
+                        className="daily-tasks-add-button"
                         type="primary"
                         size="large"
                         icon={<PlusOutlined />}
@@ -3087,8 +3160,9 @@ const DailyTasks = () => {
             </Modal>
 
             {/* Tab Switcher */}
-            <div style={{ marginBottom: 16 }}>
+            <div className="daily-tasks-tabs" style={{ marginBottom: 16 }}>
                 <Radio.Group
+                    className="daily-tasks-tab-group"
                     value={activeTab}
                     onChange={(e) => {
                         const nextTab = e.target.value as typeof activeTab;
