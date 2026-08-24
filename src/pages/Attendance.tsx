@@ -3,6 +3,7 @@ import { PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer, Legend 
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
 import {
+    STOCK_CHECK_MISSING_FINE_ENABLED,
     STOCK_CHECK_MISSING_FINE,
     STOCK_CHECK_POLICY_START_DATE,
     isPastStockCheckWorkingDay,
@@ -3931,6 +3932,7 @@ export default function Attendance() {
     }, [employees, evidencePenaltyRecords, overviewDateRange, systemUsers]);
 
     const autoStockCheckMissingFines = useMemo(() => {
+        if (!STOCK_CHECK_MISSING_FINE_ENABLED) return [] as FineRecord[];
         const endLimit = dayjs().subtract(1, 'day').endOf('day');
         const rangeStart = overviewDateRange[0].startOf('day');
         const rangeEnd = overviewDateRange[1].isBefore(endLimit)

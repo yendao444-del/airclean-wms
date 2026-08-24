@@ -7669,7 +7669,7 @@ async function appendHandlingUnitsTransactions(tx, entries) {
     const key = "handlingUnitsTransactionsJson";
     // AppConfig là một JSON dùng chung giữa nhiều máy. Advisory transaction
     // lock ngăn hai node cùng đọc bản cũ rồi ghi đè lịch sử của nhau.
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
     const config = await tx.appConfig.findUnique({ where: { key } });
     let items = [];
     try {
@@ -7692,6 +7692,9 @@ async function appendHandlingUnitsTransactions(tx, entries) {
     });
   } catch (error) {
     console.warn("Could not persist handling-unit history:", error.message);
+    // Lịch sử và số dư kiện phải cùng commit hoặc cùng rollback. Không được
+    // báo thành công khi chỉ cập nhật được số dư.
+    throw error;
   }
 }
 
@@ -7845,6 +7848,9 @@ async function executeRutHang(
           return { ...savedResult, unit: existingUnit, duplicate: true };
         }
       }
+      // PostgreSQL là nguồn dữ liệu chính. Không fallback sang JSON sau khi
+      // transaction lỗi vì có thể báo thành công dù dữ liệu không đồng bộ.
+      throw dbErr;
     }
   }
 
