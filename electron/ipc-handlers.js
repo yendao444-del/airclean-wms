@@ -11544,16 +11544,22 @@ async function writeGoodsCompanies(companies, client = prisma) {
 }
 
 async function withGoodsCompaniesWriteLock(callback) {
-  return prisma.$transaction(
-    async (tx) => {
-      // pg_advisory_xact_lock returns PostgreSQL `void`. Prisma's $queryRaw
-      // tries to deserialize that value and fails before the write callback
-      // can run, while $executeRaw is intended for result-less statements.
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${GOODS_COMPANIES_CONFIG_KEY}))`;
-      return callback(tx);
-    },
-    { isolationLevel: "Serializable", timeout: 10_000, maxWait: 10_000 },
-  );
+  // Serializable transactions already protect this read/modify/write flow.
+  // Avoid pg_advisory_xact_lock entirely: PostgreSQL exposes that function as
+  // `void`, which older Prisma runtimes cannot deserialize reliably.
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await prisma.$transaction(callback, {
+        isolationLevel: "Serializable",
+        timeout: 10_000,
+        maxWait: 10_000,
+      });
+    } catch (error) {
+      const retryable = error?.code === "P2034" || /write conflict|deadlock/i.test(String(error?.message || ""));
+      if (!retryable || attempt === 3) throw error;
+    }
+  }
+  throw new Error("Không thể khóa dữ liệu công ty hàng hóa.");
 }
 
 // Goods companies / product brands. Persisted in AppConfig so it works with
