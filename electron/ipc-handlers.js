@@ -5721,6 +5721,22 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
       .sort((a, b) => String(a?.sku || "").localeCompare(String(b?.sku || "")));
     const qrLabels = parseJsonArray(qrLabelsCfg?.value)
       .filter((item) => ["issued", "printed", "scanning"].includes(item?.status))
+      .map((item) => {
+        const currentZone = String(item?.location?.zone || "").trim();
+        if (currentZone && currentZone !== "Chưa phân khu") return item;
+        const spec = packagingSpecs.find(
+          (candidate) =>
+            Number(candidate?.id) === Number(item?.packagingSpecId) ||
+            (candidate?.sku === item?.sku &&
+              candidate?.name === item?.packagingName &&
+              candidate?.baseUnit === item?.baseUnit &&
+              Number(candidate?.conversionFactor) === Number(item?.conversionFactor)),
+        );
+        const specZone = String(spec?.location?.zone || "").trim();
+        return specZone && specZone !== "Chưa phân khu"
+          ? { ...item, location: normalizeHandlingLocation(spec.location) }
+          : item;
+      })
       .slice(-300)
       .reverse();
     const catalog = new Map();
@@ -6313,10 +6329,11 @@ ipcMain.handle("handlingUnits:issueQrLabels", async (_event, payload = {}) => {
     const conversionFactor = Math.floor(Number(payload.conversionFactor || 0));
     const quantity = Math.floor(Number(payload.quantity || 0));
     const requestedSupplierId = Number(payload.supplierId || 0) || null;
-    const location = normalizeHandlingLocation(payload.location);
-    if (!sku || !packagingName || conversionFactor <= 0 || quantity <= 0 || !location.zone) {
+    const requestedZone = String(payload?.location?.zone || "").trim();
+    if (!sku || !packagingName || conversionFactor <= 0 || quantity <= 0 || !requestedZone) {
       throw new Error("Cần chọn SKU, dạng kiện, quy đổi, số tem và khu vực lưu kho hợp lệ.");
     }
+    const location = normalizeHandlingLocation({ ...payload.location, zone: requestedZone });
     if (!["Tải", "Thùng", "Lẻ"].includes(packagingName)) {
       throw new Error("Dạng kiện chỉ được chọn: Tải, Thùng hoặc Lẻ.");
     }
