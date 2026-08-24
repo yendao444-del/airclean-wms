@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
     Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List,
-    Modal, Row, Space, Statistic, Table, Tag, Typography, Upload, message,
+    Modal, Popconfirm, Row, Space, Statistic, Table, Tag, Tooltip, Typography, Upload, message,
 } from 'antd';
 import type { UploadProps } from 'antd';
 import {
-    CheckCircleOutlined, CloudUploadOutlined, HistoryOutlined, MailOutlined,
+    CheckCircleOutlined, CloudUploadOutlined, DeleteOutlined, HistoryOutlined, MailOutlined,
     SafetyCertificateOutlined, SendOutlined, SettingOutlined, ShopOutlined,
 } from '@ant-design/icons';
 import * as XLSX from 'xlsx';
@@ -118,6 +118,9 @@ function uniqueOrders(orders: ComplaintOrder[]) {
     return [...byOrder.values()];
 }
 
+const complaintOrderKey = (order: ComplaintOrder) =>
+    `${order.platform}:${order.orderId}:${order.trackingNumber}`.toLowerCase();
+
 export default function CarrierComplaintsPage() {
     const [rawOrders, setRawOrders] = useState<ComplaintOrder[]>([]);
     const [eligible, setEligible] = useState<ComplaintOrder[]>([]);
@@ -131,6 +134,7 @@ export default function CarrierComplaintsPage() {
     const [historyOpen, setHistoryOpen] = useState(false);
     const [previewOpen, setPreviewOpen] = useState(false);
     const [history, setHistory] = useState<ComplaintBatch[]>([]);
+    const [dismissedOrderKeys, setDismissedOrderKeys] = useState<Set<string>>(new Set());
     const [form] = Form.useForm();
 
     useEffect(() => {
@@ -158,19 +162,29 @@ export default function CarrierComplaintsPage() {
     const duplicateCount = excluded.filter(item => item.reasonCode === 'DUPLICATE_COMPLAINT').length;
     const reviewCount = excluded.filter(item => item.reasonCode === 'NEEDS_REVIEW').length;
 
-    const reconcile = async (orders: ComplaintOrder[], files: number) => {
+    const reconcile = async (orders: ComplaintOrder[], files: number, preserveDismissed = false) => {
         const normalized = uniqueOrders(orders);
         if (!normalized.length) throw new Error('Không tìm thấy đơn Shopee/TikTok có mã đơn và mã vận đơn hợp lệ');
         const result = await window.electronAPI.carrierComplaints.reconcile({ orders: normalized });
         if (!result.success) throw new Error(result.error || 'Không thể đối soát đơn hàng');
+        const nextEligible = (result.data.eligible || []).filter((order: ComplaintOrder) =>
+            !preserveDismissed || !dismissedOrderKeys.has(complaintOrderKey(order)));
+        if (!preserveDismissed) setDismissedOrderKeys(new Set());
         setRawOrders(normalized);
-        setEligible(result.data.eligible || []);
+        setEligible(nextEligible);
         setExcluded(result.data.excluded || []);
         setConfig(result.data.config || { recipients: {} });
         setFileCount(files);
-        const firstCode = result.data.eligible?.[0]?.carrierCode || '';
+        const firstCode = nextEligible[0]?.carrierCode || '';
         setSelectedCode(firstCode);
-        message.success(`Đã đọc ${normalized.length} đơn, giữ lại ${result.data.eligible?.length || 0} đơn chưa lấy`);
+        message.success(`Đã đọc ${normalized.length} đơn, giữ lại ${nextEligible.length} đơn chưa lấy`);
+    };
+
+    const removeOrderFromComplaint = (order: ComplaintOrder) => {
+        const key = complaintOrderKey(order);
+        setDismissedOrderKeys(current => new Set(current).add(key));
+        setEligible(current => current.filter(item => complaintOrderKey(item) !== key));
+        message.success(`Đã loại vận đơn ${order.trackingNumber} khỏi lô khiếu nại`);
     };
 
     const readFiles = async (files: File[]) => {
@@ -250,7 +264,7 @@ export default function CarrierComplaintsPage() {
                     });
                     if (!result.success) throw new Error(result.error || 'Gửi khiếu nại thất bại');
                     message.success(result.message || `Đã gửi ${selected.orders.length} đơn`);
-                    await reconcile(rawOrders, fileCount);
+                    await reconcile(rawOrders, fileCount, true);
                 } catch (error) {
                     message.error(error instanceof Error ? error.message : 'Gửi khiếu nại thất bại');
                 } finally { setSending(''); }
@@ -305,7 +319,7 @@ export default function CarrierComplaintsPage() {
                             <Descriptions.Item label="Thời điểm chốt">18:30 hôm nay</Descriptions.Item>
                         </Descriptions>
                         <div className="cc-order-title"><strong>Danh sách vận đơn ({selected.orders.length})</strong><Button type="link" onClick={() => setPreviewOpen(true)}>Xem nội dung</Button></div>
-                        <List size="small" className="cc-order-list" dataSource={selected.orders} renderItem={(order, index) => <List.Item extra={<Tag>{order.platform}</Tag>}><Typography.Text type="secondary">{index + 1}.</Typography.Text>&nbsp; <strong>{order.trackingNumber}</strong></List.Item>} />
+                        <List size="small" className="cc-order-list" dataSource={selected.orders} renderItem={(order, index) => <List.Item extra={<Space size={4}><Tag>{order.platform}</Tag><Popconfirm title="Loại đơn khỏi lô khiếu nại?" description={`Vận đơn ${order.trackingNumber} sẽ không được gửi trong lần này.`} okText="Loại đơn" cancelText="Hủy" okButtonProps={{ danger: true }} onConfirm={() => removeOrderFromComplaint(order)}><Tooltip title="Loại khỏi lô khiếu nại"><Button className="cc-remove-order" type="text" danger size="small" icon={<DeleteOutlined />} aria-label={`Loại vận đơn ${order.trackingNumber} khỏi lô khiếu nại`} /></Tooltip></Popconfirm></Space>}><Typography.Text type="secondary">{index + 1}.</Typography.Text>&nbsp; <strong>{order.trackingNumber}</strong></List.Item>} />
                         <Alert className="cc-safety" type="success" showIcon icon={<SafetyCertificateOutlined />} message="Đã chống khiếu nại nhầm và trùng" description="Kiểm tra mã đơn + mã vận đơn và đối soát lại ngay trước khi gửi." />
                         <Button block type="primary" size="large" icon={<SendOutlined />} disabled={!selected.recipient} loading={sending === selected.code} onClick={sendGroup}>{selected.recipient ? `Gửi khiếu nại ${selected.code} • ${selected.orders.length} đơn` : `Cấu hình email ${selected.code} trước`}</Button>
                     </> : <Empty description="Chưa có DVVC được chọn" />}

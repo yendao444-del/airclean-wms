@@ -1118,6 +1118,13 @@ const ShiftPill = ({ label, status, time, outTime }: { label: string; status: 0 
                 <span>{label}</span>
                 <span style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                     {c.icon}
+                    {time && (
+                        <span style={{
+                            fontSize: 8, fontWeight: 600, opacity: 0.8,
+                            borderLeft: '1px solid', paddingLeft: 3, marginLeft: 1,
+                            fontVariantNumeric: 'tabular-nums', letterSpacing: -0.2,
+                        }}>{time}</span>
+                    )}
                     {outTime && (
                         <span style={{
                             fontSize: 8, fontWeight: 600, opacity: 0.7,
@@ -1485,6 +1492,18 @@ const InlineLeavePopover = ({
 // ===============================================
 // ===== FACE ATTENDANCE TAB COMPONENT =====
 // ===============================================
+const ATTENDANCE_TIME_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Bangkok',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+});
+
+const formatAttendanceTime = (value: string | Date) => {
+    const parsed = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(parsed.getTime()) ? '' : ATTENDANCE_TIME_FORMATTER.format(parsed);
+};
+
 const CHECK_TYPE_LABELS: Record<string, { label: string; color: string }> = {
     morning_in: { label: 'Sáng vào', color: '#52c41a' },
     morning_out: { label: 'Sáng ra', color: '#fa8c16' },
@@ -1562,9 +1581,8 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
     // Load today logs + profiles
     const loadData = useCallback(async () => {
         if (!api) return;
-        const today = new Date().toISOString().slice(0, 10);
         const [logsRes, profRes] = await Promise.all([
-            api.getLogs({ date: today }),
+            api.getLogs({ today: true }),
             api.getProfiles(),
         ]);
         if (logsRes.success) setTodayLogs(logsRes.data);
@@ -2241,7 +2259,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
     const logColumns = [
         { title: 'Nhân viên', dataIndex: 'displayUserName', key: 'userName', render: (v: string) => <Text strong>{v}</Text> },
         { title: 'Loại', dataIndex: 'checkType', key: 'checkType', width: 140, render: (v: string) => { const c = CHECK_TYPE_LABELS[v]; return <Tag color={c?.color} style={{ fontWeight: 700 }}>{c?.label || v}</Tag>; } },
-        { title: 'Giờ', dataIndex: 'timestamp', key: 'timestamp', width: 140, render: (v: string) => <Text>{new Date(v).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}</Text> },
+        { title: 'Giờ', dataIndex: 'timestamp', key: 'timestamp', width: 140, render: (v: string) => <Text>{formatAttendanceTime(v)}</Text> },
         { title: 'Độ chính xác', dataIndex: 'confidence', key: 'confidence', width: 150, render: (v: number) => <Text type="secondary">{Math.round((v || 0) * 100)}%</Text> },
     ];
 
@@ -4215,22 +4233,24 @@ export default function Attendance() {
             logs.forEach(log => {
                 const dayIdx = dayjs(log.date).date() - 1;
                 if (dayIdx < 0 || dayIdx >= daysInMonth) return;
-                const logTime = dayjs(log.timestamp);
-                const logMin = logTime.hour() * 60 + logTime.minute();
+                const logTime = formatAttendanceTime(log.timestamp);
+                if (!logTime) return;
+                const [logHour, logMinute] = logTime.split(':').map(Number);
+                const logMin = logHour * 60 + logMinute;
 
                 if (log.checkType === 'morning_in') {
-                    monthData[dayIdx].amTime = logTime.format('HH:mm');
+                    monthData[dayIdx].amTime = logTime;
                     monthData[dayIdx].am = logMin > amThreshold ? 2 : 1;
                 } else if (log.checkType === 'morning_out') {
-                    monthData[dayIdx].amOutTime = logTime.format('HH:mm');
+                    monthData[dayIdx].amOutTime = logTime;
                     if (monthData[dayIdx].am === 0) monthData[dayIdx].am = 1;
                 }
 
                 if (log.checkType === 'afternoon_in') {
-                    monthData[dayIdx].pmTime = logTime.format('HH:mm');
+                    monthData[dayIdx].pmTime = logTime;
                     monthData[dayIdx].pm = logMin > pmThreshold ? 2 : 1;
                 } else if (log.checkType === 'evening_out') {
-                    monthData[dayIdx].pmOutTime = logTime.format('HH:mm');
+                    monthData[dayIdx].pmOutTime = logTime;
                     if (monthData[dayIdx].pm === 0) monthData[dayIdx].pm = 1;
                 }
             });

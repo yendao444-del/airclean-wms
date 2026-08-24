@@ -23,6 +23,8 @@
 .cc-order-title { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; }
 .cc-order-list { max-height: 230px; overflow: auto; margin-bottom: 12px; border: 1px solid #e5e7eb; border-radius: 7px; }
 .cc-order-list .ant-list-item { padding: 7px 10px; }
+.cc-remove-order { opacity: .72; }
+.cc-remove-order:hover, .cc-remove-order:focus-visible { opacity: 1; background: #fff1f0 !important; }
 .cc-safety { margin: auto 0 12px; }
 .cc-preview { max-height: 300px; overflow: auto; padding: 12px; background: #f7f8fa; border-radius: 7px; font: 12px/1.6 Consolas, monospace; }
 @media (max-width: 1200px) { .carrier-complaints-page { min-width: 760px; }.cc-detail-card { margin-top: 0; } }

@@ -25120,10 +25120,38 @@ function getLocalDateKey(now = new Date()) {
   return `${y}-${m}-${d}`;
 }
 
-function getCheckType(now = new Date()) {
-  const h = now.getHours();
-  const m = now.getMinutes();
-  const total = h * 60 + m;
+const ATTENDANCE_DB_TIME_ZONE = "Asia/Bangkok";
+let lastAttendanceClockDriftAuditAt = 0;
+
+async function getAttendanceServerClock() {
+  const rows = await prisma.$queryRawUnsafe(`
+    WITH server_clock AS (
+      SELECT clock_timestamp() AS instant
+    )
+    SELECT
+      to_char(instant AT TIME ZONE '${ATTENDANCE_DB_TIME_ZONE}', 'YYYY-MM-DD') AS "dateKey",
+      EXTRACT(HOUR FROM instant AT TIME ZONE '${ATTENDANCE_DB_TIME_ZONE}')::int AS "hour",
+      EXTRACT(MINUTE FROM instant AT TIME ZONE '${ATTENDANCE_DB_TIME_ZONE}')::int AS "minute",
+      (EXTRACT(EPOCH FROM instant) * 1000)::bigint AS "epochMs"
+    FROM server_clock
+  `);
+  const row = rows?.[0];
+  const hour = Number(row?.hour);
+  const minute = Number(row?.minute);
+  const epochMs = Number(row?.epochMs);
+  if (!row?.dateKey || !Number.isFinite(hour) || !Number.isFinite(minute) || !Number.isFinite(epochMs)) {
+    throw new Error("Không lấy được giờ chuẩn từ máy chủ chấm công");
+  }
+  return {
+    dateKey: row.dateKey,
+    hour,
+    minute,
+    totalMinutes: hour * 60 + minute,
+    epochMs,
+  };
+}
+
+function getCheckType(total) {
 
   // Ca sáng
   // Check-in: 07:00 đến trước 11:50
@@ -25152,11 +25180,11 @@ function attendanceDecision(checkType, extra = {}) {
   return { checkType, ...extra };
 }
 
-async function resolveAttendanceCheckType(faceId, date, now = new Date()) {
-  const baseCheckType = getCheckType(now);
+async function resolveAttendanceCheckType(faceId, date, totalMinutes) {
+  const baseCheckType = getCheckType(totalMinutes);
   if (!baseCheckType) return attendanceDecision(null);
 
-  const total = now.getHours() * 60 + now.getMinutes();
+  const total = totalMinutes;
   const logs = await prisma.attendanceLog.findMany({
     where: { faceId, date },
     select: { checkType: true, timestamp: true },
@@ -25626,12 +25654,37 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
       };
     }
 
-    const now = new Date();
-    const today = getLocalDateKey(now);
+    // Security: the employee workstation clock is untrusted. Date, session and
+    // the persisted timestamp all come from the Supabase/PostgreSQL clock.
+    const serverClock = await getAttendanceServerClock();
+    const today = serverClock.dateKey;
+    const clientClockDeltaMs = Date.now() - serverClock.epochMs;
+    if (Math.abs(clientClockDeltaMs) >= 30000) {
+      console.warn(
+        `[Attendance Security] Device clock differs from database by ${clientClockDeltaMs} ms`,
+      );
+      if (serverClock.epochMs - lastAttendanceClockDriftAuditAt >= 60 * 60 * 1000) {
+        lastAttendanceClockDriftAuditAt = serverClock.epochMs;
+        void logActivity({
+          module: "attendance",
+          action: "DEVICE_CLOCK_DRIFT",
+          description: `Đồng hồ máy chấm công lệch ${Math.round(clientClockDeltaMs / 1000)} giây so với máy chủ`,
+          recordName: result.face_id,
+          changes: {
+            serverTime: new Date(serverClock.epochMs).toISOString(),
+            deviceTime: new Date().toISOString(),
+            deviceClockDeltaMs: clientClockDeltaMs,
+          },
+          severity: "WARNING",
+          userName: "System",
+          deviceInfo: process.env.COMPUTERNAME || null,
+        });
+      }
+    }
     const checkDecision = await resolveAttendanceCheckType(
       result.face_id,
       today,
-      now,
+      serverClock.totalMinutes,
     );
     const checkType = checkDecision.checkType;
     if (!checkType) {
@@ -25683,6 +25736,8 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
         ...log,
         confidence: result.confidence,
         userName,
+        serverTime: new Date(serverClock.epochMs).toISOString(),
+        deviceClockDeltaMs: clientClockDeltaMs,
         lateFine,
         ...faceInfo,
       },
@@ -25735,10 +25790,12 @@ ipcMain.handle(
 // Lấy lịch sử chấm công
 ipcMain.handle(
   "attendance:getLogs",
-  async (event, { date, month, userId } = {}) => {
+  async (event, { date, month, userId, today = false } = {}) => {
     try {
+      const serverClock = await getAttendanceServerClock();
       const where = {};
-      if (date) where.date = date;
+      if (today) where.date = serverClock.dateKey;
+      else if (date) where.date = date;
       else if (month) where.date = { startsWith: month }; // month: 'YYYY-MM'
 
       if (userId) where.userId = userId;
@@ -25746,9 +25803,18 @@ ipcMain.handle(
       const logs = await prisma.attendanceLog.findMany({
         where,
         orderBy: { timestamp: "desc" },
-        ...(date ? { take: 200 } : {}), // Limit if single date, fetch all for month
+        ...(date || today ? { take: 200 } : {}), // Limit if single date, fetch all for month
       });
-      return { success: true, data: logs };
+      return {
+        success: true,
+        data: logs,
+        serverClock: {
+          dateKey: serverClock.dateKey,
+          hour: serverClock.hour,
+          minute: serverClock.minute,
+          epochMs: serverClock.epochMs,
+        },
+      };
     } catch (err) {
       return { success: false, error: err.message };
     }
