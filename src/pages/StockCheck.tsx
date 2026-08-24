@@ -34,7 +34,11 @@ import { useAuth } from '../contexts/AuthContext';
 import { useAppData } from '../contexts/AppDataContext';
 import { usePageHeader } from '../contexts/PageHeaderContext';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
-import { STOCK_CHECK_MISSING_FINE, STOCK_CHECK_POLICY_START_DATE } from '../lib/workCalendar';
+import {
+    STOCK_CHECK_MISSING_FINE_ENABLED,
+    STOCK_CHECK_MISSING_FINE,
+    STOCK_CHECK_POLICY_START_DATE,
+} from '../lib/workCalendar';
 
 const LS_KEY = 'stock-check-sessions-v2';
 const DAILY_TOP_ROTATION_COUNT = 2;
@@ -1330,7 +1334,7 @@ export default function StockCheck() {
     }, [contextProducts, sessions, todayStr, isAdmin, isToday]);
 
     // Auto-assign người phụ trách khi page load — nếu hôm nay chưa có session thì gán ngay,
-    // không cần chờ nhân viên bấm "Tạo phiên kiểm". Nếu không kiểm → vẫn bị phạt.
+    // không cần chờ nhân viên bấm "Tạo phiên kiểm". Chính sách phạt được điều khiển riêng.
     useEffect(() => {
         if (!isAdmin || !sessionsLoaded || !isToday || activeTab !== 'daily' || !assignableManagers.length) return;
         if (dayjs().day() === 0) return; // Chủ nhật — không kiểm
@@ -2477,7 +2481,12 @@ export default function StockCheck() {
                         style={{ marginBottom: 12, borderRadius: 8, fontSize: 12 }}
                         message={
                             <span>
-                                Phiên kiểm chưa hoàn tất: còn <strong>{incompleteSkuCount}/{totalCount} SKU</strong> chưa cân bằng. Kiểm một phần SKU không được tính là hoàn thành; cần cân bằng đủ toàn bộ SKU trước khi nộp, nếu không người phụ trách sẽ bị phạt <strong>{STOCK_CHECK_MISSING_FINE.toLocaleString('vi-VN')}đ</strong> trong Bảng công.
+                                Phiên kiểm chưa hoàn tất: còn <strong>{incompleteSkuCount}/{totalCount} SKU</strong> chưa cân bằng. Kiểm một phần SKU không được tính là hoàn thành; cần cân bằng đủ toàn bộ SKU trước khi nộp
+                                {STOCK_CHECK_MISSING_FINE_ENABLED ? (
+                                    <>; nếu không người phụ trách sẽ bị phạt <strong>{STOCK_CHECK_MISSING_FINE.toLocaleString('vi-VN')}đ</strong> trong Bảng công.</>
+                                ) : (
+                                    <>. Tính năng phạt thiếu kiểm hàng ngày hiện đang tạm tắt.</>
+                                )}
                             </span>
                         }
                     />
