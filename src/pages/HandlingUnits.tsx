@@ -2388,6 +2388,22 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     setShowQrSetup(true);
   };
 
+  const qrLabelLocation = (label: any) => {
+    const labelZone = String(label?.location?.zone || "").trim();
+    if (labelZone && labelZone !== "Chưa phân khu") return label.location;
+    const spec = [...workspace.packagingSpecs]
+      .reverse()
+      .find((candidate) =>
+        Number(candidate?.id) === Number(label?.packagingSpecId) ||
+        (candidate?.sku === label?.sku &&
+          candidate?.name === label?.packagingName &&
+          candidate?.baseUnit === label?.baseUnit &&
+          Number(candidate?.conversionFactor) === Number(label?.conversionFactor)),
+      );
+    const specZone = String(spec?.location?.zone || "").trim();
+    return specZone && specZone !== "Chưa phân khu" ? spec.location : label?.location;
+  };
+
   const openQrLabelPrint = (label: any, size: "A6" | "A7") => {
     handlePrintLabels([{
       id: label.code,
@@ -2398,7 +2414,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       status: "Chờ in",
       initialPcs: Number(label.conversionFactor),
       currentPcs: Number(label.conversionFactor),
-      location: label.location,
+      location: qrLabelLocation(label),
       qrPayload: label.code,
     }], size);
   };
@@ -2432,7 +2448,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           status: "Chưa nhập kho",
           initialPcs: Number(label.conversionFactor),
           currentPcs: Number(label.conversionFactor),
-          location: label.location,
+          location: qrLabelLocation(label),
           qrPayload: label.code,
         })),
       );
@@ -4625,7 +4641,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               {workspace.qrLabels.slice(0, 10).map((label) => (
                 <div className="hu-qr-ledger-row" key={label.code}>
                   <span><QrcodeOutlined /></span>
-                  <div><b>{label.code}</b><small>{label.sku} · {label.packagingName} = {fmt(Number(label.conversionFactor))} {label.baseUnit}</small></div>
+                    <div>
+                      <b>{label.code}</b>
+                      <small>{label.sku} · {label.packagingName} = {fmt(Number(label.conversionFactor))} {label.baseUnit}</small>
+                      <small>Vị trí: {locationFor({ location: qrLabelLocation(label) } as UnitRow)}</small>
+                    </div>
                   <div className="hu-qr-ledger-meta">
                     <small>{label.supplierName || "Chưa gán NCC"}</small>
                     <div>
