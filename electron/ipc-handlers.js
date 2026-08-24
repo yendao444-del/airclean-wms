@@ -5614,6 +5614,43 @@ ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
 
 // Tồn SKU/variant của phần mềm chỉ dùng làm số liệu tham khảo đối chiếu.
 // Số dư thực tế của workspace kiện hàng được quản lý độc lập trong HandlingUnit.
+ipcMain.handle("handlingUnits:exportLabelsPdf", async (event, payload = {}) => {
+  try {
+    requireRole("admin", "manager");
+
+    const labelSize = payload.labelSize === "A7" ? "A7" : "A6";
+    const pageWidthMm = labelSize === "A7" ? 75 : 100;
+    const pageHeightMm = labelSize === "A7" ? 100 : 150;
+
+    const requestedName = String(payload.fileName || `DBY-WMS-Tem-${labelSize}`)
+      .normalize("NFKD")
+      .replace(/[^a-zA-Z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80) || `DBY-WMS-Tem-${labelSize}`;
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const pdfPath = path.join(
+      app.getPath("downloads"),
+      `${requestedName}-${timestamp}.pdf`,
+    );
+
+    const pdfData = await event.sender.printToPDF({
+      printBackground: true,
+      preferCSSPageSize: true,
+      pageSize: { width: pageWidthMm / 25.4, height: pageHeightMm / 25.4 },
+      margins: { marginType: "none" },
+    });
+    await fs.promises.writeFile(pdfPath, pdfData);
+
+    const openError = await shell.openPath(pdfPath);
+    if (openError) throw new Error(openError);
+
+    return { success: true, data: { path: pdfPath } };
+  } catch (error) {
+    console.error("Export handling-unit labels PDF error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle("handlingUnits:getWorkspace", async () => {
   try {
     requireRole("admin", "manager");

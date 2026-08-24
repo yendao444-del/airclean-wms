@@ -11,6 +11,7 @@ import {
     Progress,
     Empty,
     Divider,
+    Dropdown,
     Modal,
     Form,
     Input,
@@ -466,6 +467,8 @@ const DailyTasks = () => {
     // History state
     const [activeTab, setActiveTab] = useState<'tasks' | 'triage' | 'assignments' | 'history'>('triage');
     const [boardFilter, setBoardFilter] = useState<'all' | 'action' | 'evidence' | 'overdue'>('all');
+    const [taskSearch, setTaskSearch] = useState('');
+    const [taskSort, setTaskSort] = useState<'priority' | 'deadline'>('priority');
     const [deadlineViewFilter, setDeadlineViewFilter] = useState<'pending' | 'completed' | 'all'>('pending');
     const [handoverSearch, setHandoverSearch] = useState('');
     const [handoverStatusFilter, setHandoverStatusFilter] = useState<'pending' | 'overdue' | 'warning' | 'completed'>('pending');
@@ -2768,7 +2771,27 @@ const DailyTasks = () => {
         const visibleDeadlineTasks = deadlineViewFilter === 'all'
             ? selectedAssignments
             : selectedAssignments.filter(task => deadlineViewFilter === 'completed' ? task.status === 'completed' : task.status !== 'completed');
-        const sourceTasks = scope === 'daily' ? selectedDailyTasks : scope === 'deadline' ? visibleDeadlineTasks : [...selectedDailyTasks, ...selectedAssignments];
+        const unfilteredSourceTasks = scope === 'daily' ? selectedDailyTasks : scope === 'deadline' ? visibleDeadlineTasks : [...selectedDailyTasks, ...selectedAssignments];
+        const normalizedTaskSearch = taskSearch.trim().toLocaleLowerCase('vi');
+        const sourceTasks = unfilteredSourceTasks.filter(task => {
+            if (normalizedTaskSearch && ![task.title, task.assignee, task.category]
+                .some(value => String(value || '').toLocaleLowerCase('vi').includes(normalizedTaskSearch))) return false;
+            if (boardFilter === 'all') return true;
+            if (boardFilter === 'action') return task.status !== 'completed';
+            if (boardFilter === 'evidence') {
+                const evidence = getEvidence(task);
+                return task.status !== 'completed' && evidence.required && evidence.status !== 'approved';
+            }
+            return task.status !== 'completed' && (task.type === 'assignment' ? getDeadlineStatus(task).status === 'overdue' : isOverdue(task));
+        }).sort((left, right) => {
+            if (taskSort === 'deadline') {
+                const leftDeadline = dayjs(`${left.dueDate || selectedDateKey} ${left.dueTime || '23:59'}`);
+                const rightDeadline = dayjs(`${right.dueDate || selectedDateKey} ${right.dueTime || '23:59'}`);
+                return leftDeadline.valueOf() - rightDeadline.valueOf();
+            }
+            const priorityOrder: Record<Task['priority'], number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+            return priorityOrder[left.priority] - priorityOrder[right.priority];
+        });
         const pendingTasks = sourceTasks.filter(task => task.status !== 'completed');
         const completedDailyTasks = scope === 'daily' ? sourceTasks.filter(task => task.status === 'completed') : [];
         const completedDeadlineTasks = scope === 'deadline' ? sourceTasks.filter(task => task.status === 'completed') : [];
@@ -2872,6 +2895,38 @@ const DailyTasks = () => {
             const evidencePenaltyAmount = isAssignment ? getAssignmentDeadlinePenalty(task) : evidence.penaltyAmount;
             const nextAssignmentEvidencePenalty = getNextAssignmentEvidencePenalty(task);
             const recurrenceInfo = getOpenRecurrenceInfo(task);
+            const adminActions = isAdmin ? (
+                <Dropdown
+                    trigger={['click']}
+                    placement="bottomRight"
+                    menu={{
+                        items: [
+                            { key: 'edit', icon: <EditOutlined />, label: 'Chỉnh sửa' },
+                            { type: 'divider' },
+                            { key: 'delete', icon: <DeleteOutlined />, label: 'Xóa công việc', danger: true },
+                        ],
+                        onClick: ({ key, domEvent }) => {
+                            domEvent.stopPropagation();
+                            if (key === 'edit') {
+                                if (isAssignment) handleEditAssignment(task);
+                                else handleEditTask(task);
+                            }
+                            if (key === 'delete') {
+                                if (isAssignment) handleDeleteAssignment(task.id);
+                                else handleDeleteTask(task.id);
+                            }
+                        },
+                    }}
+                >
+                    <Button
+                        className="daily-task-overflow-button"
+                        size="small"
+                        icon={<MoreOutlined />}
+                        aria-label="Mở menu công việc"
+                        onClick={event => event.stopPropagation()}
+                    />
+                </Dropdown>
+            ) : null;
             return <div
                 key={`${task.type}-${task.id}`}
                 className="daily-task-list-row"
@@ -2903,7 +2958,6 @@ const DailyTasks = () => {
                     </div>
                 </div>
                 <Tag style={{ width: 'fit-content', margin: 0, color: isAssignment ? '#2563eb' : '#15803d', background: isAssignment ? '#eff6ff' : '#ecfdf5', borderColor: isAssignment ? '#bfdbfe' : '#bbf7d0', fontWeight: 700 }}>{sourceLabel}</Tag>
-                <div style={{ color: color === '#dc2626' ? '#dc2626' : '#475569', fontSize: 13, fontWeight: 650 }}><ClockCircleOutlined /> {deadlineText}</div>
                 <div className={`daily-task-evidence-summary${evidencePenaltyRecorded ? ' daily-task-evidence-escalation' : ''}`} style={{ color: evidence.required ? '#c2410c' : '#64748b' }}>
                     {evidencePenaltyRecorded ? <>
                         <span className="daily-task-evidence-penalty"><WarningOutlined /> Đã phạt lần {task.evidencePenaltyCount}: {formatPenaltyAmount(evidencePenaltyAmount * Number(task.evidencePenaltyCount || 1))}đ</span>
@@ -2920,6 +2974,7 @@ const DailyTasks = () => {
                 </div>
                 {isAssignment ? (
                     <Space size={6} className="daily-task-row-actions">
+                        <span className={`daily-task-deadline-pill${color === '#dc2626' ? ' is-overdue' : ''}`}><ClockCircleOutlined /> {deadlineText}</span>
                         {needsEvidence && canSubmitAssignmentEvidence && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp bằng chứng</Button>}
                         {hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
                         {evidence.required && evidence.status === 'submitted' && canReviewEvidence && <Tooltip title="Duyệt bằng chứng"><Button type="text" size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleReviewEvidence(task, true)} style={{ color: '#16a34a' }} /></Tooltip>}
@@ -2933,16 +2988,15 @@ const DailyTasks = () => {
                         )}
                         {canRequestAssignmentCompletion && !needsEvidence && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} className="daily-task-primary-action">Báo hoàn thành</Button>}
                         {canCompleteAssignment && !needsEvidence && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleCompleteAssignment(task.id)} className="daily-task-primary-action">Xác nhận hoàn thành</Button>}
-                        {isAdmin && <Tooltip title="Sửa"><Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditAssignment(task)} /></Tooltip>}
-                        {isAdmin && <Tooltip title="Xóa"><Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteAssignment(task.id)} /></Tooltip>}
+                        {adminActions}
                     </Space>
                 ) : (
                     <Space size={6} className="daily-task-row-actions">
+                        <span className={`daily-task-deadline-pill${color === '#dc2626' ? ' is-overdue' : ''}`}><ClockCircleOutlined /> {deadlineText}</span>
                         {canCompleteDailyTask && needsEvidence && <Button size="small" type="primary" icon={<UploadOutlined />} onClick={() => handleSubmitEvidence(task)} className="daily-task-primary-action">Nộp bằng chứng</Button>}
                         {hasEvidence && <Button size="small" icon={<EyeOutlined />} onClick={() => openEvidence(task)}>Xem bằng chứng</Button>}
                         {canCompleteDailyTask && !evidence.required && <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleToggleComplete(task.id)} className="daily-task-primary-action">Hoàn thành</Button>}
-                        {isAdmin && <Tooltip title="Sửa"><Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEditTask(task)} /></Tooltip>}
-                        {isAdmin && <Tooltip title="Xóa"><Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteTask(task.id)} /></Tooltip>}
+                        {adminActions}
                     </Space>
                 )}
             </div>;
@@ -2958,7 +3012,7 @@ const DailyTasks = () => {
                             <Button size="small" type={deadlineViewFilter === 'completed' ? 'primary' : 'default'} onClick={() => setDeadlineViewFilter('completed')} style={{ borderRadius: 6 }}>Đã hoàn thành ({completedDeadlineCount})</Button>
                             <Button size="small" type={deadlineViewFilter === 'all' ? 'primary' : 'default'} onClick={() => setDeadlineViewFilter('all')} style={{ borderRadius: 6 }}>Tất cả ({selectedAssignments.length})</Button>
                         </Space>
-                    ) : <Button type="text" style={{ color: '#475569', fontWeight: 600 }}>Sắp xếp: ưu tiên</Button>}
+                    ) : <span className="daily-tasks-panel-status">Ưu tiên theo thời hạn và mức độ</span>}
                 </div>
                 {showTaskActionGuide && pendingTasks.length > 0 && (
                     <div className="daily-task-action-guide" role="status">
@@ -2971,7 +3025,7 @@ const DailyTasks = () => {
                         <InfoCircleOutlined /> Công việc lặp lại vẫn tự sinh kỳ mới đúng lịch. Kỳ cũ chưa hoàn thành sẽ tiếp tục hiển thị và tiếp tục bị phạt riêng.
                     </div>
                 )}
-                <div className="daily-task-list-header"><span>Công việc</span><span>Nguồn</span><span>Hạn</span><span>Bằng chứng / phạt</span><span style={{ textAlign: 'right' }}>Thao tác</span></div>
+                <div className="daily-task-list-header"><span>Công việc</span><span>Nguồn</span><span>Bằng chứng / phạt</span><span style={{ textAlign: 'right' }}>Thời hạn & thao tác</span></div>
                 {groups.map(group => <div key={group.key}><div style={{ padding: '9px 14px', background: group.key === 'overdue' ? '#fef2f2' : group.key === 'evidence' ? '#fff7ed' : '#f8fafc', color: group.color, fontSize: 13, fontWeight: 800 }}>{group.label} ({group.tasks.length})</div>{group.tasks.map(task => renderRow(task, group.color))}</div>)}
                 {groups.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={isCurrentWorkDate ? 'Không có công việc cần xử lý' : 'Chưa có dữ liệu công việc cho ngày này'} style={{ padding: 60 }} />}
             </section>
@@ -3034,7 +3088,12 @@ const DailyTasks = () => {
             }} styles={{ body: { padding: '14px 18px' } }}>
                 <div className="daily-tasks-hero-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div className="daily-tasks-title-tools" style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
-                        <h1 style={{ margin: 0, color: '#172033', fontSize: 22, fontWeight: 800 }}>Công việc hàng ngày</h1>
+                        <div className="daily-tasks-title-copy">
+                            <h1 style={{ margin: 0, color: '#172033', fontSize: 22, fontWeight: 800 }}>Công việc hàng ngày</h1>
+                            <p>
+                                Quản lý và theo dõi công việc của bạn · {selectedWorkDate.isSame(dayjs(), 'day') ? 'Hôm nay' : selectedWorkDate.format('DD/MM/YYYY')}
+                            </p>
+                        </div>
                         <div className="daily-tasks-date-nav" style={{ display: 'inline-flex', alignItems: 'center', height: 38, padding: 3, gap: 3, border: '1px solid #dbe3ec', borderRadius: 8, background: '#f8fafc' }}>
                             <Tooltip title="Ngày trước">
                                 <Button
@@ -3080,7 +3139,7 @@ const DailyTasks = () => {
                     </div>
 
                     <Space className="daily-tasks-stats" size={18}>
-                        <div style={{ textAlign: 'center' }}>
+                        <div className="daily-task-stat-card is-success">
                             <div style={{ fontSize: 22, fontWeight: 'bold', color: '#16a34a' }}>
                                 {completedTasks}
                             </div>
@@ -3089,7 +3148,7 @@ const DailyTasks = () => {
 
                         <Divider type="vertical" style={{ height: 34 }} />
 
-                        <div style={{ textAlign: 'center' }}>
+                        <div className="daily-task-stat-card is-danger">
                             <div style={{ fontSize: 22, fontWeight: 'bold', color: '#dc2626' }}>
                                 {overdueTasks}
                             </div>
@@ -3098,7 +3157,7 @@ const DailyTasks = () => {
 
                         <Divider type="vertical" style={{ height: 34 }} />
 
-                        <div style={{ textAlign: 'center' }}>
+                        <div className="daily-task-stat-card is-warning">
                             <div style={{ fontSize: 22, fontWeight: 'bold', color: '#d97706' }}>
                                 {urgentTasks}
                             </div>
@@ -3107,18 +3166,17 @@ const DailyTasks = () => {
 
                         <Divider type="vertical" style={{ height: 34 }} />
 
-                        <div style={{ textAlign: 'center' }}>
+                        <div className="daily-task-stat-card is-progress">
+                            <div style={{ fontSize: 22, fontWeight: 'bold', color: '#16a34a' }}>
+                                {totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0}%
+                            </div>
                             <Progress
-                                type="circle"
-                                percent={Math.round((completedTasks / totalTasks) * 100)}
-                                width={42}
-                                strokeWidth={8}
-                                strokeColor={{
-                                    '0%': '#108ee9',
-                                    '100%': '#87d068',
-                                }}
+                                percent={totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0}
+                                showInfo={false}
+                                size="small"
+                                strokeColor="#16a34a"
                             />
-                            <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>Tiến độ</div>
+                            <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>Tiến độ hôm nay</div>
                         </div>
                     </Space>
 
@@ -3230,6 +3288,36 @@ const DailyTasks = () => {
                         📜 Lịch sử ({history.length})
                     </Radio.Button>}
                 </Radio.Group>
+                <div className="daily-tasks-tab-tools">
+                    <Input
+                        allowClear
+                        prefix={<SearchOutlined />}
+                        placeholder="Tìm kiếm công việc..."
+                        value={taskSearch}
+                        onChange={event => setTaskSearch(event.target.value)}
+                        aria-label="Tìm kiếm công việc"
+                    />
+                    <Select
+                        aria-label="Lọc công việc"
+                        value={boardFilter}
+                        onChange={value => setBoardFilter(value)}
+                        options={[
+                            { value: 'all', label: 'Tất cả công việc' },
+                            { value: 'action', label: 'Cần xử lý' },
+                            { value: 'evidence', label: 'Cần bằng chứng' },
+                            { value: 'overdue', label: 'Quá hạn' },
+                        ]}
+                    />
+                    <Select
+                        aria-label="Sắp xếp công việc"
+                        value={taskSort}
+                        onChange={value => setTaskSort(value)}
+                        options={[
+                            { value: 'priority', label: 'Sắp xếp: Ưu tiên' },
+                            { value: 'deadline', label: 'Sắp xếp: Thời hạn' },
+                        ]}
+                    />
+                </div>
             </div>
 
             {/* === ASSIGNMENT TAB === */}

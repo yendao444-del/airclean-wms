@@ -700,69 +700,173 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [detail, setDetail] = useState<UnitRow | null>(null);
   const [showPrintModal, setShowPrintModal] = useState(false);
   const [printUnits, setPrintUnits] = useState<UnitRow[]>([]);
-  const [printLabelSize, setPrintLabelSize] = useState<"A6" | "A7">("A6");
+  const [printLabelSize, setPrintLabelSize] = useState<"A6" | "A7">(() =>
+    window.localStorage.getItem("hu-print-label-size") === "A7" ? "A7" : "A6",
+  );
+  const [isExportingLabelPdf, setIsExportingLabelPdf] = useState(false);
 
-  const handlePrintLabels = async () => {
-    if (document.body.classList.contains("hu-label-printing")) return;
-    const qrCodes = printUnits
-      .map((unit) => String(unit.qrPayload || "").trim())
-      .filter(Boolean);
-    if (qrCodes.length) {
+  const updatePrintLabelSize = (value: "A6" | "A7") => {
+    setPrintLabelSize(value);
+    window.localStorage.setItem("hu-print-label-size", value);
+  };
+
+  const handlePrintLabels = (
+    units: UnitRow[],
+    size: "A6" | "A7",
+  ) => {
+    if (!units.length || isExportingLabelPdf) return;
+    updatePrintLabelSize(size);
+    setPrintUnits(units);
+    setIsExportingLabelPdf(true);
+    setShowPrintModal(true);
+  };
+
+  useEffect(() => {
+    if (!isExportingLabelPdf || !showPrintModal || !printUnits.length) return;
+
+    let cancelled = false;
+    let printStyle: HTMLStyleElement | null = null;
+    let printRoot: HTMLElement | null = null;
+    const cleanup = () => {
+      document.body.classList.remove("hu-label-printing");
+      printRoot?.remove();
+      printStyle?.remove();
+    };
+
+    const exportPdf = async () => {
+      const isA7 = printLabelSize === "A7";
+      const pageWidth = isA7 ? "75mm" : "100mm";
+      const pageHeight = isA7 ? "100mm" : "150mm";
+      const pagePadding = isA7 ? "3mm" : "4mm";
+      printStyle = document.createElement("style");
+      printStyle.id = "hu-label-page-size";
+      printStyle.textContent = `
+        @media screen {
+          .hu-print-pdf-root { display: none !important; }
+        }
+        @page { size: ${pageWidth} ${pageHeight} !important; margin: 0 !important; }
+        @media print {
+          html, body {
+            width: ${pageWidth} !important;
+            min-width: ${pageWidth} !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: visible !important;
+          }
+          body.hu-label-printing > *:not(.hu-print-pdf-root) {
+            display: none !important;
+          }
+          body.hu-label-printing > .hu-print-pdf-root {
+            position: static !important;
+            display: block !important;
+            visibility: visible !important;
+            width: ${pageWidth} !important;
+            min-width: ${pageWidth} !important;
+            height: auto !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: visible !important;
+            background: #ffffff !important;
+          }
+          body.hu-label-printing > .hu-print-pdf-root,
+          body.hu-label-printing > .hu-print-pdf-root * {
+            visibility: visible !important;
+          }
+          body.hu-label-printing .hu-print-label {
+            width: ${pageWidth} !important;
+            min-width: ${pageWidth} !important;
+            max-width: ${pageWidth} !important;
+            height: ${pageHeight} !important;
+            min-height: ${pageHeight} !important;
+            max-height: ${pageHeight} !important;
+            margin: 0 !important;
+            padding: ${pagePadding} !important;
+            box-sizing: border-box !important;
+            transform: none !important;
+          }
+        }
+      `;
+      document.getElementById(printStyle.id)?.remove();
+      document.head.appendChild(printStyle);
+
       try {
-        setIsMarkingQrLabelsPrinted(true);
-        const result = await window.electronAPI?.handlingUnits?.markQrLabelsPrinted?.(qrCodes);
-        if (!result?.success) throw new Error(result?.error || "Không thể ghi nhận lệnh in tem.");
-        setIssuedQrLabels((previous) => previous.map((label) =>
-          qrCodes.includes(label.code) ? { ...label, status: "printed" } : label,
-        ));
-        void loadWorkspace(true);
+        await document.fonts?.ready;
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        );
+        if (cancelled) return;
+
+        const preview = document.querySelector(
+          ".hu-print-modal .hu-print-preview-wrapper",
+        );
+        if (!preview) {
+          throw new Error("Không tìm thấy nội dung tem để tạo PDF.");
+        }
+        printRoot = preview.cloneNode(true) as HTMLElement;
+        printRoot.classList.add("hu-print-pdf-root");
+        document.body.appendChild(printRoot);
+        document.body.classList.add("hu-label-printing");
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        );
+        if (cancelled) return;
+
+        const exportLabelsPdf = window.electronAPI?.handlingUnits?.exportLabelsPdf;
+        if (!exportLabelsPdf) {
+          throw new Error("Phiên bản ứng dụng hiện tại chưa hỗ trợ xuất PDF tem.");
+        }
+        const result = await exportLabelsPdf({
+          fileName: `DBY-WMS-Tem-${printLabelSize}-${printUnits.length}-tem`,
+          labelSize: printLabelSize,
+        });
+        if (!result?.success) {
+          throw new Error(result?.error || "Không thể tạo hoặc mở file PDF tem.");
+        }
+
+        const qrCodes = printUnits
+          .map((unit) => String(unit.qrPayload || "").trim())
+          .filter(Boolean);
+        if (qrCodes.length) {
+          try {
+            setIsMarkingQrLabelsPrinted(true);
+            const markResult =
+              await window.electronAPI?.handlingUnits?.markQrLabelsPrinted?.(qrCodes);
+            if (!markResult?.success) {
+              throw new Error(markResult?.error || "Không thể cập nhật trạng thái tem.");
+            }
+            setIssuedQrLabels((previous) =>
+              previous.map((label) =>
+                qrCodes.includes(label.code) ? { ...label, status: "printed" } : label,
+              ),
+            );
+            void loadWorkspace(true);
+          } catch (error: any) {
+            message.warning(
+              `PDF đã mở nhưng chưa cập nhật được trạng thái tem: ${error?.message || "Lỗi không xác định"}`,
+            );
+          } finally {
+            setIsMarkingQrLabelsPrinted(false);
+          }
+        }
+
+        message.success(`Đã tạo và mở PDF ${printLabelSize} ${isA7 ? "75 × 100" : "100 × 150"} mm (${printUnits.length} tem).`);
       } catch (error: any) {
-        message.error(error?.message || "Không thể ghi nhận lệnh in tem.");
-        return;
+        message.error(error?.message || "Không thể tạo hoặc mở file PDF tem.");
       } finally {
-        setIsMarkingQrLabelsPrinted(false);
-      }
-    }
-    const isA6 = printLabelSize === "A6";
-    const pageWidth = isA6 ? "100mm" : "70mm";
-    const pageHeight = isA6 ? "150mm" : "100mm";
-    const pagePadding = isA6 ? "4mm" : "3mm";
-    const printStyle = document.createElement("style");
-    printStyle.id = "hu-label-page-size";
-    printStyle.media = "print";
-    printStyle.textContent = `
-      @page { size: ${pageWidth} ${pageHeight} !important; margin: 0 !important; }
-      @media print {
-        html, body { width: ${pageWidth} !important; min-width: ${pageWidth} !important; margin: 0 !important; padding: 0 !important; }
-        body.hu-label-printing .hu-print-preview-wrapper { width: ${pageWidth} !important; min-width: ${pageWidth} !important; margin: 0 !important; padding: 0 !important; }
-        body.hu-label-printing .hu-print-label {
-          width: ${pageWidth} !important;
-          min-width: ${pageWidth} !important;
-          max-width: ${pageWidth} !important;
-          height: ${pageHeight} !important;
-          min-height: ${pageHeight} !important;
-          max-height: ${pageHeight} !important;
-          margin: 0 !important;
-          padding: ${pagePadding} !important;
-          box-sizing: border-box !important;
-          transform: none !important;
+        cleanup();
+        if (!cancelled) {
+          setIsExportingLabelPdf(false);
+          setShowPrintModal(false);
         }
       }
-    `;
-    document.getElementById(printStyle.id)?.remove();
-    document.head.appendChild(printStyle);
-    document.body.classList.add("hu-label-printing");
+    };
 
-    const cleanupTimer = window.setTimeout(() => cleanup(), 60000);
-    function cleanup() {
-      window.clearTimeout(cleanupTimer);
-      document.body.classList.remove("hu-label-printing");
-      document.getElementById(printStyle.id)?.remove();
-      window.removeEventListener("afterprint", cleanup);
-    }
-    window.addEventListener("afterprint", cleanup);
-    requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
-  };
+    void exportPdf();
+    return () => {
+      cancelled = true;
+      cleanup();
+    };
+  }, [isExportingLabelPdf, printLabelSize, printUnits, showPrintModal]);
 
   const [showLocations, setShowLocations] = useState(false);
   const [locationFocusUnit, setLocationFocusUnit] = useState<UnitRow | null>(null);
@@ -2207,7 +2311,6 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       setShowAllocation(false);
       allocationForm.resetFields();
       setPrintUnits(created);
-      setShowPrintModal(true);
     } catch (error: any) {
       if (!error?.errorFields)
         message.error(error?.message || "Không tạo được kiện.");
@@ -2274,8 +2377,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     setShowQrSetup(true);
   };
 
-  const openQrLabelPrint = (label: any) => {
-    setPrintUnits([{
+  const openQrLabelPrint = (label: any, size: "A6" | "A7") => {
+    handlePrintLabels([{
       id: label.code,
       skuName: label.sku,
       packageType: label.packagingName,
@@ -2285,8 +2388,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       initialPcs: Number(label.conversionFactor),
       currentPcs: Number(label.conversionFactor),
       qrPayload: label.code,
-    }]);
-    setShowPrintModal(true);
+    }], size);
   };
 
   const issueQrLabels = async () => {
@@ -3280,18 +3382,27 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   />
                 </div>
                 <code className="hu-qr-code-text">{detail.id}</code>
-                <Button
-                  type="primary"
-                  icon={<PrinterOutlined />}
-                  size="middle"
-                  onClick={() => {
-                    setPrintUnits([detail]);
-                    setShowPrintModal(true);
-                  }}
-                  className="hu-btn-open-print"
-                >
-                  In tem dán tải (A6/A7)
-                </Button>
+                <div className="hu-label-direct-actions">
+                  <Button
+                    type="primary"
+                    icon={<PrinterOutlined />}
+                    size="middle"
+                    loading={isExportingLabelPdf}
+                    onClick={() => handlePrintLabels([detail], "A6")}
+                    className="hu-btn-open-print"
+                  >
+                    PDF A6 · 100×150 mm
+                  </Button>
+                  <Button
+                    icon={<PrinterOutlined />}
+                    size="middle"
+                    loading={isExportingLabelPdf}
+                    onClick={() => handlePrintLabels([detail], "A7")}
+                    className="hu-btn-open-print hu-btn-open-print-a7"
+                  >
+                    PDF A7 · 75×100 mm
+                  </Button>
+                </div>
               </div>
             </div>
             <div className="hu-detail-stats">
@@ -4464,13 +4575,23 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         </Form>
         {issuedQrLabels.length > 0 && (
           <div className="hu-qr-issued-result">
-            <Flex justify="space-between" align="center"><b>Đã tạo {issuedQrLabels.length} tem QR</b><Button type="primary" icon={<PrinterOutlined />} onClick={() => setShowPrintModal(true)}>Mở bản in</Button></Flex>
+            <Flex justify="space-between" align="center" gap={12} wrap="wrap">
+              <b>Đã tạo {issuedQrLabels.length} tem QR</b>
+              <Flex gap={8} align="center" wrap="wrap">
+                <Button type="primary" icon={<PrinterOutlined />} loading={isExportingLabelPdf} onClick={() => handlePrintLabels(printUnits, "A6")}>
+                  PDF A6 · 100×150
+                </Button>
+                <Button icon={<PrinterOutlined />} loading={isExportingLabelPdf} onClick={() => handlePrintLabels(printUnits, "A7")}>
+                  PDF A7 · 75×100
+                </Button>
+              </Flex>
+            </Flex>
             <div className="hu-qr-issued-codes">{issuedQrLabels.slice(0, 12).map((label) => <Tag key={label.code} color="green">{label.code}</Tag>)}{issuedQrLabels.length > 12 && <Tag>+{issuedQrLabels.length - 12} tem</Tag>}</div>
           </div>
         )}
         <div className="hu-qr-ledger">
           <Flex justify="space-between" align="center">
-            <div><b>Sổ tem QR</b><Typography.Text type="secondary"> Tem đã phát hành, chờ quét nhập kho</Typography.Text></div>
+            <div><b>Sổ tem QR</b><Typography.Text type="secondary"> Chọn đúng nút A6 hoặc A7 trên từng tem</Typography.Text></div>
             <Tag color="blue">{workspace.qrLabels.length} tem còn hiệu lực</Tag>
           </Flex>
           {workspace.qrLabels.length ? (
@@ -4479,7 +4600,22 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 <div className="hu-qr-ledger-row" key={label.code}>
                   <span><QrcodeOutlined /></span>
                   <div><b>{label.code}</b><small>{label.sku} · {label.packagingName} = {fmt(Number(label.conversionFactor))} {label.baseUnit}</small></div>
-                  <div className="hu-qr-ledger-meta"><small>{label.supplierName || "Chưa gán NCC"}</small><div><Tag color={label.status === "printed" ? "green" : label.status === "issued" ? "blue" : "gold"}>{label.status === "printed" ? "Đã in / chưa nhập" : label.status === "issued" ? "Chờ in" : "Đang quét"}</Tag>{label.status === "issued" && <Button size="small" type="link" icon={<PrinterOutlined />} onClick={() => openQrLabelPrint(label)}>In tem</Button>}</div></div>
+                  <div className="hu-qr-ledger-meta">
+                    <small>{label.supplierName || "Chưa gán NCC"}</small>
+                    <div>
+                      <Tag color={label.status === "printed" ? "green" : label.status === "issued" ? "blue" : "gold"}>{label.status === "printed" ? "Đã in / chưa nhập" : label.status === "issued" ? "Chờ in" : "Đang quét"}</Tag>
+                      {(label.status === "issued" || label.status === "printed") && (
+                        <Flex gap={4} wrap="wrap" justify="end">
+                          <Button size="small" type="primary" icon={<PrinterOutlined />} loading={isExportingLabelPdf} onClick={() => openQrLabelPrint(label, "A6")}>
+                            {label.status === "printed" ? "In lại A6" : "In A6"}
+                          </Button>
+                          <Button size="small" icon={<PrinterOutlined />} loading={isExportingLabelPdf} onClick={() => openQrLabelPrint(label, "A7")}>
+                            {label.status === "printed" ? "In lại A7" : "In A7"}
+                          </Button>
+                        </Flex>
+                      )}
+                    </div>
+                  </div>
                 </div>
               ))}
               {workspace.qrLabels.length > 10 && <Typography.Text type="secondary">Hiển thị 10 tem mới nhất.</Typography.Text>}
@@ -5174,6 +5310,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       {/* MODAL IN TEM DÁN TẢI / KIỆN HÀNG (A6 / A7) */}
       <Modal
         className="hu-print-modal"
+        rootClassName={isExportingLabelPdf ? "hu-print-modal-exporting" : undefined}
         title={
           <Flex align="center" gap={8}>
             <PrinterOutlined style={{ color: "#0284c7", fontSize: 20 }} />
@@ -5194,47 +5331,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           setShowPrintModal(false);
           setPrintUnits([]);
         }}
-        footer={
-          <Flex
-            justify="space-between"
-            align="center"
-            style={{ width: "100%" }}
-          >
-            <Flex align="center" gap={8}>
-              <Typography.Text strong style={{ fontSize: 13 }}>
-                Khổ giấy:
-              </Typography.Text>
-              <Select
-                value={printLabelSize}
-                onChange={(value) => setPrintLabelSize(value)}
-                style={{ width: 205 }}
-                options={[
-                  { label: "A6 nhiệt (100 × 150 mm)", value: "A6" },
-                  { label: "A7 nhiệt (70 × 100 mm)", value: "A7" },
-                ]}
-              />
-            </Flex>
-            <Flex gap={8}>
-              <Button
-                onClick={() => {
-                  setShowPrintModal(false);
-                  setPrintUnits([]);
-                }}
-              >
-                Đóng
-              </Button>
-              <Button
-                type="primary"
-                icon={<PrinterOutlined />}
-                onClick={handlePrintLabels}
-                loading={isMarkingQrLabelsPrinted}
-                style={{ background: "#00b96b", borderColor: "#00b96b" }}
-              >
-                In {printUnits.length || (detail ? 1 : 0)} tem ngay
-              </Button>
-            </Flex>
-          </Flex>
-        }
+        footer={null}
         width={760}
         destroyOnHidden
       >
@@ -5272,6 +5369,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   <div className="hu-pl-qr-border">
                     <QRCode
                       value={unit.qrPayload || `https://t.me/quanlykienhang_bot?start=khui_${unit.id.replace(/[^A-Za-z0-9]/g, "_")}`}
+                      type="svg"
                       size={printLabelSize === "A6" ? 140 : 100}
                       bordered={false}
                       color="#000000"

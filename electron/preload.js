@@ -72,6 +72,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         createUnits: (records) => ipcRenderer.invoke('handlingUnits:createUnits', records),
         issueQrLabels: (data) => ipcRenderer.invoke('handlingUnits:issueQrLabels', data),
         resolveQrLabel: (code) => ipcRenderer.invoke('handlingUnits:resolveQrLabel', code),
+        exportLabelsPdf: (data) => ipcRenderer.invoke('handlingUnits:exportLabelsPdf', data),
         markQrLabelsPrinted: (codes) => ipcRenderer.invoke('handlingUnits:markQrLabelsPrinted', codes),
         markQrLabelsReceived: (codes) => ipcRenderer.invoke('handlingUnits:markQrLabelsReceived', codes),
         saveRegister: (records) => ipcRenderer.invoke('handlingUnits:saveRegister', records),
