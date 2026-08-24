@@ -251,3 +251,74 @@ The key labels from the selected direction are implemented: **Tồn kho**, **T�
 3. Capture the matching 1440 px desktop state, compare with the source image, then resolve any P1/P2 visual findings.
 
 final result: blocked
+
+---
+
+# Design QA — Công việc hàng ngày
+
+## Comparison target
+
+- Source visual truth: `C:\Users\Admin\.codex\generated_images\01a031a7-b87c-7603-ad1d-f4b30b6a4ad7\exec-89b0b722-2afc-40a9-bdee-ce2e1fd5a4c1.png`.
+- Source dimensions: 1563 × 1005 px.
+- Implementation target: `src/pages/DailyTasks.tsx` and `src/pages/DailyTasks.css`.
+- Intended viewport: authenticated Electron desktop window, approximately 1440 × 900 CSS px at density 1×.
+- Intended state: **Công việc hàng ngày → Cần xử lý**, live tasks visible, one admin overflow menu open.
+
+## Evidence status
+
+- TypeScript and production Vite build passed with `npm run build`.
+- The source visual is available and was the selected concept in this conversation.
+- Browser-rendered implementation evidence is unavailable because the in-app browser runtime fails to start with `windows sandbox failed: helper_unknown_error: setup refresh had errors`.
+- No implementation screenshot can be captured at the matching authenticated state, so the required combined visual comparison cannot be completed.
+
+## Implemented changes
+
+- Rebuilt the heading hierarchy with supporting date context and a clear primary create action.
+- Converted the compact count strip into four responsive operational metric cards.
+- Combined tabs, search, filtering, and working priority/deadline sorting into one toolbar.
+- Added title, assignee, and category search across the current workspace.
+- Preserved all existing deadline, evidence, penalty, completion, assignment, and permission behavior.
+- Replaced separate admin edit/delete buttons in the priority list with one ellipsis menu containing **Chỉnh sửa** and **Xóa công việc**.
+- Added responsive container rules for normal and narrow Electron window widths.
+
+## Required fidelity surfaces
+
+### Fonts and typography
+
+The product's existing Ant Design/system typography remains in use. Heading, helper copy, metrics, and row hierarchy were adjusted in CSS. Live wrapping and optical-weight comparison are blocked without a rendered capture.
+
+### Spacing and layout rhythm
+
+The implementation maps the source's title/action row, four-card metric grid, combined toolbar, grouped task list, and compact action zone. Exact live row height and narrow-window wrapping remain visually unverified.
+
+### Colors and visual tokens
+
+The DBY green primary action, cool-gray surfaces, white cards, amber deadline state, and red destructive/overdue states are preserved. No new gradients or placeholder styling were introduced.
+
+### Image quality and asset fidelity
+
+The redesigned content area requires no custom raster assets. Existing Ant Design icons are used for standard interface actions; the application shell continues to own the DBY logo.
+
+### Copy and content
+
+Vietnamese product copy is preserved. New labels include **Tìm kiếm công việc**, **Tất cả công việc**, **Sắp xếp: Ưu tiên**, **Sắp xếp: Thời hạn**, **Chỉnh sửa**, and **Xóa công việc**.
+
+## Findings
+
+- [P1] Authenticated implementation capture is blocked.
+  Location: Daily Tasks page in the Electron application.
+  Evidence: source concept is available, but the in-app browser process exits before a matching implementation state can be opened.
+  Impact: visual fidelity, dropdown placement, responsive wrapping, and live-data density cannot be certified against the selected image.
+  Fix: reload the Electron application, open **Công việc hàng ngày → Cần xử lý**, open one ellipsis menu, capture the window, and rerun the combined comparison.
+
+## Primary interactions checked
+
+- TypeScript/production build: passed.
+- Search, filters, sort, tabs, primary actions, and overflow menu in a rendered authenticated state: blocked.
+- Browser console errors: blocked.
+
+## Comparison history
+
+- Initial implementation pass: selected concept translated into existing production components; build passed; browser-rendered comparison blocked before the first visual iteration.
+
+final result: blocked

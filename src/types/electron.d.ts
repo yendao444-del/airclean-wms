@@ -339,6 +339,11 @@ export interface ElectronAPI {
     resolveQrLabel: (
       code: string,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    exportLabelsPdf: (data?: { fileName?: string; labelSize?: "A6" | "A7" }) => Promise<{
+      success: boolean;
+      data?: { path: string };
+      error?: string;
+    }>;
     markQrLabelsPrinted: (
       codes: string[],
     ) => Promise<{ success: boolean; data?: { count: number }; error?: string }>;

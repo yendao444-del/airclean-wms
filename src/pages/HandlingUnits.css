@@ -1108,6 +1108,22 @@
   font-weight: 800;
   letter-spacing: 0.02em;
 }
+.hu-label-direct-actions {
+  display: grid;
+  width: 100%;
+  gap: 6px;
+}
+.hu-label-direct-actions .hu-btn-open-print {
+  margin-top: 0;
+}
+.hu-label-direct-actions .hu-btn-open-print-a7 {
+  background: #ffffff !important;
+  border-color: #7c3aed !important;
+  color: #6d28d9 !important;
+}
+.hu-label-direct-actions .hu-btn-open-print-a7:hover {
+  background: #f5f3ff !important;
+}
 .hu-btn-open-print {
   width: 100%;
   margin-top: 4px;
@@ -1737,6 +1753,14 @@
   padding: 4px 0;
 }
 
+/* Modal chỉ làm renderer tạm cho PDF; không hiển thị bước xem trước. */
+@media screen {
+  .hu-print-modal-exporting {
+    visibility: hidden !important;
+    pointer-events: none !important;
+  }
+}
+
 /* ==========================================================================
    WMS LABEL PRINT TEMPLATE (A6 & A7)
    ========================================================================== */
@@ -1773,9 +1797,9 @@
   height: 150mm;
 }
 
-/* Khổ A7 nhiệt / Shopee (70 x 100 mm) */
+/* Khổ A7 nhiệt / Shopee (75 x 100 mm) */
 .hu-print-label.a7 {
-  width: 70mm;
+  width: 75mm;
   height: 100mm;
   padding: 12px;
 }
@@ -2105,7 +2129,7 @@
     height: 150mm;
   }
   .hu-print-label.a7 {
-    width: 70mm;
+    width: 75mm;
     height: 100mm;
     padding: 4mm;
   }
