@@ -82,6 +82,19 @@ for %%F in ("!PATCH_ZIP_PATH!") do (
     set /a FILE_SIZE_MB=!FILE_SIZE! / 1048576
 )
 echo [OK] Created !PATCH_ZIP! (~!FILE_SIZE_MB! MB)
+set CHECKSUM_FILE=!PATCH_ZIP_PATH!.sha256
+powershell -NoProfile -Command "$zip='!PATCH_ZIP_PATH!'; $hash=(Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower(); Set-Content -NoNewline -LiteralPath '!CHECKSUM_FILE!' -Value ($hash + '  ' + [IO.Path]::GetFileName($zip))"
+if errorlevel 1 (
+    echo [ERROR] Cannot create SHA256 checksum.
+    pause
+    exit /b 1
+)
+if not exist "!CHECKSUM_FILE!" (
+    echo [ERROR] SHA256 checksum is missing.
+    pause
+    exit /b 1
+)
+echo [OK] Created !CHECKSUM_FILE!
 echo.
 
 echo [4/4] Git and GitHub release...
@@ -98,7 +111,7 @@ if errorlevel 1 (
     )
 )
 
-gh release create v!NEW_VERSION! "!PATCH_ZIP_PATH!" --title "DBY POS v!NEW_VERSION! (LITE PATCH)" --notes "!NOTES!"
+gh release create v!NEW_VERSION! "!PATCH_ZIP_PATH!" "!CHECKSUM_FILE!" --title "DBY POS v!NEW_VERSION! (LITE PATCH)" --notes "!NOTES!"
 if errorlevel 1 (
     echo [ERROR] GitHub release creation failed. Patch zip was kept locally.
     pause
@@ -106,6 +119,7 @@ if errorlevel 1 (
 )
 
 del /Q "!PATCH_ZIP_PATH!" 2>nul
+del /Q "!CHECKSUM_FILE!" 2>nul
 
 echo.
 echo ============================================

@@ -51,6 +51,7 @@ const mapLocationCodeToZoneKey = (code?: string) => {
   if (normalized === "a3") return "TOP_3";
   if (normalized === "a4") return "TOP_4";
   if (normalized === "center" || normalized.includes("giữa")) return "CENTER";
+  if (normalized === "office" || normalized.includes("phòng làm việc")) return "OFFICE";
   if (
     normalized.includes("đóng gói") ||
     normalized.includes("packing") ||
@@ -96,6 +97,7 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
   const zoneTop4 = useMemo(() => getUnitsForZone(["A4", "Khu chứa hàng 4", "Kệ 07", "Kệ 08"]), [units]);
   const zoneCenter = useMemo(() => getUnitsForZone(["Giữa", "Khu giữa", "Khu chứa hàng giữa", "Center"]), [units]);
   const zonePacking = useMemo(() => getUnitsForZone(["Đóng gói", "Khu đóng gói", "Packing", "Hàng lẻ"]), [units]);
+  const zoneOffice = useMemo(() => getUnitsForZone(["OFFICE", "Phòng làm việc", "Văn phòng"]), [units]);
 
   const highlightedZone = useMemo(() => {
     if (!highlightedUnitId) return null;
@@ -107,8 +109,9 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
     if (containsFocusedUnit(zoneTop4)) return "TOP_4";
     if (containsFocusedUnit(zoneCenter)) return "CENTER";
     if (containsFocusedUnit(zonePacking)) return "PACKING";
+    if (containsFocusedUnit(zoneOffice)) return "OFFICE";
     return null;
-  }, [highlightedUnitId, zoneCenter, zonePacking, zoneTop1, zoneTop2, zoneTop3, zoneTop4]);
+  }, [highlightedUnitId, zoneCenter, zoneOffice, zonePacking, zoneTop1, zoneTop2, zoneTop3, zoneTop4]);
 
   const highlightedUnit = useMemo(
     () => units.find((unit) => unit.id === highlightedUnitId),
@@ -341,11 +344,18 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
             {/* ============================================================== */}
             {/* PHÒNG LÀM VIỆC (DƯỚI PHẢI - NẰM DƯỚI NHÀ VỆ SINH VÀ VÁCH DỌC)   */}
             {/* ============================================================== */}
-            <g transform="translate(648, 238)">
-              <rect x="0" y="0" width="205" height="217" rx="6" fill="#f8fafc" stroke="#e2e8f0" strokeWidth="1.5" />
+            <g
+              className={`wms-room-node ${activeZone === "OFFICE" ? "selected" : ""} ${highlightedZone === "OFFICE" ? "unit-location-focus" : ""}`}
+              onClick={() => handleZoneClick("OFFICE", "PHÒNG LÀM VIỆC", "Văn phòng điều hành & lưu trữ", zoneOffice)}
+              transform="translate(648, 238)"
+            >
+              <rect x="0" y="0" width="205" height="217" rx="6" className="wms-room-rect" />
+              {renderLocationMarker("OFFICE", 102, 135, 185)}
               <g transform="translate(102, 108)">
                 <text x="0" y="0" textAnchor="middle" className="wms-room-title">🏢 PHÒNG LÀM VIỆC</text>
-                <text x="0" y="18" textAnchor="middle" fill="#94a3b8" fontSize="11">Văn phòng điều hành</text>
+                <text x="0" y="18" textAnchor="middle" className="wms-room-count">
+                  {zoneOffice.length} kiện · {zoneOffice.reduce((s, u) => s + u.currentPcs, 0).toLocaleString("vi-VN")} đơn vị
+                </text>
               </g>
             </g>
 
@@ -392,6 +402,7 @@ export const Warehouse2DMap: React.FC<Warehouse2DMapProps> = ({
                     TOP_4: "A4",
                     CENTER: "CENTER",
                     PACKING: "Đóng gói",
+                    OFFICE: "OFFICE",
                   };
                   const code = mapZoneKeyToCode[zoneModalData.zoneKey] || "A1";
                   setZoneModalData(null);

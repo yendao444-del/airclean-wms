@@ -6313,8 +6313,9 @@ ipcMain.handle("handlingUnits:issueQrLabels", async (_event, payload = {}) => {
     const conversionFactor = Math.floor(Number(payload.conversionFactor || 0));
     const quantity = Math.floor(Number(payload.quantity || 0));
     const requestedSupplierId = Number(payload.supplierId || 0) || null;
-    if (!sku || !packagingName || conversionFactor <= 0 || quantity <= 0) {
-      throw new Error("Cần chọn SKU, dạng kiện, quy đổi và số tem hợp lệ.");
+    const location = normalizeHandlingLocation(payload.location);
+    if (!sku || !packagingName || conversionFactor <= 0 || quantity <= 0 || !location.zone) {
+      throw new Error("Cần chọn SKU, dạng kiện, quy đổi, số tem và khu vực lưu kho hợp lệ.");
     }
     if (!["Tải", "Thùng", "Lẻ"].includes(packagingName)) {
       throw new Error("Dạng kiện chỉ được chọn: Tải, Thùng hoặc Lẻ.");
@@ -6375,6 +6376,7 @@ ipcMain.handle("handlingUnits:issueQrLabels", async (_event, payload = {}) => {
       }
       const issuedAt = new Date().toISOString();
       spec.lastUsedAt = issuedAt;
+      spec.location = location;
       const batchCode = `LBL-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
       const labels = [];
       for (let index = 1; index <= quantity; index += 1) {
@@ -6390,6 +6392,7 @@ ipcMain.handle("handlingUnits:issueQrLabels", async (_event, payload = {}) => {
           conversionFactor: spec.conversionFactor,
           supplierId: supplier?.id || null,
           supplierName: supplier?.name || "",
+          location,
           status: "issued",
           batchCode,
           issuedBy: currentSession?.id || null,
