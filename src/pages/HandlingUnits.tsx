@@ -104,6 +104,7 @@ type QuickScanLine = {
   baseUnit: string;
   supplierName: string;
   supplierId?: number | null;
+  location?: { zone?: string; rack?: string };
 };
 type QuickReceiptRow = QuickScanLine & { quantity: number };
 type LocationItem = {
@@ -158,6 +159,7 @@ const ALLOCATION_ZONE_CODE_BY_MAP_KEY: Record<string, string> = {
   TOP_4: "A4",
   CENTER: "CENTER",
   PACKING: "Đóng gói",
+  OFFICE: "OFFICE",
 };
 
 function AllocationZonePicker({
@@ -655,6 +657,14 @@ const workspaceLayoutDefaults: Workspace = {
       name: "Khu vực tiếp nhận & kiểm định",
       type: "QUARANTINE",
       description: "Hàng mới nhập kho chờ phân loại và niêm phong kiện",
+      isActive: true,
+    },
+    {
+      id: 9,
+      code: "OFFICE",
+      name: "Phòng làm việc",
+      type: "STORAGE",
+      description: "Vị trí lưu kiện trong phòng làm việc / văn phòng điều hành",
       isActive: true,
     },
   ],
@@ -2372,6 +2382,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       conversionFactor: existingSpec?.conversionFactor || undefined,
       quantity: 1,
       supplierId: existingSpec?.supplierId || undefined,
+      zone: existingSpec?.location?.zone || undefined,
     });
     setIssuedQrLabels([]);
     setShowQrSetup(true);
@@ -2387,6 +2398,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       status: "Chờ in",
       initialPcs: Number(label.conversionFactor),
       currentPcs: Number(label.conversionFactor),
+      location: label.location,
       qrPayload: label.code,
     }], size);
   };
@@ -2403,6 +2415,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         conversionFactor: Number(values.conversionFactor),
         quantity: Number(values.quantity),
         supplierId: values.supplierId ? Number(values.supplierId) : undefined,
+        location: { zone: String(values.zone || "").trim() },
       });
       if (!result?.success || !result.data) {
         throw new Error(result?.error || "Không thể phát hành tem QR.");
@@ -2419,6 +2432,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           status: "Chưa nhập kho",
           initialPcs: Number(label.conversionFactor),
           currentPcs: Number(label.conversionFactor),
+          location: label.location,
           qrPayload: label.code,
         })),
       );
@@ -2486,6 +2500,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         baseUnit: label.baseUnit,
         supplierName: label.supplierName || "",
         supplierId: label.supplierId || null,
+        location: label.location,
       },
     ]);
     setQuickPriceBySku((previous) => (
@@ -2741,7 +2756,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             initialPcs: line.conversionFactor,
             currentPcs: line.conversionFactor,
             status: "Nguyên niêm phong",
-            location: { zone: "Chưa phân khu" },
+            location: line.location,
             note: `Nhập nhanh từ tem QR ${line.qrCode}`,
           };
         }));
@@ -4569,8 +4584,19 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             <Form.Item name="quantity" label="Số tem cần in" rules={[{ required: true, message: "Nhập số tem" }]}>
               <InputNumber min={1} max={500} precision={0} style={{ width: "100%" }} addonAfter="tem" />
             </Form.Item>
+            <Form.Item name="zone" label="Khu vực lưu kho" rules={[{ required: true, message: "Chọn khu vực lưu kho trước khi phát hành tem" }]}>
+              <Select
+                showSearch
+                optionFilterProp="label"
+                placeholder="Chọn vị trí sẽ để kiện"
+                options={workspace.locations.filter((location) => location.isActive).map((location) => ({
+                  value: location.code,
+                  label: `${location.code} · ${location.name}`,
+                }))}
+              />
+            </Form.Item>
           </div>
-          <Alert type="info" showIcon message="Ví dụ: 1 thùng = 240 gói hoặc 1 tải = 1.200 gói. QR sẽ mang đúng quy cách bạn phát hành, không tự suy đoán." />
+          <Alert type="info" showIcon message="QR sẽ lưu cả quy cách và khu vực. Khi in hoặc quét nhập kho, kiện tự nhận đúng vị trí đã chọn." />
           <Typography.Text type="secondary" style={{ display: "block", marginTop: 8, fontSize: 12 }}>Khi chọn SKU, hệ thống sẽ gợi ý nhà cung cấp và quy cách từ lần phát hành gần nhất. Bạn vẫn có thể sửa trước khi phát hành.</Typography.Text>
         </Form>
         {issuedQrLabels.length > 0 && (

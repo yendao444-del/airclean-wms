@@ -155,14 +155,26 @@ ipcMain.handle('update:check', async () => {
         console.log(`   Available zips: ${allZips.map(a => a.name).join(', ') || 'NONE'}`);
         console.log(`   Selected zip: ${zipAsset ? zipAsset.name : 'NULL'}`);
 
+        // Only advertise an update that can pass the mandatory integrity check.
+        // A partially uploaded GitHub release used to make every logged-in
+        // employee enter the blocking update screen, then fail after download.
+        const checksumAsset = zipAsset ? findSha256Asset(latestRelease, zipAsset) : null;
+        const updateIsInstallable = hasUpdate && Boolean(zipAsset && checksumAsset);
+        if (hasUpdate && !updateIsInstallable) {
+            console.warn('⚠️ Latest release is missing a trusted ZIP or SHA256 asset; update is deferred.');
+        }
+
         const updateInfo = {
             currentVersion,
             latestVersion,
-            hasUpdate,
+            hasUpdate: updateIsInstallable,
             releaseNotes: latestRelease.body || 'Không có ghi chú',
             publishedAt: latestRelease.published_at,
-            downloadUrl: zipAsset ? zipAsset.browser_download_url : null,
-            downloadSize: zipAsset ? zipAsset.size : 0
+            downloadUrl: updateIsInstallable ? zipAsset.browser_download_url : null,
+            downloadSize: updateIsInstallable ? zipAsset.size : 0,
+            deferredReason: hasUpdate && !updateIsInstallable
+                ? 'Bản phát hành đang hoàn tất xác minh SHA-256. Ứng dụng sẽ kiểm tra lại sau.'
+                : null
         };
 
         return { success: true, data: updateInfo };

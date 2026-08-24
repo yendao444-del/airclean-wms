@@ -36,12 +36,14 @@ export default function ForceUpdateGate({ children }: ForceUpdateGateProps) {
     const [status, setStatus] = useState<GateStatus>('checking');
     const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
     const [progress, setProgress] = useState<ProgressData | null>(null);
+    const [errorMessage, setErrorMessage] = useState('');
     const [elapsed, setElapsed] = useState(0);
     const autoStarted = useRef(false);
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const doDownload = async (info: UpdateInfo) => {
         if (!info.downloadUrl) {
+            setErrorMessage('Bản cập nhật chưa có gói tải hợp lệ. Ứng dụng vẫn có thể sử dụng bình thường.');
             setStatus('error');
             return;
         }
@@ -51,9 +53,11 @@ export default function ForceUpdateGate({ children }: ForceUpdateGateProps) {
             if (result.success) {
                 setStatus('restarting');
             } else {
+                setErrorMessage(result.error || 'Không thể tải hoặc xác minh gói cập nhật.');
                 setStatus('error');
             }
-        } catch {
+        } catch (error) {
+            setErrorMessage(error instanceof Error ? error.message : 'Không thể tải hoặc xác minh gói cập nhật.');
             setStatus('error');
         }
     };
@@ -137,6 +141,7 @@ export default function ForceUpdateGate({ children }: ForceUpdateGateProps) {
         setStatus('checking');
         setProgress(null);
         setElapsed(0);
+        setErrorMessage('');
         window.electronAPI.update.check().then((result: any) => {
             if (result.success && result.data?.hasUpdate && result.data.downloadUrl) {
                 const info: UpdateInfo = {
@@ -199,7 +204,7 @@ export default function ForceUpdateGate({ children }: ForceUpdateGateProps) {
                             border: '1px solid rgba(255,77,79,0.2)',
                             color: 'rgba(255,255,255,0.6)', fontSize: 14,
                         }}>
-                            Không thể cập nhật phần mềm. Vui lòng kiểm tra kết nối mạng và thử lại.
+                            {errorMessage || 'Không thể cập nhật phần mềm. Vui lòng kiểm tra kết nối mạng và thử lại.'}
                         </div>
                         <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
                             <button onClick={retryUpdate} style={{
