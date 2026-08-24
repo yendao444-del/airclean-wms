@@ -11546,7 +11546,10 @@ async function writeGoodsCompanies(companies, client = prisma) {
 async function withGoodsCompaniesWriteLock(callback) {
   return prisma.$transaction(
     async (tx) => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${GOODS_COMPANIES_CONFIG_KEY}))`;
+      // pg_advisory_xact_lock returns PostgreSQL `void`. Prisma's $queryRaw
+      // tries to deserialize that value and fails before the write callback
+      // can run, while $executeRaw is intended for result-less statements.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${GOODS_COMPANIES_CONFIG_KEY}))`;
       return callback(tx);
     },
     { isolationLevel: "Serializable", timeout: 10_000, maxWait: 10_000 },
