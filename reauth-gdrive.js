@@ -11,11 +11,13 @@ const path = require('path');
 const { OAUTH_CLIENT_ID: CLIENT_ID, OAUTH_CLIENT_SECRET: CLIENT_SECRET } = require('./electron/config');
 const REDIRECT_URI  = 'http://localhost:3456/callback';
 const APP_NAME = 'quan-ly-ban-hang-desktop';
-const TOKEN_PATH = process.env.GDRIVE_TOKEN_PATH || path.join(
+const USER_DATA_DIR = path.join(
     process.env.APPDATA || path.join(process.env.USERPROFILE || __dirname, 'AppData', 'Roaming'),
-    APP_NAME,
-    'gdrive-token.json'
+    APP_NAME
 );
+const TOKEN_PATH = process.env.GDRIVE_TOKEN_PATH || path.join(USER_DATA_DIR, 'gdrive-token.json');
+const ENCRYPTED_TOKEN_PATH = path.join(USER_DATA_DIR, 'gdrive-token.bin');
+const BUNDLED_TOKEN_PATH = path.join(__dirname, 'electron', 'gdrive-token.json');
 
 const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
 
@@ -56,7 +58,16 @@ const server = http.createServer(async (req, res) => {
         const { tokens } = await oauth2Client.getToken(code);
         fs.mkdirSync(path.dirname(TOKEN_PATH), { recursive: true });
         fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens, null, 2));
+        // The Electron app prefers the encrypted .bin token. Remove the stale
+        // encrypted token so the next launch migrates this freshly authorized
+        // JSON token into Windows safeStorage instead of reusing the old one.
+        if (fs.existsSync(ENCRYPTED_TOKEN_PATH)) {
+            fs.rmSync(ENCRYPTED_TOKEN_PATH, { force: true });
+        }
+        // Keep the release recovery token in sync for future employee builds.
+        fs.writeFileSync(BUNDLED_TOKEN_PATH, JSON.stringify(tokens, null, 2));
         console.log('✅ Token mới đã lưu vào:', TOKEN_PATH);
+        console.log('✅ Token đóng gói đã cập nhật:', BUNDLED_TOKEN_PATH);
         console.log('   refresh_token:', tokens.refresh_token ? '✅ Có' : '⚠️ Không có');
 
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
