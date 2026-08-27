@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { usePageHeader } from '../contexts/PageHeaderContext';
-import { Card, Row, Col, Statistic, DatePicker, Button, InputNumber, Modal, Form, Table, Tag, Tooltip, Typography, Divider, Space, Collapse, Input, message } from 'antd';
+import { Card, Row, Col, Statistic, DatePicker, Button, InputNumber, Modal, Form, Table, Tag, Tooltip, Typography, Divider, Space, Collapse, Input, message, Select, Switch } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import {
     DollarOutlined,
@@ -52,6 +52,18 @@ const DEFAULT_CONFIG = {
 
 type PNLConfig = typeof DEFAULT_CONFIG;
 
+const OPEX_CONFIG_FIELDS = [
+    { name: 'monthlyRent', label: 'Thuê kho/mặt bằng', icon: '🏠', step: 100000 },
+    { name: 'monthlyElectric', label: 'Điện', icon: '⚡', step: 100000 },
+    { name: 'monthlyWater', label: 'Nước', icon: '💧', step: 50000 },
+    { name: 'monthlyInternet', label: 'Internet', icon: '🌐', step: 50000 },
+    { name: 'monthlySalary', label: 'Lương nhân viên', icon: '👷', step: 500000 },
+    { name: 'monthlyInsurance', label: 'Bảo hiểm', icon: '🛡️', step: 100000 },
+    { name: 'monthlyEquipment', label: 'Khấu hao thiết bị', icon: '🔧', step: 100000 },
+    { name: 'monthlySoftware', label: 'Phần mềm', icon: '💻', step: 50000 },
+    { name: 'monthlyOther', label: 'Chi phí khác', icon: '📦', step: 50000 },
+] as const;
+
 // Keep these fallbacks aligned with Tools > Platform fees.
 const DEFAULT_SHOPEE_FEES = [
     { id: 'phiCoDinh', name: 'Phí cố định (Hoa hồng sàn theo Ngành hàng)', type: 'percent', value: 12, icon: '💳', color: '#2563eb', required: true, enabled: true },
@@ -59,6 +71,7 @@ const DEFAULT_SHOPEE_FEES = [
     { id: 'phiHaTang', name: 'Phí hạ tầng sàn Shopee (3.000đ/đơn)', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', required: true, enabled: true },
     { id: 'thueGTGT', name: 'Thuế GTGT (Khấu trừ cá nhân 0.96%)', type: 'percent', value: 0.96, icon: '🏛️', color: '#db2777', enabled: true },
     { id: 'thueTNCN', name: 'Thuế TNCN (Khấu trừ cá nhân 0.54%)', type: 'percent', value: 0.54, icon: '📊', color: '#0891b2', enabled: true },
+    { id: 'affiliate', name: 'Phí Affiliate Shopee', type: 'percent', value: 5, icon: '🤝', color: '#16a34a', enabled: true },
     { id: 'piShip', name: 'Phí dịch vụ vận chuyển PiShip (2.700đ/đơn)', type: 'fixed', value: 2700, icon: '📦', color: '#059669', enabled: true },
     { id: 'freeshipXtra', name: 'Gói Freeship Xtra / Freeship Xtra Plus (8%)', type: 'percent', value: 8, icon: '🚚', color: '#16a34a', enabled: false },
     { id: 'voucherXtra', name: 'Gói Voucher Xtra (Mã giảm giá/Live/Video 5.5%)', type: 'percent', value: 5.5, icon: '🎁', color: '#f59e0b', enabled: false },
@@ -71,10 +84,10 @@ const DEFAULT_TIKTOK_FEES = [
     { id: 'phiXuLyDon', name: 'Phí xử lý đơn hàng', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', required: true, enabled: true },
     { id: 'thueGTGT', name: 'Thuế GTGT (TikTok khấu trừ)', type: 'percent', value: 1, icon: '🏛️', color: '#db2777', enabled: true },
     { id: 'thueTNCN', name: 'Thuế TNCN (TikTok khấu trừ)', type: 'percent', value: 0.5, icon: '📊', color: '#0891b2', enabled: true },
-    { id: 'affiliate', name: 'Hoa hồng liên kết', type: 'percent', value: 15, icon: '🤝', color: '#16a34a', enabled: true },
+    { id: 'affiliate', name: 'Phí Affiliate TikTok', type: 'percent', value: 5, icon: '🤝', color: '#16a34a', enabled: true },
 ];
 
-const FEE_POLICY_VERSION = 20260815;
+const FEE_POLICY_VERSION = 20260826;
 const PLATFORM_CATEGORY_RATES: Record<'shopee' | 'tiktok', Record<string, number>> = {
     shopee: {
         'sp-beauty': 17,
@@ -103,6 +116,36 @@ const PLATFORM_CATEGORY_RATES: Record<'shopee' | 'tiktok', Record<string, number
         'tt-baby': 10,
         'tt-food': 10,
         'tt-other': 14,
+    },
+};
+const PLATFORM_CATEGORY_LABELS: Record<'shopee' | 'tiktok', Record<string, string>> = {
+    shopee: {
+        'sp-beauty': 'Mỹ phẩm & Sắc đẹp',
+        'sp-health': 'Sức khỏe & Y tế (Khẩu trang, TPCN)',
+        'sp-pets': 'Thú cưng & Phụ kiện',
+        'sp-fashion': 'Thời trang & Phụ kiện',
+        'sp-home': 'Nhà cửa & Đời sống',
+        'sp-sports': 'Thể thao & Du lịch',
+        'sp-baby': 'Mẹ & Bé',
+        'sp-groceries': 'Bách hóa online & Thực phẩm',
+        'sp-books': 'Sách & Văn phòng phẩm',
+        'sp-auto': 'Ô tô, Xe máy & Xe đạp',
+        'sp-appliance': 'Thiết bị điện gia dụng',
+        'sp-electronics': 'Thiết bị điện tử & Phụ kiện',
+        'sp-other': 'Ngành hàng khác / Tùy chỉnh',
+    },
+    tiktok: {
+        'tt-health': 'Thực phẩm chức năng & Sức khỏe',
+        'tt-beauty': 'Mỹ phẩm & Sắc đẹp',
+        'tt-fashion-women': 'Thời trang nữ',
+        'tt-fashion-men': 'Thời trang nam',
+        'tt-personal-care': 'Chăm sóc cá nhân & Giặt giũ',
+        'tt-electronics': 'Điện thoại & Máy tính bảng',
+        'tt-tech-accessories': 'Phụ kiện công nghệ',
+        'tt-home': 'Nhà cửa & Đời sống',
+        'tt-baby': 'Mẹ & Bé',
+        'tt-food': 'Thực phẩm & Đồ uống',
+        'tt-other': 'Ngành hàng khác / Tùy chỉnh',
     },
 };
 const normalizePlatformFees = (savedFees: any[], defaults: any[]) => {
@@ -649,11 +692,18 @@ export default function BusinessReportPage() {
     // Phí sàn riêng cho từng sàn
     const [shopeeFeeConfig, setShopeeFeeConfig] = useState<any[]>(DEFAULT_SHOPEE_FEES);
     const [tiktokFeeConfig, setTiktokFeeConfig] = useState<any[]>(DEFAULT_TIKTOK_FEES);
+    const [platformCategoryIds, setPlatformCategoryIds] = useState({ shopee: 'sp-home', tiktok: 'tt-other' });
+    const [calculatorInputsConfig, setCalculatorInputsConfig] = useState<Record<string, any>>({});
 
     // Config
     const [config, setConfig] = useState<PNLConfig>(DEFAULT_CONFIG);
     const [configModalOpen, setConfigModalOpen] = useState(false);
     const [form] = Form.useForm();
+    const feeConfigSnapshotRef = useRef<{
+        shopeeFees: any[];
+        tiktokFees: any[];
+        categories: { shopee: string; tiktok: string };
+    } | null>(null);
 
     // Drill-down modal state
     const [drillDownOpen, setDrillDownOpen] = useState(false);
@@ -746,20 +796,28 @@ export default function BusinessReportPage() {
             const calculatorInputs = calculatorInputsRes.success && calculatorInputsRes.data
                 ? calculatorInputsRes.data
                 : {};
+            setCalculatorInputsConfig(calculatorInputs);
             const shopeeCategoryId = getPlatformCategoryId('shopee', calculatorInputs.categories?.shopee);
             const tiktokCategoryId = getPlatformCategoryId('tiktok', calculatorInputs.categories?.tiktok);
+            setPlatformCategoryIds({ shopee: shopeeCategoryId, tiktok: tiktokCategoryId });
             const hasCurrentFeePolicy = calculatorInputs.feePolicyVersion === FEE_POLICY_VERSION;
+            const normalizedShopeeFees = shopeeFeesRes.success && Array.isArray(shopeeFeesRes.data)
+                ? normalizePlatformFees(shopeeFeesRes.data, DEFAULT_SHOPEE_FEES)
+                : DEFAULT_SHOPEE_FEES;
+            const normalizedTiktokFees = tiktokFeesRes.success && Array.isArray(tiktokFeesRes.data)
+                ? normalizePlatformFees(tiktokFeesRes.data, DEFAULT_TIKTOK_FEES)
+                : DEFAULT_TIKTOK_FEES;
             const nextShopeeFees = applyPlatformCategoryRate(
                 hasCurrentFeePolicy
-                    ? normalizePlatformFees(shopeeFeesRes.data, DEFAULT_SHOPEE_FEES)
-                    : DEFAULT_SHOPEE_FEES,
+                    ? normalizedShopeeFees
+                    : normalizedShopeeFees.map((fee: any) => fee.id === 'affiliate' ? { ...fee, value: 5, enabled: true } : fee),
                 'shopee',
                 shopeeCategoryId,
             );
             const nextTiktokFees = applyPlatformCategoryRate(
                 hasCurrentFeePolicy
-                    ? normalizePlatformFees(tiktokFeesRes.data, DEFAULT_TIKTOK_FEES)
-                    : DEFAULT_TIKTOK_FEES,
+                    ? normalizedTiktokFees
+                    : normalizedTiktokFees.map((fee: any) => fee.id === 'affiliate' ? { ...fee, value: 5, enabled: true } : fee),
                 'tiktok',
                 tiktokCategoryId,
             );
@@ -1090,7 +1148,15 @@ export default function BusinessReportPage() {
             // Lưu phí sàn riêng cho từng sàn (v2)
             await window.electronAPI.appConfig.set('shopee_fees_v3', shopeeFeeConfig);
             await window.electronAPI.appConfig.set('tiktok_fees_v3', tiktokFeeConfig);
+            const nextCalculatorInputs = {
+                ...calculatorInputsConfig,
+                feePolicyVersion: FEE_POLICY_VERSION,
+                categories: platformCategoryIds,
+            };
+            await window.electronAPI.appConfig.set('calculator_inputs_v2', nextCalculatorInputs);
+            setCalculatorInputsConfig(nextCalculatorInputs);
 
+            feeConfigSnapshotRef.current = null;
             setConfigModalOpen(false);
             message.success('Đã lưu cấu hình P&L!');
         } catch (err) {
@@ -1104,6 +1170,39 @@ export default function BusinessReportPage() {
     };
     const updateTiktokFee = (feeId: string, newValue: number) => {
         setTiktokFeeConfig(prev => prev.map(f => f.id === feeId ? { ...f, value: newValue } : f));
+    };
+    const toggleShopeeFee = (feeId: string, enabled: boolean) => {
+        setShopeeFeeConfig(prev => prev.map(f => f.id === feeId ? { ...f, enabled } : f));
+    };
+    const toggleTiktokFee = (feeId: string, enabled: boolean) => {
+        setTiktokFeeConfig(prev => prev.map(f => f.id === feeId ? { ...f, enabled } : f));
+    };
+    const updatePlatformCategory = (platform: 'shopee' | 'tiktok', categoryId: string) => {
+        setPlatformCategoryIds(prev => ({ ...prev, [platform]: categoryId }));
+        if (platform === 'shopee') {
+            setShopeeFeeConfig(prev => applyPlatformCategoryRate(prev, platform, categoryId));
+        } else {
+            setTiktokFeeConfig(prev => applyPlatformCategoryRate(prev, platform, categoryId));
+        }
+    };
+    const openConfigModal = () => {
+        form.setFieldsValue(config);
+        feeConfigSnapshotRef.current = {
+            shopeeFees: shopeeFeeConfig.map(fee => ({ ...fee })),
+            tiktokFees: tiktokFeeConfig.map(fee => ({ ...fee })),
+            categories: { ...platformCategoryIds },
+        };
+        setConfigModalOpen(true);
+    };
+    const closeConfigModal = () => {
+        const snapshot = feeConfigSnapshotRef.current;
+        if (snapshot) {
+            setShopeeFeeConfig(snapshot.shopeeFees);
+            setTiktokFeeConfig(snapshot.tiktokFees);
+            setPlatformCategoryIds(snapshot.categories);
+        }
+        feeConfigSnapshotRef.current = null;
+        setConfigModalOpen(false);
     };
 
 
@@ -1645,10 +1744,7 @@ export default function BusinessReportPage() {
                 </div>
                 <Space>
                     <Button icon={<DownloadOutlined />} onClick={() => window.print()}>Xuất báo cáo</Button>
-                    <Button icon={<SettingOutlined />} onClick={() => {
-                        form.setFieldsValue(config);
-                        setConfigModalOpen(true);
-                    }}>Cấu hình</Button>
+                    <Button icon={<SettingOutlined />} onClick={openConfigModal}>Cấu hình</Button>
                 </Space>
             </div>
 
@@ -1883,111 +1979,174 @@ export default function BusinessReportPage() {
             <Modal
                 title="⚙️ Cấu hình Báo cáo P&L"
                 open={configModalOpen}
-                onCancel={() => setConfigModalOpen(false)}
+                onCancel={closeConfigModal}
                 footer={null}
-                width={600}
+                width={760}
             >
                 <Form form={form} layout="vertical" onFinish={handleSaveConfig}>
-                    <Collapse defaultActiveKey={['shopee-fees', 'tiktok-fees', 'opex']} ghost>
+                    <Collapse defaultActiveKey={['platform-categories', 'shopee-fees', 'tiktok-fees', 'ads', 'opex']} ghost>
+                        <Panel header="🏷️ Ngành hàng áp dụng" key="platform-categories">
+                            <div style={{ border: '1px solid #edf0f2', borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 12, padding: '12px 14px', borderBottom: '1px solid #edf0f2' }}>
+                                    <span style={{ width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 9, background: '#fff1eb', fontSize: 18 }}>🛒</span>
+                                    <div style={{ flex: 1, minWidth: 180 }}>
+                                        <Text strong>Ngành hàng Shopee</Text>
+                                        <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>Tự cập nhật phí hoa hồng Shopee theo ngành hàng</Text>
+                                    </div>
+                                    <Select
+                                        style={{ width: 360, maxWidth: '100%' }} value={platformCategoryIds.shopee}
+                                        onChange={(value) => updatePlatformCategory('shopee', value)}
+                                        options={Object.entries(PLATFORM_CATEGORY_RATES.shopee).map(([value, rate]) => ({
+                                            value, label: `${PLATFORM_CATEGORY_LABELS.shopee[value]} - ${rate}%`,
+                                        }))}
+                                    />
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 12, padding: '12px 14px' }}>
+                                    <span style={{ width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 9, background: '#f1f1f1', fontSize: 18 }}>🎵</span>
+                                    <div style={{ flex: 1, minWidth: 180 }}>
+                                        <Text strong>Ngành hàng TikTok</Text>
+                                        <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>Tự cập nhật phí hoa hồng TikTok theo ngành hàng</Text>
+                                    </div>
+                                    <Select
+                                        style={{ width: 360, maxWidth: '100%' }} value={platformCategoryIds.tiktok}
+                                        onChange={(value) => updatePlatformCategory('tiktok', value)}
+                                        options={Object.entries(PLATFORM_CATEGORY_RATES.tiktok).map(([value, rate]) => ({
+                                            value, label: `${PLATFORM_CATEGORY_LABELS.tiktok[value]} - ${rate}%`,
+                                        }))}
+                                    />
+                                </div>
+                            </div>
+                        </Panel>
+
                         <Panel header="🛒 Phí sàn Shopee" key="shopee-fees">
                             <div style={{ padding: '6px 10px', background: '#fff7e6', borderRadius: 6, marginBottom: 12, border: '1px solid #ffd591' }}>
                                 <Text style={{ fontSize: 12, color: '#595959' }}>
                                     <InfoCircleOutlined style={{ color: '#ff6633', marginRight: 4 }} />
-                                    Cấu hình phí riêng cho <Text strong style={{ color: '#ff6633' }}>Shopee</Text>
+                                    Chọn ngành hàng và bật các khoản phí đang áp dụng cho <Text strong style={{ color: '#ff6633' }}>Shopee</Text>
                                 </Text>
                             </div>
-                            <Row gutter={[12, 8]}>
+                            <div style={{ border: '1px solid #edf0f2', borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
                                 {shopeeFeeConfig.map(fee => (
-                                    <Col span={12} key={fee.id}>
-                                        <div style={{ marginBottom: 8 }}>
-                                            <Text style={{ fontSize: 12, color: '#595959', display: 'block', marginBottom: 4 }}>
-                                                {fee.icon} {fee.name}
+                                    <div
+                                        key={fee.id}
+                                        style={{
+                                            display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10, padding: '10px 12px',
+                                            borderBottom: fee.id === shopeeFeeConfig[shopeeFeeConfig.length - 1]?.id ? 'none' : '1px solid #edf0f2',
+                                            background: fee.enabled === false ? '#fafafa' : '#fff', opacity: fee.enabled === false ? 0.62 : 1,
+                                        }}
+                                    >
+                                        <Switch size="small" checked={fee.enabled !== false} disabled={fee.required} onChange={(checked) => toggleShopeeFee(fee.id, checked)} />
+                                        <span style={{ width: 34, height: 34, flex: '0 0 34px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, background: `${fee.color || '#64748b'}18`, fontSize: 17 }}>
+                                            {fee.icon || '•'}
+                                        </span>
+                                        <div style={{ flex: 1, minWidth: 180 }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                                <Text strong style={{ fontSize: 12 }}>{fee.name}</Text>
+                                                {fee.required && <Tag color="red" style={{ margin: 0, fontSize: 10 }}>Bắt buộc</Tag>}
+                                            </div>
+                                            <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
+                                                {fee.type === 'percent' ? `${fee.value}% doanh thu` : `${fmt(fee.value)}đ / đơn`}
                                             </Text>
-                                            <InputNumber
-                                                style={{ width: '100%' }}
-                                                size="small"
-                                                value={fee.value}
-                                                onChange={(val) => updateShopeeFee(fee.id, val || 0)}
-                                                min={0}
-                                                step={fee.type === 'percent' ? 0.1 : 100}
-                                                addonAfter={fee.type === 'percent' ? '%' : 'đ'}
-                                                formatter={fee.type === 'fixed' ? (v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')) : undefined}
-                                                parser={fee.type === 'fixed' ? ((v: any) => v.replace(/,/g, '')) : undefined}
-                                            />
                                         </div>
-                                    </Col>
+                                        <InputNumber
+                                            style={{ width: 135, flex: '0 0 135px' }} size="small" value={fee.value}
+                                            disabled={fee.enabled === false} onChange={(val) => updateShopeeFee(fee.id, val || 0)} min={0}
+                                            step={fee.type === 'percent' ? 0.1 : 100} addonAfter={fee.type === 'percent' ? '%' : 'đ'}
+                                            formatter={fee.type === 'fixed' ? (v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')) : undefined}
+                                            parser={fee.type === 'fixed' ? ((v: any) => v.replace(/,/g, '')) : undefined}
+                                        />
+                                    </div>
                                 ))}
-                            </Row>
+                            </div>
                         </Panel>
 
                         <Panel header="🎵 Phí sàn TikTok" key="tiktok-fees">
                             <div style={{ padding: '6px 10px', background: '#f0f0f0', borderRadius: 6, marginBottom: 12, border: '1px solid #d9d9d9' }}>
                                 <Text style={{ fontSize: 12, color: '#595959' }}>
                                     <InfoCircleOutlined style={{ color: '#1a1a2e', marginRight: 4 }} />
-                                    Cấu hình phí riêng cho <Text strong style={{ color: '#1a1a2e' }}>TikTok</Text>
+                                    Chọn ngành hàng và bật các khoản phí đang áp dụng cho <Text strong style={{ color: '#1a1a2e' }}>TikTok</Text>
                                 </Text>
                             </div>
-                            <Row gutter={[12, 8]}>
+                            <div style={{ border: '1px solid #edf0f2', borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
                                 {tiktokFeeConfig.map(fee => (
-                                    <Col span={12} key={fee.id}>
-                                        <div style={{ marginBottom: 8 }}>
-                                            <Text style={{ fontSize: 12, color: '#595959', display: 'block', marginBottom: 4 }}>
-                                                {fee.icon} {fee.name}
+                                    <div
+                                        key={fee.id}
+                                        style={{
+                                            display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10, padding: '10px 12px',
+                                            borderBottom: fee.id === tiktokFeeConfig[tiktokFeeConfig.length - 1]?.id ? 'none' : '1px solid #edf0f2',
+                                            background: fee.enabled === false ? '#fafafa' : '#fff', opacity: fee.enabled === false ? 0.62 : 1,
+                                        }}
+                                    >
+                                        <Switch size="small" checked={fee.enabled !== false} disabled={fee.required} onChange={(checked) => toggleTiktokFee(fee.id, checked)} />
+                                        <span style={{ width: 34, height: 34, flex: '0 0 34px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, background: `${fee.color || '#64748b'}18`, fontSize: 17 }}>
+                                            {fee.icon || '•'}
+                                        </span>
+                                        <div style={{ flex: 1, minWidth: 180 }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                                <Text strong style={{ fontSize: 12 }}>{fee.name}</Text>
+                                                {fee.required && <Tag color="red" style={{ margin: 0, fontSize: 10 }}>Bắt buộc</Tag>}
+                                            </div>
+                                            <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
+                                                {fee.type === 'percent' ? `${fee.value}% doanh thu` : `${fmt(fee.value)}đ / đơn`}
                                             </Text>
-                                            <InputNumber
-                                                style={{ width: '100%' }}
-                                                size="small"
-                                                value={fee.value}
-                                                onChange={(val) => updateTiktokFee(fee.id, val || 0)}
-                                                min={0}
-                                                step={fee.type === 'percent' ? 0.1 : 100}
-                                                addonAfter={fee.type === 'percent' ? '%' : 'đ'}
-                                                formatter={fee.type === 'fixed' ? (v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')) : undefined}
-                                                parser={fee.type === 'fixed' ? ((v: any) => v.replace(/,/g, '')) : undefined}
-                                            />
                                         </div>
-                                    </Col>
+                                        <InputNumber
+                                            style={{ width: 135, flex: '0 0 135px' }} size="small" value={fee.value}
+                                            disabled={fee.enabled === false} onChange={(val) => updateTiktokFee(fee.id, val || 0)} min={0}
+                                            step={fee.type === 'percent' ? 0.1 : 100} addonAfter={fee.type === 'percent' ? '%' : 'đ'}
+                                            formatter={fee.type === 'fixed' ? (v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')) : undefined}
+                                            parser={fee.type === 'fixed' ? ((v: any) => v.replace(/,/g, '')) : undefined}
+                                        />
+                                    </div>
                                 ))}
-                            </Row>
+                            </div>
                         </Panel>
 
                         <Panel header="📣 Chi phí Quảng cáo" key="ads">
                             <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 12 }}>
                                 <InfoCircleOutlined /> Nhập % doanh thu — hệ thống tự tính: % × doanh thu từng sàn trong kỳ
                             </Text>
-                            <Row gutter={12}>
-                                <Col span={12}>
-                                    <Form.Item name="shopeeAdsPercent" label="🛍️ Shopee Ads">
-                                        <InputNumber style={{ width: '100%' }} min={0} max={100} step={0.1}
-                                            precision={2}
-                                            addonAfter="%" />
-                                    </Form.Item>
-                                </Col>
-                                <Col span={12}>
-                                    <Form.Item name="tiktokAdsPercent" label="🎵 TikTok Ads">
-                                        <InputNumber style={{ width: '100%' }} min={0} max={100} step={0.1}
-                                            precision={2}
-                                            addonAfter="%" />
-                                    </Form.Item>
-                                </Col>
-                            </Row>
+                            <div style={{ border: '1px solid #edf0f2', borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
+                                {[
+                                    { name: 'shopeeAdsPercent', label: 'Shopee Ads', icon: '🛍️', description: '% doanh thu Shopee' },
+                                    { name: 'tiktokAdsPercent', label: 'TikTok Ads', icon: '🎵', description: '% doanh thu TikTok' },
+                                ].map((item, index) => (
+                                    <div key={item.name} style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 12, padding: '12px 14px', borderBottom: index === 0 ? '1px solid #edf0f2' : 'none' }}>
+                                        <span style={{ width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 9, background: '#fff7e6', fontSize: 18 }}>{item.icon}</span>
+                                        <div style={{ flex: 1, minWidth: 180 }}>
+                                            <Text strong>{item.label}</Text>
+                                            <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>{item.description}</Text>
+                                        </div>
+                                        <Form.Item name={item.name} style={{ margin: 0 }}>
+                                            <InputNumber style={{ width: 150 }} min={0} max={100} step={0.1} precision={2} addonAfter="%" />
+                                        </Form.Item>
+                                    </div>
+                                ))}
+                            </div>
                         </Panel>
 
                         <Panel header="🏠 Chi phí vận hành hàng tháng" key="opex">
                             <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 12 }}>
                                 <InfoCircleOutlined /> Nhập tổng chi phí 1 tháng, hệ thống sẽ tự chia đều 30 ngày
                             </Text>
-                            <Row gutter={12}>
-                                <Col span={8}><Form.Item name="monthlyRent" label="Thuê kho/mặt bằng"><InputNumber style={{ width: '100%' }} min={0} step={100000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={(v: any) => v.replace(/,/g, '')} addonAfter="đ" /></Form.Item></Col>
-                                <Col span={8}><Form.Item name="monthlyElectric" label="Điện"><InputNumber style={{ width: '100%' }} min={0} step={100000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={(v: any) => v.replace(/,/g, '')} addonAfter="đ" /></Form.Item></Col>
-                                <Col span={8}><Form.Item name="monthlyWater" label="Nước"><InputNumber style={{ width: '100%' }} min={0} step={50000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={(v: any) => v.replace(/,/g, '')} addonAfter="đ" /></Form.Item></Col>
-                                <Col span={8}><Form.Item name="monthlyInternet" label="Internet"><InputNumber style={{ width: '100%' }} min={0} step={50000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={(v: any) => v.replace(/,/g, '')} addonAfter="đ" /></Form.Item></Col>
-                                <Col span={8}><Form.Item name="monthlySalary" label="Lương nhân viên"><InputNumber style={{ width: '100%' }} min={0} step={500000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={(v: any) => v.replace(/,/g, '')} addonAfter="đ" /></Form.Item></Col>
-                                <Col span={8}><Form.Item name="monthlyInsurance" label="Bảo hiểm"><InputNumber style={{ width: '100%' }} min={0} step={100000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={(v: any) => v.replace(/,/g, '')} addonAfter="đ" /></Form.Item></Col>
-                                <Col span={8}><Form.Item name="monthlyEquipment" label="Khấu hao thiết bị"><InputNumber style={{ width: '100%' }} min={0} step={100000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={(v: any) => v.replace(/,/g, '')} addonAfter="đ" /></Form.Item></Col>
-                                <Col span={8}><Form.Item name="monthlySoftware" label="Phần mềm"><InputNumber style={{ width: '100%' }} min={0} step={50000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={(v: any) => v.replace(/,/g, '')} addonAfter="đ" /></Form.Item></Col>
-                                <Col span={8}><Form.Item name="monthlyOther" label="Khác"><InputNumber style={{ width: '100%' }} min={0} step={50000} formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} parser={(v: any) => v.replace(/,/g, '')} addonAfter="đ" /></Form.Item></Col>
-                            </Row>
+                            <div style={{ border: '1px solid #edf0f2', borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
+                                {OPEX_CONFIG_FIELDS.map((field, index) => (
+                                    <div key={field.name} style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 12, padding: '11px 14px', borderBottom: index === OPEX_CONFIG_FIELDS.length - 1 ? 'none' : '1px solid #edf0f2' }}>
+                                        <span style={{ width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 9, background: '#f6ffed', fontSize: 18 }}>{field.icon}</span>
+                                        <div style={{ flex: 1, minWidth: 180 }}>
+                                            <Text strong>{field.label}</Text>
+                                            <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>Chi phí cố định mỗi tháng</Text>
+                                        </div>
+                                        <Form.Item name={field.name} style={{ margin: 0 }}>
+                                            <InputNumber<number>
+                                                style={{ width: 180 }} min={0} step={field.step} addonAfter="đ"
+                                                formatter={value => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                                                parser={(value) => Number(String(value || '').replace(/,/g, ''))}
+                                            />
+                                        </Form.Item>
+                                    </div>
+                                ))}
+                            </div>
                         </Panel>
                     </Collapse>
 

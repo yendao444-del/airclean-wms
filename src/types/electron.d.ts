@@ -630,7 +630,9 @@ export interface ElectronAPI {
       success: boolean;
       data?: {
         reset: boolean;
-        resetCount: number;
+        dayChanged?: boolean;
+        resetCount?: number;
+        recurringAssignmentsCreated?: number;
         deadlineNormalized?: number;
         message: string;
       };

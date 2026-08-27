@@ -1,6 +1,6 @@
 {
   "name": "quan-ly-ban-hang-desktop",
-  "version": "1.0.396",
+  "version": "1.0.397",
   "description": "Hệ thống quản lý bán hàng - Desktop App",
   "main": "electron/main.js",
   "scripts": {
@@ -114,6 +114,7 @@
     "@supabase/supabase-js": "^2.110.8",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",
+    "pdfjs-dist": "^6.2.108",
     "winax": "^3.6.8"
   }
 }

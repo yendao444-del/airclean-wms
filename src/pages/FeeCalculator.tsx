@@ -55,6 +55,7 @@ const DEFAULT_SHOPEE_FEES: Fee[] = [
     { id: 'phiHaTang', name: 'Phí hạ tầng sàn Shopee (3.000đ/đơn)', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', required: true, enabled: true },
     { id: 'thueGTGT', name: 'Thuế GTGT (Khấu trừ cá nhân 0.96%)', type: 'percent', value: 0.96, icon: '🏛️', color: '#db2777', enabled: true },
     { id: 'thueTNCN', name: 'Thuế TNCN (Khấu trừ cá nhân 0.54%)', type: 'percent', value: 0.54, icon: '📊', color: '#0891b2', enabled: true },
+    { id: 'affiliate', name: 'Phí Affiliate Shopee', type: 'percent', value: 5, icon: '🤝', color: '#16a34a', enabled: true },
     { id: 'piShip', name: 'Phí dịch vụ vận chuyển PiShip (2.700đ/đơn)', type: 'fixed', value: 2700, icon: '📦', color: '#059669', enabled: true },
     { id: 'freeshipXtra', name: 'Gói Freeship Xtra / Freeship Xtra Plus (8%)', type: 'percent', value: 8, icon: '🚚', color: '#16a34a', enabled: false },
     { id: 'voucherXtra', name: 'Gói Voucher Xtra (Mã giảm giá/Live/Video 5.5%)', type: 'percent', value: 5.5, icon: '🎁', color: '#f59e0b', enabled: false },
@@ -66,7 +67,7 @@ const DEFAULT_TIKTOK_FEES: Fee[] = [
     { id: 'phiXuLyDon', name: 'Phí xử lý đơn hàng', type: 'fixed', value: 3000, icon: '⚙️', color: '#7c3aed', enabled: true, required: true },
     { id: 'thueGTGT', name: 'Thuế GTGT (TikTok khấu trừ)', type: 'percent', value: 1, icon: '🏛️', color: '#db2777', enabled: true },
     { id: 'thueTNCN', name: 'Thuế TNCN (TikTok khấu trừ)', type: 'percent', value: 0.5, icon: '📊', color: '#0891b2', enabled: true },
-    { id: 'affiliate', name: 'Hoa hồng liên kết', type: 'percent', value: 15, icon: '🤝', color: '#16a34a', enabled: true },
+    { id: 'affiliate', name: 'Phí Affiliate TikTok', type: 'percent', value: 5, icon: '🤝', color: '#16a34a', enabled: true },
 ];
 const CATEGORIES: Record<Platform, Category[]> = {
     shopee: [
@@ -110,7 +111,7 @@ const DEFAULT_OPERATING_FEES: OperatingFee[] = [
 ];
 
 const numberFormat = (value: number) => new Intl.NumberFormat('vi-VN').format(Math.round(value || 0));
-const FEE_POLICY_VERSION = 20260815;
+const FEE_POLICY_VERSION = 20260826;
 const normalizeFees = (fees: Fee[], defaults: Fee[]) => {
     const savedById = new Map(fees.map((fee) => [fee.id, fee]));
     return defaults.map((defaultFee) => ({
@@ -173,17 +174,23 @@ export default function FeeCalculator() {
                     tiktok: migrateCategoryId('tiktok', saved.categories?.tiktok),
                 };
                 const hasCurrentPolicy = saved.feePolicyVersion === FEE_POLICY_VERSION;
+                const normalizedShopeeFees = shopeeRes.success && Array.isArray(shopeeRes.data)
+                    ? normalizeFees(shopeeRes.data, DEFAULT_SHOPEE_FEES)
+                    : DEFAULT_SHOPEE_FEES;
+                const normalizedTiktokFees = tiktokRes.success && Array.isArray(tiktokRes.data)
+                    ? normalizeFees(tiktokRes.data, DEFAULT_TIKTOK_FEES)
+                    : DEFAULT_TIKTOK_FEES;
                 const nextShopeeFees = applyCategoryRate(
-                    hasCurrentPolicy && shopeeRes.success && Array.isArray(shopeeRes.data)
-                        ? normalizeFees(shopeeRes.data, DEFAULT_SHOPEE_FEES)
-                        : DEFAULT_SHOPEE_FEES,
+                    hasCurrentPolicy
+                        ? normalizedShopeeFees
+                        : normalizedShopeeFees.map((fee) => fee.id === 'affiliate' ? { ...fee, value: 5, enabled: true } : fee),
                     'shopee',
                     migratedCategories.shopee,
                 );
                 const nextTiktokFees = applyCategoryRate(
-                    hasCurrentPolicy && tiktokRes.success && Array.isArray(tiktokRes.data)
-                        ? normalizeFees(tiktokRes.data, DEFAULT_TIKTOK_FEES)
-                        : DEFAULT_TIKTOK_FEES,
+                    hasCurrentPolicy
+                        ? normalizedTiktokFees
+                        : normalizedTiktokFees.map((fee) => fee.id === 'affiliate' ? { ...fee, value: 5, enabled: true } : fee),
                     'tiktok',
                     migratedCategories.tiktok,
                 );

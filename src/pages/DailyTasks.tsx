@@ -550,12 +550,27 @@ const DailyTasks = () => {
     useEffect(() => {
         // Show task cards first; reset/history work can finish in the background.
         void loadTasks();
-        (async () => {
+        let maintenanceRefreshTimer: number | undefined;
+        const resetForCurrentDay = async () => {
             // 🔄 Reset daily tasks nếu sang ngày mới
             try {
                 const resetResult = await window.electronAPI.dailyTasks.resetDaily();
-                if (resetResult.success && (resetResult.data?.reset || resetResult.data?.deadlineNormalized)) {
+                const dayChanged = Boolean(resetResult.success && resetResult.data?.dayChanged);
+                if (dayChanged) {
+                    setSelectedWorkDate(current =>
+                        current.isSame(dayjs().subtract(1, 'day'), 'day')
+                            ? dayjs().startOf('day')
+                            : current
+                    );
+                }
+                if (resetResult.success && (dayChanged || resetResult.data?.reset || resetResult.data?.deadlineNormalized)) {
                     await loadTasks();
+                }
+                if (resetResult.success) {
+                    if (maintenanceRefreshTimer !== undefined) window.clearTimeout(maintenanceRefreshTimer);
+                    maintenanceRefreshTimer = window.setTimeout(() => {
+                        void applyEvidencePenalties();
+                    }, 4000);
                 }
                 if (resetResult.success && resetResult.data?.reset) {
                     message.info({
@@ -566,8 +581,29 @@ const DailyTasks = () => {
             } catch (err) {
                 console.log('Daily reset skipped:', err);
             }
+        };
 
-        })();
+        void resetForCurrentDay();
+
+        let midnightTimer: number | undefined;
+        const scheduleMidnightReset = () => {
+            const nextDay = dayjs().add(1, 'day').startOf('day').add(1, 'second');
+            midnightTimer = window.setTimeout(async () => {
+                setSelectedWorkDate(current =>
+                    current.isSame(dayjs().subtract(1, 'day'), 'day')
+                        ? dayjs().startOf('day')
+                        : current
+                );
+                await resetForCurrentDay();
+                scheduleMidnightReset();
+            }, Math.max(1000, nextDay.diff(dayjs())));
+        };
+        scheduleMidnightReset();
+
+        return () => {
+            if (midnightTimer !== undefined) window.clearTimeout(midnightTimer);
+            if (maintenanceRefreshTimer !== undefined) window.clearTimeout(maintenanceRefreshTimer);
+        };
     }, []);
 
     const applyEvidencePenalties = async () => {
@@ -5487,4 +5523,3 @@ const HistoryCalendar = ({ tasks, history, snapshots, onOpenEvidence }: { tasks:
 };
 
 export default DailyTasks;
-

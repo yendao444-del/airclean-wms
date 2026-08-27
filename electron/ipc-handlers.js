@@ -8161,7 +8161,7 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
   const remaining = unit.remainingQuantity ?? unit.currentPcs ?? 0;
   const baseUnit = unit.baseUnit || unit.unitName || "Gói";
 
-  // Các lần xuất lẻ đều dưới 100; số khác được nhập qua nút tùy chọn.
+  // Giữ các mức rút nhanh; số lượng lớn được nhập qua nút tùy chọn.
   const qtyOptions = [10, 20, 40, 50].filter((qty) => qty <= remaining);
   if (remaining < 100 && !qtyOptions.includes(remaining)) {
     qtyOptions.push(remaining);
@@ -8244,11 +8244,11 @@ async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = 
     await answerTelegramCallbackQuery(queryId, "Hãy nhập số lượng muốn rút");
     await sendTelegramWmsMessage(
       chatId,
-      `✍️ <b>NHẬP SỐ LƯỢNG TÙY CHỌN</b>\n\n📦 Kiện: <code>${code}</code>\n👉 Hãy trả lời tin nhắn này bằng một số từ <b>1 đến 99</b>.\n<i>Ví dụ: 15, 30, 45, 75...</i>`,
+      `✍️ <b>NHẬP SỐ LƯỢNG TÙY CHỌN</b>\n\n📦 Kiện: <code>${code}</code>\n👉 Hãy trả lời bằng một <b>số nguyên dương không vượt tồn còn lại của kiện</b>.\n<i>Ví dụ: 100, 200, 500...</i>`,
       {
         force_reply: true,
         selective: true,
-        input_field_placeholder: "Nhập số lượng từ 1 đến 99",
+        input_field_placeholder: "Nhập số lượng cần rút",
       },
     );
     return;
@@ -8257,10 +8257,10 @@ async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = 
   if (data.startsWith("do_pick:")) {
     const [, code, qtyStr] = data.split(":");
     const qty = parseInt(qtyStr, 10);
-    if (!Number.isInteger(qty) || qty < 1 || qty >= 100) {
+    if (!Number.isInteger(qty) || qty < 1) {
       await answerTelegramCallbackQuery(
         queryId,
-        "Mỗi lần xuất phải từ 1 đến 99.",
+        "Số lượng rút phải là số nguyên dương.",
       );
       await sendPickQuantityMenu(chatId, code, messageId);
       return;
@@ -8459,16 +8459,16 @@ async function handleTelegramWmsIncomingMessage(message, telegramUpdateId = null
     if (!/^\d+$/.test(text)) {
       await sendTelegramWmsMessage(
         chatId,
-        "⚠️ Vui lòng chỉ nhập một số từ <b>1 đến 99</b>, hoặc gửi <code>/huy</code> để hủy.",
+        "⚠️ Vui lòng chỉ nhập một <b>số nguyên dương</b>, hoặc gửi <code>/huy</code> để hủy.",
       );
       return;
     }
 
     const qty = Number(text);
-    if (!Number.isInteger(qty) || qty < 1 || qty >= 100) {
+    if (!Number.isInteger(qty) || qty < 1) {
       await sendTelegramWmsMessage(
         chatId,
-        "⚠️ Mỗi lần xuất phải dưới 100. Vui lòng nhập số từ <b>1 đến 99</b>.",
+        "⚠️ Số lượng rút phải là một <b>số nguyên dương</b>.",
       );
       return;
     }
@@ -8617,10 +8617,10 @@ async function handleTelegramWmsIncomingMessage(message, telegramUpdateId = null
         const subParts = p.replace(/^rut[_-]/i, "").split("_");
         const code = subParts[0]?.replace(/_/g, "-");
         const qty = parseInt(subParts[1] || "50", 10);
-        if (!Number.isInteger(qty) || qty < 1 || qty >= 100) {
+        if (!Number.isInteger(qty) || qty < 1) {
           await sendTelegramWmsMessage(
             chatId,
-            "⚠️ Mỗi lần xuất qua Telegram phải từ <b>1 đến 99</b>.",
+            "⚠️ Số lượng rút phải là một <b>số nguyên dương</b>.",
           );
           return;
         }
@@ -8674,13 +8674,6 @@ async function handleTelegramWmsIncomingMessage(message, telegramUpdateId = null
     const qty = parseInt(parts[2], 10);
     if (!code || isNaN(qty) || qty <= 0) {
       await sendPickQuantityMenu(chatId, code);
-      return;
-    }
-    if (qty >= 100) {
-      await sendTelegramWmsMessage(
-        chatId,
-        "⚠️ Mỗi lần xuất qua Telegram phải dưới 100. Hãy nhập số từ <b>1 đến 99</b>.",
-      );
       return;
     }
     try {
@@ -11561,6 +11554,21 @@ async function withGoodsCompaniesWriteLock(callback) {
   }
   throw new Error("Không thể khóa dữ liệu công ty hàng hóa.");
 }
+
+ipcMain.handle("r2Test:getBootstrap", async () => {
+  try {
+    requireRole("admin");
+    const configPath = path.join(app.getPath("userData"), "r2-test-bootstrap.json");
+    if (!fs.existsSync(configPath)) return { success: true, data: null };
+    const saved = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    const endpoint = String(saved?.endpoint || "").trim().replace(/\/+$/, "");
+    const testKey = String(saved?.testKey || "").trim();
+    if (!/^https:\/\//i.test(endpoint) || !testKey) throw new Error("Cấu hình R2 staging không hợp lệ.");
+    return { success: true, data: { endpoint, testKey } };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
 
 // Goods companies / product brands. Persisted in AppConfig so it works with
 // the deployed database permissions without adding a new table.
@@ -15979,72 +15987,136 @@ async function migrateLegacyDailyTaskSnapshots() {
   }
   await prisma.appConfig.deleteMany({ where: { key: "dailyTasksSnapshots" } });
 }
+
+async function pruneDailyTaskSnapshots() {
+  const snapshotRows = await prisma.appConfig.findMany({
+    where: { key: { startsWith: DAILY_TASK_SNAPSHOT_PREFIX } },
+    select: { key: true },
+  });
+  const expiredSnapshotKeys = snapshotRows
+    .map((row) => row.key)
+    .sort((left, right) => right.localeCompare(left))
+    .slice(90);
+  if (expiredSnapshotKeys.length > 0) {
+    await prisma.appConfig.deleteMany({
+      where: { key: { in: expiredSnapshotKeys } },
+    });
+  }
+}
+
+let dailyTaskMaintenancePromise = null;
+function scheduleDailyTaskMaintenance() {
+  if (dailyTaskMaintenancePromise) return;
+
+  // Maintenance must not hold up the visible day rollover. The immutable
+  // snapshot created by reset keeps yesterday's evidence safe for this scan.
+  setTimeout(() => {
+    if (dailyTaskMaintenancePromise) return;
+    dailyTaskMaintenancePromise = (async () => {
+      const maintenanceNow = new Date();
+      await normalizeOpenDailyTaskDeadlines();
+      const results = await Promise.allSettled([
+        (async () => {
+          await reconcileSnapshotEvidencePenalties(maintenanceNow);
+          await reconcileEvidencePenalties();
+        })(),
+        reconcileRecurringAssignments(maintenanceNow),
+        pruneDailyTaskSnapshots(),
+      ]);
+      results.forEach((result) => {
+        if (result.status === "rejected") {
+          console.error("Daily task maintenance job failed:", result.reason);
+        }
+      });
+    })()
+      .catch((error) =>
+        console.error("Daily task background maintenance error:", error),
+      )
+      .finally(() => {
+        dailyTaskMaintenancePromise = null;
+      });
+  }, 250);
+}
+
+let dailyTaskResetPromise = null;
 // Reset daily tasks - tự động reset khi sang ngày mới
 ipcMain.handle("dailyTasks:resetDaily", async () => {
+  if (dailyTaskResetPromise) return dailyTaskResetPromise;
+  dailyTaskResetPromise = performDailyTaskReset();
+  try {
+    return await dailyTaskResetPromise;
+  } finally {
+    dailyTaskResetPromise = null;
+  }
+});
+
+async function performDailyTaskReset() {
   try {
     if (!prisma) throw new Error("Database chưa được khởi tạo.");
-
-    // Fix null assignee/verifier (tương thích Prisma client cũ)
-    await prisma.$executeRawUnsafe(
-      `UPDATE "DailyTask" SET assignee = '' WHERE assignee IS NULL`,
-    );
-    await prisma.$executeRawUnsafe(
-      `UPDATE "DailyTask" SET verifier = '' WHERE verifier IS NULL`,
-    );
 
     // Lấy ngày hôm nay (theo timezone local)
     const now = new Date();
     const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
-    await migrateLegacyDailyTaskSnapshots();
-    // Apply the end-of-day rule before a penalty reconciliation. This also
-    // repairs active rows created by older clients at 19:00 or 20:00.
-    const deadlineNormalized = await normalizeOpenDailyTaskDeadlines();
-    // Reconcile yesterday's immutable snapshot before any recurring task is
-    // reset or moved to today's deadline. Otherwise the old missed deadline
-    // disappears from the active row and can never be fined.
-    await reconcileSnapshotEvidencePenalties(now);
-    await reconcileEvidencePenalties();
-    await reconcileRecurringAssignments(now);
-
-    // Daily work is not generated or reset on Sunday. Assignment tasks
-    // retain their own deadlines and are intentionally unaffected.
-    if (now.getDay() === 0) {
-      return {
-        success: true,
-        data: {
-          reset: false,
-          message: "Chủ nhật không sinh công việc hàng ngày",
-        },
-      };
-    }
-
-    // Kiểm tra ngày reset cuối cùng
+    // Check the cheap marker first. Previously every page entry waited for all
+    // penalty/snapshot scans even when today's reset had already completed.
     const lastResetConfig = await prisma.appConfig.findUnique({
       where: { key: "dailyTasksLastResetDate" },
     });
-
     const lastResetDate = lastResetConfig
       ? JSON.parse(lastResetConfig.value)
       : null;
 
     if (lastResetDate === today) {
-      // Đã reset hôm nay rồi
+      scheduleDailyTaskMaintenance();
       return {
         success: true,
         data: {
           reset: false,
-          deadlineNormalized,
+          dayChanged: false,
           message: "Đã reset hôm nay rồi",
         },
       };
     }
 
-    // Fix dữ liệu cũ: Các task category='Bàn giao' nhưng type='daily' → sửa thành 'assignment'
-    await prisma.dailyTask.updateMany({
-      where: { category: "Bàn giao", type: "daily" },
-      data: { type: "assignment" },
-    });
+    // Daily work is not generated or reset on Sunday. Assignment tasks
+    // retain their own deadlines and are intentionally unaffected.
+    if (now.getDay() === 0) {
+      scheduleDailyTaskMaintenance();
+      return {
+        success: true,
+        data: {
+          reset: false,
+          dayChanged: false,
+          message: "Chủ nhật không sinh công việc hàng ngày",
+        },
+      };
+    }
+
+    // Recurring handovers are part of the new day's visible task list. Start
+    // them alongside the daily reset so their database latency overlaps, then
+    // wait before telling the renderer to reload.
+    const recurringAssignmentsPromise = reconcileRecurringAssignments(now).catch(
+      (error) => {
+        console.error("Recurring assignment reconciliation error:", error);
+        return 0;
+      },
+    );
+
+    // Repair legacy nulls in parallel before Prisma materializes task rows.
+    await Promise.all([
+      prisma.$executeRawUnsafe(
+        `UPDATE "DailyTask" SET assignee = '' WHERE assignee IS NULL`,
+      ),
+      prisma.$executeRawUnsafe(
+        `UPDATE "DailyTask" SET verifier = '' WHERE verifier IS NULL`,
+      ),
+      migrateLegacyDailyTaskSnapshots(),
+      prisma.dailyTask.updateMany({
+        where: { category: "Bàn giao", type: "daily" },
+        data: { type: "assignment" },
+      }),
+    ]);
 
     // Lấy danh sách task HÀNG NGÀY đã completed để lưu history trước khi reset
     // Bàn giao (type: 'assignment') KHÔNG reset - chỉ reset daily tasks
@@ -16053,43 +16125,33 @@ ipcMain.handle("dailyTasks:resetDaily", async () => {
     const dailyTasksBeforeReset = await prisma.dailyTask.findMany({
       where: { type: "daily" },
     });
-    const snapshotDate = lastResetDate || today;
-    const snapshotKey = `${DAILY_TASK_SNAPSHOT_PREFIX}${snapshotDate}`;
-    await prisma.appConfig.upsert({
-      where: { key: snapshotKey },
-      update: {},
-      create: {
-        key: snapshotKey,
-        value: JSON.stringify({
-          capturedAt: now.toISOString(),
-          tasks: dailyTasksBeforeReset,
-        }),
-      },
-    });
-    const snapshotRows = await prisma.appConfig.findMany({
-      where: { key: { startsWith: DAILY_TASK_SNAPSHOT_PREFIX } },
-      select: { key: true },
-    });
-    const expiredSnapshotKeys = snapshotRows
-      .map((row) => row.key)
-      .sort((left, right) => right.localeCompare(left))
-      .slice(90);
-    if (expiredSnapshotKeys.length > 0) {
-      await prisma.appConfig.deleteMany({
-        where: { key: { in: expiredSnapshotKeys } },
-      });
-    }
-
     const completedTasks = dailyTasksBeforeReset.filter(
       (task) => task.status === "completed",
     );
+    const snapshotDate = lastResetDate || today;
+    const snapshotKey = `${DAILY_TASK_SNAPSHOT_PREFIX}${snapshotDate}`;
+    const [, historyConfig] = await Promise.all([
+      prisma.appConfig.upsert({
+        where: { key: snapshotKey },
+        update: {},
+        create: {
+          key: snapshotKey,
+          value: JSON.stringify({
+            capturedAt: now.toISOString(),
+            tasks: dailyTasksBeforeReset,
+          }),
+        },
+      }),
+      completedTasks.length > 0
+        ? prisma.appConfig.findUnique({
+            where: { key: "dailyTasksHistory" },
+          })
+        : Promise.resolve(null),
+    ]);
 
     // Lưu vào history trước khi reset
+    let historyUpdate = null;
     if (completedTasks.length > 0) {
-      // Đọc history cũ
-      const historyConfig = await prisma.appConfig.findUnique({
-        where: { key: "dailyTasksHistory" },
-      });
       const existingHistory = historyConfig
         ? JSON.parse(historyConfig.value)
         : [];
@@ -16135,7 +16197,7 @@ ipcMain.handle("dailyTasks:resetDaily", async () => {
 
       const updatedHistory = [...newEntries, ...existingHistory].slice(0, 500); // Giữ tối đa 500 entries
 
-      await prisma.appConfig.upsert({
+      historyUpdate = prisma.appConfig.upsert({
         where: { key: "dailyTasksHistory" },
         update: { value: JSON.stringify(updatedHistory) },
         create: {
@@ -16144,35 +16206,23 @@ ipcMain.handle("dailyTasks:resetDaily", async () => {
         },
       });
 
-      // Reset chỉ daily tasks completed về pending (không reset bàn giao)
-      await prisma.dailyTask.updateMany({
-        where: { status: "completed", type: "daily" },
-        data: {
-          status: "pending",
-          completedAt: null,
-          verifier: "",
-        },
-      });
-
       console.log(
         `✅ [DAILY RESET] Ngày ${today}: Reset ${completedTasks.length} tasks completed → pending`,
       );
     }
 
-    // Cập nhật dueDate của chỉ DAILY tasks sang ngày hôm nay (giữ nguyên giờ)
-    // Fix bug: task vẫn mang dueDate cũ → calendar hiển thị sai ngày hoàn thành
-    // Bàn giao (assignment) giữ nguyên deadline riêng, không cập nhật
-    const allTasks = await prisma.dailyTask.findMany({
-      where: { type: "daily" },
-    });
-    for (const task of allTasks) {
+    // Build all per-task writes first, then submit them as one transaction.
+    // This avoids one network round trip per task on the remote database.
+    const taskUpdates = dailyTasksBeforeReset.map((task) => {
       const newDueDate = new Date(now);
       newDueDate.setHours(23, 59, 59, 999);
       const attachments = parseTaskAttachments(task.attachments);
       const rotationAssignee = getDailyRotationAssignee(attachments, now);
-      await prisma.dailyTask.update({
+      return prisma.dailyTask.update({
         where: { id: task.id },
         data: {
+          status: task.status === "completed" ? "pending" : task.status,
+          completedAt: task.status === "completed" ? null : task.completedAt,
           dueDate: newDueDate,
           verifier: "",
           // Người cố định phải còn nguyên để phạt/nộp bằng chứng đúng người.
@@ -16184,24 +16234,31 @@ ipcMain.handle("dailyTasks:resetDaily", async () => {
             : task.attachments,
         },
       });
-    }
-    console.log(
-      `✅ [DAILY RESET] Đã cập nhật dueDate của ${allTasks.length} tasks sang ngày ${today}`,
-    );
-
-    // Lưu ngày reset
-    await prisma.appConfig.upsert({
+    });
+    const resetMarkerUpdate = prisma.appConfig.upsert({
       where: { key: "dailyTasksLastResetDate" },
       update: { value: JSON.stringify(today) },
       create: { key: "dailyTasksLastResetDate", value: JSON.stringify(today) },
     });
+    await prisma.$transaction([
+      ...(historyUpdate ? [historyUpdate] : []),
+      ...taskUpdates,
+      resetMarkerUpdate,
+    ]);
+    const recurringAssignmentsCreated = await recurringAssignmentsPromise;
+    console.log(
+      `✅ [DAILY RESET] Đã cập nhật dueDate của ${dailyTasksBeforeReset.length} tasks sang ngày ${today}`,
+    );
+
+    scheduleDailyTaskMaintenance();
 
     return {
       success: true,
       data: {
         reset: completedTasks.length > 0,
+        dayChanged: true,
         resetCount: completedTasks.length,
-        deadlineNormalized,
+        recurringAssignmentsCreated,
         message:
           completedTasks.length > 0
             ? `Đã reset ${completedTasks.length} công việc sang ngày mới`
@@ -16212,7 +16269,7 @@ ipcMain.handle("dailyTasks:resetDaily", async () => {
     console.error("Error resetting daily tasks:", error);
     return { success: false, error: error.message };
   }
-});
+}
 
 // ========================================
 // COMBO PRODUCTS

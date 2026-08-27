@@ -47,6 +47,7 @@ import { useAuth } from '../contexts/AuthContext';
 
 const SystemLogsPage = lazy(() => import('./SystemLogs'));
 const PermissionsPage = lazy(() => import('./Permissions'));
+const R2StorageLab = lazy(() => import('./R2StorageLab'));
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -1025,6 +1026,19 @@ const Settings = () => {
       children: (
         <Suspense fallback={<div className="page-loading-center"><Spin size="large" /></div>}>
           <PermissionsPage />
+        </Suspense>
+      ),
+    }] : []),
+    ...(isAdmin ? [{
+      key: 'r2-lab',
+      label: (
+        <span>
+          <CloudUploadOutlined /> R2 Test Lab
+        </span>
+      ),
+      children: (
+        <Suspense fallback={<div className="page-loading-center"><Spin size="large" /></div>}>
+          <R2StorageLab />
         </Suspense>
       ),
     }] : []),

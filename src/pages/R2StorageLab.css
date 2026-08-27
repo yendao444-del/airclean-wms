@@ -1,0 +1,5 @@
+.r2-preview-modal .ant-modal-close:focus,
+.r2-preview-modal .ant-modal-close:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
