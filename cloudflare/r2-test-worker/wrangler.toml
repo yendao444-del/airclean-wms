@@ -1,0 +1,12 @@
+name = "dby-pos-r2-test"
+main = "src/index.ts"
+compatibility_date = "2026-08-26"
+
+[[r2_buckets]]
+binding = "R2_TEST_BUCKET"
+bucket_name = "dby-pos-test"
+
+[vars]
+ALLOWED_ORIGIN = "*"
+
+# Set the secret outside source control with: npx wrangler secret put R2_TEST_KEY

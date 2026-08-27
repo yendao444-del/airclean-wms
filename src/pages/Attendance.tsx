@@ -82,6 +82,7 @@ interface LeaveRequest {
     date: string; // YYYY-MM-DD
     session: 'morning' | 'afternoon';
     exempt?: boolean;
+    unpaid?: boolean;
     note?: string;
     createdAt?: string;
     createdBy?: string;
@@ -173,6 +174,19 @@ const getFineContentKey = (fine: Partial<FineRecord> | undefined) => {
         fine.amount || 0,
     ].join('|');
 };
+
+const normalizeFineFingerprintText = (value: unknown) => String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLocaleLowerCase('vi-VN');
+
+const getManualFineFingerprint = (fine: Partial<FineRecord>) => [
+    Number(fine.empId || 0),
+    normalizeFineFingerprintText(fine.type),
+    normalizeFineFingerprintText(fine.detail),
+    Math.round(Number(fine.amount || 0)),
+    fine.date && dayjs(fine.date).isValid() ? dayjs(fine.date).format('YYYY-MM-DD') : '',
+].join('|');
 
 const getFineRecordKey = (fine: Partial<FineRecord> | undefined) => {
     if (!fine) return '';
@@ -926,7 +940,7 @@ function calculatePayroll(
             salaryBase = shifts * salaryPerShift;
             const requestedSessions = new Set(
                 leaveRequests
-                    .filter((leave) => leave.empId === emp.id && !leave.exempt)
+                    .filter((leave) => leave.empId === emp.id && !leave.exempt && !leave.unpaid)
                     .map((leave) => `${leave.date}|${leave.session}`)
             );
             const exemptSessions = new Set(
@@ -973,7 +987,7 @@ function calculatePayroll(
             });
             const requestedSessions = new Set(
                 leaveRequests
-                    .filter((leave) => leave.empId === emp.id && !leave.exempt)
+                    .filter((leave) => leave.empId === emp.id && !leave.exempt && !leave.unpaid)
                     .map((leave) => `${leave.date}|${leave.session}`)
             );
             const exemptSessions = new Set(
@@ -1176,9 +1190,9 @@ const LeavePill = ({
     isDue: boolean;
     onClick?: () => void;
 }) => {
-    const status = request?.exempt ? 'exempt' : (request ? (isDue ? 'paid' : 'planned') : (isDue ? 'unpaid' : 'empty'));
+    const status = request?.exempt ? 'exempt' : request?.unpaid ? 'unpaid' : (request ? (isDue ? 'paid' : 'planned') : (isDue ? 'unpaid' : 'empty'));
     const tooltip = request
-        ? `${label}: ${request.exempt ? 'Miễn trừ' : (isDue ? 'Nghỉ có phép' : 'Đã xin nghỉ')}${request.note ? ` - ${request.note}` : ''}`
+        ? `${label}: ${request.exempt ? 'Miễn trừ' : request.unpaid ? 'Nghỉ không phép' : (isDue ? 'Nghỉ có phép' : 'Đã xin nghỉ')}${request.note ? ` - ${request.note}` : ''}`
         : `${label}: ${isDue ? 'Nghỉ không phép' : 'Chưa có trạng thái'}`;
 
     return (
@@ -1190,7 +1204,7 @@ const LeavePill = ({
                 disabled={!onClick}
             >
                 <span>{label}</span>
-                {(request || isDue) && <span>{request ? (request.exempt ? 'Miễn trừ' : (isDue ? 'Có phép' : 'Đã xin')) : 'Không phép'}</span>}
+                {(request || isDue) && <span>{request ? (request.exempt ? 'Miễn trừ' : request.unpaid ? 'Không phép' : (isDue ? 'Có phép' : 'Đã xin')) : 'Không phép'}</span>}
             </button>
         </Tooltip>
     );
@@ -1211,16 +1225,18 @@ const WorkSchedulePill = ({
 }) => {
     const status = request?.exempt
         ? 'exempt'
+        : request?.unpaid
+            ? 'unpaid'
         : request
             ? (isDue ? 'paid' : 'planned')
             : (!schedule ? 'empty' : (!isDue ? 'planned' : 'unpaid'));
     const unscheduledRequestLabel = !schedule && request
-        ? (request.exempt ? 'Mien tru' : (isDue ? 'Co phep' : 'Da xin'))
+        ? (request.exempt ? 'Mien tru' : request.unpaid ? 'Khong phep' : (isDue ? 'Co phep' : 'Da xin'))
         : '';
     const tooltip = !schedule
         ? `${label}: Chưa có lịch làm`
         : request
-            ? `${label}: ${request.exempt ? 'Đã xếp lịch, miễn trừ' : 'Đã xếp lịch, nghỉ có phép'}${request.note ? ` - ${request.note}` : ''}`
+            ? `${label}: ${request.exempt ? 'Đã xếp lịch, miễn trừ' : request.unpaid ? 'Đã xếp lịch, nghỉ không phép' : 'Đã xếp lịch, nghỉ có phép'}${request.note ? ` - ${request.note}` : ''}`
             : `${label}: ${isDue ? 'Đã xếp lịch nhưng không đi làm - không phép' : 'Đã xếp lịch làm'}`;
 
     return (
@@ -1233,7 +1249,7 @@ const WorkSchedulePill = ({
             >
                 <span>{label}</span>
                 {unscheduledRequestLabel && <span>{unscheduledRequestLabel}</span>}
-                {schedule && <span>{request?.exempt ? 'Miễn trừ' : (!isDue ? 'Đã xếp' : (request ? 'Có phép' : 'Không phép'))}</span>}
+                {schedule && <span>{request?.exempt ? 'Miễn trừ' : request?.unpaid ? 'Không phép' : (!isDue ? 'Đã xếp' : (request ? 'Có phép' : 'Không phép'))}</span>}
             </button>
         </Tooltip>
     );
@@ -1255,7 +1271,7 @@ const InlineSchedulePopover = ({
     schedule?: WorkScheduleRecord;
     request?: LeaveRequest;
     isDue: boolean;
-    onSave: (action: 'save' | 'clear' | 'leave' | 'exempt', scope: LeaveSession | 'full_day', note: string) => void;
+    onSave: (action: 'save' | 'clear' | 'leave' | 'unpaid' | 'exempt', scope: LeaveSession | 'full_day', note: string) => void;
     children: React.ReactNode;
 }) => {
     const [open, setOpen] = useState(false);
@@ -1267,7 +1283,7 @@ const InlineSchedulePopover = ({
         }
     }, [open, schedule]);
 
-    const handleAction = (action: 'save' | 'clear' | 'leave' | 'exempt', scope: LeaveSession | 'full_day') => {
+    const handleAction = (action: 'save' | 'clear' | 'leave' | 'unpaid' | 'exempt', scope: LeaveSession | 'full_day') => {
         onSave(action, scope, note);
         setOpen(false);
     };
@@ -1302,7 +1318,14 @@ const InlineSchedulePopover = ({
                     style={{ background: '#fff1f0', color: '#cf1322', border: '1px solid #ffa39e', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
                     onClick={() => handleAction('leave', session)}
                 >
-                    🚫 Báo xin nghỉ {sessionLabel}
+                    Nghỉ có phép {sessionLabel}
+                </Button>
+                <Button
+                    size="small"
+                    style={{ background: '#fff1f0', color: '#a8071a', border: '1px solid #ff7875', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    onClick={() => handleAction('unpaid', session)}
+                >
+                    Nghỉ không phép {sessionLabel}
                 </Button>
                 <Button
                     size="small"
@@ -1352,16 +1375,20 @@ const InlineSchedulePopover = ({
         <Popover
             content={content}
             title={null}
-            trigger="click"
+            trigger={[]}
             open={open}
             onOpenChange={setOpen}
             placement="bottomLeft"
             overlayStyle={{ zIndex: 1050 }}
         >
-            {/* Let Popover receive the click directly.  The previous capture
-                handler set `open` before Popover processed the same event,
-                so its controlled state could immediately be toggled closed. */}
-            <span style={{ display: 'block' }}>{children}</span>
+            <span
+                style={{ display: 'block' }}
+                onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setOpen(current => !current);
+                }}
+            >{children}</span>
         </Popover>
     );
 };
@@ -1380,7 +1407,7 @@ const InlineLeavePopover = ({
     session: LeaveSession;
     request?: LeaveRequest;
     isDue: boolean;
-    onSave: (action: 'save' | 'clear' | 'exempt', scope: LeaveSession | 'full_day', note: string) => void;
+    onSave: (action: 'save' | 'clear' | 'unpaid' | 'exempt', scope: LeaveSession | 'full_day', note: string) => void;
     children: React.ReactNode;
 }) => {
     const [open, setOpen] = useState(false);
@@ -1392,7 +1419,7 @@ const InlineLeavePopover = ({
         }
     }, [open, request]);
 
-    const handleAction = (action: 'save' | 'clear' | 'exempt', scope: LeaveSession | 'full_day') => {
+    const handleAction = (action: 'save' | 'clear' | 'unpaid' | 'exempt', scope: LeaveSession | 'full_day') => {
         onSave(action, scope, note);
         setOpen(false);
     };
@@ -1413,14 +1440,28 @@ const InlineLeavePopover = ({
                     style={{ background: '#1677ff', color: '#fff', border: 'none', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
                     onClick={() => handleAction('save', session)}
                 >
-                    🚫 Nghỉ {sessionLabel}
+                    Nghỉ có phép {sessionLabel}
                 </Button>
                 <Button
                     size="small"
                     style={{ background: '#e6f4ff', color: '#1677ff', border: '1px solid #91caff', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
                     onClick={() => handleAction('save', 'full_day')}
                 >
-                    📅 Nghỉ cả ngày (Sáng + Chiều)
+                    Nghỉ có phép cả ngày
+                </Button>
+                <Button
+                    size="small"
+                    style={{ background: '#fff1f0', color: '#a8071a', border: '1px solid #ff7875', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    onClick={() => handleAction('unpaid', session)}
+                >
+                    Nghỉ không phép {sessionLabel}
+                </Button>
+                <Button
+                    size="small"
+                    style={{ background: '#fff2e8', color: '#ad2102', border: '1px solid #ffbb96', height: 26, fontSize: 11, fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                    onClick={() => handleAction('unpaid', 'full_day')}
+                >
+                    Nghỉ không phép cả ngày
                 </Button>
                 <Button
                     size="small"
@@ -1477,15 +1518,21 @@ const InlineLeavePopover = ({
         <Popover
             content={content}
             title={null}
-            trigger="click"
+            trigger={[]}
             open={open}
             onOpenChange={setOpen}
             placement="bottomLeft"
             overlayStyle={{ zIndex: 1050 }}
         >
-            {/* Keep the trigger event intact so an unpaid-leave pill can open
-                the actions for recording paid leave. */}
-            <span style={{ display: 'block' }}>{children}</span>
+            {/* Control the trigger explicitly so nested table/tooltip handlers cannot swallow the click. */}
+            <span
+                style={{ display: 'block' }}
+                onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setOpen(current => !current);
+                }}
+            >{children}</span>
         </Popover>
     );
 };
@@ -3172,6 +3219,8 @@ export default function Attendance() {
                     if (d.lockedPeriods) setLockedPeriods(d.lockedPeriods);
                     if (d.payrollOverrides) setPayrollOverrides(d.payrollOverrides);
                     if (d.gmailSentLog) setGmailSentLog(d.gmailSentLog);
+                    if (Array.isArray(d.leaveRecords)) setLeaveRecords(d.leaveRecords);
+                    if (Array.isArray(d.workSchedules)) setWorkSchedules(d.workSchedules);
                 } else {
                     setEmployees(initialEmployees);
                 }
@@ -3246,8 +3295,8 @@ export default function Attendance() {
     // 2a. Luôn cập nhật ref khi state thay đổi (không debounce, không ghi DB)
     useEffect(() => {
         if (!isDbLoaded || employees.length === 0) return;
-        latestSnapshotRef.current = { config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog };
-    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded]);
+        latestSnapshotRef.current = { config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, leaveRecords, workSchedules };
+    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, leaveRecords, workSchedules, isDbLoaded]);
 
     const mergeAttendanceSnapshotWithDb = useCallback(async (snapshot: Record<string, any>) => {
         const api = (window as any).electronAPI;
@@ -3378,6 +3427,8 @@ export default function Attendance() {
             lockedPeriods,
             payrollOverrides,
             gmailSentLog,
+            leaveRecords,
+            workSchedules,
         };
         const snapshot = { ...baseSnapshot, ...patch };
         latestSnapshotRef.current = snapshot;
@@ -3388,14 +3439,14 @@ export default function Attendance() {
         } catch (err) {
             console.error('Lỗi lưu nhanh dữ liệu chấm công vào DB:', err);
         }
-    }, [isDbLoaded, employees, config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, saveAttendanceSnapshot]);
+    }, [isDbLoaded, employees, config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, leaveRecords, workSchedules, saveAttendanceSnapshot]);
 
     // 2b. Lưu tự động khi có thay đổi state với Debounce
     useEffect(() => {
         if (!isDbLoaded || !isBackgroundSyncComplete) return; // Chờ đối soát nền để snapshot cũ không ghi đè DB
         if (employees.length === 0) return; // Chưa có data employees → không ghi đè DB
 
-        const snapshot = { config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog };
+        const snapshot = { config, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, leaveRecords, workSchedules };
 
         const saveData = async () => {
             try {
@@ -3407,7 +3458,7 @@ export default function Attendance() {
 
         const timer = setTimeout(saveData, 500); // Đợi 500ms thao tác cuối rồi mới save
         return () => clearTimeout(timer);
-    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, isDbLoaded, isBackgroundSyncComplete, saveAttendanceSnapshot]);
+    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, leaveRecords, workSchedules, isDbLoaded, isBackgroundSyncComplete, saveAttendanceSnapshot]);
 
     // 2c. Flush save khi component unmount (navigate sang tab khác) để tránh mất data
     useEffect(() => {
@@ -3433,6 +3484,8 @@ export default function Attendance() {
     const [fineModalOpen, setFineModalOpen] = useState(false);
     const [fineForm] = Form.useForm();
     const [fineTypeDropdownOpen, setFineTypeDropdownOpen] = useState(false);
+    const [fineSubmitting, setFineSubmitting] = useState(false);
+    const fineSubmitLockRef = useRef(false);
     const [fundForm] = Form.useForm();
     const [empForm] = Form.useForm();
     const [empModalOpen, setEmpModalOpen] = useState(false);
@@ -4385,9 +4438,14 @@ export default function Attendance() {
     }, [employees, canManageBonuses]);
 
     // === Thêm/Sửa Phạt handler ===
-    const handleAddFine = useCallback(() => {
+    const handleAddFine = useCallback(async () => {
         if (checkLocked()) return;
-        fineForm.validateFields().then(async values => {
+        if (fineSubmitLockRef.current) return;
+
+        fineSubmitLockRef.current = true;
+        setFineSubmitting(true);
+        try {
+            const values = await fineForm.validateFields();
             const fineType = Array.isArray(values.type) ? values.type[0] : values.type;
             const nextFine: FineRecord = {
                 id: editingFine?.fine?.id || 'fine-manual-' + Date.now(),
@@ -4397,6 +4455,15 @@ export default function Attendance() {
                 amount: values.amount,
                 date: values.date ? values.date.toISOString() : new Date().toISOString(),
             };
+            const duplicateFine = extraFines.find(fine => {
+                if (editingFine?.isManual && editingFine.fine.id && fine.id === editingFine.fine.id) return false;
+                return getManualFineFingerprint(fine) === getManualFineFingerprint(nextFine);
+            });
+            if (duplicateFine) {
+                message.warning('Khoản phạt này đã tồn tại. Hệ thống đã chặn ghi nhận trùng lặp.');
+                return;
+            }
+
             const now = new Date().toLocaleString('vi-VN');
             let nextExtraFines = extraFines;
             let nextFineOverrides = fineOverrides;
@@ -4413,7 +4480,6 @@ export default function Attendance() {
                         savedFine = { ...fine, ...nextFine, source: fine.source };
                         return savedFine;
                     });
-                    setExtraFines(nextExtraFines);
                 } else if (editingFine.overrideKey) {
                     savedFine = {
                         ...editingFine.fine,
@@ -4425,7 +4491,6 @@ export default function Attendance() {
                         ...fineOverrides,
                         [editingFine.overrideKey]: savedFine,
                     };
-                    setFineOverrides(nextFineOverrides);
                 }
 
                 nextFineAuditLog = [...fineAuditLog, {
@@ -4438,18 +4503,19 @@ export default function Attendance() {
                     after: savedFine,
                     note: 'Sửa khoản phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
                 }];
-                setFineAuditLog(nextFineAuditLog);
                 const saved = await persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineOverrides: nextFineOverrides, fineAuditLog: nextFineAuditLog });
                 if (!saved) {
                     message.error('Chưa lưu được khoản phạt vào DB. Vui lòng thử lại trước khi reload app.');
                     return;
                 }
 
+                setExtraFines(nextExtraFines);
+                setFineOverrides(nextFineOverrides);
+                setFineAuditLog(nextFineAuditLog);
                 setEditingFine(null);
                 message.success('Đã cập nhật khoản phạt.');
             } else {
                 nextExtraFines = [...extraFines, nextFine];
-                setExtraFines(nextExtraFines);
 
                 nextFineAuditLog = [...fineAuditLog, {
                     id: 'flog-' + Date.now(),
@@ -4460,20 +4526,29 @@ export default function Attendance() {
                     after: nextFine,
                     note: 'Thêm phạt: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount) + ' — "' + values.detail + '"',
                 }];
-                setFineAuditLog(nextFineAuditLog);
                 const saved = await persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineAuditLog: nextFineAuditLog });
                 if (!saved) {
                     message.error('Chưa lưu được khoản phạt vào DB. Vui lòng thử lại trước khi reload app.');
                     return;
                 }
 
+                setExtraFines(nextExtraFines);
+                setFineAuditLog(nextFineAuditLog);
                 message.success(`Đã thêm phạt ${fmt(values.amount)} cho ${employees.find(e => e.id === values.empId)?.name} (Đã lưu lịch sử)`);
             }
 
             setFineModalOpen(false);
             setFineTypeDropdownOpen(false);
             fineForm.resetFields();
-        });
+        } catch (error: any) {
+            if (!error?.errorFields) {
+                console.error('Lỗi ghi nhận khoản phạt:', error);
+                message.error('Không thể ghi nhận khoản phạt. Vui lòng thử lại.');
+            }
+        } finally {
+            fineSubmitLockRef.current = false;
+            setFineSubmitting(false);
+        }
     }, [fineForm, employees, fineAuditActor, editingFine, extraFines, fineOverrides, fineAuditLog, persistAttendanceSnapshotNow]);
 
     // === Xóa Phạt Thủ Công handler ===
@@ -5977,7 +6052,7 @@ export default function Attendance() {
     const saveWorkScheduleInline = useCallback((
         emp: any,
         date: dayjs.Dayjs,
-        action: 'save' | 'clear' | 'leave' | 'exempt',
+        action: 'save' | 'clear' | 'leave' | 'unpaid' | 'exempt',
         scope: LeaveSession | 'full_day',
         note: string = ''
     ) => {
@@ -5991,7 +6066,7 @@ export default function Attendance() {
         const dateStr = date.format('YYYY-MM-DD');
         const sessions: LeaveSession[] = scope === 'full_day' ? ['morning', 'afternoon'] : [scope];
 
-        if (action === 'leave' || action === 'exempt') {
+        if (action === 'leave' || action === 'unpaid' || action === 'exempt') {
             setLeaveRecords(prev => {
                 const withoutCurrent = prev.filter(leave => !(leave.empId === emp.id && leave.date === dateStr && sessions.includes(leave.session)));
                 const now = new Date().toISOString();
@@ -6001,13 +6076,14 @@ export default function Attendance() {
                     date: dateStr,
                     session,
                     exempt: action === 'exempt',
+                    unpaid: action === 'unpaid',
                     note,
                     createdAt: now,
                     createdBy: currentUser || user?.username || 'System',
                 }));
                 return [...withoutCurrent, ...nextRecords];
             });
-            message.success(action === 'exempt' ? 'Đã ghi nhận miễn trừ ca.' : 'Đã ghi nhận xin nghỉ ca.');
+            message.success(action === 'exempt' ? 'Đã ghi nhận miễn trừ ca.' : action === 'unpaid' ? 'Đã ghi nhận nghỉ không phép.' : 'Đã ghi nhận nghỉ có phép.');
             return;
         }
 
@@ -6032,7 +6108,7 @@ export default function Attendance() {
     const saveLeaveRequestInline = useCallback((
         emp: any,
         date: dayjs.Dayjs,
-        action: 'save' | 'clear' | 'exempt',
+        action: 'save' | 'clear' | 'unpaid' | 'exempt',
         scope: LeaveSession | 'full_day',
         note: string = ''
     ) => {
@@ -6056,13 +6132,14 @@ export default function Attendance() {
                 date: dateStr,
                 session,
                 exempt: action === 'exempt',
+                unpaid: action === 'unpaid',
                 note,
                 createdAt: now,
                 createdBy: currentUser || user?.username || 'System',
             }));
             return [...withoutCurrent, ...nextRecords];
         });
-        message.success(action === 'clear' ? 'Đã xóa lịch xin nghỉ.' : (action === 'exempt' ? 'Đã ghi nhận miễn trừ.' : 'Đã ghi nhận nghỉ phép.'));
+        message.success(action === 'clear' ? 'Đã xóa trạng thái nghỉ.' : (action === 'exempt' ? 'Đã ghi nhận miễn trừ.' : action === 'unpaid' ? 'Đã ghi nhận nghỉ không phép.' : 'Đã ghi nhận nghỉ có phép.'));
     }, [canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, checkLocked, currentUser, user?.username]);
 
     const openLeaveRequestModal = useCallback((emp: Employee, date: dayjs.Dayjs, defaultSession: LeaveSession, existingLeave?: LeaveRequest) => {
@@ -6951,7 +7028,7 @@ export default function Attendance() {
                     })()}
                     {isAdmin && <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal} disabled={isCurrentPeriodLocked}>Cấu hình</Button>}
                     {isCurrentPeriodLocked ? (
-                        currentUser === 'admin' ? (
+                        isAdmin ? (
                             <Button
                                 icon={<LockOutlined />}
                                 onClick={() => {
@@ -8015,11 +8092,21 @@ export default function Attendance() {
                     </div>
                 }
                 open={fineModalOpen}
-                onCancel={() => { setFineModalOpen(false); setFineTypeDropdownOpen(false); setEditingFine(null); fineForm.resetFields(); }}
+                onCancel={() => {
+                    if (fineSubmitLockRef.current) return;
+                    setFineModalOpen(false);
+                    setFineTypeDropdownOpen(false);
+                    setEditingFine(null);
+                    fineForm.resetFields();
+                }}
                 onOk={handleAddFine}
                 okText={editingFine ? 'Lưu thay đổi' : 'Xác nhận phạt'}
                 cancelText="Hủy"
-                okButtonProps={{ icon: <PlusOutlined />, danger: true, style: { fontWeight: 700 } }}
+                okButtonProps={{ icon: <PlusOutlined />, danger: true, loading: fineSubmitting, disabled: fineSubmitting, style: { fontWeight: 700 } }}
+                cancelButtonProps={{ disabled: fineSubmitting }}
+                closable={!fineSubmitting}
+                maskClosable={!fineSubmitting}
+                keyboard={!fineSubmitting}
                 width={520}
             >
                 <Form form={fineForm} layout="vertical">

@@ -289,6 +289,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
         get: (key) => ipcRenderer.invoke('appConfig:get', key),
         set: (key, value) => ipcRenderer.invoke('appConfig:set', key, value),
     },
+    r2Test: {
+        getBootstrap: () => ipcRenderer.invoke('r2Test:getBootstrap'),
+    },
     stockCheck: {
         getSessions: (options) => ipcRenderer.invoke('stockCheck:getSessions', options),
         ensureDailySession: (data) => ipcRenderer.invoke('stockCheck:ensureDailySession', data),
