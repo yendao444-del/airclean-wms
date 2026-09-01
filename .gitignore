@@ -45,6 +45,7 @@ python/.build-venv/
 python/.face-build-python.txt
 python/build/
 .face-build-python.txt
+.runtime-build/
 
 # Python installer và file rác từ bat script
 python-*.exe
