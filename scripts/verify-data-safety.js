@@ -4,6 +4,7 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), 'utf8');
 const ipc = read('electron/ipc-handlers.js');
+const normalizedIpc = ipc.replace(/\r\n/g, '\n');
 const main = read('electron/main.js');
 const offlineQueue = read('electron/offline-queue.js');
 const ecommerce = read('src/pages/EcommerceExport.tsx');
@@ -32,7 +33,28 @@ if (!allowedChannelsMatch) {
   requireText(allowedChannelsMatch[1], '"update:check",', 'Official update checks must remain available');
   requireText(allowedChannelsMatch[1], '"update:download",', 'Verified official updates must remain installable');
   requireText(allowedChannelsMatch[1], '"update:restart",', 'The app must be able to restart after a verified update');
+  requireText(allowedChannelsMatch[1], '"stockCheck:createFullSession",', 'Transactional full stock-check creation must remain available');
+  for (const channel of [
+    'stockCheck:ensureDailySession',
+    'stockCheck:createRecheckSession',
+    'stockCheck:updateCount',
+    'stockCheck:retryCount',
+    'stockCheck:updateNote',
+    'stockCheck:balanceItems',
+    'stockCheck:balanceItem',
+    'stockCheck:submitSession',
+  ]) {
+    requireText(allowedChannelsMatch[1], `"${channel}",`, `${channel} must remain available`);
+  }
 }
+const createFullSessionStart = ipc.indexOf('ipcMain.handle("stockCheck:createFullSession"');
+const createFullSessionEnd = ipc.indexOf('"stockCheck:createRecheckSession"', createFullSessionStart);
+const createFullSessionHandler = createFullSessionStart >= 0 && createFullSessionEnd > createFullSessionStart
+  ? ipc.slice(createFullSessionStart, createFullSessionEnd)
+  : '';
+requireText(createFullSessionHandler, 'await lockStockCheckSessions(tx);', 'Full stock-check creation must hold the shared session lock');
+requireText(createFullSessionHandler, 'await writeStockCheckSessions(nextSessions, tx);', 'Full stock-check creation must save inside its transaction');
+rejectText(createFullSessionHandler, 'adminSaveSessions', 'Full stock-check creation must not use bulk session replacement');
 const submitEvidenceStart = ipc.indexOf('ipcMain.handle("dailyTasks:submitEvidence"');
 const submitEvidenceEnd = ipc.indexOf('"dailyTasks:reviewEvidence"', submitEvidenceStart);
 const submitEvidenceHandler = submitEvidenceStart >= 0 && submitEvidenceEnd > submitEvidenceStart
@@ -41,6 +63,24 @@ const submitEvidenceHandler = submitEvidenceStart >= 0 && submitEvidenceEnd > su
 requireText(submitEvidenceHandler, 'await prisma.$transaction(async (tx) => {', 'Evidence database writes must remain transactional');
 requireText(submitEvidenceHandler, 'rollbackFreshDailyEvidenceUpload(objectKey)', 'Fresh evidence uploads must be rolled back on failure');
 requireText(submitEvidenceHandler, 'updatedAt: task.updatedAt,', 'Evidence submission must reject stale task updates');
+
+const loginStart = normalizedIpc.lastIndexOf('ipcMain.handle(\n  "users:login"');
+const loginEnd = normalizedIpc.indexOf('ipcMain.handle("users:logout"', loginStart);
+const loginHandler = loginStart >= 0 && loginEnd > loginStart
+  ? normalizedIpc.slice(loginStart, loginEnd)
+  : '';
+requireText(loginHandler, 'if (isTemporaryPassword(user)) {', 'Temporary passwords must be consumed on successful login');
+requireText(loginHandler, 'crypto.randomBytes(32)', 'Consumed temporary passwords must be replaced with an unknown value');
+requireText(loginHandler, 'user-password:${user.id}', 'Temporary-password consumption must use the per-user transaction lock');
+requireText(loginHandler, 'temporaryPasswordGrant', 'A consumed temporary password needs a session-bound change grant');
+
+const changePasswordStart = normalizedIpc.indexOf('ipcMain.handle(\n  "users:changePassword"');
+const changePasswordEnd = normalizedIpc.indexOf('// Reset password', changePasswordStart);
+const changePasswordHandler = changePasswordStart >= 0 && changePasswordEnd > changePasswordStart
+  ? normalizedIpc.slice(changePasswordStart, changePasswordEnd)
+  : '';
+requireText(changePasswordHandler, 'hasValidTemporaryPasswordGrant(freshUser)', 'Password change must validate the one-time session grant');
+requireText(changePasswordHandler, 'delete currentSession.temporaryPasswordGrant;', 'Password change must clear the one-time session grant');
 
 const mapMatch = ipc.match(/const DATA_SAFETY_BLOCKED_CHANNELS = new Map\(\[([\s\S]*?)\n\]\);/);
 if (!mapMatch) {

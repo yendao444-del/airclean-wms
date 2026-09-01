@@ -1479,6 +1479,30 @@ export default function StockCheck() {
                 : '',
             createdAt: dayjs().toISOString(),
         };
+        if (useFullInventory) {
+            const result = await window.electronAPI.stockCheck.createFullSession({
+                items,
+                assignedTo: assignee.username,
+            });
+            if (!result?.success || !result.session) {
+                message.error(result?.error || 'Không thể tạo phiên kiểm toàn bộ.');
+                return;
+            }
+            setSessions(current => [
+                ...current.filter(existing => existing.id !== result.session.id),
+                result.session,
+            ]);
+            countingInputsRef.current = {};
+            setCountingInputs({});
+            setExpandedProductGroups({});
+            setExpandedConvGroups({});
+            if (result.created === false) {
+                message.info('Phiên kiểm toàn bộ hôm nay đã được tạo trước đó. Đã tải lại dữ liệu đã lưu.');
+            } else {
+                message.success(`Đã tạo phiên kiểm toàn bộ ${pool.length} sản phẩm / ${items.length} dòng → ${result.session.assignedName}`);
+            }
+            return;
+        }
         // Xóa session cũ cùng tab type rồi thêm mới — không ảnh hưởng tab kia
         const carriedDates = new Set(carryOver.dates);
         persistSessions(sessions

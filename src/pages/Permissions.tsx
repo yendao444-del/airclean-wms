@@ -136,6 +136,7 @@ export default function PermissionsPage() {
 
     const handleEdit = (user: User) => {
         setEditingUser(user);
+        form.resetFields();
         form.setFieldsValue({
             username: user.username,
             fullName: user.fullName,
@@ -207,7 +208,7 @@ export default function PermissionsPage() {
                 resignationDate: values.resignationDate?.format?.('YYYY-MM-DD'),
                 resignationReason: values.resignationReason?.trim() || '',
             };
-            if (editingUser && !payload.password) {
+            if (editingUser) {
                 delete payload.password;
             }
 
@@ -505,17 +506,20 @@ export default function PermissionsPage() {
                         <Input placeholder="VD: nhanvien@gmail.com" size="large" />
                     </Form.Item>
 
-                    <Form.Item
-                        label={editingUser ? 'Mật khẩu tạm mới (để trống nếu không đổi)' : 'Mật khẩu tạm'}
-                        name="password"
-                        rules={[
-                            { required: !editingUser, message: 'Vui lòng nhập mật khẩu!' },
-                            { min: 8, message: 'Mật khẩu phải có ít nhất 8 ký tự!' },
-                            { pattern: /(?=.*[A-Za-z])(?=.*\d)/, message: 'Mật khẩu phải gồm chữ và số!' },
-                        ]}
-                    >
-                        <Input.Password placeholder={editingUser ? 'Không nhập nếu giữ mật khẩu cũ' : 'Nhập mật khẩu'} size="large" />
-                    </Form.Item>
+                    {!editingUser && (
+                        <Form.Item
+                            label="Mật khẩu tạm"
+                            name="password"
+                            extra="Chỉ dùng để đăng nhập thành công một lần; sau đó người dùng bắt buộc đặt mật khẩu mới."
+                            rules={[
+                                { required: true, message: 'Vui lòng nhập mật khẩu!' },
+                                { min: 8, message: 'Mật khẩu phải có ít nhất 8 ký tự!' },
+                                { pattern: /(?=.*[A-Za-z])(?=.*\d)/, message: 'Mật khẩu phải gồm chữ và số!' },
+                            ]}
+                        >
+                            <Input.Password placeholder="Nhập mật khẩu tạm" size="large" />
+                        </Form.Item>
+                    )}
 
 
                     <Form.Item
@@ -600,7 +604,7 @@ export default function PermissionsPage() {
                     showIcon
                     style={{ marginBottom: 16 }}
                     message="Không thể xem mật khẩu hiện tại"
-                    description="Mật khẩu được lưu dưới dạng mã băm bảo mật. Admin chỉ có thể cấp mật khẩu tạm; người dùng sẽ phải đổi lại ở lần đăng nhập tiếp theo."
+                    description="Mật khẩu tạm chỉ đăng nhập thành công một lần và bị vô hiệu hóa ngay. Người dùng phải đặt mật khẩu mới trong chính phiên đăng nhập đó."
                 />
                 <Form form={passwordForm} layout="vertical" onFinish={handlePasswordSubmit}>
                     <div style={{ marginBottom: 16, padding: 12, background: '#f0f5ff', borderRadius: 8 }}>
@@ -610,7 +614,7 @@ export default function PermissionsPage() {
                         <Text strong>Họ tên: </Text>
                         <Text>{changingPasswordUser?.fullName}</Text>
                         <br />
-                        <Text type="warning">Mật khẩu này là tạm thời. Người dùng sẽ phải đổi ngay sau khi đăng nhập.</Text>
+                        <Text type="warning">Chỉ dùng được cho một lần đăng nhập thành công. Nếu thoát trước khi đổi mật khẩu, admin phải cấp lại.</Text>
                     </div>
 
                     <Form.Item
