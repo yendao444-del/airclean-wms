@@ -9,6 +9,7 @@ const main = read('electron/main.js');
 const offlineQueue = read('electron/offline-queue.js');
 const ecommerce = read('src/pages/EcommerceExport.tsx');
 const stockBalance = read('src/pages/StockBalance.tsx');
+const returnsPage = read('src/pages/Returns.tsx');
 const r2Lab = read('src/pages/R2StorageLab.tsx');
 const r2TestWorker = read('cloudflare/r2-test-worker/src/index.ts');
 const evidenceWorker = read('cloudflare/r2-daily-evidence-worker/src/index.ts');
@@ -39,6 +40,16 @@ if (!allowedChannelsMatch) {
   requireText(allowedChannelsMatch[1], '"dailyTasks:reviewEvidence",', 'Evidence review must remain available');
   requireText(allowedChannelsMatch[1], '"returns:updateWorkflow",', 'Narrow return workflow updates must remain available');
   requireText(allowedChannelsMatch[1], '"refunds:updateStatus",', 'Narrow refund status updates must remain available');
+  for (const channel of [
+    'dailyTasks:addNote',
+    'dailyTasks:reopen',
+    'dailyTasks:completeAssignment',
+    'dailyTasks:saveCategories',
+    'returns:updateWorkflowBulk',
+    'returns:saveStatusList',
+  ]) {
+    requireText(allowedChannelsMatch[1], `"${channel}",`, `${channel} must remain available`);
+  }
   requireText(allowedChannelsMatch[1], '"attendance:recognize",', 'Face attendance recognition must remain available');
   requireText(allowedChannelsMatch[1], '"update:check",', 'Official update checks must remain available');
   requireText(allowedChannelsMatch[1], '"update:download",', 'Verified official updates must remain installable');
@@ -273,6 +284,15 @@ requireText(ipc, 'missingWithdrawalCodes.length > 0 && !DATA_SAFETY_MODE', 'Hand
 requireText(ipc, 'ipcMain.handle("stockBalance:apply"', 'Atomic stock balance handler is missing');
 requireText(ipc, 'ipcMain.handle("returns:updateWorkflow"', 'Narrow return workflow handler is missing');
 requireText(ipc, 'ipcMain.handle("refunds:updateStatus"', 'Narrow refund status handler is missing');
+requireText(ipc, 'async function writeDailyTaskHistory(tx, entry)', 'Serialized daily-task history writer is missing');
+requireText(ipc, "pg_advisory_xact_lock(hashtext('dailyTasksHistory'))", 'Daily-task history writes must be serialized');
+requireText(ipc, 'ipcMain.handle("dailyTasks:addNote"', 'Append-only daily-task note handler is missing');
+requireText(ipc, 'ipcMain.handle("dailyTasks:reopen"', 'Transactional daily-task reopen handler is missing');
+requireText(ipc, 'ipcMain.handle("dailyTasks:completeAssignment"', 'Transactional assignment completion handler is missing');
+requireText(ipc, 'ipcMain.handle("returns:updateWorkflowBulk"', 'Atomic bulk return workflow handler is missing');
+requireText(ipc, "pg_advisory_xact_lock(hashtext('attendanceData'))", 'Return fine reconciliation must hold the attendance lock');
+requireText(ipc, 'Number.isSafeInteger(linkedReturnId)', 'Return fines must prefer an exact returnId link');
+rejectText(returnsPage, "appConfig.set('attendanceData'", 'Returns renderer must not overwrite the attendance ledger');
 requireText(ipc, 'Assignment đã được thay đổi trên máy khác.', 'Assignment completion must reject stale writes');
 requireText(ipc, 'Công việc đã được thay đổi trên máy khác. Vui lòng tải lại và thử lại.', 'Task completion/review must reject stale writes');
 requireText(ipc, 'purchaseCreateOperation:', 'Purchase create idempotency claim is missing');
