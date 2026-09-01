@@ -105,6 +105,12 @@ if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
 )
 xcopy "!BUILD_DIST!\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 xcopy "electron\*" "!PATCH_TEMP!\resources\app\electron\" /E /I /Y /Q >nul 2>&1
+call node scripts\prepare-r2-daily-evidence-config.js "!PATCH_TEMP!\resources\app\electron\r2-daily-evidence-bootstrap.json"
+if errorlevel 1 (
+    echo    [ERROR] Khong tao duoc cau hinh R2 cho Cong viec hang ngay.
+    pause
+    exit /b 1
+)
 :: Patch desktop chi can google-oauth-config.json da tao o tren. Khong phat
 :: hanh config dev co database/service credentials cho may nhan vien.
 del /Q "!PATCH_TEMP!\resources\app\electron\config.js" 2>nul
@@ -149,7 +155,8 @@ echo.
 
 echo [4/4] Git and GitHub release...
 echo ----------------------------------------
-git add -A
+:: Chi stage ma nguon va cau hinh phat hanh; bo qua log va tai lieu tam.
+git add .gitignore BUILD-INSTALLER.bat RELEASE-ver3.bat RELEASE.bat electron/ipc-handlers.js electron/preload.js package.json scripts/prepare-r2-daily-evidence-config.js scripts/verify-data-safety.js src/pages/Attendance.tsx src/pages/DailyTasks.tsx src/pages/Returns.tsx src/pages/StockCheck.tsx src/types/electron.d.ts
 git commit -m "v!NEW_VERSION! - !NOTES!"
 if errorlevel 1 (
     echo [WARN] Git commit failed or there is nothing new to commit.

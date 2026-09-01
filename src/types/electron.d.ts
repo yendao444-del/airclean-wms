@@ -261,6 +261,15 @@ export interface ElectronAPI {
       id: number,
       data: any,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    updateStatus: (
+      id: number,
+      status: 'processing' | 'received' | 'lost',
+    ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    updateWorkflow: (
+      id: number,
+      field: 'packer' | 'status' | 'faultParty',
+      value: string | null,
+    ) => Promise<{ success: boolean; data?: any; error?: string }>;
     repairMissingPrices: (
       purchaseId: number,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -549,6 +558,13 @@ export interface ElectronAPI {
       id: number,
       status: string,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    archive: (
+      id: number,
+      reason?: string,
+    ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    deleteAssignment: (
+      id: number,
+    ) => Promise<{ success: boolean; data?: any; error?: string }>;
     uploadEvidenceImage: (payload: {
       taskId: number;
       mimeType: string;
@@ -810,6 +826,10 @@ export interface ElectronAPI {
       id: number,
       data: any,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    addProcessNote: (
+      id: number,
+      note: string,
+    ) => Promise<{ success: boolean; data?: any; error?: string }>;
     delete: (id: number) => Promise<{ success: boolean; error?: string }>;
     bulkCreate: (
       records: any[],
@@ -986,6 +1006,11 @@ export interface ElectronAPI {
       data?: { lockedPeriods: any[] };
       error?: string;
     }>;
+    getPayslipQrImage: (data: { url: string }) => Promise<{
+      success: boolean;
+      data?: { dataUrl: string };
+      error?: string;
+    }>;
     sendPayslipEmail: (data: {
       to: string;
       employeeName: string;
@@ -1021,6 +1046,14 @@ export interface ElectronAPI {
       success: boolean;
       session?: any;
       created?: boolean;
+      error?: string;
+    }>;
+    cancelSession: (data: {
+      sessionId: string;
+      reason?: string;
+    }) => Promise<{
+      success: boolean;
+      session?: any;
       error?: string;
     }>;
     createRecheckSession: (data: {

@@ -1077,14 +1077,18 @@ const DailyTasks = () => {
 
     const handleDeleteAssignment = (taskId: number) => {
         Modal.confirm({
-            title: 'Xóa công việc bàn giao?',
-            content: 'Bạn có chắc muốn xóa?',
-            okText: 'Xóa', okType: 'danger', cancelText: 'Hủy',
+            title: 'Xóa vĩnh viễn công việc bàn giao?',
+            content: 'Công việc bàn giao và các dữ liệu phạt phát sinh riêng từ công việc này sẽ bị xóa. Bạn có thể tạo lại công việc sau, nhưng thao tác này không thể hoàn tác.',
+            okText: 'Xóa vĩnh viễn', okType: 'danger', cancelText: 'Hủy',
             onOk: async () => {
-                await window.electronAPI.dailyTasks.delete(taskId);
-                message.success('Đã xóa!');
+                const result = await window.electronAPI.dailyTasks.deleteAssignment(taskId);
+                if (!result?.success) {
+                    message.warning(result?.error || 'Không thể xóa công việc bàn giao.');
+                    return;
+                }
+                message.success('Đã xóa vĩnh viễn công việc bàn giao.');
                 window.dispatchEvent(new CustomEvent('task-changed'));
-                loadTasks();
+                await loadTasks();
             }
         });
     };

@@ -43,6 +43,8 @@ call npm run embed:wms-token
 if errorlevel 1 goto build_failed
 call npm run embed:google-oauth
 if errorlevel 1 goto build_failed
+call npm run prepare:r2-daily-evidence
+if errorlevel 1 goto build_failed
 call npm run prepare:runtime-db
 if errorlevel 1 goto build_failed
 call npx prisma generate

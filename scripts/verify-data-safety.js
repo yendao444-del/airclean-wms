@@ -13,6 +13,7 @@ const r2Lab = read('src/pages/R2StorageLab.tsx');
 const r2TestWorker = read('cloudflare/r2-test-worker/src/index.ts');
 const evidenceWorker = read('cloudflare/r2-daily-evidence-worker/src/index.ts');
 const devLauncher = read('scripts/start-electron-dev.js');
+const r2BootstrapScript = read('scripts/prepare-r2-daily-evidence-config.js');
 
 const failures = [];
 const requireText = (source, text, label) => {
@@ -23,17 +24,27 @@ const rejectText = (source, text, label) => {
 };
 
 requireText(ipc, 'const DATA_SAFETY_MODE = true;', 'DATA_SAFETY_MODE must default to true');
+requireText(ipc, 'path.join(__dirname, "r2-daily-evidence-bootstrap.json")', 'Daily evidence R2 must support bundled production bootstrap configuration');
+requireText(r2BootstrapScript, 'DAILY_EVIDENCE_KEY', 'R2 bootstrap preparation must read the worker key');
+requireText(r2BootstrapScript, 'legacyBootstrap.testKey', 'R2 bootstrap preparation must reuse the existing production-compatible device key');
+requireText(r2BootstrapScript, 'development-only$/i.test(key)', 'R2 bootstrap preparation must reject the development-only key');
 const allowedChannelsMatch = ipc.match(/const DATA_SAFETY_ALLOWED_CHANNELS = new Set\(\[([\s\S]*?)\n\]\);/);
 if (!allowedChannelsMatch) {
   failures.push('Data-safety allowed-channel set is missing');
 } else {
   requireText(allowedChannelsMatch[1], '"dailyTasks:createAssignments",', 'Atomic assignment creation must remain available');
   requireText(allowedChannelsMatch[1], '"dailyTasks:submitEvidence",', 'Compensated evidence submission must remain available');
+  requireText(allowedChannelsMatch[1], '"dailyTasks:requestAssignmentCompletion",', 'Assignment completion requests must remain available');
+  requireText(allowedChannelsMatch[1], '"dailyTasks:completeRegularTask",', 'Regular task completion must remain available');
+  requireText(allowedChannelsMatch[1], '"dailyTasks:reviewEvidence",', 'Evidence review must remain available');
+  requireText(allowedChannelsMatch[1], '"returns:updateWorkflow",', 'Narrow return workflow updates must remain available');
+  requireText(allowedChannelsMatch[1], '"refunds:updateStatus",', 'Narrow refund status updates must remain available');
   requireText(allowedChannelsMatch[1], '"attendance:recognize",', 'Face attendance recognition must remain available');
   requireText(allowedChannelsMatch[1], '"update:check",', 'Official update checks must remain available');
   requireText(allowedChannelsMatch[1], '"update:download",', 'Verified official updates must remain installable');
   requireText(allowedChannelsMatch[1], '"update:restart",', 'The app must be able to restart after a verified update');
   requireText(allowedChannelsMatch[1], '"stockCheck:createFullSession",', 'Transactional full stock-check creation must remain available');
+  requireText(allowedChannelsMatch[1], '"stockCheck:cancelSession",', 'Admin stock-check cancellation must remain available');
   for (const channel of [
     'stockCheck:ensureDailySession',
     'stockCheck:createRecheckSession',
@@ -48,13 +59,28 @@ if (!allowedChannelsMatch) {
   }
 }
 const createFullSessionStart = ipc.indexOf('ipcMain.handle("stockCheck:createFullSession"');
-const createFullSessionEnd = ipc.indexOf('"stockCheck:createRecheckSession"', createFullSessionStart);
+const createFullSessionEnd = ipc.indexOf('"stockCheck:cancelSession"', createFullSessionStart);
 const createFullSessionHandler = createFullSessionStart >= 0 && createFullSessionEnd > createFullSessionStart
   ? ipc.slice(createFullSessionStart, createFullSessionEnd)
   : '';
 requireText(createFullSessionHandler, 'await lockStockCheckSessions(tx);', 'Full stock-check creation must hold the shared session lock');
 requireText(createFullSessionHandler, 'await writeStockCheckSessions(nextSessions, tx);', 'Full stock-check creation must save inside its transaction');
 rejectText(createFullSessionHandler, 'adminSaveSessions', 'Full stock-check creation must not use bulk session replacement');
+rejectText(createFullSessionHandler, 'Chỉ quản trị viên được tạo phiên kiểm toàn bộ.', 'Full stock-check creation must remain available to every authenticated stock-check user');
+const ensureDailySessionStart = ipc.indexOf('ipcMain.handle("stockCheck:ensureDailySession"');
+const ensureDailySessionEnd = ipc.indexOf('ipcMain.handle("stockCheck:createFullSession"', ensureDailySessionStart);
+const ensureDailySessionHandler = ensureDailySessionStart >= 0 && ensureDailySessionEnd > ensureDailySessionStart
+  ? ipc.slice(ensureDailySessionStart, ensureDailySessionEnd)
+  : '';
+requireText(ensureDailySessionHandler, 'session?.type === "full"', 'Daily stock-check creation must stop when a full session exists');
+requireText(ensureDailySessionHandler, 'Phiên kiểm hàng ngày đã được tạm dừng.', 'Daily stock-check creation must explain the full-session lock');
+const cancelSessionStart = normalizedIpc.indexOf('ipcMain.handle(\n  "stockCheck:cancelSession"');
+const cancelSessionEnd = normalizedIpc.indexOf('ipcMain.handle(\n  "stockCheck:createRecheckSession"', cancelSessionStart);
+const cancelSessionHandler = cancelSessionStart >= 0 && cancelSessionEnd > cancelSessionStart
+  ? normalizedIpc.slice(cancelSessionStart, cancelSessionEnd)
+  : '';
+requireText(cancelSessionHandler, 'requireRole("admin");', 'Stock-check cancellation must remain admin-only');
+requireText(cancelSessionHandler, 'await lockStockCheckSessions(tx);', 'Stock-check cancellation must hold the shared session lock');
 const submitEvidenceStart = ipc.indexOf('ipcMain.handle("dailyTasks:submitEvidence"');
 const submitEvidenceEnd = ipc.indexOf('"dailyTasks:reviewEvidence"', submitEvidenceStart);
 const submitEvidenceHandler = submitEvidenceStart >= 0 && submitEvidenceEnd > submitEvidenceStart
@@ -245,6 +271,10 @@ requireText(ipc, 'Displayed recoverable VAT status', 'Purchase read path safety-
 requireText(ipc, 'Copied legacy Google token to safeStorage and preserved the source file', 'Legacy token source preservation is missing');
 requireText(ipc, 'missingWithdrawalCodes.length > 0 && !DATA_SAFETY_MODE', 'Handling-unit read path still backfills shared markers');
 requireText(ipc, 'ipcMain.handle("stockBalance:apply"', 'Atomic stock balance handler is missing');
+requireText(ipc, 'ipcMain.handle("returns:updateWorkflow"', 'Narrow return workflow handler is missing');
+requireText(ipc, 'ipcMain.handle("refunds:updateStatus"', 'Narrow refund status handler is missing');
+requireText(ipc, 'Assignment đã được thay đổi trên máy khác.', 'Assignment completion must reject stale writes');
+requireText(ipc, 'Công việc đã được thay đổi trên máy khác. Vui lòng tải lại và thử lại.', 'Task completion/review must reject stale writes');
 requireText(ipc, 'purchaseCreateOperation:', 'Purchase create idempotency claim is missing');
 requireText(ipc, 'stockBalanceOperation:', 'Stock balance idempotency claim is missing');
 requireText(ipc, 'getMisaIntegrationBaseUrl(config)', 'MISA environment routing is missing');

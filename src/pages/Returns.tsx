@@ -228,7 +228,10 @@ export default function ReturnsPage() {
                     { value: 'completed', label: 'Hoàn thành', color: 'green', isFinal: true },
                 ];
                 setStatusList(defaultStatuses);
-                await window.electronAPI.appConfig.set('statusList', defaultStatuses);
+                const saveResult = await window.electronAPI.appConfig.set('statusList', defaultStatuses);
+                if (!saveResult?.success) {
+                    console.warn('[Returns] Không thể lưu danh sách trạng thái mặc định:', saveResult?.error);
+                }
             }
         } catch (error) {
             console.error('Error loading status list:', error);
@@ -238,10 +241,12 @@ export default function ReturnsPage() {
 
     const saveStatusList = async (list: Array<{ value: string; label: string; color: string; isFinal?: boolean }>) => {
         try {
-            await window.electronAPI.appConfig.set('statusList', list);
+            const result = await window.electronAPI.appConfig.set('statusList', list);
+            if (!result?.success) throw new Error(result?.error || 'Không thể lưu danh sách trạng thái.');
             setStatusList(list);
-        } catch (error) {
+        } catch (error: any) {
             console.error('Error saving status list:', error);
+            message.error(error?.message || 'Không thể lưu danh sách trạng thái.');
         }
     };
 
@@ -342,9 +347,9 @@ export default function ReturnsPage() {
                     console.log(`✅ Đã xóa phiếu trả #${id} từ database`);
                     await loadReturns();
                     message.success('Đã xóa phiếu trả!');
-                } catch (error) {
+                } catch (error: any) {
                     console.error('❌ Lỗi xóa phiếu trả:', error);
-                    message.error('Lỗi khi xóa phiếu trả!');
+                    message.error(error?.message || 'Lỗi khi xóa phiếu trả!');
                 }
             },
         });
@@ -395,9 +400,9 @@ export default function ReturnsPage() {
                     await loadReturns();
                     message.success(`Đã xóa ${selectedRowKeys.length} phiếu trả!`);
                     setSelectedRowKeys([]);
-                } catch (error) {
+                } catch (error: any) {
                     console.error('❌ Lỗi xóa hàng loạt:', error);
-                    message.error('Lỗi khi xóa phiếu trả hàng loạt!');
+                    message.error(error?.message || 'Lỗi khi xóa phiếu trả hàng loạt!');
                 }
             },
         });
@@ -906,11 +911,15 @@ export default function ReturnsPage() {
     const handleBulkPackerChange = async (packer: string) => {
         if (!selectedRowKeys.length) return;
         try {
-            await Promise.all(selectedRowKeys.map(id => window.electronAPI.returns.update(id, { packer })));
+            const results = await Promise.all(selectedRowKeys.map(id =>
+                window.electronAPI.returns.updateWorkflow(id, 'packer', packer)
+            ));
+            const failed = results.find(result => !result?.success);
+            if (failed) throw new Error(failed.error || 'Không thể gán nhân viên cho phiếu trả.');
             setReturns(prev => prev.map(item => selectedRowKeys.includes(item.id) ? { ...item, packer } : item));
             message.success(`Đã gán nhân viên cho ${selectedRowKeys.length} phiếu`);
-        } catch {
-            message.error('Không thể gán nhân viên cho các phiếu đã chọn');
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể gán nhân viên cho các phiếu đã chọn');
             await loadReturns(true);
         }
     };
@@ -923,12 +932,16 @@ export default function ReturnsPage() {
             return;
         }
         try {
-            await Promise.all(selectedRowKeys.map(id => window.electronAPI.returns.update(id, { status })));
+            const results = await Promise.all(selectedRowKeys.map(id =>
+                window.electronAPI.returns.updateWorkflow(id, 'status', status)
+            ));
+            const failed = results.find(result => !result?.success);
+            if (failed) throw new Error(failed.error || 'Không thể cập nhật trạng thái phiếu trả.');
             await loadReturns(true);
             setSelectedRowKeys([]);
             message.success('Đã cập nhật trạng thái hàng loạt');
-        } catch {
-            message.error('Không thể cập nhật trạng thái hàng loạt');
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể cập nhật trạng thái hàng loạt');
         }
     };
 
@@ -982,13 +995,17 @@ export default function ReturnsPage() {
             },
         ];
         try {
-            await window.electronAPI.returns.update(record.id, { notes: JSON.stringify(updatedLogs) });
+            const result = await window.electronAPI.returns.addProcessNote(record.id, quickNote.trim());
+            if (!result?.success) throw new Error(result?.error || 'Không thể lưu ghi chú');
+            setReturns(prev => prev.map(item => item.id === record.id
+                ? { ...item, processNotes: result.data?.processNotes || JSON.stringify(updatedLogs) }
+                : item));
             setQuickNotes(prev => ({ ...prev, [record.id]: '' }));
             setShowInputRows(prev => ({ ...prev, [record.id]: false }));
             await loadReturns(true);
             message.success('Đã thêm ghi chú');
-        } catch {
-            message.error('Không thể lưu ghi chú');
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể lưu ghi chú');
         }
     };
 
@@ -1086,14 +1103,16 @@ export default function ReturnsPage() {
 
                     // 🔧 FIX: Gọi API update để lưu notes vào DB
                     try {
-                        await window.electronAPI.returns.update(record.id, {
-                            notes: notesJson,
-                        });
+                        const result = await window.electronAPI.returns.addProcessNote(record.id, quickNote.trim());
+                        if (!result?.success) throw new Error(result?.error || 'Không thể lưu ghi chú');
+                        setReturns(prev => prev.map(item => item.id === record.id
+                            ? { ...item, processNotes: result.data?.processNotes || notesJson }
+                            : item));
                         console.log(`✅ Đã lưu ghi chú cho phiếu #${record.id}`);
                         await loadReturns();
-                    } catch (err) {
+                    } catch (err: any) {
                         console.error('❌ Lỗi lưu ghi chú:', err);
-                        message.error('Lỗi lưu ghi chú!');
+                        message.error(err?.message || 'Lỗi lưu ghi chú!');
                         return;
                     }
 
@@ -1198,7 +1217,8 @@ export default function ReturnsPage() {
                         disabled={isInHistory}
                         onChange={async (value) => {
                             // Update in database
-                            await window.electronAPI.returns.update(record.id, { packer: value });
+                            const result = await window.electronAPI.returns.updateWorkflow(record.id, 'packer', value ?? null);
+                            if (!result?.success) throw new Error(result?.error || 'Không thể cập nhật nhân viên đóng gói.');
                             const updated = returns.map(r =>
                                 r.id === record.id ? { ...r, packer: value } : r
                             );
@@ -1254,7 +1274,7 @@ export default function ReturnsPage() {
                             );
                             setReturns(updated);
                             try {
-                                const result = await window.electronAPI.returns.update(record.id, { faultParty: value });
+                                const result = await window.electronAPI.returns.updateWorkflow(record.id, 'faultParty', value);
                                 if (!result.success) throw new Error(result.error || 'Lỗi DB');
                                 // Xử lý phạt khi đơn đã hoàn thành
                                 if (record.status === 'completed') {
@@ -1311,7 +1331,8 @@ export default function ReturnsPage() {
 
                             const doUpdate = async () => {
                                 try {
-                                    await window.electronAPI.returns.update(record.id, { status: newStatus });
+                                    const result = await window.electronAPI.returns.updateWorkflow(record.id, 'status', newStatus);
+                                    if (!result?.success) throw new Error(result?.error || 'Không thể cập nhật trạng thái phiếu trả.');
 
                                     // ✅ Chỉ ghi phạt nếu "Lỗi do kho"
                                     if (newStatus === 'completed' && record.packer) {

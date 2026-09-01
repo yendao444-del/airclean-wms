@@ -29,15 +29,34 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   // One assignment group is stored as a single DailyTask row after every
   // recipient has been validated, so creation cannot leave a partial group.
   "dailyTasks:createAssignments",
+  // Assignment deletion is isolated to this admin-only, type-checked handler.
+  "dailyTasks:deleteAssignment",
+  // Archiving hides a task without deleting its row, evidence, or history.
+  "dailyTasks:archive",
   // Evidence uploads are compensated on failure, while the evidence hashes
   // and task completion are committed together in one database transaction.
   "dailyTasks:submitEvidence",
+  // Completion requests and regular-task completion only transition a task
+  // after ownership/evidence checks; handlers use a row lock and stale-write
+  // guard so they cannot overwrite a newer change from another workstation.
+  "dailyTasks:requestAssignmentCompletion",
+  "dailyTasks:completeRegularTask",
+  "dailyTasks:reviewEvidence",
   "attendance:updateLeaveStatus",
   "attendance:updatePayrollOverride",
   "attendance:updatePayrollLock",
   // Face attendance is an intended kiosk workflow. Blocking this channel
   // makes the ready AI service unusable because recognition writes the log.
   "attendance:recognize",
+  // Process notes are append-only and serialized under a row lock.
+  "returns:addProcessNote",
+  // Workflow-only return updates expose just operational fields. Full record
+  // edits remain blocked until they have an optimistic-locking contract.
+  "returns:updateWorkflow",
+  // Refund status transitions are validated separately from full record edits
+  // and serialized under a row lock; inventory restoration remains in its
+  // dedicated transactional handler.
+  "refunds:updateStatus",
   // Updates are restricted to the official GitHub repository, require a
   // matching SHA-256 asset, and require an authenticated session to install.
   "update:check",
@@ -56,6 +75,7 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   // same database transaction as their immutable balance history.
   "stockCheck:ensureDailySession",
   "stockCheck:createFullSession",
+  "stockCheck:cancelSession",
   "stockCheck:createRecheckSession",
   "stockCheck:updateCount",
   "stockCheck:retryCount",
@@ -231,6 +251,9 @@ function readJsonFile(filePath) {
 function loadDailyEvidenceR2Config() {
   const userDataPath = app.getPath("userData");
   const saved = readJsonFile(path.join(userDataPath, "r2-daily-evidence-bootstrap.json"));
+  const bundled = readJsonFile(
+    path.join(__dirname, "r2-daily-evidence-bootstrap.json"),
+  );
   // Existing test installations already have a device credential. Reuse it
   // only as a migration fallback; new installations should provide the
   // dedicated runtime file or environment variables.
@@ -240,6 +263,7 @@ function loadDailyEvidenceR2Config() {
       process.env.R2_DAILY_EVIDENCE_ENDPOINT ||
         config.R2_DAILY_EVIDENCE_ENDPOINT ||
         saved.endpoint ||
+        bundled.endpoint ||
         "https://dby-pos-daily-evidence.zicky-iluv.workers.dev",
     )
       .trim()
@@ -249,6 +273,8 @@ function loadDailyEvidenceR2Config() {
         config.R2_DAILY_EVIDENCE_KEY ||
         saved.key ||
         saved.accessKey ||
+        bundled.key ||
+        bundled.accessKey ||
         legacy.testKey ||
         "",
     ).trim(),
@@ -1357,6 +1383,7 @@ const DATA_SAFETY_BLOCKED_CHANNELS = new Map([
   ["stockBalance:create", "Ghi lịch sử cân bằng tách rời khỏi thay đổi tồn kho"],
   ["stockCheck:balanceItems", "Cân bằng nhiều mặt hàng làm thay đổi tồn kho"],
   ["stockCheck:ensureDailySession", "Tạo hoặc sửa phiên kiểm kho dùng chung"],
+  ["stockCheck:cancelSession", "Hủy phiên kiểm kho đang thực hiện"],
   ["stockCheck:createRecheckSession", "Tạo phiên kiểm lại làm thay đổi luồng kiểm kho"],
   ["stockCheck:adminSaveSessions", "Admin lưu toàn bộ phiên kiểm kho có thể ghi đè dữ liệu"],
   ["stockCheck:updateCount", "Sửa số đếm kiểm kho có thể ghi đè từ máy khác"],
@@ -15510,17 +15537,29 @@ ipcMain.handle(
         reviewedAt,
         reviewedBy: actor.fullName,
       };
-      const updatedTask = await prisma.dailyTask.update({
-        where: { id: task.id },
-        data: {
-          attachments: JSON.stringify({
-            ...attachments,
-            evidence: reviewedEvidence,
-          }),
-          status: approved ? "completed" : "pending",
-          completedAt: approved ? new Date() : null,
-          verifier: approved ? actor.fullName : "",
-        },
+      const updatedTask = await getPrismaDirectTx().$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw`
+          SELECT id FROM "DailyTask" WHERE id = ${task.id} FOR UPDATE
+        `;
+        if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+          throw new Error("Không tìm thấy công việc.");
+        }
+        const current = await tx.dailyTask.findUnique({ where: { id: task.id } });
+        if (!current || current.updatedAt.getTime() !== task.updatedAt.getTime()) {
+          throw new Error("Công việc đã được thay đổi trên máy khác. Vui lòng tải lại và thử lại.");
+        }
+        return tx.dailyTask.update({
+          where: { id: task.id },
+          data: {
+            attachments: JSON.stringify({
+              ...attachments,
+              evidence: reviewedEvidence,
+            }),
+            status: approved ? "completed" : "pending",
+            completedAt: approved ? new Date() : null,
+            verifier: approved ? actor.fullName : "",
+          },
+        });
       });
 
       let penalty = null;
@@ -15608,14 +15647,29 @@ ipcMain.handle(
         actor.role === "admin" && payload.assignee
           ? String(payload.assignee)
           : task.assignee || actor.fullName;
-      const updated = await prisma.dailyTask.update({
-        where: { id: task.id },
-        data: {
-          status: "completed",
-          completedAt: new Date(),
-          assignee,
-          verifier: verifier.fullName || verifier.username,
-        },
+      const updated = await getPrismaDirectTx().$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw`
+          SELECT id FROM "DailyTask" WHERE id = ${task.id} FOR UPDATE
+        `;
+        if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+          throw new Error("Công việc không còn tồn tại.");
+        }
+        const current = await tx.dailyTask.findUnique({ where: { id: task.id } });
+        if (!current || current.updatedAt.getTime() !== task.updatedAt.getTime()) {
+          throw new Error("Công việc đã được thay đổi trên máy khác. Vui lòng tải lại và thử lại.");
+        }
+        if (current.status === "completed") {
+          throw new Error("Công việc đã được hoàn thành trước đó.");
+        }
+        return tx.dailyTask.update({
+          where: { id: task.id },
+          data: {
+            status: "completed",
+            completedAt: new Date(),
+            assignee,
+            verifier: verifier.fullName || verifier.username,
+          },
+        });
       });
       await appendDailyTaskHistory({
         taskId: task.id,
@@ -15990,6 +16044,7 @@ ipcMain.handle("dailyTasks:list", async (event, filters = {}) => {
       excludeCompleted,
       summary,
       maintenance,
+      includeArchived,
     } = filters;
     // Expensive maintenance belongs to the full Daily Tasks screen. Global
     // alerts poll a compact read model and must not start a full DB scan.
@@ -16053,7 +16108,13 @@ ipcMain.handle("dailyTasks:list", async (event, filters = {}) => {
       orderBy: [{ status: "asc" }, { dueDate: "asc" }],
     });
 
-    return { success: true, data: tasks };
+    const visibleTasks = includeArchived
+      ? tasks
+      : tasks.filter(
+          (task) => !parseTaskAttachments(task.attachments)?.archive?.archivedAt,
+        );
+
+    return { success: true, data: visibleTasks };
   } catch (error) {
     console.error("Error listing tasks:", error);
     return { success: false, error: error.message };
@@ -16448,10 +16509,22 @@ ipcMain.handle("dailyTasks:requestAssignmentCompletion", async (_event, id) => {
       completionRequestedAt: new Date().toISOString(),
       completionRequestedBy: actor.username,
     };
-    const updated = await prisma.dailyTask.update({
-      where: { id: task.id },
-      data: { attachments: JSON.stringify(attachments) },
-    });
+      const updated = await getPrismaDirectTx().$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw`
+          SELECT id FROM "DailyTask" WHERE id = ${task.id} FOR UPDATE
+        `;
+        if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+          throw new Error("Assignment task was not found.");
+        }
+        const current = await tx.dailyTask.findUnique({ where: { id: task.id } });
+        if (!current || current.updatedAt.getTime() !== task.updatedAt.getTime()) {
+          throw new Error("Assignment đã được thay đổi trên máy khác. Vui lòng tải lại và thử lại.");
+        }
+        return tx.dailyTask.update({
+          where: { id: task.id },
+          data: { attachments: JSON.stringify(attachments) },
+        });
+      });
     await appendDailyTaskHistory({
       taskId: task.id,
       taskTitle: task.title,
@@ -16486,6 +16559,9 @@ ipcMain.handle("dailyTasks:update", async (event, id, updates) => {
     });
     if (!existingTask) throw new Error("KhÃ´ng tÃ¬m tháº¥y cÃ´ng viá»‡c.");
     const existingAttachments = parseTaskAttachments(existingTask.attachments);
+    if (existingAttachments?.archive?.archivedAt) {
+      throw new Error("Công việc đã được lưu trữ, không thể cập nhật từ cửa sổ cũ.");
+    }
     if (
       actor.role !== "admin" &&
       !isTestOperatorActor(actor) &&
@@ -16644,6 +16720,9 @@ ipcMain.handle("dailyTasks:updateStatus", async (event, id, status) => {
     });
     if (!existingTask) throw new Error("Không tìm thấy công việc.");
     const attachments = parseTaskAttachments(existingTask.attachments);
+    if (attachments?.archive?.archivedAt) {
+      throw new Error("Công việc đã được lưu trữ, không thể đổi trạng thái.");
+    }
     if (
       status === "completed" &&
       attachments?.evidence?.required &&
@@ -16699,7 +16778,102 @@ ipcMain.handle("dailyTasks:updateStatus", async (event, id, status) => {
   }
 });
 
-// Delete task
+// Archive task without deleting its row, evidence, or historical metadata.
+ipcMain.handle("dailyTasks:archive", async (event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const taskId = Number(payload.id);
+    if (!Number.isSafeInteger(taskId) || taskId <= 0) {
+      throw new Error("Mã công việc không hợp lệ.");
+    }
+
+    const archivedAt = new Date().toISOString();
+    const task = await getPrismaDirectTx().$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw`
+        SELECT id FROM "DailyTask" WHERE id = ${taskId} FOR UPDATE
+      `;
+      if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+        throw new Error("Không tìm thấy công việc.");
+      }
+      const current = await tx.dailyTask.findUnique({ where: { id: taskId } });
+      if (!current) throw new Error("Không tìm thấy công việc.");
+      const attachments = parseTaskAttachments(current.attachments);
+      if (attachments?.archive?.archivedAt) return current;
+
+      attachments.archive = {
+        archivedAt,
+        archivedBy: currentSession.username,
+        originalStatus: current.status,
+        reason: String(payload.reason || "Ẩn khỏi danh sách công việc").slice(0, 300),
+      };
+      return tx.dailyTask.update({
+        where: { id: taskId },
+        data: {
+          status: "cancelled",
+          attachments: JSON.stringify(attachments),
+        },
+      });
+    });
+
+    void logActivity({
+      module: "system",
+      action: "ARCHIVE",
+      description: `Lưu trữ công việc #${taskId}`,
+      recordName: task.title,
+      userName: currentSession.username,
+    });
+    return { success: true, data: task };
+  } catch (error) {
+    console.error("Error archiving task:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Legacy hard deletion remains blocked; assignment deletion has its own
+// admin-only, type-checked handler above.
+ipcMain.handle("dailyTasks:deleteAssignment", async (event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const taskId = Number(payload.id);
+    if (!Number.isSafeInteger(taskId) || taskId <= 0) {
+      throw new Error("Mã công việc không hợp lệ.");
+    }
+
+    const deleted = await getPrismaDirectTx().$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw`
+        SELECT id FROM "DailyTask" WHERE id = ${taskId} FOR UPDATE
+      `;
+      if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+        throw new Error("Không tìm thấy công việc.");
+      }
+      const existingTask = await tx.dailyTask.findUnique({ where: { id: taskId } });
+      if (!existingTask) throw new Error("Không tìm thấy công việc.");
+      if (existingTask.type !== "assignment") {
+        throw new Error("Chỉ công việc bàn giao mới được phép xóa vĩnh viễn.");
+      }
+
+      await tx.appConfig.deleteMany({
+        where: { key: { startsWith: `${TASK_PENALTY_KEY_PREFIX}${taskId}:` } },
+      });
+      return tx.dailyTask.delete({ where: { id: taskId } });
+    });
+
+    void logActivity({
+      module: "system",
+      action: "DELETE_ASSIGNMENT",
+      description: `Xóa vĩnh viễn công việc bàn giao #${taskId}`,
+      recordName: deleted.title,
+      userName: currentSession.username,
+    });
+    return { success: true, data: deleted };
+  } catch (error) {
+    console.error("Error deleting assignment:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle("dailyTasks:delete", async (event, id) => {
   try {
     requireRole("admin");
@@ -20710,6 +20884,48 @@ ipcMain.handle("refunds:update", async (event, id, data) => {
   }
 });
 
+// Narrow status-only mutation for scan/exception workflows. Editing customer,
+// item, amount, or note fields still requires the full update path.
+ipcMain.handle("refunds:updateStatus", async (event, payload = {}) => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Prisma not available");
+    const refundId = Number(payload.id);
+    const status = String(payload.status || "").trim().slice(0, 60);
+    if (!Number.isSafeInteger(refundId) || refundId <= 0) {
+      throw new Error("Mã phiếu hoàn không hợp lệ.");
+    }
+    if (!["processing", "received", "lost"].includes(status)) {
+      throw new Error("Trạng thái phiếu hoàn không được phép trong luồng này.");
+    }
+    const record = await getPrismaDirectTx().$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw`
+        SELECT id FROM "Refund" WHERE id = ${refundId} FOR UPDATE
+      `;
+      if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+        throw new Error("Không tìm thấy phiếu hoàn.");
+      }
+      const current = await tx.refund.findUnique({ where: { id: refundId } });
+      if (!current) throw new Error("Không tìm thấy phiếu hoàn.");
+      if (current.status === "completed") {
+        throw new Error("Phiếu hoàn đã hoàn tất, không thể đổi trạng thái bằng luồng này.");
+      }
+      return tx.refund.update({ where: { id: refundId }, data: { status } });
+    });
+    void logActivity({
+      module: "refunds",
+      action: "UPDATE_STATUS",
+      description: `Cập nhật trạng thái hàng hoàn #${refundId}: ${status}`,
+      recordName: record.refundCode || record.orderNumber || record.customerName,
+      userName: currentSession?.username,
+    });
+    return { success: true, data: record };
+  } catch (error) {
+    console.error("Update refund status error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle("refunds:delete", async (event, id) => {
   try {
     requireRole("admin", "manager");
@@ -20831,6 +21047,135 @@ ipcMain.handle("stockBalance:getAll", async (event, { limit } = {}) => {
     return { success: true, data: formatted };
   } catch (error) {
     console.error("❌ Get stock balance records error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("returns:addProcessNote", async (event, payload = {}) => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Prisma not available");
+    const returnId = Number(payload.id);
+    const note = String(payload.note || "").trim().slice(0, 1000);
+    if (!Number.isSafeInteger(returnId) || returnId <= 0) {
+      throw new Error("Mã phiếu trả không hợp lệ.");
+    }
+    if (!note) throw new Error("Ghi chú không được để trống.");
+
+    const now = new Date();
+    const timeParts = Object.fromEntries(
+      new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Asia/Bangkok",
+        day: "2-digit",
+        month: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      })
+        .formatToParts(now)
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, part.value]),
+    );
+    const newLog = {
+      timestamp: `${timeParts.day}/${timeParts.month} ${timeParts.hour}h${timeParts.minute}`,
+      note,
+      createdBy: currentSession.username,
+      createdAt: now.toISOString(),
+    };
+
+    const record = await getPrismaDirectTx().$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw`
+        SELECT id FROM "Return" WHERE id = ${returnId} FOR UPDATE
+      `;
+      if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+        throw new Error("Không tìm thấy phiếu trả.");
+      }
+      const current = await tx.return.findUnique({ where: { id: returnId } });
+      if (!current) throw new Error("Không tìm thấy phiếu trả.");
+
+      let logs = [];
+      if (current.notes) {
+        try {
+          const parsed = JSON.parse(current.notes);
+          logs = Array.isArray(parsed)
+            ? parsed
+            : [{ timestamp: "", note: String(parsed) }];
+        } catch {
+          logs = [{ timestamp: "", note: current.notes }];
+        }
+      }
+      return tx.return.update({
+        where: { id: returnId },
+        data: { notes: JSON.stringify([...logs, newLog]) },
+      });
+    });
+
+    void logActivity({
+      module: "returns",
+      action: "ADD_NOTE",
+      description: `Thêm ghi chú phiếu trả #${returnId}`,
+      recordName: record.returnCode || record.customerName,
+      userName: currentSession.username,
+    });
+    return {
+      success: true,
+      data: { ...record, processNotes: record.notes },
+    };
+  } catch (error) {
+    console.error("Add return process note error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Update only operational return fields. Full return edits remain behind the
+// safety gate because they can replace item/amount/customer data wholesale.
+ipcMain.handle("returns:updateWorkflow", async (event, payload = {}) => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Prisma not available");
+    const returnId = Number(payload.id);
+    const field = String(payload.field || "");
+    if (!Number.isSafeInteger(returnId) || returnId <= 0) {
+      throw new Error("Mã phiếu trả không hợp lệ.");
+    }
+    const updateData = {};
+    if (field === "packer") {
+      const value = payload.value == null ? null : String(payload.value).trim();
+      if (value && value.length > 120) throw new Error("Tên nhân viên đóng gói quá dài.");
+      updateData.packer = value || null;
+    } else if (field === "status") {
+      const value = String(payload.value || "").trim().slice(0, 60);
+      if (!value) throw new Error("Trạng thái phiếu trả không hợp lệ.");
+      updateData.status = value;
+    } else if (field === "faultParty") {
+      const value = String(payload.value || "");
+      if (!["warehouse", "customer"].includes(value)) {
+        throw new Error("Bên chịu lỗi không hợp lệ.");
+      }
+      updateData.faultParty = value;
+    } else {
+      throw new Error("Chỉ được cập nhật nhân viên đóng gói, trạng thái hoặc bên chịu lỗi.");
+    }
+
+    const record = await getPrismaDirectTx().$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw`
+        SELECT id FROM "Return" WHERE id = ${returnId} FOR UPDATE
+      `;
+      if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+        throw new Error("Không tìm thấy phiếu trả.");
+      }
+      return tx.return.update({ where: { id: returnId }, data: updateData });
+    });
+    void logActivity({
+      module: "returns",
+      action: "UPDATE_WORKFLOW",
+      description: `Cập nhật ${field} phiếu trả #${returnId}`,
+      recordName: record.returnCode || record.customerName,
+      changes: updateData,
+    });
+    return { success: true, data: record };
+  } catch (error) {
+    console.error("Update return workflow error:", error);
     return { success: false, error: error.message };
   }
 });
@@ -22067,6 +22412,21 @@ function getStockCheckSessionOrThrow(
   if (!session) throw new Error("Phiên kiểm hàng không tồn tại.");
   if (session.date !== getStockCheckTodayKey())
     throw new Error("Chỉ được thao tác phiên kiểm hàng hôm nay.");
+  if (session.status === "cancelled")
+    throw new Error("Phiên kiểm hàng đã bị quản trị viên hủy.");
+  const isDailySession =
+    session.type !== "full" && session.type !== "recheck";
+  const hasFullSession = sessions.some(
+    (entry) =>
+      entry?.date === session.date &&
+      entry?.type === "full" &&
+      entry?.status !== "cancelled",
+  );
+  if (isDailySession && hasFullSession) {
+    throw new Error(
+      "Hôm nay đã có phiên kiểm toàn bộ. Phiên kiểm hàng ngày đã được tạm dừng.",
+    );
+  }
   if (!allowCompleted && session.status === "completed")
     throw new Error("Phiên kiểm hàng đã nộp, không thể sửa số đếm.");
   if (currentSession.role !== "admin" && !isStockCheckAssignee(session))
@@ -22076,6 +22436,10 @@ function getStockCheckSessionOrThrow(
 
 function isStockCheckSessionCompleted(session) {
   return session?.status === "completed" && Boolean(session?.completedAt);
+}
+
+function isStockCheckSessionCancelled(session) {
+  return session?.status === "cancelled";
 }
 
 // A carry-over session transfers the obligation to count, not yesterday's
@@ -22146,6 +22510,7 @@ function createDailyCarryOverSession(sessions) {
     const fullyBalanced =
       session?.type === "daily" &&
       session?.date < today &&
+      !isStockCheckSessionCancelled(session) &&
       session?.status !== "completed" &&
       items.length > 0 &&
       items.every(
@@ -22182,7 +22547,8 @@ function createDailyCarryOverSession(sessions) {
     if (
       session?.type !== "daily" ||
       session?.date !== today ||
-      session?.status === "completed"
+      session?.status === "completed" ||
+      isStockCheckSessionCancelled(session)
     )
       return true;
     const isUntouchedCarryOver =
@@ -22223,6 +22589,7 @@ function createDailyCarryOverSession(sessions) {
       (session) =>
         session.type === "daily" &&
         session.date < today &&
+        !isStockCheckSessionCancelled(session) &&
         session.status !== "completed" &&
         !session.rolledOverTo &&
         Array.isArray(session.items) &&
@@ -22285,7 +22652,8 @@ function applySameDayFullCheckExemptions(sessions) {
   const balancedFullSkusByDate = new Map();
 
   for (const session of sessions) {
-    if (session?.type !== "full") continue;
+    if (session?.type !== "full" || isStockCheckSessionCancelled(session))
+      continue;
     const date = String(session.date || "");
     if (!date) continue;
     const balancedItems = (session.items || []).filter(
@@ -22301,7 +22669,8 @@ function applySameDayFullCheckExemptions(sessions) {
     if (
       session?.type !== "daily" ||
       session?.date !== getStockCheckTodayKey() ||
-      session?.status === "completed"
+      session?.status === "completed" ||
+      isStockCheckSessionCancelled(session)
     )
       return session;
     const balancedBySku = balancedFullSkusByDate.get(
@@ -22419,6 +22788,7 @@ function normalizeUntouchedDailyStockCheckScope(sessions) {
       session?.type !== "daily" ||
       session?.date !== today ||
       session?.status === "completed" ||
+      isStockCheckSessionCancelled(session) ||
       items.length <= DAILY_STOCK_CHECK_MAX_SKUS ||
       items.some(
         (item) =>
@@ -22629,7 +22999,8 @@ async function topUpTodayDailyStockCheckProducts(sessions, tx) {
     if (
       session?.type !== "daily" ||
       session?.date !== today ||
-      session?.status === "completed"
+      session?.status === "completed" ||
+      isStockCheckSessionCancelled(session)
     )
       return session;
     const items = Array.isArray(session.items) ? session.items : [];
@@ -22865,6 +23236,23 @@ ipcMain.handle("stockCheck:balanceItems", async (event, payload = {}) => {
           if (session.date !== getStockCheckTodayKey()) {
             throw new Error("Chỉ được cân bằng phiên kiểm hàng hôm nay.");
           }
+          if (isStockCheckSessionCancelled(session)) {
+            throw new Error("Phiên kiểm hàng đã bị quản trị viên hủy.");
+          }
+          if (
+            session.type !== "full" &&
+            session.type !== "recheck" &&
+            sessions.some(
+              (entry) =>
+                entry?.date === session.date &&
+                entry?.type === "full" &&
+                !isStockCheckSessionCancelled(entry),
+            )
+          ) {
+            throw new Error(
+              "Hôm nay đã có phiên kiểm toàn bộ. Phiên kiểm hàng ngày đã được tạm dừng.",
+            );
+          }
           if (session.status === "completed") {
             throw new Error("Stock check session has already been submitted.");
           }
@@ -23078,6 +23466,17 @@ ipcMain.handle("stockCheck:getSessions", async (_event, options = {}) => {
             where: { key: "stockCheckSessionsV2" },
           });
           const storedSessions = parseStockCheckSessionsFromConfig(record);
+          const today = getStockCheckTodayKey();
+          if (
+            storedSessions.some(
+              (session) =>
+                session?.date === today &&
+                session?.type === "full" &&
+                !isStockCheckSessionCancelled(session),
+            )
+          ) {
+            return storedSessions;
+          }
           const carried = createDailyCarryOverSession(storedSessions);
           const repaired = repairTodayCarryOverCounts(carried.sessions);
           const exempted = applySameDayFullCheckExemptions(repaired.sessions);
@@ -23109,7 +23508,8 @@ ipcMain.handle("stockCheck:getSessions", async (_event, options = {}) => {
         : sessions.filter(
             (session) =>
               session.date === getStockCheckTodayKey() &&
-              isStockCheckAssignee(session),
+              ((session.type === "full" && !isStockCheckSessionCancelled(session)) ||
+                isStockCheckAssignee(session)),
           );
     return {
       success: true,
@@ -23140,6 +23540,18 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
           where: { key: "stockCheckSessionsV2" },
         });
         const storedSessions = parseStockCheckSessionsFromConfig(record);
+        if (
+          storedSessions.some(
+            (session) =>
+              session?.date === today &&
+              session?.type === "full" &&
+              !isStockCheckSessionCancelled(session),
+          )
+        ) {
+          throw new Error(
+            "Hôm nay đã có phiên kiểm toàn bộ. Phiên kiểm hàng ngày đã được tạm dừng.",
+          );
+        }
         const carried = createDailyCarryOverSession(storedSessions);
         const repaired = repairTodayCarryOverCounts(carried.sessions);
         let sessions = repaired.sessions;
@@ -23147,6 +23559,11 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
           (session) => session?.date === today && session?.type === "daily",
         );
         if (existing) {
+          if (isStockCheckSessionCancelled(existing)) {
+            throw new Error(
+              "Phiên kiểm hàng ngày hôm nay đã được quản trị viên hủy.",
+            );
+          }
           if (carried.changed || repaired.changed)
             await writeStockCheckSessions(sessions, tx);
           return {
@@ -23288,9 +23705,6 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
 ipcMain.handle("stockCheck:createFullSession", async (event, payload = {}) => {
   try {
     requireRole();
-    if (!isPrivilegedStockCheckSession()) {
-      throw new Error("Chỉ quản trị viên được tạo phiên kiểm toàn bộ.");
-    }
     const assignedTo = String(payload.assignedTo || "").trim();
     if (!assignedTo) throw new Error("Chưa chọn người phụ trách phiên kiểm.");
     const requestedItems = normalizeRequestedStockCheckItems(payload.items);
@@ -23307,10 +23721,14 @@ ipcMain.handle("stockCheck:createFullSession", async (event, payload = {}) => {
         const existing = sessions.find(
           (session) => String(session?.id) === sessionId,
         );
-        if (existing?.items?.length) {
+        if (!isStockCheckSessionCancelled(existing) && existing?.items?.length) {
           return { session: existing, created: false };
         }
-        if (existing && isStockCheckSessionCompleted(existing)) {
+        if (
+          existing &&
+          !isStockCheckSessionCancelled(existing) &&
+          isStockCheckSessionCompleted(existing)
+        ) {
           throw new Error("Phiên kiểm toàn bộ hôm nay đã được chốt.");
         }
 
@@ -23385,6 +23803,71 @@ ipcMain.handle("stockCheck:createFullSession", async (event, payload = {}) => {
     return { success: false, error: error.message };
   }
 });
+
+ipcMain.handle(
+  "stockCheck:cancelSession",
+  async (event, payload = {}) => {
+    try {
+      requireRole("admin");
+      const sessionId = String(payload.sessionId || "").trim();
+      const reason = String(payload.reason || "").trim();
+      if (!sessionId) throw new Error("Thiếu phiên kiểm cần hủy.");
+
+      const session = await getPrismaDirectTx().$transaction(
+        async (tx) => {
+          await lockStockCheckSessions(tx);
+          const record = await tx.appConfig.findUnique({
+            where: { key: "stockCheckSessionsV2" },
+          });
+          const sessions = parseStockCheckSessionsFromConfig(record);
+          const storedSession = sessions.find(
+            (entry) => String(entry?.id) === sessionId,
+          );
+          if (!storedSession) throw new Error("Phiên kiểm hàng không tồn tại.");
+          if (storedSession.date !== getStockCheckTodayKey()) {
+            throw new Error("Chỉ được hủy phiên kiểm hàng hôm nay.");
+          }
+          if (isStockCheckSessionCompleted(storedSession)) {
+            throw new Error("Phiên kiểm đã chốt nên không thể hủy.");
+          }
+          if (isStockCheckSessionCancelled(storedSession)) return storedSession;
+
+          const now = new Date().toISOString();
+          storedSession.status = "cancelled";
+          storedSession.cancelledAt = now;
+          storedSession.cancelledBy = currentSession.username;
+          storedSession.cancellationReason = reason || "Quản trị viên hủy phiên kiểm.";
+          await writeStockCheckSessions(sessions, tx);
+          await tx.activityLog.create({
+            data: {
+              module: "stock_check",
+              action: "CANCEL_SESSION",
+              description: `Hủy phiên kiểm ${sessionId}: ${storedSession.cancellationReason}`,
+              recordName: sessionId,
+              changes: JSON.stringify({
+                sessionId,
+                sessionType: storedSession.type,
+                assignedTo: storedSession.assignedTo,
+                reason: storedSession.cancellationReason,
+              }),
+              userName: currentSession.username,
+              severity: "WARNING",
+            },
+          });
+          return storedSession;
+        },
+        { timeout: 30000, maxWait: 10000 },
+      );
+
+      return {
+        success: true,
+        session: sanitizeStockCheckSession(session, true),
+      };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  },
+);
 
 ipcMain.handle(
   "stockCheck:createRecheckSession",
@@ -23606,12 +24089,30 @@ ipcMain.handle(
           // session by omitting it from its local snapshot.
           storedSessions.forEach((session) => {
             if (
-              isStockCheckSessionCompleted(session) &&
+              (isStockCheckSessionCompleted(session) ||
+                isStockCheckSessionCancelled(session) ||
+                (session?.date === getStockCheckTodayKey() &&
+                  session?.type === "full" &&
+                  !isStockCheckSessionCancelled(session))) &&
               !incomingIds.has(String(session.id))
             ) {
               protectedSessions.push(session);
             }
           });
+
+          // Once a full check exists, keep daily data only as history and never
+          // auto-expand or recreate today's daily scope through a stale admin UI.
+          if (
+            protectedSessions.some(
+              (session) =>
+                session?.date === getStockCheckTodayKey() &&
+                session?.type === "full" &&
+                !isStockCheckSessionCancelled(session),
+            )
+          ) {
+            await writeStockCheckSessions(protectedSessions, tx);
+            return protectedSessions;
+          }
 
           const exempted = applySameDayFullCheckExemptions(protectedSessions);
           const normalizedScope = normalizeUntouchedDailyStockCheckScope(
@@ -27542,6 +28043,67 @@ ipcMain.handle(
     }
   },
 );
+
+function validatePayslipQrUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(String(value || ""));
+  } catch {
+    throw new Error("Đường dẫn VietQR không hợp lệ.");
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.hostname !== "img.vietqr.io" ||
+    !/^\/image\/[A-Za-z0-9_-]+-compact2\.png$/.test(parsed.pathname)
+  ) {
+    throw new Error("Chỉ cho phép tải ảnh từ dịch vụ VietQR chính thức.");
+  }
+  return parsed.toString();
+}
+
+async function fetchPayslipQrDataUrl(url) {
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { Accept: "image/png,image/jpeg" },
+      });
+      if (!response.ok) throw new Error(`VietQR phản hồi HTTP ${response.status}.`);
+      const image = Buffer.from(await response.arrayBuffer());
+      if (!image.length || image.length > 3 * 1024 * 1024) {
+        throw new Error("Ảnh VietQR trống hoặc vượt quá giới hạn 3 MB.");
+      }
+      const isPng =
+        image.length >= 8 &&
+        image.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+      const isJpeg = image.length >= 3 && image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff;
+      if (!isPng && !isJpeg) throw new Error("VietQR không trả về tệp ảnh hợp lệ.");
+      return `data:${isPng ? "image/png" : "image/jpeg"};base64,${image.toString("base64")}`;
+    } catch (error) {
+      lastError = error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  throw new Error(
+    `Không tải được VietQR sau 3 lần thử: ${lastError?.message || "dịch vụ không phản hồi"}`,
+  );
+}
+
+ipcMain.handle("attendance:getPayslipQrImage", async (_event, payload = {}) => {
+  try {
+    requireRole("admin");
+    const url = validatePayslipQrUrl(payload.url);
+    const dataUrl = await fetchPayslipQrDataUrl(url);
+    return { success: true, data: { dataUrl } };
+  } catch (error) {
+    console.error("❌ attendance:getPayslipQrImage error:", error.message);
+    return { success: false, error: error.message };
+  }
+});
 
 // Kiểm tra + tự khởi động Python service khi vào tab Điểm danh
 ipcMain.handle(
