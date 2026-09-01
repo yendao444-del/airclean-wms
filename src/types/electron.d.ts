@@ -1014,6 +1014,15 @@ export interface ElectronAPI {
       data?: any[];
       error?: string;
     }>;
+    createFullSession: (data: {
+      items: any[];
+      assignedTo: string;
+    }) => Promise<{
+      success: boolean;
+      session?: any;
+      created?: boolean;
+      error?: string;
+    }>;
     createRecheckSession: (data: {
       sourceSessionId: string;
       scope: "mismatch" | "all";

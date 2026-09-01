@@ -74,7 +74,7 @@ export default function MyProfile() {
         try {
             const result = await window.electronAPI.users.changePassword({
                 userId: user.id,
-                oldPassword: values.oldPassword,
+                oldPassword: user.mustChangePassword ? '' : values.oldPassword,
                 newPassword: values.newPassword,
             });
             if (!result.success) throw new Error(result.error || 'Không thể đổi mật khẩu.');
@@ -100,8 +100,8 @@ export default function MyProfile() {
                 <Alert
                     type="warning"
                     showIcon
-                    message="Đã đến hạn đổi mật khẩu"
-                    description="Để tiếp tục sử dụng hệ thống, vui lòng đặt mật khẩu mới cho tài khoản của bạn."
+                    message="Mật khẩu tạm đã được sử dụng và vô hiệu hóa"
+                    description="Bạn phải đặt mật khẩu mới trong phiên này để tiếp tục sử dụng hệ thống. Nếu thoát, hãy liên hệ admin để được cấp lại mật khẩu tạm."
                     style={{ marginBottom: 18 }}
                 />
             )}
@@ -171,7 +171,11 @@ export default function MyProfile() {
                 destroyOnClose
             >
                 <Form form={passwordForm} layout="vertical" onFinish={changePassword} style={{ marginTop: 20 }}>
-                    <Form.Item label="Mật khẩu hiện tại" name="oldPassword" rules={[{ required: true, message: 'Nhập mật khẩu hiện tại.' }]}><Input.Password prefix={<LockOutlined />} /></Form.Item>
+                    {!user.mustChangePassword && (
+                        <Form.Item label="Mật khẩu hiện tại" name="oldPassword" rules={[{ required: true, message: 'Nhập mật khẩu hiện tại.' }]}>
+                            <Input.Password prefix={<LockOutlined />} />
+                        </Form.Item>
+                    )}
                     <Form.Item label="Mật khẩu mới" name="newPassword" rules={[{ required: true, min: 8, message: 'Tối thiểu 8 ký tự.' }, { pattern: /(?=.*[A-Za-z])(?=.*\d)/, message: 'Mật khẩu cần có chữ và số.' }]}><Input.Password prefix={<LockOutlined />} /></Form.Item>
                     <Form.Item label="Xác nhận mật khẩu mới" name="confirmPassword" dependencies={['newPassword']} rules={[{ required: true, message: 'Xác nhận mật khẩu mới.' }, ({ getFieldValue }) => ({ validator(_, value) { return !value || getFieldValue('newPassword') === value ? Promise.resolve() : Promise.reject(new Error('Mật khẩu xác nhận chưa khớp.')); } })]}><Input.Password prefix={<LockOutlined />} /></Form.Item>
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>

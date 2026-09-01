@@ -51,6 +51,18 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   // This workflow uses the stock mutex and one database transaction for the
   // export, stock ledger changes, and linked marketplace order.
   "ecommerceExports:create",
+  // Stock-check mutations operate on a server-validated session under the
+  // shared session lock. Stock adjustments also use the stock mutex and the
+  // same database transaction as their immutable balance history.
+  "stockCheck:ensureDailySession",
+  "stockCheck:createFullSession",
+  "stockCheck:createRecheckSession",
+  "stockCheck:updateCount",
+  "stockCheck:retryCount",
+  "stockCheck:updateNote",
+  "stockCheck:balanceItems",
+  "stockCheck:balanceItem",
+  "stockCheck:submitSession",
 ]);
 
 // Local config is a development convenience only. Production builds must
@@ -1697,6 +1709,23 @@ async function recordFailedLogin(user) {
 async function revokeRememberTokensForUser(userId) {
   await mutateRememberTokens((tokens) =>
     tokens.filter((token) => token?.userId !== userId),
+  );
+}
+
+function isTemporaryPassword(user) {
+  if (!user?.forcePasswordChange || !user?.passwordChangedAt) return false;
+  const changedAt = new Date(user.passwordChangedAt).getTime();
+  return Number.isFinite(changedAt) && changedAt <= 1000;
+}
+
+function hasValidTemporaryPasswordGrant(user) {
+  const grant = currentSession?.temporaryPasswordGrant;
+  if (!grant || Number(grant.userId) !== Number(user?.id)) return false;
+  const changedAt = new Date(user?.passwordChangedAt).getTime();
+  return (
+    Boolean(user?.forcePasswordChange) &&
+    Number.isFinite(changedAt) &&
+    changedAt === Number(grant.consumedAt)
   );
 }
 
@@ -13692,43 +13721,45 @@ ipcMain.handle(
 
       const passwordText = assertStrongPassword(newPassword);
 
-      const user = await prisma.user.findUnique({ where: { id: userId } });
-      if (!user) {
-        return { success: false, error: "Người dùng không tồn tại" };
-      }
-
-      // Verify old password (bcrypt compare — hỗ trợ cả plaintext legacy)
-      let passwordValid = false;
-      if (user.password && user.password.startsWith("$2")) {
-        passwordValid = await bcrypt.compare(oldPassword, user.password);
-      } else {
-        passwordValid = user.password === oldPassword;
-      }
-      if (!passwordValid) {
-        return { success: false, error: "Mật khẩu hiện tại không đúng" };
-      }
-      const isSamePassword = user.password?.startsWith("$2")
-        ? await bcrypt.compare(passwordText, user.password)
-        : user.password === passwordText;
-      if (isSamePassword) {
-        return {
-          success: false,
-          error: "Mật khẩu mới phải khác mật khẩu hiện tại.",
-        };
-      }
-
-      // Hash new password before storing
       const hashedNew = await bcrypt.hash(passwordText, 10);
-      await prisma.user.update({
-        where: { id: userId },
-        data: {
-          password: hashedNew,
-          passwordChangedAt: new Date(),
-          forcePasswordChange: false,
+      const user = await getPrismaDirectTx().$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`user-password:${userId}`}))`;
+          const freshUser = await tx.user.findUnique({
+            where: { id: Number(userId) },
+          });
+          if (!freshUser) throw new Error("Người dùng không tồn tại");
+
+          const temporaryPasswordGrant = hasValidTemporaryPasswordGrant(freshUser);
+          if (!temporaryPasswordGrant) {
+            // Ordinary changes verify the current password. A consumed
+            // temporary password uses its session-bound one-time grant.
+            const passwordValid = freshUser.password?.startsWith("$2")
+              ? await bcrypt.compare(oldPassword, freshUser.password)
+              : freshUser.password === oldPassword;
+            if (!passwordValid) throw new Error("Mật khẩu hiện tại không đúng");
+            const isSamePassword = freshUser.password?.startsWith("$2")
+              ? await bcrypt.compare(passwordText, freshUser.password)
+              : freshUser.password === passwordText;
+            if (isSamePassword) {
+              throw new Error("Mật khẩu mới phải khác mật khẩu hiện tại.");
+            }
+          }
+
+          return tx.user.update({
+            where: { id: freshUser.id },
+            data: {
+              password: hashedNew,
+              passwordChangedAt: new Date(),
+              forcePasswordChange: false,
+            },
+          });
         },
-      });
+        { timeout: 15000, maxWait: 10000 },
+      );
       await revokeRememberTokensForUser(user.id);
       currentSession.mustChangePassword = false;
+      delete currentSession.temporaryPasswordGrant;
 
       console.log(`✅ Changed password for user: ${user.username}`);
       void logActivity({
@@ -13754,24 +13785,29 @@ ipcMain.handle(
       requireRole("admin");
       if (!prisma) throw new Error("Prisma not available");
 
-      const user = await prisma.user.findUnique({ where: { id: userId } });
-      if (!user) {
-        return { success: false, error: "Người dùng không tồn tại" };
-      }
-
       const passwordText = assertStrongPassword(newPassword);
       // Mật khẩu do admin cấp là tạm thời: bắt buộc đổi ngay ở lần đăng nhập tiếp theo.
       const hashedPassword = await bcrypt.hash(passwordText, 10);
-      await prisma.user.update({
-        where: { id: userId },
-        data: {
-          password: hashedPassword,
-          passwordChangedAt: new Date(0),
-          forcePasswordChange: true,
-          loginFailedAttempts: 0,
-          loginLockedUntil: null,
+      const user = await getPrismaDirectTx().$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`user-password:${userId}`}))`;
+          const freshUser = await tx.user.findUnique({
+            where: { id: Number(userId) },
+          });
+          if (!freshUser) throw new Error("Người dùng không tồn tại");
+          return tx.user.update({
+            where: { id: freshUser.id },
+            data: {
+              password: hashedPassword,
+              passwordChangedAt: new Date(0),
+              forcePasswordChange: true,
+              loginFailedAttempts: 0,
+              loginLockedUntil: null,
+            },
+          });
         },
-      });
+        { timeout: 15000, maxWait: 10000 },
+      );
       await revokeRememberTokensForUser(user.id);
 
       console.log(`✅ Reset password for user: ${user.username}`);
@@ -21975,6 +22011,51 @@ function sanitizeStockCheckSession(session, isAdmin) {
   };
 }
 
+function normalizeRequestedStockCheckItems(requestedItems, maxItems = 10000) {
+  if (!Array.isArray(requestedItems) || requestedItems.length === 0) {
+    throw new Error("Chưa có SKU để tạo phiên kiểm.");
+  }
+  if (requestedItems.length > maxItems) {
+    throw new Error(`Phiên kiểm vượt quá giới hạn ${maxItems} SKU.`);
+  }
+  const uniqueSkus = new Set();
+  const items = requestedItems
+    .map((item) => {
+      const sku = String(item?.sku || "").trim();
+      if (!sku || uniqueSkus.has(sku)) return null;
+      uniqueSkus.add(sku);
+      return {
+        sku,
+        productName: String(item?.productName || sku).slice(0, 500),
+        color: item?.color ? String(item.color).slice(0, 200) : undefined,
+        unit: String(item?.unit || "Cái").slice(0, 100),
+        category: String(item?.category || "-").slice(0, 200),
+        systemStock: Number.isFinite(Number(item?.systemStock))
+          ? Number(item.systemStock)
+          : 0,
+        actualStock: null,
+        note: "",
+        difference: 0,
+        balanced: false,
+        requiresNote: false,
+        countLocked: false,
+        retryCount: 0,
+        priorityReason: item?.priorityReason
+          ? String(item.priorityReason).slice(0, 500)
+          : undefined,
+        priorityLevel:
+          item?.priorityLevel === "critical"
+            ? "critical"
+            : item?.priorityLevel === "high"
+              ? "high"
+              : undefined,
+      };
+    })
+    .filter(Boolean);
+  if (!items.length) throw new Error("Danh sách SKU kiểm không hợp lệ.");
+  return items;
+}
+
 function getStockCheckSessionOrThrow(
   sessions,
   sessionId,
@@ -23202,6 +23283,109 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
   }
 });
 
+// Create today's full-inventory session without accepting a stale replacement
+// of the complete session ledger from the renderer.
+ipcMain.handle("stockCheck:createFullSession", async (event, payload = {}) => {
+  try {
+    requireRole();
+    if (!isPrivilegedStockCheckSession()) {
+      throw new Error("Chỉ quản trị viên được tạo phiên kiểm toàn bộ.");
+    }
+    const assignedTo = String(payload.assignedTo || "").trim();
+    if (!assignedTo) throw new Error("Chưa chọn người phụ trách phiên kiểm.");
+    const requestedItems = normalizeRequestedStockCheckItems(payload.items);
+
+    const result = await getPrismaDirectTx().$transaction(
+      async (tx) => {
+        await lockStockCheckSessions(tx);
+        const today = getStockCheckTodayKey();
+        const sessionId = `${today}-full`;
+        const record = await tx.appConfig.findUnique({
+          where: { key: "stockCheckSessionsV2" },
+        });
+        const sessions = parseStockCheckSessionsFromConfig(record);
+        const existing = sessions.find(
+          (session) => String(session?.id) === sessionId,
+        );
+        if (existing?.items?.length) {
+          return { session: existing, created: false };
+        }
+        if (existing && isStockCheckSessionCompleted(existing)) {
+          throw new Error("Phiên kiểm toàn bộ hôm nay đã được chốt.");
+        }
+
+        const assignee = await tx.user.findUnique({
+          where: { username: assignedTo },
+          select: {
+            username: true,
+            fullName: true,
+            role: true,
+            status: true,
+            permissions: true,
+          },
+        });
+        if (
+          !assignee ||
+          assignee.role !== "manager" ||
+          assignee.status !== "active" ||
+          !isOperationalAssignee(assignee)
+        ) {
+          throw new Error(
+            "Người phụ trách không còn là quản lý đang hoạt động hoặc chưa được phân công vận hành.",
+          );
+        }
+
+        const now = new Date();
+        const session = {
+          id: sessionId,
+          runId: `full-${crypto.randomUUID?.() || now.getTime()}`,
+          date: today,
+          type: "full",
+          assignedTo: assignee.username,
+          assignedName: assignee.fullName || assignee.username,
+          status: "in_progress",
+          items: requestedItems,
+          notes: "",
+          createdAt: now.toISOString(),
+          createdBy: currentSession.username,
+        };
+        const nextSessions = [
+          ...sessions.filter((stored) => String(stored?.id) !== sessionId),
+          session,
+        ].slice(-90);
+        await writeStockCheckSessions(nextSessions, tx);
+        await tx.activityLog.create({
+          data: {
+            module: "stock_check",
+            action: "CREATE_FULL_SESSION",
+            description: `Tạo phiên kiểm toàn bộ ${today}: ${requestedItems.length} SKU, giao ${assignee.username}.`,
+            recordName: sessionId,
+            changes: JSON.stringify({
+              assignedTo: assignee.username,
+              totalSku: requestedItems.length,
+            }),
+            userName: currentSession.username,
+            severity: "INFO",
+          },
+        });
+        return { session, created: true };
+      },
+      { timeout: 30000, maxWait: 10000 },
+    );
+
+    return {
+      success: true,
+      session: sanitizeStockCheckSession(
+        result.session,
+        isPrivilegedStockCheckSession(),
+      ),
+      created: result.created,
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle(
   "stockCheck:createRecheckSession",
   async (event, payload = {}) => {
@@ -24287,16 +24471,11 @@ ipcMain.handle("users:update", async (event, id, data) => {
     if (data.fullName !== undefined) updateData.fullName = data.fullName;
     if (data.email !== undefined) updateData.email = data.email;
     if (data.role !== undefined) updateData.role = data.role;
-    // 🔒 SECURITY: Hash password mới nếu đổi mật khẩu
+    // Password resets use the dedicated audited, one-time-password workflow.
     if (data.password !== undefined) {
-      updateData.password = await bcrypt.hash(
-        assertStrongPassword(data.password),
-        10,
+      throw new Error(
+        "Hãy dùng chức năng Đặt lại mật khẩu để cấp mật khẩu tạm.",
       );
-      updateData.passwordChangedAt = new Date(0);
-      updateData.forcePasswordChange = true;
-      updateData.loginFailedAttempts = 0;
-      updateData.loginLockedUntil = null;
     }
     const employmentStatus = [
       USER_STATUS_RESIGNED,
@@ -24482,19 +24661,66 @@ ipcMain.handle(
           error: "Tên đăng nhập hoặc mật khẩu không đúng.",
         };
       }
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { loginFailedAttempts: 0, loginLockedUntil: null },
-      });
+      let authenticatedUser = user;
+      let temporaryPasswordGrant = null;
+      if (isTemporaryPassword(user)) {
+        // Consume the temporary password atomically. The replacement hash is
+        // random and unknown, so another login cannot reuse the same password.
+        const invalidPasswordHash = await bcrypt.hash(
+          crypto.randomBytes(32).toString("hex"),
+          10,
+        );
+        const consumedAt = new Date();
+        authenticatedUser = await getPrismaDirectTx().$transaction(
+          async (tx) => {
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`user-password:${user.id}`}))`;
+            const freshUser = await tx.user.findUnique({
+              where: { id: user.id },
+            });
+            if (!freshUser || freshUser.status !== "active") {
+              throw new Error("Tên đăng nhập hoặc mật khẩu không đúng.");
+            }
+            const stillValid = freshUser.password?.startsWith("$2")
+              ? await bcrypt.compare(password, freshUser.password)
+              : freshUser.password === password;
+            if (!stillValid || !isTemporaryPassword(freshUser)) {
+              throw new Error(
+                "Mật khẩu tạm đã được sử dụng. Vui lòng liên hệ quản trị viên để được cấp lại.",
+              );
+            }
+            return tx.user.update({
+              where: { id: freshUser.id },
+              data: {
+                password: invalidPasswordHash,
+                passwordChangedAt: consumedAt,
+                forcePasswordChange: true,
+                loginFailedAttempts: 0,
+                loginLockedUntil: null,
+              },
+            });
+          },
+          { timeout: 15000, maxWait: 10000 },
+        );
+        temporaryPasswordGrant = {
+          userId: authenticatedUser.id,
+          consumedAt: new Date(authenticatedUser.passwordChangedAt).getTime(),
+        };
+      } else {
+        authenticatedUser = await prisma.user.update({
+          where: { id: user.id },
+          data: { loginFailedAttempts: 0, loginLockedUntil: null },
+        });
+      }
       // Lưu session phía backend
       currentSession = {
-        id: user.id,
-        username: user.username,
-        role: user.role,
-        mustChangePassword: isPasswordRotationRequired(user),
+        id: authenticatedUser.id,
+        username: authenticatedUser.username,
+        role: authenticatedUser.role,
+        mustChangePassword: isPasswordRotationRequired(authenticatedUser),
+        ...(temporaryPasswordGrant ? { temporaryPasswordGrant } : {}),
       };
-      cacheSessionStatus(user);
-      prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(
+      cacheSessionStatus(authenticatedUser);
+      prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${authenticatedUser.id}`.catch(
         () => {},
       );
       void logActivity({
@@ -24505,14 +24731,16 @@ ipcMain.handle(
         userName: user.username,
       });
       const rememberToken =
-        rememberMe && user.role === "admin"
-          ? await issueRememberToken(user.id)
+        rememberMe &&
+        authenticatedUser.role === "admin" &&
+        !currentSession.mustChangePassword
+          ? await issueRememberToken(authenticatedUser.id)
           : null;
       if (rememberToken) storeSecureRememberToken(rememberToken);
       else clearSecureRememberToken();
       return {
         success: true,
-        data: sanitizeUserForClient(user),
+        data: sanitizeUserForClient(authenticatedUser),
       };
     } catch (error) {
       console.error("❌ Login error:", error);
@@ -24546,11 +24774,15 @@ ipcMain.handle("users:getCurrentSession", async () => {
       currentSession = null;
       return { success: false };
     }
+    const existingGrant = hasValidTemporaryPasswordGrant(user)
+      ? currentSession.temporaryPasswordGrant
+      : null;
     currentSession = {
       id: user.id,
       username: user.username,
       role: user.role,
       mustChangePassword: isPasswordRotationRequired(user),
+      ...(existingGrant ? { temporaryPasswordGrant: existingGrant } : {}),
     };
     cacheSessionStatus(user);
     return { success: true, data: sanitizeUserForClient(user) };
