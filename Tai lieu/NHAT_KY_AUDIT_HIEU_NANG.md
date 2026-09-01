@@ -1405,3 +1405,28 @@ Trạng thái: **Review tĩnh chỉ đọc đã hoàn tất; không sửa ứng 
 - `npx tsc --noEmit --pretty false` → thành công.
 - `npm run build` → thành công (4008 module).
 - `git diff --check` → không có lỗi whitespace mới; chỉ còn cảnh báo chuyển LF/CRLF của worktree Windows.
+
+## 48. Chặn lẫn thưởng/phạt và người nhận trong phiếu lương Gmail (2026-09-01)
+
+### Nguyên nhân
+
+- Luồng ghép nhân viên với tài khoản Gmail cho phép so khớp theo phần đuôi username. Cách ghép mơ hồ này có thể chọn nhầm tài khoản khi hai username gần giống nhau.
+- Khi gửi Gmail hàng loạt, hàm tạo PDF nhận dữ liệu nhân viên hiện tại nhưng lại lấy phần tử `.ps-print-view` đầu tiên trong DOM. Modal cũ hoặc DOM chưa render xong có thể làm PDF của nhân viên sau chụp nội dung của nhân viên trước.
+- Phiếu lương còn hiển thị toàn bộ lịch sử vi phạm đã được miễn. Các dòng này không phải khoản khấu trừ thực tế và làm phiếu dài, khó phân biệt với phạt đang bị trừ.
+
+### Thay đổi
+
+- Chỉ ghép tài khoản bằng username chính xác; nếu không có thì dùng họ tên chính xác và duy nhất. Không còn so khớp username theo tiền tố/hậu tố.
+- Mỗi DOM phiếu lương được gắn `employeeId` và kỳ lương. Hàm tạo PDF chỉ chụp khi cả hai khóa khớp nhân viên đang gửi; nếu không khớp sẽ dừng phiếu đó thay vì gửi nhầm.
+- Thưởng và phạt thực tế trong phiếu được lọc lại bằng đúng ID nhân viên và sắp xếp theo ngày.
+- Bỏ lịch sử vi phạm đã được miễn khỏi phiếu lương/PDF/Gmail; lịch sử miễn phạt vẫn được giữ nguyên trong dữ liệu và module quản lý phạt.
+- Tài khoản nhân viên chỉ được liên kết với hàng lương có username hoặc họ tên khớp chính xác.
+- Không sửa, xóa hoặc ghi lại dữ liệu thưởng, phạt, miễn phạt, bảng công, snapshot lương hay database.
+
+### Xác minh
+
+- Đọc đối chiếu `attendanceData` ở chế độ chỉ đọc: thưởng, phạt và miễn phạt đều có `empId`; không thực hiện mutation.
+- `npx tsc --noEmit --pretty false` → thành công.
+- `npm run build` → thành công, 4008 module.
+- `node scripts/verify-data-safety.js` → thành công.
+- `git diff --check -- src/pages/Attendance.tsx` → không có lỗi whitespace mới; chỉ còn cảnh báo LF/CRLF Windows.

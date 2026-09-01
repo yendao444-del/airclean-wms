@@ -497,6 +497,27 @@ const normalizeAttendanceText = (value?: string | null) =>
         .replace(/\s+/g, ' ')
         .trim();
 
+const isSameEmployeeId = (left: unknown, right: unknown) => {
+    const leftId = Number(left);
+    const rightId = Number(right);
+    return Number.isSafeInteger(leftId) && Number.isSafeInteger(rightId) && leftId > 0 && leftId === rightId;
+};
+
+const findExactPayrollAccount = (accounts: any[], employee: { username?: string; name?: string }) => {
+    const employeeUsername = normalizeAttendanceText(employee.username || '');
+    const employeeName = normalizeAttendanceText(employee.name || '');
+    const exactUsernameMatches = employeeUsername
+        ? accounts.filter(account => normalizeAttendanceText(account?.username || '') === employeeUsername)
+        : [];
+    if (exactUsernameMatches.length === 1) return exactUsernameMatches[0];
+    if (exactUsernameMatches.length > 1) return null;
+
+    const exactNameMatches = employeeName
+        ? accounts.filter(account => normalizeAttendanceText(account?.fullName || '') === employeeName)
+        : [];
+    return exactNameMatches.length === 1 ? exactNameMatches[0] : null;
+};
+
 const findEmployeeForAttendanceLog = (
     log: { userId?: number | null; faceId?: string | null; userName?: string | null },
     employees: Employee[],
@@ -2822,8 +2843,20 @@ export default function Attendance() {
             import('html2canvas'),
             import('jspdf'),
         ]);
-        const source = document.querySelector('.ps-print-view') as HTMLElement;
-        if (!source) return;
+        const expectedEmployeeId = String(data.id);
+        const expectedPeriodKey = overviewDateRange[0].format('YYYY-MM');
+        let source: HTMLElement | undefined;
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            source = Array.from(document.querySelectorAll<HTMLElement>('.ps-print-view')).find(element =>
+                element.dataset.employeeId === expectedEmployeeId
+                && element.dataset.periodKey === expectedPeriodKey
+            );
+            if (source) break;
+            await waitForPaint();
+        }
+        if (!source) {
+            throw new Error(`Không tạo phiếu cho ${data.name}: nội dung đang hiển thị không khớp đúng nhân viên.`);
+        }
         const el = source.cloneNode(true) as HTMLElement;
         el.classList.add('ps-print-view-detail', 'ps-inv-redesign');
         el.style.cssText = [
@@ -2910,6 +2943,8 @@ export default function Attendance() {
             const { pdf, name, period, fileName } = result;
             pdf.save(fileName);
             message.success(`Đã tải xuống phiếu lương ${name.replace(/-/g, ' ')} — ${period}`);
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể tạo PDF phiếu lương.');
         } finally {
             setPdfExporting(false);
         }
@@ -2930,20 +2965,7 @@ export default function Attendance() {
         try {
             const usersRes = await api.users?.getAll?.();
             const users = usersRes?.success && Array.isArray(usersRes.data) ? usersRes.data : [];
-            const normalizedEmployeeUsername = normalizeAttendanceText(payslipModal.username || '');
-            const normalizedEmployeeName = normalizeAttendanceText(payslipModal.name || '');
-            const recipientUser = users.find((u: any) => {
-                const username = normalizeAttendanceText(u.username || '');
-                const fullName = normalizeAttendanceText(u.fullName || '');
-                return !!(
-                    (username && normalizedEmployeeUsername && (
-                        username === normalizedEmployeeUsername ||
-                        username.endsWith(normalizedEmployeeUsername) ||
-                        normalizedEmployeeUsername.endsWith(username)
-                    )) ||
-                    (fullName && normalizedEmployeeName && fullName === normalizedEmployeeName)
-                );
-            });
+            const recipientUser = findExactPayrollAccount(users, payslipModal);
             const recipientEmail = recipientUser?.email?.trim();
             if (!recipientEmail) {
                 message.error(`Chưa có Gmail cho ${payslipModal.name}. Vào Cài đặt > Quản trị > Sửa người dùng để bổ sung Gmail.`);
@@ -2974,6 +2996,8 @@ export default function Attendance() {
             } else {
                 message.error(res?.error || 'Gửi Gmail thất bại');
             }
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể tạo hoặc gửi phiếu lương.');
         } finally {
             setGmailSending(false);
         }
@@ -3009,17 +3033,8 @@ export default function Attendance() {
         const users = usersRes?.success && Array.isArray(usersRes.data) ? usersRes.data : [];
 
         const toSend = freshPayrollData.filter(p => {
-            const normUsername = normalizeAttendanceText(p.username || '');
-            const normName = normalizeAttendanceText(p.name || '');
-            return users.some((u: any) => {
-                const uUsername = normalizeAttendanceText(u.username || '');
-                const uFullName = normalizeAttendanceText(u.fullName || '');
-                const matched = !!(
-                    (uUsername && normUsername && (uUsername === normUsername || uUsername.endsWith(normUsername) || normUsername.endsWith(uUsername))) ||
-                    (uFullName && normName && uFullName === normName)
-                );
-                return matched && !!u?.email?.trim();
-            });
+            const account = findExactPayrollAccount(users, p);
+            return Boolean(account?.email?.trim());
         });
 
         if (toSend.length === 0) {
@@ -3051,16 +3066,7 @@ export default function Attendance() {
                     const p = toSend[i];
                     setBulkSendProgress(prev => prev ? { ...prev, current: i + 1, currentName: `Đang tạo PDF: ${p.name}` } : prev);
                     try {
-                        const normUsername = normalizeAttendanceText(p.username || '');
-                        const normName = normalizeAttendanceText(p.name || '');
-                        const u = users.find((u: any) => {
-                            const uUsername = normalizeAttendanceText(u.username || '');
-                            const uFullName = normalizeAttendanceText(u.fullName || '');
-                            return !!(
-                                (uUsername && normUsername && (uUsername === normUsername || uUsername.endsWith(normUsername) || normUsername.endsWith(uUsername))) ||
-                                (uFullName && normName && uFullName === normName)
-                            );
-                        });
+                        const u = findExactPayrollAccount(users, p);
                         const recipientEmail = u?.email?.trim();
                         if (!recipientEmail) {
                             results.push({ name: p.name, success: false, error: 'Chưa có Gmail' });
@@ -4324,11 +4330,7 @@ export default function Attendance() {
         const rowName = normalizeAttendanceText(row.name || '');
 
         return Boolean(
-            (rowUsername && loginUsername && (
-                rowUsername === loginUsername ||
-                rowUsername.endsWith(loginUsername) ||
-                loginUsername.endsWith(rowUsername)
-            )) ||
+            (rowUsername && loginUsername && rowUsername === loginUsername) ||
             (rowName && loginFullName && rowName === loginFullName)
         );
     }, [currentUser, user?.fullName, user?.username]);
@@ -7688,11 +7690,12 @@ export default function Attendance() {
                     const overrideKey = `${p.id}_${periodKey}`;
                     const currentOverride = payrollOverrides[overrideKey] || {};
 
-                    const empFines = overviewFines.filter(f => f.empId === p.id);
-                    const empBonuses = overviewBonuses.filter(b => b.empId === p.id);
-                    const empFineWaivers = fineWaivers.filter(waiver =>
-                        waiver?.fine?.empId === p.id && inOverviewRange(waiver.fine.date)
-                    );
+                    const empFines = overviewFines
+                        .filter(fine => isSameEmployeeId(fine.empId, p.id))
+                        .sort((a, b) => dayjs(a.date || 0).valueOf() - dayjs(b.date || 0).valueOf());
+                    const empBonuses = overviewBonuses
+                        .filter(bonus => isSameEmployeeId(bonus.empId, p.id))
+                        .sort((a, b) => dayjs(a.date || 0).valueOf() - dayjs(b.date || 0).valueOf());
                     const fineDescription = (f: FineRecord) => {
                         const fineDate = f.date ? dayjs(f.date) : null;
                         let text = (f.detail || f.type || 'Phạt').trim();
@@ -8064,7 +8067,11 @@ export default function Attendance() {
                             </>)}
 
                             {/* ===== PRINT / DETAIL VIEW ===== */}
-                            <div className={payslipPdfDetailOpen ? 'ps-print-view ps-print-view-detail ps-inv-redesign' : 'ps-print-view ps-inv-redesign'}>
+                            <div
+                                className={payslipPdfDetailOpen ? 'ps-print-view ps-print-view-detail ps-inv-redesign' : 'ps-print-view ps-inv-redesign'}
+                                data-employee-id={String(p.id)}
+                                data-period-key={overviewDateRange[0].format('YYYY-MM')}
+                            >
                                 <div className="ps-inv-container">
                                     <img className="ps-inv-watermark" src="/logo_navbar.png" alt="" aria-hidden="true" />
                                     <div className="ps-inv-header">
@@ -8163,28 +8170,6 @@ export default function Attendance() {
                                                         <td className="text-right ps-inv-text-green">+{fmt(p.mBonus)}</td>
                                                     </tr>
                                                 )}
-
-                                                {empFineWaivers.length > 0 && (
-                                                    <tr className="ps-inv-section-row ps-inv-section-neutral">
-                                                        <td colSpan={3}>Vi phạm đã được miễn trong đợt ưu đãi</td>
-                                                    </tr>
-                                                )}
-
-                                                {empFineWaivers.map((waiver, i) => (
-                                                    <tr key={`fine-waiver-${waiver.id || i}`}>
-                                                        <td>
-                                                            <span className="ps-inv-row-label">
-                                                                <span className="ps-inv-icon ps-inv-icon-green"><CheckCircleOutlined /></span>
-                                                                {waiver.fine.type || 'Vi phạm nội quy'}
-                                                            </span>
-                                                        </td>
-                                                        <td>
-                                                            {fineDescription(waiver.fine)}
-                                                            <span className="ps-inv-text-muted">Đã ghi nhận vi phạm; được miễn phạt theo ưu đãi 01–10/08.</span>
-                                                        </td>
-                                                        <td className="text-right ps-inv-text-green">Đã miễn {fmt(waiver.fine.amount)}</td>
-                                                    </tr>
-                                                ))}
 
                                                 {p.myFines > 0 && (
                                                     <tr className="ps-inv-section-row">
