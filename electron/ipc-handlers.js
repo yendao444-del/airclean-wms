@@ -35,6 +35,9 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "attendance:updateLeaveStatus",
   "attendance:updatePayrollOverride",
   "attendance:updatePayrollLock",
+  // Face attendance is an intended kiosk workflow. Blocking this channel
+  // makes the ready AI service unusable because recognition writes the log.
+  "attendance:recognize",
 ]);
 
 // Local config is a development convenience only. Production builds must

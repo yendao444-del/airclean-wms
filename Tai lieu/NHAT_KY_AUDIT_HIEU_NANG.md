@@ -1387,3 +1387,21 @@ Trạng thái: **Review tĩnh chỉ đọc đã hoàn tất; không sửa ứng 
 - `electron/main.js` gọi `app.quit()` khi cửa sổ cuối đóng. Electron CLI sau đó thoát; listener trong launcher gọi `shutdown()`, dừng Vite và kết thúc `START.bat`. Không có nhánh nào trong launcher gọi spawn Electron lần hai.
 - `app.relaunch()` chỉ còn trong module cập nhật và handler `update:restart`; đây là khởi động lại có chủ đích khi người dùng áp dụng/khởi động lại phiên bản, không chạy khi đóng cửa sổ bình thường.
 - Cơ chế single-instance chỉ đưa cửa sổ đang tồn tại ra trước nếu một Electron khác được mở; nó không tự tạo lại cửa sổ sau khi app đã thoát.
+
+## 47. Khôi phục UI nhân viên tại Bảng công > Tổng quát (2026-09-01)
+
+### Nguyên nhân
+
+- CSS của giao diện bảng lương cá nhân vẫn còn trong `src/pages/Attendance.css`, nhưng phần JSX tương ứng trong `renderOverview()` đã bị mất nên mọi tài khoản đều rơi về bảng Ant Design tổng hợp.
+
+### Thay đổi
+
+- Khôi phục nhánh giao diện riêng cho tài khoản không phải quản trị viên: thông tin nhân viên, kỳ lương, loại nhân viên, trạng thái chốt, thực lĩnh, breakdown lương/thưởng/phạt/nghỉ, công thức tổng và nút xem phiếu lương.
+- Giữ nguyên bảng tổng hợp và các control hiện có cho quản trị viên.
+- Chỉ thay đổi cách hiển thị theo vai trò; không sửa công thức tính lương, không ghi/xoá/cập nhật bản ghi chấm công, nghỉ, thưởng, phạt, khoá lương hoặc database.
+
+### Xác minh
+
+- `npx tsc --noEmit --pretty false` → thành công.
+- `npm run build` → thành công (4008 module).
+- `git diff --check` → không có lỗi whitespace mới; chỉ còn cảnh báo chuyển LF/CRLF của worktree Windows.

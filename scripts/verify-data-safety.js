@@ -28,6 +28,7 @@ if (!allowedChannelsMatch) {
 } else {
   requireText(allowedChannelsMatch[1], '"dailyTasks:createAssignments",', 'Atomic assignment creation must remain available');
   requireText(allowedChannelsMatch[1], '"dailyTasks:submitEvidence",', 'Compensated evidence submission must remain available');
+  requireText(allowedChannelsMatch[1], '"attendance:recognize",', 'Face attendance recognition must remain available');
 }
 const submitEvidenceStart = ipc.indexOf('ipcMain.handle("dailyTasks:submitEvidence"');
 const submitEvidenceEnd = ipc.indexOf('"dailyTasks:reviewEvidence"', submitEvidenceStart);
