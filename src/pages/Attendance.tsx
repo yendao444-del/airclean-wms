@@ -1900,7 +1900,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                 // Service lỗi kết nối → thử lại sau 3 giây để chờ auto-heal
                 if (res.error) {
                     console.warn('Face service error:', res.error);
-                    setLastResult({ error: res.error });
+                    setLastResult({ error: res.error, blocked: res.blocked === true });
 
                     if (isRecognizingRef.current) {
                         recognizeTimerRef.current = setTimeout(doRecognize, 3000) as unknown as ReturnType<typeof setInterval>;
@@ -2504,8 +2504,12 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                         )}
                         {lastResult?.error && (
                             <div style={{ marginTop: 12, padding: '10px 16px', background: '#fff1f0', borderRadius: 8, border: '1px solid #ffccc7', textAlign: 'center' }}>
-                                <Text style={{ color: '#cf1322', fontWeight: 700 }}>Mất kết nối với AI nhận diện</Text>
-                                <div><Text type="secondary" style={{ fontSize: 12 }}>Hệ thống đang tự động khôi phục...</Text></div>
+                                <Text style={{ color: '#cf1322', fontWeight: 700 }}>
+                                    {lastResult?.blocked ? 'Chấm công đang tạm khóa' : 'Mất kết nối với AI nhận diện'}
+                                </Text>
+                                <div><Text type="secondary" style={{ fontSize: 12 }}>
+                                    {lastResult?.blocked ? lastResult.error : 'Hệ thống đang tự động khôi phục...'}
+                                </Text></div>
                             </div>
                         )}
                     </Card>
@@ -5042,6 +5046,137 @@ export default function Attendance() {
     // TAB 1: TỔNG QUÁT
     // ============================================
     const renderOverview = () => {
+        // Nhân viên chỉ xem bảng lương cá nhân theo layout riêng; quản trị vẫn
+        // dùng bảng tổng hợp nhiều nhân viên bên dưới.
+        if (!isAdmin) {
+            const employee = currentEmployeePayroll || privatePayrollData[0];
+            if (!employee) {
+                return (
+                    <div className="att-staff-overview-state">
+                        <UserOutlined />
+                        <strong>Chưa tìm thấy hồ sơ lương cá nhân</strong>
+                        <span>Vui lòng liên hệ quản trị viên để liên kết tài khoản với hồ sơ nhân viên.</span>
+                    </div>
+                );
+            }
+
+            const employeeFines = overviewFines
+                .filter(fine => fine.empId === employee.id)
+                .sort((a, b) => dayjs(a.date || 0).valueOf() - dayjs(b.date || 0).valueOf());
+            const employeeBonuses = overviewBonuses
+                .filter(bonus => bonus.empId === employee.id)
+                .sort((a, b) => dayjs(a.date || 0).valueOf() - dayjs(b.date || 0).valueOf());
+            const periodLabel = overviewDateRange[0].isSame(overviewDateRange[1], 'month')
+                ? `Tháng ${overviewDateRange[0].format('MM/YYYY')}`
+                : `${overviewDateRange[0].format('DD/MM/YYYY')} — ${overviewDateRange[1].format('DD/MM/YYYY')}`;
+            const initials = employee.name
+                .split(/\s+/)
+                .filter(Boolean)
+                .slice(-2)
+                .map(part => part.charAt(0).toUpperCase())
+                .join('') || '?';
+            const detailPopover = (hint: string, items: Array<{ label: string; amount: number }>, total: number, positive: boolean) => (
+                <div className="att-staff-breakdown-popover">
+                    <div className="att-staff-popover-hint">{hint}</div>
+                    <div className="att-staff-popover-items">
+                        {items.length > 0 ? items.map((item, index) => (
+                            <div className="att-staff-popover-item" key={`${item.label}-${index}`}>
+                                <span>{item.label}</span>
+                                <strong className={positive ? 'is-positive' : 'is-negative'}>{positive ? '+' : '-'} {fmt(Math.abs(item.amount))}</strong>
+                            </div>
+                        )) : <span>Không có phát sinh trong kỳ.</span>}
+                    </div>
+                    <div className="att-staff-popover-total">
+                        <span>Tổng</span>
+                        <strong className={positive ? 'is-positive' : 'is-negative'}>{positive ? '+' : '-'} {fmt(Math.abs(total))}</strong>
+                    </div>
+                    <div className="att-staff-popover-action"><EyeOutlined /> Xem phiếu lương chi tiết bên dưới</div>
+                </div>
+            );
+            const rows = [
+                {
+                    label: 'Lương cơ bản',
+                    note: employee.type === 'Seasonal' ? `${employee.shifts || 0} ca đã ghi nhận` : 'Theo mức lương tháng',
+                    value: employee.salaryBase || 0,
+                    positive: true,
+                    items: [{ label: 'Lương cơ bản', amount: employee.salaryBase || 0 }],
+                },
+                {
+                    label: 'Thưởng đóng gói',
+                    note: `${employee.packTotalUnits || 0} SP · ${employee.packOrderCount || 0} đơn · ${PACKING_UNIT_PRICE}đ/SP`,
+                    value: employee.packIncome || 0,
+                    positive: true,
+                    items: [{ label: `${employee.packTotalUnits || 0} SP đóng gói`, amount: employee.packIncome || 0 }],
+                },
+                {
+                    label: 'Thưởng khác',
+                    note: employeeBonuses.length > 0 ? `${employeeBonuses.length} khoản thưởng trong kỳ` : 'Không có thưởng khác',
+                    value: employee.totalBonus || 0,
+                    positive: true,
+                    items: employeeBonuses.map(bonus => ({ label: `${bonus.type || 'Thưởng'}${bonus.detail ? ` · ${bonus.detail}` : ''}`, amount: bonus.amount || 0 })),
+                },
+                {
+                    label: 'Khấu trừ phạt',
+                    note: employeeFines.length > 0 ? `${employeeFines.length} khoản phạt trong kỳ` : 'Không có khấu trừ phạt',
+                    value: employee.myFines || 0,
+                    positive: false,
+                    items: employeeFines.map(fine => ({ label: `${fine.date ? dayjs(fine.date).format('DD/MM') : 'Không ngày'} · ${fine.type || 'Phạt'}`, amount: fine.amount || 0 })),
+                },
+                {
+                    label: 'Khấu trừ nghỉ',
+                    note: employee.leaveDeduction > 0 ? `${employee.absentDays || 0} ngày/ca nghỉ đã tính` : 'Không có khoản trừ nghỉ',
+                    value: employee.leaveDeduction || 0,
+                    positive: false,
+                    items: employee.leaveDeduction > 0 ? [{ label: `${employee.absentDays || 0} ngày/ca nghỉ`, amount: employee.leaveDeduction || 0 }] : [],
+                },
+            ];
+            const maxValue = Math.max(...rows.map(row => row.value), employee.salaryBase || 0, 1);
+
+            return (
+                <div className="att-staff-overview">
+                    <div style={{ background: '#fff', border: '1px solid #e8edf4', borderRadius: 24, padding: '30px 34px', boxShadow: '0 12px 30px rgba(31, 58, 95, 0.06)' }}>
+                        <div className="att-staff-identity">
+                            <div className="att-staff-avatar">{initials}</div>
+                            <div className="att-staff-person">
+                                <span className="att-staff-eyebrow">Bảng lương cá nhân</span>
+                                <strong>{employee.name}</strong>
+                                <span className="att-staff-eyebrow">@{employee.username || 'chưa liên kết'}</span>
+                            </div>
+                            <div className="att-staff-meta">
+                                <div className="att-staff-meta-item"><span>Kỳ xem</span><strong>{periodLabel}</strong></div>
+                                <div className="att-staff-meta-item"><span>Loại nhân viên</span><strong>{employee.type === 'Seasonal' ? 'Thời vụ' : 'Chính thức'}</strong></div>
+                                <div className="att-staff-meta-item"><span>Trạng thái</span><strong className={isCurrentPeriodLocked ? 'is-locked' : 'is-open'}>{isCurrentPeriodLocked ? 'Đã chốt' : 'Đang mở'}</strong></div>
+                            </div>
+                        </div>
+
+                        <div className="att-staff-net-pay">
+                            <span>Thực lĩnh cuối kỳ</span>
+                            <strong>{isPayrollDataReady ? fmt(employee.finalSalary || 0) : 'Đang tổng hợp...'}</strong>
+                        </div>
+
+                        <div className="att-staff-breakdown">
+                            {rows.map(row => (
+                                <Popover key={row.label} trigger="click" placement="top" content={detailPopover(row.label, row.items, row.value, row.positive)}>
+                                    <div className={`att-staff-breakdown-row ${row.positive ? 'is-positive' : 'is-negative'}`} role="button" tabIndex={0}>
+                                        <div className="att-staff-row-copy"><strong>{row.label}<EyeOutlined className="att-staff-row-detail-icon" /></strong><span>{row.note}</span></div>
+                                        <div className="att-staff-row-track"><span style={{ width: `${Math.min(100, Math.max(4, (row.value / maxValue) * 100))}%` }} /></div>
+                                        <div className="att-staff-row-value">{row.positive ? '+' : '-'} {fmt(Math.abs(row.value))}<EyeOutlined className="att-staff-row-value-icon" /></div>
+                                    </div>
+                                </Popover>
+                            ))}
+                        </div>
+
+                        <div className="att-staff-footer">
+                            <div className="att-staff-equation">
+                                <span>{fmt(employee.salaryBase || 0)}</span><i>+</i><span className="is-positive">{fmt(employee.packIncome || 0)}</span><i>+</i><span className="is-positive">{fmt(employee.totalBonus || 0)}</span><i>−</i><span className="is-negative">{fmt((employee.myFines || 0) + (employee.leaveDeduction || 0))}</span><i>=</i><strong>{fmt(employee.finalSalary || 0)}</strong>
+                            </div>
+                            <Button type="primary" icon={<FileTextOutlined />} disabled={!isPayrollDataReady} onClick={() => { setPayslipPdfDetailOpen(false); setPayslipModal(employee); }}>Xem phiếu lương</Button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
         const totalBaseSalary = privatePayrollData.reduce((sum, item) => sum + (item.salaryBase || 0), 0);
         const totalPackIncome = privatePayrollData.reduce((sum, item) => sum + (item.packIncome || 0), 0);
         const totalBonus = privatePayrollData.reduce((sum, item) => sum + (item.totalBonus || 0), 0);
@@ -7465,7 +7600,6 @@ export default function Attendance() {
                     )}
                     {showPayrollManagementControls && <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal} disabled={isCurrentPeriodLocked}>Cấu hình</Button>}
                     {showPayrollManagementControls && (isCurrentPeriodLocked ? (
-                        (
                             <Button
                                 icon={<LockOutlined />}
                                 onClick={() => {
@@ -7507,7 +7641,6 @@ export default function Attendance() {
                             >
                                 Mở khóa (Admin)
                             </Button>
-                        )
                     ) : (
                         <Button
                             className="att-btn-lock"
