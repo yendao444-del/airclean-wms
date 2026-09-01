@@ -29,6 +29,9 @@ if (!allowedChannelsMatch) {
   requireText(allowedChannelsMatch[1], '"dailyTasks:createAssignments",', 'Atomic assignment creation must remain available');
   requireText(allowedChannelsMatch[1], '"dailyTasks:submitEvidence",', 'Compensated evidence submission must remain available');
   requireText(allowedChannelsMatch[1], '"attendance:recognize",', 'Face attendance recognition must remain available');
+  requireText(allowedChannelsMatch[1], '"update:check",', 'Official update checks must remain available');
+  requireText(allowedChannelsMatch[1], '"update:download",', 'Verified official updates must remain installable');
+  requireText(allowedChannelsMatch[1], '"update:restart",', 'The app must be able to restart after a verified update');
 }
 const submitEvidenceStart = ipc.indexOf('ipcMain.handle("dailyTasks:submitEvidence"');
 const submitEvidenceEnd = ipc.indexOf('"dailyTasks:reviewEvidence"', submitEvidenceStart);

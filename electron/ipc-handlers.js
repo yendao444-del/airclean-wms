@@ -38,6 +38,11 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   // Face attendance is an intended kiosk workflow. Blocking this channel
   // makes the ready AI service unusable because recognition writes the log.
   "attendance:recognize",
+  // Updates are restricted to the official GitHub repository, require a
+  // matching SHA-256 asset, and require an authenticated session to install.
+  "update:check",
+  "update:download",
+  "update:restart",
 ]);
 
 // Local config is a development convenience only. Production builds must
