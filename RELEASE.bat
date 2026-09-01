@@ -54,6 +54,8 @@ echo.
 
 echo [4/7] Building Electron...
 echo ----------------------------------------
+call node scripts\prepare-runtime-db-config.cjs
+if errorlevel 1 ( echo [ERROR] Runtime database config build that bai! & pause & exit /b 1 )
 node --max-old-space-size=4096 node_modules/electron-builder/cli.js
 if errorlevel 1 ( echo ❌ Electron build that bai! & pause & exit /b 1 )
 echo ✅ Electron build thanh cong!

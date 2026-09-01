@@ -43,6 +43,14 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "update:check",
   "update:download",
   "update:restart",
+  // These handlers enforce admin access. They are required for issuing
+  // temporary passwords and maintaining active employee accounts.
+  "users:update",
+  "users:resetPassword",
+  "users:forcePasswordChange",
+  // This workflow uses the stock mutex and one database transaction for the
+  // export, stock ledger changes, and linked marketplace order.
+  "ecommerceExports:create",
 ]);
 
 // Local config is a development convenience only. Production builds must
@@ -13760,6 +13768,8 @@ ipcMain.handle(
           password: hashedPassword,
           passwordChangedAt: new Date(0),
           forcePasswordChange: true,
+          loginFailedAttempts: 0,
+          loginLockedUntil: null,
         },
       });
       await revokeRememberTokensForUser(user.id);
@@ -24285,6 +24295,8 @@ ipcMain.handle("users:update", async (event, id, data) => {
       );
       updateData.passwordChangedAt = new Date(0);
       updateData.forcePasswordChange = true;
+      updateData.loginFailedAttempts = 0;
+      updateData.loginLockedUntil = null;
     }
     const employmentStatus = [
       USER_STATUS_RESIGNED,

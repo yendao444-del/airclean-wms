@@ -1,6 +1,6 @@
 {
   "name": "quan-ly-ban-hang-desktop",
-  "version": "1.0.400",
+  "version": "1.0.401",
   "description": "Hệ thống quản lý bán hàng - Desktop App",
   "main": "electron/main.js",
   "scripts": {
@@ -8,9 +8,11 @@
     "build": "tsc && vite build",
     "embed:wms-token": "node scripts/embed-wms-token.js",
     "embed:google-oauth": "node scripts/prepare-google-oauth-config.js",
+    "prepare:runtime-db": "node scripts/prepare-runtime-db-config.cjs",
     "db:migrate:deploy": "prisma migrate deploy",
     "electron:dev": "node scripts/start-electron-dev.js",
-    "electron:build": "npm run embed:wms-token && npm run embed:google-oauth && npx prisma generate && npm run build && electron-builder"
+    "electron:build": "npm run embed:wms-token && npm run embed:google-oauth && npm run prepare:runtime-db && npx prisma generate && npm run build && electron-builder",
+    "electron:installer": "npm run embed:wms-token && npm run embed:google-oauth && npm run prepare:runtime-db && npx prisma generate && npm run build && electron-builder --win nsis --config.directories.output=release-installer"
   },
   "keywords": [
     "pos",
@@ -21,21 +23,14 @@
   "license": "ISC",
   "devDependencies": {
     "@ant-design/icons": "^6.1.0",
-    "@prisma/client": "5.22.0",
     "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.3",
-    "adm-zip": "^0.6.0",
     "antd": "^6.2.3",
-    "archiver": "^7.0.1",
-    "bcryptjs": "^3.0.3",
     "concurrently": "^10.0.5",
-    "dotenv": "^17.2.3",
     "electron": "^43.4.1",
     "electron-builder": "^26.15.3",
     "electron-is-dev": "^3.0.1",
-    "glob": "^13.0.1",
-    "googleapis": "^171.4.0",
     "nodemon": "^3.1.14",
     "prisma": "5.22.0",
     "react": "^19.2.4",
@@ -45,7 +40,6 @@
     "typescript": "^5.9.3",
     "vite": "^7.3.6",
     "wait-on": "^9.0.3",
-    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "^4.3.6",
     "zustand": "^5.0.11"
   },
@@ -55,9 +49,13 @@
     "directories": {
       "output": "release4"
     },
+    "electronDist": "node_modules/electron/dist",
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "python/attendance_service.py",
+      "python/requirements.txt",
+      "python/dist/attendance_service.exe",
       "!electron/config.js",
       "!electron/supabase-storage.json",
       "!electron/**/*.env",
@@ -94,27 +92,49 @@
     "extraResources": [
       {
         "from": "node_modules/.prisma",
-        "to": "node_modules/.prisma"
+        "to": "app/node_modules/.prisma"
+      },
+      {
+        "from": ".runtime-build/runtime.env",
+        "to": "app/.env"
       }
     ],
     "win": {
       "target": "dir",
+      "executableName": "DBY POS",
       "icon": "public/app_icon.ico"
     },
-    "asar": true,
-    "asarUnpack": [
-      "node_modules/.prisma/**/*",
-      "node_modules/@prisma/**/*.node",
-      "node_modules/winax/**/*"
-    ],
+    "nsis": {
+      "artifactName": "DBYPOS-v${version}-setup.${ext}",
+      "installerIcon": "public/app_icon.ico",
+      "uninstallerIcon": "public/app_icon.ico",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "DBY POS",
+      "uninstallDisplayName": "DBY POS",
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "runAfterFinish": true
+    },
+    "asar": false,
     "npmRebuild": false,
     "buildDependenciesFromSource": false
   },
   "dependencies": {
+    "@prisma/client": "5.22.0",
     "@supabase/supabase-js": "^2.110.8",
+    "adm-zip": "^0.6.0",
+    "archiver": "^7.0.1",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.2.3",
+    "glob": "^13.0.1",
+    "googleapis": "^171.4.0",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",
+    "nodemailer": "^7.0.6",
     "pdfjs-dist": "^6.2.108",
-    "winax": "^3.6.8"
+    "uuid": "^11.1.0",
+    "winax": "^3.6.8",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   }
 }
