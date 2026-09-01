@@ -2880,11 +2880,40 @@ export default function Attendance() {
             });
             await Promise.all(externalImgs.map(async (img) => {
                 try {
-                    img.src = await fetchImageAsDataUrl(img.src);
+                    if (img.dataset.payslipQr === 'true') {
+                        const result = await window.electronAPI.attendance.getPayslipQrImage({ url: img.src });
+                        if (!result?.success || !result.data?.dataUrl) {
+                            throw new Error(result?.error || 'Không tải được QR chuyển khoản.');
+                        }
+                        img.src = result.data.dataUrl;
+                    } else {
+                        img.src = await fetchImageAsDataUrl(img.src);
+                    }
                     await img.decode().catch(() => undefined);
-                } catch {
-                    // Không để QR ngoài mạng làm treo hoặc làm hỏng toàn bộ PDF.
-                    img.remove();
+                } catch (error) {
+                    if (img.dataset.payslipQr === 'true') {
+                        const fallback = document.createElement('div');
+                        fallback.style.cssText = [
+                            'width:220px',
+                            'min-height:120px',
+                            'display:flex',
+                            'align-items:center',
+                            'justify-content:center',
+                            'padding:16px',
+                            'border:1px solid #f59e0b',
+                            'border-radius:8px',
+                            'background:#fffbeb',
+                            'color:#92400e',
+                            'font-size:13px',
+                            'font-weight:700',
+                            'text-align:center',
+                        ].join(';');
+                        fallback.textContent = 'Không tải được QR chuyển khoản. Kiểm tra mạng và xuất lại phiếu lương.';
+                        img.replaceWith(fallback);
+                        console.warn('[PAYSLIP] VietQR unavailable:', error);
+                    } else {
+                        img.remove();
+                    }
                 }
             }));
             const canvas = await html2canvas(el, {
@@ -8231,7 +8260,7 @@ export default function Attendance() {
                                                 const accountName = encodeURIComponent((empData.bankAccountName || p.name).toUpperCase());
                                                 const vietQrUrl = `https://img.vietqr.io/image/${empData.bankId}-${cleanAccount}-compact2.png?amount=${Math.round(p.finalSalary)}&addInfo=${addInfo}&accountName=${accountName}`;
                                                 return (
-                                                    <img src={vietQrUrl} alt="QR chuyển khoản" style={{ width: 220, height: 220, display: 'block', borderRadius: 8, border: '1px solid #dbe3ec' }} />
+                                                    <img data-payslip-qr="true" src={vietQrUrl} alt="QR chuyển khoản" style={{ width: 220, height: 220, display: 'block', borderRadius: 8, border: '1px solid #dbe3ec' }} />
                                                 );
                                             }
                                             return (

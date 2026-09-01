@@ -92,13 +92,16 @@ interface CheckSession {
     type: 'daily' | 'weekend' | 'full' | 'recheck';
     assignedTo: string;
     assignedName: string;
-    status: 'in_progress' | 'completed';
+    status: 'in_progress' | 'completed' | 'cancelled';
     items: CheckItem[];
     notes: string;
     createdAt: string;
     autoAssigned?: boolean;
     completedAt?: string;
     completedBy?: string;
+    cancelledAt?: string;
+    cancelledBy?: string;
+    cancellationReason?: string;
     rolledOverTo?: string;
     fullCheckExemptions?: Array<{
         sku: string;
@@ -208,6 +211,7 @@ async function loadSessions(): Promise<CheckSession[]> {
     throw new Error(result?.error || 'Không thể tải phiên kiểm hàng từ máy chủ.');
 }
 function normalizeSessionStatus(session: CheckSession): CheckSession {
+    if (session.status === 'cancelled') return session;
     if (!session.items.length) return { ...session, status: 'in_progress', completedAt: undefined };
     // Completing a count is an explicit action. Do not infer it from the last
     // input, otherwise staff can use each input's feedback to probe system stock.
@@ -378,9 +382,8 @@ export default function StockCheck() {
     const { products: contextProducts } = useAppData();
     const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
 
-    // Session creation and reassignment replace the complete backend session,
-    // therefore they are intentionally admin-only. The assigned manager can
-    // still enter counts and balance their own session.
+    // Reassignment and bulk replacement remain admin-only. A full session uses
+    // its own transactional endpoint, so every stock-check user may create it.
     // Tài khoản test được mở toàn quyền trong module kiểm hàng để kiểm thử
     // như admin, kể cả các phiên đang phân công cho người khác.
     const isTestOperator = user?.isTestAccount === true;
@@ -445,13 +448,20 @@ export default function StockCheck() {
 
     const todayStr = currentDate.format('YYYY-MM-DD');
     const weekend = isWeekend(currentDate);
+    const fullSessionForDate = sessions.find(
+        session => session.date === todayStr && session.type === 'full' && session.status !== 'cancelled'
+    );
+    const dailyDisabledByFull = Boolean(fullSessionForDate);
+    const cancelledDailyForDate = sessions.find(
+        session => session.date === todayStr && session.type === 'daily' && session.status === 'cancelled'
+    );
     // ID session khác nhau cho mỗi tab — tránh update nhầm
     const recheckSessionsForDate = sessions
-        .filter(session => session.date === todayStr && session.type === 'recheck')
+        .filter(session => session.date === todayStr && session.type === 'recheck' && session.status !== 'cancelled')
         .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     const todaySession = activeTab === 'recheck'
         ? (recheckSessionsForDate.find(session => session.id === selectedRecheckId) || recheckSessionsForDate[0])
-        : sessions.find(session => session.date === todayStr && (
+        : sessions.find(session => session.date === todayStr && session.status !== 'cancelled' && (
             activeTab === 'full'
                 ? session.type === 'full'
                 : session.type !== 'full' && session.type !== 'recheck'
@@ -502,6 +512,12 @@ export default function StockCheck() {
     const uncountedSkuCount = todaySession?.items.filter(item => item.actualStock === null).length ?? 0;
     const incompleteSkuCount = todaySession?.items.filter(item => !item.balanced).length ?? 0;
     const isSessionReadyToSubmit = totalCount > 0 && incompleteSkuCount === 0;
+
+    useEffect(() => {
+        if (activeTab === 'daily' && dailyDisabledByFull) {
+            setActiveTab('full');
+        }
+    }, [activeTab, dailyDisabledByFull]);
 
     const loadTopSellingProducts = useCallback(async (): Promise<TopSellingProduct[]> => {
         try {
@@ -706,21 +722,54 @@ export default function StockCheck() {
         }
     }, [sessions, todaySession, todaySessionId]);
 
+    const handleCancelSession = useCallback(() => {
+        if (!todaySession || !isAdmin) return;
+        Modal.confirm({
+            title: 'Hủy phiên kiểm hàng?',
+            content: 'Phiên đang thực hiện sẽ dừng ngay và không thể tiếp tục nhập hoặc cân bằng. Lịch sử hủy vẫn được lưu để đối soát.',
+            okText: 'Hủy phiên',
+            okType: 'danger',
+            cancelText: 'Quay lại',
+            onOk: async () => {
+                await flushPendingCountUpdates();
+                const result = await window.electronAPI.stockCheck.cancelSession({
+                    sessionId: todaySession.id,
+                });
+                if (!result?.success || !result.session) {
+                    throw new Error(result?.error || 'Không thể hủy phiên kiểm hàng.');
+                }
+                setSessions(current => current.map(session =>
+                    session.id === todaySession.id ? { ...session, ...result.session } : session
+                ));
+                countingInputsRef.current = {};
+                setCountingInputs({});
+                message.success('Đã hủy phiên kiểm hàng.');
+            },
+        });
+    }, [todaySession, isAdmin, flushPendingCountUpdates]);
+
     useEffect(() => {
         setHeaderExtra(
             <div style={{ display: 'flex', alignItems: 'center', width: '100%' }}>
                 {/* ── Tabs (trái) ── */}
                 <div style={{ display: 'flex', gap: 3, background: '#f1f5f9', padding: 3, borderRadius: 10 }}>
                     <button
-                        onClick={() => { setActiveTab('daily'); setCurrentDate(dayjs()); }}
+                        disabled={dailyDisabledByFull}
+                        onClick={() => {
+                            if (dailyDisabledByFull) return;
+                            setActiveTab('daily');
+                            setCurrentDate(dayjs());
+                        }}
                         style={{
                             padding: '5px 14px', borderRadius: 7, fontWeight: 600, fontSize: 12,
                             background: activeTab === 'daily' ? '#10b981' : 'transparent',
-                            color: activeTab === 'daily' ? '#fff' : '#64748b',
-                            border: 'none', cursor: 'pointer', transition: 'all 0.15s',
+                            color: dailyDisabledByFull ? '#94a3b8' : activeTab === 'daily' ? '#fff' : '#64748b',
+                            border: 'none', cursor: dailyDisabledByFull ? 'not-allowed' : 'pointer',
+                            opacity: dailyDisabledByFull ? 0.65 : 1, transition: 'all 0.15s',
                         }}
+                        title={dailyDisabledByFull ? 'Hôm nay đã có phiên kiểm toàn bộ' : undefined}
                     >
-                        Kiểm hàng ngày
+                        {dailyDisabledByFull ? 'Kiểm hàng ngày · Tạm dừng' : 'Kiểm hàng ngày'}
                     </button>
                     <button
                         onClick={() => { setActiveTab('full'); setCurrentDate(dayjs()); }}
@@ -742,8 +791,8 @@ export default function StockCheck() {
                             border: 'none', cursor: 'pointer', transition: 'all 0.15s',
                         }}
                     >
-                        Kiểm lại {sessions.filter(session => session.type === 'recheck' && session.date === dayjs().format('YYYY-MM-DD')).length > 0
-                            ? `(${sessions.filter(session => session.type === 'recheck' && session.date === dayjs().format('YYYY-MM-DD')).length})`
+                        Kiểm lại {sessions.filter(session => session.type === 'recheck' && session.status !== 'cancelled' && session.date === dayjs().format('YYYY-MM-DD')).length > 0
+                            ? `(${sessions.filter(session => session.type === 'recheck' && session.status !== 'cancelled' && session.date === dayjs().format('YYYY-MM-DD')).length})`
                             : ''}
                     </button>
                 </div>
@@ -762,9 +811,14 @@ export default function StockCheck() {
                                         icon: <span>👤</span>,
                                         onClick: () => { setSelectedStaffUsername(todaySession.assignedTo); setStaffModalOpen(true); },
                                     }] : []),
-                                    ...(isAdmin && activeTab !== 'recheck' ? [
+                                    ...(isAdmin ? [
                                         { type: 'divider' as const },
-                                        {
+                                        ...(!isSessionSubmitted ? [{
+                                            key: 'cancel-session',
+                                            label: <span style={{ color: '#dc2626' }}>✕ Hủy phiên kiểm</span>,
+                                            onClick: handleCancelSession,
+                                        }] : []),
+                                        ...(activeTab !== 'recheck' ? [{
                                             key: 'undo',
                                             label: <span style={{ color: '#ef4444' }}>↩ Xóa danh sách kiểm</span>,
                                             onClick: () => Modal.confirm({
@@ -775,7 +829,7 @@ export default function StockCheck() {
                                                 cancelText: 'Hủy',
                                                 onOk: handleUndoSession,
                                             }),
-                                        },
+                                        }] : []),
                                     ] : []),
                                 ],
                             }}
@@ -837,7 +891,7 @@ export default function StockCheck() {
             </div>
         );
         return () => clearHeaderExtra();
-    }, [activeTab, todaySession, todayAssigneeInitial, todayAssigneeLabel, isAdmin, isToday, canManage, isSessionSubmitted, sessions, setHeaderExtra, clearHeaderExtra, handleUndoSession]);
+    }, [activeTab, todaySession, todayAssigneeInitial, todayAssigneeLabel, isAdmin, isToday, canManage, isSessionSubmitted, sessions, dailyDisabledByFull, setHeaderExtra, clearHeaderExtra, handleUndoSession, handleCancelSession]);
 
     const fetchStaff = async () => {
         try {
@@ -1336,7 +1390,7 @@ export default function StockCheck() {
     // Auto-assign người phụ trách khi page load — nếu hôm nay chưa có session thì gán ngay,
     // không cần chờ nhân viên bấm "Tạo phiên kiểm". Chính sách phạt được điều khiển riêng.
     useEffect(() => {
-        if (!isAdmin || !sessionsLoaded || !isToday || activeTab !== 'daily' || !assignableManagers.length) return;
+        if (!isAdmin || !sessionsLoaded || !isToday || activeTab !== 'daily' || dailyDisabledByFull || cancelledDailyForDate || !assignableManagers.length) return;
         if (dayjs().day() === 0) return; // Chủ nhật — không kiểm
         const current = sessions;
         const existingDailySession = current.find(s => s.date === todayStr && s.type !== 'full');
@@ -1362,13 +1416,13 @@ export default function StockCheck() {
         };
         const updated = current.filter(s => s.id !== todayStr).concat(preSession);
         persistSessions(updated);
-    }, [isAdmin, sessionsLoaded, isToday, activeTab, assignableManagers, todayStr, sessions]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [isAdmin, sessionsLoaded, isToday, activeTab, dailyDisabledByFull, cancelledDailyForDate, assignableManagers, todayStr, sessions]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Assignment and item generation must be one continuous workflow. Previously
     // the automatic step only created an empty assignment; a manager then saw a
     // blank page until an admin manually pressed "Tạo danh sách kiểm".
     useEffect(() => {
-        if (!isAdmin || !isToday || activeTab !== 'daily' || !todaySession || todaySession.items.length > 0 || !stockCheckActivityLoaded) return;
+        if (!isAdmin || !isToday || activeTab !== 'daily' || dailyDisabledByFull || !todaySession || todaySession.items.length > 0 || !stockCheckActivityLoaded) return;
         if (!contextProducts.length || autoGeneratedSessionRef.current === todaySession.id) return;
 
         let cancelled = false;
@@ -1405,13 +1459,13 @@ export default function StockCheck() {
             }));
         })();
         return () => { cancelled = true; };
-    }, [isAdmin, isToday, activeTab, todaySession, contextProducts, topSellingProducts, stockCheckActivityLoaded, stockCheckActivity, sessions, loadTopSellingProducts]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [isAdmin, isToday, activeTab, dailyDisabledByFull, todaySession, contextProducts, topSellingProducts, stockCheckActivityLoaded, stockCheckActivity, sessions, loadTopSellingProducts]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Quản lý cần có thể khởi tạo phiên của ngày hiện tại khi không có admin
     // mở màn hình. Việc tạo thực hiện ở main process: client chỉ gửi danh sách
     // SKU, còn máy chủ tự chọn người theo vòng và khóa giao dịch.
     useEffect(() => {
-        if (isAdmin || user?.role !== 'manager' || !isToday || activeTab !== 'daily' || todaySession || !stockCheckActivityLoaded) return;
+        if (isAdmin || user?.role !== 'manager' || !isToday || activeTab !== 'daily' || dailyDisabledByFull || cancelledDailyForDate || todaySession || !stockCheckActivityLoaded) return;
         if (!contextProducts.length || autoGeneratedSessionRef.current === `manager-${todayStr}`) return;
 
         let cancelled = false;
@@ -1432,7 +1486,7 @@ export default function StockCheck() {
             if (result.session) setSessions(previous => [...previous.filter(session => session.id !== result.session.id), result.session]);
         })();
         return () => { cancelled = true; };
-    }, [isAdmin, user?.role, isToday, activeTab, todaySession, contextProducts, topSellingProducts, stockCheckActivityLoaded, todayStr, loadTopSellingProducts]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [isAdmin, user?.role, isToday, activeTab, dailyDisabledByFull, cancelledDailyForDate, todaySession, contextProducts, topSellingProducts, stockCheckActivityLoaded, todayStr, loadTopSellingProducts]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleGenerate = async () => {
         if (isPast) {
@@ -1501,6 +1555,10 @@ export default function StockCheck() {
             } else {
                 message.success(`Đã tạo phiên kiểm toàn bộ ${pool.length} sản phẩm / ${items.length} dòng → ${result.session.assignedName}`);
             }
+            return;
+        }
+        if (activeTab === 'daily' && dailyDisabledByFull) {
+            message.warning('Hôm nay đã có phiên kiểm toàn bộ. Phiên kiểm hàng ngày đã được tạm dừng.');
             return;
         }
         // Xóa session cũ cùng tab type rồi thêm mới — không ảnh hưởng tab kia
@@ -3227,7 +3285,7 @@ export default function StockCheck() {
                                         </div>
                                     </>
                                 )}
-                                {canManage && activeTab !== 'recheck' && (
+                                {(canManage || activeTab === 'full') && activeTab !== 'recheck' && (
                                     <Button
                                         type="primary" size="large" onClick={handleGenerate}
                                         style={{ background: '#10b981', borderColor: '#10b981', borderRadius: 12, fontWeight: 700, height: 44, padding: '0 32px' }}
