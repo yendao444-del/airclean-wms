@@ -1,0 +1,1370 @@
+diff --git a/src/pages/Attendance.tsx b/src/pages/Attendance.tsx
+index df8491a..ae820c1 100644
+--- a/src/pages/Attendance.tsx
++++ b/src/pages/Attendance.tsx
+@@ -68,9 +68,12 @@ import {
+     ExclamationCircleOutlined,
+     CameraOutlined,
+     SmileOutlined,
++    BankOutlined,
++    QrcodeOutlined,
++    SafetyCertificateOutlined,
+ } from '@ant-design/icons';
+ 
+-// Khởi tạo Audio Context toàn cục cho việc phát âm báo Ting
++// Kh?i t?o Audio Context to�n c?c cho vi?c ph�t �m b�o Ting
+ export let sharedAudioCtx: AudioContext | null = null;
+ export const playTingSound = () => {
+     try {
+@@ -209,7 +212,7 @@ interface PackingOrderItem {
+ interface PackingOrderLog {
+     id: string;
+     timestamp: string;
+-    orderNumber: string;       // Mã đơn hàng
++    orderNumber: string;       // M� don h�ng
+     platform: 'Shopee' | 'TikTok' | 'POS' | 'Web' | 'Khác';
+     customerName: string;
+     packer: string;            // Người đóng gói
+@@ -273,7 +276,7 @@ const findEmployeeForAttendanceLog = (
+     const normalizedFaceId = normalizeAttendanceText(log.faceId);
+     if (normalizedFaceId) {
+         // Match trực tiếp, hoặc fallback: face cũ đăng ký với username ngắn (vd: 'toan')
+-        // nhưng username đã migrate sang đầy đủ ('nguyendinhtoan') → kiểm tra endsWith
++        // nhung username d� migrate sang d?y d? ('nguyendinhtoan') ? ki?m tra endsWith
+         const byFaceId = employees.find(emp => {
+             const u = normalizeAttendanceText(emp.username);
+             return u === normalizedFaceId || u.endsWith(normalizedFaceId);
+@@ -388,7 +391,7 @@ function calcPacksFromItems(items: PackingOrderItem[]): number {
+                     const num = parseInt(m[1], 10);
+                     const label = m[2];
+                     if (!productSuffixes.test(label)) {
+-                        // Đây là component màu: 10TRANG, 10XAM, v.v.
++                        // ��y l� component m�u: 10TRANG, 10XAM, v.v.
+                         comboTotal += num;
+                     }
+                 }
+@@ -478,7 +481,7 @@ function calculatePayroll(
+ 
+         if (emp.type === 'Seasonal') {
+             // ========== NV THỜI VỤ: Lương theo ca từ điểm danh ==========
+-            // Match logs cho nhân viên này
++            // Match logs cho nh�n vi�n n�y
+             const empLogs = liveLogs.filter((l: any) => {
+                 const matched = findEmployeeForAttendanceLog(l, employeesList);
+                 if (matched?.id === emp.id) {
+@@ -526,7 +529,7 @@ function calculatePayroll(
+         const autoShifts = shifts - extraShifts; // Số ca gốc từ điểm danh
+         const autoSalaryBase = salaryBase;
+ 
+-        // === Tính thu nhập đóng gói CÁ NHÂN bằng match linh hoạt ===
++        // === T�nh thu nh?p d�ng g�i C� NH�N b?ng match linh ho?t ===
+         let packIncome = 0;
+         let packOrderCount = 0;
+         let packTotalUnits = 0;
+@@ -703,7 +706,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+         checkService();
+         loadData();
+ 
+-        // Vòng lặp ngầm: Cứ 10 giây tự động gọi checkService() 1 lần.
++        // V�ng l?p ng?m: C? 10 gi�y t? d?ng g?i checkService() 1 l?n.
+         // Tác dụng:
+         // 1. Tự recover nếu kết nối rớt giữa chừng (User không cần tự bấm "Làm mới").
+         // 2. Chống chết yểu: Giúp backend biết tab Điểm danh vẫn đang mở (reset Idle Timer liên tục).
+@@ -857,7 +860,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+                 if (name) {
+                     const label = isMatch
+                         ? `${name} (${Math.round((result.confidence || 0) * 100)}%)`
+-                        : isDuplicate ? `${name} - Đã chấm công` : name;
++                        : isDuplicate ? `${name} - �� ch?m c�ng` : name;
+                     ctx.font = 'bold 18px Arial';
+                     const textW = ctx.measureText(label).width + 12;
+                     ctx.fillStyle = color;
+@@ -925,7 +928,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+             if (frame && api) {
+                 const res = await api.recognize(frame);
+ 
+-                // Service lỗi kết nối → thử lại sau 3 giây để chờ auto-heal
++                // Service l?i k?t n?i ? th? l?i sau 3 gi�y d? ch? auto-heal
+                 if (res.error) {
+                     console.warn('Face service error:', res.error);
+                     setLastResult({ error: res.error });
+@@ -1035,7 +1038,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+                     }, 2000);
+                     return;
+                 } else if (res.reason === 'duplicate') {
+-                    // Đã chấm công rồi — hiện tên vàng
++                    // �� ch?m c�ng r?i � hi?n t�n v�ng
+                     const isSameUserDuplicate = lastResultRef.current?.reason === 'duplicate' && lastResultRef.current?.userName === res.userName;
+                     const dupResult = { reason: 'duplicate', userName: res.userName, face_box: box };
+                     setLastResult(dupResult);
+@@ -1048,12 +1051,12 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+                             const osc = actx.createOscillator();
+                             const gain = actx.createGain();
+                             osc.connect(gain); gain.connect(actx.destination);
+-                            osc.type = 'square'; osc.frequency.value = 220; // Âm trầm (cảnh báo nhẹ)
++                            osc.type = 'square'; osc.frequency.value = 220; // �m tr?m (c?nh b�o nh?)
+                             gain.gain.setValueAtTime(0.1, actx.currentTime);
+                             gain.gain.exponentialRampToValueAtTime(0.01, actx.currentTime + 0.3);
+                             osc.start(actx.currentTime); osc.stop(actx.currentTime + 0.3);
+ 
+-                            const msg = new SpeechSynthesisUtterance(`Bạn đã chấm công rồi`);
++                            const msg = new SpeechSynthesisUtterance(`B?n d� ch?m c�ng r?i`);
+                             msg.lang = 'vi-VN';
+                             window.speechSynthesis.speak(msg);
+                         } catch (e) { }
+@@ -1066,7 +1069,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+                         }, 2000);
+                         return;
+                     }
+-                    // Nếu vẫn là người đó và vẫn duplicate, thì chỉ tracking khung vàng realtime, KHÔNG thông báo âm thanh nữa
++                    // N?u v?n l� ngu?i d� v� v?n duplicate, th� ch? tracking khung v�ng realtime, KH�NG th�ng b�o �m thanh n?a
+                 } else if (res.reason === 'out_of_hours') {
+                     const oohResult = { reason: 'out_of_hours', userName: res.userName, face_box: box };
+                     setLastResult(oohResult);
+@@ -1168,7 +1171,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+     // Detect face realtime + kiểm tra khoảng cách trong modal
+     const MIN_FACE_RATIO = 0.15; // mặt phải chiếm ít nhất 15% chiều cao frame
+     useEffect(() => {
+-        // Chỉ detect khi đã điền đủ thông tin (bắt buộc) + camera đang bật
++        // Ch? detect khi d� di?n d? th�ng tin (b?t bu?c) + camera dang b?t
+         // Không dừng detect khi regCapturing — cần biết mặt có còn trong vùng không
+         if (!registerOpen || !cameraOn || !regFaceId || !regUserName) {
+             setRegFaceStatus('no_face');
+@@ -1208,7 +1211,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+                             const imgH = res.img_height || 480;
+                             const faceH = (res.face_box.bottom - res.face_box.top) / imgH;
+ 
+-                            // Kiểm tra tâm khuôn mặt có nằm trong vùng giữa màn hình (gần vòng tròn) không
++                            // Ki?m tra t�m khu�n m?t c� n?m trong v�ng gi?a m�n h�nh (g?n v�ng tr�n) kh�ng
+                             const faceCX = (res.face_box.left + res.face_box.right) / 2;
+                             const faceCY = (res.face_box.top + res.face_box.bottom) / 2;
+                             const cx = imgW / 2;
+@@ -1239,7 +1242,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+     }, [registerOpen, cameraOn, api, captureFrame, regFaceId, regUserName]);
+ 
+     // ===== Auto-capture giống tool gốc (takeImage.py) =====
+-    // Khi face vào đúng vị trí + đã điền thông tin → tự chụp liên tiếp 50 ảnh
++    // Khi face v�o d�ng v? tr� + d� di?n th�ng tin ? t? ch?p li�n ti?p 50 ?nh
+     const REG_TARGET = 50;
+     const [regCapturedCount, setRegCapturedCount] = useState(0);
+     const regImagesRef = useRef<string[]>([]);
+@@ -1286,7 +1289,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+         // Capture hoàn thành 30 lượt
+         setRegImages(regImagesRef.current);
+         if (regImagesRef.current.length >= 5) {
+-            message.success(`Đã chụp ${regImagesRef.current.length} ảnh — bấm Lưu để hoàn tất`);
++            message.success(`�� ch?p ${regImagesRef.current.length} ?nh � b?m Luu d? ho�n t?t`);
+         } else {
+             message.warning('Không đủ ảnh, thử lại');
+         }
+@@ -1298,27 +1301,27 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+         setRegCapturing(false);
+     }, []);
+ 
+-    // AUTO-CAPTURE: khi mặt vào đúng vị trí + đã điền đủ thông tin → đếm ngược 5s rồi tự chụp
++    // AUTO-CAPTURE: khi m?t v�o d�ng v? tr� + d� di?n d? th�ng tin ? d?m ngu?c 5s r?i t? ch?p
+     const autoCaptureFiredRef = useRef(false);
+     const regStartedCameraRef = useRef(false); // camera được bật bởi nút "Đăng ký khuôn mặt mới"
+     const [regCountdown, setRegCountdown] = useState(0);
+     const regTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+ 
+-    // Tự bật camera khi chọn xong nhân viên trong modal đăng ký
++    // T? b?t camera khi ch?n xong nh�n vi�n trong modal dang k�
+     useEffect(() => {
+         if (registerOpen && regFaceId && regUserName && !cameraOnRef.current) {
+             regStartedCameraRef.current = true;
+             startCamera();
+         }
+         // eslint-disable-next-line react-hooks/exhaustive-deps
+-    }, [registerOpen, regFaceId, regUserName]); // KHÔNG đưa cameraOn vào đây — tránh loop
++    }, [registerOpen, regFaceId, regUserName]); // KH�NG dua cameraOn v�o d�y � tr�nh loop
+ 
+     useEffect(() => {
+         if (regFaceStatus === 'ok' && regFaceId && regUserName && !regCapturing && regImages.length === 0 && cameraOn) {
+             if (!autoCaptureFiredRef.current) {
+                 autoCaptureFiredRef.current = true;
+-                setRegCountdown(5); // Bắt đầu đếm ngược 5 giây
+-                playTingSound(); // Phát âm thanh báo hiệu
++                setRegCountdown(5); // B?t d?u d?m ngu?c 5 gi�y
++                playTingSound(); // Ph�t �m thanh b�o hi?u
+ 
+                 let count = 5;
+                 if (regTimerRef.current) clearInterval(regTimerRef.current);
+@@ -1361,7 +1364,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+         });
+         setRegLoading(false);
+         if (res.success) {
+-            message.success(`Đăng ký thành công! Đã lưu ${res.saved} ảnh`);
++            message.success(`�ang k� th�nh c�ng! �� luu ${res.saved} ?nh`);
+             setRegisterOpen(false);
+             setRegFaceId('');
+             setRegUserName('');
+@@ -1377,7 +1380,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+     }, [api, regFaceId, regUserName, regImages, loadData, employees]);
+ 
+     const logColumns = [
+-        { title: 'Nhân viên', dataIndex: 'displayUserName', key: 'userName', render: (v: string) => <Text strong>{v}</Text> },
++        { title: 'Nh�n vi�n', dataIndex: 'displayUserName', key: 'userName', render: (v: string) => <Text strong>{v}</Text> },
+         { title: 'Loại', dataIndex: 'checkType', key: 'checkType', width: 140, render: (v: string) => { const c = CHECK_TYPE_LABELS[v]; return <Tag color={c?.color} style={{ fontWeight: 700 }}>{c?.label || v}</Tag>; } },
+         { title: 'Giờ', dataIndex: 'timestamp', key: 'timestamp', width: 140, render: (v: string) => <Text>{new Date(v).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}</Text> },
+         { title: 'Độ chính xác', dataIndex: 'confidence', key: 'confidence', width: 150, render: (v: number) => <Text type="secondary">{Math.round((v || 0) * 100)}%</Text> },
+@@ -1525,7 +1528,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+                         )}
+                         {lastResult?.reason === 'duplicate' && (
+                             <div style={{ marginTop: 12, padding: '10px 16px', background: '#fff7e6', borderRadius: 8, border: '1px solid #ffd591', textAlign: 'center' }}>
+-                                <Text style={{ color: '#d46b08', fontWeight: 700 }}>Đã chấm công rồi (cooldown 30 phút)</Text>
++                                <Text style={{ color: '#d46b08', fontWeight: 700 }}>�� ch?m c�ng r?i (cooldown 30 ph�t)</Text>
+                             </div>
+                         )}
+                         {lastResult?.reason === 'out_of_hours' && (
+@@ -1547,7 +1550,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+                 {/* Profiles Panel */}
+                 <Col span={cameraExpanded ? 10 : 24}>
+                     <Card
+-                        title={<Space><UserOutlined style={{ color: '#722ed1' }} /><Text strong>Profiles đã đăng ký ({profiles.length})</Text></Space>}
++                        title={<Space><UserOutlined style={{ color: '#722ed1' }} /><Text strong>Profiles d� dang k� ({profiles.length})</Text></Space>}
+                         style={{ borderTop: '3px solid #722ed1', marginBottom: 20 }}
+                         bodyStyle={{ padding: '12px 16px' }}
+                     >
+@@ -1569,10 +1572,10 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+                                                     const userName = p.userName;
+                                                     Modal.confirm({
+                                                         title: `Xóa khuôn mặt "${userName}"?`,
+-                                                        content: 'Nhân viên này sẽ không thể chấm công bằng khuôn mặt nữa.',
++                                                        content: 'Nh�n vi�n n�y s? kh�ng th? ch?m c�ng b?ng khu�n m?t n?a.',
+                                                         okText: 'Xóa', okType: 'danger', cancelText: 'Hủy',
+                                                         onOk: () => api.deleteProfile(faceId).then((res: any) => {
+-                                                            if (res.success) { message.success('Đã xóa khuôn mặt'); loadData(); }
++                                                            if (res.success) { message.success('�� x�a khu�n m?t'); loadData(); }
+                                                             else { message.error(res.error || 'Xóa thất bại'); }
+                                                         }),
+                                                     });
+@@ -1607,7 +1610,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+ 
+             {/* Register Modal — Auto-capture giống tool gốc */}
+             <Modal
+-                title="Đăng ký khuôn mặt nhân viên"
++                title="�ang k� khu�n m?t nh�n vi�n"
+                 open={registerOpen}
+                 onCancel={() => {
+                     setRegisterOpen(false);
+@@ -1627,11 +1630,11 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+                 okButtonProps={{ disabled: regImages.length < 5 || !regFaceId || !regUserName }}
+             >
+                 <Form layout="vertical">
+-                    {/* Bước 1: Chọn nhân viên từ danh sách */}
++                    {/* Bu?c 1: Ch?n nh�n vi�n t? danh s�ch */}
+                     <Form.Item
+-                        label={<Text strong>① Chọn nhân viên cần đăng ký</Text>}
++                        label={<Text strong>? Ch?n nh�n vi�n c?n dang k�</Text>}
+                         validateStatus={regUserName ? 'success' : ''}
+-                        help={!regUserName ? '* Bắt buộc — vui lòng chọn một nhân viên từ danh sách' : ''}
++                        help={!regUserName ? '* B?t bu?c � vui l�ng ch?n m?t nh�n vi�n t? danh s�ch' : ''}
+                     >
+                         <Select
+                             showSearch
+@@ -1657,18 +1660,18 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+                         </Select>
+                     </Form.Item>
+                     <Form.Item
+-                        label={<Text strong>② Mã nhân viên (Tự động map)</Text>}
++                        label={<Text strong>? M� nh�n vi�n (T? d?ng map)</Text>}
+                         validateStatus={regFaceId ? 'success' : ''}
+                     >
+                         <Input
+-                            placeholder="Mã nhận diện (VD: toan, khanh...)"
++                            placeholder="M� nh?n di?n (VD: toan, khanh...)"
+                             value={regFaceId}
+                             disabled={true}
+                             prefix={<UserOutlined style={{ color: regFaceId ? '#52c41a' : '#bbb' }} />}
+                         />
+                     </Form.Item>
+ 
+-                    {/* Bước 2: Camera — chỉ hiện khi đã điền đủ thông tin */}
++                    {/* Bu?c 2: Camera � ch? hi?n khi d� di?n d? th�ng tin */}
+                     <Form.Item label={<Text strong>③ Chụp khuôn mặt</Text>}>
+                         {(!regFaceId || !regUserName) ? (
+                             <div style={{
+@@ -1680,7 +1683,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+                             }}>
+                                 <div style={{ fontSize: 32, marginBottom: 8 }}>📝</div>
+                                 <Text type="secondary" style={{ fontSize: 13 }}>
+-                                    Vui lòng điền đủ <Text strong>Mã NV</Text> và <Text strong>Tên</Text> ở trên trước
++                                    Vui l�ng di?n d? <Text strong>M� NV</Text> v� <Text strong>T�n</Text> ? tr�n tru?c
+                                 </Text>
+                             </div>
+                         ) : !cameraOn ? (
+@@ -1716,7 +1719,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+                                     }}>
+                                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                                             <Text style={{ color: '#52c41a', fontWeight: 700, fontSize: 13 }}>
+-                                                Đã chụp {regCapturedCount}/{REG_TARGET} ảnh
++                                                �� ch?p {regCapturedCount}/{REG_TARGET} ?nh
+                                             </Text>
+                                             <Button size="small" danger type="text" onClick={cancelCapture}
+                                                 style={{ color: '#ff7875', fontSize: 11 }}>Hủy</Button>
+@@ -1739,7 +1742,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
+                                         background: 'rgba(0,0,0,0.6)', padding: '8px 12px', textAlign: 'center',
+                                     }}>
+                                         <Text style={{ color: '#d9d9d9', fontSize: 11 }}>
+-                                            Điền mã NV + tên → đưa mặt vào khung → tự chụp {REG_TARGET} ảnh
++                                            �i?n m� NV + t�n ? dua m?t v�o khung ? t? ch?p {REG_TARGET} ?nh
+                                         </Text>
+                                     </div>
+                                 )}
+@@ -1786,16 +1789,23 @@ export default function Attendance() {
+ 
+     const buildPayslipPDF = async () => {
+         if (!payslipModal) return;
+-        const el = document.querySelector('.ps-print-view') as HTMLElement;
++        const el = document.querySelector('.ps-inv-redesign') as HTMLElement;
+         if (!el) return;
+         const prev = el.style.cssText;
+-        el.style.cssText = 'display:block!important;position:fixed;top:-9999px;left:0;width:580px;background:#fff;padding:24px 34px;visibility:visible;';
++        el.style.cssText = 'display:block!important;position:fixed;top:-9999px;left:0;width:920px;background:#eef2f5;padding:24px 0;visibility:visible;z-index:-1;';
+         try {
+-            const canvas = await html2canvas(el, { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
++            const canvas = await html2canvas(el, {
++                scale: 2,
++                useCORS: true,
++                backgroundColor: '#eef2f5',
++                width: el.scrollWidth,
++                height: el.scrollHeight,
++                windowWidth: 980,
++            });
+             const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+             const pageW = pdf.internal.pageSize.getWidth();
+             const pageH = pdf.internal.pageSize.getHeight();
+-            const margin = 15;
++            const margin = 8;
+             const maxW = pageW - margin * 2;
+             const maxH = pageH - margin * 2;
+             const fitByWidthH = (canvas.height * maxW) / canvas.width;
+@@ -1820,8 +1830,17 @@ export default function Attendance() {
+             const result = await buildPayslipPDF();
+             if (!result) return;
+             const { pdf, name, period, fileName } = result;
+-            pdf.save(fileName);
+-            message.success(`Đã tải xuống phiếu lương ${name.replace(/-/g, ' ')} — ${period}`);
++            const pdfBase64 = pdf.output('datauristring').split(',')[1];
++            const api = (window as any).electronAPI;
++            if (api?.attendance?.savePayslipPDF) {
++                const res = await api.attendance.savePayslipPDF({ fileName, pdfBase64 });
++                if (!res?.success) throw new Error(res?.error || 'Không lưu được file PDF');
++            } else {
++                pdf.save(fileName);
++            }
++            message.success(`Đã tải phiếu lương ${name.replace(/-/g, ' ')} — ${period} vào Downloads`);
++        } catch (err: any) {
++            message.error(err?.message || 'Xuất PDF thất bại');
+         } finally {
+             setPdfExporting(false);
+         }
+@@ -1848,7 +1867,7 @@ export default function Attendance() {
+                 pdfBase64,
+             });
+             if (res?.success) {
+-                message.success(`Đã gửi phiếu lương tới Zicky.iluv@gmail.com`);
++                message.success(`�� g?i phi?u luong t?i Zicky.iluv@gmail.com`);
+             } else if (res?.reauthRequired) {
+                 message.warning(res.error || 'Gmail chưa được cấp quyền gửi email. Cần đăng nhập Google lại với quyền Gmail.');
+             } else {
+@@ -1899,7 +1918,7 @@ export default function Attendance() {
+     const [fineAuditLog, setFineAuditLog] = useState<FineAuditLog[]>([]);
+     const [fineEmployeeFilter, setFineEmployeeFilter] = useState<number | 'all'>('all');
+ 
+-    // === State cho danh sách kỳ đã chốt ===
++    // === State cho danh s�ch k? d� ch?t ===
+     const [lockedPeriods, setLockedPeriods] = useState<LockedPeriod[]>([]);
+ 
+     // === Ghi đè lương thủ công (Admin) ===
+@@ -1933,7 +1952,7 @@ export default function Attendance() {
+                 // Hàm migrate username cũ (toan → nguyendinhtoan) sang username Quản trị
+                 const migrateUsername = (uname: string): string => {
+                     if (!uname) return uname;
+-                    if (sysUsernames.includes(uname)) return uname; // đã đúng
++                    if (sysUsernames.includes(uname)) return uname; // d� d�ng
+                     const matched = sysUsernames.find(su => su.endsWith(uname));
+                     return matched || uname;
+                 };
+@@ -1956,7 +1975,7 @@ export default function Attendance() {
+                     } else if (!d.employees) {
+                         setEmployees(initialEmployees);
+                     }
+-                    // Nếu d.employees là mảng rỗng [] → giữ nguyên (user đã xóa hết NV)
++                    // N?u d.employees l� m?ng r?ng [] ? gi? nguy�n (user d� x�a h?t NV)
+                     if (d.bonusAuditLog) setBonusAuditLog(d.bonusAuditLog);
+                     if (d.extraBonuses) setExtraBonuses(d.extraBonuses);
+                     if (d.extraFundTx) setExtraFundTx(d.extraFundTx);
+@@ -2217,7 +2236,7 @@ export default function Attendance() {
+ 
+     const [expandedPackingKeys, setExpandedPackingKeys] = useState<string[]>([]);
+ 
+-    // State cho chọn tháng (dùng cho tab Vân tay)
++    // State cho ch?n th�ng (d�ng cho tab V�n tay)
+     const [selectedMonth, setSelectedMonth] = useState(dayjs().month() + 1);
+     const [selectedYear, setSelectedYear] = useState(dayjs().year());
+     const monthNames = ['', 'Tháng 01', 'Tháng 02', 'Tháng 03', 'Tháng 04', 'Tháng 05', 'Tháng 06', 'Tháng 07', 'Tháng 08', 'Tháng 09', 'Tháng 10', 'Tháng 11', 'Tháng 12'];
+@@ -2355,7 +2374,7 @@ export default function Attendance() {
+ 
+             const dateKey = date.format('YYYY-MM-DD');
+             const session = stockCheckSessions.find((s: any) => s.date === dateKey && s.type !== 'full');
+-            // Đã hoàn thành → không phạt
++            // �� ho�n th�nh ? kh�ng ph?t
+             if (session?.status === 'completed') continue;
+ 
+             let assignee: typeof employees[number] | undefined;
+@@ -2491,7 +2510,7 @@ export default function Attendance() {
+ 
+         return employees.map(emp => {
+             const monthData = Array.from({ length: daysInMonth }).map(() => ({ am: 0 as 0 | 1 | 2, pm: 0 as 0 | 1 | 2, amTime: '', pmTime: '', amOutTime: '', pmOutTime: '' }));
+-            // Resolve log -> nhân viên bằng nhiều khóa để tránh rớt dữ liệu UI khi faceId/userId cũ không khớp tuyệt đối
++            // Resolve log -> nh�n vi�n b?ng nhi?u kh�a d? tr�nh r?t d? li?u UI khi faceId/userId cu kh�ng kh?p tuy?t d?i
+             const logs = liveAttendanceLogs.filter(l => {
+                 const matchedEmployee = findEmployeeForAttendanceLog(l, employees);
+                 return matchedEmployee?.id === emp.id &&
+@@ -2515,7 +2534,7 @@ export default function Attendance() {
+                 } else if (log.checkType === 'morning_out') {
+                     // Sáng ra — ghi nhận giờ checkout
+                     monthData[dayIdx].amOutTime = logTime.format('HH:mm');
+-                    // Nếu chưa có check-in nhưng có check-out → vẫn tính là đã đi làm (đúng giờ)
++                    // N?u chua c� check-in nhung c� check-out ? v?n t�nh l� d� di l�m (d�ng gi?)
+                     if (monthData[dayIdx].am === 0) monthData[dayIdx].am = 1;
+                 }
+ 
+@@ -2525,7 +2544,7 @@ export default function Attendance() {
+                 } else if (log.checkType === 'evening_out') {
+                     // Tối ra — ghi nhận giờ checkout
+                     monthData[dayIdx].pmOutTime = logTime.format('HH:mm');
+-                    // Nếu chưa có check-in nhưng có check-out → vẫn tính là đã đi làm
++                    // N?u chua c� check-in nhung c� check-out ? v?n t�nh l� d� di l�m
+                     if (monthData[dayIdx].pm === 0) monthData[dayIdx].pm = 1;
+                 }
+             });
+@@ -2568,7 +2587,7 @@ export default function Attendance() {
+ 
+     const checkLocked = (): boolean => {
+         if (isCurrentPeriodLocked && currentUser !== 'admin') {
+-            message.error('Kỳ này đã bị khóa. Chỉ admin mới có thể thực hiện thao tác này!');
++            message.error('K? n�y d� b? kh�a. Ch? admin m?i c� th? th?c hi?n thao t�c n�y!');
+             return true;
+         }
+         return false;
+@@ -2592,7 +2611,7 @@ export default function Attendance() {
+                     after: updated,
+                     note: 'Sửa thưởng: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount),
+                 }]);
+-                message.success('Đã cập nhật thưởng!');
++                message.success('�� c?p nh?t thu?ng!');
+             } else {
+                 const newId = 'bonus-' + Date.now();
+                 const newBonus: BonusRecord = { id: newId, empId: values.empId, type: 'Thưởng lẻ (Admin)', detail: values.detail, amount: values.amount, date: new Date().toISOString() };
+@@ -2605,7 +2624,7 @@ export default function Attendance() {
+                     after: newBonus,
+                     note: 'Thêm thưởng: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(values.amount),
+                 }]);
+-                message.success('Đã thêm thưởng!');
++                message.success('�� th�m thu?ng!');
+             }
+             setBonusModalOpen(false);
+             setEditingBonus(null);
+@@ -2625,7 +2644,7 @@ export default function Attendance() {
+             before: bonus,
+             note: 'Xóa thưởng: ' + (employees.find(e => e.id === bonus.empId)?.name || '') + ' — ' + fmt(bonus.amount) + ' — "' + bonus.detail + '"',
+         }]);
+-        message.success('Đã xóa (đã lưu lịch sử)');
++        message.success('�� x�a (d� luu l?ch s?)');
+     }, [employees]);
+ 
+     // === Thêm Phạt Thủ Công handler ===
+@@ -2653,7 +2672,7 @@ export default function Attendance() {
+ 
+             setFineModalOpen(false);
+             fineForm.resetFields();
+-            message.success(`Đã thêm phạt ${fmt(values.amount)} cho ${employees.find(e => e.id === values.empId)?.name} (Đã lưu lịch sử)`);
++            message.success(`�� th�m ph?t ${fmt(values.amount)} cho ${employees.find(e => e.id === values.empId)?.name} (�� luu l?ch s?)`);
+         });
+     }, [fineForm, employees]);
+ 
+@@ -2688,7 +2707,7 @@ export default function Attendance() {
+                     note: 'Xóa khoản phạt: ' + (employees.find(e => e.id === fine.empId)?.name || '') + ' — ' + fmt(fine.amount) + ' — "' + fine.detail + '"',
+                 }]);
+ 
+-                message.success('Đã xóa khoản phạt (Đã lưu lịch sử)!');
++                message.success('�� x�a kho?n ph?t (�� luu l?ch s?)!');
+             },
+         });
+     }, [extraFines, employees]);
+@@ -2729,7 +2748,7 @@ export default function Attendance() {
+                 // Cập nhật data
+                 setExtraFundTx(prev => prev.map(t => t.id === oldTx.id ? updatedTx : t));
+                 setEditingFundTx(null);
+-                message.success('Đã cập nhật giao dịch + ghi lịch sử!');
++                message.success('�� c?p nh?t giao d?ch + ghi l?ch s?!');
+             } else {
+                 // === CREATE MODE ===
+                 const newId = `f${Date.now()}`;
+@@ -2749,7 +2768,7 @@ export default function Attendance() {
+                     detail: `${activeType === 'in' ? 'Thu' : 'Chi'} ${fmt(values.amount)} — ${values.note}`,
+                 }, ...prev]);
+                 setFundModalType(null);
+-                message.success(`Đã ${activeType === 'in' ? 'thu' : 'chi'} ${fmt(values.amount)} thành công!`);
++                message.success(`�� ${activeType === 'in' ? 'thu' : 'chi'} ${fmt(values.amount)} th�nh c�ng!`);
+             }
+             fundForm.resetFields();
+         });
+@@ -2781,11 +2800,11 @@ export default function Attendance() {
+                     timestamp: ts,
+                     action: 'delete',
+                     txId: tx.id,
+-                    detail: `Đã xóa: ${tx.type === 'in' ? 'Thu' : 'Chi'} ${fmt(tx.amount)} — "${tx.note}" (${tx.person}, ${tx.date})`,
++                    detail: `�� x�a: ${tx.type === 'in' ? 'Thu' : 'Chi'} ${fmt(tx.amount)} � "${tx.note}" (${tx.person}, ${tx.date})`,
+                     oldData: { note: tx.note, amount: tx.amount, person: tx.person, type: tx.type },
+                 }, ...prev]);
+                 setExtraFundTx(prev => prev.filter(t => t.id !== tx.id));
+-                message.success('Xóa thành công + đã ghi lịch sử!');
++                message.success('X�a th�nh c�ng + d� ghi l?ch s?!');
+             },
+         });
+     }, []);
+@@ -2801,11 +2820,11 @@ export default function Attendance() {
+ 
+ 
+ 
+-    const saveConfig = () => { setConfig({ ...tempConfig }); setConfigModalOpen(false); message.success('Đã lưu cấu hình!'); };
++    const saveConfig = () => { setConfig({ ...tempConfig }); setConfigModalOpen(false); message.success('�� luu c?u h�nh!'); };
+ 
+     const lockPayroll = () => {
+         if (isCurrentPeriodLocked) {
+-            message.warning('Kỳ này đã được chốt rồi!');
++            message.warning('K? n�y d� du?c ch?t r?i!');
+             return;
+         }
+         const startStr = overviewDateRange[0].format('DD/MM/YYYY');
+@@ -2830,7 +2849,7 @@ export default function Attendance() {
+                     lockedBy: currentUser,
+                 };
+                 setLockedPeriods(prev => [...prev, newLock]);
+-                message.success(`Đã chốt bảng lương kỳ ${startStr} — ${endStr}!`);
++                message.success(`�� ch?t b?ng luong k? ${startStr} � ${endStr}!`);
+             },
+         });
+     };
+@@ -2847,7 +2866,7 @@ export default function Attendance() {
+                 scroll={{ x: 1050 }}
+                 columns={[
+                     {
+-                        title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 200, fixed: 'left' as const,
++                        title: 'Nh�n vi�n', dataIndex: 'name', key: 'name', width: 200, fixed: 'left' as const,
+                         render: (name: string) => {
+                             const initial = name.split(' ').pop()?.charAt(0) || '';
+                             return (
+@@ -2867,21 +2886,21 @@ export default function Attendance() {
+                         ),
+                     },
+                     {
+-                        title: 'A. Lương cơ bản', dataIndex: 'salaryBase', key: 'base', align: 'right' as const, width: 150,
++                        title: 'Lương cơ bản', dataIndex: 'salaryBase', key: 'base', align: 'right' as const, width: 150,
+                         render: (v: number) => (
+                             <span className="att-money-gray">{fmt(v)}</span>
+                         ),
+                     },
+                     {
+-                        title: 'B. Thưởng đóng gói', dataIndex: 'packIncome', key: 'pack', align: 'right' as const, width: 160,
++                        title: 'Thưởng đóng gói', dataIndex: 'packIncome', key: 'pack', align: 'right' as const, width: 160,
+                         render: (v: number, r: any) => <Tooltip title={`${r.packTotalUnits || 0} SP × ${PACKING_UNIT_PRICE}đ`}><span className="att-money-emerald">+ {fmt(v)}</span></Tooltip>,
+                     },
+                     {
+-                        title: 'C. Thưởng', dataIndex: 'totalBonus', key: 'bonus', align: 'right' as const, width: 120,
++                        title: 'Thưởng', dataIndex: 'totalBonus', key: 'bonus', align: 'right' as const, width: 120,
+                         render: (v: number) => <span className="att-money-emerald">+ {fmt(v)}</span>,
+                     },
+                     {
+-                        title: 'D. Phạt', dataIndex: 'myFines', key: 'fine', align: 'right' as const, width: 120,
++                        title: 'Phạt', dataIndex: 'myFines', key: 'fine', align: 'right' as const, width: 120,
+                         render: (v: number) => <span className="att-money-red">{v > 0 ? `- ${fmt(v)}` : `${fmt(0)}`}</span>,
+                     },
+                     {
+@@ -2976,7 +2995,7 @@ export default function Attendance() {
+                                             <div style={{ fontSize: 22, fontWeight: 900, color: '#722ed1' }}>{unitPrice.toLocaleString()}<span style={{ fontSize: 12, fontWeight: 500, color: '#aaa', marginLeft: 4 }}>đ/SP</span></div>
+                                         </div>
+                                         <div>
+-                                            <div style={{ fontSize: 10, fontWeight: 700, color: '#8c8c8c', textTransform: 'uppercase', letterSpacing: 0.4 }}>Nhân sự</div>
++                                            <div style={{ fontSize: 10, fontWeight: 700, color: '#8c8c8c', textTransform: 'uppercase', letterSpacing: 0.4 }}>Nh�n s?</div>
+                                             <div style={{ fontSize: 22, fontWeight: 900, color: '#fa8c16' }}>{uniquePackers}<span style={{ fontSize: 12, fontWeight: 500, color: '#aaa', marginLeft: 4 }}>người</span></div>
+                                         </div>
+                                     </div>
+@@ -2985,7 +3004,7 @@ export default function Attendance() {
+                                 <div style={{ background: '#f0f0f0' }} />
+                                 {/* Right: Donut Chart */}
+                                 <div style={{ padding: '16px 16px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+-                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', textTransform: 'uppercase', letterSpacing: 0.5 }}>Phân bổ đóng gói</div>
++                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', textTransform: 'uppercase', letterSpacing: 0.5 }}>Ph�n b? d�ng g�i</div>
+                                     {chartData.length > 0 ? (<>
+                                         <ResponsiveContainer width="100%" height={200}>
+                                             <PieChart>
+@@ -3058,7 +3077,7 @@ export default function Attendance() {
+                                 }
+                             },
+                             {
+-                                title: 'Nhân viên', dataIndex: 'name', key: 'name', render: (n: string, r: any) => (
++                                title: 'Nh�n vi�n', dataIndex: 'name', key: 'name', render: (n: string, r: any) => (
+                                     <div>
+                                         <Text strong style={{ color: r._rank <= 3 && r.packOrderCount > 0 ? '#000' : '#595959', fontSize: r._rank <= 3 && r.packOrderCount > 0 ? 15 : 14 }}>{n}</Text>
+                                         <div><Tag color={r._rank <= 3 && r.packOrderCount > 0 ? "blue" : "default"} style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 600, border: 'none', background: r._rank <= 3 && r.packOrderCount > 0 ? '#e6f7ff' : '#f5f5f5' }}>@{r.username || '—'}</Tag></div>
+@@ -3076,7 +3095,7 @@ export default function Attendance() {
+                                     </div>
+                                 ),
+                             },
+-                            { title: <Text strong style={{ color: '#00ab56', fontStyle: 'italic' }}>Thu nhập cá nhân</Text>, dataIndex: 'packIncome', key: 'income', align: 'right' as const, render: (v: number, r: any) => <Text strong style={{ color: v > 0 ? '#00ab56' : '#d9d9d9', fontStyle: 'italic', fontSize: r._rank <= 3 && r.packOrderCount > 0 ? 18 : 16 }}>{fmt(v || 0)}</Text> },
++                            { title: <Text strong style={{ color: '#00ab56', fontStyle: 'italic' }}>Thu nh?p c� nh�n</Text>, dataIndex: 'packIncome', key: 'income', align: 'right' as const, render: (v: number, r: any) => <Text strong style={{ color: v > 0 ? '#00ab56' : '#d9d9d9', fontStyle: 'italic', fontSize: r._rank <= 3 && r.packOrderCount > 0 ? 18 : 16 }}>{fmt(v || 0)}</Text> },
+                         ]}
+                         summary={() => {
+                             const totalPackCount = payrollData.reduce((s, d) => s + (d.packOrderCount || 0), 0);
+@@ -3129,7 +3148,7 @@ export default function Attendance() {
+                                             <tr style={{ background: '#e2e8f0' }}>
+                                                 <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 700, fontSize: 11, color: '#475569' }}>SKU</th>
+                                                 <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 700, fontSize: 11, color: '#475569' }}>Sản phẩm</th>
+-                                                <th style={{ padding: '6px 10px', textAlign: 'center', fontWeight: 700, fontSize: 11, color: '#475569' }}>Phân loại</th>
++                                                <th style={{ padding: '6px 10px', textAlign: 'center', fontWeight: 700, fontSize: 11, color: '#475569' }}>Ph�n lo?i</th>
+                                                 <th style={{ padding: '6px 10px', textAlign: 'center', fontWeight: 700, fontSize: 11, color: '#475569' }}>SL đóng</th>
+                                             </tr>
+                                         </thead>
+@@ -3188,7 +3207,7 @@ export default function Attendance() {
+                                 },
+                             },
+                             {
+-                                title: 'Mã đơn hàng', dataIndex: 'orderNumber', key: 'order', width: 160,
++                                title: 'M� don h�ng', dataIndex: 'orderNumber', key: 'order', width: 160,
+                                 render: (o: string) => <Text strong style={{ fontFamily: 'monospace', color: '#1890ff', fontSize: 12 }}>{o}</Text>,
+                             },
+                             {
+@@ -3302,7 +3321,7 @@ export default function Attendance() {
+                                                     <Button size="small" type="primary" danger ghost icon={<DeleteOutlined />} onClick={() => {
+                                                         Modal.confirm({
+                                                             title: 'Xóa khoản thưởng?',
+-                                                            content: 'Thao tác sẽ được ghi vào lịch sử dù đã xóa.',
++                                                            content: 'Thao t�c s? du?c ghi v�o l?ch s? d� d� x�a.',
+                                                             okText: 'Xóa', okType: 'danger', cancelText: 'Hủy',
+                                                             onOk: () => handleDeleteBonus(r.bonusRef),
+                                                         });
+@@ -3324,7 +3343,7 @@ export default function Attendance() {
+                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                     <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                         <div style={{ background: 'linear-gradient(135deg, #1890ff 0%, #36cfc9 100%)', width: 8, height: 24, borderRadius: 4 }} />
+-                        <Title level={4} style={{ margin: 0, color: '#1f2937' }}>Phân bổ Thưởng & Chia phạt</Title>
++                        <Title level={4} style={{ margin: 0, color: '#1f2937' }}>Ph�n b? Thu?ng & Chia ph?t</Title>
+                     </div>
+                     {isAdmin && <Button type="primary" icon={<PlusOutlined />} style={{ fontWeight: 700, borderRadius: 8, height: 38, background: 'linear-gradient(to right, #1890ff, #36cfc9)', border: 'none', boxShadow: '0 4px 10px rgba(24,144,255,0.3)' }} onClick={() => { setEditingBonus(null); bonusForm.resetFields(); setBonusModalOpen(true); }}>Thêm thưởng thủ công</Button>}
+                 </div>
+@@ -3399,7 +3418,7 @@ export default function Attendance() {
+         const fineEmployeeOptions = Array.from(new Map(
+             combinedFines.map(f => [
+                 f.empId,
+-                employees.find(e => e.id === f.empId)?.name || f.empName || `Nhân viên #${f.empId}`,
++                employees.find(e => e.id === f.empId)?.name || f.empName || `Nh�n vi�n #${f.empId}`,
+             ])
+         ).entries())
+             .map(([id, name]) => ({ value: id, label: name }))
+@@ -3421,7 +3440,7 @@ export default function Attendance() {
+                             {fineEmployeeFilter === 'all' ? `${combinedFines.length} khoản` : `${filteredFines.length}/${combinedFines.length} khoản`}
+                         </Tag>
+                         <Space size={8}>
+-                            <Text type="secondary" style={{ fontSize: 12, fontWeight: 700 }}>Lọc nhân viên</Text>
++                            <Text type="secondary" style={{ fontSize: 12, fontWeight: 700 }}>L?c nh�n vi�n</Text>
+                             <Select
+                                 size="middle"
+                                 value={fineEmployeeFilter}
+@@ -3430,7 +3449,7 @@ export default function Attendance() {
+                                 optionFilterProp="label"
+                                 style={{ width: 220 }}
+                                 options={[
+-                                    { value: 'all', label: 'Tất cả nhân viên' },
++                                    { value: 'all', label: 'T?t c? nh�n vi�n' },
+                                     ...fineEmployeeOptions,
+                                 ]}
+                             />
+@@ -3472,7 +3491,7 @@ export default function Attendance() {
+                         size="middle"
+                         columns={[
+                             {
+-                                title: 'Nhân viên', dataIndex: 'empName', key: 'name', width: 200,
++                                title: 'Nh�n vi�n', dataIndex: 'empName', key: 'name', width: 200,
+                                 render: (n: string) => <Text strong>{n}</Text>,
+                             },
+                             {
+@@ -3547,7 +3566,7 @@ export default function Attendance() {
+     const matrixColumns = useMemo(() => {
+         const columns: any[] = [
+             {
+-                title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 130, fixed: 'left' as const,
++                title: 'Nh�n vi�n', dataIndex: 'name', key: 'name', width: 130, fixed: 'left' as const,
+                 render: (name: string) => (
+                     <div className="att-matrix-name-cell">
+                         <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{name}</Text>
+@@ -3921,15 +3940,15 @@ export default function Attendance() {
+         );
+     };
+ 
+-    // === RENDER NHÂN SỰ ===
++    // === RENDER NH�N S? ===
+     const renderEmployees = () => {
+         return (
+             <Card bordered={false} style={{ borderRadius: 12 }}>
+                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+-                    <div style={{ fontSize: 16, fontWeight: 700 }}>Danh sách nhân sự</div>
++                    <div style={{ fontSize: 16, fontWeight: 700 }}>Danh s�ch nh�n s?</div>
+                     {isAdmin && (
+                         <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditingEmp(null); empForm.resetFields(); setEmpModalOpen(true); }}>
+-                            Thêm Nhân Sự
++                            Th�m Nh�n S?
+                         </Button>
+                     )}
+                 </div>
+@@ -3961,7 +3980,7 @@ export default function Attendance() {
+                                     }} />
+                                     <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => {
+                                         setEmployees(prev => prev.filter(e => e.id !== record.id));
+-                                        message.success('Đã xóa nhân viên!');
++                                        message.success('�� x�a nh�n vi�n!');
+                                     }} />
+                                 </Space>
+                             ) : null
+@@ -3984,10 +4003,10 @@ export default function Attendance() {
+             };
+             if (editingEmp) {
+                 setEmployees(prev => prev.map(e => e.id === editingEmp.id ? newEmp : e));
+-                message.success('Đã cập nhật nhân viên!');
++                message.success('�� c?p nh?t nh�n vi�n!');
+             } else {
+                 setEmployees(prev => [...prev, newEmp]);
+-                message.success('Đã thêm nhân viên mới!');
++                message.success('�� th�m nh�n vi�n m?i!');
+             }
+             setEmpModalOpen(false);
+         });
+@@ -4159,7 +4178,7 @@ export default function Attendance() {
+                                 onClick={() => {
+                                     Modal.confirm({
+                                         title: 'Mở khóa kỳ lương',
+-                                        content: `Mở khóa kỳ ${overviewDateRange[0].format('DD/MM/YYYY')} — ${overviewDateRange[1].format('DD/MM/YYYY')}? Nhân viên sẽ có thể chỉnh sửa lại.`,
++                                        content: `M? kh�a k? ${overviewDateRange[0].format('DD/MM/YYYY')} � ${overviewDateRange[1].format('DD/MM/YYYY')}? Nh�n vi�n s? c� th? ch?nh s?a l?i.`,
+                                         okText: 'Mở khóa',
+                                         cancelText: 'Hủy',
+                                         okType: 'primary',
+@@ -4168,7 +4187,7 @@ export default function Attendance() {
+                                                 !(dayjs(lp.start).isSame(overviewDateRange[0], 'day') &&
+                                                     dayjs(lp.end).isSame(overviewDateRange[1], 'day'))
+                                             ));
+-                                            message.success('Đã mở khóa kỳ lương!');
++                                            message.success('�� m? kh�a k? luong!');
+                                         },
+                                     });
+                                 }}
+@@ -4196,7 +4215,7 @@ export default function Attendance() {
+                                     opacity: 1,
+                                 }}
+                             >
+-                                Đã chốt
++                                �� ch?t
+                             </Button>
+                         )
+                     ) : (
+@@ -4224,7 +4243,7 @@ export default function Attendance() {
+                 open={!!payslipModal}
+                 onCancel={() => { setPayslipModal(null); setPayslipPdfDetailOpen(false); }}
+                 footer={null}
+-                width={520}
++                width={payslipPdfDetailOpen ? 980 : 520}
+                 className="att-payslip-modal"
+             >
+                 {payslipModal && (() => {
+@@ -4266,7 +4285,7 @@ export default function Attendance() {
+                                 updatedBy: currentUser,
+                             }
+                         }));
+-                        message.success('Đã cập nhật ghi đè lương!');
++                        message.success('�� c?p nh?t ghi d� luong!');
+                     };
+ 
+                     // Helper: Xóa toàn bộ override
+@@ -4288,7 +4307,7 @@ export default function Attendance() {
+                                     const updated = payrollData.find((pd: any) => pd.id === p.id);
+                                     if (updated) setPayslipModal(updated);
+                                 }, 100);
+-                                message.success('Đã xóa điều chỉnh — dùng lại dữ liệu tự động!');
++                                message.success('�� x�a di?u ch?nh � d�ng l?i d? li?u t? d?ng!');
+                             }
+                         });
+                     };
+@@ -4362,7 +4381,7 @@ export default function Attendance() {
+                                         {hasOv && (
+                                             <Tooltip title={`Gốc (tự động): ${autoVal}${opts?.suffix || ''}`}>
+                                                 <Tag style={{ fontSize: 9, padding: '0 4px', lineHeight: '16px', border: '1px solid #ccc', background: '#f0f0f0', color: '#555', cursor: 'help' }}>
+-                                                    ✏ Đã sửa
++                                                    ? �� s?a
+                                                 </Tag>
+                                             </Tooltip>
+                                         )}
+@@ -4408,7 +4427,7 @@ export default function Attendance() {
+                                             <CalendarOutlined style={{ fontSize: 10 }} />
+                                             {overviewDateRange[0].format('DD/MM')} — {overviewDateRange[1].format('DD/MM/YYYY')}
+                                         </span>
+-                                        {p.hasOverride && <span className="ps-badge ps-badge-orange">🔧 Đã chỉnh</span>}
++                                        {p.hasOverride && <span className="ps-badge ps-badge-orange">?? �� ch?nh</span>}
+                                         {isAdmin && (
+                                             <span className="ps-admin-badge">
+                                                 <LockOutlined style={{ fontSize: 10 }} />
+@@ -4433,7 +4452,7 @@ export default function Attendance() {
+                                 items.push({
+                                     key: 'basic',
+                                     className: 'ps-collapse-emphasis',
+-                                    label: lbl('A.', 'Lương cơ bản', fmt(p.salaryBase), true),
++                                    label: lbl('', 'Lương cơ bản', fmt(p.salaryBase), true),
+                                     children: (
+                                         <div>
+                                             {row('Từ điểm danh', `${p.autoShifts} ca`, '#111',
+@@ -4504,7 +4523,7 @@ export default function Attendance() {
+                                 items.push({
+                                     key: 'packing',
+                                     className: 'ps-collapse-emphasis',
+-                                    label: lbl('B.', 'Thưởng đóng gói sản phẩm', `+ ${fmt(p.packIncome)}`, true),
++                                    label: lbl('', 'Thưởng đóng gói sản phẩm', `+ ${fmt(p.packIncome)}`, true),
+                                     children: (
+                                         <div>
+                                             {row('Đóng gói sản phẩm', `+ ${fmt(p.packIncome)}`, '#111', `${p.packTotalUnits || 0} SP × ${PACKING_UNIT_PRICE}đ (${p.packOrderCount || 0} đơn)`)}
+@@ -4519,7 +4538,7 @@ export default function Attendance() {
+                                 if (p.mBonus > 0 || empBonuses.length > 0) {
+                                     items.push({
+                                         key: 'bonus',
+-                                        label: lbl('C.', 'Thưởng', `+ ${fmt(p.totalBonus || p.mBonus)}`, true),
++                                        label: lbl('', 'Thưởng', `+ ${fmt(p.totalBonus || p.mBonus)}`, true),
+                                         children: (
+                                             <div>
+                                                 {empBonuses.map((b: any, i: number) => row(b.detail || 'Thưởng lẻ', `+ ${fmt(b.amount)}`, '#111', `Admin — ${b.type}`))}
+@@ -4533,7 +4552,7 @@ export default function Attendance() {
+                                 if (p.myFines > 0) {
+                                     items.push({
+                                         key: 'fines',
+-                                        label: lbl('D.', 'Phạt', `- ${fmt(p.myFines)}`, true),
++                                        label: lbl('', 'Phạt', `- ${fmt(p.myFines)}`, true),
+                                         children: (
+                                             <div>
+                                                 {empFines.length > 0
+@@ -4585,7 +4604,7 @@ export default function Attendance() {
+                                                                     <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, padding: '12px 16px', marginBottom: 12 }}>
+                                                                         <div style={{ fontSize: 12, fontWeight: 700, color: '#ad6800', marginBottom: 4 }}>⚠️ LƯU Ý QUAN TRỌNG</div>
+                                                                         <div style={{ fontSize: 12, color: '#8c6d1f' }}>
+-                                                                            Số dương = <b>cộng thêm tiền</b>, số âm = <b>trừ bớt tiền</b>.
++                                                                            S? duong = <b>c?ng th�m ti?n</b>, s? �m = <b>tr? b?t ti?n</b>.
+                                                                             Thao tác này sẽ <b>ảnh hưởng trực tiếp</b> đến lương thực lĩnh.
+                                                                         </div>
+                                                                     </div>
+@@ -4658,87 +4677,365 @@ export default function Attendance() {
+                             </div>
+                             </>)}
+ 
+-                            {/* ===== PRINT VIEW — ẩn trên màn hình, hiện khi in ===== */}
+-                            <div className={payslipPdfDetailOpen ? 'ps-print-view ps-print-view-detail' : 'ps-print-view'}>
+-                                <div className="ps-pv-header">
+-                                    <div className="ps-pv-label">PHIẾU LƯƠNG THÁNG {overviewDateRange[0].format('MM/YYYY')}</div>
+-                                    <div className="ps-pv-name">{p.name}</div>
+-                                    <div className="ps-pv-meta">
+-                                        {p.type === 'Official' ? 'Nhân viên chính thức' : 'Nhân viên thời vụ'}
+-                                        &nbsp;·&nbsp;
+-                                        {overviewDateRange[0].format('DD/MM')} — {overviewDateRange[1].format('DD/MM/YYYY')}
++                            {/* ===== PRINT VIEW (MODERN INVOICE) ===== */}
++                            <div className={payslipPdfDetailOpen ? 'ps-print-view ps-print-view-detail ps-inv-redesign' : 'ps-print-view ps-inv-redesign'}>
++                                <div className="ps-inv-container">
++                                    <div className="ps-inv-header">
++                                        <div className="ps-inv-brand">
++                                            <BankOutlined className="ps-inv-brand-icon" />
++                                            <div>
++                                                <div className="ps-inv-brand-name">SMART LOGISTICS SYSTEM</div>
++                                                <div className="ps-inv-brand-sub">INTERNAL HUMAN RESOURCES</div>
++                                            </div>
++                                        </div>
++                                        <div className="ps-inv-title-group">
++                                            <div className="ps-inv-title">PHIẾU LƯƠNG</div>
++                                            <div className="ps-inv-subtitle">
++                                                <span>Kỳ thanh toán: <b>Tháng {overviewDateRange[0].format('MM/YYYY')} ({overviewDateRange[0].format('DD/MM')} - {overviewDateRange[1].format('DD/MM/YYYY')})</b></span>
++                                                <span>Ngày kết xuất: <b>{dayjs().format('DD/MM/YYYY')}</b></span>
++                                            </div>
++                                        </div>
+                                     </div>
+-                                </div>
+ 
+-                                {/* 1. Lương cơ bản */}
+-                                <div className="ps-pv-section">
+-                                    <div className="ps-pv-section-title">A. Lương cơ bản</div>
+-                                    {p.type !== 'Official' && <div className="ps-pv-row"><span>Số ca làm việc</span><span>{p.shifts} ca</span></div>}
+-                                    {p.type !== 'Official' && p.extraShifts > 0 && <div className="ps-pv-row ps-pv-sub"><span>Trong đó: {p.autoShifts} ca điểm danh + {p.extraShifts} ca thêm</span></div>}
+-                                    <div className="ps-pv-row ps-pv-emphasis"><span>Lương cơ bản</span><span>{fmt(p.salaryBase)}</span></div>
+-                                </div>
++                                    <div className="ps-inv-company">
++                                        <div><b>Đơn vị:</b> DBY Software</div>
++                                        <div><b>Địa chỉ:</b> Ngõ 80 Đại Linh, Trung Văn, Hà Nội</div>
++                                    </div>
+ 
+-                                {/* 2. Thưởng đóng gói sản phẩm */}
+-                                <div className="ps-pv-section">
+-                                    <div className="ps-pv-section-title">B. Thưởng đóng gói sản phẩm</div>
+-                                    <div className="ps-pv-row ps-pv-emphasis">
+-                                        <span>Đóng gói sản phẩm &nbsp;<span className="ps-pv-note">({p.packOrderCount || 0} đơn · {p.packTotalUnits || 0} SP × {PACKING_UNIT_PRICE}đ)</span></span>
+-                                        <span>+ {fmt(p.packIncome)}</span>
++                                    <div className="ps-inv-emp-box">
++                                        <div className="ps-inv-emp-item">
++                                            <span className="ps-inv-emp-label">Họ và tên nhân viên</span>
++                                            <span className="ps-inv-emp-value">{p.name}</span>
++                                        </div>
++                                        <div className="ps-inv-emp-item">
++                                            <span className="ps-inv-emp-label">Mã nhân viên</span>
++                                            <span className="ps-inv-emp-value ps-inv-mono">EMP{overviewDateRange[0].format('YYYYMM')}{String(p.id || 0).padStart(2, '0')}</span>
++                                        </div>
++                                        <div className="ps-inv-emp-item">
++                                            <span className="ps-inv-emp-label">Chức vụ / Vị trí</span>
++                                            <span className="ps-inv-emp-value">{p.type === 'Official' ? 'Nhân viên chính thức' : 'Nhân viên thời vụ'}</span>
++                                        </div>
++                                        <div className="ps-inv-emp-item">
++                                            <span className="ps-inv-emp-label">Trạng thái tài khoản</span>
++                                            <span className="ps-inv-status"><span /> Đang hoạt động</span>
++                                        </div>
+                                     </div>
+-                                </div>
+ 
+-                                {/* 3. Thưởng */}
+-                                {(p.mBonus > 0 || empBonuses.length > 0) && (
+-                                    <div className="ps-pv-section">
+-                                        <div className="ps-pv-section-title">C. Thưởng</div>
+-                                        {empBonuses.map((b: any, i: number) => (
+-                                            <div key={i} className="ps-pv-row ps-pv-emphasis"><span>{b.detail || 'Thưởng lẻ'}</span><span>+ {fmt(b.amount)}</span></div>
+-                                        ))}
+-                                        {p.mBonus > 0 && empBonuses.length === 0 && <div className="ps-pv-row ps-pv-emphasis"><span>Thưởng lẻ</span><span>+ {fmt(p.mBonus)}</span></div>}
++                                    <div className="ps-inv-body">
++                                        <table className="ps-inv-table">
++                                            <thead>
++                                                <tr>
++                                                    <th>Danh mục thu nhập / Khấu trừ</th>
++                                                    <th>Diễn giải / Chi tiết đối soát</th>
++                                                    <th className="text-right">Số tiền (VNĐ)</th>
++                                                </tr>
++                                            </thead>
++                                            <tbody>
++                                                <tr>
++                                                    <td className="ps-inv-item-title">Lương cơ bản</td>
++                                                    <td className="ps-inv-note">
++                                                        {p.type === 'Official'
++                                                            ? 'Theo Hợp đồng lao động chính thức'
++                                                            : `${p.shifts} ca làm việc, ghi nhận tự động từ chấm công`}
++                                                    </td>
++                                                    <td className="text-right">{fmt(p.salaryBase)}</td>
++                                                </tr>
++
++                                                {p.packIncome > 0 && (
++                                                    <tr>
++                                                        <td>
++                                                            <span className="ps-inv-row-label">
++                                                                <span className="ps-inv-icon ps-inv-icon-orange"><GiftOutlined /></span>
++                                                                Lương năng suất (Đóng gói)
++                                                            </span>
++                                                        </td>
++                                                        <td><b>{(p.packTotalUnits || 0).toLocaleString('vi-VN')} SP × {PACKING_UNIT_PRICE} đ</b><span className="ps-inv-text-muted">Tổng số: {(p.packOrderCount || 0).toLocaleString('vi-VN')} đơn hàng</span></td>
++                                                        <td className="text-right">{fmt(p.packIncome)}</td>
++                                                    </tr>
++                                                )}
++
++                                                {empBonuses.map((b: any, i: number) => (
++                                                    <tr key={`b-new-${i}`}>
++                                                        <td>
++                                                            <span className="ps-inv-row-label">
++                                                                <span className="ps-inv-icon ps-inv-icon-green"><CheckCircleOutlined /></span>
++                                                                {b.type || 'Thưởng bổ sung'}
++                                                            </span>
++                                                        </td>
++                                                        <td className="ps-inv-note">{b.detail || 'Khen thưởng / Phụ cấp'}</td>
++                                                        <td className="text-right ps-inv-text-green">+{fmt(b.amount)}</td>
++                                                    </tr>
++                                                ))}
++                                                {p.mBonus > 0 && empBonuses.length === 0 && (
++                                                    <tr>
++                                                        <td>
++                                                            <span className="ps-inv-row-label">
++                                                                <span className="ps-inv-icon ps-inv-icon-green"><CheckCircleOutlined /></span>
++                                                                Thưởng khác
++                                                            </span>
++                                                        </td>
++                                                        <td className="ps-inv-note">Theo quy định công ty</td>
++                                                        <td className="text-right ps-inv-text-green">+{fmt(p.mBonus)}</td>
++                                                    </tr>
++                                                )}
++
++                                                {p.myFines > 0 && (
++                                                    <>
++                                                        <tr className="ps-inv-section-row">
++                                                            <td colSpan={3}>Các khoản khấu trừ vi phạm</td>
++                                                        </tr>
++                                                        {empFines.length > 0 ? empFines.map((f: any, i: number) => (
++                                                            <tr key={`f-new-${i}`}>
++                                                                <td>
++                                                                    <span className="ps-inv-row-label ps-inv-fine-label">
++                                                                        <span className="ps-inv-fine-dot">{String(f.type || f.detail || '').toLowerCase().includes('muộn') ? <ClockCircleOutlined /> : <WarningOutlined />}</span>
++                                                                        {f.type || 'Vi phạm'}
++                                                                    </span>
++                                                                </td>
++                                                                <td>{fineDescription(f)}{fineTime(f) && <span className="ps-inv-text-muted">{fineTime(f)}</span>}</td>
++                                                                <td className="text-right ps-inv-text-red">-{fmt(f.amount)}</td>
++                                                            </tr>
++                                                        )) : (
++                                                            <tr>
++                                                                <td><span className="ps-inv-row-label ps-inv-fine-label"><span className="ps-inv-fine-dot"><WarningOutlined /></span>Phạt vi phạm nội quy</span></td>
++                                                                <td className="ps-inv-note">Kỷ luật / Lỗi nghiệp vụ</td>
++                                                                <td className="text-right ps-inv-text-red">-{fmt(p.myFines)}</td>
++                                                            </tr>
++                                                        )}
++                                                    </>
++                                                )}
++
++                                                {p.extraAdjust !== 0 && p.extraAdjust != null && (
++                                                    <>
++                                                        <tr className="ps-inv-section-row ps-inv-section-neutral">
++                                                            <td colSpan={3}>Điều chỉnh khác</td>
++                                                        </tr>
++                                                        <tr>
++                                                            <td className="ps-inv-item-title">{p.adjustNote || 'Điều chỉnh thủ công'}</td>
++                                                            <td className="ps-inv-note">Ghi nhận bởi quản trị viên</td>
++                                                            <td className="text-right" style={{ color: p.extraAdjust > 0 ? '#059669' : '#e11d48', fontWeight: 800 }}>
++                                                                {p.extraAdjust > 0 ? '+' : ''}{fmt(p.extraAdjust)}
++                                                            </td>
++                                                        </tr>
++                                                    </>
++                                                )}
++                                            </tbody>
++                                        </table>
+                                     </div>
+-                                )}
+ 
+-                                {/* 4. Phạt */}
+-                                {p.myFines > 0 && (
+-                                    <div className="ps-pv-section">
+-                                        <div className="ps-pv-section-title">D. Phạt</div>
+-                                        {empFines.length > 0
+-                                            ? empFines.map((f: any, i: number) => (
+-                                                <div key={i} className="ps-pv-row">
+-                                                    <span><strong>{fineTime(f)}</strong> {fineDescription(f)}</span>
+-                                                    <span className="ps-pv-money">- {fmt(f.amount)}</span>
++                                    <div className="ps-inv-summary">
++                                        <div className="ps-inv-verify">
++                                            <div className="ps-inv-qr">
++                                                <QrcodeOutlined />
++                                            </div>
++                                            <div>
++                                                <div className="ps-inv-verify-title">Xác thực điện tử</div>
++                                                <div className="ps-inv-verify-text">Quét mã QR để đối soát lịch sử đóng gói và chi tiết vi phạm trên DBY Portal.</div>
++                                            </div>
++                                        </div>
++
++                                        <div className="ps-inv-totals">
++                                            <div className="ps-inv-total-row">
++                                                <span>Tổng thu nhập (+)</span>
++                                                <span>{fmt(p.salaryBase + p.packIncome + (p.totalBonus || 0))}</span>
++                                            </div>
++                                            <div className="ps-inv-total-row">
++                                                <span>Tổng khấu trừ (-)</span>
++                                                <span className="ps-inv-text-red">-{fmt(p.myFines || 0)}</span>
++                                            </div>
++                                            {!!p.extraAdjust && (
++                                                <div className="ps-inv-total-row">
++                                                    <span>Điều chỉnh</span>
++                                                    <span style={{ color: p.extraAdjust > 0 ? '#059669' : '#e11d48' }}>
++                                                        {p.extraAdjust > 0 ? '+' : ''}{fmt(p.extraAdjust)}
++                                                    </span>
+                                                 </div>
+-                                            ))
+-                                            : <div className="ps-pv-row"><span>Phạt</span><span className="ps-pv-money">- {fmt(p.myFines)}</span></div>
+-                                        }
+-                                        <div className="ps-pv-row ps-pv-subtotal"><span>Tổng phạt</span><span className="ps-pv-money">- {fmt(p.myFines)}</span></div>
++                                            )}
++                                            <div className="ps-inv-total-net">
++                                                <span>Thực lĩnh cuối kỳ</span>
++                                                <span className="amount">{fmt(p.finalSalary)}</span>
++                                            </div>
++                                        </div>
+                                     </div>
+-                                )}
+ 
+-                                {/* 5. Điều chỉnh */}
+-                                {p.extraAdjust !== 0 && p.extraAdjust != null && (
+-                                    <div className="ps-pv-section">
+-                                        <div className="ps-pv-section-title">⑤ Điều chỉnh</div>
+-                                        <div className="ps-pv-row"><span>{p.adjustNote || 'Điều chỉnh thủ công'}</span><span>{p.extraAdjust > 0 ? '+' : ''} {fmt(p.extraAdjust)}</span></div>
++                                    <div className="ps-inv-footer">
++                                        <div className="ps-inv-footer-brand">
++                                            <SafetyCertificateOutlined style={{ fontSize: 16 }} />
++                                            Xác nhận bởi: Bộ phận Tài chính & Nhân sự Smart Logistics
++                                        </div>
++                                        <span>DBY-SIGN-VERIFIED-{overviewDateRange[0].format('YYYY')}</span>
+                                     </div>
+-                                )}
+-
+-                                {/* Tổng */}
+-                                <div className="ps-pv-total">
+-                                    <span>THỰC LĨNH THÁNG {overviewDateRange[0].format('MM/YYYY')}</span>
+-                                    <span>{fmt(p.finalSalary)}</span>
+                                 </div>
+-                                <div className="ps-pv-formula">
+-                                    <strong>Tổng lương = A + B + C - D = </strong>
+-                                    {fmt(p.salaryBase)} + {fmt(p.packIncome)} + {fmt(p.totalBonus || 0)} - {fmt(p.myFines || 0)} = <strong>{fmt(p.salaryBase + p.packIncome + (p.totalBonus || 0) - (p.myFines || 0))}</strong>
+-                                    {!!p.extraAdjust && (
+-                                        <div>
+-                                            <strong>Điều chỉnh khác:</strong> {p.extraAdjust > 0 ? '+' : '-'} {fmt(Math.abs(p.extraAdjust))} = <strong>{fmt(p.finalSalary)}</strong>
++                            </div>
++                            <div className={payslipPdfDetailOpen ? 'ps-print-view ps-print-view-detail ps-print-view-legacy' : 'ps-print-view ps-print-view-legacy'}>
++                                <div className="ps-inv-container">
++                                    {/* Header */}
++                                    <div className="ps-inv-header">
++                                        <div className="ps-inv-brand">
++                                            <BankOutlined className="ps-inv-brand-icon" />
++                                            <span>DBYPOS Logistics</span>
+                                         </div>
+-                                    )}
+-                                </div>
++                                        <div className="ps-inv-title-group">
++                                            <div className="ps-inv-title">PHIẾU LƯƠNG</div>
++                                            <div className="ps-inv-subtitle">
++                                                Kỳ thanh toán: {overviewDateRange[0].format('MM/YYYY')}
++                                                <br/>
++                                                Số phiếu: {dayjs().format('YYYYMMDD')}-{p.id?.toString().slice(-4) || '0000'}
++                                            </div>
++                                        </div>
++                                    </div>
++
++                                    {/* Employee Details */}
++                                    <div className="ps-inv-emp-box">
++                                        <div className="ps-inv-emp-item">
++                                            <span className="ps-inv-emp-label">Họ và tên</span>
++                                            <span className="ps-inv-emp-value">{p.name}</span>
++                                        </div>
++                                        <div className="ps-inv-emp-item">
++                                            <span className="ps-inv-emp-label">Mã nhân viên / ID</span>
++                                            <span className="ps-inv-emp-value">EMP-{p.id || 'N/A'}</span>
++                                        </div>
++                                        <div className="ps-inv-emp-item">
++                                            <span className="ps-inv-emp-label">Chức vụ</span>
++                                            <span className="ps-inv-emp-value">{p.type === 'Official' ? 'Nhân viên chính thức' : 'Nhân viên thời vụ'}</span>
++                                        </div>
++                                        <div className="ps-inv-emp-item">
++                                            <span className="ps-inv-emp-label">Ngày cấp phiếu</span>
++                                            <span className="ps-inv-emp-value">{dayjs().format('DD/MM/YYYY')}</span>
++                                        </div>
++                                    </div>
++
++                                    {/* Table Area */}
++                                    <div className="ps-inv-body">
++                                        <table className="ps-inv-table">
++                                            <thead>
++                                                <tr>
++                                                    <th>Khoản mục thu nhập</th>
++                                                    <th className="text-right" style={{ width: '200px' }}>Số tiền</th>
++                                                </tr>
++                                            </thead>
++                                            <tbody>
++                                                {/* 1. Lương cơ bản */}
++                                                <tr>
++                                                    <td>
++                                                        Lương cơ bản
++                                                        {p.type !== 'Official' && <span className="ps-inv-text-muted">{p.shifts} ca làm việc (Gốc: {p.autoShifts} ca)</span>}
++                                                    </td>
++                                                    <td className="text-right">{fmt(p.salaryBase)}</td>
++                                                </tr>
++
++                                                {/* 2. Đóng gói */}
++                                                {p.packIncome > 0 && (
++                                                    <tr>
++                                                        <td>
++                                                            Thưởng đóng gói sản phẩm
++                                                            <span className="ps-inv-text-muted">{p.packTotalUnits || 0} SP × {PACKING_UNIT_PRICE}đ</span>
++                                                        </td>
++                                                        <td className="text-right">{fmt(p.packIncome)}</td>
++                                                    </tr>
++                                                )}
++
++                                                {/* 3. Thưởng lẻ */}
++                                                {empBonuses.map((b: any, i: number) => (
++                                                    <tr key={`b-${i}`}>
++                                                        <td>
++                                                            {b.detail || 'Thưởng lẻ'}
++                                                            <span className="ps-inv-text-muted">Khen thưởng / Phụ cấp</span>
++                                                        </td>
++                                                        <td className="text-right">{fmt(b.amount)}</td>
++                                                    </tr>
++                                                ))}
++                                                {p.mBonus > 0 && empBonuses.length === 0 && (
++                                                    <tr>
++                                                        <td>Thưởng khác <span className="ps-inv-text-muted">Theo quy định công ty</span></td>
++                                                        <td className="text-right">{fmt(p.mBonus)}</td>
++                                                    </tr>
++                                                )}
++
++                                                {/* 4. Khấu trừ & Vi phạm */}
++                                                {p.myFines > 0 && (
++                                                    <>
++                                                        <tr className="ps-inv-tr-fine">
++                                                            <th style={{ marginTop: '16px' }}>Khấu trừ & Vi phạm</th>
++                                                            <th className="text-right" style={{ marginTop: '16px' }}>Số tiền trừ</th>
++                                                        </tr>
++                                                        {empFines.length > 0 ? empFines.map((f: any, i: number) => (
++                                                            <tr key={`f-${i}`}>
++                                                                <td>
++                                                                    <strong>{fineTime(f)}</strong> {fineDescription(f)}
++                                                                    <span className="ps-inv-text-muted">Kỷ luật / Lỗi nghiệp vụ</span>
++                                                                </td>
++                                                                <td className="text-right ps-inv-text-red">-{fmt(f.amount)}</td>
++                                                            </tr>
++                                                        )) : (
++                                                            <tr>
++                                                                <td>Phạt vi phạm nội quy</td>
++                                                                <td className="text-right ps-inv-text-red">-{fmt(p.myFines)}</td>
++                                                            </tr>
++                                                        )}
++                                                    </>
++                                                )}
++
++                                                {/* 5. Điều chỉnh */}
++                                                {p.extraAdjust !== 0 && p.extraAdjust != null && (
++                                                    <>
++                                                        <tr className="ps-inv-tr-fine">
++                                                            <th style={{ background: '#f8fafc', color: '#1e293b', borderTop: '2px solid #e2e8f0' }}>Điều chỉnh khác</th>
++                                                            <th className="text-right" style={{ background: '#f8fafc', color: '#1e293b', borderTop: '2px solid #e2e8f0' }}>Số tiền</th>
++                                                        </tr>
++                                                        <tr>
++                                                            <td>{p.adjustNote || 'Điều chỉnh thủ công'}</td>
++                                                            <td className="text-right" style={{ color: p.extraAdjust > 0 ? '#059669' : '#e11d48', fontWeight: 700 }}>
++                                                                {p.extraAdjust > 0 ? '+' : ''}{fmt(p.extraAdjust)}
++                                                            </td>
++                                                        </tr>
++                                                    </>
++                                                )}
++                                            </tbody>
++                                        </table>
++                                    </div>
++
++                                    {/* Summary */}
++                                    <div className="ps-inv-summary">
++                                        <div className="ps-inv-qr">
++                                            <QrcodeOutlined style={{ fontSize: 48 }} />
++                                            <span className="ps-inv-qr-text">Mã xác thực</span>
++                                        </div>
++
++                                        <div className="ps-inv-totals">
++                                            <div className="ps-inv-total-row">
++                                                <span>Tổng thu nhập</span>
++                                                <span>{fmt(p.salaryBase + p.packIncome + (p.totalBonus || 0))}</span>
++                                            </div>
++                                            <div className="ps-inv-total-row">
++                                                <span>Tổng khấu trừ</span>
++                                                <span className="ps-inv-text-red">-{fmt(p.myFines || 0)}</span>
++                                            </div>
++                                            {!!p.extraAdjust && (
++                                                <div className="ps-inv-total-row">
++                                                    <span>Điều chỉnh</span>
++                                                    <span style={{ color: p.extraAdjust > 0 ? '#059669' : '#e11d48' }}>
++                                                        {p.extraAdjust > 0 ? '+' : ''}{fmt(p.extraAdjust)}
++                                                    </span>
++                                                </div>
++                                            )}
++                                            
++                                            <div className="ps-inv-total-net">
++                                                <span>Thực lĩnh</span>
++                                                <span className="amount">{fmt(p.finalSalary)}</span>
++                                            </div>
++                                        </div>
++                                    </div>
+ 
+-                                <div className="ps-pv-footer">Xuất ngày {dayjs().format('DD/MM/YYYY HH:mm')} · Hệ thống quản lý nội bộ</div>
++                                    {/* Footer */}
++                                    <div className="ps-inv-footer">
++                                        <div className="ps-inv-footer-brand">
++                                            <SafetyCertificateOutlined style={{ fontSize: 16 }} />
++                                            Tài liệu nội bộ
++                                        </div>
++                                        <span>Chứng từ hợp lệ được phát hành bởi hệ thống tự động</span>
++                                    </div>
++                                </div>
+                             </div>
+ 
+                             {/* Footer actions */}
+@@ -4867,12 +5164,12 @@ export default function Attendance() {
+                         },
+                         {
+                             key: 'employees',
+-                            label: <span><TeamOutlined /> Nhân viên</span>,
++                            label: <span><TeamOutlined /> Nh�n vi�n</span>,
+                             children: (
+                                 <div style={{ marginTop: 4 }}>
+                                     <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+                                         <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => { setEditingEmp(null); empForm.resetFields(); setEmpModalOpen(true); }}>
+-                                            Thêm nhân viên
++                                            Th�m nh�n vi�n
+                                         </Button>
+                                     </div>
+                                     <Table
+@@ -4890,7 +5187,7 @@ export default function Attendance() {
+                                                 render: (_: any, record: Employee) => (
+                                                     <Space size={4}>
+                                                         <Button size="small" type="text" icon={<EditOutlined style={{ color: '#1890ff' }} />} onClick={() => { setEditingEmp(record); empForm.setFieldsValue({ ...record, username: record.username || '' }); setEmpModalOpen(true); }} />
+-                                                        <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => { setEmployees(prev => prev.filter(e => e.id !== record.id)); message.success('Đã xóa!'); }} />
++                                                        <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => { setEmployees(prev => prev.filter(e => e.id !== record.id)); message.success('�� x�a!'); }} />
+                                                     </Space>
+                                                 )
+                                             }
+@@ -4915,8 +5212,8 @@ export default function Attendance() {
+                 width={480}
+             >
+                 <Form form={bonusForm} layout="vertical" style={{ marginTop: 16 }}>
+-                    <Form.Item name="empId" label="Nhân viên" rules={[{ required: true, message: 'Vui lòng chọn nhân viên' }]}>
+-                        <Select placeholder="Chọn nhân viên nhận thưởng" size="large">
++                    <Form.Item name="empId" label="Nh�n vi�n" rules={[{ required: true, message: 'Vui l�ng ch?n nh�n vi�n' }]}>
++                        <Select placeholder="Ch?n nh�n vi�n nh?n thu?ng" size="large">
+                             {employees.map(emp => (
+                                 <Select.Option key={emp.id} value={emp.id}>
+                                     {emp.name} ({emp.type === 'Official' ? 'Chính thức' : 'Thời vụ'})
+@@ -5036,11 +5333,11 @@ export default function Attendance() {
+                     background: '#fff1f0', border: '1px solid #ffccc7',
+                     color: '#cf1322', fontWeight: 600, fontSize: 12, textAlign: 'center',
+                 }}>
+-                    ⚠️ Khoản phạt này sẽ được khấu trừ trực tiếp vào lương nhân viên tháng hiện tại
++                    ?? Kho?n ph?t n�y s? du?c kh?u tr? tr?c ti?p v�o luong nh�n vi�n th�ng hi?n t?i
+                 </div>
+                 <Form form={fineForm} layout="vertical">
+-                    <Form.Item name="empId" label="Nhân viên bị phạt" rules={[{ required: true, message: 'Vui lòng chọn nhân viên' }]}>
+-                        <Select placeholder="Chọn nhân viên" size="large">
++                    <Form.Item name="empId" label="Nh�n vi�n b? ph?t" rules={[{ required: true, message: 'Vui l�ng ch?n nh�n vi�n' }]}>
++                        <Select placeholder="Ch?n nh�n vi�n" size="large">
+                             {employees.map(emp => (
+                                 <Select.Option key={emp.id} value={emp.id}>
+                                     {emp.name} ({emp.type === 'Official' ? 'Chính thức' : 'Thời vụ'})
+@@ -5075,19 +5372,19 @@ export default function Attendance() {
+                 </Form>
+             </Modal>
+ 
+-            {/* ===== MODAL: Quản lý Nhân sự ===== */}
++            {/* ===== MODAL: Qu?n l� Nh�n s? ===== */}
+             <Modal
+-                title={editingEmp ? "✏️ Sửa Nhân Sự" : "➕ Thêm Nhân Sự"}
++                title={editingEmp ? "?? S?a Nh�n S?" : "? Th�m Nh�n S?"}
+                 open={empModalOpen}
+                 onCancel={() => setEmpModalOpen(false)}
+                 onOk={handleSaveEmp}
+-                okText="Lưu Nhân Sự" cancelText="Hủy"
++                okText="Luu Nh�n S?" cancelText="H?y"
+                 destroyOnHidden
+             >
+                 <Form form={empForm} layout="vertical">
+                     <Row gutter={16}>
+                         <Col span={14}>
+-                            <Form.Item name="name" label="Họ và tên" rules={[{ required: true, message: 'Nhập tên nhân viên' }]}>
++                            <Form.Item name="name" label="H? v� t�n" rules={[{ required: true, message: 'Nh?p t�n nh�n vi�n' }]}>
+                                 <Input size="large" placeholder="VD: Nguyễn Văn A" />
+                             </Form.Item>
+                         </Col>
+

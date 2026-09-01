@@ -2,6 +2,41 @@ const { ipcMain, dialog, shell, app, nativeImage, safeStorage } = require("elect
 const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
+function getTrustedDevelopmentOrigin() {
+  const fallback = "http://127.0.0.1:5173";
+  try {
+    const parsed = new URL(process.env.DBYPOS_VITE_DEV_SERVER_URL || fallback);
+    const trustedHost = ["localhost", "127.0.0.1"].includes(parsed.hostname);
+    const validPort = Number(parsed.port) >= 5173 && Number(parsed.port) <= 5190;
+    return parsed.protocol === "http:" && trustedHost && validPort
+      ? parsed.origin
+      : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+const TRUSTED_DEVELOPMENT_ORIGIN = getTrustedDevelopmentOrigin();
+
+// Fail closed until every destructive workflow has a verified backup and
+// rollback path. This is intentionally not configurable from the renderer or
+// environment so a deployment cannot accidentally re-enable data deletion.
+const DATA_SAFETY_MODE = true;
+// The daily rollover is transactional, idempotent, and preserves a snapshot
+// before changing task state, so it remains available in safety mode.
+const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
+  "dailyTasks:resetDaily",
+  // One assignment group is stored as a single DailyTask row after every
+  // recipient has been validated, so creation cannot leave a partial group.
+  "dailyTasks:createAssignments",
+  // Evidence uploads are compensated on failure, while the evidence hashes
+  // and task completion are committed together in one database transaction.
+  "dailyTasks:submitEvidence",
+  "attendance:updateLeaveStatus",
+  "attendance:updatePayrollOverride",
+  "attendance:updatePayrollLock",
+]);
+
 // Local config is a development convenience only. Production builds must
 // receive runtime configuration from the environment or a backend service;
 // never package database/service credentials in app.asar.
@@ -28,6 +63,8 @@ const runtimeConfigKeys = [
   "OAUTH_CLIENT_SECRET",
   "VAT_TELEGRAM_BOT",
   "VAT_TELEGRAM_CHAT",
+  "R2_DAILY_EVIDENCE_ENDPOINT",
+  "R2_DAILY_EVIDENCE_KEY",
 ];
 const config = {
   APP_NAME: "DBY POS",
@@ -72,7 +109,6 @@ const https = require("https");
 const http = require("http");
 const crypto = require("crypto");
 const zlib = require("zlib");
-const { createClient } = require("@supabase/supabase-js");
 
 function getEvidenceStorageConfigPath() {
   return path.join(app.getPath("userData"), "supabase-storage.json");
@@ -128,19 +164,176 @@ function loadEvidenceStorageConfig() {
 }
 
 const evidenceStorageConfig = loadEvidenceStorageConfig();
-const evidenceStorage =
-  evidenceStorageConfig.url && evidenceStorageConfig.serviceRoleKey
-    ? createClient(
-        evidenceStorageConfig.url,
-        evidenceStorageConfig.serviceRoleKey,
-        {
-          auth: { autoRefreshToken: false, persistSession: false },
-        },
-      )
-    : null;
+const hasEvidenceStorageConfig = Boolean(
+  evidenceStorageConfig.url && evidenceStorageConfig.serviceRoleKey,
+);
+let evidenceStorageClient;
+
+function getEvidenceStorageClient() {
+  if (!hasEvidenceStorageConfig) return null;
+  if (!evidenceStorageClient) {
+    const { createClient } = require("@supabase/supabase-js");
+    evidenceStorageClient = createClient(
+      evidenceStorageConfig.url,
+      evidenceStorageConfig.serviceRoleKey,
+      {
+        auth: { autoRefreshToken: false, persistSession: false },
+      },
+    );
+  }
+  return evidenceStorageClient;
+}
 const EVIDENCE_BUCKET = evidenceStorageConfig.bucket || "daily-task-evidence";
-const MAX_EVIDENCE_STORAGE_BYTES = 900 * 1024;
+const MAX_EVIDENCE_STORAGE_BYTES = 500 * 1024;
 const MAX_BUSINESS_DOCUMENT_BYTES = 15 * 1024 * 1024;
+const DAILY_EVIDENCE_R2_CACHE_TTL_MS = 30 * 60 * 1000;
+const DAILY_EVIDENCE_R2_CACHE_MAX_ITEMS = 50;
+const dailyEvidenceR2ImageCache = new Map();
+
+function readJsonFile(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return {};
+    return JSON.parse(fs.readFileSync(filePath, "utf8")) || {};
+  } catch (error) {
+    console.warn(`Unable to read runtime configuration at ${filePath}:`, error.message);
+    return {};
+  }
+}
+
+function loadDailyEvidenceR2Config() {
+  const userDataPath = app.getPath("userData");
+  const saved = readJsonFile(path.join(userDataPath, "r2-daily-evidence-bootstrap.json"));
+  // Existing test installations already have a device credential. Reuse it
+  // only as a migration fallback; new installations should provide the
+  // dedicated runtime file or environment variables.
+  const legacy = readJsonFile(path.join(userDataPath, "r2-test-bootstrap.json"));
+  return {
+    endpoint: String(
+      process.env.R2_DAILY_EVIDENCE_ENDPOINT ||
+        config.R2_DAILY_EVIDENCE_ENDPOINT ||
+        saved.endpoint ||
+        "https://dby-pos-daily-evidence.zicky-iluv.workers.dev",
+    )
+      .trim()
+      .replace(/\/+$/, ""),
+    key: String(
+      process.env.R2_DAILY_EVIDENCE_KEY ||
+        config.R2_DAILY_EVIDENCE_KEY ||
+        saved.key ||
+        saved.accessKey ||
+        legacy.testKey ||
+        "",
+    ).trim(),
+  };
+}
+
+const dailyEvidenceR2Config = loadDailyEvidenceR2Config();
+
+function getDailyEvidenceR2UnavailableMessage() {
+  return "R2 cho Công việc hàng ngày chưa được cấu hình trên máy này.";
+}
+
+async function requestDailyEvidenceR2(objectKey, options = {}) {
+  if (!dailyEvidenceR2Config.endpoint || !dailyEvidenceR2Config.key) {
+    throw new Error(getDailyEvidenceR2UnavailableMessage());
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const response = await fetch(
+      `${dailyEvidenceR2Config.endpoint}/objects/${encodeURIComponent(objectKey)}`,
+      {
+        ...options,
+        headers: {
+          authorization: `Bearer ${dailyEvidenceR2Config.key}`,
+          ...(options.headers || {}),
+        },
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok) {
+      let detail = "";
+      try {
+        const payload = await response.json();
+        detail = String(payload?.error || "");
+      } catch {
+        detail = "";
+      }
+      throw new Error(detail || `R2 trả về lỗi HTTP ${response.status}.`);
+    }
+    return response;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("Kết nối R2 quá lâu. Vui lòng thử lại.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function uploadDailyEvidenceToR2(objectKey, buffer, mimeType, hash) {
+  const response = await requestDailyEvidenceR2(objectKey, {
+    method: "POST",
+    headers: {
+      "content-type": mimeType,
+      "content-length": String(buffer.length),
+      "x-content-sha256": hash,
+    },
+    body: buffer,
+  });
+  return response.json();
+}
+
+async function deleteDailyEvidenceFromR2(objectKey) {
+  if (DATA_SAFETY_MODE) {
+    console.warn(
+      `[DataSafety] Preserved R2 evidence object instead of deleting: ${objectKey}`,
+    );
+    return { preserved: true };
+  }
+  await requestDailyEvidenceR2(objectKey, { method: "DELETE" });
+  dailyEvidenceR2ImageCache.delete(objectKey);
+  return { preserved: false };
+}
+
+// Compensation is limited to exact object keys uploaded by the current IPC
+// call. It cannot delete pre-existing evidence and is safe in data-safety mode.
+async function rollbackFreshDailyEvidenceUpload(objectKey) {
+  await requestDailyEvidenceR2(objectKey, { method: "DELETE" });
+  dailyEvidenceR2ImageCache.delete(objectKey);
+}
+
+async function downloadDailyEvidenceFromR2(objectKey, mimeType) {
+  const cached = dailyEvidenceR2ImageCache.get(objectKey);
+  if (cached && cached.expiresAt > Date.now() && cached.mimeType === mimeType) {
+    dailyEvidenceR2ImageCache.delete(objectKey);
+    dailyEvidenceR2ImageCache.set(objectKey, cached);
+    return cached.url;
+  }
+  if (cached) dailyEvidenceR2ImageCache.delete(objectKey);
+
+  const response = await requestDailyEvidenceR2(objectKey, { method: "GET" });
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (!buffer.length || buffer.length >= MAX_EVIDENCE_STORAGE_BYTES) {
+    throw new Error("Ảnh bằng chứng trên R2 không hợp lệ hoặc vượt quá 500 KB.");
+  }
+  if (!isValidEvidenceImage(buffer, mimeType)) {
+    throw new Error("Dữ liệu trên R2 không phải ảnh bằng chứng hợp lệ.");
+  }
+  const url = `data:${mimeType};base64,${buffer.toString("base64")}`;
+  dailyEvidenceR2ImageCache.set(objectKey, {
+    url,
+    mimeType,
+    expiresAt: Date.now() + DAILY_EVIDENCE_R2_CACHE_TTL_MS,
+  });
+  while (dailyEvidenceR2ImageCache.size > DAILY_EVIDENCE_R2_CACHE_MAX_ITEMS) {
+    const oldestKey = dailyEvidenceR2ImageCache.keys().next().value;
+    if (!oldestKey) break;
+    dailyEvidenceR2ImageCache.delete(oldestKey);
+  }
+  return url;
+}
 
 function decodeBusinessDocumentBase64(value) {
   if (typeof value !== "string" || !value) {
@@ -314,10 +507,14 @@ function ensureGoogleTokenPath() {
     if (!fs.existsSync(legacyPath)) continue;
     const tokens = readGoogleTokens(legacyPath);
     writeGoogleTokens(tokens, tokenPath);
-    if (legacyPath === getLegacyLocalGoogleTokenPath()) {
+    if (!DATA_SAFETY_MODE && legacyPath === getLegacyLocalGoogleTokenPath()) {
       fs.rmSync(legacyPath, { force: true });
     }
-    console.warn("[Drive] Migrated legacy Google token to Windows safeStorage.");
+    console.warn(
+      DATA_SAFETY_MODE
+        ? "[DataSafety] Copied legacy Google token to safeStorage and preserved the source file."
+        : "[Drive] Migrated legacy Google token to Windows safeStorage.",
+    );
     return tokenPath;
   }
 
@@ -829,6 +1026,10 @@ async function claimRuntimeIndexMigration() {
 }
 
 async function ensureRuntimePerformanceIndexes() {
+  if (DATA_SAFETY_MODE) {
+    console.warn("[DataSafety] Skipped automatic runtime index migration.");
+    return;
+  }
   if (!(await claimRuntimeIndexMigration())) return;
   try {
     const migrationClient = getPrismaDirectTx();
@@ -931,12 +1132,14 @@ try {
     .$connect()
     .then(() => {
       console.log("✅ Connected to Supabase PostgreSQL");
-      // Keep startup reads responsive; index maintenance is background-only.
-      const indexTimer = setTimeout(
-        () => void ensureRuntimePerformanceIndexes(),
-        30_000,
-      );
-      indexTimer.unref?.();
+      if (!DATA_SAFETY_MODE) {
+        // Keep startup reads responsive; index maintenance is background-only.
+        const indexTimer = setTimeout(
+          () => void ensureRuntimePerformanceIndexes(),
+          30_000,
+        );
+        indexTimer.unref?.();
+      }
     })
     .catch((err) => {
       console.error("❌ CRITICAL: Database connection failed!");
@@ -996,6 +1199,155 @@ const PUBLIC_IPC_CHANNELS = new Set([
   "users:getCurrentSession",
   "users:restoreSession",
 ]);
+const DATA_SAFETY_BLOCKED_CHANNELS = new Map([
+  ["products:delete", "Xóa sản phẩm"],
+  ["products:update", "Sửa sản phẩm có thể ghi đè thay đổi từ máy khác"],
+  ["products:updateStock", "Điều chỉnh tồn trực tiếp không gắn với giao dịch nghiệp vụ nguyên tử"],
+  ["inventory:manualAdjust", "Điều chỉnh tồn thủ công có thể làm sai lệch số liệu"],
+  ["inventoryLogs:create", "Tạo thẻ kho tách rời khỏi thay đổi tồn"],
+  ["exportOrders:adjustStock", "Điều chỉnh tồn tách rời khỏi phiếu xuất"],
+  ["refunds:adjustStock", "Điều chỉnh hoàn kho tách rời khỏi trạng thái phiếu hoàn"],
+  ["categories:delete", "Xóa danh mục"],
+  ["categories:update", "Sửa danh mục có thể ghi đè dữ liệu hiện tại"],
+  ["pickup:scan", "Quét vận đơn hiện ghi lại lịch sử cục bộ chưa có revision"],
+  ["pickup:exportPickup", "Xuất file có thể ghi đè tệp cục bộ đã tồn tại"],
+  ["posOrder:create", "Tạo đơn POS làm thay đổi tồn kho và nhiều bảng nghiệp vụ"],
+  ["posOrder:update", "Sửa đơn POS thay thế dòng hàng và hoàn/trừ lại tồn kho"],
+  ["posOrder:delete", "Hủy đơn POS làm hoàn tồn và đổi trạng thái đơn"],
+  ["handlingUnits:saveRegister", "Ghi sổ kiện có thể xóa các dòng bị thiếu"],
+  ["handlingUnits:deleteUnit", "Xóa kiện hàng"],
+  ["handlingUnits:createUnits", "Tạo kiện chưa có cơ chế hoàn tác và đối soát đa máy đã kiểm chứng"],
+  ["handlingUnits:createLocation", "Tạo vị trí kiện chưa có đối soát đa máy đã kiểm chứng"],
+  ["handlingUnits:createPackagingSpec", "Ghi quy cách kiện dùng JSON chung chưa có revision"],
+  ["handlingUnits:issueQrLabels", "Phát hành tem kiện chưa có rollback đã kiểm chứng"],
+  ["handlingUnits:markQrLabelsPrinted", "Cập nhật hàng loạt trạng thái tem chưa có rollback"],
+  ["handlingUnits:markQrLabelsReceived", "Cập nhật hàng loạt trạng thái tem chưa có rollback"],
+  ["handlingUnits:allocate", "Phân bổ kiện chưa có đối soát phục hồi đã kiểm chứng"],
+  ["handlingUnits:move", "Di chuyển kiện chưa có đối soát phục hồi đã kiểm chứng"],
+  ["handlingUnits:updateUnit", "Sửa kiện có thể ghi đè trạng thái dùng chung"],
+  ["handlingUnits:unsealUnit", "Khui kiện có đường fallback có thể làm lệch dữ liệu"],
+  ["handlingUnits:sealUnit", "Niêm phong kiện có thể ghi lệch hai nguồn dữ liệu"],
+  ["handlingUnits:pickUnit", "Rút hàng khỏi kiện chưa có đối soát phục hồi đã kiểm chứng"],
+  ["handlingUnits:requestFinalCheck", "Chuyển trạng thái chờ chốt kiện chưa có rollback đã kiểm chứng"],
+  ["handlingUnits:finalizePick", "Chốt kiện có thể làm lệch tồn và bộ đếm"],
+  ["handlingUnits:finalizeShiftCheck", "Chốt kiểm cuối ca có thể làm lệch tồn và bộ đếm"],
+  ["handlingUnits:exportLabelsPdf", "Xuất PDF tem có thể ghi đè tệp cục bộ đã tồn tại"],
+  ["purchases:deleteCompanyVATInvoice", "Xóa hóa đơn VAT công ty"],
+  ["purchases:update", "Sửa phiếu nhập hiện thay thế toàn bộ dòng hàng"],
+  ["purchases:create", "Tạo phiếu nhập thay đổi tồn kho và metadata nhiều bảng"],
+  ["purchases:delete", "Hủy phiếu nhập làm thay đổi trạng thái dữ liệu hiện tại"],
+  ["purchases:repairMissingPrices", "Sửa giá nhập hàng loạt chưa được đối chiếu dữ liệu thật"],
+  ["purchases:createVatGroup", "Tạo nhóm VAT ghi vào cấu hình JSON dùng chung"],
+  ["purchases:uploadVatGroupInvoice", "Upload VAT nhóm chưa atomic giữa Drive và database"],
+  ["purchases:uploadCompanyVATInvoice", "Upload VAT công ty chưa atomic giữa Drive và database"],
+  ["purchases:setCompanyVatStatus", "Đổi trạng thái VAT công ty có thể ghi đè trạng thái máy khác"],
+  ["purchases:uploadVATInvoice", "Upload hóa đơn VAT chưa atomic giữa Drive và database"],
+  ["purchases:uploadImportReceipt", "Upload phiếu nhập chưa atomic giữa Drive và database"],
+  ["purchases:markAsThht", "Đổi trạng thái phiếu nhập có thể ghi đè dữ liệu hiện tại"],
+  ["purchases:deleteImportReceipt", "Xóa phiếu nhập"],
+  ["purchases:deleteVatInvoice", "Xóa hóa đơn VAT"],
+  ["purchases:removeVatGroup", "Gỡ nhóm VAT làm mất liên kết phân nhóm hiện tại"],
+  ["goodsCompanies:delete", "Xóa công ty hàng hóa"],
+  ["goodsCompanies:create", "Tạo công ty hàng hóa ghi vào cấu hình dùng chung"],
+  ["goodsCompanies:update", "Sửa công ty hàng hóa có thể ghi đè cấu hình dùng chung"],
+  ["goodsCompanies:setProductCompany", "Gán công ty cho sản phẩm có thể ghi đè ánh xạ dùng chung"],
+  ["suppliers:delete", "Xóa nhà cung cấp"],
+  ["suppliers:update", "Sửa nhà cung cấp có thể ghi đè thay đổi từ máy khác"],
+  ["suppliers:deactivate", "Vô hiệu hóa nhà cung cấp làm thay đổi trạng thái nghiệp vụ"],
+  ["suppliers:reactivate", "Kích hoạt lại nhà cung cấp làm thay đổi trạng thái nghiệp vụ"],
+  ["supplierDebt:updateImportAmount", "Sửa sổ nợ JSON dùng chung chưa có revision"],
+  ["supplierDebt:addLegacyImport", "Ghi sổ nợ legacy JSON dùng chung chưa có revision"],
+  ["supplierDebt:saveBankDetails", "Ghi thông tin ngân hàng JSON dùng chung chưa có revision"],
+  ["supplierDebt:confirmPayment", "Xác nhận thanh toán hiện cắt lịch sử cũ và ghi whole-JSON"],
+  ["database:importAll", "Nhập dữ liệu có thể ghi đè dữ liệu hiện tại"],
+  ["database:exportAll", "Xuất dữ liệu có thể ghi đè tệp cục bộ đã tồn tại"],
+  ["system:restore", "Khôi phục có thể ghi đè dữ liệu hiện tại"],
+  ["system:browseAndRestore", "Khôi phục từ tệp có thể ghi đè dữ liệu hiện tại"],
+  ["system:deleteBackup", "Xóa bản sao lưu"],
+  ["dailyTasks:delete", "Xóa công việc hàng ngày"],
+  ["dailyTasks:resetDaily", "Reset ngày có thể thay đổi hàng loạt công việc"],
+  ["dailyTasks:uploadEvidenceImage", "Upload bằng chứng chưa atomic giữa storage và database"],
+  ["dailyTasks:submitEvidence", "Nộp bằng chứng chưa atomic giữa storage, lịch sử và công việc"],
+  ["dailyTasks:reviewEvidence", "Duyệt bằng chứng thay đổi nhiều nguồn chưa có rollback"],
+  ["dailyTasks:completeRegularTask", "Hoàn thành công việc thay đổi nhiều nguồn chưa có rollback"],
+  ["dailyTasks:create", "Tạo công việc hiện kích hoạt các luồng tự động chưa được cô lập"],
+  ["dailyTasks:createAssignments", "Tạo bàn giao hàng loạt chưa có rollback đầy đủ"],
+  ["dailyTasks:requestAssignmentCompletion", "Yêu cầu hoàn thành bàn giao chưa có revision đa máy"],
+  ["dailyTasks:update", "Sửa công việc và lịch sử chưa atomic"],
+  ["dailyTasks:updateStatus", "Đổi trạng thái và lịch sử chưa atomic"],
+  ["combos:delete", "Xóa combo"],
+  ["combos:update", "Sửa combo có thể ghi đè cấu phần hiện tại"],
+  ["carrierComplaints:saveConfig", "Lưu cấu hình khiếu nại ghi đè JSON dùng chung"],
+  ["carrierComplaints:reconcile", "Đối soát khiếu nại thay đổi hàng loạt trạng thái"],
+  ["carrierComplaints:send", "Gửi khiếu nại có tác dụng ngoài hệ thống và ghi lịch sử"],
+  ["ecommerceExports:create", "Tạo phiếu TMĐT có thể tác động tồn kho và đơn liên kết"],
+  ["ecommerceExports:update", "Sửa phiếu TMĐT có thể hoàn/trừ tồn và tạo đơn liên kết"],
+  ["ecommerceExports:bulkCancel", "Hủy hàng loạt phiếu TMĐT ghi đè trạng thái hiện tại"],
+  ["ecommerceExports:delete", "Xóa phiếu xuất TMĐT"],
+  ["ecommerceExports:bulkDelete", "Xóa hàng loạt phiếu xuất TMĐT"],
+  ["ecommerceExports:deleteAll", "Xóa toàn bộ phiếu xuất TMĐT"],
+  ["ecommerceExports:deleteCancelled", "Xóa phiếu xuất TMĐT đã hủy"],
+  ["ecommerceExports:bulkCreate", "Nhập TMĐT hiện xóa dữ liệu trước khi kiểm tra hoàn tất"],
+  ["marketplaceOrders:delete", "Xóa đơn sàn"],
+  ["exportOrders:delete", "Xóa phiếu xuất kho"],
+  ["exportOrders:saveWithStock", "Lưu phiếu xuất đồng thời thay đổi tồn kho"],
+  ["exportOrders:create", "Tạo phiếu xuất chưa được xác minh đầy đủ với tồn kho đa máy"],
+  ["exportOrders:update", "Sửa phiếu xuất có thể ghi đè dữ liệu hiện tại"],
+  ["returns:delete", "Xóa phiếu hoàn"],
+  ["returns:update", "Sửa phiếu trả hàng có thể ghi đè dữ liệu hiện tại"],
+  ["returns:bulkCreate", "Nhập hàng loạt phiếu trả có thể partial-commit và tạo trùng khi retry"],
+  ["refunds:delete", "Xóa phiếu hoàn tiền"],
+  ["refunds:update", "Sửa phiếu hoàn tiền có thể ghi đè dữ liệu hiện tại"],
+  ["refunds:bulkCreate", "Nhập hàng loạt phiếu hoàn có thể partial-commit và tạo trùng khi retry"],
+  ["refunds:completeAndRestore", "Hoàn tất phiếu và cộng kho là thay đổi tồn kho nghiệp vụ"],
+  ["refunds:bulkDelete", "Xóa hàng loạt phiếu hoàn tiền"],
+  ["users:delete", "Xóa người dùng"],
+  ["users:update", "Sửa tài khoản có thể ghi đè quyền và trạng thái người dùng"],
+  ["users:updateProfile", "Sửa hồ sơ có thể ghi đè dữ liệu người dùng"],
+  ["users:resetPassword", "Đặt lại mật khẩu có thể làm mất quyền truy cập hiện tại"],
+  ["users:forcePasswordChange", "Ép đổi mật khẩu làm thay đổi trạng thái đăng nhập"],
+  ["users:ensureAdmin", "Tự tạo tài khoản quản trị làm thay đổi dữ liệu xác thực"],
+  ["dailyExpenses:delete", "Xóa chi phí hàng ngày"],
+  ["dailyExpenses:upsert", "Ghi chi phí theo ngày có thể ghi đè bản ghi hiện tại"],
+  ["einvoice:delete", "Xóa hóa đơn điện tử"],
+  ["einvoice:bulkDelete", "Xóa hàng loạt hóa đơn điện tử"],
+  ["einvoice:deleteAll", "Xóa toàn bộ hóa đơn điện tử"],
+  ["einvoice:issueInvoices", "Phát hành hóa đơn chưa có cơ chế chống phát hành trùng đã kiểm chứng"],
+  ["einvoice:bulkImport", "Nhập hóa đơn hàng loạt có thể partial-commit và tạo trùng khi retry"],
+  ["einvoice:adjustInvoice", "Điều chỉnh hóa đơn hiện chưa đồng bộ thật với MISA"],
+  ["einvoice:exportExcel", "Xuất Excel hóa đơn có thể ghi đè tệp cục bộ đã tồn tại"],
+  ["misa:saveConfig", "Lưu cấu hình có thể loại mật khẩu dùng chung trước khi các máy đã di trú an toàn"],
+  ["misa:downloadPDF", "Tải PDF hóa đơn có thể ghi đè tệp cục bộ đã tồn tại"],
+  ["attendance:deleteProfile", "Xóa hồ sơ chấm công"],
+  ["attendance:register", "Đăng ký khuôn mặt có thể ghi đè hồ sơ và ảnh hiện tại"],
+  ["attendance:recognize", "Ghi log chấm công chưa có claim chống race đa máy đã kiểm chứng"],
+  ["attendance:saveEmployeeProfile", "Lưu hồ sơ nhân viên có thể ghi đè dữ liệu chấm công"],
+  ["attendance:savePayslipPDF", "Lưu phiếu lương có thể ghi đè tệp cục bộ đã tồn tại"],
+  ["attendance:reconcileLateFines", "Đối soát phạt hiện ghi đè toàn bộ dữ liệu chấm công"],
+  ["offlineQueue:sync", "Đồng bộ hàng đợi có thể phát lại và xóa tệp chờ"],
+  ["stockBalance:adjustStock", "Điều chỉnh tồn và lịch sử đang chạy qua hai giao dịch tách rời"],
+  ["stockBalance:create", "Ghi lịch sử cân bằng tách rời khỏi thay đổi tồn kho"],
+  ["stockCheck:balanceItems", "Cân bằng nhiều mặt hàng làm thay đổi tồn kho"],
+  ["stockCheck:ensureDailySession", "Tạo hoặc sửa phiên kiểm kho dùng chung"],
+  ["stockCheck:createRecheckSession", "Tạo phiên kiểm lại làm thay đổi luồng kiểm kho"],
+  ["stockCheck:adminSaveSessions", "Admin lưu toàn bộ phiên kiểm kho có thể ghi đè dữ liệu"],
+  ["stockCheck:updateCount", "Sửa số đếm kiểm kho có thể ghi đè từ máy khác"],
+  ["stockCheck:retryCount", "Đếm lại làm thay đổi kết quả kiểm kho hiện tại"],
+  ["stockCheck:updateNote", "Sửa ghi chú kiểm kho có thể ghi đè thay đổi từ máy khác"],
+  ["stockCheck:balanceItem", "Cân bằng một mặt hàng làm thay đổi tồn kho"],
+  ["stockCheck:submitSession", "Nộp phiên kiểm kho thay đổi nhiều bảng và trạng thái"],
+  ["appConfig:set", "Ghi cấu hình JSON dùng chung chưa có revision/merge chống ghi đè đa máy"],
+  ["update:download", "Tải bản cập nhật có thể thay đổi cây ứng dụng đang chạy"],
+  ["update:check", "Tự động kiểm tra hiện có thể kích hoạt luồng cập nhật bắt buộc"],
+  ["update:restoreVersion", "Khôi phục phiên bản có thể ghi đè cây ứng dụng"],
+  ["update:restart", "Khởi động lại có thể áp dụng gói cập nhật đang chờ"],
+]);
+
+function getDataSafetyBlockedOperation(channel, args) {
+  const operation = DATA_SAFETY_BLOCKED_CHANNELS.get(channel);
+  if (operation) return operation;
+  return null;
+}
 const SESSION_STATUS_EXEMPT_CHANNELS = new Set([
   "users:login",
   "users:logout",
@@ -1086,9 +1438,7 @@ ipcMain.handle = (channel, listener) =>
         !event?.sender?.mainFrame || senderFrame === event.sender.mainFrame;
       const isTrustedDevOrigin =
         !app.isPackaged &&
-        parsedSenderUrl.protocol === "http:" &&
-        ["localhost", "127.0.0.1"].includes(parsedSenderUrl.hostname) &&
-        parsedSenderUrl.port === "5173";
+        parsedSenderUrl.origin === TRUSTED_DEVELOPMENT_ORIGIN;
       const isTrustedPackagedPage =
         parsedSenderUrl.protocol === "file:" &&
         decodeURIComponent(parsedSenderUrl.pathname)
@@ -1099,6 +1449,18 @@ ipcMain.handle = (channel, listener) =>
     } catch {}
     if (!trustedSender) {
       throw new Error(`IPC sender không hợp lệ cho channel ${channel}`);
+    }
+    const blockedOperation =
+      DATA_SAFETY_MODE && !DATA_SAFETY_ALLOWED_CHANNELS.has(channel)
+      ? getDataSafetyBlockedOperation(channel, args)
+      : null;
+    if (blockedOperation) {
+      console.warn(`[DataSafety] Blocked ${channel}: ${blockedOperation}`);
+      return {
+        success: false,
+        blocked: true,
+        error: `${blockedOperation} đang tạm khóa để bảo vệ dữ liệu. Không có dữ liệu nào bị thay đổi.`,
+      };
     }
     if (!PUBLIC_IPC_CHANNELS.has(channel) && !currentSession) {
       throw new Error("Chưa đăng nhập");
@@ -1317,8 +1679,9 @@ async function recordFailedLogin(user) {
 }
 
 async function revokeRememberTokensForUser(userId) {
-  const tokens = await readRememberTokens();
-  await writeRememberTokens(tokens.filter((token) => token?.userId !== userId));
+  await mutateRememberTokens((tokens) =>
+    tokens.filter((token) => token?.userId !== userId),
+  );
 }
 
 function requireRole(...roles) {
@@ -1394,13 +1757,36 @@ async function readRememberTokens() {
   }
 }
 
-async function writeRememberTokens(tokens) {
-  if (!prisma) return;
-  await prisma.appConfig.upsert({
-    where: { key: REMEMBER_TOKENS_KEY },
-    update: { value: JSON.stringify(tokens) },
-    create: { key: REMEMBER_TOKENS_KEY, value: JSON.stringify(tokens) },
-  });
+async function mutateRememberTokens(mutator) {
+  if (!prisma) return [];
+  return getPrismaDirectTx().$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${REMEMBER_TOKENS_KEY}))`;
+      const config = await tx.appConfig.findUnique({
+        where: { key: REMEMBER_TOKENS_KEY },
+      });
+      let current = [];
+      try {
+        const parsed = JSON.parse(config?.value || "[]");
+        current = Array.isArray(parsed) ? parsed : [];
+      } catch {}
+      const next = mutator(current);
+      if (!Array.isArray(next)) {
+        throw new Error("Danh sách remember token sau cập nhật không hợp lệ.");
+      }
+      await tx.appConfig.upsert({
+        where: { key: REMEMBER_TOKENS_KEY },
+        update: { value: JSON.stringify(next) },
+        create: { key: REMEMBER_TOKENS_KEY, value: JSON.stringify(next) },
+      });
+      return next;
+    },
+    {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      timeout: 10000,
+      maxWait: 10000,
+    },
+  );
 }
 
 async function issueRememberToken(userId) {
@@ -1408,29 +1794,31 @@ async function issueRememberToken(userId) {
   const now = Date.now();
   const expiresAt = new Date(now + REMEMBER_TOKEN_TTL_MS).toISOString();
   const tokenHash = hashRememberToken(rawToken);
-  const tokens = (await readRememberTokens()).filter(
-    (t) =>
-      t &&
-      t.expiresAt &&
-      new Date(t.expiresAt).getTime() > now &&
-      t.userId !== userId,
-  );
-  tokens.push({
-    id: crypto.randomUUID(),
-    userId,
-    tokenHash,
-    createdAt: new Date(now).toISOString(),
-    expiresAt,
-  });
-  await writeRememberTokens(tokens.slice(-50));
+  await mutateRememberTokens((tokens) => [
+    ...tokens.filter(
+      (token) =>
+        token &&
+        token.expiresAt &&
+        new Date(token.expiresAt).getTime() > now &&
+        token.userId !== userId,
+    ),
+    {
+      id: crypto.randomUUID(),
+      userId,
+      tokenHash,
+      createdAt: new Date(now).toISOString(),
+      expiresAt,
+    },
+  ]);
   return rawToken;
 }
 
 async function revokeRememberToken(rawToken) {
   if (!rawToken) return;
   const tokenHash = hashRememberToken(rawToken);
-  const tokens = await readRememberTokens();
-  await writeRememberTokens(tokens.filter((t) => t?.tokenHash !== tokenHash));
+  await mutateRememberTokens((tokens) =>
+    tokens.filter((token) => token?.tokenHash !== tokenHash),
+  );
 }
 
 // ========================================
@@ -1488,10 +1876,13 @@ function logActivity({
   return activityLogQueue;
 }
 
-// ========================================
-// AUTO CLEANUP - Xóa log cũ hơn 7 ngày
-// ========================================
+// Automatic retention is disabled while data-safety mode is active. Records
+// must be archived through a reviewed, recoverable workflow before deletion.
 async function cleanupOldLogs() {
+  if (DATA_SAFETY_MODE) {
+    console.warn("[DataSafety] Skipped automatic log/export cleanup.");
+    return { skipped: true };
+  }
   try {
     if (!prisma) return;
 
@@ -1526,11 +1917,10 @@ async function cleanupOldLogs() {
   }
 }
 
-// Chạy cleanup khi app khởi động (delay 10s để DB sẵn sàng)
-setTimeout(cleanupOldLogs, 10000);
-
-// Lặp lại mỗi 24 tiếng
-setInterval(cleanupOldLogs, 24 * 60 * 60 * 1000);
+if (!DATA_SAFETY_MODE) {
+  setTimeout(cleanupOldLogs, 10000);
+  setInterval(cleanupOldLogs, 24 * 60 * 60 * 1000);
+}
 
 // ========================================
 // SYSTEM INFO
@@ -2243,13 +2633,24 @@ ipcMain.handle("products:getTopSelling", async (event, { limit = 10 } = {}) => {
             status: "completed",
             createdAt: { gte: since90Days },
           },
-          include: { items: true },
+          select: {
+            items: {
+              select: {
+                sku: true,
+                productName: true,
+                quantity: true,
+                productId: true,
+              },
+            },
+          },
         }),
         prisma.ecommerceExport.findMany({
           where: { status: "completed", createdAt: { gte: since90Days } },
+          select: { items: true },
         }),
         prisma.exportOrder.findMany({
           where: { status: "completed", createdAt: { gte: since90Days } },
+          select: { items: true },
         }),
       ]);
 
@@ -3610,56 +4011,16 @@ async function performStockUpdate({
   allowMissing = false,
 }) {
   if (!prisma) throw new Error("Database chưa được khởi tạo.");
-  const delta = isAdd ? quantity : -quantity;
-
   const response = await withStockLock(() =>
     getPrismaDirectTx().$transaction(
-      async (tx) => {
-        // Manual warehouse exports must never drive stock negative. This check
-        // runs inside the same transaction/DB lock as the mutation and also
-        // validates every component when the requested SKU is a combo.
-        if (
-          !isAdd &&
-          String(logContext?.referenceType || "").toUpperCase() === "XUAT"
-        ) {
-          await assertSaleStockAvailable(tx, sku, quantity);
-        }
-        const combo = await tx.comboProduct.findUnique({ where: { sku } });
-        if (combo) {
-          const items = JSON.parse(combo.items || "[]");
-          const updateResults = [];
-          for (const item of items) {
-            const componentQty = Number(item.quantity || 0) * quantity;
-            const componentDelta = isAdd ? componentQty : -componentQty;
-            updateResults.push(
-              await updateProductStockInTx(
-                tx,
-                item.sku,
-                componentDelta,
-                logContext,
-                { allowMissing },
-              ),
-            );
-          }
-          return { success: true, isCombo: true, deductResults: updateResults };
-        }
-
-        const result = await updateProductStockInTx(
-          tx,
+      (tx) =>
+        performStockUpdateInTx(tx, {
           sku,
-          delta,
+          quantity,
+          isAdd,
           logContext,
-          { allowMissing },
-        );
-        if (result === false) {
-          return {
-            success: false,
-            skipped: true,
-            error: `SKU "${sku}" không tìm thấy trong kho`,
-          };
-        }
-        return { success: true, data: result };
-      },
+          allowMissing,
+        }),
       { timeout: 30000, maxWait: 10000 },
     ),
   );
@@ -3674,6 +4035,53 @@ async function performStockUpdate({
     });
   }
   return response;
+}
+
+async function performStockUpdateInTx(
+  tx,
+  { sku, quantity, isAdd = false, logContext, allowMissing = false },
+) {
+  if (
+    !isAdd &&
+    String(logContext?.referenceType || "").toUpperCase() === "XUAT"
+  ) {
+    await assertSaleStockAvailable(tx, sku, quantity);
+  }
+  const combo = await tx.comboProduct.findUnique({ where: { sku } });
+  if (combo) {
+    const items = JSON.parse(combo.items || "[]");
+    const updateResults = [];
+    for (const item of items) {
+      const componentQty = Number(item.quantity || 0) * quantity;
+      const componentDelta = isAdd ? componentQty : -componentQty;
+      updateResults.push(
+        await updateProductStockInTx(
+          tx,
+          item.sku,
+          componentDelta,
+          logContext,
+          { allowMissing },
+        ),
+      );
+    }
+    return { success: true, isCombo: true, deductResults: updateResults };
+  }
+
+  const result = await updateProductStockInTx(
+    tx,
+    sku,
+    isAdd ? quantity : -quantity,
+    logContext,
+    { allowMissing },
+  );
+  if (result === false) {
+    return {
+      success: false,
+      skipped: true,
+      error: `SKU "${sku}" không tìm thấy trong kho`,
+    };
+  }
+  return { success: true, data: result };
 }
 
 async function handleDedicatedStockMutation(data, roles, referenceTypes) {
@@ -3763,25 +4171,40 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
           if (refund.status === "completed")
             throw new Error("Phiếu hàng hoàn này đã được xác nhận trước đó.");
 
-          // Stock restoration must be based on the persisted return receipt,
-          // never a caller-controlled items payload from the renderer.
-          let items = [];
+          let persistedItems = [];
           try {
-            items = JSON.parse(refund.items || "[]");
+            persistedItems = JSON.parse(refund.items || "[]");
           } catch {
-            items = [];
+            persistedItems = [];
           }
 
-          const normalizedItems = items
-            .map((item) => ({
-              sku: String(item?.sku || item?.variantSku || "").trim(),
-              quantity: Number(item?.quantity ?? item?.qty ?? 0),
-              name: String(item?.name || item?.productName || "").trim(),
-            }))
-            .filter(
-              (item) =>
-                item.sku && Number.isFinite(item.quantity) && item.quantity > 0,
-            );
+          const customItems = data.isCustom ? data.items : null;
+          if (data.isCustom && (!Array.isArray(customItems) || customItems.length === 0)) {
+            throw new Error("Danh sách hàng thực nhận không hợp lệ.");
+          }
+          if (Array.isArray(customItems) && customItems.length > 200) {
+            throw new Error("Danh sách hàng thực nhận vượt quá 200 dòng.");
+          }
+          const items = data.isCustom ? customItems : persistedItems;
+
+          const normalizedBySku = new Map();
+          for (const item of Array.isArray(items) ? items : []) {
+            const sku = String(item?.sku || item?.variantSku || "").trim();
+            const quantity = Number(item?.quantity ?? item?.qty ?? 0);
+            if (!sku || !Number.isFinite(quantity) || quantity <= 0) continue;
+            if (data.isCustom && (!Number.isInteger(quantity) || quantity > 100000)) {
+              throw new Error(`Số lượng thực nhận của SKU ${sku} không hợp lệ.`);
+            }
+            const previous = normalizedBySku.get(sku);
+            normalizedBySku.set(sku, {
+              sku,
+              quantity: Number(previous?.quantity || 0) + quantity,
+              name: String(
+                item?.name || item?.productName || previous?.name || "",
+              ).trim(),
+            });
+          }
+          const normalizedItems = [...normalizedBySku.values()];
           if (normalizedItems.length === 0)
             throw new Error("Phiếu hoàn không có SKU hợp lệ để cộng kho.");
 
@@ -3898,9 +4321,8 @@ async function buildSkuCache(tx) {
  * @param {object} tx - Prisma transaction
  * @param {Array<{sku: string, quantity: number}>} skuChanges - Danh sách {sku, quantity} (quantity < 0 = trừ kho)
  * @param {object} logContext - Context log cho inventory
- * @param {object} skuCache - Cache từ buildSkuCache()
  */
-async function batchStockUpdate(tx, skuChanges, logContext, skuCache) {
+async function batchStockUpdate(tx, skuChanges, logContext) {
   await lockGlobalInventoryMutation(tx);
   // Rebuild after acquiring the database lock. A cache created before the
   // lock could contain a stale variants JSON document from another client.
@@ -5054,9 +5476,15 @@ async function savePurchaseItemCompanies(companies, client = prisma) {
   });
 }
 
-async function getPurchaseItemPackaging() {
-  if (!prisma) return {};
-  const config = await prisma.appConfig.findUnique({
+async function lockPurchaseMetadata(tx) {
+  for (const key of [PURCHASE_ITEM_COMPANIES_KEY, PURCHASE_ITEM_PACKAGING_KEY].sort()) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+  }
+}
+
+async function getPurchaseItemPackaging(client = prisma) {
+  if (!client) return {};
+  const config = await client.appConfig.findUnique({
     where: { key: PURCHASE_ITEM_PACKAGING_KEY },
   });
   if (!config?.value) return {};
@@ -5068,8 +5496,9 @@ async function getPurchaseItemPackaging() {
   }
 }
 
-async function savePurchaseItemPackaging(purchaseId, items) {
-  const packaging = await getPurchaseItemPackaging();
+async function savePurchaseItemPackaging(purchaseId, items, client = prisma) {
+  if (!client) throw new Error("Prisma not available");
+  const packaging = await getPurchaseItemPackaging(client);
   const byLineKey = Object.fromEntries(
     (items || [])
       .map((item) => {
@@ -5109,7 +5538,7 @@ async function savePurchaseItemPackaging(purchaseId, items) {
   if (Object.keys(byLineKey).length > 0)
     packaging[String(purchaseId)] = { byLineKey };
   else delete packaging[String(purchaseId)];
-  await prisma.appConfig.upsert({
+  await client.appConfig.upsert({
     where: { key: PURCHASE_ITEM_PACKAGING_KEY },
     update: { value: JSON.stringify(packaging) },
     create: {
@@ -5228,6 +5657,7 @@ ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
       purchaseItemPackaging,
       purchaseCompanyVat,
       goodsCompanies,
+      purchases,
     ] = await Promise.all([
       getPurchaseVatGroups(),
       getPurchaseVatFileMeta(),
@@ -5235,51 +5665,50 @@ ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
       getPurchaseItemPackaging(),
       getPurchaseCompanyVat(),
       readGoodsCompanies(),
-    ]);
-
-    const purchases = await prisma.purchaseOrder.findMany({
-      where: {
-        status: { not: "cancelled" },
-        ...(since ? { createdAt: { gte: new Date(since) } } : {}),
-      },
-      select: {
-        id: true,
-        poNumber: true,
-        supplierId: true,
-        status: true,
-        subtotal: true,
-        total: true,
-        note: true,
-        createdBy: true,
-        receivedAt: true,
-        createdAt: true,
-        vatInvoiceStatus: true,
-        vatInvoiceNumber: true,
-        vatInvoiceDate: true,
-        vatInvoiceFile: true,
-        vatInvoiceDriveUrl: true,
-        importReceiptStatus: true,
-        importReceiptFile: true,
-        importReceiptDriveUrl: true,
-        supplier: { select: { id: true, name: true, code: true } },
-        items: {
-          select: {
-            id: true,
-            productId: true,
-            quantity: true,
-            price: true,
-            subtotal: true,
-            color: true,
-            variantSku: true,
-            product: { select: { name: true, sku: true, unit: true } },
+      prisma.purchaseOrder.findMany({
+        where: {
+          status: { not: "cancelled" },
+          ...(since ? { createdAt: { gte: new Date(since) } } : {}),
+        },
+        select: {
+          id: true,
+          poNumber: true,
+          supplierId: true,
+          status: true,
+          subtotal: true,
+          total: true,
+          note: true,
+          createdBy: true,
+          receivedAt: true,
+          createdAt: true,
+          vatInvoiceStatus: true,
+          vatInvoiceNumber: true,
+          vatInvoiceDate: true,
+          vatInvoiceFile: true,
+          vatInvoiceDriveUrl: true,
+          importReceiptStatus: true,
+          importReceiptFile: true,
+          importReceiptDriveUrl: true,
+          supplier: { select: { id: true, name: true, code: true } },
+          items: {
+            select: {
+              id: true,
+              productId: true,
+              quantity: true,
+              price: true,
+              subtotal: true,
+              color: true,
+              variantSku: true,
+              product: { select: { name: true, sku: true, unit: true } },
+            },
           },
         },
-      },
-      orderBy: { createdAt: "desc" },
-      // Không tự cắt lịch sử: màn hình Nhập hàng cần xem được toàn bộ phiếu.
-      // Caller nào cần giới hạn vẫn có thể truyền `limit`.
-      ...(Number.isFinite(Number(limit)) ? { take: Number(limit) } : {}),
-    });
+        orderBy: { createdAt: "desc" },
+        // Không tự cắt lịch sử: màn hình Nhập hàng cần xem được toàn bộ phiếu.
+        // Caller nào cần giới hạn vẫn có thể truyền `limit`.
+        ...(Number.isFinite(Number(limit)) ? { take: Number(limit) } : {}),
+      }),
+    ]);
 
     const goodsCompanyByProductId = new Map();
     goodsCompanies.forEach((company) => {
@@ -5373,7 +5802,7 @@ ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
         companyVatAliasesChanged = true;
       }
     });
-    if (companyVatAliasesChanged)
+    if (companyVatAliasesChanged && !DATA_SAFETY_MODE)
       await savePurchaseCompanyVat(purchaseCompanyVat);
 
     // Older edit flows could reset vatInvoiceStatus to `pending` while
@@ -5389,15 +5818,19 @@ ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
       )
       .map((p) => p.id);
     if (recoverableVatIds.length > 0) {
-      await prisma.purchaseOrder.updateMany({
-        where: { id: { in: recoverableVatIds }, vatInvoiceStatus: "pending" },
-        data: { vatInvoiceStatus: "uploaded" },
-      });
+      if (!DATA_SAFETY_MODE) {
+        await prisma.purchaseOrder.updateMany({
+          where: { id: { in: recoverableVatIds }, vatInvoiceStatus: "pending" },
+          data: { vatInvoiceStatus: "uploaded" },
+        });
+      }
       purchases.forEach((p) => {
         if (recoverableVatIds.includes(p.id)) p.vatInvoiceStatus = "uploaded";
       });
       console.log(
-        `♻️ Recovered VAT status for ${recoverableVatIds.length} purchase receipt(s).`,
+        DATA_SAFETY_MODE
+          ? `[DataSafety] Displayed recoverable VAT status for ${recoverableVatIds.length} purchase receipt(s) without writing it back.`
+          : `♻️ Recovered VAT status for ${recoverableVatIds.length} purchase receipt(s).`,
       );
     }
 
@@ -5829,7 +6262,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
     const missingWithdrawalCodes = [...withdrawalCodes].filter(
       (code) => !persistedWithdrawalCodes.has(code),
     );
-    if (missingWithdrawalCodes.length > 0) {
+    if (missingWithdrawalCodes.length > 0 && !DATA_SAFETY_MODE) {
       void prisma.appConfig
         .createMany({
           data: missingWithdrawalCodes.map((code) => ({
@@ -6737,6 +7170,14 @@ ipcMain.handle("handlingUnits:updateUnit", async (_event, payload = {}) => {
     const result = await prisma.$transaction(async (tx) => {
       const before = await tx.handlingUnit.findUnique({ where: { code } });
       if (!before) throw new Error(`Không tìm thấy kiện [${code}].`);
+      if (
+        before.status === "pending_check" &&
+        remainingQuantity !== Number(before.remainingQuantity)
+      ) {
+        throw new Error(
+          `Kiện [${code}] đang chờ kiểm thực tế. Không được sửa số lượng để bỏ qua bước kiểm; hãy dùng nút Kiểm thực tế và nhập số lượng thực tế của kiện.`,
+        );
+      }
 
       let status = before.status;
       if (remainingQuantity === 0 && status !== "pending_check") status = "empty";
@@ -7565,6 +8006,40 @@ async function executeKhuiKien(
           where: { code: normalizedCode },
         });
         if (!unit) return null;
+        const packageCategory = getHandlingUnitPackageCategory(unit.packagingName);
+        // Serialize opens for one SKU so two desktops cannot bypass the
+        // pending-check gate at the same time.
+        try {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-open:${unit.sku}`}))`;
+        } catch {
+          // Local SQLite test databases do not expose PostgreSQL advisory locks.
+        }
+        const pendingConflict = await tx.handlingUnit.findFirst({
+          where: {
+            sku: unit.sku,
+            code: { not: normalizedCode },
+            status: "pending_check",
+          },
+          select: { code: true, status: true, remainingQuantity: true, baseUnit: true, packagingName: true },
+        });
+        if (pendingConflict) {
+          throw new Error(buildPendingHandlingUnitBlockMessage(unit.sku, pendingConflict, "khui kiện mới"));
+        }
+        if (packageCategory !== "LE") {
+          const conflict = await tx.handlingUnit.findFirst({
+            where: {
+              sku: unit.sku,
+              code: { not: normalizedCode },
+              status: "opened",
+            },
+            select: { code: true, status: true, remainingQuantity: true, baseUnit: true, packagingName: true },
+          });
+          if (conflict && getHandlingUnitPackageCategory(conflict.packagingName) === packageCategory) {
+            throw new Error(
+              `SKU [${unit.sku}] chưa được khui kiện mới: kiện [${conflict.code}] đang mở (còn ${conflict.remainingQuantity} ${conflict.baseUnit}). Hãy kiểm kiện cũ trước.`,
+            );
+          }
+        }
         if (unit.status === "opened")
           throw new Error(`Kiện [${normalizedCode}] đang mở sẵn rồi.`);
         if (unit.status === "pending_check")
@@ -7632,6 +8107,30 @@ async function executeKhuiKien(
     throw new Error(`Không tìm thấy kiện [${normalizedCode}] trong hệ thống.`);
 
   const target = list[idx];
+  const targetCategory = getHandlingUnitPackageCategory(target.packagingName || target.packageType);
+  const sameSkuUnits = list.filter((candidate) =>
+    String(candidate.code || candidate.id || "").trim().toUpperCase() !== normalizedCode
+    && String(candidate.sku || candidate.skuName || "").trim().toUpperCase() === String(target.sku || target.skuName || "").trim().toUpperCase(),
+  );
+  const pendingConflict = sameSkuUnits.find((candidate) =>
+    candidate.status === "pending_check" || candidate.status === "Chờ kiểm",
+  );
+  if (pendingConflict) {
+    throw new Error(buildPendingHandlingUnitBlockMessage(
+      target.sku || target.skuName,
+      pendingConflict,
+      "khui kiện mới",
+    ));
+  }
+  if (targetCategory !== "LE") {
+    const openedConflict = sameSkuUnits.find((candidate) =>
+      (candidate.status === "opened" || candidate.status === "Đang sử dụng")
+      && getHandlingUnitPackageCategory(candidate.packagingName || candidate.packageType) === targetCategory,
+    );
+    if (openedConflict) {
+      throw new Error(`SKU [${target.sku || target.skuName}] chưa được khui kiện mới: kiện [${openedConflict.code || openedConflict.id}] đang mở. Hãy kiểm kiện cũ trước.`);
+    }
+  }
   if (target.status === "opened" || target.status === "Đang sử dụng")
     throw new Error(`Kiện [${normalizedCode}] đang mở sẵn rồi.`);
   if (target.status === "pending_check" || target.status === "Chờ kiểm")
@@ -7694,6 +8193,22 @@ function normalizeHandlingPickDestination(value) {
 }
 
 const HANDLING_UNIT_WITHDRAWAL_HISTORY_PREFIX = "handlingUnitWithdrawal:";
+
+function getHandlingUnitPackageCategory(value) {
+  const text = String(value || "").toLocaleLowerCase("vi-VN");
+  if (text.includes("tải") || text.includes("sack")) return "TAI";
+  if (text.includes("thùng") || text.includes("carton") || text.includes("box")) return "THUNG";
+  return "LE";
+}
+
+function buildPendingHandlingUnitBlockMessage(sku, pendingUnit, action) {
+  const code = pendingUnit?.code || pendingUnit?.id || "không xác định";
+  const remaining = Number(
+    pendingUnit?.remainingQuantity ?? pendingUnit?.currentPcs ?? 0,
+  );
+  const baseUnit = pendingUnit?.baseUnit || pendingUnit?.unitName || "đơn vị";
+  return `Không thể ${action}. SKU [${sku}] đang có kiện [${code}] chờ kiểm thực tế (tồn theo sổ: ${remaining} ${baseUnit}). Vui lòng vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước.`;
+}
 
 async function getHandlingUnitWithdrawalCodes(tx) {
   const rows = await tx.appConfig.findMany({
@@ -7808,6 +8323,29 @@ async function executeRutHang(
           where: { code: normalizedCode },
         });
         if (!unit) return null;
+        try {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-open:${unit.sku}`}))`;
+        } catch {
+          // Local SQLite test databases do not expose PostgreSQL advisory locks.
+        }
+        const pendingConflict = await tx.handlingUnit.findFirst({
+          where: {
+            sku: unit.sku,
+            code: { not: normalizedCode },
+            status: "pending_check",
+          },
+          select: {
+            code: true,
+            remainingQuantity: true,
+            baseUnit: true,
+          },
+        });
+        if (pendingConflict) {
+          throw new Error(buildPendingHandlingUnitBlockMessage(unit.sku, pendingConflict, "rút hàng"));
+        }
+        if (unit.status === "pending_check") {
+          throw new Error(buildPendingHandlingUnitBlockMessage(unit.sku, unit, "rút hàng"));
+        }
         if (unit.status !== "opened")
           throw new Error(
             `Kiện [${normalizedCode}] chưa khui (trạng thái: ${unit.status}). Hãy gửi /khui ${normalizedCode} trước.`,
@@ -7921,6 +8459,18 @@ async function executeRutHang(
 
   const target = list[idx];
   const currentStatus = target.status;
+  const targetSku = String(target.sku || target.skuName || "").trim();
+  const pendingConflict = list.find((candidate) =>
+    String(candidate.code || candidate.id || "").trim().toUpperCase() !== normalizedCode
+    && String(candidate.sku || candidate.skuName || "").trim().toUpperCase() === targetSku.toUpperCase()
+    && (candidate.status === "pending_check" || candidate.status === "Chờ kiểm"),
+  );
+  if (pendingConflict) {
+    throw new Error(buildPendingHandlingUnitBlockMessage(targetSku, pendingConflict, "rút hàng"));
+  }
+  if (currentStatus === "pending_check" || currentStatus === "Chờ kiểm") {
+    throw new Error(buildPendingHandlingUnitBlockMessage(targetSku, target, "rút hàng"));
+  }
   if (currentStatus !== "opened" && currentStatus !== "Đang sử dụng") {
     throw new Error(
       `Kiện [${normalizedCode}] chưa khui! Hãy gửi lệnh /khui ${normalizedCode} trước.`,
@@ -8038,6 +8588,24 @@ async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
   const openedUnits = list.filter(
     (u) => u.status === "opened" || u.status === "Đang sử dụng",
   );
+  const pendingSkuCodes = new Map();
+  list.forEach((unit) => {
+    if (unit.status !== "pending_check" && unit.status !== "Chờ kiểm") return;
+    const sku = String(unit.sku || unit.skuName || "").trim().toUpperCase();
+    if (sku && !pendingSkuCodes.has(sku)) pendingSkuCodes.set(sku, unit.code || unit.id);
+  });
+  const availableOpenedUnits = openedUnits.filter((unit) =>
+    !pendingSkuCodes.has(String(unit.sku || unit.skuName || "").trim().toUpperCase()),
+  );
+
+  if (openedUnits.length > 0 && availableOpenedUnits.length === 0) {
+    const pendingCodes = [...new Set(pendingSkuCodes.values())].filter(Boolean).join(", ");
+    const text = `⛔ <b>CHƯA THỂ RÚT HÀNG</b>\n\nCác SKU đang mở vẫn còn kiện đã về 0 chờ kiểm thực tế: <b>${pendingCodes || "vui lòng xem tab Chờ kiểm"}</b>.\n\n👉 Vào <b>Quản lý kiện hàng &gt; Chờ kiểm</b>, nhập số lượng thực tế và chốt hết các kiện này trước khi rút tiếp.`;
+    const markup = { inline_keyboard: [[{ text: "📊 Xem báo cáo tồn", callback_data: "menu_ton" }]] };
+    if (messageId) await editTelegramWmsMessage(chatId, messageId, text, markup);
+    else await sendTelegramWmsMessage(chatId, text, markup);
+    return;
+  }
 
   if (openedUnits.length === 0) {
     const sealedUnits = list.filter(
@@ -8061,16 +8629,16 @@ async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
 
   // Lối tắt chỉ áp dụng khi mở menu rút hàng lần đầu. Nút "Chọn kiện khác"
   // phải luôn hiện danh sách để người dùng có thể khui hoặc chọn kiện khác.
-  if (openedUnits.length === 1 && !forceList) {
+  if (availableOpenedUnits.length === 1 && !forceList) {
     await sendPickQuantityMenu(
       chatId,
-      openedUnits[0].code || openedUnits[0].id,
+      availableOpenedUnits[0].code || availableOpenedUnits[0].id,
       messageId,
     );
     return;
   }
 
-  const inlineKeyboard = openedUnits.map((u) => {
+  const inlineKeyboard = availableOpenedUnits.map((u) => {
     const code = u.code || u.id;
     const remaining = u.remainingQuantity ?? u.currentPcs ?? 0;
     const unit = u.baseUnit || u.unitName || "Gói";
@@ -8088,7 +8656,10 @@ async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
     { text: "🔓 Khui thêm kiện", callback_data: "menu_khui" },
   ]);
 
-  const text = `📦 <b>CHỌN KIỆN CẦN RÚT HÀNG:</b>\n<i>(Chạm vào kiện bên dưới để chọn nhanh số lượng rút)</i>`;
+  const blockedNote = openedUnits.length > availableOpenedUnits.length
+    ? `\n\n⚠️ Một số SKU đang bị khóa vì còn kiện chờ kiểm thực tế.`
+    : "";
+  const text = `📦 <b>CHỌN KIỆN CẦN RÚT HÀNG:</b>\n<i>(Chạm vào kiện bên dưới để chọn nhanh số lượng rút)</i>${blockedNote}`;
   const markup = { inline_keyboard: inlineKeyboard };
 
   if (messageId) {
@@ -8155,6 +8726,20 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
       chatId,
       `❌ Không tìm thấy kiện <code>${code}</code>.`,
     );
+    return;
+  }
+
+  const pendingConflict = list.find((candidate) =>
+    String(candidate.code || candidate.id || "").trim().toUpperCase() !== String(code).trim().toUpperCase()
+    && String(candidate.sku || candidate.skuName || "").trim().toUpperCase() === String(unit.sku || unit.skuName || "").trim().toUpperCase()
+    && (candidate.status === "pending_check" || candidate.status === "Chờ kiểm"),
+  );
+  if (pendingConflict || unit.status === "pending_check" || unit.status === "Chờ kiểm") {
+    const blocker = pendingConflict || unit;
+    const text = `⛔ <b>KHÔNG THỂ RÚT HÀNG</b>\n\n${buildPendingHandlingUnitBlockMessage(unit.sku || unit.skuName, blocker, "rút hàng")}`;
+    const markup = { inline_keyboard: [[{ text: "🔙 Chọn kiện khác", callback_data: "menu_rut_list" }]] };
+    if (messageId) await editTelegramWmsMessage(chatId, messageId, text, markup);
+    else await sendTelegramWmsMessage(chatId, text, markup);
     return;
   }
 
@@ -8867,9 +9452,13 @@ function stopTelegramWmsPolling() {
   telegramWmsOffsetLoaded = false;
 }
 
-// Electron is the single polling owner so inbound commands use the same live
-// database/session service as the package-management screen.
-startTelegramWmsPolling();
+// Remote Telegram mutations stay disabled until every sender maps to a
+// business user and each inventory action has a verified rollback path.
+if (!DATA_SAFETY_MODE) {
+  startTelegramWmsPolling();
+} else {
+  console.warn("[DataSafety] Telegram WMS mutation polling is disabled.");
+}
 
 ipcMain.handle("handlingUnits:unsealUnit", async (_event, payload = {}) => {
   try {
@@ -8892,6 +9481,16 @@ ipcMain.handle("handlingUnits:sealUnit", async (_event, payload = {}) => {
     const code = String(payload.code || "")
       .trim()
       .toUpperCase();
+    const current = await prisma.handlingUnit.findUnique({
+      where: { code },
+      select: { status: true },
+    });
+    if (!current) throw new Error(`Không tìm thấy kiện [${code}].`);
+    if (current.status === "pending_check") {
+      throw new Error(
+        `Kiện [${code}] đang chờ kiểm thực tế. Hãy nhập số lượng thực tế và chốt kiện trước, không thể đóng niêm phong để bỏ qua bước kiểm.`,
+      );
+    }
     try {
       await prisma.handlingUnit.update({
         where: { code },
@@ -9963,6 +10562,10 @@ ipcMain.handle("purchases:create", async (event, data) => {
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
+    const idempotencyKey = String(data?.idempotencyKey || "").trim();
+    if (!/^[A-Za-z0-9_-]{8,100}$/.test(idempotencyKey)) {
+      throw new Error("Mã chống tạo trùng phiếu nhập không hợp lệ.");
+    }
 
     console.log("📦 Creating purchase order with data:", data);
 
@@ -10060,6 +10663,15 @@ ipcMain.handle("purchases:create", async (event, data) => {
     const purchase = await withStockLock(() =>
       getPrismaDirectTx().$transaction(
         async (tx) => {
+          const operationKey = `purchaseCreateOperation:${idempotencyKey}`;
+          const claim = await tx.appConfig.createMany({
+            data: { key: operationKey, value: "pending" },
+            skipDuplicates: true,
+          });
+          if (claim.count === 0) {
+            throw new Error("Yêu cầu tạo phiếu nhập này đã được xử lý trước đó.");
+          }
+
           // Generate standard PN-YYMMDD-XXX
           const today = new Date();
           const dateStr = today.toISOString().slice(2, 10).replace(/-/g, "");
@@ -10137,6 +10749,7 @@ ipcMain.handle("purchases:create", async (event, data) => {
           // Company grouping is part of the purchase itself. Persist it in
           // the same transaction so a quick receiving cannot create stock
           // while losing the VAT-by-company split used by Nhập hàng.
+          await lockPurchaseMetadata(tx);
           const purchaseItemCompanies = await getPurchaseItemCompanies(tx);
           const savedItems = [...(newOrder.items || [])].sort(
             (a, b) => Number(a.id) - Number(b.id),
@@ -10152,10 +10765,24 @@ ipcMain.handle("purchases:create", async (event, data) => {
             ),
           };
           await savePurchaseItemCompanies(purchaseItemCompanies, tx);
+          await savePurchaseItemPackaging(newOrder.id, items, tx);
+          await tx.appConfig.update({
+            where: { key: operationKey },
+            data: {
+              value: JSON.stringify({
+                purchaseId: newOrder.id,
+                poNumber: newOrder.poNumber,
+              }),
+            },
+          });
 
           return newOrder;
         },
-        { timeout: 60000, maxWait: 10000 },
+        {
+          timeout: 60000,
+          maxWait: 10000,
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        },
       ),
     );
 
@@ -10166,12 +10793,6 @@ ipcMain.handle("purchases:create", async (event, data) => {
         reference: purchase.poNumber,
       },
     );
-
-    try {
-      await savePurchaseItemPackaging(purchase.id, items);
-    } catch (packagingError) {
-      console.error("Could not save purchase item packaging:", packagingError);
-    }
 
     console.log(`✅ Created purchase order: ${purchase.poNumber}`);
     void logActivity({
@@ -10186,7 +10807,7 @@ ipcMain.handle("purchases:create", async (event, data) => {
   } catch (error) {
     // The database write did not complete, so remove documents uploaded
     // solely for this failed create attempt.
-    if (uploadedReceiptFileIds.length > 0) {
+    if (!DATA_SAFETY_MODE && uploadedReceiptFileIds.length > 0) {
       try {
         const drive = getDriveClient();
         if (drive)
@@ -10266,6 +10887,7 @@ ipcMain.handle("purchases:update", async (event, { id, data }) => {
           if (!order) throw new Error("Không tìm thấy phiếu nhập.");
           if (order.status === "cancelled")
             throw new Error("Không thể sửa phiếu nhập đã hủy.");
+          await lockPurchaseMetadata(tx);
 
           const productIds = [
             ...new Set([
@@ -10312,7 +10934,7 @@ ipcMain.handle("purchases:update", async (event, { id, data }) => {
           await tx.purchaseItem.deleteMany({
             where: { purchaseOrderId: order.id },
           });
-          return tx.purchaseOrder.update({
+          const updatedOrder = await tx.purchaseOrder.update({
             where: { id: order.id },
             data: {
               supplierId,
@@ -10341,8 +10963,30 @@ ipcMain.handle("purchases:update", async (event, { id, data }) => {
             },
             include: { supplier: true, items: true },
           });
+
+          const purchaseItemCompanies = await getPurchaseItemCompanies(tx);
+          const savedItems = [...(updatedOrder.items || [])].sort(
+            (left, right) => Number(left.id) - Number(right.id),
+          );
+          purchaseItemCompanies[String(updatedOrder.id)] = {
+            byItemId: Object.fromEntries(
+              savedItems
+                .map((savedItem, index) => [
+                  getPurchaseItemCompanyKey(savedItem),
+                  String(nextItems[index]?.companyGroup || "").trim(),
+                ])
+                .filter(([, company]) => company),
+            ),
+          };
+          await savePurchaseItemCompanies(purchaseItemCompanies, tx);
+          await savePurchaseItemPackaging(updatedOrder.id, nextItems, tx);
+          return updatedOrder;
         },
-        { timeout: 60000, maxWait: 10000 },
+        {
+          timeout: 60000,
+          maxWait: 10000,
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        },
       ),
     );
 
@@ -10354,14 +10998,6 @@ ipcMain.handle("purchases:update", async (event, { id, data }) => {
         reference: purchase.poNumber,
       },
     );
-    try {
-      await savePurchaseItemPackaging(purchase.id, nextItems);
-    } catch (packagingError) {
-      console.error(
-        "Could not save updated purchase item packaging:",
-        packagingError,
-      );
-    }
     void logActivity({
       module: "purchases",
       action: "UPDATE",
@@ -11297,7 +11933,7 @@ ipcMain.handle(
 
       // 3. Cập nhật DB
       const driveUploadComplete = driveUrls.length === filesList.length;
-      if (!driveUploadComplete) {
+      if (!driveUploadComplete && !DATA_SAFETY_MODE) {
         // Không giữ một bộ chứng từ thiếu file trên Drive.
         await Promise.all(
           driveFileIds.map((fileId) =>
@@ -13140,7 +13776,14 @@ ipcMain.handle(
 // BACKUP & RESTORE SYSTEM
 // ========================================
 
-const AdmZip = require("adm-zip");
+let AdmZipConstructor;
+
+function getAdmZipConstructor() {
+  if (!AdmZipConstructor) {
+    AdmZipConstructor = require("adm-zip");
+  }
+  return AdmZipConstructor;
+}
 
 function validateBackupArchive(zip) {
   let totalUncompressedBytes = 0;
@@ -13205,13 +13848,21 @@ ipcMain.handle("system:backup", async () => {
     const minutes = String(now.getMinutes()).padStart(2, "0");
     const seconds = String(now.getSeconds()).padStart(2, "0");
 
-    const backupFileName = `BACKUP-${month}${day}${year}-${hours}${minutes}${seconds}.zip`;
-    const backupFilePath = path.join(backupDir, backupFileName);
+    const backupBaseName = `BACKUP-${month}${day}${year}-${hours}${minutes}${seconds}`;
+    let backupFileName = `${backupBaseName}.zip`;
+    let backupFilePath = path.join(backupDir, backupFileName);
+    let collision = 1;
+    while (fs.existsSync(backupFilePath)) {
+      backupFileName = `${backupBaseName}-${collision}.zip`;
+      backupFilePath = path.join(backupDir, backupFileName);
+      collision += 1;
+    }
 
     console.log("📦 Creating ZIP file:", backupFilePath);
     console.log("⚠️  This will take several minutes due to large size...");
 
-    // Sử dụng AdmZip để backup
+    // Chỉ tải thư viện ZIP khi người dùng thực sự chạy tác vụ backup.
+    const AdmZip = getAdmZipConstructor();
     const zip = new AdmZip();
 
     // Đếm files để track progress
@@ -13332,6 +13983,7 @@ ipcMain.handle("system:restore", async (event, backupPath) => {
     const restoreDir = path.join(__dirname, "..");
 
     // Sử dụng adm-zip để giải nén
+    const AdmZip = getAdmZipConstructor();
     const zip = new AdmZip(backupPath);
     validateBackupArchive(zip);
 
@@ -13377,6 +14029,7 @@ ipcMain.handle("system:inspectBackup", async (event, backupPath) => {
 
     // Lấy thông tin file
     const stats = fs.statSync(backupPath);
+    const AdmZip = getAdmZipConstructor();
     const zip = new AdmZip(backupPath);
     validateBackupArchive(zip);
     const entries = zip.getEntries();
@@ -13566,6 +14219,7 @@ function getDailyTaskEvidencePenaltyAt(dueAt) {
 }
 
 async function normalizeOpenDailyTaskDeadlines() {
+  if (DATA_SAFETY_MODE) return 0;
   const tasks = await prisma.dailyTask.findMany({
     where: { type: "daily", status: { in: ["pending", "in_progress"] } },
     select: { id: true, dueDate: true },
@@ -13766,10 +14420,11 @@ function getSubmittedEvidenceImages(evidence) {
     evidence.submittedImages.length > 0
   ) {
     return evidence.submittedImages.filter(
-      (image) => image?.storagePath || image?.driveUrl,
+      (image) => image?.r2Key || image?.storagePath || image?.driveUrl,
     );
   }
-  return evidence?.submittedImage?.storagePath ||
+  return evidence?.submittedImage?.r2Key ||
+    evidence?.submittedImage?.storagePath ||
     evidence?.submittedImage?.driveUrl
     ? [evidence.submittedImage]
     : [];
@@ -13935,7 +14590,8 @@ function evidenceVisualHashDistance(first, second) {
 const evidenceVisualHashCache = new Map();
 
 async function getRecentEvidenceVisualHashes() {
-  if (!evidenceStorage) return [];
+  const storageClient = getEvidenceStorageClient();
+  if (!storageClient) return [];
   const candidates = [];
   try {
     const [historyConfig, tasks] = await Promise.all([
@@ -13967,7 +14623,7 @@ async function getRecentEvidenceVisualHashes() {
       if (evidenceVisualHashCache.has(storagePath))
         return evidenceVisualHashCache.get(storagePath);
       try {
-        const { data, error } = await evidenceStorage.storage
+        const { data, error } = await storageClient.storage
           .from(EVIDENCE_BUCKET)
           .download(storagePath);
         if (error || !data) return null;
@@ -13989,6 +14645,7 @@ async function createEvidencePenaltyIfDue(
   now = new Date(),
   knownActiveUsers,
 ) {
+  if (DATA_SAFETY_MODE) return null;
   const attachments = parseTaskAttachments(task.attachments);
   const evidence = attachments.evidence || {};
   if (!evidence.required) return null;
@@ -14077,6 +14734,7 @@ async function createEvidencePenaltyIfDue(
 // 20 minutes" rule. Manual payroll deductions and handover penalties use
 // different sources and are intentionally untouched.
 async function cleanupPrematureDailyEvidencePenalties() {
+  if (DATA_SAFETY_MODE) return 0;
   const rows = await prisma.appConfig.findMany({
     where: { key: { startsWith: TASK_PENALTY_KEY_PREFIX } },
     select: { key: true, value: true },
@@ -14170,6 +14828,7 @@ async function repairLegacyAssignmentPenaltySchedule(
   scheduleAnchor,
   now,
 ) {
+  if (DATA_SAFETY_MODE) return;
   const dueKey = dueAt.toISOString();
   const prefix = `${ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:`;
   const legacyPrefix = `${TASK_PENALTY_KEY_PREFIX}${task.id}:${dueKey}:`;
@@ -14314,6 +14973,7 @@ async function createAssignmentEvidencePenaltyIfDue(
 
 let evidencePenaltyReconcilePromise = null;
 function reconcileEvidencePenalties() {
+  if (DATA_SAFETY_MODE) return Promise.resolve([]);
   // The page loads tasks and penalties in parallel, while a timer also runs
   // every minute. Share one reconciliation to avoid duplicate repair writes.
   if (evidencePenaltyReconcilePromise) return evidencePenaltyReconcilePromise;
@@ -14358,6 +15018,7 @@ function reconcileEvidencePenalties() {
 }
 
 async function reconcileSnapshotEvidencePenalties(now = new Date(), range = {}) {
+  if (DATA_SAFETY_MODE) return [];
   const today = getLocalDateKey(now);
   await cleanupPrematureDailyEvidencePenalties();
   const startDate = /^\d{4}-\d{2}-\d{2}$/.test(String(range.startDate || ""))
@@ -14429,7 +15090,12 @@ async function reconcileSnapshotEvidencePenalties(now = new Date(), range = {}) 
 }
 
 async function cleanupExpiredEvidenceImages() {
-  if (!evidenceStorage) return;
+  if (DATA_SAFETY_MODE) {
+    console.warn("[DataSafety] Skipped automatic evidence deletion.");
+    return { skipped: true };
+  }
+  const storageClient = getEvidenceStorageClient();
+  if (!storageClient) return;
   const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
   const tasks = await prisma.dailyTask.findMany({
     where: { attachments: { not: null } },
@@ -14449,7 +15115,7 @@ async function cleanupExpiredEvidenceImages() {
     )
       continue;
 
-    await evidenceStorage.storage
+    await storageClient.storage
       .from(EVIDENCE_BUCKET)
       .remove(storageImages.map((image) => image.storagePath))
       .catch(() => {});
@@ -14473,34 +15139,37 @@ async function cleanupExpiredEvidenceImages() {
 // Do not scan every open desktop process once a minute. Reconciliation runs
 // when Daily Tasks is opened or an evidence action occurs, preventing repeated
 // database egress from every staff machine while keeping penalties consistent.
-setTimeout(
-  () =>
-    void cleanupExpiredEvidenceImages().catch((error) =>
-      console.error("Evidence cleanup startup error:", error),
-    ),
-  45 * 1000,
-);
-setInterval(
-  () =>
-    void cleanupExpiredEvidenceImages().catch((error) =>
-      console.error("Evidence cleanup error:", error),
-    ),
-  24 * 60 * 60 * 1000,
-);
+if (!DATA_SAFETY_MODE) {
+  setTimeout(
+    () =>
+      void cleanupExpiredEvidenceImages().catch((error) =>
+        console.error("Evidence cleanup startup error:", error),
+      ),
+    45 * 1000,
+  );
+  setInterval(
+    () =>
+      void cleanupExpiredEvidenceImages().catch((error) =>
+        console.error("Evidence cleanup error:", error),
+      ),
+    24 * 60 * 60 * 1000,
+  );
+}
 
 // Get all tasks with filters
 ipcMain.handle("dailyTasks:uploadEvidenceImage", async (_event, payload) => {
   try {
     requireRole();
-    if (!evidenceStorage)
+    const storageClient = getEvidenceStorageClient();
+    if (!storageClient)
       throw new Error(getEvidenceStorageUnavailableMessage());
     const { taskId, mimeType, data, hash } = payload || {};
     if (!taskId || !mimeType || !data || !hash)
       throw new Error("Dữ liệu ảnh bằng chứng không hợp lệ.");
     const base64 = String(data).replace(/^data:[^;]+;base64,/, "");
     const buffer = Buffer.from(base64, "base64");
-    if (buffer.length > MAX_EVIDENCE_STORAGE_BYTES)
-      throw new Error("Ảnh sau nén không được vượt quá 1 MB.");
+    if (buffer.length >= MAX_EVIDENCE_STORAGE_BYTES)
+      throw new Error("Ảnh sau nén phải dưới 500 KB.");
     const extension =
       mimeType === "image/png"
         ? "png"
@@ -14508,7 +15177,7 @@ ipcMain.handle("dailyTasks:uploadEvidenceImage", async (_event, payload) => {
           ? "webp"
           : "jpg";
     const storagePath = `daily-tasks/${taskId}/${new Date().toISOString().slice(0, 10)}/${hash}.${extension}`;
-    const { error } = await evidenceStorage.storage
+    const { error } = await storageClient.storage
       .from(EVIDENCE_BUCKET)
       .upload(storagePath, buffer, {
         contentType: mimeType,
@@ -14557,8 +15226,8 @@ ipcMain.handle("users:forcePasswordChange", async (event, userId) => {
 });
 
 ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
-  const uploadedDriveFileIds = [];
-  const imageRegistryKeys = [];
+  const uploadedR2Keys = [];
+  const imageRegistryEntries = [];
   try {
     const actor = await getCurrentActor();
     const task = await prisma.dailyTask.findUnique({
@@ -14595,10 +15264,6 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
       );
     }
 
-    const evidenceDrive = await getEvidenceDriveContext();
-    const drive = evidenceDrive.drive;
-    const evidenceFolderId = evidenceDrive.folderId;
-
     const existingEvidenceHashes = await prisma.appConfig.findMany({
       where: { key: { startsWith: "dailyEvidenceHash:" } },
       select: { value: true },
@@ -14627,8 +15292,8 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
         String(image.data).replace(/^data:[^;]+;base64,/, ""),
         "base64",
       );
-      if (!buffer.length || buffer.length > MAX_EVIDENCE_STORAGE_BYTES)
-        throw new Error("Ảnh sau nén phải không vượt quá 1 MB.");
+      if (!buffer.length || buffer.length >= MAX_EVIDENCE_STORAGE_BYTES)
+        throw new Error("Ảnh sau nén phải dưới 500 KB.");
       if (!isValidEvidenceImage(buffer, image.mimeType))
         throw new Error("Dữ liệu tải lên không phải ảnh hợp lệ.");
       const hash = crypto.createHash("sha256").update(buffer).digest("hex");
@@ -14645,47 +15310,36 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
         );
       }
       const registryKey = `dailyEvidenceHash:${hash}`;
-      try {
-        await prisma.appConfig.create({
-          data: {
-            key: registryKey,
-            value: JSON.stringify({
-              taskId: task.id,
-              createdAt: new Date().toISOString(),
-              visualHash,
-            }),
-          },
-        });
-        imageRegistryKeys.push(registryKey);
-        if (visualHash) knownVisualHashes.push(visualHash);
-      } catch (error) {
-        if (error.code === "P2002")
-          throw new Error(
-            "Ảnh này đã được dùng làm bằng chứng cho công việc khác.",
-          );
-        throw error;
-      }
+      imageRegistryEntries.push({
+        key: registryKey,
+        value: JSON.stringify({
+          taskId: task.id,
+          createdAt: new Date().toISOString(),
+          visualHash,
+        }),
+      });
+      if (visualHash) knownVisualHashes.push(visualHash);
       const ext =
         image.mimeType === "image/png"
           ? "png"
           : image.mimeType === "image/webp"
             ? "webp"
             : "jpg";
-      const driveFileName = `BANGCHUNG_TASK-${task.id}_${new Date().toISOString().replace(/[:.]/g, "-")}_${hash.slice(0, 12)}.${ext}`;
-      const uploaded = await uploadPrivateEvidenceToDrive(
-        drive,
-        evidenceFolderId,
-        driveFileName,
+      const r2Key = `daily-tasks/${task.id}/${new Date().toISOString().slice(0, 10)}/${hash}.${ext}`;
+      const uploaded = await uploadDailyEvidenceToR2(
+        r2Key,
         buffer,
         image.mimeType,
+        hash,
       );
-      if (!uploaded?.fileId || !uploaded.webViewLink)
-        throw new Error("Không thể tải ảnh bằng chứng lên Google Drive.");
-      uploadedDriveFileIds.push(uploaded.fileId);
+      if (!uploaded?.ok || uploaded.key !== r2Key)
+        throw new Error("Không thể tải ảnh bằng chứng lên R2.");
+      uploadedR2Keys.push(r2Key);
       submittedImages.push({
         name: image.name || `evidence.${ext}`,
         mimeType: image.mimeType,
-        driveUrl: uploaded.webViewLink,
+        storage: "r2",
+        r2Key,
         hash,
       });
     }
@@ -14710,14 +15364,41 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
       reviewedAt: submittedAt,
       reviewedBy: "Hệ thống",
     };
-    await prisma.dailyTask.update({
-      where: { id: task.id },
-      data: {
-        attachments: JSON.stringify({ ...attachments, evidence }),
-        status: "completed",
-        completedAt: new Date(),
-        verifier: "Hệ thống",
-      },
+    const completedAt = new Date();
+    await prisma.$transaction(async (tx) => {
+      for (const registryEntry of imageRegistryEntries) {
+        try {
+          await tx.appConfig.create({ data: registryEntry });
+        } catch (error) {
+          if (error.code === "P2002") {
+            throw new Error(
+              "Ảnh này đã được dùng làm bằng chứng cho công việc khác.",
+            );
+          }
+          throw error;
+        }
+      }
+
+      // Reject a stale submission instead of overwriting a task changed on
+      // another workstation while the images were uploading.
+      const updateResult = await tx.dailyTask.updateMany({
+        where: {
+          id: task.id,
+          updatedAt: task.updatedAt,
+          status: { not: "completed" },
+        },
+        data: {
+          attachments: JSON.stringify({ ...attachments, evidence }),
+          status: "completed",
+          completedAt,
+          verifier: "Hệ thống",
+        },
+      });
+      if (updateResult.count !== 1) {
+        throw new Error(
+          "Công việc đã được thay đổi trên máy khác. Vui lòng tải lại và thử lại.",
+        );
+      }
     });
     await appendDailyTaskHistory({
       taskId: task.id,
@@ -14736,23 +15417,18 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
     };
   } catch (error) {
     await Promise.all(
-      uploadedDriveFileIds.map(async (fileId) => {
-        const drive = getDriveClient();
-        if (drive) await drive.files.delete({ fileId }).catch(() => {});
-      }),
-    );
-    await Promise.all(
-      imageRegistryKeys.map((key) =>
-        prisma.appConfig.delete({ where: { key } }).catch(() => {}),
+      uploadedR2Keys.map((objectKey) =>
+        rollbackFreshDailyEvidenceUpload(objectKey).catch((cleanupError) => {
+          console.error(
+            `Unable to roll back fresh evidence upload ${objectKey}:`,
+            cleanupError.message,
+          );
+        }),
       ),
     );
-    const reauthRequired =
-      Boolean(error?.reauthRequired) || isGoogleReauthError(error);
-    const errorMessage = reauthRequired
-      ? getDriveAuthMessage(error)
-      : error?.message || "Không thể gửi bằng chứng.";
+    const errorMessage = error?.message || "Không thể gửi bằng chứng.";
     console.error("Submit daily-task evidence error:", errorMessage);
-    return { success: false, error: errorMessage, reauthRequired };
+    return { success: false, error: errorMessage, reauthRequired: false };
   }
 });
 
@@ -14913,7 +15589,8 @@ ipcMain.handle(
       // This endpoint signs a Supabase Storage object. Initializing Drive and
       // looking up/creating its folder here added a network round-trip to
       // every image preview even though Drive is not used at all.
-      if (!evidenceStorage)
+      const storageClient = getEvidenceStorageClient();
+      if (!storageClient)
         throw new Error(getEvidenceStorageUnavailableMessage());
       const task = await prisma.dailyTask.findUnique({
         where: { id: Number(taskId) },
@@ -14947,7 +15624,7 @@ ipcMain.handle(
         storagePath = requestedPath;
       }
       if (!storagePath) throw new Error("Không tìm thấy ảnh bằng chứng.");
-      const { data, error } = await evidenceStorage.storage
+      const { data, error } = await storageClient.storage
         .from(EVIDENCE_BUCKET)
         .createSignedUrl(storagePath, 300);
       if (error) throw error;
@@ -15024,6 +15701,91 @@ async function getDailyTaskEvidenceAccess(taskId) {
   }
   return task;
 }
+
+async function getAllowedDailyTaskR2Keys(task, requestedKeys) {
+  const allowedKeys = new Set(
+    getSubmittedEvidenceImages(
+      parseTaskAttachments(task.attachments)?.evidence,
+    )
+      .map((image) => image?.r2Key)
+      .filter(Boolean),
+  );
+  if (requestedKeys.some((r2Key) => !allowedKeys.has(r2Key))) {
+    const historyConfig = await prisma.appConfig.findUnique({
+      where: { key: "dailyTasksHistory" },
+    });
+    let history = [];
+    try {
+      history = historyConfig ? JSON.parse(historyConfig.value) : [];
+    } catch {
+      history = [];
+    }
+    history
+      .filter((entry) => Number(entry?.taskId) === task.id)
+      .flatMap((entry) => getSubmittedEvidenceImages(entry?.evidence))
+      .forEach((image) => {
+        if (image?.r2Key) allowedKeys.add(image.r2Key);
+      });
+  }
+  return allowedKeys;
+}
+
+ipcMain.handle(
+  "dailyTasks:getR2EvidenceImageUrl",
+  async (_event, taskId, requestedKey, mimeType = "image/webp") => {
+    try {
+      const task = await getDailyTaskEvidenceAccess(taskId);
+      const r2Key = String(requestedKey || "");
+      const allowedKeys = await getAllowedDailyTaskR2Keys(task, [r2Key]);
+      if (!allowedKeys.has(r2Key)) {
+        throw new Error("Không tìm thấy ảnh R2 trong công việc này.");
+      }
+      const contentType = getDriveEvidenceMimeType(mimeType);
+      const url = await downloadDailyEvidenceFromR2(r2Key, contentType);
+      return { success: true, data: { url } };
+    } catch (error) {
+      console.error("R2 evidence image error:", error);
+      return { success: false, error: error.message };
+    }
+  },
+);
+
+// Validate the task once, then download all proof images in parallel. This
+// avoids repeating user/task database queries for every image in the modal.
+ipcMain.handle(
+  "dailyTasks:getR2EvidenceImageUrls",
+  async (_event, taskId, requestedImages = []) => {
+    try {
+      const task = await getDailyTaskEvidenceAccess(taskId);
+      const images = Array.isArray(requestedImages)
+        ? requestedImages.slice(0, MAX_EVIDENCE_IMAGES).map((image) => ({
+            r2Key: String(image?.r2Key || ""),
+            mimeType: getDriveEvidenceMimeType(image?.mimeType),
+          }))
+        : [];
+      const requestedKeys = images.map((image) => image.r2Key).filter(Boolean);
+      const allowedKeys = await getAllowedDailyTaskR2Keys(task, requestedKeys);
+      const results = await Promise.all(
+        images.map(async ({ r2Key, mimeType }) => {
+          try {
+            if (!r2Key || !allowedKeys.has(r2Key)) {
+              throw new Error("Không tìm thấy ảnh R2 trong công việc này.");
+            }
+            const url = await downloadDailyEvidenceFromR2(r2Key, mimeType);
+            return { r2Key, success: true, data: { url } };
+          } catch (error) {
+            console.error("R2 evidence image error:", error);
+            return { r2Key, success: false, error: error.message };
+          }
+        }),
+      );
+      return { success: true, data: { results } };
+    } catch (error) {
+      console.error("R2 evidence images error:", error);
+      return { success: false, error: error.message };
+    }
+  },
+);
 
 // Fetch all Drive evidence for one task through one authenticated session. This
 // avoids validating OAuth and querying the same task once per image.
@@ -15360,6 +16122,7 @@ const ASSIGNMENT_RECURRENCE_KEY_PREFIX = "dailyAssignmentRecurrence:";
 // currently open recurring rows that landed on Sunday/a fixed holiday so they
 // do not remain visible, overdue, or fined on a rest day.
 async function repairRecurringAssignmentRestDays() {
+  if (DATA_SAFETY_MODE) return 0;
   const assignments = await prisma.dailyTask.findMany({
     where: {
       type: "assignment",
@@ -15408,6 +16171,7 @@ async function repairRecurringAssignmentRestDays() {
 // considered the same recurrence only when its root, sequence and due time
 // all match; intentionally different handovers are left untouched.
 async function dedupeOpenRecurringAssignments() {
+  if (DATA_SAFETY_MODE) return 0;
   const assignments = await prisma.dailyTask.findMany({
     where: {
       type: "assignment",
@@ -15453,6 +16217,7 @@ async function dedupeOpenRecurringAssignments() {
 // next scheduled handover is created as a separate task.
 // The AppConfig marker makes this idempotent across multiple desktop clients.
 async function reconcileRecurringAssignments(now = new Date()) {
+  if (DATA_SAFETY_MODE) return 0;
   const assignments = await prisma.dailyTask.findMany({
     where: { type: "assignment" },
     select: {
@@ -15960,6 +16725,7 @@ ipcMain.handle("dailyTasks:stats", async (event, filters = {}) => {
 const DAILY_TASK_SNAPSHOT_PREFIX = "dailyTasksSnapshot:";
 
 async function migrateLegacyDailyTaskSnapshots() {
+  if (DATA_SAFETY_MODE) return;
   const legacy = await prisma.appConfig.findUnique({
     where: { key: "dailyTasksSnapshots" },
   });
@@ -15989,6 +16755,7 @@ async function migrateLegacyDailyTaskSnapshots() {
 }
 
 async function pruneDailyTaskSnapshots() {
+  if (DATA_SAFETY_MODE) return;
   const snapshotRows = await prisma.appConfig.findMany({
     where: { key: { startsWith: DAILY_TASK_SNAPSHOT_PREFIX } },
     select: { key: true },
@@ -16006,6 +16773,7 @@ async function pruneDailyTaskSnapshots() {
 
 let dailyTaskMaintenancePromise = null;
 function scheduleDailyTaskMaintenance() {
+  if (DATA_SAFETY_MODE) return;
   if (dailyTaskMaintenancePromise) return;
 
   // Maintenance must not hold up the visible day rollover. The immutable
@@ -16270,6 +17038,51 @@ async function performDailyTaskReset() {
     return { success: false, error: error.message };
   }
 }
+
+let dailyTaskAutoResetTimer = null;
+
+function scheduleNextDailyTaskAutoReset() {
+  if (dailyTaskAutoResetTimer) clearTimeout(dailyTaskAutoResetTimer);
+
+  const now = new Date();
+  const nextMidnight = new Date(now);
+  nextMidnight.setDate(nextMidnight.getDate() + 1);
+  nextMidnight.setHours(0, 0, 1, 0);
+
+  dailyTaskAutoResetTimer = setTimeout(async () => {
+    try {
+      const result = await performDailyTaskReset();
+      if (!result.success) {
+        console.error("Automatic daily task reset failed:", result.error);
+      } else {
+        console.log(`[DAILY RESET] Midnight check: ${result.data?.message || "completed"}`);
+      }
+    } catch (error) {
+      console.error("Automatic daily task reset crashed:", error);
+    } finally {
+      scheduleNextDailyTaskAutoReset();
+    }
+  }, Math.max(1000, nextMidnight.getTime() - Date.now()));
+  dailyTaskAutoResetTimer.unref?.();
+}
+
+// Reset once when Electron starts, then again just after every local midnight.
+// The database marker keeps this safe when several desktop clients are open.
+const dailyTaskStartupResetTimer = setTimeout(async () => {
+  try {
+    const result = await performDailyTaskReset();
+    if (!result.success) {
+      console.error("Startup daily task reset failed:", result.error);
+    } else {
+      console.log(`[DAILY RESET] Startup check: ${result.data?.message || "completed"}`);
+    }
+  } catch (error) {
+    console.error("Startup daily task reset crashed:", error);
+  } finally {
+    scheduleNextDailyTaskAutoReset();
+  }
+}, 1000);
+dailyTaskStartupResetTimer.unref?.();
 
 // ========================================
 // COMBO PRODUCTS
@@ -17682,33 +18495,64 @@ function assertTmdtItemsHaveSku(items, refCode) {
   }
 }
 
-async function assertTmdtItemsSkusExist(tx, items, refCode) {
-  for (const item of items || []) {
-    const sku = item?.variantSku || "";
-    if (!sku) continue;
-    const combo = await tx.comboProduct.findUnique({
-      where: { sku },
+async function loadExistingTmdtSkus(tx, items) {
+  const skus = [
+    ...new Set(
+      (items || [])
+        .map((item) => String(item?.variantSku || "").trim())
+        .filter(Boolean),
+    ),
+  ];
+  const existingSkus = new Set();
+  if (skus.length === 0) return existingSkus;
+
+  const [combos, directProducts] = await Promise.all([
+    tx.comboProduct.findMany({
+      where: { sku: { in: skus } },
       select: { sku: true },
-    });
-    if (combo) continue;
-    const directProduct = await tx.product
-      .findUnique({ where: { sku }, select: { sku: true } })
-      .catch(() => null);
-    if (directProduct) continue;
-    const variantProduct = await tx.product.findFirst({
-      where: { variants: { contains: sku } },
+    }),
+    tx.product.findMany({
+      where: { sku: { in: skus } },
+      select: { sku: true },
+    }),
+  ]);
+  combos.forEach((combo) => existingSkus.add(combo.sku));
+  directProducts.forEach((product) => existingSkus.add(product.sku));
+
+  const missingSkus = new Set(skus.filter((sku) => !existingSkus.has(sku)));
+  if (missingSkus.size > 0) {
+    const variantProducts = await tx.product.findMany({
+      where: { variants: { not: null } },
       select: { variants: true },
     });
-    if (variantProduct) {
+    for (const product of variantProducts) {
+      let variants = [];
       try {
-        const variants = JSON.parse(variantProduct.variants || "[]");
-        if (variants.some((v) => v?.sku === sku)) continue;
+        variants = JSON.parse(product.variants || "[]");
       } catch {}
+      for (const variant of variants) {
+        const sku = String(variant?.sku || "").trim();
+        if (missingSkus.has(sku)) existingSkus.add(sku);
+      }
     }
+  }
+  return existingSkus;
+}
+
+function assertTmdtItemsSkusExistInSet(items, refCode, existingSkus) {
+  const missingSku = (items || [])
+    .map((item) => String(item?.variantSku || "").trim())
+    .find((sku) => sku && !existingSkus.has(sku));
+  if (missingSku) {
     throw new Error(
-      `SKU TMDT không tồn tại trong kho cho ${refCode || "đơn"}: ${sku}`,
+      `SKU TMDT không tồn tại trong kho cho ${refCode || "đơn"}: ${missingSku}`,
     );
   }
+}
+
+async function assertTmdtItemsSkusExist(tx, items, refCode) {
+  const existingSkus = await loadExistingTmdtSkus(tx, items);
+  assertTmdtItemsSkusExistInSet(items, refCode, existingSkus);
 }
 
 async function ensureMarketplaceOrderInTx(tx, record, actorName) {
@@ -18076,7 +18920,6 @@ ipcMain.handle("ecommerceExports:bulkDelete", async (event, ids) => {
           // 🚀 Bước 2: Gom SKU cần hoàn kho từ đơn completed
           const completedDocs = docs.filter((d) => d.status === "completed");
           if (completedDocs.length > 0) {
-            const skuCache = await buildSkuCache(tx);
             const skuChanges = [];
             for (const doc of completedDocs) {
               const items = JSON.parse(doc.items || "[]");
@@ -18101,7 +18944,6 @@ ipcMain.handle("ecommerceExports:bulkDelete", async (event, ids) => {
                   note: `Hoàn tồn do xóa ${completedDocs.length} đơn TMDT completed`,
                   createdBy: "System",
                 },
-                skuCache,
               );
             }
           }
@@ -18278,6 +19120,7 @@ ipcMain.handle("ecommerceExports:bulkCreate", async (event, records) => {
         async (tx) => {
           // 🚀 Bước 1: Batch INSERT tất cả đơn cùng lúc (1 SQL statement)
           const normalizedRecords = [];
+          const completedRecordsForValidation = [];
           for (const data of dedupedRecords) {
             const resolvedItems = await resolveTmdtItemsSkus(tx, data.items);
             if (data.status === "completed") {
@@ -18285,16 +19128,31 @@ ipcMain.handle("ecommerceExports:bulkCreate", async (event, records) => {
                 resolvedItems,
                 data.orderNumber || data.ecommerceExportCode,
               );
-              await assertTmdtItemsSkusExist(
-                tx,
+              completedRecordsForValidation.push({
                 resolvedItems,
-                data.orderNumber || data.ecommerceExportCode,
-              );
+                refCode: data.orderNumber || data.ecommerceExportCode,
+              });
             }
             normalizedRecords.push({
               ...data,
               items: JSON.stringify(resolvedItems),
             });
+          }
+          if (completedRecordsForValidation.length > 0) {
+            const allCompletedItems = completedRecordsForValidation.flatMap(
+              (record) => record.resolvedItems,
+            );
+            const existingSkus = await loadExistingTmdtSkus(
+              tx,
+              allCompletedItems,
+            );
+            completedRecordsForValidation.forEach((record) =>
+              assertTmdtItemsSkusExistInSet(
+                record.resolvedItems,
+                record.refCode,
+                existingSkus,
+              ),
+            );
           }
 
           const createData = normalizedRecords.map((data) => ({
@@ -18321,7 +19179,6 @@ ipcMain.handle("ecommerceExports:bulkCreate", async (event, records) => {
             (d) => d.status === "completed",
           );
           if (completedRecords.length > 0) {
-            const skuCache = await buildSkuCache(tx);
             const skuChanges = [];
             for (const data of completedRecords) {
               const itemsList = JSON.parse(data.items || "[]");
@@ -18345,7 +19202,6 @@ ipcMain.handle("ecommerceExports:bulkCreate", async (event, records) => {
                   note: `Tạo hàng loạt ${completedRecords.length} đơn TMDT completed`,
                   createdBy: dedupedRecords[0]?.createdBy || "System",
                 },
-                skuCache,
               );
             }
           }
@@ -19171,6 +20027,198 @@ ipcMain.handle(
   },
 );
 
+const exportOrderOperationCache = new Map();
+const EXPORT_ORDER_OPERATION_TTL_MS = 5 * 60 * 1000;
+
+function runExportOrderOperationOnce(idempotencyKey, task) {
+  const key = String(idempotencyKey || "").trim();
+  if (!key) return task();
+
+  const now = Date.now();
+  for (const [cachedKey, entry] of exportOrderOperationCache) {
+    if (entry.expiresAt <= now) exportOrderOperationCache.delete(cachedKey);
+  }
+
+  const cached = exportOrderOperationCache.get(key);
+  if (cached) return cached.promise;
+
+  const promise = Promise.resolve().then(task);
+  exportOrderOperationCache.set(key, {
+    expiresAt: now + EXPORT_ORDER_OPERATION_TTL_MS,
+    promise,
+  });
+  promise.catch(() => exportOrderOperationCache.delete(key));
+  return promise;
+}
+
+function normalizeExportOrderItems(rawItems, label = "Danh sách sản phẩm") {
+  let items = rawItems;
+  if (typeof items === "string") {
+    try {
+      items = JSON.parse(items);
+    } catch {
+      throw new Error(`${label} không hợp lệ.`);
+    }
+  }
+  if (!Array.isArray(items) || items.length === 0)
+    throw new Error(`${label} không được để trống.`);
+
+  return items.map((item, index) => {
+    const sku = String(item?.sku || "").trim();
+    const quantity = Number(item?.quantity);
+    const unitPrice = Number(item?.unitPrice || 0);
+    if (!sku) throw new Error(`${label}: sản phẩm ${index + 1} thiếu SKU.`);
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      throw new Error(`${label}: số lượng SKU ${sku} phải là số nguyên dương.`);
+    }
+    if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+      throw new Error(`${label}: đơn giá SKU ${sku} không hợp lệ.`);
+    }
+    return {
+      sku,
+      productName: String(item?.productName || sku).trim() || sku,
+      color: item?.color ? String(item.color) : undefined,
+      quantity,
+      unitPrice,
+    };
+  });
+}
+
+function normalizeExportOrderPayload(data = {}) {
+  const customer = String(data.customer || "").trim();
+  if (!customer) throw new Error("Vui lòng nhập tên khách hàng.");
+  const exportDate = new Date(data.exportDate);
+  if (Number.isNaN(exportDate.getTime()))
+    throw new Error("Ngày xuất không hợp lệ.");
+  const items = normalizeExportOrderItems(data.items);
+  return {
+    customer,
+    exportDate,
+    status: String(data.status || "processing"),
+    notes: data.notes ? String(data.notes) : null,
+    items,
+    totalAmount: items.reduce(
+      (sum, item) => sum + item.quantity * item.unitPrice,
+      0,
+    ),
+  };
+}
+
+ipcMain.handle("exportOrders:saveWithStock", async (event, data = {}) => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Prisma not available");
+    const payload = normalizeExportOrderPayload(data);
+    const exportOrderId = data.id ? Number(data.id) : null;
+    if (data.id && (!Number.isInteger(exportOrderId) || exportOrderId <= 0)) {
+      throw new Error("Mã phiếu xuất không hợp lệ.");
+    }
+
+    const result = await runExportOrderOperationOnce(
+      data.idempotencyKey,
+      () =>
+        withStockLock(() =>
+          getPrismaDirectTx().$transaction(
+            async (tx) => {
+              let oldItems = [];
+              let record;
+
+              if (exportOrderId) {
+                const existing = await tx.exportOrder.findUnique({
+                  where: { id: exportOrderId },
+                });
+                if (!existing) throw new Error("Không tìm thấy phiếu xuất.");
+                oldItems = normalizeExportOrderItems(
+                  existing.items,
+                  "Danh sách sản phẩm của phiếu cũ",
+                );
+                const reference = `PX${existing.id.toString().padStart(4, "0")}`;
+                for (const item of oldItems) {
+                  await deductItemOrCombo(tx, item.sku, item.quantity, {
+                    type: "export",
+                    referenceType: "XUAT",
+                    reference,
+                    note: `Sửa phiếu: hoàn lại ${item.sku}`,
+                    createdBy: currentSession.username,
+                  });
+                }
+                for (const item of payload.items) {
+                  await assertSaleStockAvailable(tx, item.sku, item.quantity);
+                  await deductItemOrCombo(tx, item.sku, -item.quantity, {
+                    type: "export",
+                    referenceType: "XUAT",
+                    reference,
+                    note: `Xuất kho: ${item.productName} x${item.quantity} - Khách: ${payload.customer}`,
+                    createdBy: currentSession.username,
+                  });
+                }
+                record = await tx.exportOrder.update({
+                  where: { id: exportOrderId },
+                  data: {
+                    exportDate: payload.exportDate,
+                    customer: payload.customer,
+                    status: payload.status,
+                    totalAmount: payload.totalAmount,
+                    notes: payload.notes,
+                    items: JSON.stringify(payload.items),
+                  },
+                });
+              } else {
+                record = await tx.exportOrder.create({
+                  data: {
+                    exportDate: payload.exportDate,
+                    customer: payload.customer,
+                    status: payload.status,
+                    totalAmount: payload.totalAmount,
+                    notes: payload.notes,
+                    items: JSON.stringify(payload.items),
+                    createdBy: currentSession.username,
+                  },
+                });
+                const reference = `PX${record.id.toString().padStart(4, "0")}`;
+                for (const item of payload.items) {
+                  await assertSaleStockAvailable(tx, item.sku, item.quantity);
+                  await deductItemOrCombo(tx, item.sku, -item.quantity, {
+                    type: "export",
+                    referenceType: "XUAT",
+                    reference,
+                    note: `Xuất kho: ${item.productName} x${item.quantity} - Khách: ${payload.customer}`,
+                    createdBy: currentSession.username,
+                  });
+                }
+              }
+
+              return { record, oldItems };
+            },
+            { timeout: 30000, maxWait: 10000 },
+          ),
+        ),
+    );
+
+    emitStockChangedForSkus(
+      [...result.oldItems, ...payload.items].map((item) => item.sku),
+      {
+        referenceType: "XUAT",
+        reference: `PX${result.record.id.toString().padStart(4, "0")}`,
+      },
+    );
+    void logActivity({
+      module: "export",
+      action: exportOrderId ? "UPDATE" : "CREATE",
+      description: `${exportOrderId ? "Cập nhật" : "Tạo"} xuất hàng #${result.record.id} - ${payload.customer}`,
+      recordName: payload.customer,
+      userName: currentSession.username,
+    });
+    return {
+      success: true,
+      data: { ...result.record, items: payload.items },
+    };
+  } catch (error) {
+    console.error("❌ Save export order with stock error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle("exportOrders:create", async (event, data) => {
   try {
     requireRole("admin", "manager");
@@ -19236,16 +20284,59 @@ ipcMain.handle("exportOrders:update", async (event, id, data) => {
   }
 });
 
-ipcMain.handle("exportOrders:delete", async (event, id) => {
+ipcMain.handle("exportOrders:delete", async (event, id, options = {}) => {
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
-    await prisma.exportOrder.delete({ where: { id } });
-    console.log(`✅ Deleted export order #${id}`);
+    const exportOrderId = Number(id);
+    if (!Number.isInteger(exportOrderId) || exportOrderId <= 0)
+      throw new Error("Mã phiếu xuất không hợp lệ.");
+
+    const deleted = await runExportOrderOperationOnce(
+      options.idempotencyKey,
+      () =>
+        withStockLock(() =>
+          getPrismaDirectTx().$transaction(
+            async (tx) => {
+              const record = await tx.exportOrder.findUnique({
+                where: { id: exportOrderId },
+              });
+              if (!record) throw new Error("Không tìm thấy phiếu xuất.");
+              const items = normalizeExportOrderItems(
+                record.items,
+                "Danh sách sản phẩm của phiếu",
+              );
+              const reference = `PX${record.id.toString().padStart(4, "0")}`;
+              for (const item of items) {
+                await deductItemOrCombo(tx, item.sku, item.quantity, {
+                  type: "export",
+                  referenceType: "XUAT",
+                  reference,
+                  note: `Xóa phiếu: hoàn kho ${item.sku}`,
+                  createdBy: currentSession.username,
+                });
+              }
+              await tx.exportOrder.delete({ where: { id: exportOrderId } });
+              return { record, items };
+            },
+            { timeout: 30000, maxWait: 10000 },
+          ),
+        ),
+    );
+    emitStockChangedForSkus(
+      deleted.items.map((item) => item.sku),
+      {
+        referenceType: "XUAT",
+        reference: `PX${exportOrderId.toString().padStart(4, "0")}`,
+      },
+    );
+    console.log(`✅ Deleted export order #${exportOrderId} and restored stock`);
     void logActivity({
       module: "export",
       action: "DELETE",
-      description: `Xóa xuất hàng #${id}`,
+      description: `Xóa xuất hàng #${exportOrderId} và hoàn kho`,
+      recordName: deleted.record.customer,
+      userName: currentSession.username,
     });
     return { success: true };
   } catch (error) {
@@ -19690,6 +20781,93 @@ ipcMain.handle("stockBalance:getAll", async (event, { limit } = {}) => {
   }
 });
 
+ipcMain.handle("stockBalance:apply", async (event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const adjustments = Array.isArray(payload.adjustments)
+      ? payload.adjustments
+      : [];
+    if (adjustments.length === 0 || adjustments.length > 500) {
+      throw new Error("Danh sách cân bằng kho không hợp lệ.");
+    }
+    const idempotencyKey = String(payload.idempotencyKey || "").trim();
+    if (!/^[A-Za-z0-9_-]{8,100}$/.test(idempotencyKey)) {
+      throw new Error("Mã chống ghi trùng không hợp lệ.");
+    }
+    const validated = adjustments.map((item) => ({
+      ...validateStockMutationPayload(item, ["CAN_BANG"]),
+      allowMissing: false,
+    }));
+    const recordData = payload.record || {};
+    const recordDate = new Date(recordData.date || Date.now());
+    if (Number.isNaN(recordDate.getTime())) {
+      throw new Error("Ngày cân bằng kho không hợp lệ.");
+    }
+
+    const result = await withStockLock(() =>
+      getPrismaDirectTx().$transaction(
+        async (tx) => {
+          const operationKey = `stockBalanceOperation:${idempotencyKey}`;
+          const claim = await tx.appConfig.createMany({
+            data: { key: operationKey, value: "pending" },
+            skipDuplicates: true,
+          });
+          if (claim.count === 0) {
+            throw new Error("Yêu cầu cân bằng này đã được xử lý trước đó.");
+          }
+
+          const mutationResults = [];
+          for (const adjustment of validated) {
+            const mutation = await performStockUpdateInTx(tx, adjustment);
+            if (!mutation?.success) {
+              throw new Error(
+                mutation?.error || `Không thể cập nhật SKU ${adjustment.sku}.`,
+              );
+            }
+            mutationResults.push(mutation);
+          }
+
+          const record = await tx.stockBalance.create({
+            data: {
+              date: recordDate,
+              adjustedBy: currentSession.username,
+              items:
+                typeof recordData.items === "string"
+                  ? recordData.items
+                  : JSON.stringify(recordData.items || []),
+              notes: String(recordData.notes || "").trim() || null,
+            },
+          });
+          await tx.appConfig.update({
+            where: { key: operationKey },
+            data: { value: JSON.stringify({ recordId: record.id }) },
+          });
+          return { record, mutationResults };
+        },
+        { timeout: 60000, maxWait: 10000 },
+      ),
+    );
+
+    emitStockChangedForSkus(validated.map((item) => item.sku), {
+      referenceType: "CAN_BANG",
+      reference: validated[0]?.logContext?.reference,
+    });
+    void logActivity({
+      module: "products",
+      action: "UPDATE",
+      description: `Cân bằng kho nguyên tử ${validated.length} SKU - ${currentSession.username}`,
+      recordName: currentSession.username,
+      userName: currentSession.username,
+      severity: "WARNING",
+    });
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("❌ Atomic stock balance error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle("stockBalance:create", async (event, data) => {
   try {
     requireRole("admin");
@@ -19745,20 +20923,17 @@ async function createInventoryLog({
   try {
     if (!prisma) return null;
 
-    let reporterId = null;
-
-    // Đích danh user đang thao tác (chống ghi đè 'System' hay 'Admin' mù mờ)
-    let actualUsername = currentSession?.username;
-    if (!actualUsername && typeof createdBy === "string")
-      actualUsername = createdBy;
-
-    if (actualUsername) {
+    // Authenticated actions already carry the canonical user id. Avoid one
+    // user lookup per SKU when a transaction writes multiple inventory logs.
+    let reporterId = currentSession?.id || null;
+    if (!reporterId && typeof createdBy === "number") {
+      reporterId = createdBy;
+    } else if (!reporterId && typeof createdBy === "string") {
       const user = await prisma.user.findUnique({
-        where: { username: actualUsername },
+        where: { username: createdBy },
+        select: { id: true },
       });
       if (user) reporterId = user.id;
-    } else if (typeof createdBy === "number") {
-      reporterId = createdBy;
     }
 
     const log = await prisma.inventoryLog.create({
@@ -20262,12 +21437,27 @@ ipcMain.handle("appConfig:set", async (event, key, value) => {
                 if (current?.value) {
                   try {
                     const currentValue = JSON.parse(current.value);
-                    if (Array.isArray(currentValue?.employees)) {
-                      valueToSave = {
-                        ...(value || {}),
-                        employees: currentValue.employees,
-                      };
-                    }
+                    valueToSave = {
+                      ...(value || {}),
+                      employees: Array.isArray(currentValue?.employees)
+                        ? currentValue.employees
+                        : [],
+                      // Leave cells are mutated through the atomic attendance
+                      // API below; never accept a stale whole-page copy here.
+                      leaveRecords: Array.isArray(currentValue?.leaveRecords)
+                        ? currentValue.leaveRecords
+                        : [],
+                      // Locks/snapshots and payroll overrides have dedicated
+                      // atomic APIs. A stale whole-page autosave must never
+                      // replace either authoritative value.
+                      lockedPeriods: Array.isArray(currentValue?.lockedPeriods)
+                        ? currentValue.lockedPeriods
+                        : [],
+                      payrollOverrides:
+                        currentValue?.payrollOverrides && typeof currentValue.payrollOverrides === "object"
+                          ? currentValue.payrollOverrides
+                          : {},
+                    };
                   } catch {}
                 }
                 return tx.appConfig.upsert({
@@ -20309,6 +21499,388 @@ ipcMain.handle("appConfig:set", async (event, key, value) => {
     return { success: true, data: config };
   } catch (error) {
     console.error(`❌ Set config "${key}" error:`, error);
+    return { success: false, error: error.message };
+  }
+});
+
+function getAttendanceLockedPeriods(attendanceData) {
+  return Array.isArray(attendanceData?.lockedPeriods)
+    ? attendanceData.lockedPeriods.filter((lock) => lock && lock.start && lock.end)
+    : [];
+}
+
+function getBangkokDateKey(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString("sv-SE", { timeZone: "Asia/Bangkok" });
+}
+
+function isAttendanceDateLocked(attendanceData, dateKey) {
+  return getAttendanceLockedPeriods(attendanceData).some((lock) => {
+    const startKey = getBangkokDateKey(lock.start);
+    const endKey = getBangkokDateKey(lock.end);
+    return startKey && endKey && dateKey >= startKey && dateKey <= endKey;
+  });
+}
+
+function isAttendanceMonthLocked(attendanceData, periodKey) {
+  const monthStart = `${periodKey}-01`;
+  const monthEndDate = new Date(`${periodKey}-01T12:00:00+07:00`);
+  monthEndDate.setMonth(monthEndDate.getMonth() + 1, 0);
+  const monthEnd = getBangkokDateKey(monthEndDate);
+  return getAttendanceLockedPeriods(attendanceData).some((lock) => {
+    const startKey = getBangkokDateKey(lock.start);
+    const endKey = getBangkokDateKey(lock.end);
+    return startKey && endKey && startKey <= monthEnd && endKey >= monthStart;
+  });
+}
+
+// Lock/unlock and the frozen payroll snapshot are saved in the same database
+// transaction. This is the only path allowed to change lockedPeriods.
+ipcMain.handle("attendance:updatePayrollLock", async (event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+
+    const action = String(payload.action || "").trim();
+    if (!["lock", "unlock"].includes(action)) {
+      throw new Error("Thao tác khóa bảng lương không hợp lệ.");
+    }
+
+    const sourceLock = action === "lock" ? payload.lock : payload;
+    const start = new Date(sourceLock?.start);
+    const end = new Date(sourceLock?.end);
+    const startKey = getBangkokDateKey(start);
+    const endKey = getBangkokDateKey(end);
+    if (!startKey || !endKey || start.getTime() > end.getTime()) {
+      throw new Error("Kỳ lương không hợp lệ.");
+    }
+
+    let normalizedLock = null;
+    if (action === "lock") {
+      const snapshot = sourceLock?.payrollSnapshot;
+      if (
+        snapshot?.version !== 1 ||
+        !Array.isArray(snapshot.rows) ||
+        !Array.isArray(snapshot.packingLogs) ||
+        !Array.isArray(snapshot.fines) ||
+        !Array.isArray(snapshot.bonuses) ||
+        !snapshot.sourceSummary ||
+        typeof snapshot.sourceSummary !== "object"
+      ) {
+        throw new Error("Snapshot kỳ lương chưa đầy đủ. Kỳ chưa được khóa.");
+      }
+      if (snapshot.rows.length > 2000 || snapshot.packingLogs.length > 50000) {
+        throw new Error("Snapshot kỳ lương vượt giới hạn an toàn.");
+      }
+      const snapshotBytes = Buffer.byteLength(JSON.stringify(snapshot), "utf8");
+      if (snapshotBytes > 20 * 1024 * 1024) {
+        throw new Error("Snapshot kỳ lương quá lớn để lưu an toàn.");
+      }
+      normalizedLock = {
+        id: String(sourceLock.id || `lock-${Date.now()}`).slice(0, 100),
+        start: start.toISOString(),
+        end: end.toISOString(),
+        lockedAt: new Date().toISOString(),
+        lockedBy: currentSession.username,
+        payrollSnapshot: {
+          ...snapshot,
+          version: 1,
+          capturedAt: String(snapshot.capturedAt || new Date().toISOString()),
+          capturedBy: currentSession.username,
+        },
+      };
+    }
+
+    const result = await enqueueAttendanceDataWrite(async () => {
+      let lastConflict = null;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          return await getPrismaDirectTx().$transaction(
+            async (tx) => {
+              await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
+              const config = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
+              let attendanceData = {};
+              try {
+                attendanceData = JSON.parse(config?.value || "{}");
+              } catch {}
+
+              const lockedPeriods = getAttendanceLockedPeriods(attendanceData);
+              const matchesPeriod = (lock) => (
+                getBangkokDateKey(lock.start) === startKey &&
+                getBangkokDateKey(lock.end) === endKey
+              );
+              let nextLockedPeriods;
+              if (action === "lock") {
+                if (lockedPeriods.some(matchesPeriod)) {
+                  throw new Error("Kỳ lương này đã được khóa.");
+                }
+                nextLockedPeriods = [...lockedPeriods, normalizedLock];
+              } else {
+                if (!lockedPeriods.some(matchesPeriod)) {
+                  throw new Error("Không tìm thấy kỳ lương đang khóa.");
+                }
+                nextLockedPeriods = lockedPeriods.filter((lock) => !matchesPeriod(lock));
+              }
+
+              attendanceData = { ...attendanceData, lockedPeriods: nextLockedPeriods };
+              await tx.appConfig.upsert({
+                where: { key: "attendanceData" },
+                update: { value: JSON.stringify(attendanceData) },
+                create: { key: "attendanceData", value: JSON.stringify(attendanceData) },
+              });
+              return { lockedPeriods: nextLockedPeriods };
+            },
+            { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 },
+          );
+        } catch (error) {
+          if (!isTransactionWriteConflict(error)) throw error;
+          lastConflict = error;
+          await waitForRetry(attempt);
+        }
+      }
+      throw lastConflict || new Error("Trạng thái khóa đang được cập nhật ở máy khác. Hãy thử lại.");
+    });
+
+    void logActivity({
+      module: "attendance",
+      action: action === "lock" ? "LOCK_PAYROLL_SNAPSHOT" : "UNLOCK_PAYROLL_SNAPSHOT",
+      description: `${action === "lock" ? "Khóa" : "Mở khóa"} bảng lương ${startKey} đến ${endKey}`,
+      recordName: `${startKey}_${endKey}`,
+      userName: currentSession.username,
+      severity: "WARNING",
+    }).catch((error) => console.warn("Không thể ghi audit khóa bảng lương:", error.message));
+
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("❌ attendance:updatePayrollLock error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Update only the requested leave cells. The transaction lock prevents a
+// stale Attendance screen on another machine from overwriting unrelated data.
+ipcMain.handle("attendance:updateLeaveStatus", async (event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+
+    const empId = Number(payload.empId);
+    const date = String(payload.date || "").trim();
+    const status = String(payload.status || "").trim();
+    const note = String(payload.note || "").trim().slice(0, 500);
+    const sessions = [...new Set(
+      (Array.isArray(payload.sessions) ? payload.sessions : [payload.session])
+        .map((session) => String(session || "").trim()),
+    )];
+
+    if (!Number.isInteger(empId) || empId <= 0) {
+      throw new Error("Nhân viên không hợp lệ.");
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new Error("Ngày nghỉ không hợp lệ.");
+    }
+    if (!sessions.length || sessions.some((session) => !["morning", "afternoon"].includes(session))) {
+      throw new Error("Ca nghỉ không hợp lệ.");
+    }
+    if (!["paid", "unpaid", "exempt", "clear"].includes(status)) {
+      throw new Error("Trạng thái nghỉ không hợp lệ.");
+    }
+
+    const result = await enqueueAttendanceDataWrite(async () => {
+      let lastConflict = null;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          return await getPrismaDirectTx().$transaction(
+            async (tx) => {
+              await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
+              const config = await tx.appConfig.findUnique({
+                where: { key: "attendanceData" },
+              });
+              let attendanceData = {};
+              try {
+                attendanceData = JSON.parse(config?.value || "{}");
+              } catch {}
+
+              if (isAttendanceDateLocked(attendanceData, date)) {
+                throw new Error("Kỳ lương chứa ngày này đã khóa. Admin phải mở khóa trước khi sửa nghỉ phép.");
+              }
+
+              const currentLeaveRecords = Array.isArray(attendanceData.leaveRecords)
+                ? attendanceData.leaveRecords
+                : [];
+              const nextLeaveRecords = currentLeaveRecords.filter((leave) => !(
+                Number(leave?.empId) === empId &&
+                leave?.date === date &&
+                sessions.includes(leave?.session)
+              ));
+
+              if (status !== "clear") {
+                const now = new Date().toISOString();
+                for (const session of sessions) {
+                  nextLeaveRecords.push({
+                    id: `${empId}-${date}-${session}`,
+                    empId,
+                    date,
+                    session,
+                    exempt: status === "exempt",
+                    unpaid: status === "unpaid",
+                    note,
+                    createdAt: now,
+                    createdBy: currentSession.username,
+                  });
+                }
+              }
+
+              attendanceData = {
+                ...attendanceData,
+                leaveRecords: nextLeaveRecords,
+              };
+              await tx.appConfig.upsert({
+                where: { key: "attendanceData" },
+                update: { value: JSON.stringify(attendanceData) },
+                create: { key: "attendanceData", value: JSON.stringify(attendanceData) },
+              });
+              return { leaveRecords: nextLeaveRecords };
+            },
+            { isolationLevel: "Serializable", timeout: 10000, maxWait: 10000 },
+          );
+        } catch (error) {
+          if (!isTransactionWriteConflict(error)) throw error;
+          lastConflict = error;
+          await waitForRetry(attempt);
+        }
+      }
+      throw lastConflict || new Error("Dữ liệu nghỉ đang được cập nhật ở máy khác. Hãy thử lại.");
+    });
+
+    void logActivity({
+      module: "attendance",
+      action: "UPDATE_LEAVE_STATUS",
+      description: `Cập nhật nghỉ ${date} (${sessions.join(", ")}) cho nhân viên #${empId}: ${status}`,
+      recordName: `${empId}-${date}`,
+      userName: currentSession.username,
+      severity: "INFO",
+    }).catch((error) => console.warn("Không thể ghi audit trạng thái nghỉ:", error.message));
+
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("❌ attendance:updateLeaveStatus error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Update one employee/month override atomically. This avoids reopening the
+// whole-page attendanceData write that can overwrite another workstation.
+ipcMain.handle("attendance:updatePayrollOverride", async (event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+
+    const empId = Number(payload.empId);
+    const periodKey = String(payload.periodKey || "").trim();
+    const clear = payload.clear === true;
+    const patch = payload.patch && typeof payload.patch === "object" ? payload.patch : {};
+
+    if (!Number.isInteger(empId) || empId <= 0) {
+      throw new Error("Nhân viên không hợp lệ.");
+    }
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(periodKey)) {
+      throw new Error("Kỳ lương không hợp lệ.");
+    }
+
+    const normalizedPatch = {};
+    if (Object.prototype.hasOwnProperty.call(patch, "extraShifts")) {
+      const extraShifts = Number(patch.extraShifts);
+      if (!Number.isInteger(extraShifts) || extraShifts < 0 || extraShifts > 1000) {
+        throw new Error("Số ca điều chỉnh không hợp lệ.");
+      }
+      normalizedPatch.extraShifts = extraShifts;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "extraAdjust")) {
+      const extraAdjust = Number(patch.extraAdjust);
+      if (!Number.isFinite(extraAdjust) || Math.abs(extraAdjust) > 1000000000) {
+        throw new Error("Số tiền điều chỉnh không hợp lệ.");
+      }
+      normalizedPatch.extraAdjust = Math.round(extraAdjust);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "adjustNote")) {
+      normalizedPatch.adjustNote = String(patch.adjustNote || "").trim().slice(0, 500);
+    }
+    if (!clear && Object.keys(normalizedPatch).length === 0) {
+      throw new Error("Không có nội dung điều chỉnh.");
+    }
+
+    const overrideKey = `${empId}_${periodKey}`;
+    const result = await enqueueAttendanceDataWrite(async () => {
+      let lastConflict = null;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          return await getPrismaDirectTx().$transaction(
+            async (tx) => {
+              await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
+              const config = await tx.appConfig.findUnique({
+                where: { key: "attendanceData" },
+              });
+              let attendanceData = {};
+              try {
+                attendanceData = JSON.parse(config?.value || "{}");
+              } catch {}
+
+              if (isAttendanceMonthLocked(attendanceData, periodKey)) {
+                throw new Error("Kỳ lương này đã khóa. Admin phải mở khóa trước khi điều chỉnh lương.");
+              }
+
+              const payrollOverrides = {
+                ...(attendanceData.payrollOverrides && typeof attendanceData.payrollOverrides === "object"
+                  ? attendanceData.payrollOverrides
+                  : {}),
+              };
+
+              let savedOverride = null;
+              if (clear) {
+                delete payrollOverrides[overrideKey];
+              } else {
+                savedOverride = {
+                  ...(payrollOverrides[overrideKey] || {}),
+                  ...normalizedPatch,
+                  updatedAt: new Date().toISOString(),
+                  updatedBy: currentSession.username,
+                };
+                payrollOverrides[overrideKey] = savedOverride;
+              }
+
+              attendanceData = { ...attendanceData, payrollOverrides };
+              await tx.appConfig.upsert({
+                where: { key: "attendanceData" },
+                update: { value: JSON.stringify(attendanceData) },
+                create: { key: "attendanceData", value: JSON.stringify(attendanceData) },
+              });
+              return { overrideKey, override: savedOverride };
+            },
+            { isolationLevel: "Serializable", timeout: 10000, maxWait: 10000 },
+          );
+        } catch (error) {
+          if (!isTransactionWriteConflict(error)) throw error;
+          lastConflict = error;
+          await waitForRetry(attempt);
+        }
+      }
+      throw lastConflict || new Error("Điều chỉnh lương đang được cập nhật ở máy khác. Hãy thử lại.");
+    });
+
+    void logActivity({
+      module: "attendance",
+      action: clear ? "CLEAR_PAYROLL_OVERRIDE" : "UPDATE_PAYROLL_OVERRIDE",
+      description: `${clear ? "Xóa" : "Cập nhật"} điều chỉnh lương ${periodKey} cho nhân viên #${empId}`,
+      recordName: overrideKey,
+      userName: currentSession.username,
+      severity: "WARNING",
+    }).catch((error) => console.warn("Không thể ghi audit điều chỉnh lương:", error.message));
+
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("❌ attendance:updatePayrollOverride error:", error);
     return { success: false, error: error.message };
   }
 });
@@ -22986,11 +24558,22 @@ ipcMain.handle("users:restoreSession", async (event, rememberToken) => {
     const record = validTokens.find((t) => t.tokenHash === tokenHash);
     if (!record) {
       if (validTokens.length !== tokens.length)
-        await writeRememberTokens(validTokens);
+        await mutateRememberTokens((current) =>
+          current.filter(
+            (token) =>
+              token?.expiresAt &&
+              new Date(token.expiresAt).getTime() > now,
+          ),
+        );
       return { success: false };
     }
     if (validTokens.length !== tokens.length)
-      await writeRememberTokens(validTokens);
+      await mutateRememberTokens((current) =>
+        current.filter(
+          (token) =>
+            token?.expiresAt && new Date(token.expiresAt).getTime() > now,
+        ),
+      );
     const user = await prisma.user.findUnique({ where: { id: record.userId } });
     if (!user || user.status !== "active") return { success: false };
     currentSession = {
@@ -23223,7 +24806,21 @@ const { v4: uuidv4 } = (() => {
 })();
 
 // Cache token MISA
-let misaTokenCache = { token: null, expiresAt: 0 };
+let misaTokenCache = { token: null, expiresAt: 0, environment: null };
+
+function getMisaEnvironment(config) {
+  return config?.env === "live" ? "live" : "test";
+}
+
+function getMisaRootUrl(config) {
+  return getMisaEnvironment(config) === "live"
+    ? "https://api.meinvoice.vn"
+    : "https://testapi.meinvoice.vn";
+}
+
+function getMisaIntegrationBaseUrl(config) {
+  return `${getMisaRootUrl(config)}/api/integration`;
+}
 
 // Decoder chỉ giữ lại để di trú bản cũ từng lưu password bằng Base64.
 function decodeSecret(encoded) {
@@ -23287,11 +24884,13 @@ async function getMisaConfig() {
       writeLocalMisaPassword(legacyPassword);
       localPassword = legacyPassword;
     }
-    delete config.password;
-    await prisma.appConfig.update({
-      where: { key: "misaConfig" },
-      data: { value: JSON.stringify(config) },
-    });
+    if (!DATA_SAFETY_MODE) {
+      delete config.password;
+      await prisma.appConfig.update({
+        where: { key: "misaConfig" },
+        data: { value: JSON.stringify(config) },
+      });
+    }
   }
   config.password = localPassword;
   if (
@@ -23309,13 +24908,18 @@ async function getMisaConfig() {
 
 // Lấy token MISA (có cache)
 async function getMisaToken() {
+  const config = await getMisaConfig();
+  const environment = getMisaEnvironment(config);
   // Trả về cached token nếu chưa hết hạn (trừ 5 phút buffer)
-  if (misaTokenCache.token && Date.now() < misaTokenCache.expiresAt - 300000) {
+  if (
+    misaTokenCache.token &&
+    misaTokenCache.environment === environment &&
+    Date.now() < misaTokenCache.expiresAt - 300000
+  ) {
     return misaTokenCache.token;
   }
 
-  const config = await getMisaConfig();
-  const baseUrl = "https://api.meinvoice.vn";
+  const baseUrl = getMisaRootUrl(config);
 
   // Trim tất cả field để loại bỏ khoảng trắng ẩn
   const appid = (config.appid || "").trim();
@@ -23379,6 +24983,7 @@ async function getMisaToken() {
       misaTokenCache = {
         token: data,
         expiresAt: Date.now() + 2 * 60 * 60 * 1000, // Cache 2 giờ (MISA token expire nhanh)
+        environment,
       };
       console.log(`✅ MISA: Token obtained successfully from ${tokenUrl}`);
       return data;
@@ -23419,7 +25024,7 @@ async function getMisaToken() {
 
 // Xóa token cache khi bị reject (để lần sau lấy token mới)
 function invalidateMisaToken() {
-  misaTokenCache = { token: null, expiresAt: 0 };
+  misaTokenCache = { token: null, expiresAt: 0, environment: null };
   console.log("🔄 MISA: Token cache invalidated — sẽ lấy token mới lần tới");
 }
 
@@ -23569,7 +25174,7 @@ function buildMisaInvoiceData(order, config) {
 async function publishMisaInvoice(invoiceDataList) {
   const config = await getMisaConfig();
   const token = await getMisaToken();
-  const baseUrl = "https://api.meinvoice.vn/api/integration";
+  const baseUrl = getMisaIntegrationBaseUrl(config);
 
   // Body theo tài liệu Mục 6: { SignType, InvoiceData, PublishInvoiceData }
   const body = {
@@ -23666,7 +25271,7 @@ async function publishMisaInvoice(invoiceDataList) {
 async function downloadMisaInvoicePDF(transactionId) {
   const config = await getMisaConfig();
   let token = await getMisaToken();
-  const baseUrl = "https://api.meinvoice.vn/api/integration";
+  const baseUrl = getMisaIntegrationBaseUrl(config);
 
   async function doDownloadRequest(authToken) {
     const response = await fetch(
@@ -23748,10 +25353,12 @@ ipcMain.handle("misa:getConfig", async () => {
         writeLocalMisaPassword(legacyPassword);
       }
       delete config.password;
-      await prisma.appConfig.update({
-        where: { key: "misaConfig" },
-        data: { value: JSON.stringify(config) },
-      });
+      if (!DATA_SAFETY_MODE) {
+        await prisma.appConfig.update({
+          where: { key: "misaConfig" },
+          data: { value: JSON.stringify(config) },
+        });
+      }
     }
     delete config.password;
     return {
@@ -25443,12 +27050,124 @@ async function sendGmailSimpleMessage({ to, subject, html }) {
   }
 }
 
+let payslipGmailClientCache = null;
+
+function getGoogleAccountEmail(tokens) {
+  try {
+    const payload = String(tokens?.id_token || "").split(".")[1];
+    if (!payload) return "";
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padding = "=".repeat((4 - (normalized.length % 4)) % 4);
+    const parsed = JSON.parse(Buffer.from(normalized + padding, "base64").toString("utf8"));
+    return String(parsed?.email || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function getPayslipGmailClient(tokenPath, tokens) {
+  const tokenMtime = fs.statSync(tokenPath).mtimeMs;
+  if (
+    payslipGmailClientCache?.tokenPath === tokenPath &&
+    payslipGmailClientCache?.tokenMtime === tokenMtime
+  ) {
+    return payslipGmailClientCache;
+  }
+  if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET) {
+    throw new Error("Bản cài đặt đang thiếu cấu hình Google OAuth.");
+  }
+
+  const { google } = require("googleapis");
+  const oauth2Client = new google.auth.OAuth2(
+    OAUTH_CLIENT_ID,
+    OAUTH_CLIENT_SECRET,
+  );
+  oauth2Client.setCredentials(tokens);
+  oauth2Client.on("tokens", (newTokens) => {
+    try {
+      const saved = readGoogleTokens(tokenPath);
+      writeGoogleTokens({ ...saved, ...newTokens }, tokenPath);
+      if (payslipGmailClientCache?.tokenPath === tokenPath) {
+        payslipGmailClientCache.tokenMtime = fs.statSync(tokenPath).mtimeMs;
+      }
+    } catch (err) {
+      console.error("[Gmail] Failed to save refreshed token:", err.message);
+    }
+  });
+
+  payslipGmailClientCache = {
+    tokenPath,
+    tokenMtime,
+    gmail: google.gmail({ version: "v1", auth: oauth2Client }),
+    sender: getGoogleAccountEmail(tokens) || "yendao444@gmail.com",
+  };
+  return payslipGmailClientCache;
+}
+
+function normalizePayslipRecipient(value) {
+  const email = String(value || "").trim();
+  if (
+    !email ||
+    email.length > 320 ||
+    /[\r\n]/.test(email) ||
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+  ) {
+    throw new Error(`Địa chỉ email người nhận không hợp lệ: ${email || "(trống)"}`);
+  }
+  return email;
+}
+
+function normalizePayslipPdf(pdfBase64, pdfBytes) {
+  let pdfBuffer;
+  if (pdfBytes != null) {
+    if (Buffer.isBuffer(pdfBytes)) {
+      pdfBuffer = pdfBytes;
+    } else if (ArrayBuffer.isView(pdfBytes)) {
+      pdfBuffer = Buffer.from(pdfBytes.buffer, pdfBytes.byteOffset, pdfBytes.byteLength);
+    } else if (pdfBytes instanceof ArrayBuffer) {
+      pdfBuffer = Buffer.from(pdfBytes);
+    }
+  }
+  if (!pdfBuffer && pdfBase64) {
+    pdfBuffer = Buffer.from(
+      String(pdfBase64).replace(/^data:application\/pdf;base64,/, ""),
+      "base64",
+    );
+  }
+  if (!pdfBuffer || pdfBuffer.length < 5) {
+    throw new Error("File PDF phiếu lương trống hoặc không hợp lệ.");
+  }
+  if (pdfBuffer.length > 20 * 1024 * 1024) {
+    throw new Error("File PDF vượt 20 MB. Chưa gửi để tránh Gmail treo hoặc từ chối tệp.");
+  }
+  if (pdfBuffer.subarray(0, 5).toString("ascii") !== "%PDF-") {
+    throw new Error("Tệp đính kèm không phải PDF hợp lệ.");
+  }
+  return pdfBuffer.toString("base64");
+}
+
+function formatGmailSendError(error) {
+  const status = error?.response?.status || error?.code;
+  const reason = error?.response?.data?.error?.errors?.[0]?.reason;
+  const rawMessage =
+    error?.response?.data?.error?.message ||
+    error?.response?.data?.error ||
+    error?.message ||
+    "Gửi Gmail thất bại";
+  if (/timeout|timed out|ETIMEDOUT/i.test(String(rawMessage)) || status === "ETIMEDOUT") {
+    return "Gmail không phản hồi trong 30 giây. Chưa xác nhận thư được tiếp nhận; vui lòng kiểm tra mục Đã gửi trước khi thử lại.";
+  }
+  const suffix = [status ? `mã ${status}` : "", reason || ""].filter(Boolean).join(", ");
+  return `${typeof rawMessage === "string" ? rawMessage : JSON.stringify(rawMessage)}${suffix ? ` (${suffix})` : ""}`;
+}
+
 async function sendGmailWithAttachment({
   to,
   subject,
   html,
   fileName,
   pdfBase64,
+  pdfBytes,
 }) {
   const tokenPath = ensureGoogleTokenPath();
   if (!fs.existsSync(tokenPath)) {
@@ -25470,27 +27189,22 @@ async function sendGmailWithAttachment({
     };
   }
 
-  const { google } = require("googleapis");
-  const oauth2Client = new google.auth.OAuth2(
-    OAUTH_CLIENT_ID,
-    OAUTH_CLIENT_SECRET,
-  );
-  oauth2Client.setCredentials(tokens);
-  oauth2Client.on("tokens", (newTokens) => {
-    try {
-      const saved = readGoogleTokens(tokenPath);
-      writeGoogleTokens({ ...saved, ...newTokens }, tokenPath);
-    } catch (err) {
-      console.error("[Gmail] Failed to save refreshed token:", err.message);
-    }
-  });
+  const normalizedRecipient = normalizePayslipRecipient(to);
+  const normalizedPdfBase64 = normalizePayslipPdf(pdfBase64, pdfBytes);
 
   const boundary = `payslip_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  const sender = "yendao444@gmail.com";
-  const safeFileName = fileName || "phieu-luong.pdf";
+  const { gmail, sender } = getPayslipGmailClient(tokenPath, tokens);
+  const safeFileName =
+    String(fileName || "phieu-luong.pdf")
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 180) || "phieu-luong.pdf";
+  const asciiFileName = safeFileName.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9._ -]/g, "-") || "phieu-luong.pdf";
+  const encodedFileName = encodeURIComponent(safeFileName).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
   const message = [
     `From: ${encodeMailHeader("Hệ thống Quản lý")} <${sender}>`,
-    `To: ${to}`,
+    `To: ${normalizedRecipient}`,
     `Subject: ${encodeMailHeader(subject)}`,
     "MIME-Version: 1.0",
     `Content-Type: multipart/mixed; boundary="${boundary}"`,
@@ -25502,22 +27216,21 @@ async function sendGmailWithAttachment({
     Buffer.from(html || "", "utf8").toString("base64"),
     "",
     `--${boundary}`,
-    `Content-Type: application/pdf; name="${safeFileName}"`,
+    `Content-Type: application/pdf; name="${asciiFileName}"; name*=UTF-8''${encodedFileName}`,
     "Content-Transfer-Encoding: base64",
-    `Content-Disposition: attachment; filename="${safeFileName}"`,
+    `Content-Disposition: attachment; filename="${asciiFileName}"; filename*=UTF-8''${encodedFileName}`,
     "",
-    String(pdfBase64 || "").replace(/^data:application\/pdf;base64,/, ""),
+    normalizedPdfBase64,
     "",
     `--${boundary}--`,
   ].join("\r\n");
 
-  const gmail = google.gmail({ version: "v1", auth: oauth2Client });
   let sent;
   try {
     sent = await gmail.users.messages.send({
       userId: "me",
       requestBody: { raw: toBase64Url(message) },
-    });
+    }, { timeout: 30000 });
   } catch (err) {
     if (isGoogleReauthError(err)) {
       return {
@@ -25527,7 +27240,7 @@ async function sendGmailWithAttachment({
           "Token Google da het han hoac bi thu hoi. Vui long chay reauth-gdrive.bat de dang nhap Google lai roi gui lai Gmail.",
       };
     }
-    throw err;
+    throw new Error(formatGmailSendError(err));
   }
 
   return { success: true, data: { id: sent.data.id } };
@@ -25535,10 +27248,10 @@ async function sendGmailWithAttachment({
 
 ipcMain.handle(
   "attendance:sendPayslipEmail",
-  async (event, { to, employeeName, period, fileName, pdfBase64 } = {}) => {
+  async (event, { to, employeeName, period, fileName, pdfBase64, pdfBytes } = {}) => {
     try {
       requireRole("admin");
-      if (!to || !pdfBase64) throw new Error("Thiếu email nhận hoặc file PDF");
+      if (!to || (!pdfBase64 && !pdfBytes)) throw new Error("Thiếu email nhận hoặc file PDF");
 
       const companyName = "AIRCLEAN CORP.";
       const employeeLabel = String(employeeName || "").trim();
@@ -25565,14 +27278,14 @@ ipcMain.handle(
         html,
         fileName,
         pdfBase64,
+        pdfBytes,
       });
     } catch (err) {
       console.error("❌ attendance:sendPayslipEmail error:", err.message);
-      const message =
-        err?.response?.data?.error || err.message || "Gửi Gmail thất bại";
+      const message = formatGmailSendError(err);
       return {
         success: false,
-        error: typeof message === "string" ? message : JSON.stringify(message),
+        error: message,
       };
     }
   },
@@ -25853,10 +27566,12 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
       },
     });
 
-    const fineResult = await reconcileLateAttendanceFines(prisma, {
-      logIds: [log.id],
-      actor: "system",
-    });
+    const fineResult = DATA_SAFETY_MODE
+      ? { created: [] }
+      : await reconcileLateAttendanceFines(prisma, {
+          logIds: [log.id],
+          actor: "system",
+        });
     const lateFine = fineResult.created[0] || null;
 
     return {
@@ -26323,8 +28038,9 @@ ipcMain.handle("offlineQueue:status", () => {
   return { success: true, pendingCount: offlineQueue.count() };
 });
 
-// Flush to�n b� queue l�n Supabase
-ipcMain.handle("offlineQueue:sync", async () => {
+let offlineQueueSyncPromise = null;
+
+async function syncOfflineQueue() {
   const items = offlineQueue.dequeueAll();
   if (items.length === 0) return { success: true, synced: 0, failed: 0 };
 
@@ -26361,19 +28077,30 @@ ipcMain.handle("offlineQueue:sync", async () => {
     }
   }
 
+  const remaining = offlineQueue.count();
   console.log(
     "[OfflineQueue] Sync complete  synced:",
     synced,
     "| failed:",
     failed,
     "| remaining:",
-    offlineQueue.count(),
+    remaining,
   );
   return {
     success: true,
     synced,
     failed,
-    remaining: offlineQueue.count(),
+    remaining,
     errors,
   };
+}
+
+// Dùng chung một lượt replay nếu nhiều màn cùng yêu cầu sync.
+ipcMain.handle("offlineQueue:sync", () => {
+  if (!offlineQueueSyncPromise) {
+    offlineQueueSyncPromise = syncOfflineQueue().finally(() => {
+      offlineQueueSyncPromise = null;
+    });
+  }
+  return offlineQueueSyncPromise;
 });

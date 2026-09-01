@@ -83,10 +83,20 @@ async function executeKhuiKien(code, actor = 'Telegram Bot') {
     
     const target = list[idx];
     if (target.status === 'opened' || target.status === 'Đang sử dụng') throw new Error(`Kiện [${normalizedCode}] đang mở sẵn rồi.`);
+    if (target.status === 'pending_check' || target.status === 'Chờ kiểm') throw new Error(`Kiện [${normalizedCode}] đang chờ kiểm thực tế.`);
     if (target.status === 'empty' || target.status === 'Đã hết') throw new Error(`Kiện [${normalizedCode}] đã hết hàng.`);
     
     // Quy tắc kiểm soát kho nghiêm ngặt: Mỗi SKU chỉ được phép mở 1 kiện tại 1 thời điểm
     const targetSku = (target.sku || target.skuName || '').toUpperCase();
+    const pendingSameSku = list.find(u =>
+        (u.sku || u.skuName || '').toUpperCase() === targetSku &&
+        (u.status === 'pending_check' || u.status === 'Chờ kiểm') &&
+        (u.code || u.id || '').toUpperCase() !== normalizedCode
+    );
+    if (pendingSameSku) {
+        const pendingCode = pendingSameSku.code || pendingSameSku.id;
+        throw new Error(`Không thể khui kiện mới. SKU [${target.sku || target.skuName}] đang có kiện [${pendingCode}] chờ kiểm thực tế. Vui lòng vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước.`);
+    }
     const openedSameSku = list.find(u => 
         (u.sku || u.skuName || '').toUpperCase() === targetSku && 
         (u.status === 'opened' || u.status === 'Đang sử dụng') &&
@@ -100,11 +110,34 @@ async function executeKhuiKien(code, actor = 'Telegram Bot') {
     }
     
     try {
-        await prisma.handlingUnit.update({
-            where: { code: normalizedCode },
-            data: { status: 'opened', updatedAt: new Date() }
+        await prisma.$transaction(async tx => {
+            const dbTarget = await tx.handlingUnit.findUnique({ where: { code: normalizedCode } });
+            if (!dbTarget) throw new Error(`Không tìm thấy kiện [${normalizedCode}] trong hệ thống.`);
+            try {
+                await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-open:${dbTarget.sku}`}))`;
+            } catch {}
+            const pendingConflict = await tx.handlingUnit.findFirst({
+                where: { sku: dbTarget.sku, code: { not: normalizedCode }, status: 'pending_check' },
+                select: { code: true },
+            });
+            if (pendingConflict) {
+                throw new Error(`Không thể khui kiện mới. SKU [${dbTarget.sku}] đang có kiện [${pendingConflict.code}] chờ kiểm thực tế. Vui lòng vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước.`);
+            }
+            const openedConflict = await tx.handlingUnit.findFirst({
+                where: { sku: dbTarget.sku, code: { not: normalizedCode }, status: 'opened' },
+                select: { code: true, remainingQuantity: true, baseUnit: true },
+            });
+            if (openedConflict) {
+                throw new Error(`SKU [${dbTarget.sku}] đang có kiện [${openedConflict.code}] đang mở (còn ${openedConflict.remainingQuantity} ${openedConflict.baseUnit}). Vui lòng rút hết kiện cũ trước khi khui kiện mới!`);
+            }
+            await tx.handlingUnit.update({
+                where: { code: normalizedCode },
+                data: { status: 'opened', updatedAt: new Date() }
+            });
         });
-    } catch {}
+    } catch (error) {
+        if (error.message.includes('chờ kiểm thực tế') || error.message.includes('đang mở')) throw error;
+    }
     
     target.status = 'opened';
     target.updatedAt = new Date();
@@ -137,11 +170,28 @@ async function executeRutHang(code, quantity, actor = 'Telegram Bot') {
         const res = await prisma.$transaction(async tx => {
             const unit = await tx.handlingUnit.findUnique({ where: { code: normalizedCode } });
             if (!unit) return null;
+            try {
+                await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-open:${unit.sku}`}))`;
+            } catch {}
+            const pendingConflict = await tx.handlingUnit.findFirst({
+                where: {
+                    sku: unit.sku,
+                    code: { not: normalizedCode },
+                    status: 'pending_check',
+                },
+                select: { code: true },
+            });
+            if (pendingConflict) {
+                throw new Error(`Không thể rút hàng. SKU [${unit.sku}] đang có kiện [${pendingConflict.code}] chờ kiểm thực tế. Vui lòng vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước.`);
+            }
+            if (unit.status === 'pending_check') {
+                throw new Error(`Không thể rút hàng. Kiện [${normalizedCode}] đang chờ kiểm thực tế. Vui lòng vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước.`);
+            }
             if (unit.status !== 'opened') throw new Error(`Kiện [${normalizedCode}] chưa khui (trạng thái: ${unit.status}). Hãy khui kiện trước.`);
             if (qty > unit.remainingQuantity) throw new Error(`Số lượng rút (${qty}) lớn hơn tồn còn lại trong kiện (${unit.remainingQuantity} ${unit.baseUnit}).`);
             
             const nextRemaining = unit.remainingQuantity - qty;
-            const nextStatus = nextRemaining === 0 ? 'empty' : 'opened';
+            const nextStatus = nextRemaining === 0 ? 'pending_check' : 'opened';
             
             const updated = await tx.handlingUnit.update({
                 where: { code: normalizedCode },
@@ -163,7 +213,7 @@ async function executeRutHang(code, quantity, actor = 'Telegram Bot') {
         });
         if (res) result = res;
     } catch (dbErr) {
-        if (dbErr.message.includes('chưa khui') || dbErr.message.includes('lớn hơn tồn')) throw dbErr;
+        if (dbErr.message.includes('chưa khui') || dbErr.message.includes('lớn hơn tồn') || dbErr.message.includes('chờ kiểm thực tế')) throw dbErr;
     }
     
     if (!result) {
@@ -173,6 +223,18 @@ async function executeRutHang(code, quantity, actor = 'Telegram Bot') {
         
         const target = list[idx];
         const currentStatus = target.status;
+        const targetSku = String(target.sku || target.skuName || '').trim().toUpperCase();
+        const pendingConflict = list.find(candidate =>
+            String(candidate.code || candidate.id || '').trim().toUpperCase() !== normalizedCode &&
+            String(candidate.sku || candidate.skuName || '').trim().toUpperCase() === targetSku &&
+            (candidate.status === 'pending_check' || candidate.status === 'Chờ kiểm')
+        );
+        if (pendingConflict) {
+            throw new Error(`Không thể rút hàng. SKU [${target.sku || target.skuName}] đang có kiện [${pendingConflict.code || pendingConflict.id}] chờ kiểm thực tế. Vui lòng vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước.`);
+        }
+        if (currentStatus === 'pending_check' || currentStatus === 'Chờ kiểm') {
+            throw new Error(`Không thể rút hàng. Kiện [${normalizedCode}] đang chờ kiểm thực tế. Vui lòng vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước.`);
+        }
         if (currentStatus !== 'opened' && currentStatus !== 'Đang sử dụng') {
             throw new Error(`Kiện [${normalizedCode}] chưa khui! Hãy khui kiện trước.`);
         }
@@ -183,7 +245,7 @@ async function executeRutHang(code, quantity, actor = 'Telegram Bot') {
         }
         
         const nextRemaining = currentQty - qty;
-        const nextStatus = nextRemaining === 0 ? 'empty' : 'opened';
+        const nextStatus = nextRemaining === 0 ? 'pending_check' : 'opened';
         target.remainingQuantity = nextRemaining;
         target.currentPcs = nextRemaining;
         target.status = nextStatus;
@@ -417,6 +479,24 @@ function clearTelegramWmsInlineKeyboard(chatId, messageId) {
 async function sendRutHangMenu(chatId, messageId = null) {
     const list = await getAllHandlingUnitsFromStore();
     const openedUnits = list.filter(u => u.status === 'opened' || u.status === 'Đang sử dụng');
+    const pendingSkuCodes = new Map();
+    list.forEach(unit => {
+        if (unit.status !== 'pending_check' && unit.status !== 'Chờ kiểm') return;
+        const sku = String(unit.sku || unit.skuName || '').trim().toUpperCase();
+        if (sku && !pendingSkuCodes.has(sku)) pendingSkuCodes.set(sku, unit.code || unit.id);
+    });
+    const availableOpenedUnits = openedUnits.filter(unit =>
+        !pendingSkuCodes.has(String(unit.sku || unit.skuName || '').trim().toUpperCase())
+    );
+
+    if (openedUnits.length > 0 && availableOpenedUnits.length === 0) {
+        const pendingCodes = [...new Set(pendingSkuCodes.values())].filter(Boolean).join(', ');
+        const text = `⛔ <b>CHƯA THỂ RÚT HÀNG</b>\n\nCác SKU đang mở vẫn còn kiện đã về 0 chờ kiểm thực tế: <b>${pendingCodes || 'vui lòng xem tab Chờ kiểm'}</b>.\n\n👉 Vào <b>Quản lý kiện hàng &gt; Chờ kiểm</b>, nhập số lượng thực tế và chốt hết các kiện này trước khi rút tiếp.`;
+        const markup = { inline_keyboard: [[{ text: '📊 Xem báo cáo tồn', callback_data: 'menu_ton' }]] };
+        if (messageId) await editTelegramWmsMessage(chatId, messageId, text, markup);
+        else await sendTelegramWmsMessage(chatId, text, markup);
+        return;
+    }
     
     if (openedUnits.length === 0) {
         const sealedUnits = list.filter(u => u.status === 'sealed' || u.status === 'Nguyên niêm phong');
@@ -434,12 +514,12 @@ async function sendRutHangMenu(chatId, messageId = null) {
     }
 
     // Chỉ có một kiện đang mở thì vào thẳng màn hình chọn số lượng.
-    if (openedUnits.length === 1) {
-        await sendPickQuantityMenu(chatId, openedUnits[0].code || openedUnits[0].id, messageId);
+    if (availableOpenedUnits.length === 1) {
+        await sendPickQuantityMenu(chatId, availableOpenedUnits[0].code || availableOpenedUnits[0].id, messageId);
         return;
     }
     
-    const inlineKeyboard = openedUnits.map(u => {
+    const inlineKeyboard = availableOpenedUnits.map(u => {
         const code = u.code || u.id;
         const remaining = u.remainingQuantity ?? u.currentPcs ?? 0;
         const unit = u.baseUnit || u.unitName || 'Gói';
@@ -455,7 +535,10 @@ async function sendRutHangMenu(chatId, messageId = null) {
         { text: '🔓 Khui thêm kiện', callback_data: 'menu_khui' }
     ]);
     
-    const text = `📦 <b>CHỌN KIỆN CẦN RÚT HÀNG:</b>\n<i>(Chạm vào kiện bên dưới để chọn nhanh số lượng rút)</i>`;
+    const blockedNote = openedUnits.length > availableOpenedUnits.length
+        ? `\n\n⚠️ Một số SKU đang bị khóa vì còn kiện chờ kiểm thực tế.`
+        : '';
+    const text = `📦 <b>CHỌN KIỆN CẦN RÚT HÀNG:</b>\n<i>(Chạm vào kiện bên dưới để chọn nhanh số lượng rút)</i>${blockedNote}`;
     const markup = { inline_keyboard: inlineKeyboard };
     
     if (messageId) {
@@ -539,7 +622,21 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
         await sendTelegramWmsMessage(chatId, `❌ Không tìm thấy kiện <code>${code}</code>.`);
         return;
     }
-    
+
+    const pendingConflict = list.find(candidate =>
+        String(candidate.code || candidate.id || '').trim().toUpperCase() !== String(code).trim().toUpperCase() &&
+        String(candidate.sku || candidate.skuName || '').trim().toUpperCase() === String(unit.sku || unit.skuName || '').trim().toUpperCase() &&
+        (candidate.status === 'pending_check' || candidate.status === 'Chờ kiểm')
+    );
+    if (pendingConflict || unit.status === 'pending_check' || unit.status === 'Chờ kiểm') {
+        const blocker = pendingConflict || unit;
+        const text = `⛔ <b>KHÔNG THỂ RÚT HÀNG</b>\n\nSKU <b>${unit.sku || unit.skuName}</b> đang có kiện <b>${blocker.code || blocker.id}</b> chờ kiểm thực tế. Vào <b>Quản lý kiện hàng &gt; Chờ kiểm</b>, nhập số lượng thực tế và chốt kiện trước.`;
+        const markup = { inline_keyboard: [[{ text: '🔙 Chọn kiện khác', callback_data: 'menu_rut' }]] };
+        if (messageId) await editTelegramWmsMessage(chatId, messageId, text, markup);
+        else await sendTelegramWmsMessage(chatId, text, markup);
+        return;
+    }
+
     const remaining = unit.remainingQuantity ?? unit.currentPcs ?? 0;
     const baseUnit = unit.baseUnit || unit.unitName || 'Gói';
     

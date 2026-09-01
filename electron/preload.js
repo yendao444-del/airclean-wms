@@ -155,6 +155,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         requestAssignmentCompletion: (taskId) => ipcRenderer.invoke('dailyTasks:requestAssignmentCompletion', taskId),
         completeRegularTask: (taskId, payload) => ipcRenderer.invoke('dailyTasks:completeRegularTask', taskId, payload),
         getEvidenceImageUrl: (taskId, storagePath) => ipcRenderer.invoke('dailyTasks:getEvidenceImageUrl', taskId, storagePath),
+        getR2EvidenceImageUrl: (taskId, r2Key, mimeType) => ipcRenderer.invoke('dailyTasks:getR2EvidenceImageUrl', taskId, r2Key, mimeType),
+        getR2EvidenceImageUrls: (taskId, images) => ipcRenderer.invoke('dailyTasks:getR2EvidenceImageUrls', taskId, images),
         getDriveEvidenceImageUrl: (taskId, driveUrl, mimeType) => ipcRenderer.invoke('dailyTasks:getDriveEvidenceImageUrl', taskId, driveUrl, mimeType),
         getDriveEvidenceImageUrls: (taskId, images, requestId) => ipcRenderer.invoke('dailyTasks:getDriveEvidenceImageUrls', taskId, images, requestId),
         onDriveEvidenceImageLoaded: (callback) => {
@@ -213,9 +215,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Export Orders (XUẤT HÀNG POS)
     exportOrders: {
         getAll: (args) => ipcRenderer.invoke('exportOrders:getAll', args),
+        saveWithStock: (data) => ipcRenderer.invoke('exportOrders:saveWithStock', data),
         create: (data) => ipcRenderer.invoke('exportOrders:create', data),
         update: (id, data) => ipcRenderer.invoke('exportOrders:update', id, data),
-        delete: (id) => ipcRenderer.invoke('exportOrders:delete', id),
+        delete: (id, options) => ipcRenderer.invoke('exportOrders:delete', id, options),
         adjustStock: (data) => ipcRenderer.invoke('exportOrders:adjustStock', data),
     },
 
@@ -253,6 +256,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Stock Balance (CÂN BẰNG KHO)
     stockBalance: {
         getAll: (args) => ipcRenderer.invoke('stockBalance:getAll', args),
+        apply: (data) => ipcRenderer.invoke('stockBalance:apply', data),
         create: (data) => ipcRenderer.invoke('stockBalance:create', data),
         adjustStock: (data) => ipcRenderer.invoke('stockBalance:adjustStock', data),
     },
@@ -387,6 +391,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
         detect: (image) => ipcRenderer.invoke('attendance:detect', { image }),
         register: (data) => ipcRenderer.invoke('attendance:register', data),
         getLogs: (filters) => ipcRenderer.invoke('attendance:getLogs', filters),
+        updateLeaveStatus: (data) => ipcRenderer.invoke('attendance:updateLeaveStatus', data),
+        updatePayrollOverride: (data) => ipcRenderer.invoke('attendance:updatePayrollOverride', data),
+        updatePayrollLock: (data) => ipcRenderer.invoke('attendance:updatePayrollLock', data),
         reconcileLateFines: () => ipcRenderer.invoke('attendance:reconcileLateFines'),
         getProfiles: () => ipcRenderer.invoke('attendance:getProfiles'),
         deleteProfile: (face_id) => ipcRenderer.invoke('attendance:deleteProfile', { face_id }),

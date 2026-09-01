@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 
-interface User {
+export interface AuthUser {
     id: number;
     username: string;
     fullName: string;
@@ -14,11 +14,16 @@ interface User {
 }
 
 interface AuthContextType {
-    user: User | null;
+    user: AuthUser | null;
+    actualUser: AuthUser | null;
+    previewUser: AuthUser | null;
+    isRolePreview: boolean;
     isAuthenticated: boolean;
     login: (username: string, password: string, rememberMe?: boolean) => Promise<{ success: boolean; error?: string }>;
     logout: () => void;
-    updateCurrentUser: (user: User) => void;
+    updateCurrentUser: (user: AuthUser) => void;
+    startRolePreview: (user: AuthUser) => boolean;
+    stopRolePreview: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -34,11 +39,18 @@ const todayKey = () => {
 };
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-    const [user, setUser] = useState<User | null>(null);
+    const [actualUser, setActualUser] = useState<AuthUser | null>(null);
+    const [previewUser, setPreviewUser] = useState<AuthUser | null>(null);
+    const user = previewUser || actualUser;
 
     useEffect(() => {
         const restoreAuth = async () => {
             localStorage.removeItem('rememberedUser');
+            const usersApi = window.electronAPI?.users;
+            if (!usersApi) {
+                sessionStorage.removeItem('currentUser');
+                return;
+            }
             const savedLoginDate = localStorage.getItem(AUTH_LOGIN_DATE_KEY);
             if (savedLoginDate !== todayKey()) {
                 doLogout();
@@ -46,22 +58,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
 
             const rememberToken = localStorage.getItem(REMEMBER_TOKEN_KEY);
-            const restored: { success: boolean; data?: User } = await window.electronAPI.users
+            const restored: { success: boolean; data?: AuthUser } = await usersApi
                 .restoreSession(rememberToken || undefined)
                 .catch(() => ({ success: false }));
             // Legacy renderer token is migrated into Electron safeStorage by main.
             localStorage.removeItem(REMEMBER_TOKEN_KEY);
             if (restored.success && restored.data) {
-                setUser(restored.data);
+                setActualUser(restored.data);
                 sessionStorage.setItem('currentUser', JSON.stringify(restored.data));
                 return;
             }
 
-            const current: { success: boolean; data?: User } = await window.electronAPI.users
+            const current: { success: boolean; data?: AuthUser } = await usersApi
                 .getCurrentSession()
                 .catch(() => ({ success: false }));
             if (current?.success && current.data) {
-                setUser(current.data);
+                setActualUser(current.data);
                 sessionStorage.setItem('currentUser', JSON.stringify(current.data));
             } else {
                 sessionStorage.removeItem('currentUser');
@@ -72,7 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }, []);
 
     useEffect(() => {
-        if (!user) return;
+        if (!actualUser) return;
         const timer = window.setInterval(() => {
             if (localStorage.getItem(AUTH_LOGIN_DATE_KEY) !== todayKey()) {
                 doLogout();
@@ -80,7 +92,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }, 30000);
 
         return () => window.clearInterval(timer);
-    }, [user]);
+    }, [actualUser]);
+
+    useEffect(() => {
+        if (actualUser?.role !== 'admin') setPreviewUser(null);
+    }, [actualUser?.role]);
 
     function doLogout() {
         sessionStorage.removeItem('currentUser');
@@ -89,12 +105,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         localStorage.removeItem('rememberedUser');
         localStorage.removeItem(REMEMBER_TOKEN_KEY);
         localStorage.removeItem(AUTH_LOGIN_DATE_KEY);
-        setUser(null);
-        window.electronAPI.users.logout().catch(() => {});
+        setPreviewUser(null);
+        setActualUser(null);
+        window.electronAPI?.users?.logout().catch(() => {});
     }
 
     const login = async (username: string, password: string, rememberMe = true): Promise<{ success: boolean; error?: string }> => {
         try {
+            if (!window.electronAPI?.users) {
+                return { success: false, error: 'Chức năng đăng nhập chỉ khả dụng trong ứng dụng desktop.' };
+            }
             // Clear the prior user's cache before the next session is created.
             localStorage.removeItem('stock-check-sessions-v2');
             const result = await window.electronAPI.users.login(username, password, rememberMe);
@@ -112,7 +132,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             localStorage.removeItem(REMEMBER_TOKEN_KEY);
             localStorage.removeItem('rememberedUser');
 
-            setUser(userWithoutPassword);
+            setPreviewUser(null);
+            setActualUser(userWithoutPassword);
             return { success: true };
         } catch (error) {
             console.error('Login error:', error);
@@ -121,18 +142,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     const logout = () => doLogout();
-    const updateCurrentUser = (nextUser: User) => {
+    const updateCurrentUser = (nextUser: AuthUser) => {
+        if (!actualUser || nextUser.id !== actualUser.id) return;
         sessionStorage.setItem('currentUser', JSON.stringify(nextUser));
-        setUser(nextUser);
+        setActualUser(nextUser);
     };
+
+    const startRolePreview = (nextPreviewUser: AuthUser) => {
+        if (actualUser?.role !== 'admin' || nextPreviewUser.role === 'admin') return false;
+        setPreviewUser(nextPreviewUser);
+        return true;
+    };
+
+    const stopRolePreview = () => setPreviewUser(null);
 
     return (
         <AuthContext.Provider value={{
             user,
-            isAuthenticated: !!user,
+            actualUser,
+            previewUser,
+            isRolePreview: !!previewUser,
+            isAuthenticated: !!actualUser,
             login,
             logout,
             updateCurrentUser,
+            startRolePreview,
+            stopRolePreview,
         }}>
             {children}
         </AuthContext.Provider>

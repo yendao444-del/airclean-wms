@@ -3,7 +3,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "smoke": "node smoke-test.mjs"
+    "smoke": "node smoke-test.mjs",
+    "test:criteria": "node criteria-test.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",

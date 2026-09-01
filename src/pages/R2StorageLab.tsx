@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Badge, Button, Card, Col, Divider, Empty, Input, List, Modal, Row, Space, Spin, Statistic, Tag, Typography, Upload, message } from 'antd';
-import { CheckCircleOutlined, CloudUploadOutlined, DeleteOutlined, EyeOutlined, ApiOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CheckCircleOutlined, CloudUploadOutlined, DeleteOutlined, EyeOutlined, ApiOutlined, ReloadOutlined, RocketOutlined } from '@ant-design/icons';
 import PdfCanvasPreview from '../components/PdfCanvasPreview';
 import './R2StorageLab.css';
 
@@ -11,6 +11,8 @@ type TestResult = { name: string; status: 'running' | 'pass' | 'fail'; detail?: 
 const formatBytes = (bytes: number) => bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 const MAX_IMAGE_BYTES = 1024 * 1024;
 const TARGET_IMAGE_BYTES = 950 * 1024;
+const DATA_SAFETY_MODE = true;
+const DATA_SAFETY_MESSAGE = 'Thao tác xóa đang tạm khóa để bảo vệ dữ liệu. Không có file nào bị thay đổi.';
 
 const canvasToBlob = (canvas: HTMLCanvasElement, quality: number) => new Promise<Blob>((resolve, reject) => {
   canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Không thể tạo ảnh nén.')), 'image/webp', quality);
@@ -70,8 +72,21 @@ export default function R2StorageLab() {
   const [testResults, setTestResults] = useState<TestResult[]>([]);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [preview, setPreview] = useState<{ url: string; file: Blob; name: string; type: string } | null>(null);
+  const [deletingKeys, setDeletingKeys] = useState<Record<string, boolean>>({});
+  const deletingKeysRef = useRef<Set<string>>(new Set());
   const baseUrl = useMemo(() => endpoint.trim().replace(/\/+$/, ''), [endpoint]);
   const headers = useMemo(() => ({ 'x-r2-test-key': testKey }), [testKey]);
+
+  const testUpdateInterface = () => {
+    window.dispatchEvent(new CustomEvent('dby:update-ui-test', {
+      detail: {
+        status: 'installing',
+        percent: 84,
+        currentVersion: '1.0.397',
+        latestVersion: '1.0.398',
+      },
+    }));
+  };
 
   useEffect(() => {
     const loadBootstrap = async () => {
@@ -142,8 +157,51 @@ export default function R2StorageLab() {
     } catch (error: any) { message.error(error.message); }
     finally { setPreviewLoading(false); }
   };
-  const deleteObject = async (item: LabObject) => { try { await call(`/objects/${encodeURIComponent(item.key)}`, { method: 'DELETE' }); await loadObjects(); message.success('Đã xóa file test.'); } catch (error: any) { message.error(error.message); } };
+  const deleteObject = (item: LabObject) => {
+    if (DATA_SAFETY_MODE) {
+      message.warning(DATA_SAFETY_MESSAGE);
+      return;
+    }
+    if (deletingKeysRef.current.has(item.key)) return;
+    deletingKeysRef.current.add(item.key);
+    setDeletingKeys(current => ({ ...current, [item.key]: true }));
+
+    const clearDeleting = () => {
+      deletingKeysRef.current.delete(item.key);
+      setDeletingKeys(current => {
+        const next = { ...current };
+        delete next[item.key];
+        return next;
+      });
+    };
+
+    Modal.confirm({
+      title: 'Xóa file test?',
+      content: <Text>File <Text code>{item.key}</Text> sẽ bị xóa khỏi R2 staging.</Text>,
+      okText: 'Xóa',
+      okType: 'danger',
+      cancelText: 'Hủy',
+      onCancel: clearDeleting,
+      onOk: async () => {
+        try {
+          await call(`/objects/${encodeURIComponent(item.key)}`, { method: 'DELETE' });
+          setObjects(current => current.filter(object => object.key !== item.key));
+          setLastUpload(current => current?.key === item.key ? null : current);
+          message.success('Đã xóa file test.');
+        } catch (error: any) {
+          message.error(error.message);
+          throw error;
+        } finally {
+          clearDeleting();
+        }
+      },
+    });
+  };
   const runAutomatedTests = async () => {
+    if (DATA_SAFETY_MODE) {
+      message.warning('Bộ kiểm tra tự động có bước xóa file nên đang tạm khóa trong chế độ bảo vệ dữ liệu.');
+      return;
+    }
     const names = ['Worker health', 'Từ chối key sai', 'Upload + download đối chiếu', 'Dọn file test'];
     setTestResults(names.map(name => ({ name, status: 'running' })));
     const update = (index: number, result: Partial<TestResult>) => setTestResults(current => current.map((item, i) => i === index ? { ...item, ...result } : item));
@@ -174,13 +232,23 @@ export default function R2StorageLab() {
   return <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
     <Space align="center"><ApiOutlined style={{ fontSize: 28, color: '#1677ff' }} /><Title level={2} style={{ margin: 0 }}>R2 Storage Test Lab</Title><Tag color="gold">STAGING ONLY</Tag></Space>
     <Paragraph type="secondary">Khu vực thử nghiệm riêng cho Admin. File ở đây không liên quan đến Google Drive, phiếu bán hàng hay dữ liệu production.</Paragraph>
+    <Card className="r2-update-ui-test" style={{ marginBottom: 16 }}>
+      <div className="r2-update-ui-test__content">
+        <div className="r2-update-ui-test__icon"><RocketOutlined /></div>
+        <div className="r2-update-ui-test__copy">
+          <Title level={4}>Kiểm thử giao diện cập nhật</Title>
+          <Paragraph>Chạy mô phỏng mẫu 3 để kiểm tra bố cục toàn màn hình. Chế độ này <Text strong>không tải, không cài đặt</Text> và không thay đổi phiên bản ứng dụng.</Paragraph>
+        </div>
+        <Button type="primary" size="large" icon={<RocketOutlined />} onClick={testUpdateInterface}>Test giao diện cập nhật</Button>
+      </div>
+    </Card>
     <Card title="1. Kết nối Worker staging" style={{ marginBottom: 16 }}>
       <Row gutter={[16, 16]}><Col xs={24} md={14}><Input value={endpoint} onChange={e => { setEndpoint(e.target.value); localStorage.setItem('r2-test-endpoint', e.target.value); }} placeholder="https://dby-pos-r2-test.<subdomain>.workers.dev" addonBefore="Worker URL" /></Col><Col xs={24} md={6}><Input.Password value={testKey} onChange={e => setTestKey(e.target.value)} placeholder="R2_TEST_KEY" addonBefore="Key" /></Col><Col xs={24} md={4}><Button type="primary" icon={<ApiOutlined />} block loading={status === 'loading'} onClick={checkConnection}>Kiểm tra</Button></Col></Row>
       <div style={{ marginTop: 16 }}><Badge status={status === 'ok' ? 'success' : status === 'error' ? 'error' : status === 'loading' ? 'processing' : 'default'} text={statusText} /></div>
     </Card>
     <Row gutter={[16, 16]}>
       <Col xs={24} lg={8}><Card title="2. Upload file thử nghiệm"><Upload.Dragger beforeUpload={uploadFile} showUploadList={false} disabled={busy || !baseUrl || !testKey}><p className="ant-upload-drag-icon"><CloudUploadOutlined /></p><p>Chọn hoặc kéo ảnh/PDF vào đây</p><p className="ant-upload-hint">Ảnh tự nén dưới 1 MB trước upload · file khác tối đa 15 MB</p></Upload.Dragger>{lastUpload && <Alert type="success" showIcon icon={<CheckCircleOutlined />} style={{ marginTop: 16 }} message="Upload thành công" description={<Text code>{lastUpload.key}</Text>} />}</Card></Col>
-      <Col xs={24} lg={16}><Card title="3. Kiểm tra file trong bucket" extra={<Space><Button icon={<ReloadOutlined />} onClick={loadObjects} disabled={!baseUrl || !testKey}>Làm mới</Button><Button type="primary" onClick={runAutomatedTests} disabled={!baseUrl || !testKey} loading={testResults.some(item => item.status === 'running')}>Chạy toàn bộ kiểm tra</Button></Space>}><Row gutter={16} style={{ marginBottom: 16 }}><Col span={8}><Statistic title="File test" value={objects.length} prefix={<CloudUploadOutlined />} /></Col><Col span={8}><Statistic title="Dung lượng" value={formatBytes(objects.reduce((sum, item) => sum + (item.size || 0), 0))} /></Col><Col span={8}><Statistic title="Thao tác" value="Upload · Xem · Xóa" /></Col></Row>{testResults.length > 0 && <List size="small" header="Kết quả kiểm tra tự động" dataSource={testResults} renderItem={item => <List.Item><Badge status={item.status === 'pass' ? 'success' : item.status === 'fail' ? 'error' : 'processing'} text={<Text strong={item.status === 'pass'}>{item.name}</Text>} /><Text type="secondary">{item.detail || 'Đang chạy...'}</Text></List.Item>} />}<Divider style={{ margin: '12px 0' }} />{objects.length ? <List size="small" dataSource={objects} renderItem={item => <List.Item actions={[<Button type="link" icon={<EyeOutlined />} onClick={() => viewObject(item)}>Xem</Button>, <Button danger type="link" icon={<DeleteOutlined />} onClick={() => deleteObject(item)}>Xóa</Button>]}><List.Item.Meta title={item.key} description={`${formatBytes(item.size)} · ${item.uploaded ? new Date(item.uploaded).toLocaleString('vi-VN') : 'R2'}`} /></List.Item>} /> : <Empty description="Chưa có file test" />}</Card></Col>
+      <Col xs={24} lg={16}><Card title="3. Kiểm tra file trong bucket" extra={<Space><Button icon={<ReloadOutlined />} onClick={loadObjects} disabled={!baseUrl || !testKey}>Làm mới</Button><Button type="primary" onClick={runAutomatedTests} disabled={DATA_SAFETY_MODE || !baseUrl || !testKey} loading={testResults.some(item => item.status === 'running')}>Chạy toàn bộ kiểm tra</Button></Space>}><Row gutter={16} style={{ marginBottom: 16 }}><Col span={8}><Statistic title="File test" value={objects.length} prefix={<CloudUploadOutlined />} /></Col><Col span={8}><Statistic title="Dung lượng" value={formatBytes(objects.reduce((sum, item) => sum + (item.size || 0), 0))} /></Col><Col span={8}><Statistic title="Thao tác" value={DATA_SAFETY_MODE ? 'Upload · Xem' : 'Upload · Xem · Xóa'} /></Col></Row>{DATA_SAFETY_MODE && <Alert style={{ marginBottom: 12 }} type="warning" showIcon message="Chế độ bảo vệ dữ liệu đang bật" description="Xóa file và bộ kiểm tra có bước dọn file đang tạm khóa." />}{testResults.length > 0 && <List size="small" header="Kết quả kiểm tra tự động" dataSource={testResults} renderItem={item => <List.Item><Badge status={item.status === 'pass' ? 'success' : item.status === 'fail' ? 'error' : 'processing'} text={<Text strong={item.status === 'pass'}>{item.name}</Text>} /><Text type="secondary">{item.detail || 'Đang chạy...'}</Text></List.Item>} />}<Divider style={{ margin: '12px 0' }} />{objects.length ? <List size="small" dataSource={objects} renderItem={item => <List.Item actions={[<Button key="view" type="link" icon={<EyeOutlined />} onClick={() => viewObject(item)}>Xem</Button>, <Button key="delete" danger type="link" icon={<DeleteOutlined />} loading={Boolean(deletingKeys[item.key])} disabled={DATA_SAFETY_MODE || Boolean(deletingKeys[item.key])} onClick={() => deleteObject(item)}>Xóa</Button>]}><List.Item.Meta title={item.key} description={`${formatBytes(item.size)} · ${item.uploaded ? new Date(item.uploaded).toLocaleString('vi-VN') : 'R2'}`} /></List.Item>} /> : <Empty description="Chưa có file test" />}</Card></Col>
     </Row>
     <Alert style={{ marginTop: 16 }} type="info" showIcon message="Tiêu chí chốt giai đoạn 1" description="Health xanh, upload ảnh/PDF, mở lại file sau khi restart app, xóa file, file quá 15 MB bị chặn và không có thao tác nào ghi vào dữ liệu nghiệp vụ. Sau khi đạt các tiêu chí này mới bật chạy song song." />
     <Modal rootClassName="r2-preview-modal" open={Boolean(preview)} title={preview?.name || 'Xem file R2'} onCancel={() => setPreview(null)} footer={null} width="min(1000px, 94vw)" style={{ top: 24 }} styles={{ body: { overflow: 'hidden', padding: 12 } }} destroyOnHidden>

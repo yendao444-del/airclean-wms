@@ -32,6 +32,7 @@ if not defined NEW_VERSION (
     exit /b 1
 )
 set NOTES=Patch update - Bug fixes and improvements
+set BUILD_DIST=%CD%\_release_dist
 
 echo Bump version: v!CURRENT_VERSION! -^> v!NEW_VERSION!
 echo.
@@ -48,10 +49,12 @@ echo.
 
 echo [2/4] Build Vite...
 echo ----------------------------------------
-call npx vite build
+if exist "!BUILD_DIST!" rmdir /S /Q "!BUILD_DIST!"
+call npx vite build --outDir "!BUILD_DIST!" --emptyOutDir
 if errorlevel 1 (
     echo.
     echo [ERROR] Vite build failed.
+    if exist "!BUILD_DIST!" rmdir /S /Q "!BUILD_DIST!"
     pause
     exit /b 1
 )
@@ -100,7 +103,7 @@ if exist "%APPDATA%\quan-ly-ban-hang-desktop\gdrive-token.json" (
         echo        Chay reauth-gdrive.bat truoc khi build.
     )
 )
-xcopy "dist\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
+xcopy "!BUILD_DIST!\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 xcopy "electron\*" "!PATCH_TEMP!\resources\app\electron\" /E /I /Y /Q >nul 2>&1
 :: Patch desktop chi can google-oauth-config.json da tao o tren. Khong phat
 :: hanh config dev co database/service credentials cho may nhan vien.
@@ -119,6 +122,7 @@ powershell -NoProfile -Command "Compress-Archive -Path '!PATCH_TEMP!\*' -Destina
 set ZIP_EXIT=!errorlevel!
 
 rmdir /S /Q "!PATCH_TEMP!" 2>nul
+rmdir /S /Q "!BUILD_DIST!" 2>nul
 
 if !ZIP_EXIT! neq 0 (
     echo [ERROR] Patch zip creation failed.

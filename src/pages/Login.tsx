@@ -1,15 +1,50 @@
 import { useState } from 'react';
-import { Form, Input, Button, Card, Typography, message, Alert } from 'antd';
-import { UserOutlined, LockOutlined, LoginOutlined } from '@ant-design/icons';
+import { Alert, Button, Form, Input, message } from 'antd';
+import {
+    ArrowRightOutlined,
+    LockOutlined,
+    ShopOutlined,
+    UserOutlined,
+} from '@ant-design/icons';
 import { useAuth } from '../contexts/AuthContext';
+import './Login.css';
 
-const { Title, Text } = Typography;
+type Language = 'vi' | 'en';
+
+const copy = {
+    vi: {
+        title: 'Đăng nhập',
+        username: 'Tên đăng nhập',
+        password: 'Mật khẩu',
+        submit: 'Đăng nhập hệ thống',
+        support: 'Hệ thống nội bộ AIRCLEAN CORP.',
+        usernameRequired: 'Vui lòng nhập tên đăng nhập!',
+        passwordRequired: 'Vui lòng nhập mật khẩu!',
+        success: 'Đăng nhập thành công!',
+        invalid: 'Tên đăng nhập hoặc mật khẩu không đúng!',
+        unexpected: 'Đã xảy ra lỗi khi đăng nhập!',
+    },
+    en: {
+        title: 'Sign in',
+        username: 'Username',
+        password: 'Password',
+        submit: 'Sign in to the system',
+        support: 'AIRCLEAN CORP. Internal System',
+        usernameRequired: 'Please enter your username!',
+        passwordRequired: 'Please enter your password!',
+        success: 'Signed in successfully!',
+        invalid: 'Incorrect username or password!',
+        unexpected: 'An error occurred while signing in!',
+    },
+} as const;
 
 export default function Login() {
     const [loading, setLoading] = useState(false);
     const [loginError, setLoginError] = useState<string | null>(null);
+    const [language, setLanguage] = useState<Language>('vi');
     const { login } = useAuth();
     const [form] = Form.useForm();
+    const text = copy[language];
 
     const handleLogin = async (values: { username: string; password: string }) => {
         setLoading(true);
@@ -18,192 +53,134 @@ export default function Login() {
             const result = await login(values.username, values.password);
 
             if (result.success) {
-                message.success('Đăng nhập thành công!');
+                message.success(text.success);
             } else {
-                const errorText = result.error || 'Tên đăng nhập hoặc mật khẩu không đúng!';
+                const errorText = result.error || text.invalid;
                 setLoginError(errorText);
                 message.error(errorText);
             }
-        } catch (error) {
-            const errorText = 'Đã xảy ra lỗi khi đăng nhập!';
-            setLoginError(errorText);
-            message.error(errorText);
+        } catch {
+            setLoginError(text.unexpected);
+            message.error(text.unexpected);
         } finally {
             setLoading(false);
         }
     };
 
-    return (
-        <div style={{
-            width: '100vw',
-            height: '100vh',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-            position: 'relative',
-            overflow: 'hidden',
-        }}>
-            {/* Decorative circles */}
-            <div style={{
-                position: 'absolute',
-                width: '500px',
-                height: '500px',
-                borderRadius: '50%',
-                background: 'rgba(255,255,255,0.1)',
-                top: '-250px',
-                right: '-250px',
-            }} />
-            <div style={{
-                position: 'absolute',
-                width: '300px',
-                height: '300px',
-                borderRadius: '50%',
-                background: 'rgba(255,255,255,0.05)',
-                bottom: '-150px',
-                left: '-150px',
-            }} />
+    const selectLanguage = (nextLanguage: Language) => {
+        setLanguage(nextLanguage);
+        setLoginError(null);
+        form.setFields([
+            { name: 'username', errors: [] },
+            { name: 'password', errors: [] },
+        ]);
+    };
 
-            {/* Login Card */}
-            <Card
-                style={{
-                    width: 420,
-                    boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-                    borderRadius: 20,
-                    border: 'none',
-                    background: 'rgba(255,255,255,0.95)',
-                    backdropFilter: 'blur(10px)',
-                    position: 'relative',
-                    zIndex: 1,
-                }}
-                bodyStyle={{ padding: '48px 40px' }}
-            >
-                {/* Logo/Header */}
-                <div style={{ textAlign: 'center', marginBottom: 40 }}>
-                    <div style={{
-                        width: 100,
-                        height: 100,
-                        margin: '0 auto 24px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                    }}>
-                        <img
-                            src="./logo_splash.png"
-                            alt="AIRCLEAN Logo"
-                            style={{
-                                width: '100%',
-                                height: '100%',
-                                objectFit: 'contain',
-                            }}
-                        />
+    return (
+        <main className="login-page">
+            <section className="login-content" aria-label="AIRCLEAN CORP. login">
+                <header className="login-header">
+                    <img className="login-logo" src="./logo_splash.png" alt="AIRCLEAN CORP." />
+
+                    <div className="login-language" aria-label="Language selection">
+                        {(['vi', 'en'] as const).map((item) => (
+                            <button
+                                key={item}
+                                type="button"
+                                className={`login-language-button${language === item ? ' is-active' : ''}`}
+                                aria-pressed={language === item}
+                                onClick={() => selectLanguage(item)}
+                            >
+                                {item.toUpperCase()}
+                            </button>
+                        ))}
                     </div>
-                    <Title level={2} style={{ margin: '0 0 8px 0', color: '#262626', fontSize: 28 }}>
-                        AIRCLEAN CORP.
-                    </Title>
-                    <Text style={{ color: '#8c8c8c', fontSize: 14 }}>
-                        Warehouse Management System
-                    </Text>
+                </header>
+
+                <div className="login-brand">
+                    <h1>AIRCLEAN CORP.</h1>
                 </div>
 
-                {/* Login Form */}
-                <Form
-                    form={form}
-                    layout="vertical"
-                    onFinish={handleLogin}
-                    onValuesChange={() => setLoginError(null)}
-                    size="large"
-                >
-                    {loginError && (
-                        <Alert
-                            type="error"
-                            showIcon
-                            message={loginError}
-                            style={{ marginBottom: 16, borderRadius: 8 }}
-                        />
-                    )}
+                <div className="login-form-area">
+                    <h2>{text.title}</h2>
 
-                    <Form.Item
-                        name="username"
-                        rules={[{ required: true, message: 'Vui lòng nhập tên đăng nhập!' }]}
+                    <Form
+                        form={form}
+                        className="login-form"
+                        layout="vertical"
+                        onFinish={handleLogin}
+                        onValuesChange={() => setLoginError(null)}
+                        requiredMark={false}
                     >
-                        <Input
-                            prefix={<UserOutlined style={{ color: '#bfbfbf' }} />}
-                            placeholder="Tên đăng nhập"
-                            autoFocus
-                            style={{
-                                height: 50,
-                                borderRadius: 10,
-                                fontSize: 15,
-                            }}
-                        />
-                    </Form.Item>
+                        {loginError && (
+                            <Alert
+                                className="login-error"
+                                type="error"
+                                showIcon
+                                message={loginError}
+                            />
+                        )}
 
-                    <Form.Item
-                        name="password"
-                        rules={[{ required: true, message: 'Vui lòng nhập mật khẩu!' }]}
-                        style={{ marginBottom: 16 }}
-                    >
-                        <Input.Password
-                            prefix={<LockOutlined style={{ color: '#bfbfbf' }} />}
-                            placeholder="Mật khẩu"
-                            style={{
-                                height: 50,
-                                borderRadius: 10,
-                                fontSize: 15,
-                            }}
-                        />
-                    </Form.Item>
-
-                    <Form.Item style={{ marginBottom: 0 }}>
-                        <Button
-                            type="primary"
-                            htmlType="submit"
-                            style={{
-                                width: '100%',
-                                height: 54,
-                                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                                border: 'none',
-                                fontSize: 16,
-                                fontWeight: 600,
-                                borderRadius: 10,
-                                boxShadow: '0 8px 20px rgba(102, 126, 234, 0.4)',
-                            }}
-                            icon={<LoginOutlined />}
-                            loading={loading}
+                        <Form.Item
+                            name="username"
+                            rules={[{ required: true, message: text.usernameRequired }]}
                         >
-                            Đăng Nhập
-                        </Button>
-                    </Form.Item>
-                </Form>
-            </Card>
+                            <Input
+                                className="login-input"
+                                prefix={<UserOutlined />}
+                                placeholder={text.username}
+                                autoComplete="username"
+                                autoFocus
+                            />
+                        </Form.Item>
 
-            {/* Footer with Dev Credit */}
-            <div style={{
-                position: 'absolute',
-                bottom: 30,
-                left: 0,
-                right: 0,
-                textAlign: 'center',
-                zIndex: 1,
-            }}>
-                <Text style={{
-                    color: 'rgba(255,255,255,0.95)',
-                    fontSize: 13,
-                    fontWeight: 500,
-                    textShadow: '0 2px 8px rgba(0,0,0,0.2)',
-                }}>
-                    💻 Developed by <span style={{ fontWeight: 700 }}>Dao Yen</span>
-                </Text>
-                <br />
-                <Text style={{
-                    color: 'rgba(255,255,255,0.7)',
-                    fontSize: 12,
-                    textShadow: '0 2px 8px rgba(0,0,0,0.2)',
-                }}>
-                    © 2026 AIRCLEAN CORP. All rights reserved.
-                </Text>
-            </div>
-        </div>
+                        <Form.Item
+                            name="password"
+                            rules={[{ required: true, message: text.passwordRequired }]}
+                        >
+                            <Input.Password
+                                className="login-input"
+                                prefix={<LockOutlined />}
+                                placeholder={text.password}
+                                autoComplete="current-password"
+                            />
+                        </Form.Item>
+
+                        <Form.Item className="login-submit-item">
+                            <Button
+                                className="login-submit"
+                                type="primary"
+                                htmlType="submit"
+                                loading={loading}
+                            >
+                                <span>{text.submit}</span>
+                                <ArrowRightOutlined className="login-submit-icon" />
+                            </Button>
+                        </Form.Item>
+                    </Form>
+
+                    <div className="login-support">
+                        <ShopOutlined />
+                        <span>{text.support}</span>
+                    </div>
+                </div>
+
+                <img
+                    className="login-warehouse-art"
+                    src="./login-assets/warehouse-linework.png"
+                    alt=""
+                    aria-hidden="true"
+                />
+
+                <footer className="login-footer">
+                    <span>© 2026 AIRCLEAN CORP.</span>
+                    <span className="login-footer-line" aria-hidden="true" />
+                </footer>
+            </section>
+
+            <aside className="login-visual" aria-hidden="true">
+                <img src="./login-assets/global-logistics-panel.png" alt="" />
+            </aside>
+        </main>
     );
 }

@@ -195,6 +195,43 @@ const SP_MUTED = '#6b7280';
 const SP_BORDER = '#e5e7eb';
 const SP_BG = '#f5f6f8';
 const SP_WHITE = '#ffffff';
+const INVENTORY_NUMBER_FORMATTER = new Intl.NumberFormat('vi-VN');
+
+interface InventoryVariant {
+    color?: string;
+    sku?: string;
+    cost?: number | null;
+    stock?: number | null;
+}
+
+interface InventoryVariantRow {
+    key: number;
+    color?: string;
+    sku?: string;
+    cost: number;
+    stock: number;
+    value: number;
+}
+
+interface InventoryProductRow {
+    id: number;
+    name: string;
+    sku: string;
+    categoryId: number | null;
+    category?: { name?: string | null } | null;
+    variants?: string | null;
+    cost?: number | null;
+    stock?: number | null;
+    inventoryStock: number;
+    inventoryValue: number;
+    minVariantCost: number | null;
+    maxVariantCost: number | null;
+    variantRows: InventoryVariantRow[];
+    hasVariantPayload: boolean;
+    [key: string]: unknown;
+}
+
+const formatInventoryNumber = (value: number) => INVENTORY_NUMBER_FORMATTER.format(value);
 
 function InventoryValueTab() {
     const [products, setProducts] = useState<any[]>([]);
@@ -203,7 +240,6 @@ function InventoryValueTab() {
     const [selectedCat, setSelectedCat] = useState<number | null>(null);
     const [expandedKeys, setExpandedKeys] = useState<number[]>([]);
     const [searchText, setSearchText] = useState('');
-    const fmtN = (n: number) => new Intl.NumberFormat('vi-VN').format(n);
 
     useEffect(() => {
         (async () => {
@@ -218,44 +254,127 @@ function InventoryValueTab() {
         })();
     }, []);
 
-    const getProductValue = (p: any) => {
-        try {
-            const variants = p.variants ? JSON.parse(p.variants) : [];
-            if (variants.length > 0) return variants.reduce((s: number, v: any) => s + (v.stock || 0) * (v.cost || p.cost || 0), 0);
-        } catch { /* */ }
-        return (p.stock || 0) * (p.cost || 0);
-    };
+    const { inventoryRows, categoryCounts } = useMemo(() => {
+        const counts = new Map<number, number>();
+        const rows = products.map((product): InventoryProductRow => {
+            if (product.categoryId !== null && product.categoryId !== undefined) {
+                counts.set(product.categoryId, (counts.get(product.categoryId) || 0) + 1);
+            }
 
-    const getProductStock = (p: any) => {
-        try {
-            const variants = p.variants ? JSON.parse(p.variants) : [];
-            if (variants.length > 0) return variants.reduce((s: number, v: any) => s + (v.stock || 0), 0);
-        } catch { /* */ }
-        return p.stock || 0;
-    };
+            const fallbackStock = product.stock || 0;
+            const fallbackValue = fallbackStock * (product.cost || 0);
+            let inventoryStock = fallbackStock;
+            let inventoryValue = fallbackValue;
+            let minVariantCost: number | null = null;
+            let maxVariantCost: number | null = null;
+            let variantRows: InventoryVariantRow[] = [];
 
-    const filtered = products.filter(p => {
-        if (selectedCat !== null && p.categoryId !== selectedCat) return false;
-        if (searchText) {
-            const q = searchText.toLowerCase();
-            return p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q);
+            try {
+                const parsed = product.variants ? JSON.parse(product.variants) : [];
+                const variants: InventoryVariant[] = Array.isArray(parsed) ? parsed : [];
+                if (variants.length > 0) {
+                    inventoryStock = variants.reduce((sum, variant) => sum + (variant.stock || 0), 0);
+                    inventoryValue = variants.reduce(
+                        (sum, variant) => sum + (variant.stock || 0) * (variant.cost || product.cost || 0),
+                        0,
+                    );
+                    const costs = variants
+                        .map((variant) => variant.cost || 0)
+                        .filter((cost) => cost > 0);
+                    if (costs.length > 0) {
+                        minVariantCost = Math.min(...costs);
+                        maxVariantCost = Math.max(...costs);
+                    }
+                    variantRows = variants.map((variant, index) => ({
+                        key: index,
+                        color: variant.color,
+                        sku: variant.sku,
+                        cost: variant.cost || product.cost || 0,
+                        stock: variant.stock || 0,
+                        value: (variant.stock || 0) * (variant.cost || product.cost || 0),
+                    }));
+                }
+            } catch {
+                inventoryStock = fallbackStock;
+                inventoryValue = fallbackValue;
+                minVariantCost = null;
+                maxVariantCost = null;
+                variantRows = [];
+            }
+
+            return {
+                ...product,
+                inventoryStock,
+                inventoryValue,
+                minVariantCost,
+                maxVariantCost,
+                variantRows,
+                hasVariantPayload: !!product.variants,
+            };
+        });
+        return { inventoryRows: rows, categoryCounts: counts };
+    }, [products]);
+
+    const { filteredRows, grandTotal, grandStock } = useMemo(() => {
+        const query = searchText.toLowerCase();
+        const rows: InventoryProductRow[] = [];
+        let total = 0;
+        let stock = 0;
+
+        for (const row of inventoryRows) {
+            if (selectedCat !== null && row.categoryId !== selectedCat) continue;
+            if (
+                query &&
+                !row.name.toLowerCase().includes(query) &&
+                !row.sku.toLowerCase().includes(query)
+            ) continue;
+            rows.push(row);
+            total += row.inventoryValue;
+            stock += row.inventoryStock;
         }
-        return true;
-    });
 
-    const grandTotal = filtered.reduce((s, p) => s + getProductValue(p), 0);
-    const grandStock = filtered.reduce((s, p) => s + getProductStock(p), 0);
+        rows.sort((a, b) => b.inventoryValue - a.inventoryValue);
+        return { filteredRows: rows, grandTotal: total, grandStock: stock };
+    }, [inventoryRows, searchText, selectedCat]);
 
-    const columns = [
+    const expandedKeySet = useMemo(() => new Set(expandedKeys), [expandedKeys]);
+
+    const variantColumns = useMemo<ColumnsType<InventoryVariantRow>>(() => [
+        {
+            title: 'Phân loại', dataIndex: 'color', key: 'color',
+            render: (value: string) => <span style={{ fontWeight: 600, color: SP_TEXT, fontSize: 13 }}>{value}</span>,
+        },
+        {
+            title: 'SKU', dataIndex: 'sku', key: 'sku', width: 150,
+            render: (value: string) => <span style={{ fontSize: 12, color: SP_GREEN, fontWeight: 600 }}>{value}</span>,
+        },
+        {
+            title: 'Giá vốn', dataIndex: 'cost', key: 'cost', width: 130, align: 'right',
+            render: (value: number) => <span style={{ fontSize: 12, color: SP_MUTED }}>{formatInventoryNumber(value)}đ</span>,
+        },
+        {
+            title: 'Tồn kho', dataIndex: 'stock', key: 'stock', width: 90, align: 'right',
+            render: (value: number) => {
+                const color = value <= 0 ? SP_RED : value < 10 ? SP_YELLOW : SP_GREEN;
+                return <span style={{ fontWeight: 700, color }}>{formatInventoryNumber(value)}</span>;
+            },
+        },
+        {
+            title: 'Tổng vốn', dataIndex: 'value', key: 'value', width: 150, align: 'right',
+            render: (value: number) => <span style={{ fontWeight: 700, fontSize: 13, color: value > 0 ? SP_ORANGE : '#d1d5db' }}>{formatInventoryNumber(value)}đ</span>,
+        },
+    ], []);
+
+    const columns = useMemo<ColumnsType<InventoryProductRow>>(() => [
         {
             title: 'Tên sản phẩm', dataIndex: 'name', key: 'name',
             render: (v: string, r: any) => (
-                <span style={{ fontWeight: 600, color: expandedKeys.includes(r.id) ? SP_ORANGE : SP_TEXT, fontSize: 13 }}>{v}</span>
+                <span style={{ fontWeight: 600, color: expandedKeySet.has(r.id) ? SP_ORANGE : SP_TEXT, fontSize: 13 }}>{v}</span>
             ),
         },
         {
             title: 'Mã SKU', dataIndex: 'sku', key: 'sku', width: 140,
-            render: (v: string, r: any) => expandedKeys.includes(r.id) ? ''
+            render: (v: string, r: any) => expandedKeySet.has(r.id) ? ''
                 : <span style={{ fontSize: 12, color: SP_GREEN, fontWeight: 600 }}>{v}</span>,
         },
         {
@@ -267,37 +386,30 @@ function InventoryValueTab() {
         {
             title: 'Tồn kho', key: 'stock', width: 90, align: 'right' as const,
             render: (_: any, r: any) => {
-                if (expandedKeys.includes(r.id)) return '';
-                const s = getProductStock(r);
+                if (expandedKeySet.has(r.id)) return '';
+                const s = r.inventoryStock;
                 const color = s <= 0 ? SP_RED : s < 10 ? SP_YELLOW : SP_GREEN;
-                return <span style={{ fontWeight: 700, color, fontSize: 13 }}>{fmtN(s)}</span>;
+                return <span style={{ fontWeight: 700, color, fontSize: 13 }}>{formatInventoryNumber(s)}</span>;
             },
         },
         {
             title: 'Giá vốn', key: 'cost', width: 140, align: 'right' as const,
             render: (_: any, r: any) => {
-                if (expandedKeys.includes(r.id)) return '';
-                try {
-                    const vs = r.variants ? JSON.parse(r.variants) : [];
-                    if (vs.length > 0) {
-                        const costs = vs.map((v: any) => v.cost || 0).filter((c: number) => c > 0);
-                        if (costs.length) {
-                            const mn = Math.min(...costs), mx = Math.max(...costs);
-                            return <span style={{ fontSize: 12, color: SP_MUTED }}>{mn === mx ? `${fmtN(mn)}đ` : `${fmtN(mn)} – ${fmtN(mx)}đ`}</span>;
-                        }
-                    }
-                } catch { /* */ }
-                return <span style={{ fontSize: 12, color: SP_MUTED }}>{fmtN(r.cost || 0)}đ</span>;
+                if (expandedKeySet.has(r.id)) return '';
+                if (r.minVariantCost !== null && r.maxVariantCost !== null) {
+                    return <span style={{ fontSize: 12, color: SP_MUTED }}>{r.minVariantCost === r.maxVariantCost ? `${formatInventoryNumber(r.minVariantCost)}đ` : `${formatInventoryNumber(r.minVariantCost)} – ${formatInventoryNumber(r.maxVariantCost)}đ`}</span>;
+                }
+                return <span style={{ fontSize: 12, color: SP_MUTED }}>{formatInventoryNumber(r.cost || 0)}đ</span>;
             },
         },
         {
             title: 'Giá trị tồn', key: 'value', width: 150, align: 'right' as const,
             render: (_: any, r: any) => {
-                const v = getProductValue(r);
-                return <span style={{ fontWeight: 700, fontSize: 13, color: v > 0 ? SP_ORANGE : '#d1d5db' }}>{fmtN(v)}đ</span>;
+                const v = r.inventoryValue;
+                return <span style={{ fontWeight: 700, fontSize: 13, color: v > 0 ? SP_ORANGE : '#d1d5db' }}>{formatInventoryNumber(v)}đ</span>;
             },
         },
-    ];
+    ], [expandedKeySet]);
 
     return (
         <div style={{ padding: '20px 24px', background: SP_BG, minHeight: '100%' }}>
@@ -326,19 +438,19 @@ function InventoryValueTab() {
                 <Col span={8}>
                     <div style={{ background: SP_WHITE, borderRadius: 8, padding: '16px 18px', border: `1px solid ${SP_BORDER}`, boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
                         <div style={{ fontSize: 12, color: SP_MUTED, marginBottom: 6 }}>Giá trị tồn kho</div>
-                        <div style={{ fontSize: 24, fontWeight: 700, color: SP_ORANGE }}>{fmtN(grandTotal)}<span style={{ fontSize: 14 }}>đ</span></div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color: SP_ORANGE }}>{formatInventoryNumber(grandTotal)}<span style={{ fontSize: 14 }}>đ</span></div>
                     </div>
                 </Col>
                 <Col span={8}>
                     <div style={{ background: SP_WHITE, borderRadius: 8, padding: '16px 18px', border: `1px solid ${SP_BORDER}`, boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
                         <div style={{ fontSize: 12, color: SP_MUTED, marginBottom: 6 }}>Tổng tồn kho</div>
-                        <div style={{ fontSize: 24, fontWeight: 700, color: SP_GREEN }}>{fmtN(grandStock)}<span style={{ fontSize: 14, fontWeight: 400 }}> sp</span></div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color: SP_GREEN }}>{formatInventoryNumber(grandStock)}<span style={{ fontSize: 14, fontWeight: 400 }}> sp</span></div>
                     </div>
                 </Col>
                 <Col span={8}>
                     <div style={{ background: SP_WHITE, borderRadius: 8, padding: '16px 18px', border: `1px solid ${SP_BORDER}`, boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
                         <div style={{ fontSize: 12, color: SP_MUTED, marginBottom: 6 }}>Số mặt hàng</div>
-                        <div style={{ fontSize: 24, fontWeight: 700, color: SP_TEXT }}>{filtered.length}<span style={{ fontSize: 14, fontWeight: 400 }}> sản phẩm</span></div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color: SP_TEXT }}>{filteredRows.length}<span style={{ fontSize: 14, fontWeight: 400 }}> sản phẩm</span></div>
                     </div>
                 </Col>
             </Row>
@@ -359,7 +471,7 @@ function InventoryValueTab() {
                             Tất cả <span className="cnt">{products.length}</span>
                         </span>
                         {categories.map((c: any) => {
-                            const cnt = products.filter(p => p.categoryId === c.id).length;
+                            const cnt = categoryCounts.get(c.id) || 0;
                             return (
                                 <span key={c.id} className={`sp-cat-btn${selectedCat === c.id ? ' active' : ''}`}
                                     onClick={() => setSelectedCat(selectedCat === c.id ? null : c.id)}>
@@ -370,107 +482,73 @@ function InventoryValueTab() {
                     </div>
                 </div>
 
-                <Table
+                <Table<InventoryProductRow>
                     className="sp-inv-table"
-                    dataSource={[...filtered].sort((a, b) => getProductValue(b) - getProductValue(a))}
+                    dataSource={filteredRows}
                     rowKey="id"
                     columns={columns}
                     loading={loading}
                     size="small"
                     pagination={{ pageSize: 50, showSizeChanger: true, showTotal: t => `${t} sản phẩm`, style: { padding: '10px 16px' } }}
-                    rowClassName={(r) => expandedKeys.includes(r.id) ? 'sp-row-expanded' : ''}
+                    rowClassName={(r) => expandedKeySet.has(r.id) ? 'sp-row-expanded' : ''}
                     onRow={(r) => ({
                         onClick: () => {
-                            if (!r.variants) return;
-                            setExpandedKeys(expandedKeys.includes(r.id)
-                                ? expandedKeys.filter(k => k !== r.id)
-                                : [...expandedKeys, r.id]);
+                            if (!r.hasVariantPayload) return;
+                            setExpandedKeys((current) => current.includes(r.id)
+                                ? current.filter((key) => key !== r.id)
+                                : [...current, r.id]);
                         },
-                        style: { cursor: r.variants ? 'pointer' : 'default' },
+                        style: { cursor: r.hasVariantPayload ? 'pointer' : 'default' },
                     })}
                     expandable={{
                         expandedRowKeys: expandedKeys,
-                        onExpand: (expanded, r) => setExpandedKeys(expanded ? [...expandedKeys, r.id] : expandedKeys.filter(k => k !== r.id)),
-                        rowExpandable: r => !!(r.variants),
+                        onExpand: (expanded, r) => setExpandedKeys((current) => expanded
+                            ? (current.includes(r.id) ? current : [...current, r.id])
+                            : current.filter((key) => key !== r.id)),
+                        rowExpandable: r => r.hasVariantPayload,
                         showExpandColumn: false,
                         expandedRowRender: (record) => {
-                            try {
-                                const vs = JSON.parse(record.variants || '[]');
-                                if (!vs.length) return null;
-                                const prodTotal = vs.reduce((s: number, v: any) => s + (v.stock || 0) * (v.cost || record.cost || 0), 0);
-                                const variantRows = vs.map((v: any, i: number) => ({
-                                    key: i,
-                                    color: v.color,
-                                    sku: v.sku,
-                                    cost: v.cost || record.cost || 0,
-                                    stock: v.stock || 0,
-                                    value: (v.stock || 0) * (v.cost || record.cost || 0),
-                                }));
-                                return (
-                                    <div style={{ margin: 0 }}>
-                                        <Table
-                                            className="sp-inv-table"
-                                            dataSource={variantRows}
-                                            rowKey="key"
-                                            size="small"
-                                            pagination={false}
-                                            showHeader={true}
-                                            style={{ borderRadius: 6, overflow: 'hidden', border: `1px solid #fcd9c8` }}
-                                            columns={[
-                                                {
-                                                    title: 'Phân loại', dataIndex: 'color', key: 'color',
-                                                    render: (v: string) => <span style={{ fontWeight: 600, color: SP_TEXT, fontSize: 13 }}>{v}</span>,
-                                                },
-                                                {
-                                                    title: 'SKU', dataIndex: 'sku', key: 'sku', width: 150,
-                                                    render: (v: string) => <span style={{ fontSize: 12, color: SP_GREEN, fontWeight: 600 }}>{v}</span>,
-                                                },
-                                                {
-                                                    title: 'Giá vốn', dataIndex: 'cost', key: 'cost', width: 130, align: 'right' as const,
-                                                    render: (v: number) => <span style={{ fontSize: 12, color: SP_MUTED }}>{fmtN(v)}đ</span>,
-                                                },
-                                                {
-                                                    title: 'Tồn kho', dataIndex: 'stock', key: 'stock', width: 90, align: 'right' as const,
-                                                    render: (v: number) => {
-                                                        const c = v <= 0 ? SP_RED : v < 10 ? SP_YELLOW : SP_GREEN;
-                                                        return <span style={{ fontWeight: 700, color: c }}>{fmtN(v)}</span>;
-                                                    },
-                                                },
-                                                {
-                                                    title: 'Tổng vốn', dataIndex: 'value', key: 'value', width: 150, align: 'right' as const,
-                                                    render: (v: number) => <span style={{ fontWeight: 700, fontSize: 13, color: v > 0 ? SP_ORANGE : '#d1d5db' }}>{fmtN(v)}đ</span>,
-                                                },
-                                            ]}
-                                            summary={() => (
-                                                <Table.Summary>
-                                                    <Table.Summary.Row>
-                                                        <Table.Summary.Cell index={0} colSpan={4}>
-                                                            <span style={{ fontWeight: 600, fontSize: 12, color: SP_MUTED }}>Tổng — {record.name}</span>
-                                                        </Table.Summary.Cell>
-                                                        <Table.Summary.Cell index={1} align="right">
-                                                            <span style={{ fontWeight: 700, fontSize: 13, color: SP_ORANGE }}>{fmtN(prodTotal)}đ</span>
-                                                        </Table.Summary.Cell>
-                                                    </Table.Summary.Row>
-                                                </Table.Summary>
-                                            )}
-                                        />
-                                    </div>
-                                );
-                            } catch { return null; }
+                            if (record.variantRows.length === 0) return null;
+                            return (
+                                <div style={{ margin: 0 }}>
+                                    <Table<InventoryVariantRow>
+                                        className="sp-inv-table"
+                                        dataSource={record.variantRows}
+                                        rowKey="key"
+                                        size="small"
+                                        pagination={false}
+                                        showHeader={true}
+                                        style={{ borderRadius: 6, overflow: 'hidden', border: `1px solid #fcd9c8` }}
+                                        columns={variantColumns}
+                                        summary={() => (
+                                            <Table.Summary>
+                                                <Table.Summary.Row>
+                                                    <Table.Summary.Cell index={0} colSpan={4}>
+                                                        <span style={{ fontWeight: 600, fontSize: 12, color: SP_MUTED }}>Tổng — {record.name}</span>
+                                                    </Table.Summary.Cell>
+                                                    <Table.Summary.Cell index={1} align="right">
+                                                        <span style={{ fontWeight: 700, fontSize: 13, color: SP_ORANGE }}>{formatInventoryNumber(record.inventoryValue)}đ</span>
+                                                    </Table.Summary.Cell>
+                                                </Table.Summary.Row>
+                                            </Table.Summary>
+                                        )}
+                                    />
+                                </div>
+                            );
                         },
                     }}
                     summary={() => (
                         <Table.Summary fixed>
                             <Table.Summary.Row>
                                 <Table.Summary.Cell index={0} colSpan={3}>
-                                    <span style={{ fontWeight: 600, color: SP_TEXT, fontSize: 13 }}>Tổng cộng ({filtered.length} sản phẩm)</span>
+                                    <span style={{ fontWeight: 600, color: SP_TEXT, fontSize: 13 }}>Tổng cộng ({filteredRows.length} sản phẩm)</span>
                                 </Table.Summary.Cell>
                                 <Table.Summary.Cell index={1} align="right">
-                                    <span style={{ fontWeight: 700, color: SP_GREEN, fontSize: 13 }}>{fmtN(grandStock)}</span>
+                                    <span style={{ fontWeight: 700, color: SP_GREEN, fontSize: 13 }}>{formatInventoryNumber(grandStock)}</span>
                                 </Table.Summary.Cell>
                                 <Table.Summary.Cell index={2} />
                                 <Table.Summary.Cell index={3} align="right">
-                                    <span style={{ fontWeight: 700, color: SP_ORANGE, fontSize: 14 }}>{fmtN(grandTotal)}đ</span>
+                                    <span style={{ fontWeight: 700, color: SP_ORANGE, fontSize: 14 }}>{formatInventoryNumber(grandTotal)}đ</span>
                                 </Table.Summary.Cell>
                             </Table.Summary.Row>
                         </Table.Summary>

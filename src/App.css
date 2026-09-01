@@ -28,6 +28,66 @@
     max-width: 100%;
 }
 
+.role-preview-trigger {
+    width: 32px !important;
+    height: 32px !important;
+    color: #475569 !important;
+    background: #f4f4f5 !important;
+}
+
+.role-preview-trigger:hover,
+.role-preview-trigger--active {
+    color: #b45309 !important;
+    background: #fef3c7 !important;
+    box-shadow: inset 0 0 0 1px #f59e0b !important;
+}
+
+.role-preview-banner {
+    position: fixed;
+    top: 40px;
+    left: 0;
+    right: 0;
+    z-index: 9998;
+    height: 42px;
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    color: #78350f;
+    background:
+        linear-gradient(90deg, rgba(255, 251, 235, 0.98), rgba(254, 243, 199, 0.98)),
+        repeating-linear-gradient(135deg, transparent 0 12px, rgba(245, 158, 11, 0.08) 12px 24px);
+    border-bottom: 1px solid #f59e0b;
+    box-shadow: 0 5px 16px rgba(146, 64, 14, 0.12);
+    user-select: none;
+    -webkit-app-region: no-drag;
+}
+
+.role-preview-banner__identity {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+.role-preview-banner__identity strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.role-preview-banner__username {
+    color: #a16207;
+    font-size: 12px;
+}
+
+.role-preview-banner__notice {
+    flex: 1;
+    color: #92400e;
+    font-size: 12px;
+    text-align: center;
+}
+
 .app-content .ant-card,
 .app-content .ant-row,
 .app-content .ant-col,
@@ -425,6 +485,24 @@ button:focus-visible {
 
 /* Narrow Electron window */
 @media (max-width: 768px) {
+    .role-preview-banner {
+        gap: 8px;
+        padding: 0 8px;
+    }
+
+    .role-preview-banner__identity > span:not(.role-preview-banner__username),
+    .role-preview-banner__notice {
+        display: none;
+    }
+
+    .role-preview-banner__identity {
+        flex: 1;
+    }
+
+    .role-preview-banner__username {
+        display: none;
+    }
+
     .app-sidebar.ant-layout-sider-collapsed {
         flex-basis: 60px !important;
         width: 60px !important;

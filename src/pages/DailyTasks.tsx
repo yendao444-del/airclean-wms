@@ -168,6 +168,8 @@ interface Task {
 interface EvidenceImage {
     name: string;
     mimeType: string;
+    storage?: 'r2';
+    r2Key?: string;
     storagePath?: string;
     driveUrl?: string;
     hash: string;
@@ -279,8 +281,9 @@ const formatPenaltyAmount = (value: string | number | undefined): string => {
 
 const getDailyRotationAnchor = () => dayjs().format('YYYY-MM-DD');
 
-const MAX_EVIDENCE_IMAGE_BYTES = 900 * 1024;
-const MAX_EVIDENCE_SOURCE_BYTES = 25 * 1024 * 1024;
+const TARGET_EVIDENCE_IMAGE_BYTES = 200 * 1024;
+const MAX_EVIDENCE_IMAGE_BYTES = 500 * 1024;
+const MAX_EVIDENCE_SOURCE_BYTES = 15 * 1024 * 1024;
 const MAX_EVIDENCE_IMAGES = 5;
 
 const getEvidenceImageMimeType = (file: File): string | null => {
@@ -310,26 +313,31 @@ const compressEvidenceImage = async (file: File): Promise<File> => {
         });
         let width = Math.min(image.naturalWidth, 1920);
         let height = Math.round(image.naturalHeight * (width / image.naturalWidth));
+        let fallback: Blob | null = null;
 
         // Continue reducing extreme screenshots/photos instead of rejecting
         // them while a usable proof image can still be produced.
         while (width >= 160 && height >= 120) {
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const context = canvas.getContext('2d');
+            if (!context) throw new Error('Không thể xử lý ảnh trên thiết bị này.');
+            context.drawImage(image, 0, 0, width, height);
             for (const quality of [0.82, 0.72, 0.62, 0.52, 0.42, 0.34, 0.25]) {
-                const canvas = document.createElement('canvas');
-                canvas.width = width;
-                canvas.height = height;
-                const context = canvas.getContext('2d');
-                if (!context) throw new Error('Không thể xử lý ảnh trên thiết bị này.');
-                context.drawImage(image, 0, 0, width, height);
                 const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/webp', quality));
-                if (blob && blob.size <= MAX_EVIDENCE_IMAGE_BYTES) {
+                if (blob && blob.size <= TARGET_EVIDENCE_IMAGE_BYTES) {
                     return new File([blob], `${file.name.replace(/\.[^.]+$/, '')}.webp`, { type: 'image/webp' });
                 }
+                if (blob && blob.size < MAX_EVIDENCE_IMAGE_BYTES && (!fallback || blob.size < fallback.size)) fallback = blob;
             }
             width = Math.round(width * 0.7);
             height = Math.round(height * 0.7);
         }
-        throw new Error('Không thể nén ảnh xuống dưới 1 MB. Hãy chọn ảnh rõ nét hơn hoặc cắt bớt ảnh.');
+        if (fallback) {
+            return new File([fallback], `${file.name.replace(/\.[^.]+$/, '')}.webp`, { type: 'image/webp' });
+        }
+        throw new Error('Không thể nén ảnh xuống dưới 500 KB. Hãy chọn ảnh rõ nét hơn hoặc cắt bớt ảnh.');
     } finally {
         URL.revokeObjectURL(sourceUrl);
     }
@@ -384,6 +392,8 @@ const DailyTasks = () => {
     const [taskForm] = Form.useForm();
     const [assignmentMode, setAssignmentMode] = useState<'fixed' | 'daily'>('fixed');
     const [loading, setLoading] = useState(false);
+    const [isSavingTask, setIsSavingTask] = useState(false);
+    const taskSaveInFlightRef = useRef(false);
 
     // Quick note state for assignment cards
     const [quickNotes, setQuickNotes] = useState<Record<number, string>>({});
@@ -555,6 +565,10 @@ const DailyTasks = () => {
             // 🔄 Reset daily tasks nếu sang ngày mới
             try {
                 const resetResult = await window.electronAPI.dailyTasks.resetDaily();
+                if (!resetResult.success) {
+                    message.error(resetResult.error || 'Không thể reset công việc sang ngày mới.');
+                    return;
+                }
                 const dayChanged = Boolean(resetResult.success && resetResult.data?.dayChanged);
                 if (dayChanged) {
                     setSelectedWorkDate(current =>
@@ -1511,6 +1525,10 @@ const DailyTasks = () => {
 
     // Save task
     const handleSaveTask = async () => {
+        if (taskSaveInFlightRef.current) return;
+        taskSaveInFlightRef.current = true;
+        setIsSavingTask(true);
+
         try {
             const values = await taskForm.validateFields();
 
@@ -1576,20 +1594,22 @@ const DailyTasks = () => {
             let result;
             if (editingTask) {
                 result = await window.electronAPI.dailyTasks.update(editingTask.id, taskData);
-                message.success('Đã cập nhật task!');
             } else {
                 result = await window.electronAPI.dailyTasks.create(taskData);
-                message.success('Đã thêm task mới!');
             }
 
-            if (result.success) {
-                setTaskModalVisible(false);
-                taskForm.resetFields();
-                setEditingTask(null);
-                loadTasks();
-            }
+            if (!result.success) throw new Error(result.error || 'Không thể lưu công việc.');
+
+            message.success(editingTask ? 'Đã cập nhật task!' : 'Đã thêm task mới!');
+            setTaskModalVisible(false);
+            taskForm.resetFields();
+            setEditingTask(null);
+            await loadTasks();
         } catch (error: any) {
             message.error('Lỗi: ' + (error.message || 'Unknown error'));
+        } finally {
+            taskSaveInFlightRef.current = false;
+            setIsSavingTask(false);
         }
     };
 
@@ -1732,7 +1752,7 @@ const DailyTasks = () => {
                             <Button icon={<UploadOutlined />}>Chọn ảnh từ máy</Button>
                         </Upload>
                         <div style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>
-                            Tối đa {MAX_EVIDENCE_IMAGES} ảnh JPG, PNG hoặc WebP. Ảnh gốc tối đa 25 MB và sẽ tự nén dưới 1 MB trước khi tải lên.
+                            Tối đa {MAX_EVIDENCE_IMAGES} ảnh JPG, PNG hoặc WebP. Ảnh gốc tối đa 15 MB, ưu tiên nén khoảng 100–200 KB và luôn dưới 500 KB trước khi tải lên R2.
                         </div>
                     </div>
                 </div>
@@ -1745,7 +1765,7 @@ const DailyTasks = () => {
                 }
                 const invalidImage = selectedImages.find(image => !getEvidenceImageMimeType(image) || image.size > MAX_EVIDENCE_SOURCE_BYTES);
                 if (invalidImage) {
-                    message.warning(`Ảnh "${invalidImage.name}" phải là JPG, PNG hoặc WebP và không vượt quá 25 MB.`);
+                    message.warning(`Ảnh "${invalidImage.name}" phải là JPG, PNG hoặc WebP và không vượt quá 15 MB.`);
                     return Promise.reject();
                 }
                 try {
@@ -1755,8 +1775,8 @@ const DailyTasks = () => {
                         const selectedImage = selectedImages[index];
                         message.loading({ key: 'evidence-upload', content: `Đang nén ảnh ${index + 1}/${selectedImages.length}...`, duration: 0 });
                         const compressedImage = await compressEvidenceImage(selectedImage);
-                        if (compressedImage.size > MAX_EVIDENCE_IMAGE_BYTES) {
-                            throw new Error(`Ảnh "${selectedImage.name}" sau nén vượt quá 1 MB.`);
+                        if (compressedImage.size >= MAX_EVIDENCE_IMAGE_BYTES) {
+                            throw new Error(`Ảnh "${selectedImage.name}" sau nén vượt quá 500 KB.`);
                         }
                         const data = await new Promise<string>((resolve, reject) => {
                             const reader = new FileReader();
@@ -2190,7 +2210,7 @@ const DailyTasks = () => {
             ? evidence.submittedImages
             : evidence.submittedImage ? [evidence.submittedImage] : [];
 
-        const imageKey = (image: EvidenceImage) => image.storagePath || image.driveUrl || image.hash || image.name || '';
+        const imageKey = (image: EvidenceImage) => image.r2Key || image.storagePath || image.driveUrl || image.hash || image.name || '';
         const getCachedImageUrl = (key: string) => {
             const cached = evidenceImageUrlCacheRef.current.get(key);
             if (!cached) return '';
@@ -2228,7 +2248,8 @@ const DailyTasks = () => {
                                 <img
                                     src={image.url}
                                     alt={`Bằng chứng ${index + 1}`}
-                                    loading="lazy"
+                                    loading="eager"
+                                    fetchPriority="high"
                                     decoding="async"
                                     onError={() => message.warning(`Không thể hiển thị ảnh: ${image.name || `Bằng chứng ${index + 1}`}`)}
                                     style={{ display: 'block', width: '100%', height: 520, objectFit: 'contain', borderRadius: 8, background: '#f8fafc' }}
@@ -2299,13 +2320,20 @@ const DailyTasks = () => {
         if (submittedImages.length === 0 || cachedImages.length === submittedImages.length) return;
 
         const missingImages = submittedImages.filter(image => !getCachedImageUrl(imageKey(image)));
-        const driveImages = missingImages.filter(image => Boolean(image.driveUrl));
-        const legacyImages = missingImages.filter(image => !image.driveUrl && Boolean(image.storagePath));
+        const r2Images = missingImages.filter(image => Boolean(image.r2Key));
+        const driveImages = missingImages.filter(image => !image.r2Key && Boolean(image.driveUrl));
+        const legacyImages = missingImages.filter(image => !image.r2Key && !image.driveUrl && Boolean(image.storagePath));
         const driveRequest = driveImages.length > 0
             ? window.electronAPI.dailyTasks.getDriveEvidenceImageUrls(
                 task.id,
                 driveImages.map(image => ({ driveUrl: image.driveUrl!, mimeType: image.mimeType })),
                 requestId,
+            )
+            : Promise.resolve(null);
+        const r2Request = r2Images.length > 0
+            ? window.electronAPI.dailyTasks.getR2EvidenceImageUrls(
+                task.id,
+                r2Images.map(image => ({ r2Key: image.r2Key!, mimeType: image.mimeType })),
             )
             : Promise.resolve(null);
         const legacyRequests = legacyImages.map(async image => {
@@ -2319,10 +2347,30 @@ const DailyTasks = () => {
             }
             updateModal(loadedByKey.size + failedByKey.size < submittedImages.length);
         });
-        const [driveResult] = await Promise.all([
+        const [driveResult, r2Result] = await Promise.all([
             driveRequest,
+            r2Request,
             Promise.allSettled(legacyRequests),
         ]);
+        if (r2Result?.success && r2Result.data?.results) {
+            r2Result.data.results.forEach(result => {
+                const image = r2Images.find(item => item.r2Key === result.r2Key);
+                if (!image) return;
+                const key = imageKey(image);
+                if (result.success && result.data?.url) {
+                    cacheImageUrl(key, result.data.url);
+                    loadedByKey.set(key, { ...image, url: result.data.url });
+                    failedByKey.delete(key);
+                } else {
+                    failedByKey.set(key, result.error || 'Không thể tải ảnh bằng chứng từ R2.');
+                }
+            });
+        } else if (r2Result && !r2Result.success) {
+            r2Images.forEach(image => failedByKey.set(
+                imageKey(image),
+                r2Result.error || 'Không thể tải ảnh bằng chứng từ R2.',
+            ));
+        }
         if (driveResult?.success && driveResult.data?.results) {
             driveResult.data.results.forEach(result => {
                 const image = driveImages.find(item => item.driveUrl === result.driveUrl);
@@ -3982,15 +4030,19 @@ const DailyTasks = () => {
                 open={taskModalVisible}
                 onOk={handleSaveTask}
                 onCancel={() => {
+                    if (isSavingTask) return;
                     setTaskModalVisible(false);
                     taskForm.resetFields();
                     setEditingTask(null);
                 }}
+                confirmLoading={isSavingTask}
+                maskClosable={!isSavingTask}
+                closable={!isSavingTask}
                 width={550}
                 okText="💾 Lưu"
                 cancelText="Hủy"
-                okButtonProps={{ size: 'large', style: { minWidth: 100 } }}
-                cancelButtonProps={{ size: 'large' }}
+                okButtonProps={{ size: 'large', style: { minWidth: 100 }, disabled: isSavingTask }}
+                cancelButtonProps={{ size: 'large', disabled: isSavingTask }}
             >
                 <Form form={taskForm} layout="vertical">
                     {/* Tên công việc - BẮT BUỘC */}

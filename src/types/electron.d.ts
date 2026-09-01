@@ -582,6 +582,26 @@ export interface ElectronAPI {
       taskId: number,
       storagePath?: string,
     ) => Promise<{ success: boolean; data?: { url: string }; error?: string }>;
+    getR2EvidenceImageUrl: (
+      taskId: number,
+      r2Key: string,
+      mimeType?: string,
+    ) => Promise<{ success: boolean; data?: { url: string }; error?: string }>;
+    getR2EvidenceImageUrls: (
+      taskId: number,
+      images: Array<{ r2Key: string; mimeType?: string }>,
+    ) => Promise<{
+      success: boolean;
+      data?: {
+        results: Array<{
+          r2Key: string;
+          success: boolean;
+          data?: { url: string };
+          error?: string;
+        }>;
+      };
+      error?: string;
+    }>;
     getDriveEvidenceImageUrl: (
       taskId: number,
       driveUrl: string,
@@ -739,6 +759,21 @@ export interface ElectronAPI {
       search?: string;
       limit?: number;
     }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    saveWithStock: (data: {
+      id?: number;
+      idempotencyKey: string;
+      customer: string;
+      exportDate: string;
+      status: string;
+      notes?: string;
+      items: Array<{
+        sku: string;
+        productName: string;
+        color?: string;
+        quantity: number;
+        unitPrice: number;
+      }>;
+    }) => Promise<{ success: boolean; data?: any; error?: string }>;
     create: (
       data: any,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -746,7 +781,10 @@ export interface ElectronAPI {
       id: number,
       data: any,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
-    delete: (id: number) => Promise<{ success: boolean; error?: string }>;
+    delete: (
+      id: number,
+      options?: { idempotencyKey?: string },
+    ) => Promise<{ success: boolean; error?: string }>;
     adjustStock: (data: StockMutationPayload) => Promise<StockMutationResult>;
   };
   posOrder: {
@@ -824,6 +862,11 @@ export interface ElectronAPI {
     getAll: (filters?: {
       limit?: number;
     }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    apply: (data: {
+      idempotencyKey: string;
+      adjustments: StockMutationPayload[];
+      record: any;
+    }) => Promise<{ success: boolean; data?: any; error?: string }>;
     create: (
       data: any,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -897,6 +940,65 @@ export interface ElectronAPI {
       key: string,
       value: any,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
+  };
+  attendance: {
+    updateLeaveStatus: (data: {
+      empId: number;
+      date: string;
+      sessions: Array<"morning" | "afternoon">;
+      status: "paid" | "unpaid" | "exempt" | "clear";
+      note?: string;
+    }) => Promise<{
+      success: boolean;
+      data?: { leaveRecords?: any[] };
+      error?: string;
+    }>;
+    updatePayrollOverride: (data: {
+      empId: number;
+      periodKey: string;
+      patch?: {
+        extraShifts?: number;
+        extraAdjust?: number;
+        adjustNote?: string;
+      };
+      clear?: boolean;
+    }) => Promise<{
+      success: boolean;
+      data?: {
+        overrideKey: string;
+        override: {
+          extraShifts?: number;
+          extraAdjust?: number;
+          adjustNote?: string;
+          updatedAt?: string;
+          updatedBy?: string;
+        } | null;
+      };
+      error?: string;
+    }>;
+    updatePayrollLock: (data: {
+      action: "lock" | "unlock";
+      lock?: any;
+      start?: string;
+      end?: string;
+    }) => Promise<{
+      success: boolean;
+      data?: { lockedPeriods: any[] };
+      error?: string;
+    }>;
+    sendPayslipEmail: (data: {
+      to: string;
+      employeeName: string;
+      period: string;
+      fileName: string;
+      pdfBytes?: Uint8Array;
+      pdfBase64?: string;
+    }) => Promise<{
+      success: boolean;
+      reauthRequired?: boolean;
+      data?: { id?: string };
+      error?: string;
+    }>;
   };
   stockCheck: {
     getSessions: (options?: { maintenance?: boolean }) => Promise<{

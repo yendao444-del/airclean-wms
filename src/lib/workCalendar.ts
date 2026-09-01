@@ -19,6 +19,7 @@ export const VARIABLE_VIETNAM_HOLIDAYS: Record<string, string> = {
     '2026-02-22': 'Tết Nguyên Đán', '2026-03-27': 'Giỗ Tổ Hùng Vương',
 };
 
+export const DAILY_REPORT_MISSING_FINE_OFFICIAL = 30000;
 export const DAILY_REPORT_POLICY_START_DATE = '2026-04-28';
 
 // Temporary policy switch: daily stock checks remain active, but missing-check fines are disabled.

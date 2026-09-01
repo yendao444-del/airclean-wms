@@ -27,6 +27,9 @@ node scripts\release-version.cjs set !NEW_VERSION! >nul
 
 echo [1/6] Regenerate Prisma Client...
 echo ----------------------------------------
+:: Stop the project watcher first so it cannot relaunch Electron during the build.
+powershell -NoProfile -Command "$root=(Resolve-Path '.').Path; Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -like ('*'+$root+'*') -and $_.CommandLine -match 'nodemon.+nodemon\.electron\.json' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+timeout /t 1 /nobreak >nul
 :: Kill Electron/Node neu dang chay (tranh lock file DLL)
 taskkill /F /IM electron.exe >nul 2>&1
 taskkill /F /IM "DBY POS.exe" >nul 2>&1
