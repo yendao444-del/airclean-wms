@@ -71,6 +71,7 @@ import {
     QrcodeOutlined,
     SafetyCertificateOutlined,
     SendOutlined,
+    SearchOutlined,
 } from '@ant-design/icons';
 
 // Khởi tạo Audio Context toàn cục cho việc phát âm báo Ting
@@ -333,6 +334,8 @@ interface BonusRecord {
     detail: string;
     amount: number;
     date?: string; // ISO string — ngày tạo thưởng
+    createdBy?: string;
+    createdByName?: string;
     overtimeHours?: number;
     overtimeRate?: number;
 }
@@ -343,6 +346,21 @@ interface LockedPeriod {
     end: string;   // ISO — cuối kỳ
     lockedAt: string;
     lockedBy: string;
+    payrollSnapshot?: LockedPayrollSnapshot;
+}
+
+interface LockedPayrollSnapshot {
+    version: 1;
+    capturedAt: string;
+    capturedBy: string;
+    rows: any[];
+    packingLogs: PackingOrderLog[];
+    fines: FineRecord[];
+    bonuses: BonusRecord[];
+    sourceSummary: {
+        packingOrderCount: number;
+        packingTotalUnits: number;
+    };
 }
 
 interface BonusAuditLog {
@@ -353,6 +371,8 @@ interface BonusAuditLog {
     before?: Partial<BonusRecord>;
     after?: Partial<BonusRecord>;
     note: string;
+    changedBy?: string;
+    changedByName?: string;
 }
 
 interface FineAuditLog {
@@ -522,6 +542,17 @@ const initialWarehousePacking = { level1Units: 6100, level10Units: 870 };
 
 // Giá tiền đóng gói: mỗi sản phẩm (SKU cha) = 20đ
 const PACKING_UNIT_PRICE = 20;
+const AUGUST_2026_FINE_AMNESTY_START = dayjs('2026-08-01').startOf('day');
+const AUGUST_2026_FINE_AMNESTY_END = dayjs('2026-08-31').endOf('day');
+
+const isAugust2026WaivedFine = (fine: FineRecord) => {
+    const fineDate = dayjs(fine.date || '');
+    if (!fineDate.isValid()) return false;
+    const isInAugust = !fineDate.isBefore(AUGUST_2026_FINE_AMNESTY_START, 'day')
+        && !fineDate.isAfter(AUGUST_2026_FINE_AMNESTY_END, 'day');
+    const isLateFine = normalizeAttendanceText(fine.type).includes('di muon');
+    return isInAugust && !isLateFine;
+};
 
 // Seed lịch sử đóng gói ban đầu
 const initialPackingLogs: PackingLog[] = [
@@ -2759,9 +2790,30 @@ export default function Attendance() {
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     });
 
+    const fetchImageAsDataUrl = async (url: string, timeoutMs = 4000) => {
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            const response = await fetch(url, { signal: controller.signal });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const blob = await response.blob();
+            return await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(String(reader.result || ''));
+                reader.onerror = () => reject(reader.error || new Error('Không đọc được ảnh'));
+                reader.readAsDataURL(blob);
+            });
+        } finally {
+            window.clearTimeout(timeout);
+        }
+    };
+
+    const isValidEmailAddress = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
+
     const buildPayslipPDF = async (payslipData?: any) => {
         const data = payslipData ?? payslipModal;
         if (!data) return;
+        const startedAt = performance.now();
         const [{ default: html2canvas }, { jsPDF }] = await Promise.all([
             import('html2canvas'),
             import('jspdf'),
@@ -2791,17 +2843,19 @@ export default function Attendance() {
             });
             await Promise.all(externalImgs.map(async (img) => {
                 try {
-                    const resp = await fetch(img.src);
-                    const blob = await resp.blob();
-                    await new Promise<void>((res) => {
-                        const reader = new FileReader();
-                        reader.onload = () => { img.src = reader.result as string; res(); };
-                        reader.onerror = () => res();
-                        reader.readAsDataURL(blob);
-                    });
-                } catch { /* giữ src gốc nếu fetch fail */ }
+                    img.src = await fetchImageAsDataUrl(img.src);
+                    await img.decode().catch(() => undefined);
+                } catch {
+                    // Không để QR ngoài mạng làm treo hoặc làm hỏng toàn bộ PDF.
+                    img.remove();
+                }
             }));
-            const canvas = await html2canvas(el, { scale: 2, useCORS: false, backgroundColor: '#ffffff' });
+            const canvas = await html2canvas(el, {
+                scale: 1.4,
+                useCORS: false,
+                backgroundColor: '#ffffff',
+                logging: false,
+            });
             const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
             const pageW = pdf.internal.pageSize.getWidth();
             const pageH = pdf.internal.pageSize.getHeight();
@@ -2823,14 +2877,15 @@ export default function Attendance() {
 
                 if (pageIndex > 0) pdf.addPage();
                 const imgH = (sliceH * maxW) / canvas.width;
-                const imgData = pageCanvas.toDataURL('image/png');
-                pdf.addImage(imgData, 'PNG', margin, margin, maxW, imgH);
+                const imgData = pageCanvas.toDataURL('image/jpeg', 0.9);
+                pdf.addImage(imgData, 'JPEG', margin, margin, maxW, imgH, undefined, 'FAST');
 
                 renderedPx += sliceH;
                 pageIndex += 1;
             }
             const name = data.name.replace(/\s+/g, '-');
             const period = overviewDateRange[0].format('MM-YYYY');
+            console.log(`[PAYSLIP] Rendered ${data.name} in ${Math.round(performance.now() - startedAt)}ms`);
             return { pdf, name, period, fileName: `phieu-luong-${name}-${period}.pdf` };
         } finally {
             el.remove();
@@ -2890,22 +2945,26 @@ export default function Attendance() {
                 message.error(`Chưa có Gmail cho ${payslipModal.name}. Vào Cài đặt > Quản trị > Sửa người dùng để bổ sung Gmail.`);
                 return;
             }
+            if (!isValidEmailAddress(recipientEmail)) {
+                message.error(`Email của ${payslipModal.name} không hợp lệ: ${recipientEmail}. Vui lòng sửa trong Cài đặt > Quản trị.`);
+                return;
+            }
             await waitForPaint();
             const result = await buildPayslipPDF();
             if (!result) return;
             const { pdf, fileName, period } = result;
-            const pdfBase64 = pdf.output('datauristring').split(',')[1];
+            const pdfBytes = new Uint8Array(pdf.output('arraybuffer'));
             const res = await api.attendance.sendPayslipEmail({
                 to: recipientEmail,
                 employeeName: payslipModal.name,
                 period,
                 fileName,
-                pdfBase64,
+                pdfBytes,
             });
             if (res?.success) {
                 const periodKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
                 setGmailSentLog(prev => ({ ...prev, [`${payslipModal.id}_${periodKey}`]: new Date().toISOString() }));
-                message.success(`Đã gửi phiếu lương tới ${recipientEmail}`);
+                message.success(`Gmail đã tiếp nhận phiếu lương gửi tới ${recipientEmail}. Thư trả lại (nếu có) sẽ xuất hiện sau trong hộp thư Gmail.`);
             } else if (res?.reauthRequired) {
                 message.warning(res.error || 'Gmail chưa được cấp quyền gửi email. Cần đăng nhập Google lại với quyền Gmail.');
             } else {
@@ -2929,13 +2988,17 @@ export default function Attendance() {
         const loadingKey = 'bulk-gmail-data-ready';
         message.loading({ key: loadingKey, content: 'Đang đồng bộ dữ liệu đóng gói trước khi gửi Gmail...', duration: 0 });
         let freshPayrollData = payrollData;
-        try {
-            const freshPackingLogs = await loadPackingOrders(overviewDateRange[0].startOf('day').toISOString(), { strict: true });
-            freshPayrollData = buildPayrollDataFromPackingLogs(freshPackingLogs);
-            message.success({ key: loadingKey, content: 'Đã đồng bộ dữ liệu đóng gói đầy đủ.', duration: 2 });
-        } catch (error: any) {
-            message.error({ key: loadingKey, content: error?.message || 'Không tải được dữ liệu đóng gói. Chưa gửi Gmail để tránh thiếu lương đóng gói.', duration: 5 });
-            return;
+        if (lockedPayrollSnapshot) {
+            message.success({ key: loadingKey, content: 'Đang dùng đúng snapshot đã chốt, không tính lại từ dữ liệu nền.', duration: 2 });
+        } else {
+            try {
+                const freshPackingLogs = await loadPackingOrders(overviewDateRange[0].startOf('day').toISOString(), { strict: true });
+                freshPayrollData = buildPayrollDataFromPackingLogs(freshPackingLogs);
+                message.success({ key: loadingKey, content: 'Đã đồng bộ dữ liệu đóng gói đầy đủ.', duration: 2 });
+            } catch (error: any) {
+                message.error({ key: loadingKey, content: error?.message || 'Không tải được dữ liệu đóng gói. Chưa gửi Gmail để tránh thiếu lương đóng gói.', duration: 5 });
+                return;
+            }
         }
 
         const usersRes = await api.users?.getAll?.();
@@ -2982,7 +3045,7 @@ export default function Attendance() {
 
                 for (let i = 0; i < toSend.length; i++) {
                     const p = toSend[i];
-                    setBulkSendProgress(prev => prev ? { ...prev, current: i + 1, currentName: p.name } : prev);
+                    setBulkSendProgress(prev => prev ? { ...prev, current: i + 1, currentName: `Đang tạo PDF: ${p.name}` } : prev);
                     try {
                         const normUsername = normalizeAttendanceText(p.username || '');
                         const normName = normalizeAttendanceText(p.name || '');
@@ -2999,6 +3062,10 @@ export default function Attendance() {
                             results.push({ name: p.name, success: false, error: 'Chưa có Gmail' });
                             continue;
                         }
+                        if (!isValidEmailAddress(recipientEmail)) {
+                            results.push({ name: p.name, success: false, error: `Email không hợp lệ: ${recipientEmail}` });
+                            continue;
+                        }
                         setPayslipModal(p);
                         await waitForPaint();
                         await waitForPaint();
@@ -3008,8 +3075,10 @@ export default function Attendance() {
                             continue;
                         }
                         const { pdf, fileName, period } = pdfResult;
-                        const pdfBase64 = pdf.output('datauristring').split(',')[1];
-                        const res = await api.attendance.sendPayslipEmail({ to: recipientEmail, employeeName: p.name, period, fileName, pdfBase64 });
+                        const pdfBytes = new Uint8Array(pdf.output('arraybuffer'));
+                        setBulkSendProgress(prev => prev ? { ...prev, currentName: `Đang chuyển Gmail: ${p.name}` } : prev);
+                        await new Promise<void>(resolve => window.setTimeout(resolve, 0));
+                        const res = await api.attendance.sendPayslipEmail({ to: recipientEmail, employeeName: p.name, period, fileName, pdfBytes });
                         if (res?.reauthRequired) {
                             const authError = res.error || 'Can dang nhap Google lai';
                             results.push({ name: p.name, success: false, error: authError });
@@ -3030,6 +3099,7 @@ export default function Attendance() {
                     } catch (err: any) {
                         results.push({ name: p.name, success: false, error: err?.message || 'Lỗi không xác định' });
                     }
+                    await new Promise<void>(resolve => window.setTimeout(resolve, 0));
                 }
                 setPayslipModal(null);
                 setBulkSendProgress({ running: false, current: toSend.length, total: toSend.length, currentName: '', results });
@@ -3038,6 +3108,8 @@ export default function Attendance() {
     };
 
     const [activeTab, setActiveTab] = useState('overview');
+    const [bonusView, setBonusView] = useState<'personal' | 'manage'>('personal');
+    const [bonusSearch, setBonusSearch] = useState('');
     const [config, setConfig] = useState<PenaltyConfig>({
         graceMinutes: 5,
         // NV Chính thức theo Plan mục 3
@@ -3305,6 +3377,9 @@ export default function Attendance() {
         const { employees: _ignoredEmployees, ...safeSnapshot } = snapshot;
         try {
             const latest = await api.appConfig.get('attendanceData');
+            if (!latest?.success) {
+                throw new Error(latest?.error || 'Không đọc được attendanceData mới nhất trước khi lưu.');
+            }
             const dbData = latest?.success && latest.data ? latest.data : {};
             const mergedFineAuditLog = mergeAuditLogs(dbData.fineAuditLog || [], safeSnapshot.fineAuditLog || []);
             const mergedFineOverrides: Record<string, any> = {
@@ -3335,9 +3410,13 @@ export default function Attendance() {
                 // Waivers are administered centrally. Keep the latest DB list
                 // so an already-open renderer cannot recreate a revoked waiver.
                 fineWaivers: dbData.fineWaivers ?? safeSnapshot.fineWaivers ?? [],
+                // Payroll locks are changed only through the atomic lock API.
+                // An old open renderer must never overwrite a newer lock state.
+                lockedPeriods: dbData.lockedPeriods ?? safeSnapshot.lockedPeriods ?? [],
             };
-        } catch {
-            return safeSnapshot;
+        } catch (error) {
+            console.error('Dừng autosave vì không xác nhận được trạng thái khóa mới nhất:', error);
+            throw error;
         }
     }, []);
 
@@ -3502,42 +3581,81 @@ export default function Attendance() {
     const [packingDateRange, setPackingDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
     const fineSourcesRangeKeyRef = useRef('');
 
-    const loadPackingPromiseRef = useRef<Promise<PackingOrderLog[]> | null>(null);
+    const packingOrderLogsRef = useRef<PackingOrderLog[]>([]);
+    const packingRequestKeyRef = useRef('');
+    const packingLoadCountRef = useRef(0);
+    const loadPackingPromiseRef = useRef<{ key: string; promise: Promise<PackingOrderLog[]> } | null>(null);
+    const [packingReadyKey, setPackingReadyKey] = useState('');
+    const [packingLoadError, setPackingLoadError] = useState('');
     const [packingOrdersLoading, setPackingOrdersLoading] = useState(false);
     const loadPackingOrders = async (since?: string, options?: { strict?: boolean }): Promise<PackingOrderLog[]> => {
-        if (loadPackingPromiseRef.current) {
+        const sinceVal = since || overviewDateRange[0].startOf('day').toISOString();
+        const untilVal = overviewDateRange[1].endOf('day').toISOString();
+        const requestKey = `${dayjs(sinceVal).startOf('day').valueOf()}-${dayjs(untilVal).endOf('day').valueOf()}`;
+        packingRequestKeyRef.current = requestKey;
+
+        if (loadPackingPromiseRef.current?.key === requestKey) {
             console.log('[PACKING] Await existing loading promise');
-            return loadPackingPromiseRef.current;
+            try {
+                return await loadPackingPromiseRef.current.promise;
+            } catch (error) {
+                if (options?.strict) throw error;
+                return packingOrderLogsRef.current;
+            }
         }
 
         const task = (async () => {
         try {
             const api = (window as any).electronAPI;
-            const sinceVal = since || overviewDateRange[0].startOf('day').toISOString();
-            const untilVal = overviewDateRange[1].endOf('day').toISOString();
             const rangeDays = Math.max(overviewDateRange[1].endOf('day').diff(overviewDateRange[0].startOf('day'), 'day') + 1, 1);
             const packingFetchLimit = Math.min(Math.max(rangeDays * 800, 2000), 10000);
 
-            // Timeout wrapper: nếu API không trả kết quả trong 10s → bỏ qua
+            // A timeout is not an empty business result. Keep the last known
+            // successful data so a transient failure cannot erase payroll.
             const withTimeout = (p: Promise<any>, label: string, ms = 10000) =>
                 Promise.race([
                     p.then(r => { console.log(`[PACKING] ✅ ${label}:`, r?.data?.length || 0); return r; }),
                     new Promise((_, reject) => setTimeout(() => reject(`${label} TIMEOUT (${ms}ms)`), ms))
-                ]).catch(e => { console.warn(`[PACKING] ⚠️ ${label} failed:`, e); return { success: false, data: [] }; });
+                ]).catch(e => { console.warn(`[PACKING] ⚠️ ${label} failed:`, e); return { success: false, error: String(e) }; });
 
             // Chỉ lấy TMDT — POS và Xuất hàng không tính vào nhật ký đóng gói
-            const ecRes = await withTimeout(
+            let ecRes = await withTimeout(
                 api.ecommerceExports.getAll({
                     since: sinceVal,
                     until: untilVal,
-                    sinceField: 'updatedAt',
+                    sinceField: 'ecommerceExportDate',
+                    statusIn: ['completed'],
                     limit: packingFetchLimit,
                 }),
                 'Ecom'
             );
             console.log('[PACKING] Ecom done:', ecRes?.data?.length);
-            if (options?.strict && !ecRes.success) {
-                throw new Error('Không tải được dữ liệu đóng gói từ Supabase. Chưa gửi Gmail để tránh thiếu thưởng đóng gói.');
+            if (!ecRes?.success || !Array.isArray(ecRes.data)) {
+                throw new Error('Không tải được dữ liệu đóng gói từ Supabase. Dữ liệu gần nhất được giữ nguyên để tránh mất thưởng đóng gói.');
+            }
+            const ecommerceRows = [...ecRes.data];
+            while (ecRes.hasMore && ecommerceRows.length < 50000) {
+                ecRes = await withTimeout(
+                    api.ecommerceExports.getAll({
+                        since: sinceVal,
+                        until: untilVal,
+                        sinceField: 'ecommerceExportDate',
+                        statusIn: ['completed'],
+                        limit: packingFetchLimit,
+                        skip: ecommerceRows.length,
+                    }),
+                    `Ecom page ${Math.floor(ecommerceRows.length / packingFetchLimit) + 1}`
+                );
+                if (!ecRes?.success || !Array.isArray(ecRes.data)) {
+                    throw new Error('Không tải đủ các trang dữ liệu đóng gói. Dữ liệu gần nhất được giữ nguyên để tránh tính thiếu thưởng.');
+                }
+                if (ecRes.hasMore && ecRes.data.length === 0) {
+                    throw new Error('Phân trang dữ liệu đóng gói không tiến triển. Chưa chốt để tránh tính thiếu thưởng.');
+                }
+                ecommerceRows.push(...ecRes.data);
+            }
+            if (ecRes.hasMore) {
+                throw new Error('Dữ liệu đóng gói của kỳ vượt 50.000 đơn. Chưa chốt để tránh tính thiếu thưởng.');
             }
 
             const getPlatform = (_source: string, customer: string) => {
@@ -3574,7 +3692,7 @@ export default function Attendance() {
 
                 unified.push({
                     id: `${source}-${order.id}`,
-                    timestamp: String(order.updatedAt || order.createdAt || order.date || order.exportDate || ''),
+                    timestamp: String(order.ecommerceExportDate || order.exportDate || order.date || order.createdAt || order.updatedAt || ''),
                     orderNumber: order.orderNumber || order.ecommerceExportCode || `#${source.toUpperCase()}-${order.id}`,
                     platform: getPlatform(source, customerName),
                     customerName,
@@ -3589,28 +3707,39 @@ export default function Attendance() {
             };
 
             // Chỉ tính TMDT completed
-            if (ecRes.success && ecRes.data) ecRes.data.filter((o: any) => o.status === 'completed').forEach((o: any) => processOrder(o, 'tmdt'));
+            ecommerceRows.forEach((o: any) => processOrder(o, 'tmdt'));
 
-            console.log('[PACKING] Done. Ecom:', ecRes.success ? (ecRes.data?.length || 0) : 'FAIL', '| Unified:', unified.length);
+            console.log('[PACKING] Done. Ecom:', ecommerceRows.length, '| Unified:', unified.length);
 
             const sorted = unified.sort((a, b) => dayjs(b.timestamp).unix() - dayjs(a.timestamp).unix());
-            setPackingOrderLogsData(sorted);
+            if (packingRequestKeyRef.current === requestKey) {
+                packingOrderLogsRef.current = sorted;
+                setPackingOrderLogsData(sorted);
+                setPackingReadyKey(requestKey);
+                setPackingLoadError('');
+            }
             return sorted;
         } catch (error) {
             console.error('Lỗi tải dữ liệu đơn hàng:', error);
-            message.error('Không thể tải dữ liệu đơn đóng gói!');
-            if (options?.strict) throw error;
-            return [];
+            const errorMessage = error instanceof Error ? error.message : 'Không thể tải dữ liệu đơn đóng gói.';
+            if (packingRequestKeyRef.current === requestKey) setPackingLoadError(errorMessage);
+            message.error(errorMessage);
+            throw error;
         }
         })();
 
-        loadPackingPromiseRef.current = task;
+        loadPackingPromiseRef.current = { key: requestKey, promise: task };
+        packingLoadCountRef.current += 1;
         setPackingOrdersLoading(true);
         try {
             return await task;
+        } catch (error) {
+            if (options?.strict) throw error;
+            return packingOrderLogsRef.current;
         } finally {
-            loadPackingPromiseRef.current = null;
-            setPackingOrdersLoading(false);
+            if (loadPackingPromiseRef.current?.key === requestKey) loadPackingPromiseRef.current = null;
+            packingLoadCountRef.current = Math.max(0, packingLoadCountRef.current - 1);
+            setPackingOrdersLoading(packingLoadCountRef.current > 0);
         }
     };
 
@@ -4116,9 +4245,22 @@ export default function Attendance() {
             && d.isBefore(overviewDateRange[1].endOf('day').add(1, 'ms'));
     }
 
-    const overviewFines = useMemo(() => allFines.filter(f => inOverviewRange(f.date)), [allFines, overviewDateRange]);
-    const overviewBonuses = useMemo(() => extraBonuses.filter(b => inOverviewRange(b.date)), [extraBonuses, overviewDateRange]);
-    const overviewPackingLogs = useMemo(() => packingOrderLogsData.filter(o => inOverviewRange(o.timestamp)), [packingOrderLogsData, overviewDateRange]);
+    // August 2026 policy: keep history intact, but deduct only late-arrival fines.
+    const liveOverviewFines = useMemo(
+        () => allFines.filter(f => inOverviewRange(f.date) && !isAugust2026WaivedFine(f)),
+        [allFines, overviewDateRange]
+    );
+    const liveOverviewBonuses = useMemo(() => extraBonuses.filter(b => inOverviewRange(b.date)), [extraBonuses, overviewDateRange]);
+    const liveOverviewPackingLogs = useMemo(() => packingOrderLogsData.filter(o => inOverviewRange(o.timestamp)), [packingOrderLogsData, overviewDateRange]);
+
+    const currentLockedPeriod = useMemo(() => lockedPeriods.find(lp =>
+        dayjs(lp.start).isSame(overviewDateRange[0], 'day') &&
+        dayjs(lp.end).isSame(overviewDateRange[1], 'day')
+    ), [lockedPeriods, overviewDateRange]);
+    const lockedPayrollSnapshot = currentLockedPeriod?.payrollSnapshot;
+    const overviewFines = lockedPayrollSnapshot?.fines || liveOverviewFines;
+    const overviewBonuses = lockedPayrollSnapshot?.bonuses || liveOverviewBonuses;
+    const overviewPackingLogs = lockedPayrollSnapshot?.packingLogs || liveOverviewPackingLogs;
     const overviewWareHousePacking = useMemo(() => {
         let totalUnits = 0;
         overviewPackingLogs.forEach(order => {
@@ -4128,14 +4270,14 @@ export default function Attendance() {
     }, [overviewPackingLogs]);
 
     // Kỳ hiện tại có bị khóa không?
-    const isCurrentPeriodLocked = useMemo(() =>
-        lockedPeriods.some(lp =>
-            dayjs(lp.start).isSame(overviewDateRange[0], 'day') &&
-            dayjs(lp.end).isSame(overviewDateRange[1], 'day')
-        ), [lockedPeriods, overviewDateRange]);
+    const isCurrentPeriodLocked = Boolean(currentLockedPeriod);
     const overviewAttendanceExpectedKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
     const overviewAttendanceReady = isBackgroundSyncComplete && overviewAttendanceLogsKey === overviewAttendanceExpectedKey;
-    const isPayrollDataReady = overviewAttendanceReady && areFineSourcesReady;
+    const packingExpectedKey = `${overviewDateRange[0].startOf('day').valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}`;
+    const isPackingDataReady = packingReadyKey === packingExpectedKey && !packingLoadError;
+    const isPayrollDataReady = isCurrentPeriodLocked
+        ? Boolean(lockedPayrollSnapshot)
+        : (overviewAttendanceReady && areFineSourcesReady && isPackingDataReady);
     const employmentEndDates = useMemo(() => Object.fromEntries(
         systemUsers
             .filter((item: any) => item?.employmentStatus === 'resigned' && item?.resignationDate)
@@ -4145,10 +4287,10 @@ export default function Attendance() {
         !employmentEndDates[normalizeAttendanceText(emp.username)]
     ), [employees, employmentEndDates]);
 
-    const payrollData = useMemo(() => calculatePayroll(
+    const payrollData = useMemo(() => lockedPayrollSnapshot?.rows || calculatePayroll(
         overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses,
         overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, employmentEndDates, payrollOverrides, overviewAttendanceReady
-    ), [overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, employmentEndDates, payrollOverrides, overviewAttendanceReady]);
+    ), [lockedPayrollSnapshot, overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, employmentEndDates, payrollOverrides, overviewAttendanceReady]);
 
     function buildPayrollDataFromPackingLogs(orderLogs: PackingOrderLog[]) {
         const freshOverviewPackingLogs = orderLogs.filter(o => inOverviewRange(o.timestamp));
@@ -4171,8 +4313,7 @@ export default function Attendance() {
     }
 
     const canViewAllPayroll = isAdmin;
-    const isCurrentUserPayrollRow = useCallback((row: { username?: string; name?: string }) => {
-        if (canViewAllPayroll) return true;
+    const matchesCurrentUserPayrollRow = useCallback((row: { username?: string; name?: string }) => {
         const rowUsername = normalizeAttendanceText(row.username || '');
         const loginUsername = normalizeAttendanceText(user?.username || currentUser || '');
         const loginFullName = normalizeAttendanceText(user?.fullName || '');
@@ -4186,10 +4327,17 @@ export default function Attendance() {
             )) ||
             (rowName && loginFullName && rowName === loginFullName)
         );
-    }, [canViewAllPayroll, currentUser, user?.fullName, user?.username]);
+    }, [currentUser, user?.fullName, user?.username]);
+    const isCurrentUserPayrollRow = useCallback((row: { username?: string; name?: string }) => {
+        return canViewAllPayroll || matchesCurrentUserPayrollRow(row);
+    }, [canViewAllPayroll, matchesCurrentUserPayrollRow]);
     const privatePayrollData = useMemo(
         () => payrollData.filter(isCurrentUserPayrollRow),
         [payrollData, isCurrentUserPayrollRow]
+    );
+    const currentEmployeePayroll = useMemo(
+        () => payrollData.find(matchesCurrentUserPayrollRow),
+        [payrollData, matchesCurrentUserPayrollRow]
     );
 
     // Totals cho Overview
@@ -4396,11 +4544,23 @@ export default function Attendance() {
                     before,
                     after: updated,
                     note: 'Sửa thưởng: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(amount),
+                    changedBy: fineAuditActor.username,
+                    changedByName: fineAuditActor.displayName,
                 }]);
                 message.success('Đã cập nhật thưởng!');
             } else {
                 const newId = 'bonus-' + Date.now();
-                const newBonus: BonusRecord = { id: newId, empId: values.empId, type: bonusType, detail: values.detail, amount, date: new Date().toISOString(), ...overtimeFields };
+                const newBonus: BonusRecord = {
+                    id: newId,
+                    empId: values.empId,
+                    type: bonusType,
+                    detail: values.detail,
+                    amount,
+                    date: new Date().toISOString(),
+                    createdBy: fineAuditActor.username,
+                    createdByName: fineAuditActor.displayName,
+                    ...overtimeFields,
+                };
                 setExtraBonuses(prev => [...prev, newBonus]);
                 setBonusAuditLog(prev => [...prev, {
                     id: 'log-' + Date.now(),
@@ -4409,6 +4569,8 @@ export default function Attendance() {
                     timestamp: now,
                     after: newBonus,
                     note: 'Thêm thưởng: ' + (employees.find(e => e.id === values.empId)?.name || '') + ' — ' + fmt(amount),
+                    changedBy: fineAuditActor.username,
+                    changedByName: fineAuditActor.displayName,
                 }]);
                 message.success('Đã thêm thưởng!');
             }
@@ -4416,7 +4578,7 @@ export default function Attendance() {
             setEditingBonus(null);
             bonusForm.resetFields();
         });
-    }, [bonusForm, editingBonus, employees, canManageBonuses]);
+    }, [bonusForm, editingBonus, employees, canManageBonuses, fineAuditActor]);
 
     const handleDeleteBonus = useCallback((bonus: BonusRecord) => {
         if (!canManageBonuses) {
@@ -4433,9 +4595,11 @@ export default function Attendance() {
             timestamp: now,
             before: bonus,
             note: 'Xóa thưởng: ' + (employees.find(e => e.id === bonus.empId)?.name || '') + ' — ' + fmt(bonus.amount) + ' — "' + bonus.detail + '"',
+            changedBy: fineAuditActor.username,
+            changedByName: fineAuditActor.displayName,
         }]);
         message.success('Đã xóa (đã lưu lịch sử)');
-    }, [employees, canManageBonuses]);
+    }, [employees, canManageBonuses, fineAuditActor]);
 
     // === Thêm/Sửa Phạt handler ===
     const handleAddFine = useCallback(async () => {
@@ -4806,8 +4970,12 @@ export default function Attendance() {
     const saveConfig = () => { if (checkLocked()) return; setConfig({ ...tempConfig }); setConfigModalOpen(false); message.success('Đã lưu cấu hình!'); };
 
     const lockPayroll = () => {
+        if (!isAdmin) {
+            message.error('Chỉ Admin được phép chốt bảng lương.');
+            return;
+        }
         if (!isPayrollDataReady) {
-            message.info('Đang tổng hợp đầy đủ dữ liệu lương và các khoản phạt. Vui lòng chờ trước khi chốt kỳ.');
+            message.info(packingLoadError || 'Đang tổng hợp đầy đủ dữ liệu chấm công, đóng gói và các khoản phạt. Vui lòng chờ trước khi chốt kỳ.');
             return;
         }
         if (isCurrentPeriodLocked) {
@@ -4827,15 +4995,44 @@ export default function Attendance() {
             okText: 'Chốt & Khóa',
             cancelText: 'Hủy',
             okType: 'primary',
-            onOk: () => {
+            onOk: async () => {
+                const api = (window as any).electronAPI;
+                if (!api?.attendance?.updatePayrollLock) {
+                    throw new Error('Ứng dụng chưa có API khóa bảng lương an toàn. Vui lòng khởi động lại app.');
+                }
+                const freshPackingLogs = await loadPackingOrders(overviewDateRange[0].startOf('day').toISOString(), { strict: true });
+                const freshOverviewPackingLogs = freshPackingLogs.filter(o => inOverviewRange(o.timestamp));
+                const freshPayrollRows = buildPayrollDataFromPackingLogs(freshPackingLogs);
+                const capturedAt = new Date().toISOString();
                 const newLock: LockedPeriod = {
                     id: 'lock-' + Date.now(),
                     start: overviewDateRange[0].startOf('day').toISOString(),
                     end: overviewDateRange[1].endOf('day').toISOString(),
-                    lockedAt: new Date().toISOString(),
+                    lockedAt: capturedAt,
                     lockedBy: currentUser,
+                    payrollSnapshot: {
+                        version: 1,
+                        capturedAt,
+                        capturedBy: currentUser,
+                        rows: freshPayrollRows,
+                        packingLogs: freshOverviewPackingLogs,
+                        fines: liveOverviewFines,
+                        bonuses: liveOverviewBonuses,
+                        sourceSummary: {
+                            packingOrderCount: freshOverviewPackingLogs.length,
+                            packingTotalUnits: freshOverviewPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items), 0),
+                        },
+                    },
                 };
-                setLockedPeriods(prev => [...prev, newLock]);
+                const result = await api.attendance.updatePayrollLock({ action: 'lock', lock: newLock });
+                if (!result?.success || !Array.isArray(result.data?.lockedPeriods)) {
+                    throw new Error(result?.error || 'Không thể lưu snapshot kỳ lương. Kỳ chưa được khóa.');
+                }
+                const nextLockedPeriods = result.data.lockedPeriods as LockedPeriod[];
+                setLockedPeriods(nextLockedPeriods);
+                if (latestSnapshotRef.current) {
+                    latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), lockedPeriods: nextLockedPeriods };
+                }
                 message.success(`Đã chốt bảng lương kỳ ${startStr} — ${endStr}!`);
             },
         });
@@ -5001,6 +5198,119 @@ export default function Attendance() {
         const platformIcon: Record<string, string> = {
             Shopee: '🛒', TikTok: '🎵', POS: '💰', Web: '🌐', 'Khác': '📋',
         };
+
+        const leaderboard = employees.map((emp, employeeIndex) => {
+            const logs = orderLogs.filter(order => matchPacker(order.packer, emp));
+            const units = logs.reduce((sum, order) => sum + calcPacksFromItems(order.items), 0);
+            const midpoint = overviewDateRange[0].add(Math.floor(overviewDateRange[1].diff(overviewDateRange[0], 'day') / 2), 'day');
+            const firstHalf = logs.filter(order => dayjs(order.timestamp).isBefore(midpoint, 'day')).length;
+            const secondHalf = logs.length - firstHalf;
+            return {
+                ...emp,
+                employeeIndex,
+                orderCount: logs.length,
+                units,
+                income: units * unitPrice,
+                trend: secondHalf - firstHalf,
+                form: Array.from({ length: 7 }, (_, index) => logs.some(order => dayjs(order.timestamp).isSame(overviewDateRange[1].subtract(6 - index, 'day'), 'day'))),
+            };
+        }).sort((a, b) => b.orderCount - a.orderCount || b.units - a.units || a.id - b.id);
+        const leader = leaderboard[0];
+        const challenger = leaderboard[1];
+        const maxOrders = Math.max(leader?.orderCount || 0, 1);
+        const totalIncome = leaderboard.reduce((sum, entry) => sum + entry.income, 0);
+        const totalUnits = leaderboard.reduce((sum, entry) => sum + entry.units, 0);
+        const gap = leader && challenger ? Math.max(leader.orderCount - challenger.orderCount, 0) : 0;
+        const avatarIcons = ['🦊', '🐼', '🐯', '🐸', '🦁', '🐨'];
+
+        return (
+            <div className="packing-league">
+                <section className="packing-race-banner">
+                    <div className="packing-race-main">
+                        <div className="packing-race-title">🏆 Cuộc đua đóng gói tháng {overviewDateRange[0].format('MM/YYYY')}</div>
+                        <div className="packing-race-stats">
+                            <span>📦 Đội: <b>{orderLogs.length.toLocaleString('vi-VN')} đơn</b></span>
+                            <span>🧮 Sản lượng: <b>{totalUnits.toLocaleString('vi-VN')} SP</b></span>
+                            <span>💰 Thu nhập: <b>{fmt(totalIncome)}</b></span>
+                            <span>👑 Dẫn đầu: <b>{leader?.orderCount ? leader.name : 'Chưa có'}</b></span>
+                            <span>🏷️ Đơn giá: <b>{unitPrice} đ/SP</b></span>
+                        </div>
+                        <div className="packing-valid-rule">🛡️ Chỉ tính đơn TMĐT hoàn tất hợp lệ trong tháng đang xem</div>
+                    </div>
+                    <div className="packing-prize-box">
+                        <span>Tổng thu nhập sản lượng</span>
+                        <strong>{fmt(totalIncome)}</strong>
+                        <small>{totalUnits.toLocaleString('vi-VN')} SP đã ghi nhận</small>
+                    </div>
+                </section>
+
+                <div className="packing-league-layout">
+                    <div className="packing-league-main">
+                        <section className="packing-panel">
+                            <div className="packing-panel-title">
+                                <div>🏁 Bảng xếp hạng hiệu suất</div>
+                                <Button size="small" icon={<SyncOutlined />} onClick={() => loadPackingOrders(overviewDateRange[0].startOf('day').toISOString())}>Tải lại</Button>
+                            </div>
+                            <div className="packing-ranking-scroll">
+                                <table className="packing-ranking-table">
+                                    <thead><tr><th>Hạng</th><th>Nhân viên</th><th>Đơn</th><th>Sản phẩm</th><th>Thu nhập</th><th>Tỷ trọng</th><th>Xu hướng</th><th>7 ngày cuối</th></tr></thead>
+                                    <tbody>
+                                        {leaderboard.map((entry, index) => {
+                                            const share = totalUnits > 0 ? Math.round(entry.units / totalUnits * 100) : 0;
+                                            return <tr key={entry.id} className={`packing-rank-row packing-rank-${index + 1}`}>
+                                                <td><span className="packing-rank-number">{index + 1}</span>{index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : ''}</td>
+                                                <td><div className="packing-person"><span className={`packing-avatar ${index === 0 ? 'leader' : ''}`}>{avatarIcons[index % avatarIcons.length]}</span><div><strong>{entry.name}</strong><small>@{entry.username || '—'}</small><em className={entry.type === 'Official' ? 'official' : 'seasonal'}>{entry.type === 'Official' ? 'Chính thức' : 'Thời vụ'}</em></div></div></td>
+                                                <td><strong className="packing-blue-number">{entry.orderCount}</strong><small> đơn</small></td>
+                                                <td><strong>{entry.units.toLocaleString('vi-VN')}</strong><small> SP</small></td>
+                                                <td><strong className="packing-income">{fmt(entry.income)}</strong></td>
+                                                <td><strong>{share}%</strong><div className="packing-meter"><i style={{ width: `${share}%` }} /></div></td>
+                                                <td><span className={entry.trend >= 0 ? 'packing-up' : 'packing-down'}>{entry.trend >= 0 ? '↑' : '↓'} {Math.abs(entry.trend)} đơn</span></td>
+                                                <td><div className="packing-form">{entry.form.map((active, formIndex) => <i key={formIndex} className={active ? 'active' : ''} />)}</div></td>
+                                            </tr>;
+                                        })}
+                                    </tbody>
+                                    <tfoot><tr><td colSpan={2}>TỔNG ĐỘI</td><td>{orderLogs.length} đơn</td><td>{totalUnits.toLocaleString('vi-VN')} SP</td><td>{fmt(totalIncome)}</td><td>100%</td><td colSpan={2}></td></tr></tfoot>
+                                </table>
+                            </div>
+                        </section>
+
+                        <section className="packing-panel">
+                            <div className="packing-panel-title"><div>📋 Nhật ký đóng gói theo đơn hàng</div><Tag color="blue">{orderLogs.length} đơn</Tag></div>
+                            <Table
+                                className="packing-log-table"
+                                dataSource={orderLogs.map(order => ({ ...order, key: order.id }))}
+                                pagination={orderLogs.length > 8 ? { pageSize: 8, size: 'small' } : false}
+                                size="small"
+                                scroll={{ x: 780 }}
+                                expandable={{
+                                    expandedRowRender: (record: PackingOrderLog) => <div className="packing-order-detail">{record.items.map((item, index) => <div key={`${record.id}-${index}`}><code>{item.sku}</code><span>{item.productName}{item.variant ? ` - ${item.variant}` : ''}</span><b>{item.quantity}</b></div>)}</div>,
+                                    expandedRowKeys: expandedPackingKeys,
+                                    onExpandedRowsChange: keys => setExpandedPackingKeys(keys as string[]),
+                                }}
+                                columns={[
+                                    { title: 'Thời gian', dataIndex: 'timestamp', width: 115, render: (value: string) => dayjs(value).isValid() ? dayjs(value).format('DD/MM HH:mm') : '—' },
+                                    { title: 'Mã đơn', dataIndex: 'orderNumber', width: 150, render: (value: string) => <span className="packing-order-code">{value}</span> },
+                                    { title: 'Sàn', dataIndex: 'platform', width: 95, render: (value: string) => `${platformIcon[value] || '📋'} ${value}` },
+                                    { title: 'Người đóng', dataIndex: 'packer', width: 150 },
+                                    { title: 'Sản phẩm', render: (_: any, record: PackingOrderLog) => `${calcPacksFromItems(record.items).toLocaleString('vi-VN')} SP` },
+                                    { title: 'Trạng thái', dataIndex: 'status', width: 110, render: (value: string) => <span className={value === 'completed' ? 'packing-complete' : 'packing-down'}>{value === 'completed' ? '✓ Hoàn tất' : '⚠ Có lỗi'}</span> },
+                                ]}
+                            />
+                        </section>
+                    </div>
+
+                    <aside className="packing-league-rail">
+                        <section className="packing-panel packing-rival-card">
+                            <div className="packing-panel-title"><div>⚔️ Cuộc đua dẫn đầu</div></div>
+                            {leader?.orderCount ? <><div className="packing-rival-people"><div><span className="packing-avatar leader">{avatarIcons[0]}</span><strong>{leader.name}</strong><div className="packing-gap-lead">{leader.orderCount} đơn</div></div><strong>VS</strong><div><span className="packing-avatar">{avatarIcons[1]}</span><strong>{challenger?.name || 'Chưa có'}</strong><div className="packing-gap-chase">{challenger?.orderCount || 0} đơn</div></div></div><div className="packing-rival-gap"><span>Khoảng cách hiện tại</span><strong>{gap} đơn</strong><div className="packing-progress"><i style={{ width: `${Math.min(100, ((challenger?.orderCount || 0) / maxOrders) * 100)}%` }} /></div><small>{challenger ? `${challenger.name} cần thêm ${gap + 1} đơn để vượt` : 'Chưa có người bám đuổi'}</small></div></> : <div className="packing-empty">Chưa có dữ liệu đóng gói</div>}
+                        </section>
+                        <section className="packing-panel packing-reward-card"><span style={{ fontSize: 24 }}>💵</span><div><span>Thu nhập theo sản lượng</span><strong>{unitPrice}đ/SP</strong><small>Tự động tính theo sản phẩm hợp lệ đã đóng</small><div className="packing-valid-rule">✓ Không chia đều theo đầu người</div></div></section>
+                        <section className="packing-panel packing-champion-card"><span style={{ fontSize: 22 }}>👑</span><div><span>Người dẫn đầu tháng</span><strong>{leader?.orderCount ? leader.name : 'Chưa xác định'}</strong><small>{leader?.orderCount ? `${leader.orderCount} đơn · ${leader.units.toLocaleString('vi-VN')} SP` : 'Chờ dữ liệu đơn hàng'}</small></div></section>
+                        <section className="packing-panel packing-goal-card"><div className="packing-panel-title"><div>🎯 Mục tiêu đội</div></div><p>Doanh số sản lượng đang ghi nhận <b>{totalUnits.toLocaleString('vi-VN')} SP</b>, tương ứng <b>{fmt(totalIncome)}</b>.</p></section>
+                    </aside>
+                </div>
+            </div>
+        );
 
         return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
@@ -5356,6 +5666,150 @@ export default function Attendance() {
     // TAB 3: THƯỞNG
     // ============================================
     const renderBonuses = () => {
+        if (bonusView === 'personal' || !canManageBonuses) {
+            const currentEmployee = currentEmployeePayroll;
+            const allPersonalBonuses = currentEmployee
+                ? overviewBonuses
+                    .filter(bonus => bonus.empId === currentEmployee.id)
+                    .sort((a, b) => dayjs(b.date || 0).valueOf() - dayjs(a.date || 0).valueOf())
+                : [];
+            const creatorLabel = (bonus: BonusRecord) => {
+                const createLog = [...bonusAuditLog].reverse().find(log => log.bonusId === bonus.id && log.action === 'create');
+                const creatorUsername = bonus.createdBy || createLog?.changedBy || '';
+                const creatorAccount = systemUsers.find((account: any) =>
+                    normalizeAttendanceText(account?.username || '') === normalizeAttendanceText(creatorUsername)
+                );
+                const creatorName = bonus.createdByName
+                    || createLog?.changedByName
+                    || creatorAccount?.fullName
+                    || creatorUsername
+                    || 'Admin';
+                const isCreatorAdmin = creatorAccount?.role === 'admin'
+                    || normalizeAttendanceText(creatorUsername) === 'admin'
+                    || (!creatorUsername && !bonus.createdByName && !createLog?.changedByName);
+                return isCreatorAdmin && !/\(admin\)$/i.test(creatorName) && normalizeAttendanceText(creatorName) !== 'admin'
+                    ? `${creatorName} (Admin)`
+                    : creatorName;
+            };
+            const normalizedSearch = normalizeAttendanceText(bonusSearch);
+            const personalBonuses = normalizedSearch
+                ? allPersonalBonuses.filter(bonus => normalizeAttendanceText([
+                    bonus.type,
+                    bonus.detail,
+                    creatorLabel(bonus),
+                    bonus.amount,
+                    bonus.date ? dayjs(bonus.date).format('DD/MM/YYYY') : '',
+                ].join(' ')).includes(normalizedSearch))
+                : allPersonalBonuses;
+            const personalTotal = allPersonalBonuses.reduce((sum, bonus) => sum + bonus.amount, 0);
+            const latestBonusDate = allPersonalBonuses.find(bonus => bonus.date && dayjs(bonus.date).isValid())?.date;
+
+            return (
+                <div className="att-personal-bonus">
+                    <div className="att-personal-bonus-head">
+                        <div>
+                            <Title level={3} style={{ margin: 0 }}>Thưởng của tôi</Title>
+                            <Text type="secondary">Các khoản thưởng được ghi nhận cho bạn</Text>
+                        </div>
+                        <div className="att-personal-bonus-actions">
+                            <Input
+                                allowClear
+                                prefix={<SearchOutlined />}
+                                placeholder="Tìm nội dung"
+                                value={bonusSearch}
+                                onChange={event => setBonusSearch(event.target.value)}
+                            />
+                            {canManageBonuses && (
+                                <Button icon={<SettingOutlined />} onClick={() => setBonusView('manage')}>
+                                    Quản lý thưởng
+                                </Button>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="att-personal-bonus-summary">
+                        <div className="att-personal-bonus-stat att-personal-bonus-stat--total">
+                            <span className="att-personal-bonus-stat-icon"><WalletOutlined /></span>
+                            <div>
+                                <span>Tổng thưởng trong kỳ</span>
+                                <strong>{fmt(personalTotal)} đ</strong>
+                            </div>
+                        </div>
+                        <div className="att-personal-bonus-stat">
+                            <GiftOutlined />
+                            <strong>{allPersonalBonuses.length}</strong>
+                            <span>khoản thưởng</span>
+                        </div>
+                        <div className="att-personal-bonus-stat">
+                            <ClockCircleOutlined />
+                            <div>
+                                <span>Cập nhật gần nhất</span>
+                                <strong>{latestBonusDate ? dayjs(latestBonusDate).format('DD/MM/YYYY') : '—'}</strong>
+                            </div>
+                        </div>
+                    </div>
+
+                    <Table
+                        className="att-personal-bonus-table"
+                        rowKey="id"
+                        dataSource={personalBonuses}
+                        pagination={personalBonuses.length > 10 ? { pageSize: 10, size: 'small' } : false}
+                        scroll={{ x: 860 }}
+                        locale={{
+                            emptyText: currentEmployee
+                                ? (normalizedSearch ? 'Không tìm thấy khoản thưởng phù hợp' : 'Chưa có khoản thưởng nào trong kỳ này')
+                                : 'Tài khoản này chưa được liên kết với hồ sơ nhân viên',
+                        }}
+                        columns={[
+                            {
+                                title: 'Ngày',
+                                dataIndex: 'date',
+                                width: 140,
+                                render: (date?: string) => date && dayjs(date).isValid() ? dayjs(date).format('DD/MM/YYYY') : '—',
+                            },
+                            {
+                                title: 'Nguồn thưởng',
+                                dataIndex: 'type',
+                                width: 220,
+                                render: (type: string) => <Tag className="att-personal-bonus-source">{type?.replace(/\s*\(Admin\)$/i, '') || 'Thưởng'}</Tag>,
+                            },
+                            {
+                                title: 'Nội dung',
+                                dataIndex: 'detail',
+                                render: (detail: string) => detail || '—',
+                            },
+                            {
+                                title: 'Người tạo',
+                                key: 'creator',
+                                width: 210,
+                                render: (_: unknown, bonus: BonusRecord) => creatorLabel(bonus),
+                            },
+                            {
+                                title: 'Số tiền',
+                                dataIndex: 'amount',
+                                width: 170,
+                                align: 'right' as const,
+                                render: (amount: number) => <Text strong style={{ color: '#00ab56' }}>+{fmt(amount)} đ</Text>,
+                            },
+                        ]}
+                        summary={() => personalBonuses.length > 0 ? (
+                            <Table.Summary.Row>
+                                <Table.Summary.Cell index={0} colSpan={4}><Text strong>Tổng cộng</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell index={4} align="right">
+                                    <Text strong style={{ color: '#00ab56' }}>+{fmt(personalTotal)} đ</Text>
+                                </Table.Summary.Cell>
+                            </Table.Summary.Row>
+                        ) : null}
+                    />
+
+                    <div className="att-personal-bonus-note">
+                        <span><LockOutlined /></span>
+                        Bạn chỉ có thể xem các khoản thưởng của mình
+                    </div>
+                </div>
+            );
+        }
+
         const auditColorMap: Record<string, string> = { create: 'green', edit: 'blue', delete: 'red' };
         const auditLabelMap: Record<string, string> = { create: 'Thêm', edit: 'Sửa', delete: 'Xóa' };
 
@@ -5448,9 +5902,15 @@ export default function Attendance() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                         <div style={{ background: 'linear-gradient(135deg, #1890ff 0%, #36cfc9 100%)', width: 8, height: 24, borderRadius: 4 }} />
-                        <Title level={4} style={{ margin: 0, color: '#1f2937' }}>Phân bổ Thưởng & Chia phạt</Title>
+                        <div>
+                            <Title level={4} style={{ margin: 0, color: '#1f2937' }}>Quản lý thưởng</Title>
+                            <Text type="secondary">Phân bổ và điều chỉnh thưởng cho nhân viên</Text>
+                        </div>
                     </div>
-                    {canManageBonuses && !isCurrentPeriodLocked && <Button type="primary" icon={<PlusOutlined />} style={{ fontWeight: 700, borderRadius: 8, height: 38, background: 'linear-gradient(to right, #1890ff, #36cfc9)', border: 'none', boxShadow: '0 4px 10px rgba(24,144,255,0.3)' }} onClick={() => { setEditingBonus(null); bonusForm.resetFields(); bonusForm.setFieldsValue({ bonusKind: 'manual' }); setBonusModalOpen(true); }}>Thêm thưởng thủ công</Button>}
+                    <Space>
+                        <Button onClick={() => setBonusView('personal')}>Thưởng của tôi</Button>
+                        {canManageBonuses && !isCurrentPeriodLocked && <Button type="primary" icon={<PlusOutlined />} style={{ fontWeight: 700, borderRadius: 8, height: 38, background: 'linear-gradient(to right, #1890ff, #36cfc9)', border: 'none', boxShadow: '0 4px 10px rgba(24,144,255,0.3)' }} onClick={() => { setEditingBonus(null); bonusForm.resetFields(); bonusForm.setFieldsValue({ bonusKind: 'manual' }); setBonusModalOpen(true); }}>Thêm thưởng thủ công</Button>}
+                    </Space>
                 </div>
                 <Card
                     bodyStyle={{ padding: 0 }}
@@ -6879,7 +7339,7 @@ export default function Attendance() {
     const tabNavItems = [
         { key: 'overview', label: <><ProfileOutlined /> Tổng quát</> },
         { key: 'packaging', label: <><TeamOutlined /> Đóng gói</> },
-        { key: 'bonuses', label: 'Thưởng' },
+        { key: 'bonuses', label: <><GiftOutlined /> Thưởng</> },
         { key: 'fines', label: 'Phạt' },
         { key: 'attendance', label: <><CalendarOutlined /> Điểm danh</> },
         {
@@ -6917,6 +7377,7 @@ export default function Attendance() {
             default: return renderOverview();
         }
     };
+    const showPayrollManagementControls = isAdmin && (activeTab !== 'bonuses' || bonusView === 'manage');
 
     // ===== RENDER =====
     if (!isDbLoaded) {
@@ -6933,7 +7394,10 @@ export default function Attendance() {
             <div className="att-tabs-sticky">
                 <Tabs
                     activeKey={activeTab}
-                    onChange={setActiveTab}
+                    onChange={nextTab => {
+                        if (nextTab === 'bonuses') setBonusView('personal');
+                        setActiveTab(nextTab);
+                    }}
                     items={tabNavItems}
                     size="large"
                 />
@@ -6947,88 +7411,61 @@ export default function Attendance() {
                             Đang đồng bộ dữ liệu nền
                         </Tag>
                     )}
-                    {/* Custom Time Range Selector — kiểu Google Analytics */}
+                    {/* Shared period selector for every attendance tab. */}
                     {(() => {
                         const now = dayjs();
                         const rangeLabel = (() => {
-                            const s = overviewDateRange[0];
-                            const e = overviewDateRange[1];
-                            if (s.isSame(now, 'day') && e.isSame(now, 'day')) return 'Hôm nay';
-                            if (s.isSame(now.subtract(1, 'day'), 'day') && e.isSame(now.subtract(1, 'day'), 'day')) return 'Hôm qua';
-                            if (s.isSame(now.subtract(6, 'day'), 'day') && e.isSame(now, 'day')) return 'Trong 7 ngày qua';
-                            if (s.isSame(now.subtract(29, 'day'), 'day') && e.isSame(now, 'day')) return 'Trong 30 ngày qua';
-                            if (s.isSame(e, 'day')) return s.format('DD/MM/YYYY');
-                            if (s.isSame(s.startOf('month'), 'day') && e.isSame(s.endOf('month'), 'day')) {
-                                if (s.isSame(now.startOf('month'), 'day')) return 'Tháng này';
-                                if (s.isSame(now.subtract(1, 'month').startOf('month'), 'day')) return 'Tháng trước';
-                                return `Tháng ${s.format('MM/YYYY')}`;
-                            }
-                            if (s.isSame(s.startOf('week'), 'day') && e.isSame(s.endOf('week'), 'day')) return `Tuần ${s.format('DD/MM')} — ${e.format('DD/MM')}`;
-                            if (s.isSame(s.startOf('year'), 'day') && e.isSame(s.endOf('year'), 'day')) return `Năm ${s.format('YYYY')}`;
-                            return `${s.format('DD/MM/YYYY')} — ${e.format('DD/MM/YYYY')}`;
+                            const [start, end] = overviewDateRange;
+                            if (start.isSame(now.startOf('month'), 'day') && end.isSame(now.endOf('month'), 'day')) return 'Tháng này';
+                            if (start.isSame(now.subtract(1, 'month').startOf('month'), 'day') && end.isSame(now.subtract(1, 'month').endOf('month'), 'day')) return 'Tháng trước';
+                            if (start.isSame(now.subtract(6, 'day'), 'day') && end.isSame(now, 'day')) return 'Trong 7 ngày qua';
+                            if (start.isSame(now.subtract(29, 'day'), 'day') && end.isSame(now, 'day')) return 'Trong 30 ngày qua';
+                            if (start.isSame(end, 'day')) return start.format('DD/MM/YYYY');
+                            if (start.isSame(start.startOf('month'), 'day') && end.isSame(start.endOf('month'), 'day')) return `Tháng ${start.format('MM/YYYY')}`;
+                            return `${start.format('DD/MM/YYYY')} — ${end.format('DD/MM/YYYY')}`;
                         })();
                         const setRange = (start: dayjs.Dayjs, end: dayjs.Dayjs) => setOverviewDateRange([start, end]);
-                        return (
-                            <Dropdown
-                                trigger={['click']}
-                                popupRender={() => (
-                                    <div style={{ background: '#fff', borderRadius: 8, boxShadow: '0 6px 16px rgba(0,0,0,.12)', padding: '8px 0', minWidth: 220, border: '1px solid #f0f0f0' }}>
-                                        {/* Quick presets */}
-                                        {[
-                                            { label: 'Tháng này', fn: () => setRange(now.startOf('month'), now.endOf('month')) },
-                                            { label: 'Tháng trước', fn: () => setRange(now.subtract(1, 'month').startOf('month'), now.subtract(1, 'month').endOf('month')) },
-                                        ].map(opt => (
-                                            <div key={opt.label}
-                                                onClick={opt.fn}
-                                                style={{ padding: '8px 16px', cursor: 'pointer', fontSize: 13, fontWeight: 500, color: rangeLabel === opt.label ? '#1677ff' : '#262626', background: rangeLabel === opt.label ? '#e6f4ff' : 'transparent', transition: 'all .15s' }}
-                                                onMouseEnter={e => { if (rangeLabel !== opt.label) e.currentTarget.style.background = '#f5f5f5'; }}
-                                                onMouseLeave={e => { if (rangeLabel !== opt.label) e.currentTarget.style.background = 'transparent'; }}
-                                            >{opt.label}</div>
-                                        ))}
-                                        <div style={{ height: 1, background: '#f0f0f0', margin: '6px 0' }} />
-                                        {/* Theo ngày */}
-                                        <div style={{ padding: '4px 16px' }}>
-                                            <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Theo ngày</div>
-                                            <DatePicker
-                                                size="small"
-                                                format="DD/MM/YYYY"
-                                                placeholder="Chọn ngày..."
-                                                style={{ width: '100%' }}
-                                                onChange={d => { if (d) setRange(d.startOf('day'), d.endOf('day')); }}
-                                            />
-                                        </div>
-                                        {/* Theo tháng */}
-                                        <div style={{ padding: '4px 16px', paddingBottom: 8 }}>
-                                            <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Theo tháng</div>
-                                            <DatePicker
-                                                picker="month"
-                                                size="small"
-                                                format="MM/YYYY"
-                                                style={{ width: '100%' }}
-                                                onChange={d => { if (d) setRange(d.startOf('month'), d.endOf('month')); }}
-                                            />
-                                        </div>
-                                    </div>
-                                )}
-                            >
-                                <Button
-                                    style={{ borderRadius: 8, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, padding: '4px 14px', height: 'auto' }}
-                                >
-                                    <CalendarOutlined style={{ color: '#1677ff' }} />
-                                    <span style={{ color: '#1677ff', fontWeight: 700 }}>{rangeLabel}</span>
-                                    <span style={{ color: '#8c8c8c', fontSize: 12 }}>
-                                        {overviewDateRange[0].isSame(overviewDateRange[1], 'day')
-                                            ? overviewDateRange[0].format('DD/MM/YYYY')
-                                            : `${overviewDateRange[0].format('DD/MM')} → ${overviewDateRange[1].format('DD/MM/YYYY')}`}
-                                    </span>
-                                    <DownOutlined style={{ fontSize: 10, color: '#8c8c8c' }} />
-                                </Button>
-                            </Dropdown>
-                        );
+                        const presets = [
+                            { label: 'Tháng này', fn: () => setRange(now.startOf('month'), now.endOf('month')) },
+                            { label: 'Tháng trước', fn: () => setRange(now.subtract(1, 'month').startOf('month'), now.subtract(1, 'month').endOf('month')) },
+                            { label: 'Trong 7 ngày qua', fn: () => setRange(now.subtract(6, 'day').startOf('day'), now.endOf('day')) },
+                            { label: 'Trong 30 ngày qua', fn: () => setRange(now.subtract(29, 'day').startOf('day'), now.endOf('day')) },
+                        ];
+                        return <Dropdown
+                            trigger={['click']}
+                            popupRender={() => <div style={{ background: '#fff', borderRadius: 8, boxShadow: '0 6px 16px rgba(0,0,0,.12)', padding: '8px 0', minWidth: 300, border: '1px solid #f0f0f0' }}>
+                                {presets.map(option => <div key={option.label} onClick={option.fn} style={{ padding: '8px 16px', cursor: 'pointer', fontSize: 13, fontWeight: 500, color: rangeLabel === option.label ? '#1677ff' : '#262626', background: rangeLabel === option.label ? '#e6f4ff' : 'transparent' }}>{option.label}</div>)}
+                                <Divider style={{ margin: '6px 0' }} />
+                                <div style={{ padding: '4px 16px' }}>
+                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Theo ngày</div>
+                                    <DatePicker size="small" format="DD/MM/YYYY" placeholder="Chọn ngày..." style={{ width: '100%' }} onChange={date => date && setRange(date.startOf('day'), date.endOf('day'))} />
+                                </div>
+                                <div style={{ padding: '4px 16px' }}>
+                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Theo tháng</div>
+                                    <DatePicker picker="month" size="small" format="MM/YYYY" placeholder="Chọn tháng..." style={{ width: '100%' }} onChange={date => date && setRange(date.startOf('month'), date.endOf('month'))} />
+                                </div>
+                                <div style={{ padding: '4px 16px 8px' }}>
+                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Tùy chỉnh khoảng</div>
+                                    <DatePicker.RangePicker size="small" format="DD/MM/YYYY" allowClear={false} style={{ width: '100%' }} onChange={dates => dates?.[0] && dates?.[1] && setRange(dates[0], dates[1])} />
+                                </div>
+                            </div>}
+                        >
+                            <Button style={{ borderRadius: 8, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, padding: '4px 14px', height: 'auto' }}>
+                                <CalendarOutlined style={{ color: '#1677ff' }} />
+                                <span style={{ color: '#1677ff', fontWeight: 700 }}>{rangeLabel}</span>
+                                <span style={{ color: '#8c8c8c', fontSize: 12 }}>{overviewDateRange[0].format('DD/MM')} → {overviewDateRange[1].format('DD/MM/YYYY')}</span>
+                                <DownOutlined style={{ fontSize: 10, color: '#8c8c8c' }} />
+                            </Button>
+                        </Dropdown>;
                     })()}
-                    {isAdmin && <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal} disabled={isCurrentPeriodLocked}>Cấu hình</Button>}
-                    {isCurrentPeriodLocked ? (
-                        isAdmin ? (
+                    {showPayrollManagementControls && isCurrentPeriodLocked && !lockedPayrollSnapshot && (
+                        <Tooltip title="Kỳ này được khóa bằng cơ chế cũ, chưa có snapshot bất biến. Admin cần mở khóa rồi Chốt & Khóa lại sau khi kiểm tra số liệu.">
+                            <Tag color="warning" icon={<WarningOutlined />}>Cần chốt lại an toàn</Tag>
+                        </Tooltip>
+                    )}
+                    {showPayrollManagementControls && <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal} disabled={isCurrentPeriodLocked}>Cấu hình</Button>}
+                    {showPayrollManagementControls && (isCurrentPeriodLocked ? (
+                        (
                             <Button
                                 icon={<LockOutlined />}
                                 onClick={() => {
@@ -7038,11 +7475,24 @@ export default function Attendance() {
                                         okText: 'Mở khóa',
                                         cancelText: 'Hủy',
                                         okType: 'primary',
-                                        onOk: () => {
-                                            setLockedPeriods(prev => prev.filter(lp =>
-                                                !(dayjs(lp.start).isSame(overviewDateRange[0], 'day') &&
-                                                    dayjs(lp.end).isSame(overviewDateRange[1], 'day'))
-                                            ));
+                                        onOk: async () => {
+                                            const api = (window as any).electronAPI;
+                                            if (!api?.attendance?.updatePayrollLock) {
+                                                throw new Error('Ứng dụng chưa có API mở khóa bảng lương an toàn. Vui lòng khởi động lại app.');
+                                            }
+                                            const result = await api.attendance.updatePayrollLock({
+                                                action: 'unlock',
+                                                start: currentLockedPeriod?.start,
+                                                end: currentLockedPeriod?.end,
+                                            });
+                                            if (!result?.success || !Array.isArray(result.data?.lockedPeriods)) {
+                                                throw new Error(result?.error || 'Không thể mở khóa kỳ lương.');
+                                            }
+                                            const nextLockedPeriods = result.data.lockedPeriods as LockedPeriod[];
+                                            setLockedPeriods(nextLockedPeriods);
+                                            if (latestSnapshotRef.current) {
+                                                latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), lockedPeriods: nextLockedPeriods };
+                                            }
                                             message.success('Đã mở khóa kỳ lương!');
                                         },
                                     });
@@ -7057,22 +7507,6 @@ export default function Attendance() {
                             >
                                 Mở khóa (Admin)
                             </Button>
-                        ) : (
-                            <Button
-                                icon={<LockOutlined />}
-                                disabled
-                                style={{
-                                    borderRadius: 8,
-                                    fontWeight: 700,
-                                    background: '#fff7e6',
-                                    borderColor: '#ffa940',
-                                    color: '#d46b08',
-                                    cursor: 'not-allowed',
-                                    opacity: 1,
-                                }}
-                            >
-                                Đã chốt
-                            </Button>
                         )
                     ) : (
                         <Button
@@ -7085,8 +7519,8 @@ export default function Attendance() {
                         >
                             Chốt & Khóa
                         </Button>
-                    )}
-                    {isCurrentPeriodLocked && (
+                    ))}
+                    {showPayrollManagementControls && isCurrentPeriodLocked && (
                         <Tooltip title="Gửi Gmail hàng loạt">
                             <Button
                                 size="small"
@@ -7741,20 +8175,20 @@ export default function Attendance() {
                                                 const sentAt = gmailSentLog[`${p.id}_${periodKey}`];
                                                 const sentTime = sentAt ? dayjs(sentAt).format('DD/MM HH:mm') : null;
                                                 return sentTime ? (
-                                                    <Tooltip title={`Đã gửi lúc ${sentTime} — Bấm để gửi lại`}>
+                                                    <Tooltip title={`Gmail đã tiếp nhận lúc ${sentTime} — Bấm để gửi lại`}>
                                                         <Button
                                                             loading={gmailSending}
                                                             icon={<CheckCircleOutlined style={{ color: '#52c41a' }} />}
                                                             style={{ borderColor: '#52c41a', color: '#52c41a' }}
                                                             onClick={() => Modal.confirm({
                                                                 title: 'Gửi lại phiếu lương?',
-                                                                content: `Phiếu đã được gửi lúc ${sentTime}. Bạn có muốn gửi lại không?`,
+                                                                content: `Gmail đã tiếp nhận phiếu lúc ${sentTime}. Bạn có muốn gửi lại không?`,
                                                                 okText: 'Gửi lại',
                                                                 cancelText: 'Hủy',
                                                                 onOk: handleSendPayslipGmail,
                                                             })}
                                                         >
-                                                            Đã gửi {sentTime}
+                                                            Gmail nhận {sentTime}
                                                         </Button>
                                                     </Tooltip>
                                                 ) : (
@@ -8286,10 +8720,13 @@ export default function Attendance() {
                         <div>
                             <div style={{ marginBottom: 16, textAlign: 'center' }}>
                                 <Text style={{ fontSize: 15 }}>
-                                    Đã gửi xong:{' '}
-                                    <strong style={{ color: '#52c41a' }}>{bulkSendProgress.results.filter(r => r.success).length}</strong> thành công,{' '}
+                                    Gmail đã tiếp nhận:{' '}
+                                    <strong style={{ color: '#52c41a' }}>{bulkSendProgress.results.filter(r => r.success).length}</strong> thư,{' '}
                                     <strong style={{ color: '#ff4d4f' }}>{bulkSendProgress.results.filter(r => !r.success).length}</strong> thất bại
                                 </Text>
+                                <div style={{ marginTop: 6, color: '#8c8c8c', fontSize: 12 }}>
+                                    Thư bị máy chủ người nhận trả lại sẽ xuất hiện sau trong hộp thư Gmail và không thể xác nhận chỉ bằng quyền gửi.
+                                </div>
                             </div>
                             <div style={{ maxHeight: 300, overflowY: 'auto' }}>
                                 {bulkSendProgress.results.map((r, idx) => (

@@ -3,6 +3,20 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 
+function getDevelopmentServerUrl() {
+    const fallback = 'http://127.0.0.1:5173';
+    try {
+        const parsed = new URL(process.env.DBYPOS_VITE_DEV_SERVER_URL || fallback);
+        const trustedHost = ['localhost', '127.0.0.1'].includes(parsed.hostname);
+        const validPort = Number(parsed.port) >= 5173 && Number(parsed.port) <= 5190;
+        return parsed.protocol === 'http:' && trustedHost && validPort ? parsed.origin : fallback;
+    } catch {
+        return fallback;
+    }
+}
+
+const DEVELOPMENT_SERVER_URL = getDevelopmentServerUrl();
+
 // The packaged app can be started by an updater/launcher whose stdout and
 // stderr pipes are closed immediately afterwards. Any later console.* call
 // would otherwise emit an unhandled EPIPE and Electron would show a fatal
@@ -42,6 +56,18 @@ Module._resolveFilename = function (request, parent, isMain, options) {
 
 let mainWindow;
 let pythonProcess = null;
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+    app.quit();
+} else {
+    app.on('second-instance', () => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+    });
+}
 
 function findPythonExe() {
     const { spawnSync } = require('child_process');
@@ -181,9 +207,7 @@ function isTrustedAppUrl(rawUrl) {
                 .toLowerCase()
                 .endsWith('/dist/index.html');
         if (!app.isPackaged) {
-            const isTrustedDevServer = parsed.protocol === 'http:' &&
-                ['localhost', '127.0.0.1'].includes(parsed.hostname) &&
-                parsed.port === '5173';
+            const isTrustedDevServer = parsed.origin === DEVELOPMENT_SERVER_URL;
             return isTrustedDevServer || isTrustedFilePage;
         }
         return isTrustedFilePage;
@@ -220,7 +244,7 @@ function configureSessionSecurity() {
         "img-src 'self' data: blob: https:",
         "media-src 'self' data: blob:",
         "worker-src 'self' blob:",
-        "connect-src 'self' http://127.0.0.1:* http://localhost:* https://api.github.com https://github.com https://*.supabase.co https://*.workers.dev ws://localhost:5173",
+        "connect-src 'self' http://127.0.0.1:* http://localhost:* https://api.github.com https://github.com https://*.supabase.co https://*.workers.dev ws://127.0.0.1:* ws://localhost:*",
         "frame-src 'self' data: blob: https://drive.google.com https://docs.google.com",
         "object-src 'none'",
         "base-uri 'self'",
@@ -228,7 +252,7 @@ function configureSessionSecurity() {
     ].join('; ');
     const urls = app.isPackaged
         ? ['file://*/*']
-        : ['file://*/*', 'http://localhost:5173/*', 'http://127.0.0.1:5173/*'];
+        : ['file://*/*', `${DEVELOPMENT_SERVER_URL}/*`];
     session.defaultSession.webRequest.onHeadersReceived({ urls }, (details, callback) => {
         callback({
             responseHeaders: {
@@ -292,6 +316,40 @@ function createWindow() {
         backgroundColor: '#ffffff',
     });
 
+    if (!app.isPackaged) {
+        const diagnosticPath = path.join(process.cwd(), 'tmp', 'renderer-diagnostics.log');
+        const writeDiagnostic = (eventName, detail) => {
+            try {
+                fs.mkdirSync(path.dirname(diagnosticPath), { recursive: true });
+                fs.appendFileSync(
+                    diagnosticPath,
+                    `${new Date().toISOString()} [${eventName}] ${String(detail || '')}\n`,
+                    'utf8',
+                );
+            } catch {}
+        };
+        mainWindow.webContents.on('did-finish-load', () =>
+            writeDiagnostic('did-finish-load', mainWindow?.webContents?.getURL()),
+        );
+        mainWindow.webContents.on('did-fail-load', (_event, code, description, url) =>
+            writeDiagnostic('did-fail-load', `${code} ${description} ${url}`),
+        );
+        mainWindow.webContents.on('preload-error', (_event, preloadPath, error) =>
+            writeDiagnostic('preload-error', `${preloadPath}: ${error?.stack || error}`),
+        );
+        mainWindow.webContents.on('render-process-gone', (_event, details) =>
+            writeDiagnostic('render-process-gone', JSON.stringify(details)),
+        );
+        mainWindow.webContents.on('console-message', (details) => {
+            writeDiagnostic('console', JSON.stringify({
+                level: details.level,
+                message: details.message,
+                lineNumber: details.lineNumber,
+                sourceId: details.sourceId,
+            }));
+        });
+    }
+
     // Open as a centered resizable window; users can maximize when needed.
     mainWindow.once('ready-to-show', () => {
         mainWindow.center();
@@ -329,7 +387,7 @@ function createWindow() {
     });
 
     // Load React app - auto-detect dev server
-    const VITE_DEV_SERVER = 'http://localhost:5173';
+    const VITE_DEV_SERVER = DEVELOPMENT_SERVER_URL;
     const isDev = !app.isPackaged;
 
     console.log('isDev:', isDev, '| isPackaged:', app.isPackaged);
@@ -339,14 +397,22 @@ function createWindow() {
         const indexPath = path.join(__dirname, '../dist/index.html');
         // Retry nhiều lần chờ Vite sẵn sàng
         const tryLoad = (retriesLeft) => {
-            http.get(VITE_DEV_SERVER, () => {
+            const request = http.get(VITE_DEV_SERVER, (response) => {
+                request.setTimeout(0);
+                response.resume();
                 console.log('✅ Vite dev server detected → loading', VITE_DEV_SERVER);
-                mainWindow.loadURL(VITE_DEV_SERVER);
-            }).on('error', () => {
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    mainWindow.loadURL(VITE_DEV_SERVER);
+                }
+            });
+            request.setTimeout(1000, () => {
+                request.destroy(new Error('Vite probe timeout'));
+            });
+            request.on('error', () => {
                 if (retriesLeft > 0) {
                     console.log(`⏳ Vite not ready, retrying... (${retriesLeft} left)`);
                     setTimeout(() => tryLoad(retriesLeft - 1), 500);
-                } else {
+                } else if (mainWindow && !mainWindow.isDestroyed()) {
                     console.log('📦 No dev server → loading dist:', indexPath);
                     mainWindow.loadFile(indexPath);
                 }
@@ -365,6 +431,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+    if (!hasSingleInstanceLock) return;
     configureSessionSecurity();
     // Tạo cửa sổ TRƯỚC để luôn hiển thị app
     createWindow();

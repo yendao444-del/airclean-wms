@@ -24,7 +24,6 @@ import {
 import { EditOutlined, DeleteOutlined, SendOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, SettingOutlined, SearchOutlined, UserOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import * as XLSX from 'xlsx';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -111,6 +110,7 @@ export default function EcommerceExportPage() {
     const [ecommerceExports, setEcommerceExports] = useState<EcommerceExport[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
     const [hasMoreExports, setHasMoreExports] = useState(false);
     const [offlinePending, setOfflinePending] = useState(0); // Số đơn chờ sync
     const [modalVisible, setModalVisible] = useState(false);
@@ -134,6 +134,7 @@ export default function EcommerceExportPage() {
     const scanInputRef = useRef<any>(null);
     const tempPendingIdRef = useRef(-1);
     const inFlightScanKeysRef = useRef<Set<string>>(new Set());
+    const saveInFlightRef = useRef(false);
     // 🚀 In-memory mirror giống allOrders của tool gốc — không await DB mỗi lần quét
     const exportsRef = useRef<EcommerceExport[]>([]);
     // 🗺️ O(1) Tracking lookup Map — tracking → record ID (không dùng index vì index sẽ stale sau reload)
@@ -505,17 +506,6 @@ export default function EcommerceExportPage() {
             const result = await window.electronAPI.ecommerceExports.getAll(buildEcommerceExportFilters(append));
             if (myRequestId !== requestIdRef.current) return;
             if (result.success && result.data) {
-                // Purge cancelled ngay tu data DB tuoi - tranh dung state rong luc khoi dong
-                const cancelledIds = result.data
-                    .filter((r: any) => r.status === 'cancelled')
-                    .map((r: any) => r.id);
-                if (statusFilterRef.current !== 'cancelled' && cancelledIds.length > 0) {
-                    window.electronAPI.ecommerceExports.bulkDelete(cancelledIds)
-                        .then((res) => console.log('Purged ' + cancelledIds.length + ' don TMDT da huy'))
-                        .catch(() => {});
-                    result.data = result.data.filter((r: any) => r.status !== 'cancelled');
-                }
-
                 // Khong downgrade 'completed' trong ref ve 'pending' khi DB chua kip commit
                 const normalizedDb = normalizeDbExports(result.data.map((item: any) => {
                     const existing = exportsRef.current.find((r: any) => r.id === item.id);
@@ -1054,6 +1044,7 @@ Thời gian: ${currentTime}`;
                 try {
                     const data = event.target?.result;
                     const isCSV = file.name.toLowerCase().endsWith('.csv');
+                    const XLSX = await import('xlsx');
                     const workbook = XLSX.read(data, { type: isCSV ? 'string' : 'binary' });
                     const sheet = workbook.Sheets[workbook.SheetNames[0]];
                     const json = XLSX.utils.sheet_to_json(sheet) as any[];
@@ -1118,7 +1109,7 @@ Thời gian: ${currentTime}`;
     };
 
     // 📤 Xuất Excel với bộ lọc trạng thái
-    const handleExportExcel = (filterStatus: 'all' | 'completed' | 'processing') => {
+    const handleExportExcel = async (filterStatus: 'all' | 'completed' | 'processing') => {
         try {
             console.log('🔍 Export filter:', filterStatus);
             console.log('📦 Total ecommerceExports:', ecommerceExports.length, ecommerceExports);
@@ -1137,6 +1128,8 @@ Thời gian: ${currentTime}`;
                 message.warning('Không có dữ liệu để xuất!');
                 return;
             }
+
+            const XLSX = await import('xlsx');
 
             // Chuyển đổi dữ liệu sang format Excel
             const excelData = dataToExport.map((ecommerceExport, index) => {
@@ -1218,6 +1211,10 @@ Thời gian: ${currentTime}`;
     };
 
     const handleSubmit = async () => {
+        if (saveInFlightRef.current) return;
+        saveInFlightRef.current = true;
+        setSaving(true);
+
         try {
             const values = await form.validateFields();
 
@@ -1315,6 +1312,9 @@ Thời gian: ${currentTime}`;
         } catch (error) {
             console.error('Submit error:', error);
             message.error('Lỗi khi lưu phiếu xuất');
+        } finally {
+            saveInFlightRef.current = false;
+            setSaving(false);
         }
     };
 
@@ -1377,6 +1377,7 @@ Thời gian: ${currentTime}`;
                 const persistedCompletedKeys = new Set<string>();
                 const data = e.target?.result;
                 const isCSV = file.name.toLowerCase().endsWith('.csv');
+                const XLSX = await import('xlsx');
                 const workbook = XLSX.read(data, { type: isCSV ? 'string' : 'binary' });
                 const sheetName = workbook.SheetNames[0];
                 const worksheet = workbook.Sheets[sheetName];
@@ -1690,6 +1691,7 @@ Thời gian: ${currentTime}`;
                     const bytes = new Uint8Array(binaryString.length);
                     for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
                     const isCSV = fileData.name.toLowerCase().endsWith('.csv');
+                    const XLSX = await import('xlsx');
                     let workbook;
                     if (isCSV) {
                         const decoder = new TextDecoder('utf-8');
@@ -2752,7 +2754,9 @@ Thời gian: ${currentTime}`;
             <Modal
                 title={editingEcommerceExport ? '�S�️ Sửa phiếu xuất' : '�~" Tạo phiếu xuất m�:i'}
                 open={modalVisible}
-                onCancel={() => setModalVisible(false)}
+                onCancel={() => { if (!saving) setModalVisible(false); }}
+                maskClosable={!saving}
+                closable={!saving}
                 footer={null}
                 width={900}
             >
@@ -2896,13 +2900,15 @@ Thời gian: ${currentTime}`;
                     </Form.Item>
 
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
-                        <Button onClick={() => setModalVisible(false)} size="large">
+                        <Button onClick={() => setModalVisible(false)} size="large" disabled={saving}>
                             Hủy
                         </Button>
                         <Button
                             type="primary"
                             htmlType="submit"
                             size="large"
+                            loading={saving}
+                            disabled={saving}
                             style={{ background: '#52c41a', borderColor: '#52c41a' }}
                         >
                             {editingEcommerceExport ? 'Cập nhật' : 'Lưu phiếu'}

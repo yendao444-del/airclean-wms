@@ -697,6 +697,15 @@ const FlowTraceabilityDashboard: React.FC<FlowTraceabilityDashboardProps> = ({ p
 
 type StockAlertLevel = 'all_zero' | 'has_zero' | 'low' | 'approaching' | 'ok';
 const STOCK_APPROACHING_BUFFER_RATIO = 0.1;
+const STOCK_COST_FORMATTER = new Intl.NumberFormat('vi-VN');
+
+interface ProductRowDisplayMeta {
+    alertLevel: StockAlertLevel;
+    minVariantCost: number | null;
+    maxVariantCost: number | null;
+    configuredMinCount: number;
+    zeroVariantCount: number;
+}
 
 function getStockAlertLevel(
     record: ProductRow,
@@ -718,6 +727,33 @@ function getStockAlertLevel(
     if (hasLow) return 'low';
     if (hasApproaching) return 'approaching';
     return 'ok';
+}
+
+function resolveProductAlertLevel(
+    record: ProductRow,
+    isAdmin: boolean,
+    variantMinStocks: Record<string, number>,
+    pausedVariants: Record<string, boolean>,
+): StockAlertLevel {
+    if (!isAdmin && record.variants.some(variant => variant.inventoryStatus)) {
+        let allOut = true;
+        let hasOut = false;
+        let hasLow = false;
+        let hasApproaching = false;
+        for (const variant of record.variants) {
+            const status = variant.inventoryStatus || 'ok';
+            if (status !== 'out') allOut = false;
+            if (status === 'out') hasOut = true;
+            else if (status === 'low') hasLow = true;
+            else if (status === 'approaching') hasApproaching = true;
+        }
+        if (allOut) return 'all_zero';
+        if (hasOut) return 'has_zero';
+        if (hasLow) return 'low';
+        if (hasApproaching) return 'approaching';
+        return 'ok';
+    }
+    return getStockAlertLevel(record, variantMinStocks, pausedVariants);
 }
 
 export default function StockBalancePage() {
@@ -1269,18 +1305,18 @@ export default function StockBalancePage() {
             onOk: async () => {
                 setLoading(true);
                 try {
-                    await window.electronAPI.stockBalance.adjustStock({
+                    const adjustment = {
                         sku: item.sku,
                         quantity: Math.abs(item.difference),
                         isAdd: item.difference > 0,
                         logContext: {
                             type: 'adjustment',
-                            referenceType: 'CAN_BANG',
+                            referenceType: 'CAN_BANG' as const,
                             reference: `CBL-${dayjs().format('YYMMDD-HHmm')}`,
                             note: `Cân bằng lẻ. Hệ thống ${item.systemStock} → Thực tế ${item.actualStock}. Lý do: ${note}`,
                             createdBy: currentUser
                         }
-                    });
+                    };
 
                     const newRecord = {
                         date: dayjs().format('YYYY-MM-DD HH:mm:ss'),
@@ -1289,7 +1325,12 @@ export default function StockBalancePage() {
                         notes: note,
                     };
 
-                    await window.electronAPI.stockBalance.create(newRecord);
+                    const result = await window.electronAPI.stockBalance.apply({
+                        idempotencyKey: crypto.randomUUID(),
+                        adjustments: [adjustment],
+                        record: newRecord,
+                    });
+                    if (!result?.success) throw new Error(result?.error || 'Không thể cân bằng kho.');
                     await loadBalanceRecords();
 
                     message.success(`✅ Đã cân bằng ${item.sku}: ${item.systemStock} → ${item.actualStock}`);
@@ -1327,28 +1368,19 @@ export default function StockBalancePage() {
             onOk: async () => {
                 setLoading(true);
                 try {
-                    let successCount = 0;
-                    let failCount = 0;
-
-                    for (const item of itemsToAdjust) {
-                        try {
-                            await window.electronAPI.stockBalance.adjustStock({
+                    const reference = `CBT-${dayjs().format('YYMMDD-HHmm')}`;
+                    const adjustments = itemsToAdjust.map(item => ({
                                 sku: item.sku,
                                 quantity: Math.abs(item.difference),
                                 isAdd: item.difference > 0,
                                 logContext: {
                                     type: 'adjustment',
-                                    referenceType: 'CAN_BANG',
-                                    reference: `CBT-${dayjs().format('YYMMDD-HHmm')}`,
+                                    referenceType: 'CAN_BANG' as const,
+                                    reference,
                                     note: `Cân bằng lô. Khác biệt: ${item.difference > 0 ? '+' : ''}${item.difference}. Lý do: ${form.getFieldValue('notes') || 'Không nhập'}`,
                                     createdBy: currentUser
                                 }
-                            });
-                            successCount++;
-                        } catch {
-                            failCount++;
-                        }
-                    }
+                    }));
 
                     const newRecord = {
                         date: dayjs().format('YYYY-MM-DD HH:mm:ss'),
@@ -1357,15 +1389,14 @@ export default function StockBalancePage() {
                         notes: form.getFieldValue('notes') || '',
                     };
 
-                    await window.electronAPI.stockBalance.create(newRecord);
+                    const result = await window.electronAPI.stockBalance.apply({
+                        idempotencyKey: crypto.randomUUID(),
+                        adjustments,
+                        record: newRecord,
+                    });
+                    if (!result?.success) throw new Error(result?.error || 'Không thể cân bằng kho.');
                     await loadBalanceRecords();
-
-                    if (successCount > 0) {
-                        message.success(`✅ Đã cân bằng ${successCount} sản phẩm!`);
-                    }
-                    if (failCount > 0) {
-                        message.warning(`⚠️ Không thể cân bằng ${failCount} sản phẩm!`);
-                    }
+                    message.success(`✅ Đã cân bằng ${itemsToAdjust.length} sản phẩm!`);
 
                     await loadProducts();
                     setModalVisible(false);
@@ -1436,18 +1467,18 @@ export default function StockBalancePage() {
                 onOk: async () => {
                     setLoading(true);
                     try {
-                        await window.electronAPI.stockBalance.adjustStock({
+                        const adjustment = {
                             sku: quickBalanceItem.sku,
                             quantity: Math.abs(difference),
                             isAdd: difference > 0,
                             logContext: {
                                 type: 'adjustment',
-                                referenceType: 'CAN_BANG',
+                                referenceType: 'CAN_BANG' as const,
                                 reference: `CBN-${dayjs().format('YYMMDD-HHmm')}`,
                                 note: `Cân bằng nhanh. Hệ thống ${quickBalanceItem.systemStock} → Thực tế ${actualStock}. Lý do: ${values.notes || 'Không nhập'}`,
                                 createdBy: currentUser
                             }
-                        });
+                        };
 
                         const adjustedItem = {
                             ...quickBalanceItem,
@@ -1462,7 +1493,12 @@ export default function StockBalancePage() {
                             notes: values.notes || 'Cân bằng nhanh',
                         };
 
-                        await window.electronAPI.stockBalance.create(newRecord);
+                        const result = await window.electronAPI.stockBalance.apply({
+                            idempotencyKey: crypto.randomUUID(),
+                            adjustments: [adjustment],
+                            record: newRecord,
+                        });
+                        if (!result?.success) throw new Error(result?.error || 'Không thể cân bằng kho.');
                         await loadBalanceRecords();
 
                         message.success(`✅ Đã cân bằng ${quickBalanceItem.sku}!`);
@@ -1482,6 +1518,35 @@ export default function StockBalancePage() {
             console.error('Validation error:', error);
         }
     };
+
+    const productDisplayMeta = useMemo(() => {
+        const metaByKey = new Map<string, ProductRowDisplayMeta>();
+        for (const record of productRows) {
+            let minVariantCost: number | null = null;
+            let maxVariantCost: number | null = null;
+            let configuredMinCount = 0;
+            let zeroVariantCount = 0;
+
+            for (const variant of record.variants) {
+                const cost = variant.cost || 0;
+                if (cost > 0) {
+                    minVariantCost = minVariantCost === null ? cost : Math.min(minVariantCost, cost);
+                    maxVariantCost = maxVariantCost === null ? cost : Math.max(maxVariantCost, cost);
+                }
+                if ((variantMinStocks[variant.sku] ?? 0) > 0) configuredMinCount += 1;
+                if (variant.systemStock === 0) zeroVariantCount += 1;
+            }
+
+            metaByKey.set(record.key, {
+                alertLevel: resolveProductAlertLevel(record, isAdmin, variantMinStocks, pausedVariants),
+                minVariantCost,
+                maxVariantCost,
+                configuredMinCount,
+                zeroVariantCount,
+            });
+        }
+        return metaByKey;
+    }, [productRows, isAdmin, variantMinStocks, pausedVariants]);
 
     // Columns cho bảng product-level (grouped)
     const productColumns: ColumnsType<ProductRow> = [
@@ -1538,19 +1603,18 @@ export default function StockBalancePage() {
             width: 130,
             align: 'right',
             render: (_cost: any, record: ProductRow) => {
-                const costs = record.variants.map(v => v.cost || 0).filter(c => c > 0);
-                if (costs.length > 0) {
-                    const min = Math.min(...costs);
-                    const max = Math.max(...costs);
-                    const fmt = (n: number) => new Intl.NumberFormat('vi-VN').format(n);
+                const meta = productDisplayMeta.get(record.key);
+                if (meta && meta.minVariantCost !== null && meta.maxVariantCost !== null) {
+                    const min = meta.minVariantCost;
+                    const max = meta.maxVariantCost;
                     return (
                         <span style={{ fontWeight: 600, color: '#595959' }}>
-                            {min === max ? `${fmt(min)}đ` : `${fmt(min)}đ - ${fmt(max)}đ`}
+                            {min === max ? `${STOCK_COST_FORMATTER.format(min)}đ` : `${STOCK_COST_FORMATTER.format(min)}đ - ${STOCK_COST_FORMATTER.format(max)}đ`}
                         </span>
                     );
                 }
                 return record.cost && record.cost > 0
-                    ? <span style={{ fontWeight: 600, color: '#595959' }}>{new Intl.NumberFormat('vi-VN').format(record.cost)}đ</span>
+                    ? <span style={{ fontWeight: 600, color: '#595959' }}>{STOCK_COST_FORMATTER.format(record.cost)}đ</span>
                     : <span style={{ color: '#bfbfbf' }}>—</span>;
             },
         },
@@ -1565,7 +1629,7 @@ export default function StockBalancePage() {
             width: 120,
             align: 'center' as const,
             render: (_: number, record: ProductRow) => {
-                const setCount = record.variants.filter(v => (variantMinStocks[v.sku] ?? 0) > 0).length;
+                const setCount = productDisplayMeta.get(record.key)?.configuredMinCount || 0;
                 const total = record.variants.length;
                 if (setCount === 0) return <span style={{ color: '#bfbfbf', fontSize: 12 }}>— chưa đặt</span>;
                 const allSet = setCount === total;
@@ -1583,7 +1647,8 @@ export default function StockBalancePage() {
             width: 120,
             align: 'center',
             render: (stock: number, record: ProductRow) => {
-                const level = getAlertLevel(record);
+                const meta = productDisplayMeta.get(record.key);
+                const level = meta?.alertLevel || 'ok';
                 const visibleStock = getVisibleStockForRecord(record, stock);
                 const bgMap: Record<StockAlertLevel, string> = {
                     all_zero:   '#cf1322',
@@ -1594,7 +1659,7 @@ export default function StockBalancePage() {
                 };
                 const subLabelMap: Record<StockAlertLevel, React.ReactNode> = {
                     all_zero:   <div style={{ fontSize: 10, color: '#820014', fontWeight: 700, background: '#fff1f0', padding: '2px 6px', borderRadius: 4, border: '1px solid #ffa39e' }}>HẾT HÀNG</div>,
-                    has_zero:   <div style={{ fontSize: 10, color: '#cf1322', fontWeight: 700, background: '#fff1f0', padding: '2px 6px', borderRadius: 4, border: '1px solid #ffa39e' }}>Hết {record.variants.filter(v => v.systemStock === 0).length} màu</div>,
+                    has_zero:   <div style={{ fontSize: 10, color: '#cf1322', fontWeight: 700, background: '#fff1f0', padding: '2px 6px', borderRadius: 4, border: '1px solid #ffa39e' }}>Hết {meta?.zeroVariantCount || 0} màu</div>,
                     low:        <div style={{ fontSize: 10, color: '#d46b08', fontWeight: 700, background: '#fff7e6', padding: '2px 6px', borderRadius: 4, border: '1px solid #ffd591' }}>Dưới ngưỡng nhập</div>,
                     approaching:<div style={{ fontSize: 10, color: '#876800', fontWeight: 600, background: '#fffbe6', padding: '2px 6px', borderRadius: 4, border: '1px solid #ffe58f' }}>Sắp tới ngưỡng</div>,
                     ok:         null,
@@ -1749,44 +1814,41 @@ export default function StockBalancePage() {
         setTimeout(() => { variantMinSavingRef.current = false; }, 300);
     };
 
-    const getAlertLevel = (record: ProductRow) => {
-        if (!isAdmin && record.variants.some(variant => variant.inventoryStatus)) {
-            const statuses = record.variants.map(variant => variant.inventoryStatus || 'ok');
-            if (statuses.every(status => status === 'out')) return 'all_zero';
-            if (statuses.some(status => status === 'out')) return 'has_zero';
-            if (statuses.some(status => status === 'low')) return 'low';
-            if (statuses.some(status => status === 'approaching')) return 'approaching';
-            return 'ok';
-        }
-        return getStockAlertLevel(record, variantMinStocks, pausedVariants);
-    };
-
-    // Base filter: category + search text
-    const baseFilteredRows = productRows.filter(row => {
-        if (selectedCategory && row.categoryName !== selectedCategory) return false;
-        if (!searchText.trim()) return true;
+    const { filteredProductRows, stockFilterCounts, baseFilteredCount } = useMemo(() => {
+        const counts = { need: 0, low: 0, ok: 0 };
+        const rows: ProductRow[] = [];
+        let matchingCount = 0;
+        const hasSearch = Boolean(searchText.trim());
         const search = searchText.toLowerCase();
-        return (
-            row.productName.toLowerCase().includes(search) ||
-            row.variants.some(v =>
-                v.sku.toLowerCase().includes(search) ||
-                (v.color?.toLowerCase().includes(search) || false)
-            )
-        );
-    });
 
-    const stockFilterCounts = {
-        need: baseFilteredRows.filter(r => { const l = getAlertLevel(r); return l === 'all_zero' || l === 'has_zero' || l === 'low'; }).length,
-        low:  baseFilteredRows.filter(r => getAlertLevel(r) === 'approaching').length,
-        ok:   baseFilteredRows.filter(r => getAlertLevel(r) === 'ok').length,
-    };
+        for (const row of productRows) {
+            if (selectedCategory && row.categoryName !== selectedCategory) continue;
+            if (
+                hasSearch &&
+                !row.productName.toLowerCase().includes(search) &&
+                !row.variants.some(variant =>
+                    variant.sku.toLowerCase().includes(search) ||
+                    (variant.color?.toLowerCase().includes(search) || false)
+                )
+            ) continue;
 
-    const filteredProductRows = (() => {
-        if (stockFilter === 'all')  return baseFilteredRows;
-        if (stockFilter === 'need') return baseFilteredRows.filter(r => { const l = getAlertLevel(r); return l === 'all_zero' || l === 'has_zero' || l === 'low'; });
-        if (stockFilter === 'low')  return baseFilteredRows.filter(r => getAlertLevel(r) === 'approaching');
-        return baseFilteredRows.filter(r => getAlertLevel(r) === 'ok');
-    })();
+            matchingCount += 1;
+            const level = productDisplayMeta.get(row.key)?.alertLevel || 'ok';
+            const isNeed = level === 'all_zero' || level === 'has_zero' || level === 'low';
+            if (isNeed) counts.need += 1;
+            else if (level === 'approaching') counts.low += 1;
+            else if (level === 'ok') counts.ok += 1;
+
+            if (
+                stockFilter === 'all' ||
+                (stockFilter === 'need' && isNeed) ||
+                (stockFilter === 'low' && level === 'approaching') ||
+                (stockFilter === 'ok' && level === 'ok')
+            ) rows.push(row);
+        }
+
+        return { filteredProductRows: rows, stockFilterCounts: counts, baseFilteredCount: matchingCount };
+    }, [productRows, productDisplayMeta, selectedCategory, searchText, stockFilter]);
     const canViewStockNumbers = isAdmin || stockFilter === 'need' || stockFilter === 'low';
 
     function isVariantInCurrentStockAlert(variant: StockBalanceItem): boolean {
@@ -1832,7 +1894,10 @@ export default function StockBalancePage() {
         return <FlowTraceabilityDashboard productRows={productRows} onRefresh={loadProducts} />;
     };
 
-    const uniqueCategories = Array.from(new Set(productRows.map(r => r.categoryName))).sort();
+    const uniqueCategories = useMemo(
+        () => Array.from(new Set(productRows.map(row => row.categoryName))).sort(),
+        [productRows],
+    );
 
     return (
         <div className="stock-command-center">
@@ -1905,7 +1970,7 @@ export default function StockBalancePage() {
                     <Button icon={<FilterOutlined />}>Bộ lọc</Button>
                     <div style={{ flex: 1 }} />
                     {([
-                        { key: 'all',  label: 'Tất cả', count: baseFilteredRows.length, color: '#1677ff', bg: '#e6f4ff' },
+                        { key: 'all',  label: 'Tất cả', count: baseFilteredCount, color: '#1677ff', bg: '#e6f4ff' },
                         { key: 'need', label: 'Cần nhập', count: stockFilterCounts.need, color: '#cf1322', bg: '#fff1f0' },
                         { key: 'low', label: 'Sắp hết', count: stockFilterCounts.low, color: '#d46b08', bg: '#fff7e6' },
                         { key: 'ok', label: 'Bình thường', count: stockFilterCounts.ok, color: '#389e0d', bg: '#f6ffed' },

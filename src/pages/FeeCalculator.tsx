@@ -157,8 +157,10 @@ export default function FeeCalculator() {
     const [monthlyFixedCost, setMonthlyFixedCost] = useState(5000000);
     const [monthlyOrders, setMonthlyOrders] = useState(1000);
     const [editingFee, setEditingFee] = useState<Fee | null>(null);
+    const [savingFee, setSavingFee] = useState(false);
     const [isScrolled, setIsScrolled] = useState(false);
     const pageRef = useRef<HTMLElement | null>(null);
+    const feeSaveInFlightRef = useRef(false);
 
     useEffect(() => {
         const load = async () => {
@@ -287,6 +289,28 @@ export default function FeeCalculator() {
         message.success(`Đã áp dụng phí hoa hồng ${category.feeRate}% cho ${category.name}`);
     };
 
+    const handleSaveEditedFee = async () => {
+        if (!editingFee || feeSaveInFlightRef.current) return;
+        feeSaveInFlightRef.current = true;
+        setSavingFee(true);
+
+        try {
+            const nextFees = currentFees.map((fee) => fee.id === editingFee.id ? editingFee : fee);
+            const key = platform === 'shopee' ? 'shopee_fees_v3' : 'tiktok_fees_v3';
+            const result = await window.electronAPI.appConfig.set(key, nextFees);
+            if (!result.success) throw new Error(result.error || 'Không thể lưu cấu hình phí.');
+
+            if (platform === 'shopee') setShopeeFees(nextFees); else setTiktokFees(nextFees);
+            setEditingFee(null);
+            message.success('Đã lưu khoản phí.');
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : 'Không thể lưu cấu hình phí.');
+        } finally {
+            feeSaveInFlightRef.current = false;
+            setSavingFee(false);
+        }
+    };
+
     const platformTitle = platform === 'shopee' ? 'Shopee' : 'TikTok Shop';
     const platformColor = platform === 'shopee' ? '#ee4d2d' : '#151515';
 
@@ -399,7 +423,7 @@ export default function FeeCalculator() {
                 <div className="fee-bottom-profit"><small>Lợi nhuận thực tế</small><b className={profit >= 0 ? 'fee-profit-text-positive' : 'fee-profit-text-negative'}>{profit >= 0 ? '+' : ''}{numberFormat(profit)}đ</b><span>{margin.toFixed(1)}%</span></div>
             </div>}
 
-            <Modal title={`Sửa ${editingFee?.name || 'khoản phí'}`} open={!!editingFee} onCancel={() => setEditingFee(null)} onOk={() => { if (editingFee) void saveFees(currentFees.map((fee) => fee.id === editingFee.id ? editingFee : fee)); setEditingFee(null); }} okText="Lưu phí" cancelText="Hủy" okButtonProps={{ icon: <SaveOutlined /> }}>
+            <Modal title={`Sửa ${editingFee?.name || 'khoản phí'}`} open={!!editingFee} onCancel={() => { if (!savingFee) setEditingFee(null); }} onOk={handleSaveEditedFee} confirmLoading={savingFee} maskClosable={!savingFee} closable={!savingFee} okText="Lưu phí" cancelText="Hủy" okButtonProps={{ icon: <SaveOutlined />, disabled: savingFee }} cancelButtonProps={{ disabled: savingFee }}>
                 {editingFee && <Space direction="vertical" size="middle" className="fee-full-width">
                     <div><Text>Tên khoản phí</Text><Input value={editingFee.name} onChange={(event) => setEditingFee({ ...editingFee, name: event.target.value })} /></div>
                     <div><Text>Loại tính phí</Text><Segmented block value={editingFee.type} onChange={(type) => setEditingFee({ ...editingFee, type: type as Fee['type'] })} options={[{ label: 'Phần trăm', value: 'percent', icon: <PercentageOutlined /> }, { label: 'Cố định', value: 'fixed', icon: <DollarOutlined /> }]} /></div>

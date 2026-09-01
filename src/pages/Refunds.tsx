@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useAppData } from '../contexts/AppDataContext';
 import {
     Card,
@@ -24,7 +24,6 @@ import {
 import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, RollbackOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, CheckCircleOutlined, WarningOutlined, SearchOutlined, StopOutlined, DollarOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import * as XLSX from 'xlsx';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -75,11 +74,29 @@ interface Refund {
     createdAt?: Date;
 }
 
+const refundItemsDisplayCache = new Map<string, RefundItem[]>();
+function getRefundItemsForDisplay(items: string): RefundItem[] {
+    const cacheKey = String(items || '');
+    const cached = refundItemsDisplayCache.get(cacheKey);
+    if (cached) return cached;
+
+    let parsed: RefundItem[] = [];
+    try {
+        const value = JSON.parse(cacheKey || '[]');
+        parsed = Array.isArray(value) ? value : [];
+    } catch { /* invalid legacy payload */ }
+
+    if (refundItemsDisplayCache.size >= 2000) refundItemsDisplayCache.clear();
+    refundItemsDisplayCache.set(cacheKey, parsed);
+    return parsed;
+}
+
 export default function RefundsPage() {
     const [refunds, setRefunds] = useState<Refund[]>([]);
     const { products } = useAppData();
     const [loading, setLoading] = useState(false);
     const [importLoading, setImportLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
     const [methodModalVisible, setMethodModalVisible] = useState(false);
     const [inputMethod, setInputMethod] = useState<'manual' | 'excel'>('manual');
@@ -102,6 +119,7 @@ export default function RefundsPage() {
     const scanInputRef = useRef<any>(null);
     const successSoundRef = useRef<HTMLAudioElement | null>(null);
     const alertSoundRef = useRef<HTMLAudioElement | null>(null);
+    const saveInFlightRef = useRef(false);
 
     // 🔍 State cho bộ lọc trạng thái
     const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'received' | 'completed' | 'overdue' | 'lost'>('pending');
@@ -235,7 +253,11 @@ export default function RefundsPage() {
             okType: 'danger',
             cancelText: 'Hủy',
             onOk: async () => {
-                await window.electronAPI.refunds.delete(refundRecord.id);
+                const result = await window.electronAPI.refunds.delete(refundRecord.id);
+                if (!result?.success) {
+                    message.error(result?.error || 'Không thể xóa phiếu hoàn.');
+                    return;
+                }
                 await loadRefunds();
                 message.success('Đã xóa phiếu hoàn!');
             },
@@ -271,7 +293,8 @@ export default function RefundsPage() {
             width: 600,
             onOk: async () => {
                 try {
-                    await window.electronAPI.refunds.bulkDelete(selectedRowKeys);
+                    const result = await window.electronAPI.refunds.bulkDelete(selectedRowKeys);
+                    if (!result?.success) throw new Error(result?.error || 'Không thể xóa phiếu hoàn.');
                     await loadRefunds();
 
                     message.success(`Đã xóa ${selectedRowKeys.length} phiếu hoàn!`);
@@ -317,7 +340,8 @@ export default function RefundsPage() {
 
                 // Helper function to encapsulate refund receiving logic
                 const doReceiveRefund = async (refundToReceive: Refund) => {
-                    await window.electronAPI.refunds.update(refundToReceive.id, { status: 'received' });
+                    const result = await window.electronAPI.refunds.update(refundToReceive.id, { status: 'received' });
+                    if (!result?.success) throw new Error(result?.error || 'Không thể cập nhật phiếu hoàn.');
                     const updatedRefunds = refunds.map(r =>
                         r.id === refundToReceive.id ? { ...r, status: 'received' } : r
                     );
@@ -689,7 +713,7 @@ export default function RefundsPage() {
     };
 
     // 📤 Xuất Excel với bộ lọc trạng thái
-    const handleExportExcel = (filterStatus: 'all' | 'completed' | 'processing') => {
+    const handleExportExcel = async (filterStatus: 'all' | 'completed' | 'processing') => {
         try {
             console.log('🔍 Export filter:', filterStatus);
             console.log('📦 Total refunds:', refunds.length, refunds);
@@ -708,6 +732,8 @@ export default function RefundsPage() {
                 message.warning('Không có dữ liệu để xuất!');
                 return;
             }
+
+            const XLSX = await import('xlsx');
 
             // Chuyển đổi dữ liệu sang format Excel
             const excelData = dataToExport.map((refund, index) => {
@@ -788,6 +814,10 @@ export default function RefundsPage() {
     };
 
     const handleSubmit = async () => {
+        if (saveInFlightRef.current) return;
+        saveInFlightRef.current = true;
+        setSaving(true);
+
         try {
             const values = await form.validateFields();
 
@@ -811,7 +841,8 @@ export default function RefundsPage() {
                     items: JSON.stringify(refundItems),
                     totalAmount,
                 };
-                await window.electronAPI.refunds.update(editingRefund.id, updatedData);
+                const result = await window.electronAPI.refunds.update(editingRefund.id, updatedData);
+                if (!result.success) throw new Error(result.error || 'Không thể cập nhật phiếu hoàn.');
             } else {
                 // CREATE MODE
                 const newRefund = {
@@ -825,7 +856,8 @@ export default function RefundsPage() {
                     items: JSON.stringify(refundItems),
                     totalAmount,
                 };
-                await window.electronAPI.refunds.create(newRefund);
+                const result = await window.electronAPI.refunds.create(newRefund);
+                if (!result.success) throw new Error(result.error || 'Không thể tạo phiếu hoàn.');
             }
 
             // Reload from database
@@ -840,7 +872,10 @@ export default function RefundsPage() {
             setEditingRefund(null);
         } catch (error) {
             console.error('Submit error:', error);
-            message.error('Lỗi khi lưu phiếu hoàn');
+            message.error(error instanceof Error ? error.message : 'Lỗi khi lưu phiếu hoàn');
+        } finally {
+            saveInFlightRef.current = false;
+            setSaving(false);
         }
     };
 
@@ -1161,16 +1196,11 @@ export default function RefundsPage() {
             width: 80,
             align: 'center',
             render: (items) => {
-                try {
-                    const parsed = JSON.parse(items);
-                    const count = parsed.length;
-                    if (count > 1) {
-                        return <Tag color="red" style={{ fontWeight: 600 }}>{count} SKU</Tag>;
-                    }
-                    return <Tag color="default">{count}</Tag>;
-                } catch {
-                    return <Tag color="default">0</Tag>;
+                const count = getRefundItemsForDisplay(items).length;
+                if (count > 1) {
+                    return <Tag color="red" style={{ fontWeight: 600 }}>{count} SKU</Tag>;
                 }
+                return <Tag color="default">{count}</Tag>;
             },
         },
         {
@@ -1347,7 +1377,8 @@ export default function RefundsPage() {
     const handleMarkLost = async () => {
         if (!lostTarget) return;
         try {
-            await window.electronAPI.refunds.update(lostTarget.id, { status: 'lost' });
+            const result = await window.electronAPI.refunds.update(lostTarget.id, { status: 'lost' });
+            if (!result?.success) throw new Error(result?.error || 'Không thể đánh dấu mất hàng.');
             setRefunds(prev => prev.map(r => r.id === lostTarget.id ? { ...r, status: 'lost' } : r));
             message.success(`🚫 Đã đánh dấu mất hàng: ${lostTarget.orderNumber || lostTarget.refundCode || '#' + lostTarget.id}`);
             setLostModalVisible(false);
@@ -1374,49 +1405,79 @@ export default function RefundsPage() {
         setCompAmount(0);
     };
 
-    // 🔍 Lọc dữ liệu theo trạng thái và tìm kiếm
-    const filteredRefunds = refunds.filter(refund => {
-        // Filter by text first
-        if (searchText) {
-            const lowerSearch = searchText.toLowerCase().trim();
-            const orderMatch = refund.orderNumber?.toLowerCase().includes(lowerSearch);
-            const refundCodeMatch = refund.refundCode?.toLowerCase().includes(lowerSearch);
+    const {
+        filteredRefunds,
+        statusCounts,
+        lostRefunds,
+        lostTotal,
+        lostCompensated,
+        lostNotCompensated,
+        compensatedTotal,
+        notCompensatedTotal,
+    } = useMemo(() => {
+        const lowerSearch = searchText.toLowerCase().trim();
+        const now = dayjs();
+        const filtered: Refund[] = [];
+        const lost: Refund[] = [];
+        const compensated: Refund[] = [];
+        const notCompensated: Refund[] = [];
+        const counts = { pending: 0, received: 0, completed: 0, overdue: 0, lost: 0 };
+        let totalLost = 0;
+        let totalCompensated = 0;
+        let totalNotCompensated = 0;
 
-            // Extract tracking purely
-            let tracking = '';
-            const trackingMatch = refund.notes?.match(/Tracking: ([^|]+)/);
-            if (trackingMatch) {
-                tracking = trackingMatch[1].trim();
+        for (const refund of refunds) {
+            if (refund.status === 'pending') counts.pending++;
+            if (refund.status === 'received') counts.received++;
+            if (refund.status === 'completed') counts.completed++;
+            if (refund.status === 'lost') counts.lost++;
+
+            const daysPassed = now.diff(dayjs(refund.refundDate), 'day');
+            const isOverdue = daysPassed > 3
+                && refund.status !== 'completed'
+                && refund.status !== 'received'
+                && refund.status !== 'lost';
+            if (isOverdue) counts.overdue++;
+
+            if (refund.status === 'lost') {
+                lost.push(refund);
+                totalLost += refund.totalAmount;
+                const compensation = compensationMap[refund.id];
+                if (compensation) {
+                    compensated.push(refund);
+                    totalCompensated += compensation.amount || 0;
+                } else {
+                    notCompensated.push(refund);
+                    totalNotCompensated += refund.totalAmount;
+                }
             }
-            const trackMatch = tracking.toLowerCase().includes(lowerSearch);
 
-            // Or just check inside notes generally
-            const notesMatch = refund.notes?.toLowerCase().includes(lowerSearch);
+            if (lowerSearch) {
+                const trackingMatch = refund.notes?.match(/Tracking: ([^|]+)/);
+                const tracking = trackingMatch ? trackingMatch[1].trim() : '';
+                const matchesSearch = refund.orderNumber?.toLowerCase().includes(lowerSearch)
+                    || refund.refundCode?.toLowerCase().includes(lowerSearch)
+                    || tracking.toLowerCase().includes(lowerSearch)
+                    || refund.notes?.toLowerCase().includes(lowerSearch);
+                if (!matchesSearch) continue;
+            }
 
-            if (!orderMatch && !refundCodeMatch && !trackMatch && !notesMatch) return false;
+            const matchesStatus = statusFilter === 'all'
+                || (statusFilter === 'overdue' ? isOverdue : refund.status === statusFilter);
+            if (matchesStatus) filtered.push(refund);
         }
 
-        if (statusFilter === 'all') return true;
-        if (statusFilter === 'pending') return refund.status === 'pending';
-        if (statusFilter === 'received') return refund.status === 'received';
-        if (statusFilter === 'completed') return refund.status === 'completed';
-        if (statusFilter === 'lost') return refund.status === 'lost';
-        if (statusFilter === 'overdue') {
-            const refundDate = dayjs(refund.refundDate);
-            const now = dayjs();
-            const daysPassed = now.diff(refundDate, 'day');
-            return daysPassed > 3 && refund.status !== 'completed' && refund.status !== 'received' && refund.status !== 'lost';
-        }
-        return true;
-    });
-
-    // 📊 Thống kê mất hàng
-    const lostRefunds = refunds.filter(r => r.status === 'lost');
-    const lostTotal = lostRefunds.reduce((s, r) => s + r.totalAmount, 0);
-    const lostCompensated = lostRefunds.filter(r => compensationMap[r.id]);
-    const lostNotCompensated = lostRefunds.filter(r => !compensationMap[r.id]);
-    const compensatedTotal = lostCompensated.reduce((s, r) => s + (compensationMap[r.id]?.amount || 0), 0);
-    const notCompensatedTotal = lostNotCompensated.reduce((s, r) => s + r.totalAmount, 0);
+        return {
+            filteredRefunds: filtered,
+            statusCounts: counts,
+            lostRefunds: lost,
+            lostTotal: totalLost,
+            lostCompensated: compensated,
+            lostNotCompensated: notCompensated,
+            compensatedTotal: totalCompensated,
+            notCompensatedTotal: totalNotCompensated,
+        };
+    }, [refunds, searchText, statusFilter, compensationMap]);
 
     // Cột đền bù (chỉ hiện khi filter = lost)
     const lostColumns: ColumnsType<Refund> = statusFilter === 'lost' ? [
@@ -1660,19 +1721,16 @@ export default function RefundsPage() {
                         size="large"
                     >
                         <Radio.Button value="pending">
-                            📦 Chưa hoàn ({refunds.filter(r => r.status === 'pending').length})
+                            📦 Chưa hoàn ({statusCounts.pending})
                         </Radio.Button>
                         <Radio.Button value="received">
-                            📋 Đã nhận ({refunds.filter(r => r.status === 'received').length})
+                            📋 Đã nhận ({statusCounts.received})
                         </Radio.Button>
                         <Radio.Button value="overdue">
-                            ⚠️ Khiếu nại ({refunds.filter(r => {
-                                const daysPassed = dayjs().diff(dayjs(r.refundDate), 'day');
-                                return daysPassed > 3 && r.status !== 'completed' && r.status !== 'received' && r.status !== 'lost';
-                            }).length})
+                            ⚠️ Khiếu nại ({statusCounts.overdue})
                         </Radio.Button>
                         <Radio.Button value="completed">
-                            ✅ Đã hoàn ({refunds.filter(r => r.status === 'completed').length})
+                            ✅ Đã hoàn ({statusCounts.completed})
                         </Radio.Button>
                         <Radio.Button value="lost" style={statusFilter === 'lost' ? { background: '#ff4d4f', borderColor: '#ff4d4f' } : { color: '#a8071a', fontWeight: 700 }}>
                             🚫 Mất hàng ({lostRefunds.length})
@@ -1752,12 +1810,7 @@ export default function RefundsPage() {
                         scroll={{ x: 1600 }}
                         rowClassName={(record) => {
                             if (record.status === 'lost' && compensationMap[record.id]) return 'compensated-row';
-                            try {
-                                const items = JSON.parse(record.items);
-                                return items.length > 1 ? 'multi-sku-row' : '';
-                            } catch {
-                                return '';
-                            }
+                            return getRefundItemsForDisplay(record.items).length > 1 ? 'multi-sku-row' : '';
                         }}
                         rowSelection={{
                             selectedRowKeys,
@@ -1773,8 +1826,7 @@ export default function RefundsPage() {
                             showExpandColumn: false,
                             expandRowByClick: true,
                             expandedRowRender: (record) => {
-                                let origItems: RefundItem[] = [];
-                                try { origItems = JSON.parse(record.items); } catch { origItems = []; }
+                                const origItems = getRefundItemsForDisplay(record.items);
 
                                 if (origItems.length === 0) {
                                     return <p style={{ margin: 0, color: '#bfbfbf' }}>Không có sản phẩm</p>;
@@ -1989,14 +2041,7 @@ export default function RefundsPage() {
                                     </div>
                                 );
                             },
-                            rowExpandable: (record) => {
-                                try {
-                                    const items = JSON.parse(record.items);
-                                    return items.length > 0;
-                                } catch {
-                                    return false;
-                                }
-                            },
+                            rowExpandable: (record) => getRefundItemsForDisplay(record.items).length > 0,
                         }}
                         pagination={{
                             pageSize: 100,
@@ -2072,7 +2117,9 @@ export default function RefundsPage() {
                 <Modal
                     title={editingRefund ? '✏️ Sửa phiếu hoàn' : '➕ Tạo phiếu hoàn mới'}
                     open={modalVisible}
-                    onCancel={() => setModalVisible(false)}
+                    onCancel={() => { if (!saving) setModalVisible(false); }}
+                    maskClosable={!saving}
+                    closable={!saving}
                     footer={null}
                     width={900}
                 >
@@ -2217,13 +2264,15 @@ export default function RefundsPage() {
                         </Form.Item>
 
                         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
-                            <Button onClick={() => setModalVisible(false)} size="large">
+                            <Button onClick={() => setModalVisible(false)} size="large" disabled={saving}>
                                 Hủy
                             </Button>
                             <Button
                                 type="primary"
                                 htmlType="submit"
                                 size="large"
+                                loading={saving}
+                                disabled={saving}
                                 style={{ background: '#722ed1', borderColor: '#722ed1' }}
                             >
                                 {editingRefund ? 'Cập nhật' : 'Lưu phiếu'}

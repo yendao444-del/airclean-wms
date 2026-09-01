@@ -19,13 +19,34 @@ function init(userDataPath) {
     if (!fs.existsSync(queueDir)) {
         fs.mkdirSync(queueDir, { recursive: true });
     }
-    // Dọn .tmp còn sót từ lần crash trước
+    let pendingCount = 0;
+    let preservedTempCount = 0;
+    // Recover a complete temp write only when its final file is missing.
+    // Conflicting or invalid temp files remain untouched for reconciliation.
     try {
-        fs.readdirSync(queueDir)
-            .filter(f => f.endsWith('.tmp'))
-            .forEach(f => { try { fs.unlinkSync(path.join(queueDir, f)); } catch {} });
+        for (const filename of fs.readdirSync(queueDir)) {
+            if (filename.endsWith('.tmp')) {
+                const tempPath = path.join(queueDir, filename);
+                const finalName = filename.slice(0, -4);
+                const finalPath = path.join(queueDir, finalName);
+                try {
+                    JSON.parse(fs.readFileSync(tempPath, 'utf8'));
+                    if (!fs.existsSync(finalPath) && finalName.endsWith('.json')) {
+                        fs.renameSync(tempPath, finalPath);
+                        pendingCount += 1;
+                        console.warn(`[OfflineQueue] Recovered complete temp item: ${finalName}`);
+                    } else {
+                        preservedTempCount += 1;
+                    }
+                } catch {
+                    preservedTempCount += 1;
+                }
+            } else if (filename.endsWith('.json')) {
+                pendingCount += 1;
+            }
+        }
     } catch {}
-    console.log(`[OfflineQueue] Initialized at: ${queueDir} | Pending: ${count()}`);
+    console.log(`[OfflineQueue] Initialized at: ${queueDir} | Pending: ${pendingCount} | Preserved temp: ${preservedTempCount}`);
 }
 
 /**

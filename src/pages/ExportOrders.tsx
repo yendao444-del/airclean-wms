@@ -28,7 +28,6 @@ import {
     BarcodeOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
-import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 
@@ -66,7 +65,6 @@ interface ExportOrder {
 }
 
 export default function ExportOrdersPage() {
-    const currentUser = useCurrentUser();
     const [modalVisible, setModalVisible] = useState(false);
     const [exports, setExports] = useState<ExportOrder[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
@@ -83,6 +81,15 @@ export default function ExportOrdersPage() {
     const [tempProduct, setTempProduct] = useState<Product | null>(null);
     const [tempVariants, setTempVariants] = useState<any[]>([]);
     const autoAddTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const submitLockRef = useRef(false);
+    const deletingIdsRef = useRef(new Set<number>());
+    const [submitting, setSubmitting] = useState(false);
+    const [deletingIds, setDeletingIds] = useState<Set<number>>(new Set());
+
+    const createOperationKey = (action: string, id?: number) => {
+        const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+        return `export-order:${action}:${id || 'new'}:${suffix}`;
+    };
 
     useEffect(() => {
         loadProducts();
@@ -248,6 +255,9 @@ export default function ExportOrdersPage() {
     // SUBMIT
     // ========================================
     const handleSubmit = async () => {
+        if (submitLockRef.current) return;
+        submitLockRef.current = true;
+        setSubmitting(true);
         try {
             const values = await form.validateFields(['customer', 'exportDate', 'status', 'notes']);
 
@@ -258,47 +268,18 @@ export default function ExportOrdersPage() {
 
             const isEditing = !!editingExport;
             const currentEditingExport = editingExport;
-            const totalAmount = exportItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
-            const refCode = isEditing
-                ? `PX${currentEditingExport!.id.toString().padStart(4, '0')}`
-                : 'Tạo mới';
-
-            // EDIT: hoàn lại tất cả stock cũ trước
-            if (isEditing && currentEditingExport) {
-                for (const oldItem of currentEditingExport.items) {
-                    await window.electronAPI.exportOrders.adjustStock({
-                        sku: oldItem.sku,
-                        quantity: oldItem.quantity,
-                        isAdd: true,
-                        logContext: { type: 'export', referenceType: 'XUAT', reference: refCode, note: `Sửa phiếu: hoàn lại ${oldItem.sku}`, createdBy: currentUser }
-                    });
-                }
-            }
-
-            // Trừ stock theo items mới
-            for (const item of exportItems) {
-                await window.electronAPI.exportOrders.adjustStock({
-                    sku: item.sku,
-                    quantity: item.quantity,
-                    isAdd: false,
-                    logContext: { type: 'export', referenceType: 'XUAT', reference: refCode, note: `Xuất kho: ${item.productName} x${item.quantity} - Khách: ${values.customer}`, createdBy: currentUser }
-                });
-            }
 
             const payload = {
+                id: currentEditingExport?.id,
+                idempotencyKey: createOperationKey(isEditing ? 'update' : 'create', currentEditingExport?.id),
                 customer: values.customer,
                 exportDate: values.exportDate.format('YYYY-MM-DD HH:mm:ss'),
                 status: values.status,
                 notes: values.notes,
-                totalAmount,
                 items: exportItems,
             };
-
-            if (isEditing && currentEditingExport) {
-                await window.electronAPI.exportOrders.update(currentEditingExport.id, payload);
-            } else {
-                await window.electronAPI.exportOrders.create({ ...payload, createdBy: currentUser || null });
-            }
+            const result = await window.electronAPI.exportOrders.saveWithStock(payload);
+            if (!result.success) throw new Error(result.error || 'Không thể lưu phiếu xuất.');
 
             message.success(isEditing ? '✅ Đã cập nhật phiếu xuất!' : '✅ Đã tạo phiếu xuất thành công!');
             setModalVisible(false);
@@ -311,6 +292,12 @@ export default function ExportOrdersPage() {
             await loadProducts();
         } catch (error) {
             console.error('Submit error:', error);
+            if (!(error as { errorFields?: unknown[] })?.errorFields) {
+                message.error(error instanceof Error ? error.message : 'Không thể lưu phiếu xuất.');
+            }
+        } finally {
+            submitLockRef.current = false;
+            setSubmitting(false);
         }
     };
 
@@ -336,19 +323,24 @@ export default function ExportOrdersPage() {
             okType: 'danger',
             cancelText: 'Hủy',
             onOk: async () => {
-                await window.electronAPI.exportOrders.delete(record.id);
-                await loadExports();
-                // Hoàn lại stock TẤT CẢ items
-                for (const item of record.items) {
-                    await window.electronAPI.exportOrders.adjustStock({
-                        sku: item.sku,
-                        quantity: item.quantity,
-                        isAdd: true,
-                        logContext: { type: 'export', referenceType: 'XUAT', reference: `PX${record.id.toString().padStart(4, '0')}`, note: `Xóa phiếu: hoàn kho ${item.sku}`, createdBy: currentUser }
+                if (deletingIdsRef.current.has(record.id)) return;
+                deletingIdsRef.current.add(record.id);
+                setDeletingIds(new Set(deletingIdsRef.current));
+                try {
+                    const result = await window.electronAPI.exportOrders.delete(record.id, {
+                        idempotencyKey: createOperationKey('delete', record.id),
                     });
+                    if (!result.success) throw new Error(result.error || 'Không thể xóa phiếu xuất.');
+                    setExports(prev => prev.filter(item => item.id !== record.id));
+                    message.success('✅ Đã xóa phiếu xuất và hoàn kho!');
+                    await loadProducts();
+                } catch (error) {
+                    message.error(error instanceof Error ? error.message : 'Không thể xóa phiếu xuất.');
+                    throw error;
+                } finally {
+                    deletingIdsRef.current.delete(record.id);
+                    setDeletingIds(new Set(deletingIdsRef.current));
                 }
-                message.success('✅ Đã xóa phiếu xuất!');
-                await loadProducts();
             },
         });
     };
@@ -459,6 +451,7 @@ export default function ExportOrdersPage() {
                                 key: 'edit',
                                 label: 'Sửa',
                                 icon: <EditOutlined />,
+                                disabled: deletingIds.has(record.id),
                                 onClick: () => handleEdit(record),
                             },
                             {
@@ -469,6 +462,7 @@ export default function ExportOrdersPage() {
                                 label: 'Xóa',
                                 icon: <DeleteOutlined />,
                                 danger: true,
+                                disabled: deletingIds.has(record.id),
                                 onClick: () => handleDelete(record),
                             },
                         ],
@@ -476,7 +470,7 @@ export default function ExportOrdersPage() {
                     trigger={['click']}
                     placement="bottomRight"
                 >
-                    <Button type="text" size="small" icon={<MoreOutlined style={{ fontSize: 18 }} />} />
+                    <Button loading={deletingIds.has(record.id)} disabled={deletingIds.has(record.id)} type="text" size="small" icon={<MoreOutlined style={{ fontSize: 18 }} />} />
                 </Dropdown>
             ),
         },
@@ -554,7 +548,9 @@ export default function ExportOrdersPage() {
                 key={`export-modal-${products.length}`}
                 title={editingExport ? '✏️ Sửa phiếu xuất' : '➕ Tạo phiếu xuất mới'}
                 open={modalVisible}
-                onCancel={() => setModalVisible(false)}
+                onCancel={() => { if (!submitting) setModalVisible(false); }}
+                closable={!submitting}
+                maskClosable={!submitting}
                 footer={null}
                 width={700}
             >
@@ -711,11 +707,13 @@ export default function ExportOrdersPage() {
                     </Form.Item>
 
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
-                        <Button onClick={() => setModalVisible(false)} size="large">Hủy</Button>
+                        <Button onClick={() => setModalVisible(false)} size="large" disabled={submitting}>Hủy</Button>
                         <Button
                             type="primary"
                             htmlType="submit"
                             size="large"
+                            loading={submitting}
+                            disabled={submitting}
                             style={{ background: '#00ab56', borderColor: '#00ab56' }}
                         >
                             {editingExport ? '✅ Cập nhật phiếu xuất' : '✅ Tạo phiếu xuất'}

@@ -432,6 +432,8 @@ export default function PurchasePage() {
 
     // 🔒 State cho submit chống double click
     const [submitting, setSubmitting] = useState(false);
+    const submitLockRef = useRef(false);
+    const purchaseCreateKeyRef = useRef(crypto.randomUUID());
 
     // 🔍 State cho tìm kiếm và lọc
     const [searchText, setSearchText] = useState('');
@@ -755,6 +757,7 @@ export default function PurchasePage() {
 
     const handleAdd = () => {
         setEditingPurchase(null);
+        purchaseCreateKeyRef.current = crypto.randomUUID();
         priceBackfillAttemptedRef.current = false;
         setPurchaseItems([]);
         setAddingProduct(true);
@@ -957,6 +960,8 @@ export default function PurchasePage() {
             return;
         }
 
+        if (submitLockRef.current) return;
+        submitLockRef.current = true;
         setSubmitting(true);
         try {
             const itemsForSave = purchaseItems.map(item => {
@@ -977,6 +982,7 @@ export default function PurchasePage() {
                 items: JSON.stringify(itemsForSave),
                 totalAmount,
                 ...(importReceiptFiles ? { importReceiptFiles } : {}),
+                ...(!editingPurchase ? { idempotencyKey: purchaseCreateKeyRef.current } : {}),
                 createdBy: editingPurchase ? editingPurchase.createdBy : currentUser,
                 // On edit, false flags mean “unchanged”, not “clear VAT”.
                 isThht: values.isThht ? true : (editingPurchase ? undefined : false),
@@ -1059,6 +1065,7 @@ export default function PurchasePage() {
         } catch (error) {
             message.error('Lỗi khi lưu phiếu nhập');
         } finally {
+            submitLockRef.current = false;
             setSubmitting(false);
         }
     };

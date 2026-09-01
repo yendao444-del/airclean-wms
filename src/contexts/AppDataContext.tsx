@@ -6,19 +6,9 @@ export interface Product {
     category?: { id: number; name: string };
 }
 
-export interface ExportOrder {
-    id: number; exportDate: string; customer: string; status: string;
-    totalAmount: number; items: string; createdAt: string;
-}
-
 export interface EcommerceExport {
     id: number; customerName: string; ecommerceExportDate: string; status: string;
     totalAmount: number; items: string; orderNumber?: string; createdAt: string;
-}
-
-export interface Purchase {
-    id: number; supplierId: number; supplierName?: string; purchaseDate: string;
-    totalAmount: number; status: string; items: string; createdAt: string;
 }
 
 export interface Combo {
@@ -27,20 +17,18 @@ export interface Combo {
 
 interface AppDataContextValue {
     products: Product[];
-    exportOrders: ExportOrder[];
     ecomExports: EcommerceExport[];
-    purchases: Purchase[];
     combos: Combo[];
-    costMap: Record<string, number>;
     loading: boolean;
     refresh: () => void;
 }
 
 type AppDataSnapshot = Omit<AppDataContextValue, 'loading' | 'refresh'>;
+export type AppDataRequirements = Partial<Record<keyof AppDataSnapshot, boolean>>;
 
 const AppDataContext = createContext<AppDataContextValue | null>(null);
 
-let appDataInflight: Promise<AppDataSnapshot> | null = null;
+const appDataInflight = new Map<keyof AppDataSnapshot, Promise<ApiListResult<unknown>>>();
 const APP_DATA_TIMEOUT_MS = 15000;
 
 type ApiListResult<T> = {
@@ -69,79 +57,65 @@ async function safeListCall<T>(name: string, promise: Promise<ApiListResult<T>>)
     }
 }
 
-async function fetchAppDataSnapshot(): Promise<AppDataSnapshot> {
-    if (appDataInflight) return appDataInflight;
+function fetchResource<T>(key: keyof AppDataSnapshot, loader: () => Promise<ApiListResult<T>>) {
+    const current = appDataInflight.get(key) as Promise<ApiListResult<T>> | undefined;
+    if (current) return current;
 
-    appDataInflight = (async () => {
-        const api = (window as any).electronAPI;
-        if (!api) throw new Error('electronAPI is not available');
-        const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-        const untilNow = new Date().toISOString();
-        const [pRes, exRes, ecRes, puRes, cbRes] = await Promise.all([
-            safeListCall<Product>('products:getCatalogForSale', (api.products.getCatalogForSale?.() || api.products.getAll())),
-            safeListCall<ExportOrder>('exportOrders:getAll', api.exportOrders.getAll({ since: since90 })),
-            safeListCall<EcommerceExport>('ecommerceExports:getAll', api.ecommerceExports.getAll({ since: since90, until: untilNow, limit: 2000 })),
-            safeListCall<Purchase>('purchases:getAll', api.purchases.getAll({ since: since90 })),
-            safeListCall<Combo>('combos:getAll', api.combos.getAll()),
-        ]);
-
-        const products = pRes.success ? (pRes.data || []) : [];
-        const exportOrders = exRes.success ? (exRes.data || []) : [];
-        const ecomExports = ecRes.success ? (ecRes.data || []) : [];
-        const purchases = puRes.success ? (puRes.data || []) : [];
-        const combos = cbRes.success ? (cbRes.data || []) : [];
-        const costMap: Record<string, number> = {};
-
-        for (const p of products) {
-            if (p.sku) costMap[p.sku] = p.cost ?? 0;
-            try {
-                const variants = p.variants ? JSON.parse(p.variants) : [];
-                for (const v of variants) {
-                    if (v.sku) costMap[v.sku] = (v.cost != null && v.cost > 0) ? v.cost : (p.cost ?? 0);
-                }
-            } catch { /* skip */ }
-        }
-
-        for (const c of combos) {
-            if (c.sku) costMap[c.sku] = c.cost || 0;
-        }
-
-        return { products, exportOrders, ecomExports, purchases, combos, costMap };
-    })();
-
-    try {
-        return await appDataInflight;
-    } finally {
-        appDataInflight = null;
-    }
+    const request = loader().finally(() => appDataInflight.delete(key));
+    appDataInflight.set(key, request as Promise<ApiListResult<unknown>>);
+    return request;
 }
 
-export function AppDataProvider({ children }: { children: ReactNode }) {
+async function fetchAppDataSnapshot(requirements: Required<AppDataRequirements>): Promise<AppDataSnapshot> {
+    const api = (window as any).electronAPI;
+    if (!api) throw new Error('electronAPI is not available');
+    const since90 = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+    const untilNow = new Date().toISOString();
+    const productsRequest = requirements.products
+        ? fetchResource<Product>('products', () => safeListCall<Product>('products:getCatalogForSale', (api.products.getCatalogForSale?.() || api.products.getAll())))
+        : Promise.resolve({ success: true, data: [] } as ApiListResult<Product>);
+    const ecomExportsRequest = requirements.ecomExports
+        ? fetchResource<EcommerceExport>('ecomExports', () => safeListCall<EcommerceExport>('ecommerceExports:getAll', api.ecommerceExports.getAll({ since: since90, until: untilNow, limit: 2000 })))
+        : Promise.resolve({ success: true, data: [] } as ApiListResult<EcommerceExport>);
+    const combosRequest = requirements.combos
+        ? fetchResource<Combo>('combos', () => safeListCall<Combo>('combos:getAll', api.combos.getAll()))
+        : Promise.resolve({ success: true, data: [] } as ApiListResult<Combo>);
+    const [pRes, ecRes, cbRes] = await Promise.all([productsRequest, ecomExportsRequest, combosRequest]);
+
+    return {
+        products: pRes.success ? (pRes.data || []) : [],
+        ecomExports: ecRes.success ? (ecRes.data || []) : [],
+        combos: cbRes.success ? (cbRes.data || []) : [],
+    };
+}
+
+export function AppDataProvider({ children, requirements = {} }: { children: ReactNode; requirements?: AppDataRequirements }) {
+    const needsProducts = requirements.products === true;
+    const needsEcomExports = requirements.ecomExports === true;
+    const needsCombos = requirements.combos === true;
     const [loading, setLoading] = useState(true);
     const [products, setProducts] = useState<Product[]>([]);
-    const [exportOrders, setExportOrders] = useState<ExportOrder[]>([]);
     const [ecomExports, setEcomExports] = useState<EcommerceExport[]>([]);
-    const [purchases, setPurchases] = useState<Purchase[]>([]);
     const [combos, setCombos] = useState<Combo[]>([]);
-    const [costMap, setCostMap] = useState<Record<string, number>>({});
     const stockRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const loadData = useCallback(async (silent = false) => {
         try {
             if (!silent) setLoading(true);
-            const snapshot = await fetchAppDataSnapshot();
+            const snapshot = await fetchAppDataSnapshot({
+                products: needsProducts,
+                ecomExports: needsEcomExports,
+                combos: needsCombos,
+            });
             setProducts(snapshot.products);
-            setExportOrders(snapshot.exportOrders);
             setEcomExports(snapshot.ecomExports);
-            setPurchases(snapshot.purchases);
             setCombos(snapshot.combos);
-            setCostMap(snapshot.costMap);
         } catch (e) {
             console.error('AppData load error:', e);
         } finally {
             if (!silent) setLoading(false);
         }
-    }, []);
+    }, [needsProducts, needsEcomExports, needsCombos]);
 
     useEffect(() => {
         loadData();
@@ -149,7 +123,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
 
     useEffect(() => {
         const api = (window as any).electronAPI;
-        if (!api?.products?.onStockChanged || !api?.products?.getBySkus) return;
+        if (!needsProducts || !api?.products?.onStockChanged || !api?.products?.getBySkus) return;
 
         const unsubscribe = api.products.onStockChanged((change: { sku?: string; skus?: string[] }) => {
             const skus = [...new Set([...(change?.skus || []), change?.sku]
@@ -171,11 +145,11 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
             if (stockRefreshTimerRef.current) clearTimeout(stockRefreshTimerRef.current);
             unsubscribe?.();
         };
-    }, []);
+    }, [needsProducts]);
 
     return (
         <AppDataContext.Provider value={{
-            products, exportOrders, ecomExports, purchases, combos, costMap, loading,
+            products, ecomExports, combos, loading,
             refresh: () => loadData(true),
         }}>
             {children}

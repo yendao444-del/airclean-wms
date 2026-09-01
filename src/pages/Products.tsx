@@ -1021,6 +1021,9 @@ export default function ProductsPage() {
             width: 120,
             minWidth: 100,
             fixed: 'right' as const,
+            onCell: () => ({
+                onClick: (event) => event.stopPropagation(),
+            }),
             render: (_: any, record: Product) => {
                 const menuItems: MenuProps['items'] = [
                     {

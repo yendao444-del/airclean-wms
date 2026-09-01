@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, lazy, Suspense, Component, ErrorInfo, ReactNode } from 'react';
+import { useState, useEffect, useMemo, useRef, lazy, Suspense, Component, ErrorInfo, ReactNode } from 'react';
 import { Layout, Menu, Button, Typography, ConfigProvider, Space, Dropdown, Tooltip, Avatar } from 'antd';
 import AntAppProvider from './components/AntAppProvider';
 import {
@@ -31,6 +31,9 @@ import {
     WalletOutlined,
     ApartmentOutlined,
     SafetyCertificateOutlined,
+    EyeOutlined,
+    TeamOutlined,
+    CloseOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import viVN from 'antd/locale/vi_VN';
@@ -38,13 +41,15 @@ import './App.css';
 import { usePermissions } from './lib/hooks/usePermissions';
 import ForceUpdateGate from './components/ForceUpdateGate';
 
-// ✅ EAGER LOADING - Chỉ Dashboard (trang mặc định) + global components
-import DashboardPage from './pages/Dashboard';
+// Dashboard includes charting code, so load it after authentication like the
+// rest of the operational screens instead of making the login bundle pay for it.
+const DashboardPage = lazy(() => import('./pages/Dashboard'));
 import GlobalTaskAlerts from './components/GlobalTaskAlerts';
 import HeaderTaskTicker from './components/HeaderTaskTicker';
 
 import Login from './pages/Login';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import type { AuthUser } from './contexts/AuthContext';
 import { PageHeaderProvider, usePageHeader } from './contexts/PageHeaderContext';
 import { AppDataProvider } from './contexts/AppDataContext';
 
@@ -111,18 +116,140 @@ type MenuItem = Required<MenuProps>['items'][number];
 
 
 function AppContent() {
-    const { user, logout } = useAuth();
+    const {
+        user,
+        actualUser,
+        previewUser,
+        isRolePreview,
+        startRolePreview,
+        stopRolePreview,
+        logout,
+    } = useAuth();
     const { getAccessibleMenuKeys, hasPermission } = usePermissions();
     const [selectedKey, setSelectedKey] = useState('dashboard');
     const [collapsed, setCollapsed] = useState(false);
+    const [previewAccounts, setPreviewAccounts] = useState<AuthUser[]>([]);
+    const [previewAccountsLoading, setPreviewAccountsLoading] = useState(false);
+    const [previewAccountsError, setPreviewAccountsError] = useState('');
     const previousAccessiblePageRef = useRef('dashboard');
-    const roleLabel = user?.role === 'admin' ? 'Quản trị viên' : user?.role === 'manager' ? 'Quản lý' : 'Nhân viên';
-    const profileLabel = user?.fullName?.trim().toLocaleLowerCase('vi-VN') === roleLabel.toLocaleLowerCase('vi-VN')
-        ? user.username
-        : (user?.fullName || user?.username || 'Tài khoản');
+    const roleLabel = actualUser?.role === 'admin' ? 'Quản trị viên' : actualUser?.role === 'manager' ? 'Quản lý' : 'Nhân viên';
+    const profileLabel = actualUser?.fullName?.trim().toLocaleLowerCase('vi-VN') === roleLabel.toLocaleLowerCase('vi-VN')
+        ? actualUser.username
+        : (actualUser?.fullName || actualUser?.username || 'Tài khoản');
+    const previewRoleLabel = previewUser?.role === 'manager'
+        ? 'Quản lý'
+        : previewUser?.role === 'viewer'
+            ? 'Nhân viên chỉ xem'
+            : 'Nhân viên';
+
+    useEffect(() => {
+        if (actualUser?.role !== 'admin') {
+            setPreviewAccounts([]);
+            setPreviewAccountsError('');
+            return;
+        }
+
+        let cancelled = false;
+        setPreviewAccountsLoading(true);
+        setPreviewAccountsError('');
+        window.electronAPI.users.getAll()
+            .then(result => {
+                if (cancelled) return;
+                if (!result.success || !Array.isArray(result.data)) {
+                    setPreviewAccountsError(result.error || 'Không tải được danh sách tài khoản.');
+                    return;
+                }
+                setPreviewAccounts(result.data.filter((account: AuthUser & { employmentStatus?: string }) =>
+                    account.role !== 'admin'
+                    && account.isActive !== false
+                    && account.employmentStatus !== 'resigned'
+                ));
+            })
+            .catch(() => {
+                if (!cancelled) setPreviewAccountsError('Không tải được danh sách tài khoản.');
+            })
+            .finally(() => {
+                if (!cancelled) setPreviewAccountsLoading(false);
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [actualUser?.id, actualUser?.role]);
 
     // Filter menu items based on user permissions
-    const accessibleKeys = getAccessibleMenuKeys();
+    const accessibleKeys = useMemo(
+        () => getAccessibleMenuKeys(),
+        [user?.role, user?.isTestAccount],
+    );
+    const genericManagerPreview: AuthUser = {
+        id: -101,
+        username: 'preview-manager',
+        fullName: 'Mẫu quyền Quản lý',
+        role: 'manager',
+        isActive: true,
+    };
+    const genericStaffPreview: AuthUser = {
+        id: -102,
+        username: 'preview-staff',
+        fullName: 'Mẫu quyền Nhân viên',
+        role: 'staff',
+        isActive: true,
+    };
+    const managerPreviewAccounts = previewAccounts.filter(account => account.role === 'manager');
+    const staffPreviewAccounts = previewAccounts.filter(account => account.role === 'staff' || account.role === 'viewer');
+    const managerTargets = managerPreviewAccounts.length > 0 ? managerPreviewAccounts : [genericManagerPreview];
+    const staffTargets = staffPreviewAccounts.length > 0 ? staffPreviewAccounts : [genericStaffPreview];
+    const createPreviewMenuItem = (account: AuthUser): MenuItem => ({
+        key: `preview-${account.role}-${account.id}`,
+        icon: account.role === 'manager' ? <TeamOutlined /> : <UserOutlined />,
+        label: (
+            <div style={{ minWidth: 210, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis' }}>{account.fullName || account.username}</div>
+                    <div style={{ color: '#64748b', fontSize: 11 }}>{account.username}</div>
+                </div>
+                {previewUser?.id === account.id && <CheckCircleOutlined style={{ color: '#00ab56' }} />}
+            </div>
+        ),
+        onClick: () => startRolePreview(account),
+    } as MenuItem);
+    const previewMenuItems: MenuProps['items'] = previewAccountsLoading ? [
+        { key: 'preview-loading', label: 'Đang tải danh sách tài khoản...', disabled: true },
+    ] : [
+        {
+            key: 'preview-title',
+            label: (
+                <div style={{ padding: '2px 0' }}>
+                    <div style={{ fontWeight: 800 }}>Xem giao diện với vai trò</div>
+                    <div style={{ color: '#64748b', fontSize: 11 }}>Chỉ mô phỏng phần hiển thị và phạm vi dữ liệu.</div>
+                </div>
+            ),
+            disabled: true,
+        },
+        ...(previewAccountsError ? [{ key: 'preview-error', label: previewAccountsError, danger: true, disabled: true } as MenuItem] : []),
+        { type: 'divider' },
+        {
+            type: 'group',
+            label: 'Quản lý',
+            children: managerTargets.map(createPreviewMenuItem),
+        },
+        {
+            type: 'group',
+            label: 'Nhân viên',
+            children: staffTargets.map(createPreviewMenuItem),
+        },
+        ...(isRolePreview ? [
+            { type: 'divider' as const },
+            {
+                key: 'stop-preview',
+                icon: <CloseOutlined />,
+                label: 'Trở về giao diện Admin',
+                danger: true,
+                onClick: stopRolePreview,
+            } as MenuItem,
+        ] : []),
+    ];
     const canAccessKey = (key: string) => accessibleKeys.includes(key);
     const navigateTo = (key: string) => {
         if (key === 'my-profile' || canAccessKey(key)) {
@@ -153,10 +280,10 @@ function AppContent() {
     }, [user, selectedKey, accessibleKeys]);
 
     useEffect(() => {
-        if (user?.mustChangePassword && user.role !== 'admin' && selectedKey !== 'my-profile') {
+        if (actualUser?.mustChangePassword && actualUser.role !== 'admin' && selectedKey !== 'my-profile') {
             setSelectedKey('my-profile');
         }
-    }, [selectedKey, user?.mustChangePassword, user?.role]);
+    }, [actualUser?.mustChangePassword, actualUser?.role, selectedKey]);
 
     // Lắng nghe sự kiện navigate từ các component không có state selectedKey
     useEffect(() => {
@@ -350,7 +477,9 @@ function AppContent() {
             return null;
         }
 
-        const withAppData = (node: ReactNode) => <AppDataProvider>{node}</AppDataProvider>;
+        const withAppData = (node: ReactNode, requirements: Parameters<typeof AppDataProvider>[0]['requirements']) => (
+            <AppDataProvider requirements={requirements}>{node}</AppDataProvider>
+        );
 
         switch (selectedKey) {
             case 'dashboard':
@@ -367,7 +496,7 @@ function AppContent() {
             case 'fee-calculator':
                 return <FeeCalculatorPage />;
             case 'order-picking':
-                return withAppData(<OrderPickingPage />);
+                return withAppData(<OrderPickingPage />, { products: true, combos: true });
             case 'purchase':
                 return <PurchasePage />;
             case 'supplier-debt':
@@ -377,7 +506,7 @@ function AppContent() {
             case 'returns':
                 return <ReturnsPage />;
             case 'refunds':
-                return withAppData(<RefundsPage />);
+                return withAppData(<RefundsPage />, { products: true });
             case 'ecommerce-export':
                 return <EcommerceExportPage />;
             case 'carrier-complaints':
@@ -387,9 +516,9 @@ function AppContent() {
             case 'orders':
                 return <OrdersPage />;
             case 'stock-balance':
-                return withAppData(<StockBalancePage />);
+                return withAppData(<StockBalancePage />, { products: true, ecomExports: true });
             case 'stock-check':
-                return withAppData(<StockCheckPage />);
+                return withAppData(<StockCheckPage />, { products: true });
             case 'handling-units':
                 return <HandlingUnitsPage onExit={exitHandlingUnits} />;
             case 'business-report':
@@ -428,6 +557,7 @@ function AppContent() {
     // Handling units is a warehouse workspace, not another cramped POS page.
     // It keeps the Electron title bar/session but owns the complete app area.
     const isHandlingUnitsWorkspace = selectedKey === 'handling-units';
+    const shellTop = isRolePreview ? 82 : 40;
     return (
         <ConfigProvider
             locale={viVN}
@@ -486,6 +616,22 @@ function AppContent() {
                                 </div>
                             </Tooltip>
                         ))}
+                        {actualUser?.role === 'admin' && (
+                            <Dropdown
+                                trigger={['click']}
+                                placement="bottomRight"
+                                menu={{ items: previewMenuItems }}
+                            >
+                                <Button
+                                    className={`role-preview-trigger${isRolePreview ? ' role-preview-trigger--active' : ''}`}
+                                    type="text"
+                                    shape="circle"
+                                    icon={<EyeOutlined />}
+                                    aria-label="Xem giao diện theo vai trò"
+                                    title={isRolePreview ? 'Đổi vai trò đang xem' : 'Xem giao diện theo vai trò'}
+                                />
+                            </Dropdown>
+                        )}
                     </div>
                     <div style={{ width: 1, height: 16, background: '#e8e8e8', margin: '0 4px' }} />
                     <div style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
@@ -502,9 +648,12 @@ function AppContent() {
                                     { type: 'divider' },
                                     {
                                         key: 'my-profile',
-                                        label: 'Hồ sơ của tôi',
+                                        label: isRolePreview ? 'Trở về hồ sơ Admin' : 'Hồ sơ của tôi',
                                         icon: <UserOutlined />,
-                                        onClick: () => navigateTo('my-profile'),
+                                        onClick: () => {
+                                            if (isRolePreview) stopRolePreview();
+                                            navigateTo('my-profile');
+                                        },
                                     },
                                     {
                                         key: 'logout',
@@ -521,8 +670,8 @@ function AppContent() {
                                 onMouseEnter={e => (e.currentTarget.style.boxShadow = '0 0 0 3px #e5e7eb')}
                                 onMouseLeave={e => (e.currentTarget.style.boxShadow = 'none')}
                             >
-                                <Avatar size={32} src={user?.avatar || undefined} style={{ background: user?.role === 'admin' ? '#f59e0b' : user?.role === 'manager' ? '#3b82f6' : '#00ab56', color: '#fff', fontWeight: 800, boxShadow: '0 2px 8px rgba(0,0,0,0.18)' }}>
-                                    {user?.role === 'admin' ? '👑' : (user?.username || 'U')[0].toUpperCase()}
+                                <Avatar size={32} src={actualUser?.avatar || undefined} style={{ background: actualUser?.role === 'admin' ? '#f59e0b' : actualUser?.role === 'manager' ? '#3b82f6' : '#00ab56', color: '#fff', fontWeight: 800, boxShadow: '0 2px 8px rgba(0,0,0,0.18)' }}>
+                                    {actualUser?.role === 'admin' ? '👑' : (actualUser?.username || 'U')[0].toUpperCase()}
                                 </Avatar>
                                 {/* Online dot */}
                                 <div style={{
@@ -535,7 +684,21 @@ function AppContent() {
                         </Dropdown>
                     </div>
                 </div>
-                <Layout className="app-shell" style={{ minHeight: '100vh', background: '#f0f2f5', paddingTop: 40 }}>
+                {isRolePreview && previewUser && (
+                    <div className="role-preview-banner">
+                        <div className="role-preview-banner__identity">
+                            <EyeOutlined />
+                            <span>Đang xem với quyền:</span>
+                            <strong>{previewRoleLabel} — {previewUser.fullName || previewUser.username}</strong>
+                            <span className="role-preview-banner__username">@{previewUser.username}</span>
+                        </div>
+                        <div className="role-preview-banner__notice">Chỉ dùng để kiểm tra hiển thị; tránh thao tác ghi dữ liệu.</div>
+                        <Button size="small" icon={<CloseOutlined />} onClick={stopRolePreview}>
+                            Thoát chế độ xem
+                        </Button>
+                    </div>
+                )}
+                <Layout className="app-shell" style={{ minHeight: '100vh', background: '#f0f2f5', paddingTop: shellTop }}>
                     {!isHandlingUnitsWorkspace && <Sider
                         className="app-sidebar"
                         collapsible
@@ -545,10 +708,10 @@ function AppContent() {
                         collapsedWidth={80}
                         style={{
                             overflow: 'auto',
-                            height: 'calc(100vh - 40px)',
+                            height: `calc(100vh - ${shellTop}px)`,
                             position: 'fixed',
                             left: 0,
-                            top: 40,
+                            top: shellTop,
                             bottom: 0,
                             background: '#fff',
                             boxShadow: '2px 0 8px rgba(0,0,0,0.06)',
@@ -597,12 +760,15 @@ function AppContent() {
                         </Header>}
 
                         <Content
+                            key={`viewer-${user?.role || 'none'}-${user?.id || 0}`}
                             className={`app-content app-content--${selectedKey}`}
                             style={{
                                 margin: (selectedKey === 'pos' || selectedKey === 'daily-tasks' || isHandlingUnitsWorkspace) ? 0 : 24,
                                 padding: 0,
                                 minHeight: 280,
-                                maxHeight: (selectedKey === 'pos' || selectedKey === 'daily-tasks' || isHandlingUnitsWorkspace) ? 'calc(100vh - 40px)' : 'calc(100vh - 112px)',
+                                maxHeight: (selectedKey === 'pos' || selectedKey === 'daily-tasks' || isHandlingUnitsWorkspace)
+                                    ? `calc(100vh - ${shellTop}px)`
+                                    : `calc(100vh - ${shellTop + 72}px)`,
                                 overflowY: selectedKey === 'pos' ? 'hidden' : 'auto',
                                 overflowX: 'auto',
                             }}
@@ -637,7 +803,8 @@ function AppContent() {
 
 function SessionUpdateGate({ children }: { children: React.ReactNode }) {
     const { isAuthenticated } = useAuth();
-    return isAuthenticated ? <ForceUpdateGate>{children}</ForceUpdateGate> : <>{children}</>;
+    const isUpdateUiPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).has('updateUiTest');
+    return isAuthenticated || isUpdateUiPreview ? <ForceUpdateGate>{children}</ForceUpdateGate> : <>{children}</>;
 }
 
 function OfflineQueueSync() {

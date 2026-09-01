@@ -8,6 +8,7 @@ const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 1024 * 1024;
 const MAX_TEST_STORAGE_BYTES = 500 * 1024 * 1024;
 const MAX_TEST_OBJECTS = 500;
+const DATA_SAFETY_MODE = true;
 
 const json = (body: unknown, status = 200, origin = "*") =>
   new Response(JSON.stringify(body), {
@@ -63,6 +64,9 @@ export default {
       if (contentType.startsWith("image/") && body.byteLength >= MAX_IMAGE_BYTES) {
         return json({ ok: false, error: "Images must be compressed below 1 MB before upload" }, 413, origin);
       }
+      if (DATA_SAFETY_MODE && await env.R2_TEST_BUCKET.head(key)) {
+        return json({ ok: false, blocked: true, error: "Replacing an existing object is disabled by data-safety mode" }, 409, origin);
+      }
       const usage = await env.R2_TEST_BUCKET.list({ prefix: "test/", limit: 501 });
       const usedBytes = usage.objects.reduce((sum, item) => sum + item.size, 0);
       if (usage.objects.length >= MAX_TEST_OBJECTS || usage.truncated || usedBytes + body.byteLength > MAX_TEST_STORAGE_BYTES) {
@@ -81,6 +85,9 @@ export default {
       return request.method === "HEAD" ? new Response(null, { headers }) : new Response(object.body, { headers });
     }
     if (request.method === "DELETE") {
+      if (DATA_SAFETY_MODE) {
+        return json({ ok: false, blocked: true, error: "Deletion is disabled by data-safety mode" }, 423, origin);
+      }
       await env.R2_TEST_BUCKET.delete(key);
       return json({ ok: true, key, deleted: true }, 200, origin);
     }

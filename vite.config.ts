@@ -34,17 +34,21 @@ export default defineConfig({
         // 🎯 CODE SPLITTING & VENDOR CHUNKS
         rollupOptions: {
             output: {
-                // Manual chunks for better caching
-                manualChunks: {
-                    // Charts & visualization (if used)
-                    'vendor-charts': ['recharts'],
-
-                    // Date utilities
-                    'vendor-utils': ['dayjs', 'dayjs/locale/vi'],
-
-                    // Excel libraries
-                    'vendor-excel': ['xlsx'],
+                // Explicit package-only chunks keep shared React runtime out
+                // of lazy feature bundles. The object form also pulled chart
+                // dependencies into vendor-charts, making it preload at login.
+                manualChunks(id) {
+                    const normalizedId = id.replace(/\\/g, '/');
+                    if (normalizedId.includes('/node_modules/recharts/')) return 'vendor-charts';
+                    if (normalizedId.includes('/node_modules/dayjs/')) return 'vendor-utils';
+                    if (normalizedId.includes('/node_modules/xlsx/')) return 'vendor-excel';
+                    return undefined;
                 },
+
+                // Keep React and other shared runtime dependencies in the
+                // entry/shared graph instead of pulling them into a lazy
+                // feature chunk such as recharts.
+                onlyExplicitManualChunks: true,
 
                 // Naming pattern for chunks
                 chunkFileNames: 'assets/js/[name]-[hash].js',
@@ -65,15 +69,17 @@ export default defineConfig({
 
     // ⚡ OPTIMIZATION FOR DEPENDENCIES
     optimizeDeps: {
-        // Pre-bundle these dependencies
+        // Keep the initial set small: feature-only packages are discovered when
+        // their lazy page is opened instead of blocking the first app window.
         include: [
             'react',
             'react-dom',
             'antd',
-            '@ant-design/icons',
             'dayjs',
-            'xlsx',
         ],
+        // The explicit shell dependencies above are known up front, so let the
+        // browser consume their result without waiting for the full import crawl.
+        holdUntilCrawlEnd: false,
         // Exclude from pre-bundling (already optimized)
         exclude: [],
     },

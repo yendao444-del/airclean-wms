@@ -8,7 +8,7 @@ import {
     CheckCircleOutlined, CloudUploadOutlined, DeleteOutlined, HistoryOutlined, MailOutlined,
     SafetyCertificateOutlined, SendOutlined, SettingOutlined, ShopOutlined,
 } from '@ant-design/icons';
-import * as XLSX from 'xlsx';
+import type { WorkBook } from 'xlsx';
 import dayjs from 'dayjs';
 import './CarrierComplaints.css';
 
@@ -69,9 +69,9 @@ function identifyCarrier(raw: unknown) {
     return { code, name: CARRIER_NAMES[code] || String(raw || 'Chưa nhận diện').trim() };
 }
 
-function parseWorkbook(workbook: XLSX.WorkBook, sourceFile: string): ComplaintOrder[] {
+function parseWorkbook(workbook: WorkBook, sourceFile: string, xlsx: typeof import('xlsx')): ComplaintOrder[] {
     const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '' });
+    const rows = xlsx.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '' });
     const first = rows[0] || {};
     const isTikTok = Object.keys(first).some(key => ['order id', 'cancelled time'].includes(normalizeHeader(key)));
     const isShopee = rowValue(first, ['Mã đơn hàng']) !== undefined
@@ -190,10 +190,11 @@ export default function CarrierComplaintsPage() {
     const readFiles = async (files: File[]) => {
         setLoading(true);
         try {
+            const XLSX = await import('xlsx');
             const parsed: ComplaintOrder[] = [];
             for (const file of files) {
                 const buffer = await file.arrayBuffer();
-                parsed.push(...parseWorkbook(XLSX.read(buffer, { type: 'array' }), file.name));
+                parsed.push(...parseWorkbook(XLSX.read(buffer, { type: 'array' }), file.name, XLSX));
             }
             await reconcile(parsed, files.length);
         } catch (error) {
@@ -219,10 +220,11 @@ export default function CarrierComplaintsPage() {
             }
             const loaded = await window.electronAPI.ecommerceExports.loadExcelFiles(folder.data);
             if (!loaded.success) throw new Error(loaded.error || 'Không đọc được thư mục');
+            const XLSX = await import('xlsx');
             const parsed: ComplaintOrder[] = [];
             for (const file of loaded.data || []) {
                 const bytes = Uint8Array.from(atob(file.data), char => char.charCodeAt(0));
-                parsed.push(...parseWorkbook(XLSX.read(bytes, { type: 'array' }), file.name));
+                parsed.push(...parseWorkbook(XLSX.read(bytes, { type: 'array' }), file.name, XLSX));
             }
             await reconcile(parsed, loaded.data?.length || 0);
         } catch (error) {

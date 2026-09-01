@@ -8,6 +8,8 @@ echo.
 cd /d "%~dp0"
 
 echo [1/3] Tat Electron cu...
+powershell -NoProfile -Command "$root=(Resolve-Path '.').Path; Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -like ('*'+$root+'*') -and $_.CommandLine -match 'nodemon.+nodemon\.electron\.json' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+timeout /t 1 /nobreak >nul
 taskkill /F /IM electron.exe 2>nul
 timeout /t 1 /nobreak >nul
 

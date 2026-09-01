@@ -1,4 +1,19 @@
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Button, Progress } from 'antd';
+import {
+    CheckOutlined,
+    ClockCircleOutlined,
+    CloseOutlined,
+    DatabaseOutlined,
+    DownloadOutlined,
+    InboxOutlined,
+    ReloadOutlined,
+    SafetyCertificateOutlined,
+    SettingOutlined,
+    SyncOutlined,
+    WarningOutlined,
+} from '@ant-design/icons';
+import './ForceUpdateGate.css';
 
 type UpdateStep = 'checking' | 'downloading' | 'extracting' | 'installing' | 'restarting';
 type GateStatus = UpdateStep | 'error' | 'idle';
@@ -20,28 +35,53 @@ interface ProgressData {
     elapsed: number;
 }
 
+interface TestEventDetail {
+    status?: GateStatus;
+    percent?: number;
+    currentVersion?: string;
+    latestVersion?: string;
+}
+
 interface ForceUpdateGateProps {
     children: React.ReactNode;
 }
 
-const STEPS: { key: UpdateStep; label: string; icon: string; desc: string }[] = [
-    { key: 'checking', label: 'Kiểm tra phiên bản', icon: '🔍', desc: 'Kết nối GitHub...' },
-    { key: 'downloading', label: 'Tải bản cập nhật', icon: '⬇', desc: 'Đang tải...' },
-    { key: 'extracting', label: 'Giải nén', icon: '📦', desc: 'Giải nén files...' },
-    { key: 'installing', label: 'Cài đặt', icon: '📋', desc: 'Cập nhật files vào ứng dụng' },
-    { key: 'restarting', label: 'Khởi động lại', icon: '🔄', desc: 'App sẽ tự mở lại' },
+const STEPS: { key: UpdateStep; label: string; icon: React.ReactNode }[] = [
+    { key: 'checking', label: 'Kiểm tra', icon: <CheckOutlined /> },
+    { key: 'downloading', label: 'Tải xuống', icon: <DownloadOutlined /> },
+    { key: 'extracting', label: 'Giải nén', icon: <InboxOutlined /> },
+    { key: 'installing', label: 'Cài đặt', icon: <SettingOutlined /> },
+    { key: 'restarting', label: 'Khởi động lại', icon: <ReloadOutlined /> },
 ];
 
+const DEV_PREVIEW = import.meta.env.DEV && new URLSearchParams(window.location.search).has('updateUiTest');
+
 export default function ForceUpdateGate({ children }: ForceUpdateGateProps) {
-    const [status, setStatus] = useState<GateStatus>('checking');
-    const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
-    const [progress, setProgress] = useState<ProgressData | null>(null);
+    const [status, setStatus] = useState<GateStatus>(DEV_PREVIEW ? 'installing' : 'checking');
+    const [testMode, setTestMode] = useState(DEV_PREVIEW);
+    const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(DEV_PREVIEW ? {
+        currentVersion: '1.0.397',
+        latestVersion: '1.0.398',
+        releaseNotes: '',
+        downloadUrl: '',
+        downloadSize: 0,
+    } : null);
+    const [progress, setProgress] = useState<ProgressData | null>(DEV_PREVIEW ? {
+        percent: 84,
+        dlMB: '84.0',
+        totalMB: '100.0',
+        speedKBs: 0,
+        etaSec: 18,
+        elapsed: 42,
+    } : null);
     const [errorMessage, setErrorMessage] = useState('');
-    const [elapsed, setElapsed] = useState(0);
+    const [elapsed, setElapsed] = useState(DEV_PREVIEW ? 42 : 0);
     const autoStarted = useRef(false);
+    const testModeRef = useRef(DEV_PREVIEW);
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const doDownload = async (info: UpdateInfo) => {
+        if (testModeRef.current) return;
         if (!info.downloadUrl) {
             setErrorMessage('Bản cập nhật chưa có gói tải hợp lệ. Ứng dụng vẫn có thể sử dụng bình thường.');
             setStatus('error');
@@ -62,7 +102,10 @@ export default function ForceUpdateGate({ children }: ForceUpdateGateProps) {
         }
     };
 
-    // Elapsed timer
+    useEffect(() => {
+        testModeRef.current = testMode;
+    }, [testMode]);
+
     useEffect(() => {
         if (status !== 'idle' && status !== 'error') {
             timerRef.current = setInterval(() => setElapsed(prev => prev + 1), 1000);
@@ -70,16 +113,37 @@ export default function ForceUpdateGate({ children }: ForceUpdateGateProps) {
         }
     }, [status]);
 
-    // Listen for progress & step events from main process
+    useEffect(() => {
+        const openTestPreview = (event: Event) => {
+            const detail = (event as CustomEvent<TestEventDetail>).detail || {};
+            const percent = Math.max(0, Math.min(100, detail.percent ?? 84));
+            testModeRef.current = true;
+            setTestMode(true);
+            setErrorMessage('');
+            setElapsed(42);
+            setUpdateInfo({
+                currentVersion: detail.currentVersion || '1.0.397',
+                latestVersion: detail.latestVersion || '1.0.398',
+                releaseNotes: '',
+                downloadUrl: '',
+                downloadSize: 0,
+            });
+            setProgress({ percent, dlMB: String(percent), totalMB: '100', speedKBs: 0, etaSec: 18, elapsed: 42 });
+            setStatus(detail.status || 'installing');
+        };
+        window.addEventListener('dby:update-ui-test', openTestPreview);
+        return () => window.removeEventListener('dby:update-ui-test', openTestPreview);
+    }, []);
+
     useEffect(() => {
         const api = (window as any).electronAPI?.update;
         if (!api) return;
 
         const cleanupProgress = api.onProgress?.((data: ProgressData) => {
-            setProgress(data);
+            if (!testModeRef.current) setProgress(data);
         });
         const cleanupStep = api.onStep?.((data: { step: UpdateStep; message: string }) => {
-            setStatus(data.step);
+            if (!testModeRef.current) setStatus(data.step);
         });
 
         return () => {
@@ -88,8 +152,8 @@ export default function ForceUpdateGate({ children }: ForceUpdateGateProps) {
         };
     }, []);
 
-    // Initial check
     useEffect(() => {
+        if (DEV_PREVIEW) return;
         const checkAndAutoUpdate = async () => {
             setStatus('checking');
             try {
@@ -106,7 +170,7 @@ export default function ForceUpdateGate({ children }: ForceUpdateGateProps) {
 
                     if (!autoStarted.current) {
                         autoStarted.current = true;
-                        console.log(`🔄 Auto-update: v${info.currentVersion} → v${info.latestVersion}`);
+                        console.log(`Auto-update: v${info.currentVersion} -> v${info.latestVersion}`);
                         await doDownload(info);
                     }
                 } else {
@@ -116,27 +180,36 @@ export default function ForceUpdateGate({ children }: ForceUpdateGateProps) {
                 setStatus('idle');
             }
         };
-        checkAndAutoUpdate();
+        void checkAndAutoUpdate();
     }, []);
 
-    // Idle hoặc đang checking → render app bình thường (checking chạy ngầm, không chặn)
-    if (status === 'idle' || status === 'checking') {
+    const displayPercent = useMemo(() => {
+        if (status === 'checking') return 8;
+        if (status === 'downloading') return progress?.percent || 36;
+        if (status === 'extracting') return Math.max(progress?.percent || 0, 68);
+        if (status === 'installing') return Math.max(progress?.percent || 0, 84);
+        if (status === 'restarting') return 100;
+        return progress?.percent || 0;
+    }, [progress?.percent, status]);
+
+    if (status === 'idle' || (status === 'checking' && !testMode)) {
         return <>{children}</>;
     }
 
-    // ===== FULL SCREEN BLOCKING - STEPS TIMELINE =====
-    const currentStepIdx = STEPS.findIndex(s => s.key === status);
-    const sizeMB = updateInfo?.downloadSize
-        ? (updateInfo.downloadSize / 1024 / 1024).toFixed(1)
-        : '0';
+    const currentStepIdx = STEPS.findIndex(step => step.key === status);
 
     const formatEta = (sec: number) => {
-        if (sec <= 0) return '--';
-        if (sec < 60) return `~${sec}s`;
-        return `~${Math.floor(sec / 60)}m${sec % 60}s`;
+        if (sec <= 0) return 'vài giây';
+        if (sec < 60) return `${sec} giây`;
+        return `${Math.floor(sec / 60)} phút ${sec % 60} giây`;
     };
 
     const retryUpdate = () => {
+        if (testMode) {
+            setStatus('installing');
+            setErrorMessage('');
+            return;
+        }
         autoStarted.current = false;
         setStatus('checking');
         setProgress(null);
@@ -153,197 +226,96 @@ export default function ForceUpdateGate({ children }: ForceUpdateGateProps) {
                 };
                 setUpdateInfo(info);
                 autoStarted.current = true;
-                doDownload(info);
+                void doDownload(info);
             } else {
                 setStatus('idle');
             }
         }).catch(() => setStatus('idle'));
     };
 
+    const closeTestMode = () => {
+        testModeRef.current = false;
+        setTestMode(false);
+        setStatus('idle');
+        setProgress(null);
+        setElapsed(0);
+        setErrorMessage('');
+    };
+
     return (
-        <div style={{
-            position: 'fixed', inset: 0, zIndex: 99999,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: 'linear-gradient(180deg, #111827 0%, #1e293b 100%)',
-            fontFamily: "'Segoe UI', -apple-system, sans-serif",
-        }}>
-            <div style={{ width: 520, padding: 48 }}>
-                {/* Header */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 36 }}>
-                    <div style={{
-                        width: 56, height: 56, borderRadius: 16,
-                        background: status === 'error'
-                            ? 'linear-gradient(135deg, #ff4d4f, #cf1322)'
-                            : 'linear-gradient(135deg, #00ab56, #34d399)',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        fontSize: 28, flexShrink: 0,
-                        boxShadow: status === 'error'
-                            ? '0 4px 20px rgba(255,77,79,0.3)'
-                            : '0 4px 20px rgba(0,171,86,0.3)',
-                    }}>
-                        {status === 'error' ? '❌' : '🏭'}
-                    </div>
-                    <div>
-                        <div style={{ fontSize: 18, fontWeight: 700, color: '#fff' }}>AIRCLEAN WMS</div>
-                        <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)' }}>
-                            {status === 'error'
-                                ? 'Cập nhật thất bại'
-                                : updateInfo
-                                    ? `Cập nhật v${updateInfo.currentVersion} → v${updateInfo.latestVersion}`
-                                    : `Đang kiểm tra...`}
-                        </div>
-                    </div>
+        <div className="update-gate" role="dialog" aria-modal="true" aria-label="Đang cập nhật ứng dụng">
+            <img className="update-gate__art" src="/login-assets/global-logistics-panel.png" alt="" />
+
+            <header className="update-gate__header">
+                <img src="/logo_splash.png" alt="DB" className="update-gate__logo" />
+                <span className="update-gate__brand-divider" />
+                <div>
+                    <strong>AIRCLEAN CORP.</strong>
+                    <span>Hệ thống nội bộ AIRCLEAN CORP.</span>
                 </div>
+            </header>
 
-                {/* Error state */}
-                {status === 'error' ? (
-                    <div style={{ textAlign: 'center' }}>
-                        <div style={{
-                            padding: '20px', marginBottom: 24, borderRadius: 12,
-                            background: 'rgba(255,77,79,0.08)',
-                            border: '1px solid rgba(255,77,79,0.2)',
-                            color: 'rgba(255,255,255,0.6)', fontSize: 14,
-                        }}>
-                            {errorMessage || 'Không thể cập nhật phần mềm. Vui lòng kiểm tra kết nối mạng và thử lại.'}
-                        </div>
-                        <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
-                            <button onClick={retryUpdate} style={{
-                                padding: '10px 28px', borderRadius: 10, border: 'none',
-                                background: '#00ab56', color: '#fff', fontSize: 14, fontWeight: 600,
-                                cursor: 'pointer',
-                            }}>🔄 Thử lại</button>
-                            <button onClick={() => setStatus('idle')} style={{
-                                padding: '10px 28px', borderRadius: 10,
-                                border: '1px solid rgba(255,255,255,0.2)',
-                                background: 'transparent', color: 'rgba(255,255,255,0.7)',
-                                fontSize: 14, cursor: 'pointer',
-                            }}>Bỏ qua</button>
-                        </div>
+            {testMode && (
+                <div className="update-gate__test-controls">
+                    <span>CHẾ ĐỘ KIỂM THỬ</span>
+                    <Button icon={<CloseOutlined />} onClick={closeTestMode}>Thoát kiểm thử</Button>
+                </div>
+            )}
+
+            {status === 'error' ? (
+                <main className="update-gate__error">
+                    <WarningOutlined />
+                    <h1>Cập nhật chưa hoàn tất</h1>
+                    <p>{errorMessage || 'Không thể cập nhật phần mềm. Vui lòng kiểm tra kết nối mạng và thử lại.'}</p>
+                    <div>
+                        <Button type="primary" icon={<ReloadOutlined />} onClick={retryUpdate}>Thử lại</Button>
+                        <Button onClick={testMode ? closeTestMode : () => setStatus('idle')}>{testMode ? 'Thoát kiểm thử' : 'Bỏ qua'}</Button>
                     </div>
-                ) : (
-                    <>
-                        {/* Steps */}
-                        <div style={{ display: 'flex', flexDirection: 'column' }}>
-                            {STEPS.map((step, i) => {
-                                const isDone = currentStepIdx > i;
-                                const isActive = currentStepIdx === i;
-                                const isPending = currentStepIdx < i;
+                </main>
+            ) : (
+                <main className="update-gate__main">
+                    <section className="update-gate__progress-panel">
+                        <Progress
+                            type="circle"
+                            percent={displayPercent}
+                            size={430}
+                            strokeWidth={4}
+                            strokeColor={{ '0%': '#d7bb63', '52%': '#9edbca', '100%': '#91c94a' }}
+                            railColor="rgba(215, 187, 99, 0.16)"
+                            format={percent => (
+                                <div className="update-gate__progress-content">
+                                    <InboxOutlined />
+                                    <strong>{percent}%</strong>
+                                    <span>{status === 'restarting' ? 'Sẵn sàng khởi động lại' : 'Đang cập nhật hệ thống'}</span>
+                                </div>
+                            )}
+                        />
+                    </section>
 
-                                return (
-                                    <div key={step.key} style={{
-                                        display: 'flex', alignItems: 'flex-start', gap: 16,
-                                        padding: '14px 0', position: 'relative',
-                                    }}>
-                                        {/* Dot */}
-                                        <div style={{
-                                            width: 32, height: 32, borderRadius: '50%',
-                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                            fontSize: 14, flexShrink: 0, position: 'relative', zIndex: 2,
-                                            transition: 'all 0.5s',
-                                            ...(isDone ? {
-                                                background: '#00ab56', border: '2px solid #00ab56', color: '#fff',
-                                            } : isActive ? {
-                                                background: 'rgba(0,171,86,0.15)', border: '2px solid #00ab56', color: '#00ab56',
-                                                animation: 'pulse 2s ease-in-out infinite',
-                                            } : {
-                                                background: 'rgba(255,255,255,0.06)', border: '2px solid rgba(255,255,255,0.1)',
-                                                color: 'rgba(255,255,255,0.2)', opacity: 0.4,
-                                            }),
-                                        }}>
-                                            {isDone ? '✓' : step.icon}
-                                        </div>
+                    <ol className="update-gate__steps" aria-label="Tiến trình cập nhật">
+                        {STEPS.map((step, index) => {
+                            const isDone = currentStepIdx > index;
+                            const isActive = currentStepIdx === index;
+                            return (
+                                <li key={step.key} className={`${isDone ? 'is-done' : ''} ${isActive ? 'is-active' : ''}`}>
+                                    <span className="update-gate__step-icon">{isDone ? <CheckOutlined /> : step.icon}</span>
+                                    <span>{step.label}</span>
+                                </li>
+                            );
+                        })}
+                    </ol>
+                </main>
+            )}
 
-                                        {/* Line */}
-                                        {i < STEPS.length - 1 && (
-                                            <div style={{
-                                                position: 'absolute', left: 15, top: 46,
-                                                width: 2, height: 'calc(100% - 32px)',
-                                                background: isDone ? '#00ab56' : 'rgba(255,255,255,0.08)',
-                                                transition: 'background 0.5s',
-                                            }} />
-                                        )}
-
-                                        {/* Content */}
-                                        <div style={{ flex: 1 }}>
-                                            <div style={{
-                                                fontSize: 14, fontWeight: 600, color: '#fff',
-                                                opacity: isPending ? 0.3 : 1,
-                                            }}>
-                                                {step.label}
-                                                {isActive && step.key === 'downloading' && progress && (
-                                                    <span style={{ color: '#52c41a', marginLeft: 8 }}>
-                                                        {progress.percent}%
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <div style={{
-                                                fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2,
-                                            }}>
-                                                {isDone
-                                                    ? (step.key === 'checking' && updateInfo
-                                                        ? `Phát hiện v${updateInfo.latestVersion} (${sizeMB} MB)`
-                                                        : '✅ Hoàn tất')
-                                                    : isActive && step.key === 'downloading' && progress
-                                                        ? `${progress.dlMB} / ${progress.totalMB} MB • ${progress.speedKBs} KB/s`
-                                                        : step.desc
-                                                }
-                                            </div>
-
-                                            {/* Mini progress bar for downloading */}
-                                            {isActive && step.key === 'downloading' && (
-                                                <div style={{
-                                                    marginTop: 8, height: 4, borderRadius: 4,
-                                                    background: 'rgba(255,255,255,0.06)', overflow: 'hidden',
-                                                }}>
-                                                    <div style={{
-                                                        height: '100%', borderRadius: 4,
-                                                        background: 'linear-gradient(90deg, #00ab56, #34d399)',
-                                                        width: `${progress?.percent || 0}%`,
-                                                        transition: 'width 0.3s ease',
-                                                    }} />
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
-
-                        {/* Footer: elapsed + ETA */}
-                        <div style={{
-                            marginTop: 24, padding: '12px 16px', borderRadius: 12,
-                            background: 'rgba(255,255,255,0.04)',
-                            display: 'flex', justifyContent: 'space-between', fontSize: 12,
-                            color: 'rgba(255,255,255,0.35)',
-                        }}>
-                            <span>⏱ Thời gian: {elapsed}s</span>
-                            <span style={{ color: '#52c41a', fontWeight: 600 }}>
-                                {progress?.etaSec
-                                    ? `Còn lại: ${formatEta(progress.etaSec)}`
-                                    : 'Đang xử lý...'}
-                            </span>
-                        </div>
-
-                        {/* Warning */}
-                        <div style={{
-                            marginTop: 12, padding: '10px 14px', borderRadius: 10,
-                            background: 'rgba(250,173,20,0.06)',
-                            border: '1px solid rgba(250,173,20,0.15)',
-                            fontSize: 12, color: '#faad14', textAlign: 'center',
-                        }}>
-                            ⚠️ Vui lòng không tắt ứng dụng trong quá trình cập nhật
-                        </div>
-                    </>
-                )}
-            </div>
-
-            {/* CSS */}
-            <style>{`
-                @keyframes pulse {
-                    0%,100% { box-shadow: 0 0 0 0 rgba(0,171,86,0.3); }
-                    50% { box-shadow: 0 0 0 8px rgba(0,171,86,0); }
-                }
-            `}</style>
+            <footer className="update-gate__footer">
+                <div className="update-gate__facts">
+                    <div><SyncOutlined /><span>Hệ thống sẽ tự mở lại<br />khi hoàn tất</span></div>
+                    <div><SafetyCertificateOutlined /><span>Không tắt ứng dụng<br />hoặc ngắt nguồn</span></div>
+                    <div><DatabaseOutlined /><span>Dữ liệu được<br />bảo toàn</span></div>
+                    <div><ClockCircleOutlined /><span>Thời gian còn lại<br />khoảng {formatEta(progress?.etaSec || Math.max(5, 60 - elapsed))}</span></div>
+                </div>
+                <div className="update-gate__version"><span />v{updateInfo?.latestVersion || '1.0.398'}<span /></div>
+            </footer>
         </div>
     );
 }

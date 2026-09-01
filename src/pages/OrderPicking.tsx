@@ -6,7 +6,6 @@ import {
     WarningOutlined, CloseCircleOutlined, InfoCircleOutlined, DeleteOutlined,
     EnterOutlined, EyeOutlined, FolderOpenOutlined,
 } from '@ant-design/icons';
-import * as XLSX from 'xlsx';
 import './OrderPicking.css';
 
 const { Text } = Typography;
@@ -585,10 +584,11 @@ export default function OrderPickingPage() {
     // ===== IMPORT EXCEL =====
     const handleExcelImport = (file: File) => {
         const reader = new FileReader();
-        reader.onload = (e) => {
+        reader.onload = async (e) => {
             try {
                 const data = e.target?.result;
                 const isCSV = file.name.toLowerCase().endsWith('.csv');
+                const XLSX = await import('xlsx');
                 const workbook = XLSX.read(data, { type: isCSV ? 'string' : 'binary' });
                 const sheet = workbook.Sheets[workbook.SheetNames[0]];
                 const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];

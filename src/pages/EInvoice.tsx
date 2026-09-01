@@ -32,7 +32,6 @@ import {
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import * as XLSX from 'xlsx';
 
 const { Title, Text } = Typography;
 
@@ -170,6 +169,7 @@ export default function EInvoicePage() {
             try {
                 const data = e.target?.result;
                 const isCSV = file.name.toLowerCase().endsWith('.csv');
+                const XLSX = await import('xlsx');
                 const workbook = XLSX.read(data, { type: isCSV ? 'string' : 'binary' });
                 const sheetName = workbook.SheetNames[0];
                 const worksheet = workbook.Sheets[sheetName];

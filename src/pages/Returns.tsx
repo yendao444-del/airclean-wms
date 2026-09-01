@@ -55,7 +55,6 @@ import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
 import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
-import * as XLSX from 'xlsx';
 import './Returns.css';
 
 dayjs.extend(customParseFormat);
@@ -146,6 +145,7 @@ export default function ReturnsPage() {
     const [returns, setReturns] = useState<Return[]>([]);
     const [loading, setLoading] = useState(false);
     const [importLoading, setImportLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
     const [methodModalVisible, setMethodModalVisible] = useState(false);
     const [inputMethod, setInputMethod] = useState<'manual' | 'excel'>('manual');
@@ -189,6 +189,7 @@ export default function ReturnsPage() {
     // ✨ State cho collapse/expand logs
     const [collapsedLogs, setCollapsedLogs] = useState<Record<number, boolean>>({});
     const syncReturnFinesRef = useRef(false);
+    const saveInFlightRef = useRef(false);
 
     useEffect(() => {
         loadReturns();
@@ -328,13 +329,16 @@ export default function ReturnsPage() {
             cancelText: 'Hủy',
             onOk: async () => {
                 try {
-                    // Xóa khoản phạt nếu phiếu đã hoàn thành và lỗi do kho
+                    const deleteResult = await window.electronAPI.returns.delete(id);
+                    if (!deleteResult?.success) {
+                        throw new Error(deleteResult?.error || 'Không thể xóa phiếu trả.');
+                    }
+                    // Chỉ gỡ phạt sau khi phiếu đã được xóa thành công.
                     if (returnRecord?.status === 'completed' &&
                         returnRecord?.faultParty !== 'customer' &&
                         returnRecord?.complaintCode) {
                         await processReturnFineRemoval(returnRecord.complaintCode);
                     }
-                    await window.electronAPI.returns.delete(id);
                     console.log(`✅ Đã xóa phiếu trả #${id} từ database`);
                     await loadReturns();
                     message.success('Đã xóa phiếu trả!');
@@ -377,13 +381,15 @@ export default function ReturnsPage() {
                 try {
                     for (const id of selectedRowKeys) {
                         const returnRecord = returns.find(r => r.id === id);
-                        // Xóa khoản phạt nếu phiếu đã hoàn thành và lỗi do kho
+                        const deleteResult = await window.electronAPI.returns.delete(id);
+                        if (!deleteResult?.success) {
+                            throw new Error(deleteResult?.error || `Không thể xóa phiếu trả #${id}.`);
+                        }
                         if (returnRecord?.status === 'completed' &&
                             returnRecord?.faultParty !== 'customer' &&
                             returnRecord?.complaintCode) {
                             await processReturnFineRemoval(returnRecord.complaintCode);
                         }
-                        await window.electronAPI.returns.delete(id);
                         console.log(`✅ Đã xóa phiếu trả #${id}`);
                     }
                     await loadReturns();
@@ -408,9 +414,14 @@ export default function ReturnsPage() {
                     !(f.source === 'returns' && f.detail && f.detail.includes(complaintCode))
                 );
                 if (attData.extraFines.length < before) {
-                    await electronApi.appConfig.set('attendanceData', attData);
+                    const saveResult = await electronApi.appConfig.set('attendanceData', attData);
+                    if (!saveResult?.success) {
+                        console.warn('[Returns] Không gỡ phạt:', saveResult?.error);
+                        return false;
+                    }
                     window.dispatchEvent(new CustomEvent('attendance:fineRemoved', { detail: { complaintCode } }));
                     message.info(`Đã xóa khoản phạt liên quan đến phiếu ${complaintCode}.`);
+                    return true;
                 }
             }
         } catch (error) {
@@ -460,7 +471,11 @@ export default function ReturnsPage() {
                     };
 
                     attData.extraFines = [...existingFines, newFine];
-                    await electronApi.appConfig.set('attendanceData', attData);
+                    const saveResult = await electronApi.appConfig.set('attendanceData', attData);
+                    if (!saveResult?.success) {
+                        console.warn('[Returns] Không ghi phạt:', saveResult?.error);
+                        return false;
+                    }
                     window.dispatchEvent(new CustomEvent('attendance:fineAdded', { detail: newFine }));
                     if (silent) return true;
                     message.warning(`⚠️ Đã tự động ghi nhận mức phạt ${amount.toLocaleString('vi-VN')}đ cho NV ${packerEmp.displayName || packerEmp.name} (Lỗi trả hàng)!`);
@@ -540,7 +555,11 @@ export default function ReturnsPage() {
             if (newFines.length === 0) return;
 
             attData.extraFines = [...existingFines, ...newFines];
-            await electronApi.appConfig.set('attendanceData', attData);
+            const saveResult = await electronApi.appConfig.set('attendanceData', attData);
+            if (!saveResult?.success) {
+                console.warn('[Returns] Không đồng bộ phạt:', saveResult?.error);
+                return;
+            }
             newFines.forEach(fine => {
                 window.dispatchEvent(new CustomEvent('attendance:fineAdded', { detail: fine }));
             });
@@ -556,6 +575,10 @@ export default function ReturnsPage() {
     };
 
     const handleSubmit = async () => {
+        if (saveInFlightRef.current) return;
+        saveInFlightRef.current = true;
+        setSaving(true);
+
         try {
             const values = await form.validateFields();
 
@@ -581,15 +604,17 @@ export default function ReturnsPage() {
 
             if (editingReturn) {
                 // EDIT MODE - gọi API update
-                await window.electronAPI.returns.update(editingReturn.id, dbData);
+                const result = await window.electronAPI.returns.update(editingReturn.id, dbData);
+                if (!result.success) throw new Error(result.error || 'Không thể cập nhật phiếu trả.');
                 console.log(`✅ Đã cập nhật phiếu trả #${editingReturn.id}`);
                 updatedReturns = returns; // placeholder for activity log
             } else {
                 // CREATE MODE - gọi API create
                 const result = await window.electronAPI.returns.create(dbData);
+                if (!result.success || !result.data?.id) throw new Error(result.error || 'Không thể tạo phiếu trả.');
                 console.log(`✅ Đã tạo phiếu trả mới`);
                 const newReturn: Return = {
-                    id: result.data?.id || 0,
+                    id: result.data.id,
                     complaintCode: values.complaintCode,
                     orderNumber: values.orderNumber,
                     productName: values.productName,
@@ -606,8 +631,11 @@ export default function ReturnsPage() {
 
             await loadReturns();
 
-            // Log activity
-            if (editingReturn) {
+            // Các tác vụ phụ không được biến một phiếu đã lưu thành thao tác "thất bại"
+            // vì người dùng bấm lại sẽ tạo trùng phiếu mới.
+            try {
+                // Log activity
+                if (editingReturn) {
                 const changes: any = {};
                 if (editingReturn.status !== values.status) {
                     const oldStatus = statusList.find(s => s.value === editingReturn.status);
@@ -638,7 +666,7 @@ export default function ReturnsPage() {
                     changeDescriptions.push(`lỗi do: ${changes.faultParty.old} → ${changes.faultParty.new}`);
                 }
 
-                await window.electronAPI.activityLog.create({
+                    await window.electronAPI.activityLog.create({
                     module: 'returns',
                     action: 'UPDATE',
                     recordId: editingReturn.id,
@@ -647,11 +675,11 @@ export default function ReturnsPage() {
                     description: `Cập nhật phiếu trả "${editingReturn.complaintCode}"` + (changeDescriptions.length > 0 ? `: ${changeDescriptions.join(', ')}` : ''),
                     userName: currentUser,
                     severity: 'INFO'
-                });
-            } else {
-                // Create
-                const newReturn = updatedReturns[0];
-                await window.electronAPI.activityLog.create({
+                    });
+                } else {
+                    // Create
+                    const newReturn = updatedReturns[0];
+                    await window.electronAPI.activityLog.create({
                     module: 'returns',
                     action: 'CREATE',
                     recordId: newReturn.id,
@@ -659,21 +687,25 @@ export default function ReturnsPage() {
                     description: `Tạo phiếu trả hàng mới "${newReturn.complaintCode}" (Đơn: ${newReturn.orderNumber}, SP: ${newReturn.productName}, Lỗi do: ${faultParty === 'customer' ? 'khách hàng' : 'kho'})`,
                     userName: currentUser,
                     severity: 'INFO'
-                });
-            }
+                    });
+                }
 
-            // ✅ Chỉ ghi phạt nếu "Lỗi do kho" + hoàn thành + có packer
-            if (values.status === 'completed' && values.packer && faultParty === 'warehouse') {
-                const isStatusChanged = !editingReturn || editingReturn.status !== 'completed';
-                if (isStatusChanged) {
-                    await processReturnFine(values.packer, values.complaintCode, values.complaintDate);
+                // ✅ Chỉ ghi phạt nếu "Lỗi do kho" + hoàn thành + có packer
+                if (values.status === 'completed' && values.packer && faultParty === 'warehouse') {
+                    const isStatusChanged = !editingReturn || editingReturn.status !== 'completed';
+                    if (isStatusChanged) {
+                        await processReturnFine(values.packer, values.complaintCode, values.complaintDate);
+                    }
+                } else if (faultParty === 'customer') {
+                    // Đổi sang "lỗi do khách" → xóa phạt cũ nếu đã từng tạo
+                    const wasWarehouse = editingReturn && editingReturn.faultParty !== 'customer';
+                    if (wasWarehouse && editingReturn.status === 'completed') {
+                        await processReturnFineRemoval(values.complaintCode);
+                    }
                 }
-            } else if (faultParty === 'customer') {
-                // Đổi sang "lỗi do khách" → xóa phạt cũ nếu đã từng tạo
-                const wasWarehouse = editingReturn && editingReturn.faultParty !== 'customer';
-                if (wasWarehouse && editingReturn.status === 'completed') {
-                    await processReturnFineRemoval(values.complaintCode);
-                }
+            } catch (sideEffectError) {
+                console.error('Phiếu trả đã lưu nhưng tác vụ phụ thất bại:', sideEffectError);
+                message.warning('Phiếu đã lưu, nhưng nhật ký/phạt chưa đồng bộ đầy đủ.');
             }
 
             message.success(editingReturn ? '✅ Đã cập nhật phiếu trả!' : '✅ Đã tạo phiếu trả mới!');
@@ -682,9 +714,12 @@ export default function ReturnsPage() {
             setEditingReturn(null);
             setProcessLogs([]);
             setTempNote('');
-        } catch (error) {
+        } catch (error: any) {
             console.error('Submit error:', error);
-            message.error('Lỗi khi lưu phiếu trả');
+            message.error(error?.message || 'Lỗi khi lưu phiếu trả');
+        } finally {
+            saveInFlightRef.current = false;
+            setSaving(false);
         }
     };
 
@@ -699,6 +734,7 @@ export default function ReturnsPage() {
             try {
                 const data = e.target?.result;
                 const isCSV = file.name.toLowerCase().endsWith('.csv');
+                const XLSX = await import('xlsx');
                 const workbook = XLSX.read(data, { type: isCSV ? 'string' : 'binary' });
                 const sheetName = workbook.SheetNames[0];
                 const worksheet = workbook.Sheets[sheetName];
@@ -896,7 +932,7 @@ export default function ReturnsPage() {
         }
     };
 
-    const handleExportDisplayed = () => {
+    const handleExportDisplayed = async () => {
         const rows = displayedReturns.map(item => ({
             'Mã KN': item.complaintCode,
             'Đơn hàng': item.orderNumber,
@@ -907,6 +943,7 @@ export default function ReturnsPage() {
             'Lỗi do': item.faultParty === 'customer' ? 'Khách hàng' : 'Kho',
             'Trạng thái': statusList.find(status => status.value === item.status)?.label || item.status,
         }));
+        const XLSX = await import('xlsx');
         const worksheet = XLSX.utils.json_to_sheet(rows);
         const workbook = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(workbook, worksheet, 'Tra hang');
@@ -1684,9 +1721,12 @@ export default function ReturnsPage() {
                     }
                     open={modalVisible}
                     onCancel={() => {
+                        if (saving) return;
                         setModalVisible(false);
                         setEditingReturn(null);
                     }}
+                    maskClosable={!saving}
+                    closable={!saving}
                     footer={null}
                     width={700}
                 >
@@ -1871,10 +1911,10 @@ export default function ReturnsPage() {
                         </div>
 
                         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
-                            <Button onClick={() => setModalVisible(false)} size="large">
+                            <Button onClick={() => setModalVisible(false)} size="large" disabled={saving}>
                                 Hủy
                             </Button>
-                            <Button type="primary" danger htmlType="submit" size="large">
+                            <Button type="primary" danger htmlType="submit" size="large" loading={saving} disabled={saving}>
                                 {editingReturn ? 'Cập nhật' : 'Tạo phiếu trả'}
                             </Button>
                         </div>

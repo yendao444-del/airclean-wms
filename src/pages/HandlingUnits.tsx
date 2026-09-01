@@ -272,20 +272,39 @@ const getPackageCategory = (packageType?: string): "TAI" | "THUNG" | "LE" => {
   return "LE";
 };
 
+const getPendingCheckConflict = (
+  targetUnit: UnitRow,
+  allUnits: UnitRow[],
+): UnitRow | null =>
+  allUnits.find(
+    (unit) =>
+      unit.id?.toUpperCase() !== targetUnit.id?.toUpperCase() &&
+      unit.skuName?.toUpperCase() === targetUnit.skuName?.toUpperCase() &&
+      (unit.status === "Chờ kiểm" || unit.status === "pending_check"),
+  ) || null;
+
+const pendingCheckBlockText = (unit: UnitRow, conflict: UnitRow, action: string) =>
+  `Không thể ${action}. SKU [${unit.skuName}] đang có kiện [${conflict.id}] chờ kiểm thực tế (tồn theo sổ: ${conflict.currentPcs} ${conflict.unitName}). Vui lòng vào tab Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước.`;
+
 const getConflictingOpenedUnit = (
   targetUnit: UnitRow,
   allUnits: UnitRow[],
 ): UnitRow | null => {
   const cat = getPackageCategory(targetUnit.packageType);
-  // Riêng với hàng Lẻ: Không bao giờ khóa khui
+  const sameSku = (u: UnitRow) =>
+    u.id?.toUpperCase() !== targetUnit.id?.toUpperCase() &&
+    u.skuName?.toUpperCase() === targetUnit.skuName?.toUpperCase();
+
+  // Kiện đã về 0/chờ kiểm luôn khóa kiện mới cùng SKU, kể cả khác dạng bao bì.
+  const pendingCheck = getPendingCheckConflict(targetUnit, allUnits);
+  if (pendingCheck) return pendingCheck;
+
+  // Riêng với hàng lẻ: không áp dụng quy tắc chỉ một kiện đang mở.
   if (cat === "LE") return null;
 
   return (
     allUnits.find((u) => {
-      if (u.id?.toUpperCase() === targetUnit.id?.toUpperCase()) return false;
-      if (u.skuName?.toUpperCase() !== targetUnit.skuName?.toUpperCase())
-        return false;
-      if (u.status !== "Đang sử dụng" && u.status !== "Chờ kiểm") return false;
+      if (!sameSku(u) || u.status !== "Đang sử dụng") return false;
       return getPackageCategory(u.packageType) === cat;
     }) || null
   );
@@ -1125,17 +1144,21 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     };
   }, [showTelegramModal]);
 
-  const handleUnsealUnit = async (unit: UnitRow) => {
+  const handleUnsealUnit = async (unit: UnitRow): Promise<boolean> => {
     try {
       const conflict = getConflictingOpenedUnit(unit, workspace.register);
       if (conflict) {
+        if (conflict.status === "Chờ kiểm" || conflict.status === "pending_check") {
+          message.warning(pendingCheckBlockText(unit, conflict, "khui kiện mới"), 8);
+          return false;
+        }
         const catLabel =
           getPackageCategory(unit.packageType) === "TAI" ? "Tải" : "Thùng";
         message.warning(
           `⚠️ Không thể khui! SKU [${unit.skuName}] đang có kiện ${catLabel} [${conflict.id}] đang mở (còn ${fmt(conflict.currentPcs)} ${conflict.unitName}). Vui lòng rút hết kiện cũ trước khi khui kiện ${catLabel} mới!`,
           6,
         );
-        return;
+        return false;
       }
 
       if (window.electronAPI?.handlingUnits?.unsealUnit) {
@@ -1171,8 +1194,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       message.success(
         `Đã khui kiện ${unit.id} thành công (chuyển sang Đang sử dụng)!`,
       );
+      return true;
     } catch (err: any) {
       message.error(err?.message || "Lỗi khui kiện");
+      return false;
     }
   };
 
@@ -1264,6 +1289,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   };
 
   const handlePickUnit = (unit: UnitRow) => {
+    const pendingConflict = getPendingCheckConflict(unit, workspace.register);
+    if (pendingConflict) {
+      message.warning(pendingCheckBlockText(unit, pendingConflict, "rút hàng"), 8);
+      return;
+    }
     pickRequestIdRef.current = `HU-PICK-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setPickingUnit(unit);
     pickForm.setFieldsValue({
@@ -1278,6 +1308,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     isSubmittingPickRef.current = true;
     setIsSubmittingPick(true);
     try {
+      const pendingConflict = getPendingCheckConflict(pickingUnit, workspace.register);
+      if (pendingConflict) {
+        throw new Error(pendingCheckBlockText(pickingUnit, pendingConflict, "rút hàng"));
+      }
       const values = await pickForm.validateFields();
       const qty = Number(values.quantity || 0);
       const destination: PickDestination = "PACKING";
@@ -1489,8 +1523,13 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           } else if (targetUnit.status === "Đã hết") {
             botReply = `❌ Kiện <code>${targetCode}</code> đã hết hàng!`;
           } else {
-            await handleUnsealUnit(targetUnit);
-            botReply = `✅ <b>KHUI KIỆN THÀNH CÔNG!</b>\n📦 Mã Kiện: <code>${targetUnit.id}</code>\n🏷️ SKU: <b>${targetUnit.skuName}</b>\n📍 Vị trí: <b>${locationFor(targetUnit)}</b>\n📊 Tồn: <b>${fmt(targetUnit.currentPcs)} ${targetUnit.unitName}</b>\n👉 Đã chuyển sang: <b>Đang sử dụng</b>`;
+            const conflict = getPendingCheckConflict(targetUnit, workspace.register);
+            const opened = conflict ? false : await handleUnsealUnit(targetUnit);
+            botReply = conflict
+              ? `❌ ${pendingCheckBlockText(targetUnit, conflict, "khui kiện mới")}`
+              : opened
+                ? `✅ <b>KHUI KIỆN THÀNH CÔNG!</b>\n📦 Mã Kiện: <code>${targetUnit.id}</code>\n🏷️ SKU: <b>${targetUnit.skuName}</b>\n📍 Vị trí: <b>${locationFor(targetUnit)}</b>\n📊 Tồn: <b>${fmt(targetUnit.currentPcs)} ${targetUnit.unitName}</b>\n👉 Đã chuyển sang: <b>Đang sử dụng</b>`
+                : `❌ Không thể khui kiện <code>${targetUnit.id}</code>. Vui lòng kiểm tra cảnh báo trên màn hình.`;
           }
         }
       } else if (cmd === "/rut") {
@@ -1509,28 +1548,33 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           } else if (qty > targetUnit.currentPcs) {
             botReply = `❌ Số lượng rút (${qty}) lớn hơn tồn còn lại trong kiện (${targetUnit.currentPcs} ${targetUnit.unitName})!`;
           } else {
-            const remaining = targetUnit.currentPcs - qty;
-            const nextStatus = remaining === 0 ? "Đã hết" : "Đang sử dụng";
-            setWorkspace((prev) => ({
-              ...prev,
-              register: prev.register.map((u) =>
-                u.id === targetUnit.id
-                  ? { ...u, currentPcs: remaining, status: nextStatus }
-                  : u,
-              ),
-              recentTransactions: [
-                {
-                  id: `TR-${Date.now()}`,
-                  unitId: targetUnit.id,
-                  createdAt: new Date().toISOString(),
-                  type: "Lấy hàng",
-                  quantity: -qty,
-                  note: `Rút ${qty} ${targetUnit.unitName} sang Khu đóng gói qua Telegram`,
-                },
-                ...prev.recentTransactions,
-              ],
-            }));
-            botReply = `🚀 <b>RÚT HÀNG SANG KHU ĐÓNG GÓI THÀNH CÔNG!</b>\n📦 Mã Kiện: <code>${targetUnit.id}</code>\n📉 Đã rút: <b>${fmt(qty)} ${targetUnit.unitName}</b>\n📊 Còn lại trong kiện: <b>${fmt(remaining)} ${targetUnit.unitName}</b> ${nextStatus === "Đã hết" ? "<i>(Đã hết kiện)</i>" : ""}`;
+            const pendingConflict = getPendingCheckConflict(targetUnit, workspace.register);
+            if (pendingConflict) {
+              botReply = `❌ ${pendingCheckBlockText(targetUnit, pendingConflict, "rút hàng")}`;
+            } else {
+              const remaining = targetUnit.currentPcs - qty;
+              const nextStatus = remaining === 0 ? "Chờ kiểm" : "Đang sử dụng";
+              setWorkspace((prev) => ({
+                ...prev,
+                register: prev.register.map((u) =>
+                  u.id === targetUnit.id
+                    ? { ...u, currentPcs: remaining, status: nextStatus }
+                    : u,
+                ),
+                recentTransactions: [
+                  {
+                    id: `TR-${Date.now()}`,
+                    unitId: targetUnit.id,
+                    createdAt: new Date().toISOString(),
+                    type: "Lấy hàng",
+                    quantity: -qty,
+                    note: `Rút ${qty} ${targetUnit.unitName} sang Khu đóng gói qua Telegram`,
+                  },
+                  ...prev.recentTransactions,
+                ],
+              }));
+              botReply = `🚀 <b>RÚT HÀNG SANG KHU ĐÓNG GÓI THÀNH CÔNG!</b>\n📦 Mã Kiện: <code>${targetUnit.id}</code>\n📉 Đã rút: <b>${fmt(qty)} ${targetUnit.unitName}</b>\n📊 Còn lại trong kiện: <b>${fmt(remaining)} ${targetUnit.unitName}</b> ${nextStatus === "Chờ kiểm" ? "<i>(Chờ kiểm thực tế)</i>" : ""}`;
+            }
           }
         }
       } else if (cmd === "/kiem") {
@@ -1776,6 +1820,26 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     return index;
   }, [workspace.register]);
 
+  const allocationGaps = useMemo(() =>
+    workspace.catalog
+      .map((item) => {
+        const allocated = (unitsBySku.get(item.sku) || []).reduce(
+          (total, unit) => total + Math.max(0, Number(unit.currentPcs || 0)),
+          0,
+        );
+        return {
+          ...item,
+          allocated,
+          missingQuantity: Math.max(0, Number(item.stock || 0) - allocated),
+        };
+      })
+      .filter((item) => item.missingQuantity > 0)
+      .sort((a, b) => b.missingQuantity - a.missingQuantity),
+  [workspace.catalog, unitsBySku]);
+  const allocationGapBySku = useMemo(
+    () => new Map(allocationGaps.map((item) => [item.sku, item.missingQuantity])),
+    [allocationGaps],
+  );
   const unitsByLocation = useMemo(() => {
     const index = new Map<string, UnitRow[]>();
     workspace.register.forEach((unit) => {
@@ -1800,6 +1864,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   }, [workspace.register]);
 
   const getIndexedConflict = (unit: UnitRow) => {
+    const pendingConflict = workspace.register.find((candidate) =>
+      candidate.id.toUpperCase() !== unit.id.toUpperCase()
+      && candidate.skuName.toUpperCase() === unit.skuName.toUpperCase()
+      && candidate.status === "Chờ kiểm",
+    );
+    if (pendingConflict) return pendingConflict;
     const category = getPackageCategory(unit.packageType);
     if (category === "LE") return null;
     const conflict = openedUnitBySkuAndCategory.get(
@@ -2847,6 +2917,26 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           </button>
         </Flex>
       </nav>
+      {shiftCheckCandidates.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          icon={<ExclamationCircleFilled />}
+          className="hu-shift-check-alert"
+          message={
+            <span>
+              <b>Cần kiểm kiện cuối ca:</b> hôm nay có {shiftCheckCandidates.length} kiện đã phát sinh rút hàng nhưng chưa được kiểm lại.
+              {' '}Bạn phải kiểm/chốt các kiện này trước khi khui kiện mới cùng SKU và cùng loại.
+            </span>
+          }
+          action={
+            <Button size="small" type="primary" onClick={openShiftCheck}>
+              Kiểm ngay
+            </Button>
+          }
+          style={{ margin: "12px 16px 0", borderRadius: 10 }}
+        />
+      )}
       <section className="hu-browser">
         <aside className="hu-sku-panel">
           <Flex
@@ -2884,6 +2974,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     (unitsBySku.get(c.sku) || []).length,
                   0,
                 );
+                const groupUnallocatedCount = group.children.filter(
+                  (item) => Number(allocationGapBySku.get(item.sku) || 0) > 0,
+                ).length;
                 return (
                   <div className="hu-sku-group" key={group.groupName}>
                     <button
@@ -2897,6 +2990,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                       </span>
                       <span className="hu-sku-group-count">
                         {group.children.length} màu · {groupUnitsCount} kiện
+                        {groupUnallocatedCount > 0 && (
+                          <Tooltip title={`${groupUnallocatedCount} SKU trong nhóm còn hàng chưa phân kiện`}>
+                            <ExclamationCircleFilled className="hu-unallocated-icon" />
+                          </Tooltip>
+                        )}
                       </span>
                     </button>
                     {isOpen && (
@@ -2905,6 +3003,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                           const unitCount = (unitsBySku.get(item.sku) || [])
                             .length;
                           const colorInfo = getColorDot(item.color, item.sku);
+                          const missingQuantity = Number(allocationGapBySku.get(item.sku) || 0);
                           // Each variant is identified by its actual SKU in the catalog.
                           const shortName = item.sku;
                           return (
@@ -2922,7 +3021,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                 }}
                               />
                               <div className="hu-sku-content">
-                                <div className="hu-sku-name">{shortName}</div>
+                                <div className="hu-sku-name">
+                                  <span className="hu-sku-name-text">{shortName}</span>
+                                  {missingQuantity > 0 && (
+                                    <Tooltip title={`Chưa phân ${fmt(missingQuantity)} ${item.unitName} vào kiện`}>
+                                      <ExclamationCircleFilled className="hu-unallocated-icon hu-unallocated-icon-sku" />
+                                    </Tooltip>
+                                  )}
+                                </div>
                                 <div className="hu-sku-meta">
                                   <span className="hu-sku-stock">
                                     <b>{fmt(item.stock)}</b> {item.unitName} ·{" "}
@@ -3114,6 +3220,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               >
                   {visibleUnits.map((unit) => {
                     const deleteLocked = !isAdmin && unitHasWithdrawalHistory(unit);
+                    const pendingPickConflict = unit.status === "Đang sử dụng"
+                      ? getPendingCheckConflict(unit, workspace.register)
+                      : null;
                     return (
                     <button
                       type="button"
@@ -3187,7 +3296,9 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                       : "thùng";
                                   return (
                                     <Tooltip
-                                      title={`Đang có ${catLabel} [${conflict.id}] cùng SKU đang mở (còn ${fmt(conflict.currentPcs)} gói). Vui lòng rút hết kiện cũ trước khi khui ${catLabel} mới.`}
+                                      title={conflict.status === "Chờ kiểm"
+                                        ? pendingCheckBlockText(unit, conflict, "khui kiện mới")
+                                        : `Đang có ${catLabel} [${conflict.id}] cùng SKU đang mở (còn ${fmt(conflict.currentPcs)} gói). Vui lòng rút hết kiện cũ trước khi khui ${catLabel} mới.`}
                                     >
                                       <button
                                         className="hu-action-btn unseal"
@@ -3198,9 +3309,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                           color: "#8c8c8c",
                                           borderColor: "#d9d9d9",
                                         }}
-                                        onClick={() =>
+                                         onClick={() =>
                                           message.warning(
-                                            `⚠️ SKU này đang có ${catLabel} [${conflict.id}] mở sẵn. Vui lòng rút hết kiện cũ trước khi khui thêm ${catLabel}!`,
+                                            conflict.status === "Chờ kiểm"
+                                              ? pendingCheckBlockText(unit, conflict, "khui kiện mới")
+                                              : `⚠️ SKU này đang có ${catLabel} [${conflict.id}] mở sẵn. Vui lòng rút hết kiện cũ trước khi khui thêm ${catLabel}!`,
+                                            8,
                                           )
                                         }
                                       >
@@ -3219,12 +3333,24 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                 );
                               })()}
                             {unit.status === "Đang sử dụng" && (
-                              <button
-                                className="hu-action-btn final-check"
-                                onClick={() => handlePickUnit(unit)}
-                              >
-                                <ShoppingCartOutlined /> Rút hàng
-                              </button>
+                              pendingPickConflict ? (
+                                <Tooltip title={pendingCheckBlockText(unit, pendingPickConflict, "rút hàng")}>
+                                  <button
+                                    className="hu-action-btn final-check"
+                                    style={{ opacity: 0.72, cursor: "not-allowed", background: "#fff7e6", color: "#ad6800", borderColor: "#ffd591" }}
+                                    onClick={() => message.warning(pendingCheckBlockText(unit, pendingPickConflict, "rút hàng"), 8)}
+                                  >
+                                    <LockOutlined /> Chờ kiểm {pendingPickConflict.id}
+                                  </button>
+                                </Tooltip>
+                              ) : (
+                                <button
+                                  className="hu-action-btn final-check"
+                                  onClick={() => handlePickUnit(unit)}
+                                >
+                                  <ShoppingCartOutlined /> Rút hàng
+                                </button>
+                              )
                             )}
                             {unit.status === "Chờ kiểm" && (
                               <button
@@ -3459,13 +3585,21 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               </div>
             </div>
             <div className="hu-detail-actions-row">
-              <Button
-                icon={<EditOutlined />}
-                size="middle"
-                onClick={() => openEditUnit(detail)}
-              >
-                Sửa thông tin kiện
-              </Button>
+              {detail.status === "Chờ kiểm" ? (
+                <Tooltip title="Kiện đang chờ kiểm: hãy dùng Kiểm và chốt hết kiện để nhập số lượng thực tế, không sửa số lượng tại đây.">
+                  <Button disabled icon={<LockOutlined />} size="middle">
+                    Khóa sửa số lượng khi chờ kiểm
+                  </Button>
+                </Tooltip>
+              ) : (
+                <Button
+                  icon={<EditOutlined />}
+                  size="middle"
+                  onClick={() => openEditUnit(detail)}
+                >
+                  Sửa thông tin kiện
+                </Button>
+              )}
               {detail.status === "Nguyên niêm phong" &&
                 (() => {
                   const conflict = getIndexedConflict(detail);
@@ -3476,10 +3610,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                         : "thùng";
                     return (
                       <Tooltip
-                        title={`SKU này đang có ${catLabel} [${conflict.id}] đang mở (còn ${fmt(conflict.currentPcs)} ${detail.unitName}). Hãy rút hết kiện cũ trước.`}
+                        title={conflict.status === "Chờ kiểm"
+                          ? pendingCheckBlockText(detail, conflict, "khui kiện mới")
+                          : `SKU này đang có ${catLabel} [${conflict.id}] đang mở (còn ${fmt(conflict.currentPcs)} ${detail.unitName}). Hãy rút hết kiện cũ trước.`}
                       >
                         <Button disabled icon={<LockOutlined />} size="middle">
-                          Khóa khui (Chờ kiện {conflict.id})
+                          {conflict.status === "Chờ kiểm"
+                            ? `Khóa khui — cần kiểm ${conflict.id}`
+                            : `Khóa khui (Chờ kiện ${conflict.id})`}
                         </Button>
                       </Tooltip>
                     );
@@ -3498,15 +3636,31 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 })()}
               {detail.status === "Đang sử dụng" && (
                 <>
-                  <Button
-                    type="primary"
-                    icon={<ShoppingCartOutlined />}
-                    size="middle"
-                    style={{ background: "#1890ff", borderColor: "#1890ff" }}
-                    onClick={() => handlePickUnit(detail)}
-                  >
-                    Rút hàng sang Khu đóng gói
-                  </Button>
+                  {(() => {
+                    const pendingConflict = getPendingCheckConflict(detail, workspace.register);
+                    return pendingConflict ? (
+                      <Tooltip title={pendingCheckBlockText(detail, pendingConflict, "rút hàng")}>
+                        <Button
+                          icon={<LockOutlined />}
+                          size="middle"
+                          style={{ color: "#ad6800", background: "#fff7e6", borderColor: "#ffd591" }}
+                          onClick={() => message.warning(pendingCheckBlockText(detail, pendingConflict, "rút hàng"), 8)}
+                        >
+                          Khóa rút — cần kiểm {pendingConflict.id}
+                        </Button>
+                      </Tooltip>
+                    ) : (
+                      <Button
+                        type="primary"
+                        icon={<ShoppingCartOutlined />}
+                        size="middle"
+                        style={{ background: "#1890ff", borderColor: "#1890ff" }}
+                        onClick={() => handlePickUnit(detail)}
+                      >
+                        Rút hàng sang Khu đóng gói
+                      </Button>
+                    );
+                  })()}
                   <Button
                     icon={<LockOutlined />}
                     size="middle"

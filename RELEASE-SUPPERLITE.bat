@@ -32,6 +32,7 @@ set NOTES=Lite patch - UI and formula updates
 set PATCH_ZIP=DBYPOS-PATCH-LITE-v!NEW_VERSION!.zip
 set PATCH_ZIP_PATH=%CD%\!PATCH_ZIP!
 set PATCH_TEMP=%CD%\_patch_lite_temp
+set BUILD_DIST=%CD%\_release_dist
 
 echo Version: v!CURRENT_VERSION! -^> v!NEW_VERSION!
 echo.
@@ -47,9 +48,11 @@ echo [OK] Version updated.
 echo.
 
 echo [2/4] Build Vite...
-call npx vite build
+if exist "!BUILD_DIST!" rmdir /S /Q "!BUILD_DIST!"
+call npx vite build --outDir "!BUILD_DIST!" --emptyOutDir
 if errorlevel 1 (
     echo [ERROR] Vite build failed.
+    if exist "!BUILD_DIST!" rmdir /S /Q "!BUILD_DIST!"
     node scripts\release-version.cjs set !CURRENT_VERSION! >nul
     echo [OK] Restored package.json to v!CURRENT_VERSION!.
     pause
@@ -63,12 +66,13 @@ if exist "!PATCH_ZIP_PATH!" del /Q "!PATCH_ZIP_PATH!"
 if exist "!PATCH_TEMP!" rmdir /S /Q "!PATCH_TEMP!"
 
 mkdir "!PATCH_TEMP!\resources\app\dist"
-xcopy "dist\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
+xcopy "!BUILD_DIST!\*" "!PATCH_TEMP!\resources\app\dist\" /E /I /Y /Q >nul 2>&1
 copy /Y "package.json" "!PATCH_TEMP!\resources\app\package.json" >nul 2>&1
 
 powershell -NoProfile -Command "Compress-Archive -Path '!PATCH_TEMP!\*' -DestinationPath '!PATCH_ZIP_PATH!' -Force"
 set ZIP_EXIT=!errorlevel!
 rmdir /S /Q "!PATCH_TEMP!" 2>nul
+rmdir /S /Q "!BUILD_DIST!" 2>nul
 
 if !ZIP_EXIT! neq 0 (
     echo [ERROR] Patch zip creation failed.

@@ -8,10 +8,10 @@ import {
 import type { Product, Category } from '../types/electron';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import plainCartonImage from '../assets/plain-kraft-carton.webp';
-import maskBoxBlue from '../assets/pos-catalog/mask-box-blue.png';
-import maskBoxPink from '../assets/pos-catalog/mask-box-pink.png';
-import maskBoxMint from '../assets/pos-catalog/mask-box-mint.png';
-import maskBoxLocPhat from '../assets/pos-catalog/mask-box-loc-phat.png';
+import maskBoxBlue from '../assets/pos-catalog/mask-box-blue.webp';
+import maskBoxPink from '../assets/pos-catalog/mask-box-pink.webp';
+import maskBoxMint from '../assets/pos-catalog/mask-box-mint.webp';
+import maskBoxLocPhat from '../assets/pos-catalog/mask-box-loc-phat.webp';
 import './POS.css';
 
 // === Types ===
