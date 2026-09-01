@@ -130,6 +130,7 @@ interface Return {
     processNotes?: string; // JSON array of timeline logs
     faultParty?: 'warehouse' | 'customer'; // Lỗi do kho hay do khách hàng
     createdAt?: Date;
+    updatedAt?: string | Date;
 }
 
 interface ProcessLog {
@@ -228,7 +229,7 @@ export default function ReturnsPage() {
                     { value: 'completed', label: 'Hoàn thành', color: 'green', isFinal: true },
                 ];
                 setStatusList(defaultStatuses);
-                const saveResult = await window.electronAPI.appConfig.set('statusList', defaultStatuses);
+                const saveResult = await window.electronAPI.returns.saveStatusList(defaultStatuses, null);
                 if (!saveResult?.success) {
                     console.warn('[Returns] Không thể lưu danh sách trạng thái mặc định:', saveResult?.error);
                 }
@@ -241,12 +242,14 @@ export default function ReturnsPage() {
 
     const saveStatusList = async (list: Array<{ value: string; label: string; color: string; isFinal?: boolean }>) => {
         try {
-            const result = await window.electronAPI.appConfig.set('statusList', list);
+            const result = await window.electronAPI.returns.saveStatusList(list, statusList);
             if (!result?.success) throw new Error(result?.error || 'Không thể lưu danh sách trạng thái.');
-            setStatusList(list);
+            setStatusList(result.data || list);
+            return result.data || list;
         } catch (error: any) {
             console.error('Error saving status list:', error);
             message.error(error?.message || 'Không thể lưu danh sách trạng thái.');
+            throw error;
         }
     };
 
@@ -325,7 +328,6 @@ export default function ReturnsPage() {
     };
 
     const handleDelete = (id: number) => {
-        const returnRecord = returns.find(r => r.id === id);
         Modal.confirm({
             title: 'Xóa phiếu trả?',
             content: 'Bạn có chắc muốn xóa phiếu này?',
@@ -337,12 +339,6 @@ export default function ReturnsPage() {
                     const deleteResult = await window.electronAPI.returns.delete(id);
                     if (!deleteResult?.success) {
                         throw new Error(deleteResult?.error || 'Không thể xóa phiếu trả.');
-                    }
-                    // Chỉ gỡ phạt sau khi phiếu đã được xóa thành công.
-                    if (returnRecord?.status === 'completed' &&
-                        returnRecord?.faultParty !== 'customer' &&
-                        returnRecord?.complaintCode) {
-                        await processReturnFineRemoval(returnRecord.complaintCode);
                     }
                     console.log(`✅ Đã xóa phiếu trả #${id} từ database`);
                     await loadReturns();
@@ -385,15 +381,9 @@ export default function ReturnsPage() {
             onOk: async () => {
                 try {
                     for (const id of selectedRowKeys) {
-                        const returnRecord = returns.find(r => r.id === id);
                         const deleteResult = await window.electronAPI.returns.delete(id);
                         if (!deleteResult?.success) {
                             throw new Error(deleteResult?.error || `Không thể xóa phiếu trả #${id}.`);
-                        }
-                        if (returnRecord?.status === 'completed' &&
-                            returnRecord?.faultParty !== 'customer' &&
-                            returnRecord?.complaintCode) {
-                            await processReturnFineRemoval(returnRecord.complaintCode);
                         }
                         console.log(`✅ Đã xóa phiếu trả #${id}`);
                     }
@@ -408,91 +398,6 @@ export default function ReturnsPage() {
         });
     };
 
-    const processReturnFineRemoval = async (complaintCode: string) => {
-        try {
-            const electronApi = (window as any).electronAPI;
-            const attRes = await electronApi.appConfig.get('attendanceData');
-            if (attRes.success && attRes.data) {
-                const attData = typeof attRes.data === 'string' ? JSON.parse(attRes.data) : attRes.data;
-                const before = (attData.extraFines || []).length;
-                attData.extraFines = (attData.extraFines || []).filter((f: any) =>
-                    !(f.source === 'returns' && f.detail && f.detail.includes(complaintCode))
-                );
-                if (attData.extraFines.length < before) {
-                    const saveResult = await electronApi.appConfig.set('attendanceData', attData);
-                    if (!saveResult?.success) {
-                        console.warn('[Returns] Không gỡ phạt:', saveResult?.error);
-                        return false;
-                    }
-                    window.dispatchEvent(new CustomEvent('attendance:fineRemoved', { detail: { complaintCode } }));
-                    message.info(`Đã xóa khoản phạt liên quan đến phiếu ${complaintCode}.`);
-                    return true;
-                }
-            }
-        } catch (error) {
-            console.error('Lỗi xóa phạt tự động:', error);
-        }
-    };
-
-    const processReturnFine = async (packerName: string, complaintCode: string, fineDate?: any, silent = false) => {
-        if (!packerName || !complaintCode) return false;
-        try {
-            const electronApi = (window as any).electronAPI;
-            const attRes = await electronApi.appConfig.get('attendanceData');
-            if (attRes.success && attRes.data) {
-                const attData = typeof attRes.data === 'string' ? JSON.parse(attRes.data) : attRes.data;
-                const config = attData.config || {};
-                const attEmployees = attData.employees || [];
-
-                const packerEmp = attEmployees.find((e: any) => isReturnAssigneeMatch(packerName, e));
-                if (!packerEmp) {
-                    console.warn(`[Returns] Không tìm thấy NV "${packerName}" trong danh sách chấm công.`);
-                    if (silent) return false;
-                    message.warning(`⚠️ Không tìm thấy nhân viên "${packerName}" trong danh sách chấm công. Phạt chưa được ghi nhận!`);
-                    return false;
-                }
-
-                const isSeasonal = packerEmp.type === 'Seasonal';
-                const amount = isSeasonal ? (config.wrongOrderFineSeasonal || 0) : (config.wrongOrderFineOfficial || 0);
-
-                if (amount > 0) {
-                    const existingFines = attData.extraFines || [];
-                    const hasExistingFine = existingFines.some((f: any) =>
-                        f.source === 'returns' && f.detail && f.detail.includes(complaintCode)
-                    );
-                    if (hasExistingFine) return false;
-
-                    const parsedFineDate = parseReturnDate(fineDate);
-                    const fineDateValue = parsedFineDate.isValid()
-                        ? parsedFineDate.toISOString()
-                        : new Date().toISOString();
-                    const newFine = {
-                        empId: packerEmp.id,
-                        type: 'Khác',
-                        detail: `Đóng gói sai đơn, phát sinh KH hoàn hàng/khiếu nại (Mã phiếu: ${complaintCode})`,
-                        amount: amount,
-                        date: fineDateValue,
-                        source: 'returns'
-                    };
-
-                    attData.extraFines = [...existingFines, newFine];
-                    const saveResult = await electronApi.appConfig.set('attendanceData', attData);
-                    if (!saveResult?.success) {
-                        console.warn('[Returns] Không ghi phạt:', saveResult?.error);
-                        return false;
-                    }
-                    window.dispatchEvent(new CustomEvent('attendance:fineAdded', { detail: newFine }));
-                    if (silent) return true;
-                    message.warning(`⚠️ Đã tự động ghi nhận mức phạt ${amount.toLocaleString('vi-VN')}đ cho NV ${packerEmp.displayName || packerEmp.name} (Lỗi trả hàng)!`);
-                    return true;
-                }
-            }
-        } catch (error) {
-            console.error('Lỗi tính phạt tự động:', error);
-        }
-        return false;
-    };
-
     const syncMissingReturnFines = async (rows: Return[], silent = false) => {
         if (syncReturnFinesRef.current) return;
         syncReturnFinesRef.current = true;
@@ -505,73 +410,20 @@ export default function ReturnsPage() {
                 !!row.complaintCode
             );
             if (candidates.length === 0) return;
-
-            const electronApi = (window as any).electronAPI;
-            const attRes = await electronApi.appConfig.get('attendanceData');
-            if (!attRes.success || !attRes.data) return;
-
-            const attData = typeof attRes.data === 'string' ? JSON.parse(attRes.data) : attRes.data;
-            const config = attData.config || {};
-            const attEmployees = attData.employees || [];
-            const existingFines = attData.extraFines || [];
-            const existingReturnCodes = new Set(
-                existingFines
-                    .filter((f: any) => f.source === 'returns' && f.detail)
-                    .map((f: any) => {
-                        const match = String(f.detail).match(/Mã phiếu:\s*([^)]+)/);
-                        return match?.[1]?.trim() || '';
-                    })
-                    .filter(Boolean)
+            const result = await window.electronAPI.returns.updateWorkflowBulk(
+                candidates.map(row => ({
+                    id: row.id,
+                    field: 'status' as const,
+                    value: 'completed',
+                    expectedUpdatedAt: row.updatedAt,
+                })),
             );
-
-            const findPackerEmp = (packerName: string) => {
-                return attEmployees.find((e: any) => isReturnAssigneeMatch(packerName, e));
-            };
-
-            const newFines: any[] = [];
-            for (const row of candidates) {
-                if (existingReturnCodes.has(row.complaintCode)) continue;
-
-                const packerEmp = findPackerEmp(row.packer!);
-                if (!packerEmp) {
-                    console.warn(`[Returns] Không tìm thấy NV "${row.packer}" trong danh sách chấm công.`);
-                    continue;
-                }
-
-                const amount = packerEmp.type === 'Seasonal'
-                    ? (config.wrongOrderFineSeasonal || 0)
-                    : (config.wrongOrderFineOfficial || 0);
-                if (amount <= 0) continue;
-
-                const fine = {
-                    empId: packerEmp.id,
-                    type: 'Khác',
-                    detail: `Đóng gói sai đơn, phát sinh KH hoàn hàng/khiếu nại (Mã phiếu: ${row.complaintCode})`,
-                    amount,
-                    date: parseReturnDate(row.complaintDate).isValid()
-                        ? parseReturnDate(row.complaintDate).toISOString()
-                        : new Date().toISOString(),
-                    source: 'returns'
-                };
-                newFines.push(fine);
-                existingReturnCodes.add(row.complaintCode);
-            }
-
-            if (newFines.length === 0) return;
-
-            attData.extraFines = [...existingFines, ...newFines];
-            const saveResult = await electronApi.appConfig.set('attendanceData', attData);
-            if (!saveResult?.success) {
-                console.warn('[Returns] Không đồng bộ phạt:', saveResult?.error);
+            if (!result?.success) {
+                console.warn('[Returns] Không đồng bộ phạt:', result?.error);
                 return;
             }
-            newFines.forEach(fine => {
-                window.dispatchEvent(new CustomEvent('attendance:fineAdded', { detail: fine }));
-            });
-
-            if (!silent) {
-                message.info(`Đã đồng bộ ${newFines.length} khoản phạt trả hàng vào Bảng công.`);
-            }
+            if (!silent) message.info('Đã đối chiếu phạt trả hàng với Bảng công.');
+            window.dispatchEvent(new CustomEvent('attendance:fineChanged'));
         } catch (error) {
             console.error('Lỗi đồng bộ phạt trả hàng:', error);
         } finally {
@@ -589,6 +441,7 @@ export default function ReturnsPage() {
 
             // Xác định faultParty (mặc định 'warehouse' nếu chưa chọn)
             const faultParty: 'warehouse' | 'customer' = values.faultParty || 'warehouse';
+            const requestedStatus = values.status;
 
             // Map frontend fields → DB fields
             const dbData = {
@@ -600,12 +453,15 @@ export default function ReturnsPage() {
                 items: JSON.stringify([]),
                 totalAmount: 0,
                 notes: processLogs.length > 0 ? JSON.stringify(processLogs) : null,
-                status: values.status,
+                // A new completed return is first created as pending, then
+                // promoted through the atomic workflow+fine transaction.
+                status: !editingReturn && requestedStatus === 'completed' ? 'pending' : requestedStatus,
                 packer: values.packer || null,
                 faultParty,
             };
 
             let updatedReturns: Return[];
+            let workflowWarning = '';
 
             if (editingReturn) {
                 // EDIT MODE - gọi API update
@@ -617,19 +473,35 @@ export default function ReturnsPage() {
                 // CREATE MODE - gọi API create
                 const result = await window.electronAPI.returns.create(dbData);
                 if (!result.success || !result.data?.id) throw new Error(result.error || 'Không thể tạo phiếu trả.');
+                let savedRecord = result.data;
+                if (requestedStatus === 'completed') {
+                    const workflowResult = await window.electronAPI.returns.updateWorkflow(
+                        result.data.id,
+                        'status',
+                        'completed',
+                        result.data.updatedAt,
+                    );
+                    if (workflowResult?.success) {
+                        savedRecord = workflowResult.data;
+                        window.dispatchEvent(new CustomEvent('attendance:fineChanged', { detail: { complaintCode: values.complaintCode } }));
+                    } else {
+                        workflowWarning = workflowResult?.error || 'Phiếu đã được tạo ở trạng thái Đang xử lý nhưng chưa thể hoàn thành.';
+                    }
+                }
                 console.log(`✅ Đã tạo phiếu trả mới`);
                 const newReturn: Return = {
-                    id: result.data.id,
+                    id: savedRecord.id,
                     complaintCode: values.complaintCode,
                     orderNumber: values.orderNumber,
                     productName: values.productName,
                     complaintDate: values.complaintDate.format('YYYY-MM-DD'),
-                    status: values.status,
+                    status: savedRecord.status,
                     reason: values.reason,
                     packer: values.packer || undefined,
                     faultParty,
                     processNotes: processLogs.length > 0 ? JSON.stringify(processLogs) : undefined,
                     createdAt: new Date(),
+                    updatedAt: savedRecord.updatedAt,
                 };
                 updatedReturns = [newReturn, ...returns];
             }
@@ -695,25 +567,16 @@ export default function ReturnsPage() {
                     });
                 }
 
-                // ✅ Chỉ ghi phạt nếu "Lỗi do kho" + hoàn thành + có packer
-                if (values.status === 'completed' && values.packer && faultParty === 'warehouse') {
-                    const isStatusChanged = !editingReturn || editingReturn.status !== 'completed';
-                    if (isStatusChanged) {
-                        await processReturnFine(values.packer, values.complaintCode, values.complaintDate);
-                    }
-                } else if (faultParty === 'customer') {
-                    // Đổi sang "lỗi do khách" → xóa phạt cũ nếu đã từng tạo
-                    const wasWarehouse = editingReturn && editingReturn.faultParty !== 'customer';
-                    if (wasWarehouse && editingReturn.status === 'completed') {
-                        await processReturnFineRemoval(values.complaintCode);
-                    }
-                }
             } catch (sideEffectError) {
-                console.error('Phiếu trả đã lưu nhưng tác vụ phụ thất bại:', sideEffectError);
-                message.warning('Phiếu đã lưu, nhưng nhật ký/phạt chưa đồng bộ đầy đủ.');
+                console.error('Phiếu trả đã lưu nhưng nhật ký phụ thất bại:', sideEffectError);
+                message.warning('Phiếu đã lưu, nhưng nhật ký hoạt động chưa đồng bộ đầy đủ.');
             }
 
-            message.success(editingReturn ? '✅ Đã cập nhật phiếu trả!' : '✅ Đã tạo phiếu trả mới!');
+            if (workflowWarning) {
+                message.warning(`Phiếu đã tạo an toàn ở trạng thái Đang xử lý. ${workflowWarning}`);
+            } else {
+                message.success(editingReturn ? '✅ Đã cập nhật phiếu trả!' : '✅ Đã tạo phiếu trả mới!');
+            }
             setModalVisible(false);
             form.resetFields();
             setEditingReturn(null);
@@ -911,12 +774,16 @@ export default function ReturnsPage() {
     const handleBulkPackerChange = async (packer: string) => {
         if (!selectedRowKeys.length) return;
         try {
-            const results = await Promise.all(selectedRowKeys.map(id =>
-                window.electronAPI.returns.updateWorkflow(id, 'packer', packer)
-            ));
-            const failed = results.find(result => !result?.success);
-            if (failed) throw new Error(failed.error || 'Không thể gán nhân viên cho phiếu trả.');
-            setReturns(prev => prev.map(item => selectedRowKeys.includes(item.id) ? { ...item, packer } : item));
+            const result = await window.electronAPI.returns.updateWorkflowBulk(
+                returns
+                    .filter(item => selectedRowKeys.includes(item.id))
+                    .map(item => ({ id: item.id, field: 'packer' as const, value: packer, expectedUpdatedAt: item.updatedAt }))
+            );
+            if (!result?.success) throw new Error(result?.error || 'Không thể gán nhân viên cho phiếu trả.');
+            const updatedById = new Map((result.data || []).map((item: any) => [item.id, item]));
+            setReturns(prev => prev.map(item => updatedById.has(item.id)
+                ? { ...item, packer, updatedAt: updatedById.get(item.id)?.updatedAt }
+                : item));
             message.success(`Đã gán nhân viên cho ${selectedRowKeys.length} phiếu`);
         } catch (error: any) {
             message.error(error?.message || 'Không thể gán nhân viên cho các phiếu đã chọn');
@@ -932,16 +799,16 @@ export default function ReturnsPage() {
             return;
         }
         try {
-            const results = await Promise.all(selectedRowKeys.map(id =>
-                window.electronAPI.returns.updateWorkflow(id, 'status', status)
-            ));
-            const failed = results.find(result => !result?.success);
-            if (failed) throw new Error(failed.error || 'Không thể cập nhật trạng thái phiếu trả.');
+            const result = await window.electronAPI.returns.updateWorkflowBulk(
+                selected.map(item => ({ id: item.id, field: 'status' as const, value: status, expectedUpdatedAt: item.updatedAt }))
+            );
+            if (!result?.success) throw new Error(result?.error || 'Không thể cập nhật trạng thái phiếu trả.');
             await loadReturns(true);
             setSelectedRowKeys([]);
             message.success('Đã cập nhật trạng thái hàng loạt');
         } catch (error: any) {
             message.error(error?.message || 'Không thể cập nhật trạng thái hàng loạt');
+            await loadReturns(true);
         }
     };
 
@@ -1217,10 +1084,10 @@ export default function ReturnsPage() {
                         disabled={isInHistory}
                         onChange={async (value) => {
                             // Update in database
-                            const result = await window.electronAPI.returns.updateWorkflow(record.id, 'packer', value ?? null);
+                            const result = await window.electronAPI.returns.updateWorkflow(record.id, 'packer', value ?? null, record.updatedAt);
                             if (!result?.success) throw new Error(result?.error || 'Không thể cập nhật nhân viên đóng gói.');
                             const updated = returns.map(r =>
-                                r.id === record.id ? { ...r, packer: value } : r
+                                r.id === record.id ? { ...r, packer: value, updatedAt: result.data?.updatedAt } : r
                             );
                             setReturns(updated);
                             message.success('Đã cập nhật nhân viên đóng gói!');
@@ -1274,18 +1141,12 @@ export default function ReturnsPage() {
                             );
                             setReturns(updated);
                             try {
-                                const result = await window.electronAPI.returns.updateWorkflow(record.id, 'faultParty', value);
+                                const result = await window.electronAPI.returns.updateWorkflow(record.id, 'faultParty', value, record.updatedAt);
                                 if (!result.success) throw new Error(result.error || 'Lỗi DB');
-                                // Xử lý phạt khi đơn đã hoàn thành
-                                if (record.status === 'completed') {
-                                    if (value === 'customer' && record.faultParty !== 'customer') {
-                                        // Đổi sang "lỗi do khách" → xóa phạt cũ
-                                        await processReturnFineRemoval(record.complaintCode);
-                                    } else if (value === 'warehouse' && record.faultParty === 'customer' && record.packer) {
-                                        // Đổi sang "lỗi do kho" → tạo phạt mới
-                                        await processReturnFine(record.packer, record.complaintCode, record.complaintDate);
-                                    }
-                                }
+                                setReturns(prev => prev.map(item => item.id === record.id
+                                    ? { ...item, faultParty: value as 'warehouse' | 'customer', updatedAt: result.data?.updatedAt }
+                                    : item));
+                                window.dispatchEvent(new CustomEvent('attendance:fineChanged', { detail: { complaintCode: record.complaintCode } }));
                                 message.success('Đã cập nhật!');
                             } catch (err: any) {
                                 // Hoàn tác nếu lỗi
@@ -1331,21 +1192,9 @@ export default function ReturnsPage() {
 
                             const doUpdate = async () => {
                                 try {
-                                    const result = await window.electronAPI.returns.updateWorkflow(record.id, 'status', newStatus);
+                                    const result = await window.electronAPI.returns.updateWorkflow(record.id, 'status', newStatus, record.updatedAt);
                                     if (!result?.success) throw new Error(result?.error || 'Không thể cập nhật trạng thái phiếu trả.');
-
-                                    // ✅ Chỉ ghi phạt nếu "Lỗi do kho"
-                                    if (newStatus === 'completed' && record.packer) {
-                                        if (record.faultParty === 'customer') {
-                                            console.log(`[Returns] Bỏ qua ghi phạt - Lỗi do khách hàng (phiếu: ${record.complaintCode})`);
-                                        } else {
-                                            // 'warehouse' hoặc undefined (mặc định = lỗi kho)
-                                            await processReturnFine(record.packer, record.complaintCode, record.complaintDate);
-                                        }
-                                    } else if (record.status === 'completed' && newStatus !== 'completed' && record.complaintCode) {
-                                        await processReturnFineRemoval(record.complaintCode);
-                                    }
-
+                                    window.dispatchEvent(new CustomEvent('attendance:fineChanged', { detail: { complaintCode: record.complaintCode } }));
                                     await loadReturns();
                                     message.success('Đã cập nhật trạng thái!');
                                 } catch (err) {
@@ -1387,7 +1236,7 @@ export default function ReturnsPage() {
                                             placeholder="Thêm trạng thái..."
                                             value={newStatusLabel}
                                             onChange={(e) => setNewStatusLabel(e.target.value)}
-                                            onPressEnter={(e) => {
+                                            onPressEnter={async (e) => {
                                                 e.stopPropagation();
                                                 if (newStatusLabel.trim()) {
                                                     const newStatusValue = newStatusLabel.trim().toLowerCase().replace(/\s+/g, '_');
@@ -1401,7 +1250,7 @@ export default function ReturnsPage() {
                                                         color: 'blue',
                                                     };
                                                     const updated = [...statusList, newStatus];
-                                                    saveStatusList(updated);
+                                                    await saveStatusList(updated);
                                                     setNewStatusLabel('');
                                                     message.success('Đã thêm trạng thái mới!');
                                                 }
@@ -1413,7 +1262,7 @@ export default function ReturnsPage() {
                                         <Button
                                             type="primary"
                                             icon={<PlusOutlined />}
-                                            onClick={(e) => {
+                                            onClick={async (e) => {
                                                 e.stopPropagation();
                                                 if (newStatusLabel.trim()) {
                                                     const newStatusValue = newStatusLabel.trim().toLowerCase().replace(/\s+/g, '_');
@@ -1427,7 +1276,7 @@ export default function ReturnsPage() {
                                                         color: 'blue',
                                                     };
                                                     const updated = [...statusList, newStatus];
-                                                    saveStatusList(updated);
+                                                    await saveStatusList(updated);
                                                     setNewStatusLabel('');
                                                     message.success('Đã thêm trạng thái mới!');
                                                 }
@@ -1456,9 +1305,9 @@ export default function ReturnsPage() {
                                                 okText: 'Xóa',
                                                 okType: 'danger',
                                                 cancelText: 'Hủy',
-                                                onOk: () => {
+                                                onOk: async () => {
                                                     const updated = statusList.filter(status => status.value !== s.value);
-                                                    saveStatusList(updated);
+                                                    await saveStatusList(updated);
                                                     message.success('Đã xóa trạng thái!');
                                                 },
                                             });
@@ -2011,7 +1860,7 @@ export default function ReturnsPage() {
                                             placeholder="Tên trạng thái mới..."
                                             value={newStatusLabel}
                                             onChange={(e) => setNewStatusLabel(e.target.value)}
-                                            onPressEnter={() => {
+                                            onPressEnter={async () => {
                                                 if (newStatusLabel.trim()) {
                                                     const newValue = newStatusLabel.trim().toLowerCase().replace(/\\s+/g, '-');
                                                     const exists = statusList.some(s => s.value === newValue);
@@ -2023,7 +1872,7 @@ export default function ReturnsPage() {
                                                             label: newStatusLabel.trim(),
                                                             color: randomColor
                                                         }];
-                                                        saveStatusList(updated);
+                                                        await saveStatusList(updated);
                                                         setNewStatusLabel('');
                                                         message.success('Đã thêm trạng thái mới!');
                                                     } else {
@@ -2035,7 +1884,7 @@ export default function ReturnsPage() {
                                         <Button
                                             type="primary"
                                             icon={<PlusOutlined />}
-                                            onClick={() => {
+                                            onClick={async () => {
                                                 if (newStatusLabel.trim()) {
                                                     const newValue = newStatusLabel.trim().toLowerCase().replace(/\\s+/g, '-');
                                                     const exists = statusList.some(s => s.value === newValue);
@@ -2047,7 +1896,7 @@ export default function ReturnsPage() {
                                                             label: newStatusLabel.trim(),
                                                             color: randomColor
                                                         }];
-                                                        saveStatusList(updated);
+                                                        await saveStatusList(updated);
                                                         setNewStatusLabel('');
                                                         message.success('Đã thêm trạng thái mới!');
                                                     } else {
@@ -2077,9 +1926,9 @@ export default function ReturnsPage() {
                                                         okText: 'Xóa',
                                                         cancelText: 'Hủy',
                                                         okButtonProps: { danger: true },
-                                                        onOk: () => {
+                                                        onOk: async () => {
                                                             const updated = statusList.filter(s => s.value !== status.value);
-                                                            saveStatusList(updated);
+                                                            await saveStatusList(updated);
                                                             message.success(`Đã xóa "${status.label}"!`);
                                                         },
                                                     });

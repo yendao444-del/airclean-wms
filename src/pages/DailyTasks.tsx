@@ -444,7 +444,10 @@ const DailyTasks = () => {
                     setCategories(catResult.data);
                 } else {
                     // Lưu default categories vào DB lần đầu
-                    await window.electronAPI.appConfig.set('dailyTasksCategories', CATEGORIES);
+                    const saveResult = await window.electronAPI.dailyTasks.saveCategories(CATEGORIES, null);
+                    if (!saveResult?.success) {
+                        console.warn('Không thể lưu danh mục mặc định:', saveResult?.error);
+                    }
                 }
             } catch (error) {
                 console.error('Error loading config:', error);
@@ -452,26 +455,48 @@ const DailyTasks = () => {
         })();
     }, []);
 
-    const saveAssigneeList = async (_list: string[]) => {
+    const saveAssigneeList = async (requestedList: string[]) => {
         const usersResult = await window.electronAPI.users.getAll();
-        if (usersResult.success && usersResult.data) {
-            const usernames = usersResult.data
-                .filter((u: any) =>
-                    u?.username &&
-                    u.username !== 'admin' &&
-                    u.isActive !== false &&
-                    u.operationalAssignee !== false
-                )
-                .map((u: any) => String(u.username).trim())
-                .filter(Boolean)
-                .sort((a: string, b: string) => a.localeCompare(b, 'vi'));
-            setAssigneeList(usernames);
+        if (!usersResult.success || !usersResult.data) {
+            throw new Error(usersResult.error || 'Không thể tải danh sách nhân viên.');
+        }
+        const usernames = usersResult.data
+            .filter((u: any) =>
+                u?.username &&
+                u.username !== 'admin' &&
+                u.isActive !== false &&
+                u.operationalAssignee !== false
+            )
+            .map((u: any) => String(u.username).trim())
+            .filter(Boolean)
+            .sort((a: string, b: string) => a.localeCompare(b, 'vi'));
+        const invalidName = requestedList.find(name => !usernames.includes(name));
+        if (invalidName) {
+            throw new Error(`"${invalidName}" chưa có tài khoản nhân viên hoạt động. Hãy tạo tài khoản trước.`);
+        }
+        const omittedUser = usernames.find(name => !requestedList.includes(name));
+        if (omittedUser) {
+            throw new Error(`Không thể xóa "${omittedUser}" tại đây. Hãy cập nhật trạng thái tài khoản nhân viên.`);
+        }
+        setAssigneeList(usernames);
+        return usernames;
+    };
+
+    const trySaveAssigneeList = async (requestedList: string[]) => {
+        try {
+            await saveAssigneeList(requestedList);
+            return true;
+        } catch (error: any) {
+            message.error(error?.message || 'Không thể cập nhật danh sách người thực hiện.');
+            return false;
         }
     };
 
     const saveCategories = async (cats: typeof CATEGORIES) => {
-        setCategories(cats);
-        await window.electronAPI.appConfig.set('dailyTasksCategories', cats);
+        const result = await window.electronAPI.dailyTasks.saveCategories(cats, categories);
+        if (!result?.success) throw new Error(result?.error || 'Không thể lưu danh mục công việc.');
+        setCategories(result.data || cats);
+        return result.data || cats;
     };
 
     // History state
@@ -1065,7 +1090,7 @@ const DailyTasks = () => {
                 loadTasks();
                 return;
             }
-            const result = await window.electronAPI.dailyTasks.update(taskId, { status: 'completed' });
+            const result = await window.electronAPI.dailyTasks.completeAssignment(taskId);
             if (!result.success) throw new Error(result.error || 'Không thể hoàn thành bàn giao.');
             message.success('✅ Đã hoàn thành!');
             window.dispatchEvent(new CustomEvent('task-changed'));
@@ -1127,9 +1152,8 @@ const DailyTasks = () => {
                         timestamp: dayjs().format('DD/MM HH[h]mm'),
                         note: noteValue.trim()
                     };
-                    await window.electronAPI.dailyTasks.update(task.id, {
-                        note: JSON.stringify([...existing, newLog])
-                    });
+                    const result = await window.electronAPI.dailyTasks.addNote(task.id, newLog.note);
+                    if (!result?.success) throw new Error(result?.error || 'Không thể lưu ghi chú.');
                     message.success('Đã lưu ghi chú!');
                     loadTasks();
                 } catch (e: any) {
@@ -1151,9 +1175,8 @@ const DailyTasks = () => {
                 timestamp: dayjs().format('DD/MM HH[h]mm'),
                 note: noteText
             };
-            await window.electronAPI.dailyTasks.update(task.id, {
-                note: JSON.stringify([...existing, newLog])
-            });
+            const result = await window.electronAPI.dailyTasks.addNote(task.id, newLog.note);
+            if (!result?.success) throw new Error(result?.error || 'Không thể lưu ghi chú.');
             message.success('Đã thêm ghi chú!');
             setQuickNotes(prev => ({ ...prev, [task.id]: '' }));
             setShowNoteInput(prev => ({ ...prev, [task.id]: false }));
@@ -1374,21 +1397,17 @@ const DailyTasks = () => {
                 cancelText: 'Đóng',
                 onOk: async () => {
                     try {
-                        // Update status
+                        const result = await window.electronAPI.dailyTasks.reopen(taskId);
+                        if (!result.success) throw new Error(result.error || 'Không thể mở lại công việc.');
                         setTasks(prev => prev.map(t =>
                             t.id === taskId
-                                ? { ...t, status: 'pending' }
+                                ? { ...t, ...result.data, status: 'pending', attachments: parseAttachments(result.data?.attachments) }
                                 : t
                         ));
-
-                        // The backend persists the audit event before reporting success.
                         message.success({
                             content: '⚠️ Đã hủy hoàn thành!',
                             duration: 2
                         });
-
-                        const result = await window.electronAPI.dailyTasks.update(taskId, { status: 'pending' });
-                        if (!result.success) throw new Error(result.error || 'Không thể mở lại công việc.');
                         if (activeTab === 'history' || activeTab === 'triage') await loadHistory();
                     } catch (error: any) {
                         message.error('Lỗi: ' + (error.message || 'Unknown error'));
@@ -1420,7 +1439,8 @@ const DailyTasks = () => {
                 onOk: async () => {
                     try {
                         for (const task of orphanTasks) {
-                            await window.electronAPI.dailyTasks.delete(task.id);
+                            const result = await window.electronAPI.dailyTasks.delete(task.id);
+                            if (!result?.success) throw new Error(result?.error || `Không thể xóa công việc #${task.id}.`);
                         }
                         await loadTasks();
                         message.success(`Đã xóa ${orphanTasks.length} công việc trong cột "Khác"!`);
@@ -1443,7 +1463,8 @@ const DailyTasks = () => {
                 try {
                     // Xóa tất cả tasks trong danh mục này trên DATABASE
                     for (const task of tasksInCategory) {
-                        await window.electronAPI.dailyTasks.delete(task.id);
+                        const result = await window.electronAPI.dailyTasks.delete(task.id);
+                        if (!result?.success) throw new Error(result?.error || `Không thể xóa công việc #${task.id}.`);
                     }
                     // Xóa danh mục khỏi config
                     const updated = categories.filter(c => c.key !== categoryKey);
@@ -1519,6 +1540,8 @@ const DailyTasks = () => {
                     if (result.success) {
                         message.success('Đã xóa!');
                         loadTasks();
+                    } else {
+                        throw new Error(result.error || 'Không thể xóa công việc.');
                     }
                 } catch (error: any) {
                     message.error('Lỗi: ' + (error.message || 'Unknown error'));
@@ -1645,8 +1668,9 @@ const DailyTasks = () => {
             setCategoryModalVisible(false);
             categoryForm.resetFields();
             setEditingCategory(null);
-        } catch (error) {
+        } catch (error: any) {
             console.error('Validation error:', error);
+            message.error(error?.message || 'Không thể lưu danh mục.');
         }
     };
 
@@ -4157,12 +4181,13 @@ const DailyTasks = () => {
                                 (option?.label as string || '').toLowerCase().includes(input.toLowerCase())
                             }
                             onSearch={() => { }}
-                            onChange={(value) => {
+                            onChange={async (value) => {
                                 // Nếu người dùng gõ tên mới (không có trong danh sách)
                                 if (value && !assigneeList.includes(value)) {
                                     const updated = [...assigneeList, value];
-                                    saveAssigneeList(updated);
-                                    message.success(`✅ Đã thêm "${value}" vào danh sách!`);
+                                    if (await trySaveAssigneeList(updated)) {
+                                        message.success(`✅ Đã thêm "${value}" vào danh sách!`);
+                                    }
                                 }
                             }}
                         >
@@ -4192,10 +4217,11 @@ const DailyTasks = () => {
                                                         okText: 'Xóa',
                                                         okType: 'danger',
                                                         cancelText: 'Hủy',
-                                                        onOk: () => {
+                                                        onOk: async () => {
                                                             const updated = assigneeList.filter(p => p !== name);
-                                                            saveAssigneeList(updated);
-                                                            message.success('Đã xóa!');
+                                                            if (await trySaveAssigneeList(updated)) {
+                                                                message.success('Đã xóa!');
+                                                            }
                                                         },
                                                     });
                                                 }}
@@ -4237,7 +4263,7 @@ const DailyTasks = () => {
                                     autoFocus
                                     value={newAssigneeName}
                                     onChange={(e) => setNewAssigneeName(e.target.value)}
-                                    onPressEnter={() => {
+                                    onPressEnter={async () => {
                                         const name = newAssigneeName.trim();
                                         if (!name) return;
                                         if (assigneeList.includes(name)) {
@@ -4245,7 +4271,7 @@ const DailyTasks = () => {
                                             return;
                                         }
                                         const updated = [...assigneeList, name];
-                                        saveAssigneeList(updated);
+                                        if (!(await trySaveAssigneeList(updated))) return;
                                         taskForm.setFieldsValue({ assignee: name });
                                         setNewAssigneeName('');
                                         setShowAddAssignee(false);
@@ -4259,7 +4285,7 @@ const DailyTasks = () => {
                                     type="primary"
                                     size="small"
                                     icon={<PlusOutlined />}
-                                    onClick={() => {
+                                    onClick={async () => {
                                         const name = newAssigneeName.trim();
                                         if (!name) {
                                             message.warning('Vui lòng nhập tên!');
@@ -4270,7 +4296,7 @@ const DailyTasks = () => {
                                             return;
                                         }
                                         const updated = [...assigneeList, name];
-                                        saveAssigneeList(updated);
+                                        if (!(await trySaveAssigneeList(updated))) return;
                                         taskForm.setFieldsValue({ assignee: name });
                                         setNewAssigneeName('');
                                         setShowAddAssignee(false);

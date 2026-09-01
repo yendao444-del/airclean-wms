@@ -261,15 +261,6 @@ export interface ElectronAPI {
       id: number,
       data: any,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
-    updateStatus: (
-      id: number,
-      status: 'processing' | 'received' | 'lost',
-    ) => Promise<{ success: boolean; data?: any; error?: string }>;
-    updateWorkflow: (
-      id: number,
-      field: 'packer' | 'status' | 'faultParty',
-      value: string | null,
-    ) => Promise<{ success: boolean; data?: any; error?: string }>;
     repairMissingPrices: (
       purchaseId: number,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -594,6 +585,20 @@ export interface ElectronAPI {
       taskId: number,
       payload: { verifier: string; assignee?: string },
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    addNote: (
+      taskId: number,
+      note: string,
+    ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    reopen: (
+      taskId: number,
+    ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    completeAssignment: (
+      taskId: number,
+    ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    saveCategories: (
+      categories: any[],
+      expectedCategories: any[] | null,
+    ) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     getEvidenceImageUrl: (
       taskId: number,
       storagePath?: string,
@@ -826,6 +831,24 @@ export interface ElectronAPI {
       id: number,
       data: any,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    updateWorkflow: (
+      id: number,
+      field: 'packer' | 'status' | 'faultParty',
+      value: string | null,
+      expectedUpdatedAt?: string | Date,
+    ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    updateWorkflowBulk: (
+      updates: Array<{
+        id: number;
+        field: 'packer' | 'status' | 'faultParty';
+        value: string | null;
+        expectedUpdatedAt?: string | Date;
+      }>,
+    ) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    saveStatusList: (
+      statuses: any[],
+      expectedStatuses: any[] | null,
+    ) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     addProcessNote: (
       id: number,
       note: string,
@@ -846,6 +869,11 @@ export interface ElectronAPI {
     update: (
       id: number,
       data: any,
+    ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    updateStatus: (
+      id: number,
+      status: 'processing' | 'received' | 'lost',
+      expectedUpdatedAt?: string | Date,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
     delete: (id: number) => Promise<{ success: boolean; error?: string }>;
     bulkDelete: (

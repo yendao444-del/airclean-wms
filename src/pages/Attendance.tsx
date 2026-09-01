@@ -3392,11 +3392,25 @@ export default function Attendance() {
                 });
             }
         };
+        const handleFineChanged = async () => {
+            try {
+                const result = await window.electronAPI.appConfig.get('attendanceData');
+                if (result?.success && result.data) {
+                    const data = typeof result.data === 'string' ? JSON.parse(result.data) : result.data;
+                    setExtraFines((Array.isArray(data.extraFines) ? data.extraFines : [])
+                        .map((fine: FineRecord, index: number) => ensureFineId(fine, index)));
+                }
+            } catch (error) {
+                console.error('Không thể tải lại phạt sau cập nhật phiếu trả:', error);
+            }
+        };
         window.addEventListener('attendance:fineAdded', handleFineAdded);
         window.addEventListener('attendance:fineRemoved', handleFineRemoved);
+        window.addEventListener('attendance:fineChanged', handleFineChanged);
         return () => {
             window.removeEventListener('attendance:fineAdded', handleFineAdded);
             window.removeEventListener('attendance:fineRemoved', handleFineRemoved);
+            window.removeEventListener('attendance:fineChanged', handleFineChanged);
         };
     }, []);
 

@@ -42,6 +42,10 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "dailyTasks:requestAssignmentCompletion",
   "dailyTasks:completeRegularTask",
   "dailyTasks:reviewEvidence",
+  "dailyTasks:addNote",
+  "dailyTasks:reopen",
+  "dailyTasks:completeAssignment",
+  "dailyTasks:saveCategories",
   "attendance:updateLeaveStatus",
   "attendance:updatePayrollOverride",
   "attendance:updatePayrollLock",
@@ -53,6 +57,8 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   // Workflow-only return updates expose just operational fields. Full record
   // edits remain blocked until they have an optimistic-locking contract.
   "returns:updateWorkflow",
+  "returns:updateWorkflowBulk",
+  "returns:saveStatusList",
   // Refund status transitions are validated separately from full record edits
   // and serialized under a row lock; inventory restoration remains in its
   // dedicated transactional handler.
@@ -14346,24 +14352,36 @@ function parseTaskAttachments(attachments) {
   }
 }
 
+async function writeDailyTaskHistory(tx, entry) {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('dailyTasksHistory'))`;
+  const historyConfig = await tx.appConfig.findUnique({
+    where: { key: "dailyTasksHistory" },
+  });
+  let history = [];
+  try {
+    const parsed = historyConfig?.value ? JSON.parse(historyConfig.value) : [];
+    history = Array.isArray(parsed) ? parsed : [];
+  } catch {}
+  const updatedHistory = [entry, ...history].slice(0, 500);
+  await tx.appConfig.upsert({
+    where: { key: "dailyTasksHistory" },
+    update: { value: JSON.stringify(updatedHistory) },
+    create: {
+      key: "dailyTasksHistory",
+      value: JSON.stringify(updatedHistory),
+    },
+  });
+}
+
 async function appendDailyTaskHistory(entry) {
   try {
-    const historyConfig = await prisma.appConfig.findUnique({
-      where: { key: "dailyTasksHistory" },
-    });
-    const history = historyConfig ? JSON.parse(historyConfig.value) : [];
-    const updatedHistory = [entry, ...history].slice(0, 500);
-
-    await prisma.appConfig.upsert({
-      where: { key: "dailyTasksHistory" },
-      update: { value: JSON.stringify(updatedHistory) },
-      create: {
-        key: "dailyTasksHistory",
-        value: JSON.stringify(updatedHistory),
-      },
-    });
+    await getPrismaDirectTx().$transaction(
+      (tx) => writeDailyTaskHistory(tx, entry),
+      { isolationLevel: "Serializable", timeout: 10000, maxWait: 10000 },
+    );
   } catch (error) {
-    // Evidence remains valid even if its audit entry cannot be written.
+    // The operational mutation remains valid if this secondary audit write
+    // fails, but concurrent history appends can no longer overwrite each other.
     console.error("Unable to write daily task history:", error.message);
   }
 }
@@ -15548,7 +15566,7 @@ ipcMain.handle(
         if (!current || current.updatedAt.getTime() !== task.updatedAt.getTime()) {
           throw new Error("Công việc đã được thay đổi trên máy khác. Vui lòng tải lại và thử lại.");
         }
-        return tx.dailyTask.update({
+        const updated = await tx.dailyTask.update({
           where: { id: task.id },
           data: {
             attachments: JSON.stringify({
@@ -15560,23 +15578,24 @@ ipcMain.handle(
             verifier: approved ? actor.fullName : "",
           },
         });
+        await writeDailyTaskHistory(tx, {
+          taskId: task.id,
+          taskTitle: task.title,
+          category: task.category,
+          assignee: task.assignee,
+          verifier: actor.fullName,
+          action: approved ? "evidence_approved" : "evidence_rejected",
+          timestamp: reviewedAt,
+          evidence: getEvidenceHistoryPayload(reviewedEvidence),
+          description: approved
+            ? `Đã duyệt bằng chứng: "${task.title}"`
+            : `Đã từ chối bằng chứng: "${task.title}"`,
+        });
+        return updated;
       });
 
       let penalty = null;
       if (!approved) penalty = await createEvidencePenaltyIfDue(updatedTask);
-      await appendDailyTaskHistory({
-        taskId: task.id,
-        taskTitle: task.title,
-        category: task.category,
-        assignee: task.assignee,
-        verifier: actor.fullName,
-        action: approved ? "evidence_approved" : "evidence_rejected",
-        timestamp: reviewedAt,
-        evidence: getEvidenceHistoryPayload(reviewedEvidence),
-        description: approved
-          ? `Đã duyệt bằng chứng: "${task.title}"`
-          : `Đã từ chối bằng chứng: "${task.title}"`,
-      });
       return { success: true, data: { task: updatedTask, penalty } };
     } catch (error) {
       return { success: false, error: error.message };
@@ -15661,7 +15680,7 @@ ipcMain.handle(
         if (current.status === "completed") {
           throw new Error("Công việc đã được hoàn thành trước đó.");
         }
-        return tx.dailyTask.update({
+        const completed = await tx.dailyTask.update({
           where: { id: task.id },
           data: {
             status: "completed",
@@ -15670,17 +15689,18 @@ ipcMain.handle(
             verifier: verifier.fullName || verifier.username,
           },
         });
-      });
-      await appendDailyTaskHistory({
-        taskId: task.id,
-        taskTitle: task.title,
-        category: task.category,
-        assignee: updated.assignee,
-        verifier: updated.verifier || "",
-        action: "completed",
-        timestamp:
-          updated.completedAt?.toISOString() || new Date().toISOString(),
-        description: `Completed task: "${task.title}"`,
+        await writeDailyTaskHistory(tx, {
+          taskId: task.id,
+          taskTitle: task.title,
+          category: task.category,
+          assignee: completed.assignee,
+          verifier: completed.verifier || "",
+          action: "completed",
+          timestamp:
+            completed.completedAt?.toISOString() || new Date().toISOString(),
+          description: `Completed task: "${task.title}"`,
+        });
+        return completed;
       });
       return { success: true, data: updated };
     } catch (error) {
@@ -16520,21 +16540,22 @@ ipcMain.handle("dailyTasks:requestAssignmentCompletion", async (_event, id) => {
         if (!current || current.updatedAt.getTime() !== task.updatedAt.getTime()) {
           throw new Error("Assignment đã được thay đổi trên máy khác. Vui lòng tải lại và thử lại.");
         }
-        return tx.dailyTask.update({
+        const requested = await tx.dailyTask.update({
           where: { id: task.id },
           data: { attachments: JSON.stringify(attachments) },
         });
+        await writeDailyTaskHistory(tx, {
+          taskId: task.id,
+          taskTitle: task.title,
+          category: task.category,
+          assignee: task.assignee,
+          verifier: task.verifier || "",
+          action: "completion_requested",
+          timestamp: new Date().toISOString(),
+          description: `${actor.username} requested completion for assignment: "${task.title}"`,
+        });
+        return requested;
       });
-    await appendDailyTaskHistory({
-      taskId: task.id,
-      taskTitle: task.title,
-      category: task.category,
-      assignee: task.assignee,
-      verifier: task.verifier || "",
-      action: "completion_requested",
-      timestamp: new Date().toISOString(),
-      description: `${actor.username} requested completion for assignment: "${task.title}"`,
-    });
     void logActivity({
       module: "daily_tasks",
       action: "REQUEST_COMPLETE",
@@ -16545,6 +16566,247 @@ ipcMain.handle("dailyTasks:requestAssignmentCompletion", async (_event, id) => {
     return { success: true, data: updated };
   } catch (error) {
     console.error("Error requesting assignment completion:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("dailyTasks:addNote", async (_event, payload = {}) => {
+  try {
+    const actor = await getCurrentActor();
+    const taskId = Number(payload.taskId);
+    const note = String(payload.note || "").trim().slice(0, 1000);
+    if (!Number.isSafeInteger(taskId) || taskId <= 0) {
+      throw new Error("Mã công việc không hợp lệ.");
+    }
+    if (!note) throw new Error("Ghi chú không được để trống.");
+
+    const updated = await getPrismaDirectTx().$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw`
+        SELECT id FROM "DailyTask" WHERE id = ${taskId} FOR UPDATE
+      `;
+      if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+        throw new Error("Không tìm thấy công việc.");
+      }
+      const task = await tx.dailyTask.findUnique({ where: { id: taskId } });
+      if (!task) throw new Error("Không tìm thấy công việc.");
+      const attachments = parseTaskAttachments(task.attachments);
+      if (attachments?.archive?.archivedAt) {
+        throw new Error("Công việc đã được lưu trữ, không thể thêm ghi chú.");
+      }
+      if (
+        task.type === "assignment" &&
+        actor.role !== "admin" &&
+        !isTestOperatorActor(actor) &&
+        !actorOwnsTask(actor, task)
+      ) {
+        throw new Error("Bạn chỉ có thể ghi chú công việc bàn giao cho mình.");
+      }
+      let logs = [];
+      try {
+        const parsed = task.note ? JSON.parse(task.note) : [];
+        logs = Array.isArray(parsed)
+          ? parsed
+          : task.note
+            ? [{ timestamp: "", note: String(parsed) }]
+            : [];
+      } catch {
+        logs = task.note ? [{ timestamp: "", note: task.note }] : [];
+      }
+      const createdAt = new Date();
+      const newLog = {
+        timestamp: createdAt.toLocaleString("vi-VN", {
+          timeZone: "Asia/Bangkok",
+          day: "2-digit",
+          month: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }),
+        note,
+        createdBy: actor.username,
+        createdAt: createdAt.toISOString(),
+      };
+      return tx.dailyTask.update({
+        where: { id: taskId },
+        data: { note: JSON.stringify([...logs, newLog]) },
+      });
+    });
+    return { success: true, data: updated };
+  } catch (error) {
+    console.error("Error adding daily task note:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("dailyTasks:completeAssignment", async (_event, payload = {}) => {
+  try {
+    const actor = await getCurrentActor();
+    if (actor.role !== "admin") {
+      throw new Error("Chỉ admin được xác nhận hoàn thành bàn giao.");
+    }
+    const taskId = Number(payload.taskId);
+    if (!Number.isSafeInteger(taskId) || taskId <= 0) {
+      throw new Error("Mã công việc không hợp lệ.");
+    }
+    const updated = await getPrismaDirectTx().$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw`
+        SELECT id FROM "DailyTask" WHERE id = ${taskId} FOR UPDATE
+      `;
+      if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+        throw new Error("Không tìm thấy công việc bàn giao.");
+      }
+      const task = await tx.dailyTask.findUnique({ where: { id: taskId } });
+      if (!task || task.type !== "assignment") {
+        throw new Error("Chỉ công việc bàn giao mới dùng thao tác này.");
+      }
+      if (task.status === "completed") return task;
+      const attachments = parseTaskAttachments(task.attachments);
+      if (attachments?.archive?.archivedAt) {
+        throw new Error("Công việc đã được lưu trữ.");
+      }
+      if (
+        attachments?.evidence?.required &&
+        attachments.evidence.status !== "approved"
+      ) {
+        throw new Error("Bằng chứng phải được duyệt trước khi hoàn thành bàn giao.");
+      }
+      const completed = await tx.dailyTask.update({
+        where: { id: taskId },
+        data: {
+          status: "completed",
+          completedAt: new Date(),
+          verifier: actor.fullName,
+        },
+      });
+      await writeDailyTaskHistory(tx, {
+        taskId,
+        taskTitle: task.title,
+        category: task.category,
+        assignee: completed.assignee,
+        verifier: actor.fullName,
+        action: "completed",
+        timestamp: completed.completedAt.toISOString(),
+        description: `Đã hoàn thành bàn giao: "${task.title}"`,
+      });
+      return completed;
+    });
+    return { success: true, data: updated };
+  } catch (error) {
+    console.error("Error completing assignment:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("dailyTasks:reopen", async (_event, payload = {}) => {
+  try {
+    requireRole("admin");
+    const taskId = Number(payload.taskId);
+    if (!Number.isSafeInteger(taskId) || taskId <= 0) {
+      throw new Error("Mã công việc không hợp lệ.");
+    }
+    const updated = await getPrismaDirectTx().$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw`
+        SELECT id FROM "DailyTask" WHERE id = ${taskId} FOR UPDATE
+      `;
+      if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+        throw new Error("Không tìm thấy công việc.");
+      }
+      const task = await tx.dailyTask.findUnique({ where: { id: taskId } });
+      if (!task) throw new Error("Không tìm thấy công việc.");
+      if (task.status !== "completed") {
+        throw new Error("Công việc chưa hoàn thành nên không cần mở lại.");
+      }
+      const attachments = parseTaskAttachments(task.attachments);
+      if (attachments?.archive?.archivedAt) {
+        throw new Error("Công việc đã được lưu trữ.");
+      }
+      const nextAttachments = attachments?.evidence?.required
+        ? clearEvidenceSubmission(attachments)
+        : { ...attachments };
+      if (nextAttachments.assignment) {
+        delete nextAttachments.assignment.completionRequestedAt;
+        delete nextAttachments.assignment.completionRequestedBy;
+      }
+      const reopened = await tx.dailyTask.update({
+        where: { id: taskId },
+        data: {
+          status: "pending",
+          completedAt: null,
+          verifier: "",
+          attachments: JSON.stringify(nextAttachments),
+        },
+      });
+      await writeDailyTaskHistory(tx, {
+        taskId,
+        taskTitle: task.title,
+        category: task.category,
+        assignee: task.assignee,
+        verifier: currentSession.username,
+        action: "pending",
+        timestamp: new Date().toISOString(),
+        description: `Đã mở lại ${task.type === "assignment" ? "bàn giao" : "công việc"}: "${task.title}"`,
+      });
+      return reopened;
+    });
+    return { success: true, data: updated };
+  } catch (error) {
+    console.error("Error reopening daily task:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("dailyTasks:saveCategories", async (_event, payload = {}) => {
+  try {
+    requireRole("admin", "manager");
+    const categories = Array.isArray(payload.categories) ? payload.categories : [];
+    const hasExpectedCategories = Object.prototype.hasOwnProperty.call(
+      payload,
+      "expectedCategories",
+    );
+    const expectedCategories = Array.isArray(payload.expectedCategories)
+      ? payload.expectedCategories
+      : null;
+    if (categories.length === 0 || categories.length > 50) {
+      throw new Error("Danh sách danh mục không hợp lệ.");
+    }
+    const normalized = categories.map((category) => {
+      const key = String(category?.key || "").trim().slice(0, 100);
+      if (!key) throw new Error("Tên danh mục không được để trống.");
+      return {
+        key,
+        icon: String(category?.icon || "").slice(0, 20),
+        color: String(category?.color || "").slice(0, 40),
+        gradient: String(category?.gradient || "").slice(0, 200),
+      };
+    });
+    if (new Set(normalized.map((category) => category.key)).size !== normalized.length) {
+      throw new Error("Tên danh mục không được trùng nhau.");
+    }
+    const result = await getPrismaDirectTx().$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('dailyTasksCategories'))`;
+      const current = await tx.appConfig.findUnique({
+        where: { key: "dailyTasksCategories" },
+      });
+      let currentCategories = null;
+      try {
+        currentCategories = current?.value ? JSON.parse(current.value) : null;
+      } catch {}
+      if (
+        hasExpectedCategories &&
+        JSON.stringify(currentCategories) !== JSON.stringify(expectedCategories)
+      ) {
+        throw new Error("Danh mục đã được thay đổi trên máy khác. Vui lòng tải lại.");
+      }
+      await tx.appConfig.upsert({
+        where: { key: "dailyTasksCategories" },
+        update: { value: JSON.stringify(normalized) },
+        create: { key: "dailyTasksCategories", value: JSON.stringify(normalized) },
+      });
+      return normalized;
+    });
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("Error saving daily-task categories:", error);
     return { success: false, error: error.message };
   }
 });
@@ -20892,11 +21154,17 @@ ipcMain.handle("refunds:updateStatus", async (event, payload = {}) => {
     if (!prisma) throw new Error("Prisma not available");
     const refundId = Number(payload.id);
     const status = String(payload.status || "").trim().slice(0, 60);
+    const expectedUpdatedAt = payload.expectedUpdatedAt
+      ? new Date(payload.expectedUpdatedAt)
+      : null;
     if (!Number.isSafeInteger(refundId) || refundId <= 0) {
       throw new Error("Mã phiếu hoàn không hợp lệ.");
     }
     if (!["processing", "received", "lost"].includes(status)) {
       throw new Error("Trạng thái phiếu hoàn không được phép trong luồng này.");
+    }
+    if (expectedUpdatedAt && Number.isNaN(expectedUpdatedAt.getTime())) {
+      throw new Error("Phiên bản phiếu hoàn không hợp lệ.");
     }
     const record = await getPrismaDirectTx().$transaction(async (tx) => {
       const lockedRows = await tx.$queryRaw`
@@ -20907,6 +21175,12 @@ ipcMain.handle("refunds:updateStatus", async (event, payload = {}) => {
       }
       const current = await tx.refund.findUnique({ where: { id: refundId } });
       if (!current) throw new Error("Không tìm thấy phiếu hoàn.");
+      if (
+        expectedUpdatedAt &&
+        current.updatedAt.getTime() !== expectedUpdatedAt.getTime()
+      ) {
+        throw new Error("Phiếu hoàn đã được thay đổi trên máy khác. Vui lòng tải lại.");
+      }
       if (current.status === "completed") {
         throw new Error("Phiếu hoàn đã hoàn tất, không thể đổi trạng thái bằng luồng này.");
       }
@@ -21127,55 +21401,277 @@ ipcMain.handle("returns:addProcessNote", async (event, payload = {}) => {
   }
 });
 
-// Update only operational return fields. Full return edits remain behind the
-// safety gate because they can replace item/amount/customer data wholesale.
-ipcMain.handle("returns:updateWorkflow", async (event, payload = {}) => {
+function normalizeReturnEmployeeKey(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function validateReturnWorkflowUpdate(payload) {
+  const returnId = Number(payload?.id);
+  const field = String(payload?.field || "");
+  if (!Number.isSafeInteger(returnId) || returnId <= 0) {
+    throw new Error("Mã phiếu trả không hợp lệ.");
+  }
+  let value;
+  if (field === "packer") {
+    value = payload.value == null ? null : String(payload.value).trim();
+    if (value && value.length > 120) {
+      throw new Error("Tên nhân viên đóng gói quá dài.");
+    }
+    value = value || null;
+  } else if (field === "status") {
+    value = String(payload.value || "").trim().slice(0, 60);
+    if (!value) throw new Error("Trạng thái phiếu trả không hợp lệ.");
+  } else if (field === "faultParty") {
+    value = String(payload.value || "");
+    if (!["warehouse", "customer"].includes(value)) {
+      throw new Error("Bên chịu lỗi không hợp lệ.");
+    }
+  } else {
+    throw new Error("Chỉ được cập nhật nhân viên đóng gói, trạng thái hoặc bên chịu lỗi.");
+  }
+  const expectedUpdatedAt = payload.expectedUpdatedAt
+    ? new Date(payload.expectedUpdatedAt)
+    : null;
+  if (expectedUpdatedAt && Number.isNaN(expectedUpdatedAt.getTime())) {
+    throw new Error("Phiên bản phiếu trả không hợp lệ.");
+  }
+  return { returnId, field, value, expectedUpdatedAt };
+}
+
+async function applyReturnWorkflowUpdates(updates) {
+  const normalizedUpdates = updates.map(validateReturnWorkflowUpdate);
+  if (normalizedUpdates.length === 0 || normalizedUpdates.length > 200) {
+    throw new Error("Danh sách cập nhật phiếu trả không hợp lệ.");
+  }
+  if (new Set(normalizedUpdates.map((item) => item.returnId)).size !== normalizedUpdates.length) {
+    throw new Error("Một phiếu trả không được cập nhật hai lần trong cùng thao tác.");
+  }
+
+  return getPrismaDirectTx().$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
+      const attendanceConfig = await tx.appConfig.findUnique({
+        where: { key: "attendanceData" },
+      });
+      let attendanceData = {};
+      try {
+        attendanceData = attendanceConfig?.value
+          ? JSON.parse(attendanceConfig.value)
+          : {};
+      } catch {}
+      const employees = Array.isArray(attendanceData.employees)
+        ? attendanceData.employees
+        : [];
+      let fines = Array.isArray(attendanceData.extraFines)
+        ? [...attendanceData.extraFines]
+        : [];
+      let attendanceDirty = false;
+      const records = [];
+
+      for (const update of [...normalizedUpdates].sort((a, b) => a.returnId - b.returnId)) {
+        const lockedRows = await tx.$queryRaw`
+          SELECT id FROM "Return" WHERE id = ${update.returnId} FOR UPDATE
+        `;
+        if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+          throw new Error(`Không tìm thấy phiếu trả #${update.returnId}.`);
+        }
+        const current = await tx.return.findUnique({ where: { id: update.returnId } });
+        if (!current) throw new Error(`Không tìm thấy phiếu trả #${update.returnId}.`);
+        if (
+          update.expectedUpdatedAt &&
+          current.updatedAt.getTime() !== update.expectedUpdatedAt.getTime()
+        ) {
+          throw new Error(`Phiếu trả #${update.returnId} đã được thay đổi trên máy khác. Vui lòng tải lại.`);
+        }
+        const record = current[update.field] === update.value
+          ? current
+          : await tx.return.update({
+              where: { id: update.returnId },
+              data: { [update.field]: update.value },
+            });
+
+        const complaintCode = String(record.returnCode || "").trim();
+        if (record.status === "completed" && !record.packer) {
+          throw new Error(`Phiếu trả ${complaintCode || `#${record.id}`} chưa có nhân viên đóng gói.`);
+        }
+        if (record.status === "completed" && !complaintCode) {
+          throw new Error(`Phiếu trả #${record.id} chưa có mã khiếu nại.`);
+        }
+        const fineIndexes = fines
+          .map((fine, index) => ({ fine, index }))
+          .filter(({ fine }) => {
+            if (fine?.source !== "returns") return false;
+            const linkedReturnId = Number(fine?.returnId);
+            if (Number.isSafeInteger(linkedReturnId) && linkedReturnId > 0) {
+              return linkedReturnId === record.id;
+            }
+            const matchedCode = String(fine?.detail || "")
+              .match(/Mã phiếu:\s*([^)]+)/)?.[1]
+              ?.trim();
+            return Boolean(complaintCode && matchedCode === complaintCode);
+          })
+          .map(({ index }) => index);
+        const shouldFine =
+          record.status === "completed" &&
+          record.faultParty !== "customer" &&
+          Boolean(record.packer) &&
+          Boolean(complaintCode);
+        let desiredFine = null;
+        if (shouldFine) {
+          const packerKey = normalizeReturnEmployeeKey(record.packer);
+          const employee = employees.find((candidate) =>
+            [candidate?.username, candidate?.name, candidate?.displayName]
+              .some((name) => normalizeReturnEmployeeKey(name) === packerKey),
+          );
+          if (!employee) {
+            throw new Error(`Không tìm thấy nhân viên đóng gói "${record.packer}" trong Bảng công.`);
+          }
+          const amount = employee.type === "Seasonal"
+            ? Number(attendanceData?.config?.wrongOrderFineSeasonal || 0)
+            : Number(attendanceData?.config?.wrongOrderFineOfficial || 0);
+          if (amount > 0) {
+            desiredFine = {
+              id: fineIndexes.length > 0
+                ? fines[fineIndexes[0]]?.id || `return-${record.id}`
+                : `return-${record.id}`,
+              empId: employee.id,
+              type: "Khác",
+              detail: `Đóng gói sai đơn, phát sinh KH hoàn hàng/khiếu nại (Mã phiếu: ${complaintCode})`,
+              amount,
+              date: record.returnDate.toISOString(),
+              source: "returns",
+              returnId: record.id,
+            };
+          }
+        }
+        const existingFine = fineIndexes.length > 0 ? fines[fineIndexes[0]] : null;
+        const fineChanged = desiredFine
+          ? JSON.stringify(existingFine || null) !== JSON.stringify(desiredFine) || fineIndexes.length > 1
+          : fineIndexes.length > 0;
+        if (fineChanged) {
+          const periodKey = getBangkokDateKey(record.returnDate).slice(0, 7);
+          if (periodKey && isAttendanceMonthLocked(attendanceData, periodKey)) {
+            throw new Error(`Bảng lương ${periodKey} đã khóa; không thể thay đổi khoản phạt của phiếu ${complaintCode || `#${record.id}`}.`);
+          }
+          const indexSet = new Set(fineIndexes);
+          fines = fines.filter((_fine, index) => !indexSet.has(index));
+          if (desiredFine) fines.push(desiredFine);
+          attendanceDirty = true;
+        }
+        records.push(record);
+      }
+
+      if (attendanceDirty) {
+        attendanceData = { ...attendanceData, extraFines: fines };
+        await tx.appConfig.upsert({
+          where: { key: "attendanceData" },
+          update: { value: JSON.stringify(attendanceData) },
+          create: { key: "attendanceData", value: JSON.stringify(attendanceData) },
+        });
+      }
+      return records;
+    },
+    { isolationLevel: "Serializable", timeout: 20000, maxWait: 10000 },
+  );
+}
+
+// Update only operational return fields. Fine reconciliation is committed in
+// the same transaction, so a completed return cannot silently miss its fine.
+ipcMain.handle("returns:updateWorkflow", async (_event, payload = {}) => {
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
-    const returnId = Number(payload.id);
-    const field = String(payload.field || "");
-    if (!Number.isSafeInteger(returnId) || returnId <= 0) {
-      throw new Error("Mã phiếu trả không hợp lệ.");
-    }
-    const updateData = {};
-    if (field === "packer") {
-      const value = payload.value == null ? null : String(payload.value).trim();
-      if (value && value.length > 120) throw new Error("Tên nhân viên đóng gói quá dài.");
-      updateData.packer = value || null;
-    } else if (field === "status") {
-      const value = String(payload.value || "").trim().slice(0, 60);
-      if (!value) throw new Error("Trạng thái phiếu trả không hợp lệ.");
-      updateData.status = value;
-    } else if (field === "faultParty") {
-      const value = String(payload.value || "");
-      if (!["warehouse", "customer"].includes(value)) {
-        throw new Error("Bên chịu lỗi không hợp lệ.");
-      }
-      updateData.faultParty = value;
-    } else {
-      throw new Error("Chỉ được cập nhật nhân viên đóng gói, trạng thái hoặc bên chịu lỗi.");
-    }
-
-    const record = await getPrismaDirectTx().$transaction(async (tx) => {
-      const lockedRows = await tx.$queryRaw`
-        SELECT id FROM "Return" WHERE id = ${returnId} FOR UPDATE
-      `;
-      if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
-        throw new Error("Không tìm thấy phiếu trả.");
-      }
-      return tx.return.update({ where: { id: returnId }, data: updateData });
-    });
+    const [record] = await applyReturnWorkflowUpdates([payload]);
     void logActivity({
       module: "returns",
       action: "UPDATE_WORKFLOW",
-      description: `Cập nhật ${field} phiếu trả #${returnId}`,
+      description: `Cập nhật ${payload.field} phiếu trả #${record.id}`,
       recordName: record.returnCode || record.customerName,
-      changes: updateData,
+      changes: { [payload.field]: payload.value },
     });
     return { success: true, data: record };
   } catch (error) {
     console.error("Update return workflow error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("returns:updateWorkflowBulk", async (_event, payload = {}) => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Prisma not available");
+    const updates = Array.isArray(payload.updates) ? payload.updates : [];
+    const records = await applyReturnWorkflowUpdates(updates);
+    void logActivity({
+      module: "returns",
+      action: "UPDATE_WORKFLOW_BULK",
+      description: `Cập nhật vận hành hàng loạt ${records.length} phiếu trả`,
+      changes: updates.map(({ id, field, value }) => ({ id, field, value })),
+    });
+    return { success: true, data: records };
+  } catch (error) {
+    console.error("Bulk update return workflow error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("returns:saveStatusList", async (_event, payload = {}) => {
+  try {
+    requireRole("admin", "manager");
+    const statuses = Array.isArray(payload.statuses) ? payload.statuses : [];
+    const hasExpectedStatuses = Object.prototype.hasOwnProperty.call(
+      payload,
+      "expectedStatuses",
+    );
+    const expectedStatuses = Array.isArray(payload.expectedStatuses)
+      ? payload.expectedStatuses
+      : null;
+    if (statuses.length === 0 || statuses.length > 50) {
+      throw new Error("Danh sách trạng thái không hợp lệ.");
+    }
+    const normalized = statuses.map((status) => {
+      const value = String(status?.value || "").trim().slice(0, 60);
+      const label = String(status?.label || "").trim().slice(0, 100);
+      if (!value || !label || /[\u0000-\u001f]/.test(value)) {
+        throw new Error("Tên trạng thái không hợp lệ.");
+      }
+      return {
+        value,
+        label,
+        color: String(status?.color || "default").slice(0, 30),
+        isFinal: status?.isFinal === true,
+      };
+    });
+    if (new Set(normalized.map((status) => status.value)).size !== normalized.length) {
+      throw new Error("Mã trạng thái không được trùng nhau.");
+    }
+    const result = await getPrismaDirectTx().$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('statusList'))`;
+      const current = await tx.appConfig.findUnique({ where: { key: "statusList" } });
+      let currentStatuses = null;
+      try {
+        currentStatuses = current?.value ? JSON.parse(current.value) : null;
+      } catch {}
+      if (
+        hasExpectedStatuses &&
+        JSON.stringify(currentStatuses) !== JSON.stringify(expectedStatuses)
+      ) {
+        throw new Error("Danh sách trạng thái đã đổi trên máy khác. Vui lòng tải lại.");
+      }
+      await tx.appConfig.upsert({
+        where: { key: "statusList" },
+        update: { value: JSON.stringify(normalized) },
+        create: { key: "statusList", value: JSON.stringify(normalized) },
+      });
+      return normalized;
+    });
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("Save return status list error:", error);
     return { success: false, error: error.message };
   }
 });
