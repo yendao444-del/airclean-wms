@@ -33,8 +33,7 @@ echo Version: v%APP_VERSION%
 echo.
 
 echo [1/5] Stopping DBY POS and development watchers...
-powershell -NoProfile -Command "$root=(Resolve-Path '.').Path; Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -like ('*'+$root+'*') -and $_.CommandLine -match 'nodemon.+nodemon\.electron\.json' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-taskkill /F /IM electron.exe >nul 2>&1
+powershell -NoProfile -Command "$root=(Resolve-Path '.').Path; Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('node.exe','electron.exe','esbuild.exe') -and $_.CommandLine -like ('*'+$root+'*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 taskkill /F /IM "DBY POS.exe" >nul 2>&1
 timeout /t 2 /nobreak >nul
 
