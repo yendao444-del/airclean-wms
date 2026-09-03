@@ -407,6 +407,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         updateLeaveStatus: (data) => ipcRenderer.invoke('attendance:updateLeaveStatus', data),
         updatePayrollOverride: (data) => ipcRenderer.invoke('attendance:updatePayrollOverride', data),
         updatePayrollLock: (data) => ipcRenderer.invoke('attendance:updatePayrollLock', data),
+        updatePackingCommission: (data) => ipcRenderer.invoke('attendance:updatePackingCommission', data),
+        deleteFine: (data) => ipcRenderer.invoke('attendance:deleteFine', data),
         reconcileLateFines: () => ipcRenderer.invoke('attendance:reconcileLateFines'),
         getProfiles: () => ipcRenderer.invoke('attendance:getProfiles'),
         deleteProfile: (face_id) => ipcRenderer.invoke('attendance:deleteProfile', { face_id }),

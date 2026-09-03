@@ -49,6 +49,11 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "attendance:updateLeaveStatus",
   "attendance:updatePayrollOverride",
   "attendance:updatePayrollLock",
+  "attendance:updatePackingCommission",
+  "attendance:deleteFine",
+  // Combo deletion is an isolated, audited row delete used to remove
+  // redundant one-component combo records without touching base products.
+  "combos:delete",
   // Face attendance is an intended kiosk workflow. Blocking this channel
   // makes the ready AI service unusable because recognition writes the log.
   "attendance:recognize",
@@ -73,6 +78,17 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "users:update",
   "users:resetPassword",
   "users:forcePasswordChange",
+  // QR issuance/status updates serialize their shared registries under
+  // database advisory locks. PDF names include a timestamp, so exports do
+  // not overwrite an existing file.
+  "handlingUnits:createUnits",
+  "handlingUnits:issueQrLabels",
+  "handlingUnits:markQrLabelsPrinted",
+  "handlingUnits:markQrLabelsReceived",
+  "handlingUnits:exportLabelsPdf",
+  // Purchase creation claims an idempotency key and commits the receipt,
+  // stock ledger, stock values, and metadata in one serializable transaction.
+  "purchases:create",
   // This workflow uses the stock mutex and one database transaction for the
   // export, stock ledger changes, and linked marketplace order.
   "ecommerceExports:create",
@@ -1802,6 +1818,7 @@ function sanitizeUserForClient(user) {
     ...safeUser,
     isActive: user.status === "active",
     mustChangePassword,
+    canChangePasswordWithoutCurrent: hasValidTemporaryPasswordGrant(user),
     isTestAccount: isTestOperatorSession(user),
   };
 }
@@ -6589,7 +6606,28 @@ ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
       };
     });
 
-    await prisma.$transaction(async (tx) => {
+    const createResult = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('handling-units-create'))`;
+      const existingUnits = await tx.handlingUnit.findMany({
+        where: { code: { in: createRows.map((item) => item.code) } },
+      });
+      if (existingUnits.length > 0) {
+        const existingByCode = new Map(existingUnits.map((item) => [item.code, item]));
+        const isExactRetry = createRows.every((item) => {
+          const existing = existingByCode.get(item.code);
+          return existing
+            && Number(existing.productId) === Number(item.productId)
+            && Number(existing.purchaseOrderId || 0) === Number(item.purchaseOrderId || 0)
+            && Number(existing.purchaseItemId || 0) === Number(item.purchaseItemId || 0)
+            && String(existing.sku) === String(item.sku)
+            && Number(existing.initialQuantity) === Number(item.initialQuantity);
+        });
+        if (existingUnits.length === createRows.length && isExactRetry) {
+          return { duplicate: true };
+        }
+        throw new Error("Một hoặc nhiều mã kiện đã tồn tại với dữ liệu khác.");
+      }
+
       await tx.handlingUnit.createMany({ data: createRows });
       await appendHandlingUnitsTransactions(
         tx,
@@ -6604,13 +6642,16 @@ ipcMain.handle("handlingUnits:createUnits", async (_event, records = []) => {
             `Tạo kiện mới ${item.code} tại ${toHandlingUnitLocationCode(item.location)}`,
         })),
       );
+      return { duplicate: false };
     });
 
-    broadcastHandlingUnitsChanged("UNITS_CREATED", {
-      count: createRows.length,
-      codes: createRows.map((item) => item.code),
-    });
-    return { success: true, data: records };
+    if (!createResult.duplicate) {
+      broadcastHandlingUnitsChanged("UNITS_CREATED", {
+        count: createRows.length,
+        codes: createRows.map((item) => item.code),
+      });
+    }
+    return { success: true, data: records, duplicate: createResult.duplicate };
   } catch (error) {
     console.error("Create handling units error:", error);
     return {
@@ -6667,6 +6708,12 @@ async function writeHandlingConfigArray(client, key, value) {
     update: { value: JSON.stringify(value) },
     create: { key, value: JSON.stringify(value) },
   });
+}
+
+async function lockHandlingConfigKeys(tx, keys) {
+  for (const key of [...new Set(keys)].sort()) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+  }
 }
 
 function normalizeHandlingLocation(input = {}) {
@@ -6851,6 +6898,10 @@ ipcMain.handle("handlingUnits:issueQrLabels", async (_event, payload = {}) => {
     if (quantity > 500) throw new Error("Mỗi lần chỉ được phát hành tối đa 500 tem.");
 
     const result = await prisma.$transaction(async (tx) => {
+      await lockHandlingConfigKeys(tx, [
+        HANDLING_PACKAGING_SPECS_KEY,
+        HANDLING_QR_LABELS_KEY,
+      ]);
       const product = await resolveProductForHandlingSku(tx, sku);
       const specs = await readHandlingConfigArray(tx, HANDLING_PACKAGING_SPECS_KEY);
       const registry = await readHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY);
@@ -6977,6 +7028,7 @@ ipcMain.handle("handlingUnits:markQrLabelsPrinted", async (_event, codes = []) =
     )];
     if (!normalizedCodes.length) throw new Error("Chưa có tem QR để xác nhận in.");
     const updated = await prisma.$transaction(async (tx) => {
+      await lockHandlingConfigKeys(tx, [HANDLING_QR_LABELS_KEY]);
       const registry = await readHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY);
       const wanted = new Set(normalizedCodes);
       let count = 0;
@@ -7012,15 +7064,12 @@ ipcMain.handle("handlingUnits:markQrLabelsReceived", async (_event, codes = []) 
     if (!normalizedCodes.length) throw new Error("Chưa có tem QR cần ghi nhận nhập kho.");
 
     const result = await prisma.$transaction(async (tx) => {
+      await lockHandlingConfigKeys(tx, [HANDLING_QR_LABELS_KEY]);
       const registry = await readHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY);
       const wanted = new Set(normalizedCodes);
       const labels = registry.filter((label) => wanted.has(String(label?.code || "").trim().toUpperCase()));
       if (labels.length !== normalizedCodes.length) {
         throw new Error("Có tem QR không tồn tại trong sổ tem.");
-      }
-      const unavailable = labels.find((label) => !["issued", "printed"].includes(label.status));
-      if (unavailable) {
-        throw new Error(`Tem ${unavailable.code} đã được nhập kho hoặc không còn khả dụng.`);
       }
       const physicalUnits = await tx.handlingUnit.findMany({
         where: { code: { in: normalizedCodes } },
@@ -7030,6 +7079,24 @@ ipcMain.handle("handlingUnits:markQrLabelsReceived", async (_event, codes = []) 
         throw new Error("Không tìm thấy đủ kiện vật lý tương ứng để chốt nhập kho.");
       }
       const unitByCode = new Map(physicalUnits.map((unit) => [unit.code, unit]));
+      const receivedLabels = labels.filter((label) => label.status === "received");
+      if (receivedLabels.length === labels.length) {
+        const matchesPhysicalUnits = receivedLabels.every((label) => {
+          const code = String(label?.code || "").trim().toUpperCase();
+          return String(label?.handlingUnitCode || code).trim().toUpperCase() === code
+            && unitByCode.has(code);
+        });
+        if (matchesPhysicalUnits) {
+          return { count: labels.length, codes: normalizedCodes, duplicate: true };
+        }
+      }
+      if (receivedLabels.length > 0) {
+        throw new Error("Một phần lô tem đã được nhập kho. Vui lòng tải lại dữ liệu trước khi thử lại.");
+      }
+      const unavailable = labels.find((label) => !["issued", "printed"].includes(label.status));
+      if (unavailable) {
+        throw new Error(`Tem ${unavailable.code} không còn khả dụng.`);
+      }
       const receivedAt = new Date().toISOString();
       registry.forEach((label) => {
         const code = String(label?.code || "").trim().toUpperCase();
@@ -7041,9 +7108,9 @@ ipcMain.handle("handlingUnits:markQrLabelsReceived", async (_event, codes = []) 
         label.purchaseOrderId = unit?.purchaseOrderId || null;
       });
       await writeHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY, registry);
-      return { count: labels.length, codes: normalizedCodes };
+      return { count: labels.length, codes: normalizedCodes, duplicate: false };
     });
-    broadcastHandlingUnitsChanged("QR_LABELS_RECEIVED", result);
+    if (!result.duplicate) broadcastHandlingUnitsChanged("QR_LABELS_RECEIVED", result);
     return { success: true, data: result };
   } catch (error) {
     console.error("Mark QR labels received error:", error);
@@ -8060,6 +8127,7 @@ async function executeKhuiKien(
     .trim()
     .toUpperCase();
   if (!normalizedCode) throw new Error("Vui lòng cung cấp mã kiện.");
+  if (!prisma) throw new Error("Database chưa sẵn sàng để khui kiện.");
   const operationKey = buildTelegramWmsOperationKey(
     telegramUpdateId,
     "unseal",
@@ -8069,6 +8137,7 @@ async function executeKhuiKien(
   if (prisma) {
     try {
       const res = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${normalizedCode}`}))`;
         if (operationKey) {
           const completed = await tx.appConfig.findUnique({
             where: { key: operationKey },
@@ -8173,7 +8242,12 @@ async function executeKhuiKien(
         });
         if (existingUnit) return existingUnit;
       }
+      if (DATA_SAFETY_MODE) throw dbErr;
     }
+  }
+
+  if (DATA_SAFETY_MODE) {
+    throw new Error(`Không tìm thấy kiện [${normalizedCode}] trong dữ liệu kiện hàng hiện tại.`);
   }
 
   // Fallback store
@@ -8368,6 +8442,7 @@ async function executeRutHang(
   const destinationMeta = HANDLING_PICK_DESTINATIONS[destinationCode];
   if (!normalizedCode || qty <= 0)
     throw new Error("Vui lòng nhập mã kiện và số lượng cần rút hợp lệ.");
+  if (!prisma) throw new Error("Database chưa sẵn sàng để rút hàng.");
   const operationKey = buildTelegramWmsOperationKey(
     telegramUpdateId,
     "pick",
@@ -8377,6 +8452,7 @@ async function executeRutHang(
   if (prisma) {
     try {
       const res = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${normalizedCode}`}))`;
         if (operationKey) {
           const completed = await tx.appConfig.findUnique({
             where: { key: operationKey },
@@ -8445,21 +8521,19 @@ async function executeRutHang(
           },
         });
 
-        let destinationPcs = 0;
-        try {
-          const cfg = await tx.appConfig.findUnique({
-            where: { key: destinationMeta.configKey },
-          });
-          destinationPcs = Math.max(0, Number(cfg?.value || 0)) + qty;
-          await tx.appConfig.upsert({
-            where: { key: destinationMeta.configKey },
-            create: {
-              key: destinationMeta.configKey,
-              value: String(destinationPcs),
-            },
-            update: { value: String(destinationPcs) },
-          });
-        } catch {}
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${destinationMeta.configKey}))`;
+        const cfg = await tx.appConfig.findUnique({
+          where: { key: destinationMeta.configKey },
+        });
+        const destinationPcs = Math.max(0, Number(cfg?.value || 0)) + qty;
+        await tx.appConfig.upsert({
+          where: { key: destinationMeta.configKey },
+          create: {
+            key: destinationMeta.configKey,
+            value: String(destinationPcs),
+          },
+          update: { value: String(destinationPcs) },
+        });
         await appendHandlingUnitsTransaction(tx, {
           unitId: normalizedCode,
           type: destinationMeta.transactionType,
@@ -8491,20 +8565,24 @@ async function executeRutHang(
           });
         }
 
-        broadcastHandlingUnitsChanged("PICK", {
-          code: normalizedCode,
-          quantity: qty,
-          remaining: nextRemaining,
-          status: nextStatus,
-          destination: destinationCode,
-          actor,
-        });
         return {
           unit: updated,
           ...operationResult,
         };
       });
-      if (res) return res;
+      if (res) {
+        if (!res.duplicate) {
+          broadcastHandlingUnitsChanged("PICK", {
+            code: normalizedCode,
+            quantity: qty,
+            remaining: res.remaining,
+            status: res.unit?.status,
+            destination: destinationCode,
+            actor,
+          });
+        }
+        return res;
+      }
     } catch (dbErr) {
       if (
         dbErr.message.includes("chưa khui") ||
@@ -8525,6 +8603,10 @@ async function executeRutHang(
       // transaction lỗi vì có thể báo thành công dù dữ liệu không đồng bộ.
       throw dbErr;
     }
+  }
+
+  if (DATA_SAFETY_MODE) {
+    throw new Error(`Không tìm thấy kiện [${normalizedCode}] trong dữ liệu kiện hàng hiện tại.`);
   }
 
   // Fallback store
@@ -9530,13 +9612,10 @@ function stopTelegramWmsPolling() {
   telegramWmsOffsetLoaded = false;
 }
 
-// Remote Telegram mutations stay disabled until every sender maps to a
-// business user and each inventory action has a verified rollback path.
-if (!DATA_SAFETY_MODE) {
-  startTelegramWmsPolling();
-} else {
-  console.warn("[DataSafety] Telegram WMS mutation polling is disabled.");
-}
+// Telegram mutations use database transactions, idempotency keys, and
+// database-wide locks. Context authorization still limits the bot to the
+// configured warehouse group.
+startTelegramWmsPolling();
 
 ipcMain.handle("handlingUnits:unsealUnit", async (_event, payload = {}) => {
   try {
@@ -10634,15 +10713,55 @@ ipcMain.handle(
   },
 );
 
+async function findCompletedPurchaseCreate(client, idempotencyKey) {
+  const operation = await client.appConfig.findUnique({
+    where: { key: `purchaseCreateOperation:${idempotencyKey}` },
+    select: { value: true },
+  });
+  if (!operation?.value || operation.value === "pending") return null;
+  try {
+    const saved = JSON.parse(operation.value);
+    const purchaseId = Number(saved?.purchaseId || 0);
+    if (!Number.isInteger(purchaseId) || purchaseId <= 0) return null;
+    return client.purchaseOrder.findUnique({
+      where: { id: purchaseId },
+      include: { supplier: true, items: true },
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function cleanupFreshPurchaseReceiptUploads(fileIds) {
+  if (!Array.isArray(fileIds) || fileIds.length === 0) return;
+  try {
+    const drive = getDriveClient();
+    if (!drive) return;
+    await Promise.all(
+      fileIds.map((fileId) => drive.files.delete({ fileId }).catch(() => null)),
+    );
+  } catch (cleanupError) {
+    console.error(
+      "Could not clean up receipt files after failed purchase create:",
+      cleanupError,
+    );
+  }
+}
+
 // Create purchase
 ipcMain.handle("purchases:create", async (event, data) => {
   let uploadedReceiptFileIds = [];
+  let duplicatePurchase = false;
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
     const idempotencyKey = String(data?.idempotencyKey || "").trim();
     if (!/^[A-Za-z0-9_-]{8,100}$/.test(idempotencyKey)) {
       throw new Error("Mã chống tạo trùng phiếu nhập không hợp lệ.");
+    }
+    const completedPurchase = await findCompletedPurchaseCreate(prisma, idempotencyKey);
+    if (completedPurchase) {
+      return { success: true, data: completedPurchase, duplicate: true };
     }
 
     console.log("📦 Creating purchase order with data:", data);
@@ -10747,7 +10866,12 @@ ipcMain.handle("purchases:create", async (event, data) => {
             skipDuplicates: true,
           });
           if (claim.count === 0) {
-            throw new Error("Yêu cầu tạo phiếu nhập này đã được xử lý trước đó.");
+            const existingPurchase = await findCompletedPurchaseCreate(tx, idempotencyKey);
+            if (existingPurchase) {
+              duplicatePurchase = true;
+              return existingPurchase;
+            }
+            throw new Error("Yêu cầu tạo phiếu nhập này đang được xử lý ở máy khác. Vui lòng thử lại sau.");
           }
 
           // Generate standard PN-YYMMDD-XXX
@@ -10864,6 +10988,12 @@ ipcMain.handle("purchases:create", async (event, data) => {
       ),
     );
 
+    if (duplicatePurchase) {
+      await cleanupFreshPurchaseReceiptUploads(uploadedReceiptFileIds);
+      uploadedReceiptFileIds = [];
+      return { success: true, data: purchase, duplicate: true };
+    }
+
     emitStockChangedForSkus(
       items.map((item) => item.variantSku || item.sku),
       {
@@ -10885,22 +11015,7 @@ ipcMain.handle("purchases:create", async (event, data) => {
   } catch (error) {
     // The database write did not complete, so remove documents uploaded
     // solely for this failed create attempt.
-    if (!DATA_SAFETY_MODE && uploadedReceiptFileIds.length > 0) {
-      try {
-        const drive = getDriveClient();
-        if (drive)
-          await Promise.all(
-            uploadedReceiptFileIds.map((fileId) =>
-              drive.files.delete({ fileId }).catch(() => null),
-            ),
-          );
-      } catch (cleanupError) {
-        console.error(
-          "Could not clean up receipt files after failed purchase create:",
-          cleanupError,
-        );
-      }
-    }
+    await cleanupFreshPurchaseReceiptUploads(uploadedReceiptFileIds);
     console.error("❌ Create purchase error:", error);
     return { success: false, error: error.message };
   }
@@ -13763,7 +13878,9 @@ ipcMain.handle(
           });
           if (!freshUser) throw new Error("Người dùng không tồn tại");
 
-          const temporaryPasswordGrant = hasValidTemporaryPasswordGrant(freshUser);
+          const temporaryPasswordGrant = hasValidTemporaryPasswordGrant(freshUser)
+            ? currentSession.temporaryPasswordGrant
+            : null;
           if (!temporaryPasswordGrant) {
             // Ordinary changes verify the current password. A consumed
             // temporary password uses its session-bound one-time grant.
@@ -13776,6 +13893,13 @@ ipcMain.handle(
               : freshUser.password === passwordText;
             if (isSamePassword) {
               throw new Error("Mật khẩu mới phải khác mật khẩu hiện tại.");
+            }
+          } else if (temporaryPasswordGrant.previousPasswordHash) {
+            const isSameTemporaryPassword = temporaryPasswordGrant.previousPasswordHash.startsWith("$2")
+              ? await bcrypt.compare(passwordText, temporaryPasswordGrant.previousPasswordHash)
+              : passwordText === temporaryPasswordGrant.previousPasswordHash;
+            if (isSameTemporaryPassword) {
+              throw new Error("Mật khẩu mới phải khác mật khẩu tạm vừa đăng nhập.");
             }
           }
 
@@ -22430,6 +22554,207 @@ function isAttendanceMonthLocked(attendanceData, periodKey) {
   });
 }
 
+// Packing commission is updated through a narrow, admin-only transaction so
+// the renderer never has to overwrite the shared attendanceData document.
+ipcMain.handle("attendance:updatePackingCommission", async (event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+
+    const source = payload?.commission;
+    if (!source || typeof source !== "object") {
+      throw new Error("Cấu hình hoa hồng không hợp lệ.");
+    }
+    const baseKeys = ["easy", "medium", "high"];
+    const customLevels = (Array.isArray(source.customLevels) ? source.customLevels : []).map((level) => ({
+      key: String(level?.key || "").trim().slice(0, 80),
+      label: String(level?.label || "").trim().slice(0, 80),
+      unit: String(level?.unit || "gói").trim().slice(0, 30) || "gói",
+    }));
+    if (customLevels.length > 50 || customLevels.some((level) => !/^custom-[a-zA-Z0-9-]+$/.test(level.key) || !level.label || baseKeys.includes(level.key))) {
+      throw new Error("Danh sách mức hoa hồng riêng không hợp lệ.");
+    }
+    const validKeys = new Set([...baseKeys, ...customLevels.map((level) => level.key)]);
+    const rates = {};
+    validKeys.forEach((key) => {
+      const rate = Number(source?.rates?.[key]);
+      if (!Number.isFinite(rate) || rate < 0 || rate > 1000000000) {
+        throw new Error(`Đơn giá hoa hồng ${key} không hợp lệ.`);
+      }
+      rates[key] = rate;
+    });
+    const sourceSkuLevels = source.skuLevels && typeof source.skuLevels === "object" ? source.skuLevels : {};
+    const skuEntries = Object.entries(sourceSkuLevels);
+    if (skuEntries.length > 20000) throw new Error("Số sản phẩm được gán vượt giới hạn an toàn.");
+    const skuLevels = {};
+    skuEntries.forEach(([sku, level]) => {
+      const normalizedSku = String(sku || "").trim().toUpperCase().slice(0, 150);
+      const normalizedLevel = String(level || "").trim();
+      if (normalizedSku && validKeys.has(normalizedLevel)) skuLevels[normalizedSku] = normalizedLevel;
+    });
+
+    const result = await enqueueAttendanceDataWrite(async () => {
+      let lastConflict = null;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          return await getPrismaDirectTx().$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
+            const row = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
+            let attendanceData = {};
+            try { attendanceData = JSON.parse(row?.value || "{}"); } catch {}
+
+            const current = attendanceData?.config?.packingCommission || {};
+            const history = Array.isArray(current.history) ? current.history.slice(-199) : [];
+            if (current.updatedAt && !history.some((version) => version?.effectiveAt === current.updatedAt)) {
+              history.push({
+                effectiveAt: current.updatedAt,
+                rates: current.rates || { easy: 20, medium: 30, high: 40 },
+                skuLevels: current.skuLevels || {},
+                customLevels: current.customLevels || [],
+                updatedBy: current.updatedBy,
+              });
+            }
+            const effectiveAt = new Date().toISOString();
+            const version = { effectiveAt, rates, skuLevels, customLevels, updatedBy: currentSession.username };
+            const packingCommission = {
+              rates,
+              skuLevels,
+              customLevels,
+              history: [...history.slice(-199), version],
+              updatedAt: effectiveAt,
+              updatedBy: currentSession.username,
+            };
+            const nextAttendanceData = {
+              ...attendanceData,
+              config: { ...(attendanceData.config || {}), packingCommission },
+            };
+            if (Buffer.byteLength(JSON.stringify(packingCommission), "utf8") > 5 * 1024 * 1024) {
+              throw new Error("Lịch sử cấu hình hoa hồng vượt giới hạn lưu trữ.");
+            }
+            await tx.appConfig.upsert({
+              where: { key: "attendanceData" },
+              update: { value: JSON.stringify(nextAttendanceData) },
+              create: { key: "attendanceData", value: JSON.stringify(nextAttendanceData) },
+            });
+            return packingCommission;
+          }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 });
+        } catch (error) {
+          if (!isTransactionWriteConflict(error)) throw error;
+          lastConflict = error;
+          await waitForRetry(attempt);
+        }
+      }
+      throw lastConflict || new Error("Cấu hình đang được cập nhật ở máy khác. Hãy thử lại.");
+    });
+
+    void logActivity({
+      module: "attendance",
+      action: "UPDATE_PACKING_COMMISSION",
+      description: `Cập nhật hoa hồng đóng gói (${Object.keys(skuLevels).length} sản phẩm)`,
+      recordName: "packingCommission",
+      userName: currentSession.username,
+      severity: "INFO",
+    }).catch((error) => console.warn("Không thể ghi audit hoa hồng đóng gói:", error.message));
+
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("❌ attendance:updatePackingCommission error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("attendance:deleteFine", async (event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const kind = String(payload.kind || "");
+    if (!['manual', 'system'].includes(kind)) throw new Error("Loại khoản phạt không hợp lệ.");
+
+    const sourceFine = payload.fine && typeof payload.fine === "object" ? payload.fine : {};
+    const fine = {
+      id: sourceFine.id ? String(sourceFine.id).slice(0, 200) : undefined,
+      empId: Number(sourceFine.empId),
+      type: String(sourceFine.type || "").slice(0, 200),
+      detail: String(sourceFine.detail || "").slice(0, 1000),
+      amount: Math.max(0, Number(sourceFine.amount || 0)),
+      date: sourceFine.date ? String(sourceFine.date).slice(0, 100) : undefined,
+      source: sourceFine.source ? String(sourceFine.source).slice(0, 100) : undefined,
+    };
+    if (!Number.isFinite(fine.empId) || !fine.type || !fine.detail || !Number.isFinite(fine.amount)) {
+      throw new Error("Thông tin khoản phạt không hợp lệ.");
+    }
+    const fineId = String(payload.fineId || fine.id || "").trim().slice(0, 200);
+    const overrideKey = String(payload.overrideKey || "").trim().slice(0, 2000);
+    if (kind === 'manual' && !fineId) throw new Error("Thiếu mã khoản phạt thủ công.");
+    if (kind === 'system' && !overrideKey) throw new Error("Thiếu khóa khoản phạt hệ thống.");
+
+    const result = await enqueueAttendanceDataWrite(async () => {
+      let lastConflict = null;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          return await getPrismaDirectTx().$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('attendanceData'))`;
+            const row = await tx.appConfig.findUnique({ where: { key: "attendanceData" } });
+            let attendanceData = {};
+            try { attendanceData = JSON.parse(row?.value || "{}"); } catch {}
+
+            let extraFines = Array.isArray(attendanceData.extraFines) ? attendanceData.extraFines : [];
+            const fineOverrides = attendanceData.fineOverrides && typeof attendanceData.fineOverrides === "object"
+              ? { ...attendanceData.fineOverrides }
+              : {};
+            const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? [...attendanceData.fineAuditLog] : [];
+
+            if (kind === 'manual') {
+              if (!extraFines.some((item) => String(item?.id || '') === fineId)) {
+                throw new Error("Khoản phạt đã bị xóa hoặc không còn tồn tại.");
+              }
+              extraFines = extraFines.filter((item) => String(item?.id || '') !== fineId);
+            } else {
+              fineOverrides[overrideKey] = { ...fine, disabled: true };
+            }
+
+            fineAuditLog.push({
+              id: `flog-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              action: 'delete',
+              timestamp: new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Bangkok' }),
+              changedBy: currentSession.username,
+              changedByName: currentSession.fullName || currentSession.username,
+              before: fine,
+              note: String(payload?.audit?.note || `Xóa khoản phạt: ${fine.type} — ${fine.amount}`).slice(0, 2000),
+            });
+
+            const nextAttendanceData = { ...attendanceData, extraFines, fineOverrides, fineAuditLog };
+            await tx.appConfig.upsert({
+              where: { key: "attendanceData" },
+              update: { value: JSON.stringify(nextAttendanceData) },
+              create: { key: "attendanceData", value: JSON.stringify(nextAttendanceData) },
+            });
+            return { extraFines, fineOverrides, fineAuditLog };
+          }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 });
+        } catch (error) {
+          if (!isTransactionWriteConflict(error)) throw error;
+          lastConflict = error;
+          await waitForRetry(attempt);
+        }
+      }
+      throw lastConflict || new Error("Khoản phạt đang được cập nhật ở máy khác. Hãy thử lại.");
+    });
+
+    void logActivity({
+      module: "attendance",
+      action: "DELETE_FINE",
+      description: `Xóa khoản phạt ${fine.type} của nhân viên ${fine.empId}`,
+      recordName: fineId || overrideKey,
+      userName: currentSession.username,
+      severity: "WARNING",
+    }).catch((error) => console.warn("Không thể ghi audit xóa phạt:", error.message));
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("❌ attendance:deleteFine error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 // Lock/unlock and the frozen payroll snapshot are saved in the same database
 // transaction. This is the only path allowed to change lockedPeriods.
 ipcMain.handle("attendance:updatePayrollLock", async (event, payload = {}) => {
@@ -25660,6 +25985,7 @@ ipcMain.handle(
       }
       let authenticatedUser = user;
       let temporaryPasswordGrant = null;
+      let consumedTemporaryPasswordHash = "";
       if (isTemporaryPassword(user)) {
         // Consume the temporary password atomically. The replacement hash is
         // random and unknown, so another login cannot reuse the same password.
@@ -25685,6 +26011,7 @@ ipcMain.handle(
                 "Mật khẩu tạm đã được sử dụng. Vui lòng liên hệ quản trị viên để được cấp lại.",
               );
             }
+            consumedTemporaryPasswordHash = String(freshUser.password || "");
             return tx.user.update({
               where: { id: freshUser.id },
               data: {
@@ -25701,6 +26028,7 @@ ipcMain.handle(
         temporaryPasswordGrant = {
           userId: authenticatedUser.id,
           consumedAt: new Date(authenticatedUser.passwordChangedAt).getTime(),
+          previousPasswordHash: consumedTemporaryPasswordHash,
         };
       } else {
         authenticatedUser = await prisma.user.update({

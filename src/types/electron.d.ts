@@ -1034,6 +1034,28 @@ export interface ElectronAPI {
       data?: { lockedPeriods: any[] };
       error?: string;
     }>;
+    updatePackingCommission: (data: {
+      commission: {
+        rates: Record<string, number>;
+        skuLevels: Record<string, string>;
+        customLevels?: Array<{ key: string; label: string; unit: string }>;
+      };
+    }) => Promise<{
+      success: boolean;
+      data?: any;
+      error?: string;
+    }>;
+    deleteFine: (data: {
+      kind: "manual" | "system";
+      fine: any;
+      fineId?: string;
+      overrideKey?: string;
+      audit?: any;
+    }) => Promise<{
+      success: boolean;
+      data?: { extraFines: any[]; fineOverrides: Record<string, any>; fineAuditLog: any[] };
+      error?: string;
+    }>;
     getPayslipQrImage: (data: { url: string }) => Promise<{
       success: boolean;
       data?: { dataUrl: string };

@@ -6,6 +6,7 @@ import {
     STOCK_CHECK_MISSING_FINE_ENABLED,
     STOCK_CHECK_MISSING_FINE,
     STOCK_CHECK_POLICY_START_DATE,
+    isVietnamRestDay,
     isPastStockCheckWorkingDay,
 } from '../lib/workCalendar';
 import './Attendance.css';
@@ -36,6 +37,7 @@ import {
     DatePicker,
     Collapse,
     Popover,
+    Radio,
 } from 'antd';
 import {
     CheckCircleOutlined,
@@ -72,10 +74,23 @@ import {
     SafetyCertificateOutlined,
     SendOutlined,
     SearchOutlined,
+    TrophyOutlined,
+    BarChartOutlined,
+    InboxOutlined,
+    TagsOutlined,
+    CrownOutlined,
+    ArrowUpOutlined,
+    ArrowDownOutlined,
+    ShoppingCartOutlined,
+    VideoCameraOutlined,
+    GlobalOutlined,
 } from '@ant-design/icons';
+import packingFoxMascot from '../assets/packing/fox-mascot.jpg';
+import packingPandaMascot from '../assets/packing/panda-mascot.jpg';
+import packingTigerMascot from '../assets/packing/tiger-mascot.jpg';
 
-// Khởi tạo Audio Context toàn cục cho việc phát âm báo Ting
-export let sharedAudioCtx: AudioContext | null = null;
+// Dùng chung Audio Context trong màn hình chấm công để phát âm báo Ting.
+let sharedAudioCtx: AudioContext | null = null;
 
 interface LeaveRequest {
     id: string;
@@ -100,7 +115,7 @@ interface WorkScheduleRecord {
 }
 
 type LeaveSession = 'morning' | 'afternoon';
-export const playTingSound = () => {
+const playTingSound = () => {
     try {
         if (!sharedAudioCtx) sharedAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
         if (sharedAudioCtx?.state === 'suspended') sharedAudioCtx.resume();
@@ -442,6 +457,11 @@ interface PackingOrderItem {
     productName: string;
     variant?: string;
     quantity: number;
+    packingLevel?: string;
+    packingUnit?: string;
+    packingUnitPrice?: number;
+    packingUnits?: number;
+    packingIncome?: number;
 }
 
 interface PackingOrderLog {
@@ -475,7 +495,117 @@ interface PenaltyConfig {
     afternoonStart: string; // '13:30'
     // Ngày công chuẩn
     standardWorkDays: number; // 26
+    packingCommission?: PackingCommissionConfig;
 }
+
+type PackingDifficulty = 'easy' | 'medium' | 'high';
+
+interface CustomPackingLevel {
+    key: string;
+    label: string;
+    unit: string;
+}
+
+interface PackingCommissionConfig {
+    rates: Record<string, number>;
+    skuLevels: Record<string, string>;
+    customLevels?: CustomPackingLevel[];
+    history?: PackingCommissionVersion[];
+    updatedAt?: string;
+    updatedBy?: string;
+}
+
+interface PackingCommissionVersion {
+    effectiveAt: string;
+    rates: Record<string, number>;
+    skuLevels: Record<string, string>;
+    customLevels?: CustomPackingLevel[];
+    updatedBy?: string;
+}
+
+interface PackingCatalogItem {
+    sku: string;
+    productName: string;
+    memberSkus: string[];
+}
+
+const PACKING_LEVELS: Array<{ key: PackingDifficulty; label: string; color: string }> = [
+    { key: 'easy', label: 'Dễ', color: 'green' },
+    { key: 'medium', label: 'Trung bình', color: 'gold' },
+    { key: 'high', label: 'Cao', color: 'red' },
+];
+
+const DEFAULT_PACKING_COMMISSION: PackingCommissionConfig = {
+    rates: { easy: 20, medium: 30, high: 40 },
+    skuLevels: {},
+};
+
+const normalizePackingSku = (value: unknown) => String(value || '').trim().toUpperCase();
+
+const normalizeCustomPackingLevels = (levels?: CustomPackingLevel[]) => (Array.isArray(levels) ? levels : [])
+    .map(level => ({
+        key: String(level?.key || '').trim(),
+        label: String(level?.label || '').trim(),
+        unit: String(level?.unit || 'gói').trim() || 'gói',
+    }))
+    .filter(level => level.key && level.label && !PACKING_LEVELS.some(option => option.key === level.key));
+
+const normalizePackingRates = (rates?: Record<string, number>, customLevels: CustomPackingLevel[] = []) => {
+    const normalized: Record<string, number> = {
+        easy: Math.max(0, Number(rates?.easy ?? DEFAULT_PACKING_COMMISSION.rates.easy)),
+        medium: Math.max(0, Number(rates?.medium ?? DEFAULT_PACKING_COMMISSION.rates.medium)),
+        high: Math.max(0, Number(rates?.high ?? DEFAULT_PACKING_COMMISSION.rates.high)),
+    };
+    customLevels.forEach(level => { normalized[level.key] = Math.max(0, Number(rates?.[level.key] || 0)); });
+    return normalized;
+};
+
+const normalizePackingSkuLevels = (skuLevels?: Record<string, string>, validLevelKeys: string[] = PACKING_LEVELS.map(level => level.key)) => Object.fromEntries(
+    Object.entries(skuLevels || {})
+        .map(([sku, level]) => [normalizePackingSku(sku), level])
+        .filter(([sku, level]) => Boolean(sku) && validLevelKeys.includes(level))
+) as Record<string, string>;
+
+const normalizePackingCommission = (value?: Partial<PackingCommissionConfig> | null): PackingCommissionConfig => {
+    const customLevels = normalizeCustomPackingLevels(value?.customLevels);
+    const validLevelKeys = [...PACKING_LEVELS.map(level => level.key), ...customLevels.map(level => level.key)];
+    const rates = normalizePackingRates(value?.rates, customLevels);
+    const skuLevels = normalizePackingSkuLevels(value?.skuLevels, validLevelKeys);
+    const history = (Array.isArray(value?.history) ? value.history : [])
+        .filter(version => version?.effectiveAt && dayjs(version.effectiveAt).isValid())
+        .map(version => {
+            const versionCustomLevels = normalizeCustomPackingLevels(version.customLevels);
+            const versionKeys = [...PACKING_LEVELS.map(level => level.key), ...versionCustomLevels.map(level => level.key)];
+            return {
+                effectiveAt: version.effectiveAt,
+                rates: normalizePackingRates(version.rates, versionCustomLevels),
+                skuLevels: normalizePackingSkuLevels(version.skuLevels, versionKeys),
+                customLevels: versionCustomLevels,
+                updatedBy: version.updatedBy,
+            };
+        });
+    if (value?.updatedAt && dayjs(value.updatedAt).isValid() && !history.some(version => version.effectiveAt === value.updatedAt)) {
+        history.push({ effectiveAt: value.updatedAt, rates, skuLevels, customLevels, updatedBy: value.updatedBy });
+    }
+    history.sort((left, right) => dayjs(left.effectiveAt).valueOf() - dayjs(right.effectiveAt).valueOf());
+    return {
+        rates,
+        skuLevels,
+        customLevels,
+        history,
+        updatedAt: value?.updatedAt,
+        updatedBy: value?.updatedBy,
+    };
+};
+
+const getPackingLevelOptions = (commission: PackingCommissionConfig) => [
+    ...PACKING_LEVELS.map(level => ({ ...level, unit: 'gói', rate: commission.rates[level.key] })),
+    ...(commission.customLevels || []).map(level => ({ ...level, color: 'cyan', rate: commission.rates[level.key] || 0 })),
+];
+
+const getPackingLevelOption = (commission: PackingCommissionConfig, key: string) =>
+    getPackingLevelOptions(commission).find(level => level.key === key)
+    || { key: 'easy', label: 'Dễ', unit: 'gói', color: 'green', rate: commission.rates.easy };
 
 // === Điều chỉnh lương thủ công (Admin) ===
 // Key = `${empId}_${YYYY-MM}` ví dụ: "3_2026-04"
@@ -561,8 +691,6 @@ const initialEmployees: Employee[] = [
 
 const initialWarehousePacking = { level1Units: 6100, level10Units: 870 };
 
-// Giá tiền đóng gói: mỗi sản phẩm (SKU cha) = 20đ
-const PACKING_UNIT_PRICE = 20;
 const AUGUST_2026_FINE_AMNESTY_START = dayjs('2026-08-01').startOf('day');
 const AUGUST_2026_FINE_AMNESTY_END = dayjs('2026-08-31').endOf('day');
 
@@ -677,10 +805,7 @@ const getFundTxCreatedMs = (tx: FundTransaction) => {
 // ===== HELPERS =====
 const fmt = (v: number) => new Intl.NumberFormat('vi-VN').format(Math.round(v)) + ' đ';
 
-// Tính tổng số lượng sản phẩm (theo SKU cha) trong đơn hàng
-// SKU format: {prefix}-{code} e.g. "20-5DUNI-TRANG" → prefix 20 = 20 sản phẩm
-// Combo 20 gói x1 = 20 SP × 20đ = 400đ
-// CB- (combo mix) SKU: parse prefix tương tự hoặc tính từ combo components
+// Hoa hồng đóng gói tính theo số gói thực tế trên từng dòng đơn hàng.
 const VAT_OVERDUE_FINE_FIRST_AMOUNT = 30000;
 const VAT_OVERDUE_FINE_STAGE_INCREMENT = 10000;
 const VAT_FIRST_FINE_AFTER_DAYS = 5;
@@ -699,11 +824,37 @@ const isLegacyReturnOverdueAtRollout = (returnAt: dayjs.Dayjs) =>
     returnAt.isBefore(RETURN_FINE_POLICY_EFFECTIVE_AT, 'day')
     && !returnAt.startOf('day').add(5, 'day').isAfter(RETURN_LEGACY_GRACE_NOTICE_AT);
 
-const getReturnFineDate = (returnAt: dayjs.Dayjs, stage: number) => {
-    const firstFineAt = isLegacyReturnOverdueAtRollout(returnAt)
+const getRawReturnFirstFineDate = (returnAt: dayjs.Dayjs) =>
+    isLegacyReturnOverdueAtRollout(returnAt)
         ? RETURN_LEGACY_FIRST_FINE_AT
         : returnAt.startOf('day').add(RETURN_FIRST_FINE_AFTER_DAYS, 'day');
-    return firstFineAt.add(Math.max(0, stage - 1), 'day');
+
+const moveToNextReturnFineDay = (date: dayjs.Dayjs) => {
+    let cursor = date.startOf('day');
+    while (isVietnamRestDay(cursor)) cursor = cursor.add(1, 'day');
+    return cursor;
+};
+
+const addReturnFineDays = (start: dayjs.Dayjs, count: number) => {
+    let cursor = moveToNextReturnFineDay(start);
+    let added = 0;
+    while (added < Math.max(0, count)) {
+        cursor = cursor.add(1, 'day');
+        if (!isVietnamRestDay(cursor)) added += 1;
+    }
+    return cursor;
+};
+
+const getReturnFineDate = (returnAt: dayjs.Dayjs, stage: number) =>
+    addReturnFineDays(getRawReturnFirstFineDate(returnAt), Math.max(0, stage - 1));
+
+const getReturnFineId = (returnId: number, returnAt: dayjs.Dayjs, stage: number) => {
+    const baseId = `return-overdue-${returnId}-stage-${stage}`;
+    const legacyDate = getRawReturnFirstFineDate(returnAt).add(Math.max(0, stage - 1), 'day');
+    const correctedDate = getReturnFineDate(returnAt, stage);
+    return correctedDate.isSame(legacyDate, 'day')
+        ? baseId
+        : `${baseId}-workday-${correctedDate.format('YYYYMMDD')}`;
 };
 
 const getReturnFineStage = (returnAt: dayjs.Dayjs, now = dayjs()) => {
@@ -711,7 +862,9 @@ const getReturnFineStage = (returnAt: dayjs.Dayjs, now = dayjs()) => {
     if (!isNewPolicyReturn && !isLegacyReturnOverdueAtRollout(returnAt)) return 0;
     const firstFineAt = getReturnFineDate(returnAt, 1);
     if (now.isBefore(firstFineAt)) return 0;
-    return now.startOf('day').diff(firstFineAt.startOf('day'), 'day') + 1;
+    let stage = 0;
+    while (stage < 366 && !now.isBefore(getReturnFineDate(returnAt, stage + 1))) stage += 1;
+    return stage;
 };
 
 const getReturnFineAmount = (stage: number) =>
@@ -820,43 +973,78 @@ const getAssignmentDeadlineRecipients = (task: any): string[] => {
     }
     return task?.assignee ? [String(task.assignee)] : [];
 };
+function calcPackingUnitsFromItem(item: PackingOrderItem): number {
+    if (Number.isFinite(item.packingUnits)) return Math.max(0, Number(item.packingUnits));
+    return Math.max(0, Number(item.quantity || 1));
+}
+
 function calcPacksFromItems(items: PackingOrderItem[]): number {
-    let totalPacks = 0;
+    return items.reduce((total, item) => total + calcPackingUnitsFromItem(item), 0);
+}
+
+function getPackingLevel(item: PackingOrderItem, commission: PackingCommissionConfig): string {
+    if (item.packingLevel && getPackingLevelOptions(commission).some(option => option.key === item.packingLevel)) return item.packingLevel;
+    return commission.skuLevels[normalizePackingSku(item.sku)] || 'easy';
+}
+
+function getPackingCommissionAt(rawCommission?: PackingCommissionConfig, timestamp?: string): PackingCommissionConfig {
+    const commission = normalizePackingCommission(rawCommission);
+    if (!timestamp || !dayjs(timestamp).isValid()) return commission;
+    const orderTime = dayjs(timestamp).valueOf();
+    const version = [...(commission.history || [])]
+        .reverse()
+        .find(item => dayjs(item.effectiveAt).valueOf() <= orderTime);
+    if (!version) return normalizePackingCommission(DEFAULT_PACKING_COMMISSION);
+    return normalizePackingCommission({ rates: version.rates, skuLevels: version.skuLevels, customLevels: version.customLevels });
+}
+
+function calcPackingCommission(items: PackingOrderItem[], rawCommission?: PackingCommissionConfig, timestamp?: string) {
+    const commission = getPackingCommissionAt(rawCommission, timestamp);
+    const breakdown: Record<string, { units: number; income: number }> = Object.fromEntries(
+        getPackingLevelOptions(commission).map(level => [level.key, { units: 0, income: 0 }])
+    );
+
     items.forEach(item => {
-        const sku = (item.sku || '').toUpperCase();
-        let packCount = 1;
+        const level = getPackingLevel(item, commission);
+        if (!breakdown[level]) breakdown[level] = { units: 0, income: 0 };
+        const units = calcPackingUnitsFromItem(item);
+        const unitPrice = Number.isFinite(item.packingUnitPrice)
+            ? Math.max(0, Number(item.packingUnitPrice))
+            : commission.rates[level];
+        const income = Number.isFinite(item.packingIncome)
+            ? Math.max(0, Number(item.packingIncome))
+            : units * unitPrice;
 
-        if (sku.startsWith('CB-')) {
-            // Combo SKU: CB-10TRANG-10XAM-5DUNI
-            // Parse các cặp {số}{tên màu} từ phần sau CB-
-            // Ví dụ: "10TRANG-10XAM-5DUNI" → match "10TRANG", "10XAM" → 10+10=20
-            // Suffix kiểu "-5DUNI" (loại sản phẩm) sẽ bị bỏ qua vì regex chỉ match {số}{chữ} dạng tên màu
-            const body = sku.substring(3); // Bỏ "CB-"
-            const segments = body.split('-');
-            let comboTotal = 0;
-            // Lấy các segment có dạng {số}{tên} — chỉ tính segment mà phần chữ KHÔNG chứa "UNI|DUNI|5D" (đó là tên SP, không phải màu)
-            const productSuffixes = /^(5D|UNI|DUNI|5DUNI)/i;
-            for (const seg of segments) {
-                const m = seg.match(/^(\d+)(.+)$/);
-                if (m) {
-                    const num = parseInt(m[1], 10);
-                    const label = m[2];
-                    if (!productSuffixes.test(label)) {
-                        // Đây là component màu: 10TRANG, 10XAM, v.v.
-                        comboTotal += num;
-                    }
-                }
-            }
-            packCount = comboTotal > 0 ? comboTotal : 1;
-        } else {
-            // SKU thường: "20-5DUNI-TRANG" → prefix 20 = 20 gói
-            const prefixMatch = sku.match(/^(\d+)-/);
-            packCount = prefixMatch ? parseInt(prefixMatch[1], 10) : 1;
-        }
-
-        totalPacks += (item.quantity || 1) * packCount;
+        breakdown[level].units += units;
+        breakdown[level].income += income;
     });
-    return totalPacks;
+
+    return {
+        units: Object.values(breakdown).reduce((sum, row) => sum + row.units, 0),
+        income: Object.values(breakdown).reduce((sum, row) => sum + row.income, 0),
+        breakdown,
+    };
+}
+
+function snapshotPackingOrder(order: PackingOrderLog, rawCommission?: PackingCommissionConfig): PackingOrderLog {
+    const commission = getPackingCommissionAt(rawCommission, order.timestamp);
+    return {
+        ...order,
+        items: order.items.map(item => {
+            const level = getPackingLevel(item, commission);
+            const levelOption = getPackingLevelOption(commission, level);
+            const packingUnits = calcPackingUnitsFromItem(item);
+            const packingUnitPrice = commission.rates[level];
+            return {
+                ...item,
+                packingLevel: level,
+                packingUnit: levelOption.unit,
+                packingUnits,
+                packingUnitPrice,
+                packingIncome: packingUnits * packingUnitPrice,
+            };
+        }),
+    };
 }
 
 // Match packer robustly (ignores accents and case)
@@ -900,14 +1088,18 @@ function calculatePayroll(
     monthNum: number,
     yearNum: number,
     orderLogs: PackingOrderLog[],
+    packingCommission: PackingCommissionConfig = DEFAULT_PACKING_COMMISSION,
     employmentEndDates: Record<string, string> = {},
     overrides?: Record<string, PayrollOverride>,
     attendanceDeductionsReady = true
 ) {
     const STANDARD_WORK_DAYS = 26;
     const HOURS_PER_SHIFT = 4;
-    const unitPrice = PACKING_UNIT_PRICE; // 20đ/SP
-    const totalPackValue_100 = (packingData.level1Units + packingData.level10Units) * unitPrice;
+    const normalizedPackingCommission = normalizePackingCommission(packingCommission);
+    const totalPackValue_100 = orderLogs.reduce(
+        (sum, order) => sum + calcPackingCommission(order.items, normalizedPackingCommission, order.timestamp).income,
+        0
+    );
     const periodKey = `${yearNum}-${String(monthNum).padStart(2, '0')}`;
     const today = dayjs().startOf('day');
     const daysInPayrollMonth = dayjs(`${yearNum}-${monthNum}-01`).daysInMonth();
@@ -1084,15 +1276,21 @@ function calculatePayroll(
         let packIncome = 0;
         let packOrderCount = 0;
         let packTotalUnits = 0;
+        const packBreakdown: Record<string, { units: number; income: number }> = {};
 
         orderLogs.forEach(order => {
             const orderDate = dayjs(order.timestamp);
             if (employmentEnd && orderDate.isValid() && !isWithinEmployment(orderDate)) return;
             if (matchPacker(order.packer || '', emp)) {
-                const totalPacks = calcPacksFromItems(order.items);
-                packIncome += totalPacks * unitPrice;
+                const packing = calcPackingCommission(order.items, normalizedPackingCommission, order.timestamp);
+                packIncome += packing.income;
                 packOrderCount += 1;
-                packTotalUnits += totalPacks;
+                packTotalUnits += packing.units;
+                Object.entries(packing.breakdown).forEach(([key, row]) => {
+                    if (!packBreakdown[key]) packBreakdown[key] = { units: 0, income: 0 };
+                    packBreakdown[key].units += row.units;
+                    packBreakdown[key].income += row.income;
+                });
             }
         });
 
@@ -1112,7 +1310,7 @@ function calculatePayroll(
         return {
             ...emp, shifts, absentDays, salaryBase, packIncome, totalPackValue_100,
             fineShare, mBonus, myFines, totalBonus, finalSalary, leaveDeduction,
-            packOrderCount, packTotalUnits,
+            packOrderCount, packTotalUnits, packBreakdown,
             // Giá trị gốc (auto) để so sánh trên UI
             autoShifts, autoSalaryBase, autoPackIncome,
             extraShifts, extraAdjust, adjustNote, hasOverride, salaryPerShift,
@@ -3166,8 +3364,23 @@ export default function Attendance() {
         morningStart: '08:00',
         afternoonStart: '13:30',
         standardWorkDays: 26,
+        packingCommission: DEFAULT_PACKING_COMMISSION,
     });
     const [tempConfig, setTempConfig] = useState<PenaltyConfig>(config);
+    const [packingCatalog, setPackingCatalog] = useState<PackingCatalogItem[]>([]);
+    const [packingSkuSearch, setPackingSkuSearch] = useState('');
+    const [selectedPackingSkus, setSelectedPackingSkus] = useState<Array<string | number>>([]);
+    const [packingConfigView, setPackingConfigView] = useState<'unassigned' | 'assigned'>('unassigned');
+    const [packingAssignmentOpen, setPackingAssignmentOpen] = useState(false);
+    const [packingAssignmentMode, setPackingAssignmentMode] = useState<'assign' | 'change'>('assign');
+    const [pendingPackingLevel, setPendingPackingLevel] = useState<string>('easy');
+    const [customPackingLevelOpen, setCustomPackingLevelOpen] = useState(false);
+    const [customPackingLevelName, setCustomPackingLevelName] = useState('');
+    const [customPackingLevelRate, setCustomPackingLevelRate] = useState<number>(100);
+    const [customPackingLevelUnit, setCustomPackingLevelUnit] = useState('kiện');
+    const [editingCustomPackingLevelKey, setEditingCustomPackingLevelKey] = useState<string | null>(null);
+    const [packingConfigSaving, setPackingConfigSaving] = useState(false);
+    const [packingRatesExpanded, setPackingRatesExpanded] = useState(false);
 
     const [employees, setEmployees] = useState<Employee[]>([]);
 
@@ -3269,10 +3482,35 @@ export default function Attendance() {
 
                 // Hai nguồn độc lập được tải song song để rút ngắn thời gian mở trang.
                 let knownUsernames: string[] = [];
-                const [usersRes, rs] = await Promise.all([
+                const [usersRes, rs, productsRes] = await Promise.all([
                     api.users.getAll().catch(() => null),
                     api.appConfig.get('attendanceData'),
+                    api.products?.getAll ? api.products.getAll().catch(() => null) : Promise.resolve(null),
                 ]);
+                const catalogBySku = new Map<string, PackingCatalogItem>();
+                const addCatalogItem = (sku: unknown, productName: unknown, memberSkus: unknown[] = []) => {
+                    const normalizedSku = normalizePackingSku(sku);
+                    if (!normalizedSku || catalogBySku.has(normalizedSku)) return;
+                    const normalizedMembers = [...new Set([normalizedSku, ...memberSkus.map(normalizePackingSku)].filter(Boolean))];
+                    catalogBySku.set(normalizedSku, {
+                        sku: normalizedSku,
+                        productName: String(productName || normalizedSku),
+                        memberSkus: normalizedMembers,
+                    });
+                };
+                if (productsRes?.success && Array.isArray(productsRes.data)) {
+                    productsRes.data.forEach((product: any) => {
+                        let variants: any[] = [];
+                        try {
+                            const parsedVariants = typeof product.variants === 'string'
+                                ? JSON.parse(product.variants || '[]')
+                                : (product.variants || []);
+                            if (Array.isArray(parsedVariants)) variants = parsedVariants;
+                        } catch { }
+                        addCatalogItem(product.sku, product.name, variants.map(variant => variant?.sku));
+                    });
+                }
+                setPackingCatalog([...catalogBySku.values()].sort((a, b) => a.sku.localeCompare(b.sku)));
                 try {
                     if (usersRes?.success && usersRes.data) {
                         setSystemUsers(usersRes.data);
@@ -3302,8 +3540,12 @@ export default function Attendance() {
                 if (rs && rs.success && rs.data) {
                     const d = rs.data;
                     if (d.config) {
-                        setConfig(d.config);
-                        setTempConfig(d.config);
+                        const normalizedConfig = {
+                            ...d.config,
+                            packingCommission: normalizePackingCommission(d.config.packingCommission),
+                        } as PenaltyConfig;
+                        setConfig(normalizedConfig);
+                        setTempConfig(normalizedConfig);
                     }
                     if (d.employees && Array.isArray(d.employees) && d.employees.length > 0) {
                         const merged = d.employees.map((emp: any) => {
@@ -4047,7 +4289,7 @@ export default function Attendance() {
                 const stage = index + 1;
                 const penaltyDate = getReturnFineDate(returnAt, stage);
                 return {
-                    id: `return-overdue-${record.id}-stage-${stage}`,
+                    id: getReturnFineId(record.id, returnAt, stage),
                     empId: employee.id,
                     type: 'Trả hàng quá hạn',
                     detail: `Phiếu ${complaintCode}${record.orderNumber ? ` - đơn ${record.orderNumber}` : ''} quá 7 ngày chưa Hoàn thành - phạt lần ${stage}`,
@@ -4059,20 +4301,43 @@ export default function Attendance() {
         });
     }, [employees, returnOverdueTracking, overviewDateRange]);
 
-    // Mỗi ngày trễ là một khoản phạt lịch sử riêng. Khi phiếu hoàn thành,
-    // hệ thống dừng tạo khoản mới nhưng không xóa các khoản đã phát sinh.
+    // Reconcile persisted return fines with the working-day schedule. This
+    // removes rows previously created on Sundays/holidays and gives corrected
+    // rows a new ID so they can be created on the next chargeable day.
     useEffect(() => {
-        if (!isAdmin || !isDbLoaded || employees.length === 0 || autoReturnOverdueFines.length === 0) return;
-        const existingIds = new Set(extraFines
+        if (!isAdmin || !isDbLoaded || employees.length === 0) return;
+        const returnById = new Map(returnOverdueTracking.map(record => [Number(record.id), record]));
+        const invalidFines = extraFines.filter(fine => {
+            if (fine.source !== 'returns_overdue' || !fine.id || !fine.date) return false;
+            const idMatch = String(fine.id).match(/^return-overdue-(\d+)-stage-(\d+)/);
+            if (!idMatch) return false;
+            const record = returnById.get(Number(idMatch[1]));
+            const returnAt = dayjs(record?.complaintDate || record?.returnDate);
+            const fineAt = dayjs(fine.date);
+            if (!returnAt.isValid() || !fineAt.isValid()) return false;
+            return !fineAt.isSame(getReturnFineDate(returnAt, Number(idMatch[2])), 'day');
+        });
+        const invalidIds = new Set(invalidFines.map(fine => fine.id).filter(Boolean));
+        const retainedFines = extraFines.filter(fine => !invalidIds.has(fine.id));
+        const existingIds = new Set(retainedFines
             .filter(fine => fine.source === 'returns_overdue')
             .map(fine => fine.id)
             .filter(Boolean));
         const deletedIds = new Set(getDeletedFineKeys(fineAuditLog));
         const missing = autoReturnOverdueFines.filter(fine => fine.id && !existingIds.has(fine.id) && !deletedIds.has(fine.id));
-        if (missing.length === 0) return;
+        if (invalidFines.length === 0 && missing.length === 0) return;
 
         const now = new Date().toLocaleString('vi-VN');
         const actor = fineAuditActorRef.current;
+        const correctionEntries: FineAuditLog[] = invalidFines.map((fine, index) => ({
+            id: `flog-return-overdue-correction-${fine.id}-${Date.now()}-${index}`,
+            action: 'delete',
+            timestamp: now,
+            changedBy: actor.username,
+            changedByName: actor.displayName,
+            before: fine,
+            note: 'Hệ thống gỡ khoản phạt Trả hàng sai lịch: không tính Chủ nhật và ngày lễ toàn quốc.',
+        }));
         const auditEntries: FineAuditLog[] = missing.map(fine => ({
             id: `flog-return-overdue-${fine.id}`,
             action: 'create',
@@ -4082,12 +4347,12 @@ export default function Attendance() {
             after: fine,
             note: `Tự động ghi nhận phạt Trả hàng quá hạn: ${fine.detail}`,
         }));
-        const nextFines = [...extraFines, ...missing];
-        const nextAuditLog = [...fineAuditLog, ...auditEntries];
+        const nextFines = [...retainedFines, ...missing];
+        const nextAuditLog = [...fineAuditLog, ...correctionEntries, ...auditEntries];
         setExtraFines(nextFines);
         setFineAuditLog(nextAuditLog);
         void persistAttendanceSnapshotNow({ extraFines: nextFines, fineAuditLog: nextAuditLog });
-    }, [isAdmin, isDbLoaded, employees.length, autoReturnOverdueFines, extraFines, fineAuditLog, persistAttendanceSnapshotNow]);
+    }, [isAdmin, isDbLoaded, employees.length, autoReturnOverdueFines, extraFines, fineAuditLog, returnOverdueTracking, persistAttendanceSnapshotNow]);
 
     const autoDeadlineOverdueFines = useMemo(() => {
         const officialEmployees = employees.filter(emp => emp.type === 'Official');
@@ -4261,6 +4526,19 @@ export default function Attendance() {
                 // Auto VAT fines made before the approved rollout are invalid;
                 // preserve their audit data but do not show/deduct them.
                 .filter(f => f.source !== 'purchase_vat_overdue' || !f.date || !dayjs(f.date).isBefore(VAT_FINE_POLICY_EFFECTIVE_AT))
+                // Hide legacy return deductions immediately while the admin
+                // reconciliation removes rows created on Sundays/holidays.
+                .filter(f => {
+                    if (f.source !== 'returns_overdue' || !f.id || !f.date) return true;
+                    const idMatch = String(f.id).match(/^return-overdue-(\d+)-stage-(\d+)/);
+                    if (!idMatch) return true;
+                    const record = returnOverdueTracking.find(item => Number(item.id) === Number(idMatch[1]));
+                    const returnAt = dayjs(record?.complaintDate || record?.returnDate);
+                    const fineAt = dayjs(f.date);
+                    return !returnAt.isValid()
+                        || !fineAt.isValid()
+                        || fineAt.isSame(getReturnFineDate(returnAt, Number(idMatch[2])), 'day');
+                })
                 .filter(f => !f.disabled);
             const vatRows = new Map<string, FineRecord>();
             const result: FineRecord[] = [];
@@ -4287,7 +4565,7 @@ export default function Attendance() {
             result.push(...vatRows.values());
             return result;
         },
-        [extraFines, autoVatOverdueFines, autoReturnOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoStockCheckMissingFines, applyFineOverride]
+        [extraFines, fineAuditLog, returnOverdueTracking, autoVatOverdueFines, autoReturnOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoStockCheckMissingFines, applyFineOverride]
     );
 
     // Helper: lọc theo overviewDateRange
@@ -4305,6 +4583,26 @@ export default function Attendance() {
     );
     const liveOverviewBonuses = useMemo(() => extraBonuses.filter(b => inOverviewRange(b.date)), [extraBonuses, overviewDateRange]);
     const liveOverviewPackingLogs = useMemo(() => packingOrderLogsData.filter(o => inOverviewRange(o.timestamp)), [packingOrderLogsData, overviewDateRange]);
+    const packingCommission = useMemo(() => {
+        const commission = normalizePackingCommission(config.packingCommission);
+        const expandSkuLevels = (source: Record<string, string>) => {
+            const expanded = { ...source };
+            packingCatalog.forEach(product => {
+                const parentLevel = source[normalizePackingSku(product.sku)];
+                if (!parentLevel) return;
+                product.memberSkus.forEach(sku => { expanded[normalizePackingSku(sku)] = parentLevel; });
+            });
+            return expanded;
+        };
+        return {
+            ...commission,
+            skuLevels: expandSkuLevels(commission.skuLevels),
+            history: (commission.history || []).map(version => ({
+                ...version,
+                skuLevels: expandSkuLevels(version.skuLevels),
+            })),
+        };
+    }, [config.packingCommission, packingCatalog]);
 
     const currentLockedPeriod = useMemo(() => lockedPeriods.find(lp =>
         dayjs(lp.start).isSame(overviewDateRange[0], 'day') &&
@@ -4342,8 +4640,8 @@ export default function Attendance() {
 
     const payrollData = useMemo(() => lockedPayrollSnapshot?.rows || calculatePayroll(
         overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses,
-        overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, employmentEndDates, payrollOverrides, overviewAttendanceReady
-    ), [lockedPayrollSnapshot, overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, employmentEndDates, payrollOverrides, overviewAttendanceReady]);
+        overviewAttendanceLogs, overviewDateRange[0].month() + 1, overviewDateRange[0].year(), overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceReady
+    ), [lockedPayrollSnapshot, overviewFines, leaveRecords, workSchedules, overviewWareHousePacking, employees, overviewBonuses, overviewAttendanceLogs, overviewDateRange, overviewPackingLogs, packingCommission, employmentEndDates, payrollOverrides, overviewAttendanceReady]);
 
     function buildPayrollDataFromPackingLogs(orderLogs: PackingOrderLog[]) {
         const freshOverviewPackingLogs = orderLogs.filter(o => inOverviewRange(o.timestamp));
@@ -4359,6 +4657,7 @@ export default function Attendance() {
             overviewDateRange[0].month() + 1,
             overviewDateRange[0].year(),
             freshOverviewPackingLogs,
+            packingCommission,
             employmentEndDates,
             payrollOverrides,
             overviewAttendanceReady
@@ -4544,7 +4843,192 @@ export default function Attendance() {
         return { income, expense, balance: income - expense };
     }, []);
 
-    const openConfigModal = () => { setTempConfig({ ...config }); setConfigModalOpen(true); };
+    const tempPackingCommission = useMemo(
+        () => normalizePackingCommission(tempConfig.packingCommission),
+        [tempConfig.packingCommission]
+    );
+    const assignedPackingCatalog = useMemo(() => packingCatalog.filter(item =>
+        Boolean(tempPackingCommission.skuLevels[normalizePackingSku(item.sku)])
+    ), [packingCatalog, tempPackingCommission.skuLevels]);
+    const unassignedPackingCatalog = useMemo(() => packingCatalog.filter(item =>
+        !tempPackingCommission.skuLevels[normalizePackingSku(item.sku)]
+    ), [packingCatalog, tempPackingCommission.skuLevels]);
+    const filteredPackingCatalog = useMemo(() => {
+        const needle = normalizeAttendanceText(packingSkuSearch);
+        const source = packingConfigView === 'assigned' ? assignedPackingCatalog : unassignedPackingCatalog;
+        if (!needle) return source;
+        return source.filter(item =>
+            normalizeAttendanceText(item.productName).includes(needle)
+        );
+    }, [assignedPackingCatalog, packingConfigView, packingSkuSearch, unassignedPackingCatalog]);
+
+    const getPackingCatalogLevel = (item: PackingCatalogItem): string =>
+        tempPackingCommission.skuLevels[normalizePackingSku(item.sku)] || 'easy';
+
+    const updateTempPackingRate = (level: string, value: number | null) => {
+        setTempConfig(previous => {
+            const current = normalizePackingCommission(previous.packingCommission);
+            return {
+                ...previous,
+                packingCommission: {
+                    ...current,
+                    rates: { ...current.rates, [level]: Math.max(0, Number(value || 0)) },
+                },
+            };
+        });
+    };
+
+    const persistPackingCommission = async (rawCommission: PackingCommissionConfig) => {
+        if (!isAdmin) {
+            message.error('Chỉ Admin được phép thay đổi hoa hồng đóng gói.');
+            return false;
+        }
+        const commission = normalizePackingCommission(rawCommission);
+        const api = (window as any).electronAPI;
+        if (!api?.attendance?.updatePackingCommission) {
+            message.error('Ứng dụng chưa có API lưu hoa hồng an toàn. Vui lòng khởi động lại ứng dụng.');
+            return false;
+        }
+        setPackingConfigSaving(true);
+        try {
+            const result = await api.attendance.updatePackingCommission({ commission });
+            if (!result?.success || !result.data) {
+                throw new Error(result?.error || 'Không lưu được cấu hình hoa hồng.');
+            }
+            const savedCommission = normalizePackingCommission(result.data);
+            const nextConfig = { ...config, packingCommission: savedCommission };
+            setConfig(nextConfig);
+            setTempConfig(nextConfig);
+            if (latestSnapshotRef.current) {
+                latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), config: nextConfig };
+            }
+            return true;
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : 'Không lưu được cấu hình hoa hồng.');
+            return false;
+        } finally {
+            setPackingConfigSaving(false);
+        }
+    };
+
+    const assignPackingLevel = async (skus: Array<string | number>, level: string) => {
+        if (skus.length === 0) {
+            message.info('Hãy chọn ít nhất một sản phẩm.');
+            return;
+        }
+        const current = normalizePackingCommission(tempConfig.packingCommission);
+        const skuLevels = { ...current.skuLevels };
+        skus.forEach(sku => {
+            const key = normalizePackingSku(sku);
+            if (key) skuLevels[key] = level;
+        });
+        const saved = await persistPackingCommission({ ...current, skuLevels });
+        if (!saved) return;
+        setSelectedPackingSkus([]);
+        setPackingAssignmentOpen(false);
+        message.success(`${packingAssignmentMode === 'change' ? 'Đã đổi' : 'Đã gán'} ${skus.length} sản phẩm sang mức ${getPackingLevelOption(tempPackingCommission, level).label}.`);
+    };
+
+    const openPackingAssignment = (skus: Array<string | number>, mode: 'assign' | 'change') => {
+        if (skus.length === 0) {
+            message.info('Hãy chọn ít nhất một sản phẩm.');
+            return;
+        }
+        setSelectedPackingSkus(skus);
+        setPackingAssignmentMode(mode);
+        setPendingPackingLevel(mode === 'change' && skus.length === 1
+            ? getPackingCatalogLevel(packingCatalog.find(item => normalizePackingSku(item.sku) === normalizePackingSku(skus[0])) || { sku: '', productName: '', memberSkus: [] })
+            : 'easy');
+        setPackingAssignmentOpen(true);
+    };
+
+    const savePackingRates = async () => {
+        const saved = await persistPackingCommission(tempPackingCommission);
+        if (saved) {
+            setPackingRatesExpanded(false);
+            message.success('Đã lưu đơn giá hoa hồng mới.');
+        }
+    };
+
+    const createCustomPackingLevel = async () => {
+        const label = customPackingLevelName.trim();
+        const unit = customPackingLevelUnit.trim();
+        if (!label || !unit || customPackingLevelRate < 0) {
+            message.info('Nhập đầy đủ tên mức, đơn vị và đơn giá.');
+            return;
+        }
+        const current = normalizePackingCommission(tempConfig.packingCommission);
+        const key = editingCustomPackingLevelKey || `custom-${Date.now()}`;
+        const customLevels = editingCustomPackingLevelKey
+            ? (current.customLevels || []).map(level => level.key === key ? { ...level, label, unit } : level)
+            : [...(current.customLevels || []), { key, label, unit }];
+        const saved = await persistPackingCommission({ ...current, rates: { ...current.rates, [key]: customPackingLevelRate }, customLevels });
+        if (!saved) return;
+        setPendingPackingLevel(key);
+        setCustomPackingLevelOpen(false);
+        setEditingCustomPackingLevelKey(null);
+        setCustomPackingLevelName('');
+        setCustomPackingLevelRate(100);
+        setCustomPackingLevelUnit('kiện');
+        setPackingRatesExpanded(false);
+        message.success(`${editingCustomPackingLevelKey ? 'Đã cập nhật' : 'Đã tạo và lưu'} mức “${label}”.`);
+    };
+
+    const editCustomPackingLevel = (level: CustomPackingLevel) => {
+        setEditingCustomPackingLevelKey(level.key);
+        setCustomPackingLevelName(level.label);
+        setCustomPackingLevelRate(Number(tempPackingCommission.rates[level.key] || 0));
+        setCustomPackingLevelUnit(level.unit);
+        setCustomPackingLevelOpen(true);
+    };
+
+    const deleteCustomPackingLevel = (level: CustomPackingLevel) => {
+        Modal.confirm({
+            title: 'Xóa mức hoa hồng riêng?',
+            content: `Các sản phẩm đang dùng mức “${level.label}” sẽ trở về mức Dễ. Lịch sử đơn cũ vẫn giữ nguyên mức đã ghi nhận.`,
+            okText: 'Xóa mức', cancelText: 'Hủy', okType: 'danger',
+            onOk: async () => {
+                const current = normalizePackingCommission(tempConfig.packingCommission);
+                const skuLevels = Object.fromEntries(Object.entries(current.skuLevels).filter(([, key]) => key !== level.key));
+                const rates = { ...current.rates };
+                delete rates[level.key];
+                const customLevels = (current.customLevels || []).filter(item => item.key !== level.key);
+                const saved = await persistPackingCommission({ ...current, rates, skuLevels, customLevels });
+                if (saved) message.success(`Đã xóa mức “${level.label}”.`);
+            },
+        });
+    };
+
+    const unassignPackingProducts = async (skus: Array<string | number>) => {
+        if (skus.length === 0) return;
+        const current = normalizePackingCommission(tempConfig.packingCommission);
+        const skuLevels = { ...current.skuLevels };
+        skus.forEach(sku => {
+            const key = normalizePackingSku(sku);
+            const catalogItem = packingCatalog.find(item => normalizePackingSku(item.sku) === key);
+            (catalogItem?.memberSkus || [key]).forEach(memberSku => delete skuLevels[normalizePackingSku(memberSku)]);
+        });
+        const saved = await persistPackingCommission({ ...current, skuLevels });
+        if (!saved) return;
+        setSelectedPackingSkus([]);
+        message.success(`Đã bỏ gán ${skus.length} sản phẩm.`);
+    };
+
+    const openConfigModal = () => {
+        if (activeTab === 'packaging' && !isAdmin) {
+            message.error('Chỉ Admin được phép cấu hình hoa hồng đóng gói.');
+            return;
+        }
+        setTempConfig({ ...config, packingCommission: normalizePackingCommission(config.packingCommission) });
+        setActiveConfigTab(activeTab === 'packaging' ? 'packing' : 'rules');
+        setSelectedPackingSkus([]);
+        setPackingConfigView('unassigned');
+        setPackingSkuSearch('');
+        setPackingAssignmentOpen(false);
+        setPendingPackingLevel('easy');
+        setPackingRatesExpanded(false);
+        setConfigModalOpen(true);
+    };
 
     const checkLocked = (): boolean => {
         if (isCurrentPeriodLocked) {
@@ -4788,27 +5272,27 @@ export default function Attendance() {
             cancelText: 'Hủy',
             okType: 'danger' as const,
             onOk: async () => {
-                const now = new Date().toLocaleString('vi-VN');
-                const nextExtraFines = fineId
-                    ? extraFines.filter(item => item.id !== fineId)
-                    : extraFines.filter((_, i) => i !== fineIndex);
-                const nextFineAuditLog: FineAuditLog[] = [...fineAuditLog, {
-                    id: 'flog-' + Date.now(),
-                    action: 'delete',
-                    timestamp: now,
-                    changedBy: fineAuditActor.username,
-                    changedByName: fineAuditActor.displayName,
-                    before: fine,
-                    note: 'Xóa khoản phạt: ' + (employees.find(e => e.id === fine.empId)?.name || '') + ' — ' + fmt(fine.amount) + ' — "' + fine.detail + '"',
-                }];
-                setExtraFines(nextExtraFines);
-                setFineAuditLog(nextFineAuditLog);
-                const saved = await persistAttendanceSnapshotNow({ extraFines: nextExtraFines, fineAuditLog: nextFineAuditLog });
-                if (!saved) {
-                    message.error('Chưa lưu được thay đổi phạt vào DB. Vui lòng thử lại trước khi reload app.');
-                    return;
+                const api = (window as any).electronAPI;
+                if (!api?.attendance?.deleteFine) {
+                    const error = 'Ứng dụng chưa có API xóa phạt an toàn. Vui lòng khởi động lại ứng dụng.';
+                    message.error(error);
+                    throw new Error(error);
                 }
-
+                const result = await api.attendance.deleteFine({
+                    kind: 'manual',
+                    fine,
+                    fineId: fine.id,
+                    audit: { note: 'Xóa khoản phạt: ' + (employees.find(e => e.id === fine.empId)?.name || '') + ' — ' + fmt(fine.amount) + ' — "' + fine.detail + '"' },
+                });
+                if (!result?.success || !result.data) {
+                    const error = result?.error || 'Không xóa được khoản phạt khỏi database.';
+                    message.error(error);
+                    throw new Error(error);
+                }
+                setExtraFines((result.data.extraFines || []).map((item: FineRecord, index: number) => ensureFineId(item, index)));
+                setFineOverrides(result.data.fineOverrides || {});
+                setFineAuditLog(result.data.fineAuditLog || []);
+                if (latestSnapshotRef.current) latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), ...result.data };
                 message.success('Đã xóa khoản phạt (Đã lưu lịch sử)!');
             },
         });
@@ -4856,7 +5340,7 @@ export default function Attendance() {
             okText: 'Xóa phạt',
             cancelText: 'Hủy',
             okType: 'danger' as const,
-            onOk: () => {
+            onOk: async () => {
                 const disabledFine: FineRecord = {
                     empId: record.empId,
                     type: record.type,
@@ -4867,21 +5351,27 @@ export default function Attendance() {
                     disabled: true,
                 };
 
-                const now = new Date().toLocaleString('vi-VN');
-                const nextFineOverrides = { ...fineOverrides, [record.overrideKey]: disabledFine };
-                const nextFineAuditLog: FineAuditLog[] = [...fineAuditLog, {
-                    id: 'flog-' + Date.now(),
-                    action: 'delete',
-                    timestamp: now,
-                    changedBy: fineAuditActor.username,
-                    changedByName: fineAuditActor.displayName,
-                    before: record,
-                    note: 'Xóa khoản phạt hệ thống: ' + (employees.find(e => e.id === record.empId)?.name || '') + ' — ' + fmt(record.amount) + ' — "' + record.detail + '"',
-                }];
-                setFineOverrides(nextFineOverrides);
-                setFineAuditLog(nextFineAuditLog);
-                void persistAttendanceSnapshotNow({ fineOverrides: nextFineOverrides, fineAuditLog: nextFineAuditLog });
-
+                const api = (window as any).electronAPI;
+                if (!api?.attendance?.deleteFine) {
+                    const error = 'Ứng dụng chưa có API xóa phạt an toàn. Vui lòng khởi động lại ứng dụng.';
+                    message.error(error);
+                    throw new Error(error);
+                }
+                const result = await api.attendance.deleteFine({
+                    kind: 'system',
+                    fine: disabledFine,
+                    overrideKey: record.overrideKey,
+                    audit: { note: 'Xóa khoản phạt hệ thống: ' + (employees.find(e => e.id === record.empId)?.name || '') + ' — ' + fmt(record.amount) + ' — "' + record.detail + '"' },
+                });
+                if (!result?.success || !result.data) {
+                    const error = result?.error || 'Không xóa được khoản phạt khỏi database.';
+                    message.error(error);
+                    throw new Error(error);
+                }
+                setExtraFines((result.data.extraFines || []).map((item: FineRecord, index: number) => ensureFineId(item, index)));
+                setFineOverrides(result.data.fineOverrides || {});
+                setFineAuditLog(result.data.fineAuditLog || []);
+                if (latestSnapshotRef.current) latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), ...result.data };
                 message.success('Đã xóa khoản phạt hệ thống khỏi Bảng công.');
             },
         });
@@ -5016,7 +5506,42 @@ export default function Attendance() {
 
 
 
-    const saveConfig = () => { if (checkLocked()) return; setConfig({ ...tempConfig }); setConfigModalOpen(false); message.success('Đã lưu cấu hình!'); };
+    const saveConfig = () => {
+        if (activeConfigTab !== 'packing' && checkLocked()) return;
+        if (activeConfigTab === 'packing' && !isAdmin) {
+            message.error('Chỉ Admin được phép thay đổi hoa hồng đóng gói.');
+            return;
+        }
+        const nextPackingCommission = normalizePackingCommission(tempConfig.packingCommission);
+        const effectiveAt = new Date().toISOString();
+        const versionHistory = activeConfigTab === 'packing'
+            ? [
+                ...(nextPackingCommission.history || []),
+                {
+                    effectiveAt,
+                    rates: { ...nextPackingCommission.rates },
+                    skuLevels: { ...nextPackingCommission.skuLevels },
+                    customLevels: [...(nextPackingCommission.customLevels || [])],
+                    updatedBy: fineAuditActor.username,
+                },
+            ]
+            : nextPackingCommission.history;
+        const nextConfig: PenaltyConfig = {
+            ...tempConfig,
+            packingCommission: activeConfigTab === 'packing'
+                ? {
+                    ...nextPackingCommission,
+                    history: versionHistory,
+                    updatedAt: effectiveAt,
+                    updatedBy: fineAuditActor.username,
+                }
+                : nextPackingCommission,
+        };
+        setConfig(nextConfig);
+        setTempConfig(nextConfig);
+        setConfigModalOpen(false);
+        message.success(activeConfigTab === 'packing' ? 'Đã lưu cấu hình hoa hồng đóng gói!' : 'Đã lưu cấu hình!');
+    };
 
     const lockPayroll = () => {
         if (!isAdmin) {
@@ -5051,7 +5576,8 @@ export default function Attendance() {
                 }
                 const freshPackingLogs = await loadPackingOrders(overviewDateRange[0].startOf('day').toISOString(), { strict: true });
                 const freshOverviewPackingLogs = freshPackingLogs.filter(o => inOverviewRange(o.timestamp));
-                const freshPayrollRows = buildPayrollDataFromPackingLogs(freshPackingLogs);
+                const snapshottedPackingLogs = freshOverviewPackingLogs.map(order => snapshotPackingOrder(order, packingCommission));
+                const freshPayrollRows = buildPayrollDataFromPackingLogs(snapshottedPackingLogs);
                 const capturedAt = new Date().toISOString();
                 const newLock: LockedPeriod = {
                     id: 'lock-' + Date.now(),
@@ -5064,12 +5590,12 @@ export default function Attendance() {
                         capturedAt,
                         capturedBy: currentUser,
                         rows: freshPayrollRows,
-                        packingLogs: freshOverviewPackingLogs,
+                        packingLogs: snapshottedPackingLogs,
                         fines: liveOverviewFines,
                         bonuses: liveOverviewBonuses,
                         sourceSummary: {
-                            packingOrderCount: freshOverviewPackingLogs.length,
-                            packingTotalUnits: freshOverviewPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items), 0),
+                            packingOrderCount: snapshottedPackingLogs.length,
+                            packingTotalUnits: snapshottedPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items), 0),
                         },
                     },
                 };
@@ -5148,10 +5674,10 @@ export default function Attendance() {
                 },
                 {
                     label: 'Thưởng đóng gói',
-                    note: `${employee.packTotalUnits || 0} SP · ${employee.packOrderCount || 0} đơn · ${PACKING_UNIT_PRICE}đ/SP`,
+                    note: `${employee.packTotalUnits || 0} gói · ${employee.packOrderCount || 0} đơn · tính theo mức độ đóng gói`,
                     value: employee.packIncome || 0,
                     positive: true,
-                    items: [{ label: `${employee.packTotalUnits || 0} SP đóng gói`, amount: employee.packIncome || 0 }],
+                    items: [{ label: `${employee.packTotalUnits || 0} gói đóng gói`, amount: employee.packIncome || 0 }],
                 },
                 {
                     label: 'Thưởng khác',
@@ -5311,7 +5837,7 @@ export default function Attendance() {
                     },
                     {
                         title: 'Thưởng đóng gói', dataIndex: 'packIncome', key: 'pack', align: 'right' as const, width: 160,
-                        render: (v: number, r: any) => <Tooltip title={`${r.packTotalUnits || 0} SP × ${PACKING_UNIT_PRICE}đ`}><span className="att-money-emerald">+ {fmt(v)}</span></Tooltip>,
+                        render: (v: number, r: any) => <Tooltip title={`${r.packTotalUnits || 0} gói · tính theo mức Dễ / Trung bình / Cao`}><span className="att-money-emerald">+ {fmt(v)}</span></Tooltip>,
                     },
                     {
                         title: 'Thưởng', dataIndex: 'totalBonus', key: 'bonus', align: 'right' as const, width: 120,
@@ -5355,16 +5881,15 @@ export default function Attendance() {
     // TAB 2: ĐÓNG GÓI (TEAM)
     // ============================================
     const renderPackaging = () => {
-        const unitPrice = PACKING_UNIT_PRICE; // 20đ/SP
-
+        const unitPrice = 20;
         const orderLogs = overviewPackingLogs;
 
-        // Tính tổng số lượng SP (theo SKU cha) từ tất cả đơn
-        let filteredTotalSP = 0;
-        orderLogs.forEach(order => {
-            filteredTotalSP += calcPacksFromItems(order.items);
-        });
-        const filteredPackValue = filteredTotalSP * unitPrice;
+        const filteredPacking = orderLogs.reduce((total, order) => {
+            const result = calcPackingCommission(order.items, packingCommission, order.timestamp);
+            return { units: total.units + result.units, income: total.income + result.income };
+        }, { units: 0, income: 0 });
+        const filteredTotalSP = filteredPacking.units;
+        const filteredPackValue = filteredPacking.income;
         const filteredTotalUnits = orderLogs.length; // Tổng đơn hàng
 
         const totalOrders = orderLogs.length;
@@ -5375,13 +5900,16 @@ export default function Attendance() {
         const platformColor: Record<string, string> = {
             Shopee: '#ee4d2d', TikTok: '#000000', POS: '#1890ff', Web: '#722ed1', 'Khác': '#8c8c8c',
         };
-        const platformIcon: Record<string, string> = {
-            Shopee: '🛒', TikTok: '🎵', POS: '💰', Web: '🌐', 'Khác': '📋',
+        const platformIcon: Record<string, React.ReactNode> = {
+            Shopee: <ShoppingCartOutlined />, TikTok: <VideoCameraOutlined />, POS: <DollarOutlined />, Web: <GlobalOutlined />, 'Khác': <FileTextOutlined />,
         };
 
         const leaderboard = employees.map((emp, employeeIndex) => {
             const logs = orderLogs.filter(order => matchPacker(order.packer, emp));
-            const units = logs.reduce((sum, order) => sum + calcPacksFromItems(order.items), 0);
+            const packing = logs.reduce((total, order) => {
+                const result = calcPackingCommission(order.items, packingCommission, order.timestamp);
+                return { units: total.units + result.units, income: total.income + result.income };
+            }, { units: 0, income: 0 });
             const midpoint = overviewDateRange[0].add(Math.floor(overviewDateRange[1].diff(overviewDateRange[0], 'day') / 2), 'day');
             const firstHalf = logs.filter(order => dayjs(order.timestamp).isBefore(midpoint, 'day')).length;
             const secondHalf = logs.length - firstHalf;
@@ -5389,38 +5917,84 @@ export default function Attendance() {
                 ...emp,
                 employeeIndex,
                 orderCount: logs.length,
-                units,
-                income: units * unitPrice,
+                units: packing.units,
+                income: packing.income,
                 trend: secondHalf - firstHalf,
                 form: Array.from({ length: 7 }, (_, index) => logs.some(order => dayjs(order.timestamp).isSame(overviewDateRange[1].subtract(6 - index, 'day'), 'day'))),
             };
         }).sort((a, b) => b.orderCount - a.orderCount || b.units - a.units || a.id - b.id);
         const leader = leaderboard[0];
-        const challenger = leaderboard[1];
-        const maxOrders = Math.max(leader?.orderCount || 0, 1);
         const totalIncome = leaderboard.reduce((sum, entry) => sum + entry.income, 0);
         const totalUnits = leaderboard.reduce((sum, entry) => sum + entry.units, 0);
-        const gap = leader && challenger ? Math.max(leader.orderCount - challenger.orderCount, 0) : 0;
-        const avatarIcons = ['🦊', '🐼', '🐯', '🐸', '🦁', '🐨'];
+        const rankingMascots = [packingFoxMascot, packingPandaMascot, packingTigerMascot];
+        const today = dayjs().startOf('day');
+        const weekStart = today.subtract((today.day() + 6) % 7, 'day');
+        const weekEnd = weekStart.add(6, 'day');
+        const reloadPacking = () => loadPackingOrders(overviewDateRange[0].startOf('day').toISOString());
 
         return (
             <div className="packing-league">
-                <section className="packing-race-banner">
-                    <div className="packing-race-main">
-                        <div className="packing-race-title">🏆 Cuộc đua đóng gói tháng {overviewDateRange[0].format('MM/YYYY')}</div>
-                        <div className="packing-race-stats">
-                            <span>📦 Đội: <b>{orderLogs.length.toLocaleString('vi-VN')} đơn</b></span>
-                            <span>🧮 Sản lượng: <b>{totalUnits.toLocaleString('vi-VN')} SP</b></span>
-                            <span>💰 Thu nhập: <b>{fmt(totalIncome)}</b></span>
-                            <span>👑 Dẫn đầu: <b>{leader?.orderCount ? leader.name : 'Chưa có'}</b></span>
-                            <span>🏷️ Đơn giá: <b>{unitPrice} đ/SP</b></span>
-                        </div>
-                        <div className="packing-valid-rule">🛡️ Chỉ tính đơn TMĐT hoàn tất hợp lệ trong tháng đang xem</div>
+                <header className="packing-page-head">
+                    <div>
+                        <h2><TrophyOutlined /> Cuộc đua đóng gói tháng {overviewDateRange[0].format('MM/YYYY')}</h2>
+                        <div className="packing-valid-rule"><SafetyCertificateOutlined /> Chỉ tính đơn TMĐT hoàn tất hợp lệ trong tháng đang xem</div>
                     </div>
-                    <div className="packing-prize-box">
-                        <span>Tổng thu nhập sản lượng</span>
-                        <strong>{fmt(totalIncome)}</strong>
-                        <small>{totalUnits.toLocaleString('vi-VN')} SP đã ghi nhận</small>
+                    <Button className="packing-reload-button" icon={<SyncOutlined />} onClick={reloadPacking}>Tải lại</Button>
+                </header>
+
+                <section className="packing-hero-grid">
+                    <article className="packing-champion-hero">
+                        <div className="packing-champion-art">
+                            <div className="packing-champion-halo">
+                                <img src={packingFoxMascot} alt="Linh vật cáo của nhân viên dẫn đầu" />
+                            </div>
+                            <div className="packing-champion-medal"><CrownOutlined /><b>1</b></div>
+                        </div>
+                        <div className="packing-champion-copy">
+                            <div className="packing-top-label"><CrownOutlined /> Top 1</div>
+                            <span className="packing-leading-label">Dẫn đầu tháng</span>
+                            <h3>{leader?.orderCount ? leader.name : 'Chưa có nhân viên dẫn đầu'}</h3>
+                            <p>@{leader?.username || '—'}</p>
+                            {leader && <Tag className={leader.type === 'Official' ? 'packing-staff-tag official' : 'packing-staff-tag seasonal'}>
+                                <CheckCircleOutlined /> {leader.type === 'Official' ? 'Chính thức' : 'Thời vụ'}
+                            </Tag>}
+                            <div className="packing-champion-metrics">
+                                <div><strong>{leader?.orderCount.toLocaleString('vi-VN') || 0}</strong><span>đơn</span></div>
+                                <div><strong>{leader?.units.toLocaleString('vi-VN') || 0}</strong><span>SP</span></div>
+                                <div><strong>{fmt(leader?.income || 0)}</strong><span>Thu nhập</span></div>
+                            </div>
+                        </div>
+                    </article>
+
+                    <div className="packing-summary-stack">
+                        <article className="packing-month-summary">
+                            <h3>TỔNG KẾT THÁNG <span>(toàn đội)</span></h3>
+                            <div className="packing-summary-metrics">
+                                <div><InboxOutlined /><strong>{orderLogs.length.toLocaleString('vi-VN')}</strong><span>đơn</span></div>
+                                <div><BarChartOutlined /><strong>{totalUnits.toLocaleString('vi-VN')}</strong><span>SP</span></div>
+                                <div><DollarOutlined /><strong>{fmt(totalIncome)}</strong></div>
+                            </div>
+                        </article>
+
+                        <article className="packing-income-summary">
+                            <div className="packing-income-icon"><DollarOutlined /></div>
+                            <div><span>Tổng thu nhập sản lượng</span><strong>{fmt(totalIncome)}</strong></div>
+                            <div className="packing-income-facts">
+                                <span><ProfileOutlined /> {totalUnits.toLocaleString('vi-VN')} SP đã ghi nhận</span>
+                                <span><TagsOutlined /> Đơn giá mặc định: <b>{unitPrice}đ/SP</b></span>
+                            </div>
+                        </article>
+
+                        <article className="packing-weekly-prize">
+                            <div className="packing-week-icon"><CalendarOutlined /></div>
+                            <div className="packing-week-copy">
+                                <strong>Thưởng tuần <b>100.000đ</b></strong>
+                                <span>{weekStart.format('DD/MM')} – {weekEnd.format('DD/MM')}</span>
+                                <small>Nhân viên đóng gói nhiều nhất tuần</small>
+                            </div>
+                            <div className="packing-coming-soon"><ClockCircleOutlined /> Sắp ra mắt</div>
+                            <small className="packing-reset-note"><SafetyCertificateOutlined /> Tự động reset vào mỗi Thứ Hai · Chưa tính vào thu nhập</small>
+                        </article>
                     </div>
                 </section>
 
@@ -5428,66 +6002,78 @@ export default function Attendance() {
                     <div className="packing-league-main">
                         <section className="packing-panel">
                             <div className="packing-panel-title">
-                                <div>🏁 Bảng xếp hạng hiệu suất</div>
-                                <Button size="small" icon={<SyncOutlined />} onClick={() => loadPackingOrders(overviewDateRange[0].startOf('day').toISOString())}>Tải lại</Button>
+                                <div><BarChartOutlined /> Bảng xếp hạng hiệu suất</div>
+                                <Button size="small" icon={<SyncOutlined />} onClick={reloadPacking}>Tải lại</Button>
                             </div>
                             <div className="packing-ranking-scroll">
                                 <table className="packing-ranking-table">
-                                    <thead><tr><th>Hạng</th><th>Nhân viên</th><th>Đơn</th><th>Sản phẩm</th><th>Thu nhập</th><th>Tỷ trọng</th><th>Xu hướng</th><th>7 ngày cuối</th></tr></thead>
+                                    <thead><tr><th>Hạng</th><th>Nhân viên</th><th>Đơn</th><th>Sản phẩm</th><th>Thu nhập</th><th>Tỷ trọng</th><th>Xu hướng</th></tr></thead>
                                     <tbody>
                                         {leaderboard.map((entry, index) => {
                                             const share = totalUnits > 0 ? Math.round(entry.units / totalUnits * 100) : 0;
                                             return <tr key={entry.id} className={`packing-rank-row packing-rank-${index + 1}`}>
-                                                <td><span className="packing-rank-number">{index + 1}</span>{index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : ''}</td>
-                                                <td><div className="packing-person"><span className={`packing-avatar ${index === 0 ? 'leader' : ''}`}>{avatarIcons[index % avatarIcons.length]}</span><div><strong>{entry.name}</strong><small>@{entry.username || '—'}</small><em className={entry.type === 'Official' ? 'official' : 'seasonal'}>{entry.type === 'Official' ? 'Chính thức' : 'Thời vụ'}</em></div></div></td>
+                                                <td><span className={`packing-rank-number rank-${index + 1}`}>{index < 3 && <CrownOutlined />}{index + 1}</span></td>
+                                                <td><div className="packing-person"><span className={`packing-avatar ${index === 0 ? 'leader' : ''}`}>{rankingMascots[index] ? <img src={rankingMascots[index]} alt="" /> : <UserOutlined />}</span><div><strong>{entry.name}</strong><small>@{entry.username || '—'}</small><em className={entry.type === 'Official' ? 'official' : 'seasonal'}>{entry.type === 'Official' ? 'Chính thức' : 'Thời vụ'}</em></div></div></td>
                                                 <td><strong className="packing-blue-number">{entry.orderCount}</strong><small> đơn</small></td>
                                                 <td><strong>{entry.units.toLocaleString('vi-VN')}</strong><small> SP</small></td>
                                                 <td><strong className="packing-income">{fmt(entry.income)}</strong></td>
                                                 <td><strong>{share}%</strong><div className="packing-meter"><i style={{ width: `${share}%` }} /></div></td>
-                                                <td><span className={entry.trend >= 0 ? 'packing-up' : 'packing-down'}>{entry.trend >= 0 ? '↑' : '↓'} {Math.abs(entry.trend)} đơn</span></td>
-                                                <td><div className="packing-form">{entry.form.map((active, formIndex) => <i key={formIndex} className={active ? 'active' : ''} />)}</div></td>
+                                                <td><span className={entry.trend >= 0 ? 'packing-up' : 'packing-down'}>{entry.trend >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />} {Math.abs(entry.trend)} đơn</span></td>
                                             </tr>;
                                         })}
                                     </tbody>
-                                    <tfoot><tr><td colSpan={2}>TỔNG ĐỘI</td><td>{orderLogs.length} đơn</td><td>{totalUnits.toLocaleString('vi-VN')} SP</td><td>{fmt(totalIncome)}</td><td>100%</td><td colSpan={2}></td></tr></tfoot>
+                                    <tfoot><tr><td colSpan={2}>TỔNG ĐỘI</td><td>{orderLogs.length} đơn</td><td>{totalUnits.toLocaleString('vi-VN')} SP</td><td>{fmt(totalIncome)}</td><td>100%</td><td></td></tr></tfoot>
                                 </table>
                             </div>
                         </section>
 
                         <section className="packing-panel">
-                            <div className="packing-panel-title"><div>📋 Nhật ký đóng gói theo đơn hàng</div><Tag color="blue">{orderLogs.length} đơn</Tag></div>
+                            <div className="packing-panel-title"><div><FileTextOutlined /> Nhật ký đóng gói theo đơn hàng</div><Tag color="blue">{orderLogs.length} đơn</Tag></div>
                             <Table
                                 className="packing-log-table"
                                 dataSource={orderLogs.map(order => ({ ...order, key: order.id }))}
                                 pagination={orderLogs.length > 8 ? { pageSize: 8, size: 'small' } : false}
                                 size="small"
-                                scroll={{ x: 780 }}
+                                tableLayout="fixed"
                                 expandable={{
-                                    expandedRowRender: (record: PackingOrderLog) => <div className="packing-order-detail">{record.items.map((item, index) => <div key={`${record.id}-${index}`}><code>{item.sku}</code><span>{item.productName}{item.variant ? ` - ${item.variant}` : ''}</span><b>{item.quantity}</b></div>)}</div>,
+                                    expandedRowRender: (record: PackingOrderLog) => <div className="packing-order-detail">{record.items.map((item, index) => {
+                                        const effectiveCommission = getPackingCommissionAt(packingCommission, record.timestamp);
+                                        const level = getPackingLevel(item, effectiveCommission);
+                                        const levelMeta = getPackingLevelOption(effectiveCommission, level);
+                                        const units = calcPackingUnitsFromItem(item);
+                                        const rate = Number.isFinite(item.packingUnitPrice) ? Number(item.packingUnitPrice) : effectiveCommission.rates[level];
+                                        const income = Number.isFinite(item.packingIncome) ? Number(item.packingIncome) : units * rate;
+                                        const unit = item.packingUnit || levelMeta.unit;
+                                        return <div key={`${record.id}-${index}`}><code>{item.sku}</code><span>{item.productName}{item.variant ? ` - ${item.variant}` : ''}</span><Tag color={levelMeta.color}>{levelMeta.label}</Tag><b>{units} {unit} × {rate}đ = {fmt(income)}</b></div>;
+                                    })}</div>,
                                     expandedRowKeys: expandedPackingKeys,
                                     onExpandedRowsChange: keys => setExpandedPackingKeys(keys as string[]),
+                                    showExpandColumn: false,
                                 }}
+                                onRow={(record: PackingOrderLog) => ({
+                                    onDoubleClick: () => setExpandedPackingKeys(previous => previous.includes(record.id)
+                                        ? previous.filter(key => key !== record.id)
+                                        : [...previous, record.id]),
+                                })}
                                 columns={[
                                     { title: 'Thời gian', dataIndex: 'timestamp', width: 115, render: (value: string) => dayjs(value).isValid() ? dayjs(value).format('DD/MM HH:mm') : '—' },
                                     { title: 'Mã đơn', dataIndex: 'orderNumber', width: 150, render: (value: string) => <span className="packing-order-code">{value}</span> },
-                                    { title: 'Sàn', dataIndex: 'platform', width: 95, render: (value: string) => `${platformIcon[value] || '📋'} ${value}` },
+                                    { title: 'Sàn', dataIndex: 'platform', width: 95, render: (value: string) => <span className="packing-platform" style={{ color: platformColor[value] || platformColor.Khác }}>{platformIcon[value] || platformIcon.Khác} <b>{value}</b></span> },
                                     { title: 'Người đóng', dataIndex: 'packer', width: 150 },
-                                    { title: 'Sản phẩm', render: (_: any, record: PackingOrderLog) => `${calcPacksFromItems(record.items).toLocaleString('vi-VN')} SP` },
-                                    { title: 'Trạng thái', dataIndex: 'status', width: 110, render: (value: string) => <span className={value === 'completed' ? 'packing-complete' : 'packing-down'}>{value === 'completed' ? '✓ Hoàn tất' : '⚠ Có lỗi'}</span> },
+                                    { title: 'Sản phẩm', render: (_: any, record: PackingOrderLog) => {
+                                        const firstItem = record.items[0];
+                                        const productName = firstItem
+                                            ? `${firstItem.productName}${firstItem.variant ? ` - ${firstItem.variant}` : ''}`
+                                            : 'Không có thông tin';
+                                        const extraItems = Math.max(0, record.items.length - 1);
+                                        return <div className="packing-product-summary"><Tooltip title={record.items.map(item => `${item.productName}${item.variant ? ` - ${item.variant}` : ''}`).join('\n')}><span>{productName}</span></Tooltip><small>{calcPacksFromItems(record.items).toLocaleString('vi-VN')} SP{extraItems > 0 ? ` · +${extraItems} sản phẩm` : ''}</small></div>;
+                                    } },
+                                    { title: 'Hoa hồng', width: 115, align: 'right' as const, render: (_: any, record: PackingOrderLog) => <strong className="packing-order-income">+{fmt(calcPackingCommission(record.items, packingCommission, record.timestamp).income)}</strong> },
                                 ]}
                             />
                         </section>
                     </div>
 
-                    <aside className="packing-league-rail">
-                        <section className="packing-panel packing-rival-card">
-                            <div className="packing-panel-title"><div>⚔️ Cuộc đua dẫn đầu</div></div>
-                            {leader?.orderCount ? <><div className="packing-rival-people"><div><span className="packing-avatar leader">{avatarIcons[0]}</span><strong>{leader.name}</strong><div className="packing-gap-lead">{leader.orderCount} đơn</div></div><strong>VS</strong><div><span className="packing-avatar">{avatarIcons[1]}</span><strong>{challenger?.name || 'Chưa có'}</strong><div className="packing-gap-chase">{challenger?.orderCount || 0} đơn</div></div></div><div className="packing-rival-gap"><span>Khoảng cách hiện tại</span><strong>{gap} đơn</strong><div className="packing-progress"><i style={{ width: `${Math.min(100, ((challenger?.orderCount || 0) / maxOrders) * 100)}%` }} /></div><small>{challenger ? `${challenger.name} cần thêm ${gap + 1} đơn để vượt` : 'Chưa có người bám đuổi'}</small></div></> : <div className="packing-empty">Chưa có dữ liệu đóng gói</div>}
-                        </section>
-                        <section className="packing-panel packing-reward-card"><span style={{ fontSize: 24 }}>💵</span><div><span>Thu nhập theo sản lượng</span><strong>{unitPrice}đ/SP</strong><small>Tự động tính theo sản phẩm hợp lệ đã đóng</small><div className="packing-valid-rule">✓ Không chia đều theo đầu người</div></div></section>
-                        <section className="packing-panel packing-champion-card"><span style={{ fontSize: 22 }}>👑</span><div><span>Người dẫn đầu tháng</span><strong>{leader?.orderCount ? leader.name : 'Chưa xác định'}</strong><small>{leader?.orderCount ? `${leader.orderCount} đơn · ${leader.units.toLocaleString('vi-VN')} SP` : 'Chờ dữ liệu đơn hàng'}</small></div></section>
-                        <section className="packing-panel packing-goal-card"><div className="packing-panel-title"><div>🎯 Mục tiêu đội</div></div><p>Doanh số sản lượng đang ghi nhận <b>{totalUnits.toLocaleString('vi-VN')} SP</b>, tương ứng <b>{fmt(totalIncome)}</b>.</p></section>
-                    </aside>
                 </div>
             </div>
         );
@@ -5816,12 +6402,11 @@ export default function Attendance() {
                             {
                                 title: 'GHI NHẬN LƯƠNG', key: 'sku', width: 160, align: 'right' as const,
                                 render: (_: any, r: PackingOrderLog) => {
-                                    const totalPacks = calcPacksFromItems(r.items);
-                                    const totalMoney = totalPacks * unitPrice;
+                                    const packing = calcPackingCommission(r.items, packingCommission, r.timestamp);
                                     return (
                                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
-                                            <Tag color="blue" style={{ margin: 0, fontWeight: 700, fontSize: 10 }}>{totalPacks} SP × {unitPrice}đ</Tag>
-                                            <Text style={{ fontSize: 11, fontWeight: 800, color: '#00ab56', marginTop: 2 }}>+{totalMoney.toLocaleString('vi-VN')} đ</Text>
+                                            <Tag color="blue" style={{ margin: 0, fontWeight: 700, fontSize: 10 }}>{packing.units} SP × {unitPrice}đ</Tag>
+                                            <Text style={{ fontSize: 11, fontWeight: 800, color: '#00ab56', marginTop: 2 }}>+{packing.income.toLocaleString('vi-VN')} đ</Text>
                                         </div>
                                     );
                                 },
@@ -7643,7 +8228,7 @@ export default function Attendance() {
                             <Tag color="warning" icon={<WarningOutlined />}>Cần chốt lại an toàn</Tag>
                         </Tooltip>
                     )}
-                    {showPayrollManagementControls && <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal} disabled={isCurrentPeriodLocked}>Cấu hình</Button>}
+                    {showPayrollManagementControls && <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal} disabled={activeTab !== 'packaging' && isCurrentPeriodLocked}>{activeTab === 'packaging' ? 'Cấu hình hoa hồng' : 'Cấu hình'}</Button>}
                     {showPayrollManagementControls && (isCurrentPeriodLocked ? (
                             <Button
                                 icon={<LockOutlined />}
@@ -8001,7 +8586,7 @@ export default function Attendance() {
                                                 <tr>
                                                     <td>
                                                         <span className="ps-summary-row-label">Lương năng suất (Đóng gói)</span>
-                                                        <span className="ps-summary-row-note">{p.packTotalUnits || 0} SP × {PACKING_UNIT_PRICE}đ · {p.packOrderCount || 0} đơn</span>
+                                                        <span className="ps-summary-row-note">{p.packTotalUnits || 0} gói theo mức độ · {p.packOrderCount || 0} đơn</span>
                                                     </td>
                                                     <td className="ps-summary-green">+ {fmt(p.packIncome || 0)}</td>
                                                 </tr>
@@ -8182,7 +8767,7 @@ export default function Attendance() {
                                                         </span>
                                                     </td>
                                                     <td>
-                                                        <b>{(p.packTotalUnits || 0).toLocaleString('vi-VN')} SP × {PACKING_UNIT_PRICE}đ</b>
+                                                        <b>{(p.packTotalUnits || 0).toLocaleString('vi-VN')} gói · Dễ / Trung bình / Cao</b>
                                                         <span className="ps-inv-text-muted">Tổng số: {(p.packOrderCount || 0).toLocaleString('vi-VN')} đơn hàng</span>
                                                     </td>
                                                     <td className="text-right ps-inv-text-green">+{fmt(p.packIncome || 0)}</td>
@@ -8397,7 +8982,7 @@ export default function Attendance() {
                 ] : [
                     <Button key="close" onClick={() => setConfigModalOpen(false)}>Đóng</Button>,
                 ]}
-                width={640}
+                width={activeConfigTab === 'packing' ? 920 : 640}
             >
                 <Tabs
                     activeKey={activeConfigTab}
@@ -8405,6 +8990,120 @@ export default function Attendance() {
                     size="small"
                     style={{ marginTop: -8 }}
                     items={[
+                        {
+                            key: 'packing',
+                            label: <span><TeamOutlined /> Hoa hồng đóng gói</span>,
+                            children: (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginTop: 8 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                                        <Button
+                                            size="small"
+                                            icon={<SettingOutlined />}
+                                            onClick={() => {
+                                                if (packingRatesExpanded) {
+                                                    setTempConfig(previous => ({ ...previous, packingCommission: normalizePackingCommission(config.packingCommission) }));
+                                                }
+                                                setPackingRatesExpanded(!packingRatesExpanded);
+                                            }}
+                                        >
+                                            {packingRatesExpanded ? 'Ẩn thiết lập đơn giá' : 'Thiết lập đơn giá'}
+                                        </Button>
+                                    </div>
+                                    {packingRatesExpanded && <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '10px 12px', background: '#f8fbfa', border: '1px solid #dff0e7', borderRadius: 8 }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                                            <Text strong>Thiết lập đơn giá cơ bản</Text>
+                                            <Button size="small" type="primary" loading={packingConfigSaving} onClick={savePackingRates}>Lưu đơn giá</Button>
+                                        </div>
+                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+                                            {PACKING_LEVELS.map(level => (
+                                                <InputNumber key={level.key} min={0} step={10} value={tempPackingCommission.rates[level.key]} onChange={value => updateTempPackingRate(level.key, value)} addonBefore={level.label} addonAfter="đ/gói" style={{ width: '100%' }} />
+                                            ))}
+                                        </div>
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                                <Text strong>Mức riêng:</Text>
+                                                {(tempPackingCommission.customLevels || []).length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>Chưa có</Text>}
+                                                {(tempPackingCommission.customLevels || []).map(level => (
+                                                    <Space.Compact key={level.key}>
+                                                        <Tag color="cyan" style={{ margin: 0 }}>{level.label}: {(tempPackingCommission.rates[level.key] || 0).toLocaleString('vi-VN')}đ/{level.unit}</Tag>
+                                                        <Button size="small" onClick={() => editCustomPackingLevel(level)} disabled={packingConfigSaving}>Sửa</Button>
+                                                        <Button size="small" danger onClick={() => deleteCustomPackingLevel(level)} disabled={packingConfigSaving}>Xóa</Button>
+                                                    </Space.Compact>
+                                                ))}
+                                            </div>
+                                            <Button size="small" icon={<PlusOutlined />} disabled={packingConfigSaving} onClick={() => setCustomPackingLevelOpen(true)}>Tạo mức riêng</Button>
+                                        </div>
+                                    </div>}
+                                    <Tabs
+                                        activeKey={packingConfigView}
+                                        onChange={key => {
+                                            setPackingConfigView(key as 'unassigned' | 'assigned');
+                                            setSelectedPackingSkus([]);
+                                        }}
+                                        size="small"
+                                        items={[
+                                            { key: 'unassigned', label: <span>Chưa gán <Badge count={unassignedPackingCatalog.length} showZero color="#d9f7e6" style={{ color: '#079447', boxShadow: 'none', marginLeft: 6 }} /></span> },
+                                            { key: 'assigned', label: <span>Đã gán <Badge count={assignedPackingCatalog.length} showZero color="#f0f0f0" style={{ color: '#595959', boxShadow: 'none', marginLeft: 6 }} /></span> },
+                                        ]}
+                                    />
+                                    <Text type="secondary" style={{ fontSize: 12 }}>
+                                        Sản phẩm chưa gán vẫn được tính mặc định mức Dễ ({tempPackingCommission.rates.easy.toLocaleString('vi-VN')}đ/gói). Màu sắc và biến thể con tự động kế thừa sản phẩm cha.
+                                    </Text>
+                                    <Text style={{ fontSize: 12, color: '#079447' }}>
+                                        Cấu hình mới chỉ áp dụng cho đơn được ghi nhận sau thời điểm xác nhận lưu. Đơn cũ giữ nguyên mức tại thời điểm phát sinh.
+                                    </Text>
+                                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                        <Input
+                                            allowClear
+                                            prefix={<SearchOutlined />}
+                                            placeholder="Tìm tên dòng sản phẩm..."
+                                            value={packingSkuSearch}
+                                            onChange={event => setPackingSkuSearch(event.target.value)}
+                                            style={{ flex: 1 }}
+                                        />
+                                        <Tag style={{ margin: 0, padding: '5px 10px', whiteSpace: 'nowrap' }}>Sản phẩm cha</Tag>
+                                    </div>
+                                    <Table
+                                        rowKey="sku"
+                                        size="small"
+                                        pagination={{ pageSize: 10, showSizeChanger: false, hideOnSinglePage: true }}
+                                        dataSource={filteredPackingCatalog}
+                                        rowSelection={{
+                                            selectedRowKeys: selectedPackingSkus,
+                                            onChange: keys => setSelectedPackingSkus(keys.filter((key): key is string | number => typeof key === 'string' || typeof key === 'number')),
+                                        }}
+                                        columns={[
+                                            {
+                                                title: 'Dòng sản phẩm', dataIndex: 'productName',
+                                                render: (name: string, row: PackingCatalogItem) => <Space direction="vertical" size={0}><Text strong>{name}</Text><Text type="secondary" style={{ fontSize: 11 }}>{row.sku}</Text></Space>,
+                                            },
+                                            {
+                                                title: 'Trạng thái', key: 'status', width: 150,
+                                                render: (_: any, row: PackingCatalogItem) => {
+                                                    const level = getPackingLevelOption(tempPackingCommission, getPackingCatalogLevel(row));
+                                                    return packingConfigView === 'assigned'
+                                                        ? <Tag color={level.color}>{level.label} · {level.rate.toLocaleString('vi-VN')}đ/{level.unit}</Tag>
+                                                        : <Tag color="green">Mặc định Dễ · {tempPackingCommission.rates.easy.toLocaleString('vi-VN')}đ/gói</Tag>;
+                                                },
+                                            },
+                                            {
+                                                title: 'Ghi chú', key: 'note',
+                                                render: () => <Text type="secondary">Sản phẩm cha</Text>,
+                                            },
+                                            ...(packingConfigView === 'assigned' ? [{
+                                                title: '', key: 'action', width: 90, align: 'right' as const,
+                                                render: (_: any, row: PackingCatalogItem) => <Space size={2}><Button type="link" size="small" disabled={packingConfigSaving} onClick={() => openPackingAssignment([row.sku], 'change')}>Đổi mức</Button><Button type="link" danger size="small" disabled={packingConfigSaving} onClick={() => unassignPackingProducts([row.sku])}>Bỏ gán</Button></Space>,
+                                            }] : []),
+                                        ]}
+                                    />
+                                    <div style={{ position: 'sticky', bottom: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '12px 14px', background: '#fff', border: '1px solid #d9d9d9', borderRadius: 8, boxShadow: '0 -3px 10px rgba(0,0,0,.05)' }}>
+                                        <Text><CheckCircleOutlined style={{ color: '#08a64b', marginRight: 8 }} />Đã chọn <b>{selectedPackingSkus.length}</b> sản phẩm <span style={{ color: '#d9d9d9', margin: '0 10px' }}>|</span><Text type="secondary">Mỗi sản phẩm được tính theo đơn vị gói</Text></Text>
+                                        {packingConfigView === 'unassigned' ? <Button type="primary" disabled={selectedPackingSkus.length === 0 || packingConfigSaving} onClick={() => openPackingAssignment(selectedPackingSkus, 'assign')}>Gán hoa hồng</Button> : <Space><Button type="primary" disabled={selectedPackingSkus.length === 0 || packingConfigSaving} onClick={() => openPackingAssignment(selectedPackingSkus, 'change')}>Đổi mức</Button><Button danger loading={packingConfigSaving} disabled={selectedPackingSkus.length === 0} onClick={() => unassignPackingProducts(selectedPackingSkus)}>Bỏ gán sản phẩm</Button></Space>}
+                                    </div>
+                                    <Text type="secondary" style={{ fontSize: 11 }}>Hiển thị {filteredPackingCatalog.length.toLocaleString('vi-VN')} / {packingConfigView === 'assigned' ? assignedPackingCatalog.length : unassignedPackingCatalog.length} sản phẩm</Text>
+                                </div>
+                            ),
+                        },
                         {
                             key: 'rules',
                             label: <span><SettingOutlined /> Quy tắc & Phạt</span>,
@@ -8523,6 +9222,61 @@ export default function Attendance() {
                         },
                     ].filter(item => item.key !== 'employees')}
                 />
+            </Modal>
+
+            <Modal
+                title={packingAssignmentMode === 'change' ? 'Đổi mức hoa hồng đóng gói' : 'Gán hoa hồng đóng gói'}
+                open={packingAssignmentOpen}
+                onCancel={() => setPackingAssignmentOpen(false)}
+                width={430}
+                centered
+                footer={[
+                    <Button key="cancel" onClick={() => setPackingAssignmentOpen(false)}>Hủy</Button>,
+                    <Button key="confirm" type="primary" loading={packingConfigSaving} onClick={() => assignPackingLevel(selectedPackingSkus, pendingPackingLevel)}>
+                        Xác nhận {packingAssignmentMode === 'change' ? 'đổi' : 'gán'} {selectedPackingSkus.length} sản phẩm
+                    </Button>,
+                ]}
+            >
+                <Text type="secondary" style={{ display: 'block', marginBottom: 14 }}>Áp dụng mức mới cho {selectedPackingSkus.length} sản phẩm đã chọn. Đơn phát sinh trước thời điểm xác nhận vẫn giữ mức cũ.</Text>
+                <Radio.Group value={pendingPackingLevel} onChange={event => setPendingPackingLevel(event.target.value)} style={{ width: '100%' }}>
+                    <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                        {getPackingLevelOptions(tempPackingCommission).map(level => (
+                            <Radio key={level.key} value={level.key} style={{ width: '100%', margin: 0, padding: '11px 12px', border: `1px solid ${pendingPackingLevel === level.key ? '#8ad9ae' : '#e5e5e5'}`, borderRadius: 8, color: level.key === 'easy' ? '#079447' : level.key === 'medium' ? '#d48806' : '#cf1322', fontWeight: 600 }}>
+                                <span style={{ display: 'inline-flex', justifyContent: 'space-between', width: 'calc(100% - 24px)' }}><span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: level.key === 'easy' ? '#16a05d' : level.key === 'medium' ? '#f0a000' : level.key === 'high' ? '#f04444' : '#13a8a8', marginRight: 8 }} />{level.label}</span><span>{level.rate.toLocaleString('vi-VN')}đ/{level.unit}</span></span>
+                            </Radio>
+                        ))}
+                    </Space>
+                </Radio.Group>
+            </Modal>
+
+            <Modal
+                title={editingCustomPackingLevelKey ? 'Sửa mức hoa hồng riêng' : 'Tạo mức hoa hồng riêng'}
+                open={customPackingLevelOpen}
+                onCancel={() => { setCustomPackingLevelOpen(false); setEditingCustomPackingLevelKey(null); }}
+                onOk={createCustomPackingLevel}
+                confirmLoading={packingConfigSaving}
+                okText={editingCustomPackingLevelKey ? 'Lưu thay đổi' : 'Tạo mức hoa hồng'}
+                cancelText="Hủy"
+                width={440}
+                centered
+            >
+                <Space direction="vertical" size={14} style={{ width: '100%', marginTop: 8 }}>
+                    <div>
+                        <Text strong style={{ display: 'block', marginBottom: 6 }}>Tên mức hoa hồng</Text>
+                        <Input value={customPackingLevelName} onChange={event => setCustomPackingLevelName(event.target.value)} placeholder="Ví dụ: Kiện riêng" maxLength={40} />
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 140px', gap: 10 }}>
+                        <div>
+                            <Text strong style={{ display: 'block', marginBottom: 6 }}>Đơn giá</Text>
+                            <InputNumber min={0} step={10} value={customPackingLevelRate} onChange={value => setCustomPackingLevelRate(Number(value || 0))} addonAfter="đ" style={{ width: '100%' }} />
+                        </div>
+                        <div>
+                            <Text strong style={{ display: 'block', marginBottom: 6 }}>Đơn vị</Text>
+                            <Input value={customPackingLevelUnit} onChange={event => setCustomPackingLevelUnit(event.target.value)} placeholder="kiện" maxLength={20} />
+                        </div>
+                    </div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Ví dụ: “Kiện riêng – 100đ/kiện”. Sau khi tạo, chọn sản phẩm cha và gán vào mức này.</Text>
+                </Space>
             </Modal>
 
             {/* ===== MODAL: Thêm Thưởng Lẻ ===== */}

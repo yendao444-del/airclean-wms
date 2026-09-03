@@ -10,6 +10,7 @@ const offlineQueue = read('electron/offline-queue.js');
 const ecommerce = read('src/pages/EcommerceExport.tsx');
 const stockBalance = read('src/pages/StockBalance.tsx');
 const returnsPage = read('src/pages/Returns.tsx');
+const handlingUnitsPage = read('src/pages/HandlingUnits.tsx');
 const r2Lab = read('src/pages/R2StorageLab.tsx');
 const r2TestWorker = read('cloudflare/r2-test-worker/src/index.ts');
 const evidenceWorker = read('cloudflare/r2-daily-evidence-worker/src/index.ts');
@@ -56,6 +57,16 @@ if (!allowedChannelsMatch) {
   requireText(allowedChannelsMatch[1], '"update:restart",', 'The app must be able to restart after a verified update');
   requireText(allowedChannelsMatch[1], '"stockCheck:createFullSession",', 'Transactional full stock-check creation must remain available');
   requireText(allowedChannelsMatch[1], '"stockCheck:cancelSession",', 'Admin stock-check cancellation must remain available');
+  for (const channel of [
+    'handlingUnits:createUnits',
+    'handlingUnits:issueQrLabels',
+    'handlingUnits:markQrLabelsPrinted',
+    'handlingUnits:markQrLabelsReceived',
+    'handlingUnits:exportLabelsPdf',
+    'purchases:create',
+  ]) {
+    requireText(allowedChannelsMatch[1], `"${channel}",`, `${channel} must remain available`);
+  }
   for (const channel of [
     'stockCheck:ensureDailySession',
     'stockCheck:createRecheckSession',
@@ -110,6 +121,7 @@ requireText(loginHandler, 'if (isTemporaryPassword(user)) {', 'Temporary passwor
 requireText(loginHandler, 'crypto.randomBytes(32)', 'Consumed temporary passwords must be replaced with an unknown value');
 requireText(loginHandler, 'user-password:${user.id}', 'Temporary-password consumption must use the per-user transaction lock');
 requireText(loginHandler, 'temporaryPasswordGrant', 'A consumed temporary password needs a session-bound change grant');
+requireText(loginHandler, 'previousPasswordHash: consumedTemporaryPasswordHash', 'The temporary-password grant must remember the consumed hash');
 
 const changePasswordStart = normalizedIpc.indexOf('ipcMain.handle(\n  "users:changePassword"');
 const changePasswordEnd = normalizedIpc.indexOf('// Reset password', changePasswordStart);
@@ -117,7 +129,9 @@ const changePasswordHandler = changePasswordStart >= 0 && changePasswordEnd > ch
   ? normalizedIpc.slice(changePasswordStart, changePasswordEnd)
   : '';
 requireText(changePasswordHandler, 'hasValidTemporaryPasswordGrant(freshUser)', 'Password change must validate the one-time session grant');
+requireText(changePasswordHandler, 'temporaryPasswordGrant.previousPasswordHash', 'Password change must reject reuse of the consumed temporary password');
 requireText(changePasswordHandler, 'delete currentSession.temporaryPasswordGrant;', 'Password change must clear the one-time session grant');
+requireText(ipc, 'canChangePasswordWithoutCurrent: hasValidTemporaryPasswordGrant(user)', 'Renderer must know when the current-password field may be skipped');
 
 const mapMatch = ipc.match(/const DATA_SAFETY_BLOCKED_CHANNELS = new Map\(\[([\s\S]*?)\n\]\);/);
 if (!mapMatch) {
@@ -273,7 +287,10 @@ if (!mapMatch) {
   }
 }
 
-requireText(ipc, 'if (!DATA_SAFETY_MODE) {\n  startTelegramWmsPolling();', 'Telegram mutation polling must be disabled');
+requireText(ipc, '\nstartTelegramWmsPolling();', 'Transactional Telegram WMS polling must remain enabled');
+rejectText(ipc, 'Telegram WMS mutation polling is disabled', 'Telegram WMS polling is still disabled');
+requireText(ipc, 'handling-unit-code:${normalizedCode}', 'Telegram handling-unit mutations must serialize by unit code');
+requireText(ipc, 'lockHandlingConfigKeys(tx, [HANDLING_QR_LABELS_KEY])', 'QR registry updates must hold the shared registry lock');
 requireText(ipc, 'Skipped automatic log/export cleanup', 'Automatic log cleanup guard is missing');
 requireText(ipc, 'Skipped automatic evidence deletion', 'Automatic evidence cleanup guard is missing');
 requireText(ipc, 'Skipped automatic runtime index migration', 'Automatic runtime index migration guard is missing');
@@ -296,6 +313,9 @@ rejectText(returnsPage, "appConfig.set('attendanceData'", 'Returns renderer must
 requireText(ipc, 'Assignment đã được thay đổi trên máy khác.', 'Assignment completion must reject stale writes');
 requireText(ipc, 'Công việc đã được thay đổi trên máy khác. Vui lòng tải lại và thử lại.', 'Task completion/review must reject stale writes');
 requireText(ipc, 'purchaseCreateOperation:', 'Purchase create idempotency claim is missing');
+requireText(ipc, 'findCompletedPurchaseCreate(tx, idempotencyKey)', 'Purchase retries must recover the already-created receipt');
+requireText(ipc, "pg_advisory_xact_lock(hashtext('handling-units-create'))", 'Handling-unit batch creation must be serialized');
+requireText(handlingUnitsPage, 'idempotencyKey: `${operationBaseKey}-${supplierGroupIndex}`', 'Quick QR receiving must provide stable purchase idempotency keys');
 requireText(ipc, 'stockBalanceOperation:', 'Stock balance idempotency claim is missing');
 requireText(ipc, 'getMisaIntegrationBaseUrl(config)', 'MISA environment routing is missing');
 requireText(main, 'app.requestSingleInstanceLock()', 'Single-instance lock is missing');
