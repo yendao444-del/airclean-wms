@@ -162,7 +162,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
         saveCategories: (categories, expectedCategories) => ipcRenderer.invoke('dailyTasks:saveCategories', { categories, expectedCategories }),
         getEvidenceImageUrl: (taskId, storagePath) => ipcRenderer.invoke('dailyTasks:getEvidenceImageUrl', taskId, storagePath),
         getR2EvidenceImageUrl: (taskId, r2Key, mimeType) => ipcRenderer.invoke('dailyTasks:getR2EvidenceImageUrl', taskId, r2Key, mimeType),
-        getR2EvidenceImageUrls: (taskId, images) => ipcRenderer.invoke('dailyTasks:getR2EvidenceImageUrls', taskId, images),
+        getR2EvidenceImageUrls: (taskId, images, requestId) => ipcRenderer.invoke('dailyTasks:getR2EvidenceImageUrls', taskId, images, requestId),
+        onR2EvidenceImageLoaded: (callback) => {
+            const handler = (_event, data) => callback(data);
+            ipcRenderer.on('dailyTasks:r2EvidenceImageLoaded', handler);
+            return () => ipcRenderer.removeListener('dailyTasks:r2EvidenceImageLoaded', handler);
+        },
         getDriveEvidenceImageUrl: (taskId, driveUrl, mimeType) => ipcRenderer.invoke('dailyTasks:getDriveEvidenceImageUrl', taskId, driveUrl, mimeType),
         getDriveEvidenceImageUrls: (taskId, images, requestId) => ipcRenderer.invoke('dailyTasks:getDriveEvidenceImageUrls', taskId, images, requestId),
         onDriveEvidenceImageLoaded: (callback) => {

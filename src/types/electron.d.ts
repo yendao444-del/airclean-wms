@@ -374,6 +374,7 @@ export interface ElectronAPI {
     finalizePick: (data: {
       code: string;
       actualQuantity: number;
+      expectedQuantity?: number;
       destination?: "PACKING" | "LOOSE" | "OUTBOUND" | "QUARANTINE";
       note?: string;
       idempotencyKey?: string;
@@ -398,6 +399,7 @@ export interface ElectronAPI {
       packagingName: string;
       initialQuantity: number;
       remainingQuantity: number;
+      expectedRemainingQuantity?: number;
       location: { zone?: string; rack?: string };
       note?: string;
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -611,18 +613,28 @@ export interface ElectronAPI {
     getR2EvidenceImageUrls: (
       taskId: number,
       images: Array<{ r2Key: string; mimeType?: string }>,
+      requestId?: string,
     ) => Promise<{
       success: boolean;
       data?: {
         results: Array<{
           r2Key: string;
           success: boolean;
-          data?: { url: string };
+          data?: { bytes: ArrayBuffer; mimeType: string };
           error?: string;
         }>;
       };
       error?: string;
     }>;
+    onR2EvidenceImageLoaded: (callback: (payload: {
+      requestId: string;
+      result: {
+        r2Key: string;
+        success: boolean;
+        data?: { bytes: ArrayBuffer; mimeType: string };
+        error?: string;
+      };
+    }) => void) => () => void;
     getDriveEvidenceImageUrl: (
       taskId: number,
       driveUrl: string,
@@ -1188,11 +1200,21 @@ export interface ElectronAPI {
       sku: string;
       note?: string;
       reference?: string;
+      unitAdjustments?: Array<{
+        code: string;
+        expectedQuantity: number;
+        actualQuantity: number;
+      }>;
     }) => Promise<{
       success: boolean;
       status?: string;
       item?: any;
       session?: any;
+      units?: Array<{
+        code: string;
+        remainingQuantity: number;
+        status: "sealed" | "opened" | "empty";
+      }>;
       error?: string;
     }>;
     submitSession: (data: {

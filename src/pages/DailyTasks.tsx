@@ -531,6 +531,13 @@ const DailyTasks = () => {
     const hasShownRowActionHintRef = useRef(false);
     const evidenceImageUrlCacheRef = useRef(new Map<string, { url: string; expiresAt: number }>());
 
+    useEffect(() => () => {
+        evidenceImageUrlCacheRef.current.forEach(({ url }) => {
+            if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+        });
+        evidenceImageUrlCacheRef.current.clear();
+    }, []);
+
     const dismissTaskActionGuide = () => {
         setShowTaskActionGuide(false);
     };
@@ -2243,6 +2250,7 @@ const DailyTasks = () => {
             const cached = evidenceImageUrlCacheRef.current.get(key);
             if (!cached) return '';
             if (cached.expiresAt <= Date.now()) {
+                if (cached.url.startsWith('blob:')) URL.revokeObjectURL(cached.url);
                 evidenceImageUrlCacheRef.current.delete(key);
                 return '';
             }
@@ -2250,18 +2258,23 @@ const DailyTasks = () => {
         };
         const cacheImageUrl = (key: string, url: string) => {
             const cache = evidenceImageUrlCacheRef.current;
+            const previous = cache.get(key);
+            if (previous?.url.startsWith('blob:') && previous.url !== url) URL.revokeObjectURL(previous.url);
             cache.delete(key);
-            // Drive previews are data URLs and do not expire; Supabase URLs do.
             cache.set(key, {
                 url,
-                expiresAt: Date.now() + (url.startsWith('data:') ? 30 : 4) * 60 * 1000,
+                expiresAt: Date.now() + (url.startsWith('data:') || url.startsWith('blob:') ? 30 : 4) * 60 * 1000,
             });
             while (cache.size > 50) {
                 const oldestKey = cache.keys().next().value;
                 if (!oldestKey) break;
+                const oldest = cache.get(oldestKey);
+                if (oldest?.url.startsWith('blob:')) URL.revokeObjectURL(oldest.url);
                 cache.delete(oldestKey);
             }
         };
+        const createR2ImageUrl = (bytes: ArrayBuffer, mimeType: string) =>
+            URL.createObjectURL(new Blob([bytes], { type: mimeType || 'image/webp' }));
         const renderEvidence = (
             images: Array<EvidenceImage & { url: string }>,
             loading: boolean,
@@ -2321,6 +2334,21 @@ const DailyTasks = () => {
             });
         };
         const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const unsubscribeR2Progress = window.electronAPI.dailyTasks.onR2EvidenceImageLoaded(({ requestId: responseId, result }) => {
+            if (responseId !== requestId || !modalActive) return;
+            const image = submittedImages.find(item => item.r2Key === result.r2Key);
+            if (!image) return;
+            const key = imageKey(image);
+            if (result.success && result.data?.bytes) {
+                const url = createR2ImageUrl(result.data.bytes, result.data.mimeType);
+                cacheImageUrl(key, url);
+                loadedByKey.set(key, { ...image, url });
+                failedByKey.delete(key);
+            } else {
+                failedByKey.set(key, result.error || 'Không thể tải ảnh bằng chứng từ R2.');
+            }
+            updateModal(loadedByKey.size + failedByKey.size < submittedImages.length);
+        });
         const unsubscribeDriveProgress = window.electronAPI.dailyTasks.onDriveEvidenceImageLoaded(({ requestId: responseId, result }) => {
             if (responseId !== requestId || !modalActive) return;
             const image = submittedImages.find(item => item.driveUrl === result.driveUrl);
@@ -2342,6 +2370,7 @@ const DailyTasks = () => {
             okText: 'Đóng',
             afterClose: () => {
                 modalActive = false;
+                unsubscribeR2Progress();
                 unsubscribeDriveProgress();
             },
         });
@@ -2362,6 +2391,7 @@ const DailyTasks = () => {
             ? window.electronAPI.dailyTasks.getR2EvidenceImageUrls(
                 task.id,
                 r2Images.map(image => ({ r2Key: image.r2Key!, mimeType: image.mimeType })),
+                requestId,
             )
             : Promise.resolve(null);
         const legacyRequests = legacyImages.map(async image => {
@@ -2385,12 +2415,13 @@ const DailyTasks = () => {
                 const image = r2Images.find(item => item.r2Key === result.r2Key);
                 if (!image) return;
                 const key = imageKey(image);
-                if (result.success && result.data?.url) {
-                    cacheImageUrl(key, result.data.url);
-                    loadedByKey.set(key, { ...image, url: result.data.url });
+                if (result.success && result.data?.bytes && !loadedByKey.has(key)) {
+                    const url = createR2ImageUrl(result.data.bytes, result.data.mimeType);
+                    cacheImageUrl(key, url);
+                    loadedByKey.set(key, { ...image, url });
                     failedByKey.delete(key);
                 } else {
-                    failedByKey.set(key, result.error || 'Không thể tải ảnh bằng chứng từ R2.');
+                    if (!loadedByKey.has(key)) failedByKey.set(key, result.error || 'Không thể tải ảnh bằng chứng từ R2.');
                 }
             });
         } else if (r2Result && !r2Result.success) {

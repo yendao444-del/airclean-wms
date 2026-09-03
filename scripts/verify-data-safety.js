@@ -11,6 +11,7 @@ const ecommerce = read('src/pages/EcommerceExport.tsx');
 const stockBalance = read('src/pages/StockBalance.tsx');
 const returnsPage = read('src/pages/Returns.tsx');
 const handlingUnitsPage = read('src/pages/HandlingUnits.tsx');
+const stockCheckPage = read('src/pages/StockCheck.tsx');
 const r2Lab = read('src/pages/R2StorageLab.tsx');
 const r2TestWorker = read('cloudflare/r2-test-worker/src/index.ts');
 const evidenceWorker = read('cloudflare/r2-daily-evidence-worker/src/index.ts');
@@ -57,6 +58,8 @@ if (!allowedChannelsMatch) {
   requireText(allowedChannelsMatch[1], '"update:restart",', 'The app must be able to restart after a verified update');
   requireText(allowedChannelsMatch[1], '"stockCheck:createFullSession",', 'Transactional full stock-check creation must remain available');
   requireText(allowedChannelsMatch[1], '"stockCheck:cancelSession",', 'Admin stock-check cancellation must remain available');
+  requireText(allowedChannelsMatch[1], '"handlingUnits:updateUnit",', 'Guarded stock-check unit updates must remain available');
+  requireText(allowedChannelsMatch[1], '"handlingUnits:finalizePick",', 'Guarded pending-unit finalization must remain available');
   for (const channel of [
     'handlingUnits:createUnits',
     'handlingUnits:issueQrLabels',
@@ -317,6 +320,26 @@ requireText(ipc, 'findCompletedPurchaseCreate(tx, idempotencyKey)', 'Purchase re
 requireText(ipc, "pg_advisory_xact_lock(hashtext('handling-units-create'))", 'Handling-unit batch creation must be serialized');
 requireText(handlingUnitsPage, 'idempotencyKey: `${operationBaseKey}-${supplierGroupIndex}`', 'Quick QR receiving must provide stable purchase idempotency keys');
 requireText(ipc, 'stockBalanceOperation:', 'Stock balance idempotency claim is missing');
+const balanceItemStart = ipc.indexOf('ipcMain.handle("stockCheck:balanceItem"');
+const balanceItemEnd = ipc.indexOf('ipcMain.handle("stockCheck:submitSession"', balanceItemStart);
+const balanceItemHandler = balanceItemStart >= 0 && balanceItemEnd > balanceItemStart
+  ? ipc.slice(balanceItemStart, balanceItemEnd)
+  : '';
+requireText(balanceItemHandler, 'normalizeStockCheckUnitAdjustments(', 'Package stock check must validate all unit adjustments');
+requireText(balanceItemHandler, 'reconcileStockCheckHandlingUnits(', 'Package stock check must reconcile units inside balanceItem');
+requireText(balanceItemHandler, 'getPrismaDirectTx().$transaction(', 'Package and SKU stock must share one database transaction');
+requireText(balanceItemHandler, 'if (item.balanced) {', 'A completed SKU must be idempotently rejected before another balance');
+requireText(ipc, 'FOR UPDATE`', 'Handling-unit reconciliation must lock package rows before validating stale counts');
+requireText(ipc, 'SKU đã hoàn tất, không thể ghi đè số kiểm.', 'Late count saves must not reopen a balanced SKU');
+const packageBalanceStart = stockCheckPage.indexOf('const handleCompletePackageSku = async');
+const packageBalanceEnd = stockCheckPage.indexOf('const confirmCompletePackageSku', packageBalanceStart);
+const packageBalanceHandler = packageBalanceStart >= 0 && packageBalanceEnd > packageBalanceStart
+  ? stockCheckPage.slice(packageBalanceStart, packageBalanceEnd)
+  : '';
+requireText(packageBalanceHandler, 'stockCheck.balanceItem({', 'Package confirmation must use the atomic stock-check endpoint');
+requireText(packageBalanceHandler, 'unitAdjustments:', 'Package confirmation must submit expected and actual unit counts together');
+rejectText(packageBalanceHandler, 'handlingUnits.finalizePick(', 'Package confirmation must not finalize units in separate requests');
+rejectText(packageBalanceHandler, 'handlingUnits.updateUnit(', 'Package confirmation must not update units in separate requests');
 requireText(ipc, 'getMisaIntegrationBaseUrl(config)', 'MISA environment routing is missing');
 requireText(main, 'app.requestSingleInstanceLock()', 'Single-instance lock is missing');
 requireText(offlineQueue, 'Recovered complete temp item', 'Offline temp recovery is missing');

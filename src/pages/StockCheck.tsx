@@ -144,6 +144,14 @@ interface HandlingCatalogItem {
     unitName: string;
 }
 
+interface PackageSkuConfirmation {
+    item: CheckItem;
+    actualTotal: number;
+    stockDifference: number;
+    requiresReason: boolean;
+    changedUnits: HandlingUnitRow[];
+}
+
 const normalizeSku = (value?: string) => String(value || '').trim().toUpperCase();
 
 const handlingUnitImage = (unit: HandlingUnitRow) => {
@@ -426,8 +434,10 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const [handlingUnits, setHandlingUnits] = useState<HandlingUnitRow[]>([]);
     const [handlingWorkspaceLoading, setHandlingWorkspaceLoading] = useState(true);
     const [handlingWorkspaceError, setHandlingWorkspaceError] = useState('');
-    const [sealedUnitChecks, setSealedUnitChecks] = useState<Record<string, boolean>>({});
-    const [openedUnitCounts, setOpenedUnitCounts] = useState<Record<string, number | null>>({});
+    const [actualUnitCounts, setActualUnitCounts] = useState<Record<string, number | null>>({});
+    const [sealedMismatchUnits, setSealedMismatchUnits] = useState<Record<string, boolean>>({});
+    const [packageConfirmation, setPackageConfirmation] = useState<PackageSkuConfirmation | null>(null);
+    const [packageConfirmationNote, setPackageConfirmationNote] = useState('');
     const [expandedConvGroups, setExpandedConvGroups] = useState<Record<string, boolean>>({});
     const [conversionModalGroup, setConversionModalGroup] = useState<string | null>(null);
     const [topSellingProducts, setTopSellingProducts] = useState<TopSellingProduct[]>([]);
@@ -1634,7 +1644,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                         items: session.items.map(entry => entry.sku !== item.sku ? entry : { ...entry, ...(result.item || {}), verificationStatus: result.status === 'match' || result.status === 'balanced_mismatch' ? result.status : undefined }),
                 }
             )));
-        if (result.status === 'match' || result.status === 'balanced_mismatch' || result.status === 'duplicate_repaired') {
+        if (result.status === 'match' || result.status === 'balanced_mismatch' || result.status === 'duplicate_repaired' || result.status === 'already_balanced') {
             setProductTabs(prev => prev[item.productName] === 'reconciliation'
                 ? { ...prev, [item.productName]: 'check' }
                 : prev);
@@ -1658,6 +1668,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             }
             if (result.status === 'balanced_mismatch') message.success('Đã cân bằng theo lý do đã nhập.');
             if (result.status === 'duplicate_repaired') message.success('Đã đồng bộ lại kết quả cân bằng trước đó.');
+            if (result.status === 'already_balanced') message.info('SKU này đã được cân bằng trước đó.');
             if (result.status === 'missing_count') message.warning('Chưa nhập số đếm thực tế.');
         } catch (error: any) {
             message.error(error?.message || 'Không thể cân bằng kho.');
@@ -1894,10 +1905,10 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const selectedSkuUnits = useMemo(() => handlingUnits.filter(unit =>
         normalizeSku(unit.skuName) === normalizeSku(selectedSku) && unit.status !== 'Đã hết'
     ), [handlingUnits, selectedSku]);
+    const selectedPackageCountsComplete = selectedSkuUnits.length > 0 && selectedSkuUnits.every(unit =>
+        actualUnitCounts[unit.id] !== null && actualUnitCounts[unit.id] !== undefined
+    );
     const selectedCatalogItem = handlingCatalog.find(item => normalizeSku(item.sku) === normalizeSku(selectedSku));
-    const selectedSealedUnits = selectedSkuUnits.filter(unit => unit.status === 'Nguyên niêm phong');
-    const selectedOpenedUnits = selectedSkuUnits.filter(unit => unit.status !== 'Nguyên niêm phong');
-
     useEffect(() => {
         if (!todaySession?.items.length) {
             setActiveSku('');
@@ -1911,72 +1922,225 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
 
     const updatePackageActualStock = useCallback((
         item: CheckItem,
-        nextSealedChecks: Record<string, boolean>,
-        nextOpenedCounts: Record<string, number | null>,
+        nextUnitCounts: Record<string, number | null>,
     ) => {
         const skuUnits = handlingUnits.filter(unit => normalizeSku(unit.skuName) === normalizeSku(item.sku) && unit.status !== 'Đã hết');
-        if (!skuUnits.length) return;
-        const sealed = skuUnits.filter(unit => unit.status === 'Nguyên niêm phong');
-        const opened = skuUnits.filter(unit => unit.status !== 'Nguyên niêm phong');
-        const isComplete = sealed.every(unit => nextSealedChecks[unit.id] === true)
-            && opened.every(unit => nextOpenedCounts[unit.id] !== null && nextOpenedCounts[unit.id] !== undefined);
-        if (!isComplete) {
-            applyActualStock(item.sku, null);
+        if (!skuUnits.length || !todaySession) return;
+        const isComplete = skuUnits.every(unit =>
+            nextUnitCounts[unit.id] !== null && nextUnitCounts[unit.id] !== undefined
+        );
+        const actualTotal = isComplete
+            ? skuUnits.reduce(
+                (sum, unit) => sum + Number(nextUnitCounts[unit.id] || 0),
+                0,
+            )
+            : null;
+
+        // Package counts are committed by balanceItem together with unit and
+        // product stock. Keeping this draft local avoids an extra request and
+        // prevents a failed balance from leaving half-updated package data.
+        setSessions(current => current.map(session => session.id !== todaySession.id ? session : {
+            ...session,
+            items: session.items.map(entry => entry.sku !== item.sku ? entry : {
+                ...entry,
+                actualStock: actualTotal,
+                difference: isAdmin && actualTotal !== null
+                    ? actualTotal - Number(entry.systemStock || 0)
+                    : 0,
+                balanced: false,
+            }),
+        }));
+    }, [handlingUnits, todaySession, isAdmin]);
+
+    useEffect(() => {
+        if (!selectedItem) return;
+        let changed = false;
+        const next = { ...actualUnitCounts };
+        selectedSkuUnits.forEach(unit => {
+            // Show the package ledger quantity immediately for verification.
+            // Checking key existence keeps a manually-cleared input empty.
+            if (!Object.prototype.hasOwnProperty.call(next, unit.id)) {
+                next[unit.id] = Number(unit.currentPcs || 0);
+                changed = true;
+            }
+        });
+        if (!changed) return;
+        setActualUnitCounts(next);
+        if (!selectedItem.balanced && canEditCounts) {
+            updatePackageActualStock(selectedItem, next);
+        }
+    }, [
+        actualUnitCounts,
+        canEditCounts,
+        selectedItem?.balanced,
+        selectedItem?.sku,
+        selectedSkuUnits,
+        updatePackageActualStock,
+    ]);
+
+    const handleUnitActualCount = (item: CheckItem, unitId: string, value: number | null) => {
+        if (!canEditCounts || item.balanced) return;
+        const next = { ...actualUnitCounts, [unitId]: value };
+        setActualUnitCounts(next);
+        updatePackageActualStock(item, next);
+    };
+
+    const handleSealedDecision = (item: CheckItem, unit: HandlingUnitRow, decision: 'match' | 'mismatch') => {
+        if (!canEditCounts || item.balanced) return;
+        if (decision === 'match') {
+            setSealedMismatchUnits(previous => ({ ...previous, [unit.id]: false }));
+            handleUnitActualCount(item, unit.id, Number(unit.currentPcs || 0));
             return;
         }
-        const sealedTotal = sealed.reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0);
-        const openedTotal = opened.reduce((sum, unit) => sum + Number(nextOpenedCounts[unit.id] || 0), 0);
-        applyActualStock(item.sku, sealedTotal + openedTotal);
-    }, [handlingUnits, applyActualStock]);
-
-    const handleSealedUnitCheck = (item: CheckItem, unitId: string, checked: boolean) => {
-        if (!canEditCounts || item.balanced || item.countLocked) return;
-        const next = { ...sealedUnitChecks, [unitId]: checked };
-        setSealedUnitChecks(next);
-        updatePackageActualStock(item, next, openedUnitCounts);
+        if (sealedMismatchUnits[unit.id]) return;
+        setSealedMismatchUnits(previous => ({ ...previous, [unit.id]: true }));
+        handleUnitActualCount(item, unit.id, null);
     };
 
-    const handleOpenedUnitCount = (item: CheckItem, unitId: string, value: number | null) => {
-        if (!canEditCounts || item.balanced || item.countLocked) return;
-        const next = { ...openedUnitCounts, [unitId]: value };
-        setOpenedUnitCounts(next);
-        updatePackageActualStock(item, sealedUnitChecks, next);
-    };
-
-    const handleCompletePackageSku = async (item: CheckItem) => {
+    const handleCompletePackageSku = async (item: CheckItem, confirmationNote: string): Promise<boolean> => {
         const skuUnits = handlingUnits.filter(unit =>
             normalizeSku(unit.skuName) === normalizeSku(item.sku) && unit.status !== 'Đã hết'
         );
-        const pendingUnits = skuUnits.filter(unit => unit.status === 'Chờ kiểm' || unit.status === 'pending_check');
-        const missingPendingCount = pendingUnits.find(unit =>
-            openedUnitCounts[unit.id] === null || openedUnitCounts[unit.id] === undefined
+        const missingCount = skuUnits.find(unit =>
+            actualUnitCounts[unit.id] === null || actualUnitCounts[unit.id] === undefined
         );
-        if (missingPendingCount) {
-            message.warning(`Nhập số lượng thực tế của kiện ${missingPendingCount.id} trước khi hoàn tất SKU.`);
-            return;
+        if (missingCount) {
+            message.warning(`Nhập số lượng thực tế của kiện ${missingCount.id} trước khi hoàn tất SKU.`);
+            return false;
+        }
+        const actualTotal = skuUnits.reduce(
+            (sum, unit) => sum + Number(actualUnitCounts[unit.id] || 0),
+            0,
+        );
+        const note = confirmationNote.trim();
+        const knownSystemStock = Number(item.systemStock);
+        if (Number.isFinite(knownSystemStock) && actualTotal !== knownSystemStock && !note) {
+            message.warning('Số thực tế đang lệch tồn phần mềm. Vui lòng nhập lý do chênh lệch để xác nhận.');
+            return false;
         }
 
+        setBalancing(previous => ({ ...previous, [item.sku]: true }));
         try {
-            for (const unit of pendingUnits) {
-                const actualQuantity = Number(openedUnitCounts[unit.id] || 0);
-                const result = await window.electronAPI.handlingUnits.finalizePick({
+            if (!await flushConversionRates()) return false;
+
+            // Cancel the old debounced count write. The atomic endpoint below
+            // records the count, every package and the SKU stock in one commit.
+            const pendingTimer = countSaveTimersRef.current[item.sku];
+            if (pendingTimer) {
+                clearTimeout(pendingTimer);
+                delete countSaveTimersRef.current[item.sku];
+                delete countSaveCallbacksRef.current[item.sku];
+                countSaveVersionsRef.current[item.sku] = (countSaveVersionsRef.current[item.sku] || 0) + 1;
+            }
+            const pendingRequest = countRequestQueueRef.current[item.sku];
+            if (pendingRequest) await pendingRequest.catch(() => undefined);
+
+            const result = await window.electronAPI.stockCheck.balanceItem({
+                sessionId: todaySessionId,
+                sku: item.sku,
+                note,
+                reference: `STOCK-CHECK-${todaySession?.runId || todaySessionId}-${item.sku}`,
+                unitAdjustments: skuUnits.map(unit => ({
                     code: unit.id,
-                    actualQuantity,
-                    destination: 'PACKING',
-                    note: `Chốt kiểm kiện trong phiên kiểm hàng ${todaySessionId}`,
-                    idempotencyKey: `STOCK-CHECK-UNIT-${todaySession?.runId || todaySessionId}-${unit.id}`,
-                });
-                if (!result?.success) throw new Error(result?.error || `Không thể chốt kiện ${unit.id}.`);
-                setHandlingUnits(current => current.map(entry => entry.id !== unit.id ? entry : {
-                    ...entry,
-                    currentPcs: actualQuantity,
-                    status: actualQuantity > 0 ? 'Đang sử dụng' : 'Đã hết',
+                    expectedQuantity: Number(unit.currentPcs || 0),
+                    actualQuantity: Number(actualUnitCounts[unit.id] || 0),
+                })),
+            });
+            if (!result?.success) {
+                message.error(result?.error || 'Không thể hoàn tất kiểm kiện. Không có dữ liệu nào được cập nhật.');
+                return false;
+            }
+            if (result.status === 'mismatch_requires_note') {
+                const revealedDifference = Number(result.item?.balanceDifference ?? result.item?.difference);
+                setPackageConfirmation(current => current ? {
+                    ...current,
+                    stockDifference: Number.isFinite(revealedDifference) ? revealedDifference : current.stockDifference,
+                    requiresReason: true,
+                } : current);
+                message.warning('Có chênh lệch tồn. Nhập lý do ngay trong cửa sổ xác nhận rồi bấm xác nhận lại.');
+                return false;
+            }
+            if (result.status === 'missing_count') {
+                message.warning('Chưa có đủ số lượng thực tế để hoàn tất SKU.');
+                return false;
+            }
+
+            setSessions(current => current.map(session => session.id !== todaySessionId ? session : (
+                result.session
+                    ? { ...session, ...result.session }
+                    : {
+                        ...session,
+                        items: session.items.map(entry => entry.sku !== item.sku ? entry : { ...entry, ...(result.item || {}) }),
+                    }
+            )));
+            if (Array.isArray(result.units) && result.units.length > 0) {
+                const updatedUnits = new Map(result.units.map(unit => [normalizeSku(unit.code), unit]));
+                setHandlingUnits(current => current.map(unit => {
+                    const updated = updatedUnits.get(normalizeSku(unit.id));
+                    if (!updated) return unit;
+                    return {
+                        ...unit,
+                        currentPcs: Number(updated.remainingQuantity || 0),
+                        status: updated.status === 'sealed'
+                            ? 'Nguyên niêm phong'
+                            : updated.status === 'empty'
+                                ? 'Đã hết'
+                                : 'Đang sử dụng',
+                    };
                 }));
             }
-            await handleSingleBalance(item);
+            if (result.status === 'duplicate') {
+                const refreshed = await loadSessions();
+                setSessions(refreshed.map(normalizeSessionStatus));
+                message.warning('Yêu cầu trước đã hoàn tất. Dữ liệu phiên kiểm đã được đồng bộ lại.');
+                return true;
+            }
+            if (result.status === 'balanced_mismatch') message.success('Đã cập nhật kiện và cân bằng tồn theo lý do đã nhập.');
+            else if (result.status === 'duplicate_repaired') message.success('Đã đồng bộ lại kết quả xác nhận trước đó.');
+            else if (result.status === 'already_balanced') message.info('SKU này đã được cân bằng trước đó và đã được khóa thao tác.');
+            else message.success('Khớp. Đã ghi nhận toàn bộ kiện và tồn SKU.');
+            return true;
         } catch (error: any) {
-            message.error(error?.message || 'Không thể hoàn tất kiểm kiện.');
+            message.error(error?.message || 'Không thể hoàn tất kiểm kiện. Không có dữ liệu nào được cập nhật.');
+            return false;
+        } finally {
+            setBalancing(previous => {
+                const next = { ...previous };
+                delete next[item.sku];
+                return next;
+            });
         }
+    };
+
+    const confirmCompletePackageSku = (item: CheckItem) => {
+        const skuUnits = handlingUnits.filter(unit =>
+            normalizeSku(unit.skuName) === normalizeSku(item.sku) && unit.status !== 'Đã hết'
+        );
+        const missingCount = skuUnits.find(unit =>
+            actualUnitCounts[unit.id] === null || actualUnitCounts[unit.id] === undefined
+        );
+        if (missingCount) {
+            message.warning(`Nhập số lượng thực tế của kiện ${missingCount.id} trước khi hoàn tất SKU.`);
+            return;
+        }
+        const actualTotal = skuUnits.reduce(
+            (sum, unit) => sum + Number(actualUnitCounts[unit.id] || 0),
+            0,
+        );
+        const changedUnits = skuUnits.filter(unit =>
+            Number(actualUnitCounts[unit.id] || 0) !== Number(unit.currentPcs || 0)
+        );
+        setPackageConfirmationNote(item.note || '');
+        setPackageConfirmation({
+            item,
+            actualTotal,
+            stockDifference: Number.isFinite(Number(item.systemStock))
+                ? actualTotal - Number(item.systemStock)
+                : 0,
+            requiresReason: Number.isFinite(Number(item.systemStock))
+                && actualTotal !== Number(item.systemStock),
+            changedUnits,
+        });
     };
 
     const inProgressGroupCount = productGroups.filter(group => group.items.some(item => item.actualStock !== null && !item.balanced)).length;
@@ -3059,9 +3223,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                             <h3>Kiểm theo kiện hàng thực tế</h3>
                                             <p>Dữ liệu, hình ảnh và trạng thái được lấy trực tiếp từ Quản lý kiện hàng.</p>
                                         </div>
-                                        <Button icon={<SettingOutlined />} onClick={() => setConversionModalGroup(selectedItem.productName)}>
-                                            Xem quy cách đóng gói
-                                        </Button>
                                     </div>
 
                                     {handlingWorkspaceLoading ? (
@@ -3079,7 +3240,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                         <div className="stock-check-package-grid">
                                             {selectedSkuUnits.map(unit => {
                                                 const sealed = unit.status === 'Nguyên niêm phong';
-                                                const disabled = selectedItem.balanced || selectedItem.countLocked || !canEditCounts;
+                                                const disabled = selectedItem.balanced || !canEditCounts;
                                                 return (
                                                     <article key={unit.id} className={`stock-check-package-card${sealed ? ' sealed' : ' opened'}`}>
                                                         <div className="stock-check-package-card-top">
@@ -3090,29 +3251,58 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                                         <div className="stock-check-package-meta">
                                                             <div><span>Vị trí</span><strong>{handlingUnitLocation(unit)}</strong></div>
                                                             <div><span>Quy cách</span><strong>{unit.packageLabel || `${unit.initialPcs.toLocaleString('vi-VN')} ${unit.unitName}`}</strong></div>
+                                                            <div className="stock-check-package-ledger-stock">
+                                                                <span>Tồn trên Quản lý kiện hàng</span>
+                                                                <strong>{Number(unit.currentPcs || 0).toLocaleString('vi-VN')} {unit.unitName}</strong>
+                                                            </div>
                                                             {unit.receiptCode && <div><span>Phiếu nhập</span><strong>{unit.receiptCode}</strong></div>}
                                                         </div>
                                                         {sealed ? (
-                                                            <label className={`stock-check-sealed-confirm${sealedUnitChecks[unit.id] ? ' checked' : ''}`}>
-                                                                <Checkbox
-                                                                    checked={!!sealedUnitChecks[unit.id]}
+                                                            <div className="stock-check-sealed-choice">
+                                                                <Radio.Group
+                                                                    value={actualUnitCounts[unit.id] === null || actualUnitCounts[unit.id] === undefined
+                                                                        ? undefined
+                                                                        : sealedMismatchUnits[unit.id] ? 'mismatch' : 'match'}
                                                                     disabled={disabled}
-                                                                    onChange={event => handleSealedUnitCheck(selectedItem, unit.id, event.target.checked)}
+                                                                    onChange={event => handleSealedDecision(selectedItem, unit, event.target.value)}
+                                                                    optionType="button"
+                                                                    buttonStyle="solid"
+                                                                    options={[
+                                                                        { label: 'Khớp nguyên kiện', value: 'match' },
+                                                                        { label: 'Không khớp', value: 'mismatch' },
+                                                                    ]}
                                                                 />
-                                                                <span><b>Xác nhận kiện còn nguyên</b><small>Tính {Number(unit.currentPcs || 0).toLocaleString('vi-VN')} {unit.unitName}</small></span>
-                                                            </label>
+                                                                {sealedMismatchUnits[unit.id] ? (
+                                                                    <div className="stock-check-sealed-mismatch-input">
+                                                                        <label>Số {unit.unitName} thực tế</label>
+                                                                        <InputNumber
+                                                                            autoFocus
+                                                                            min={0}
+                                                                            precision={0}
+                                                                            max={Number(unit.initialPcs || 0) || undefined}
+                                                                            placeholder={`Tối đa ${Number(unit.initialPcs || 0).toLocaleString('vi-VN')}`}
+                                                                            value={actualUnitCounts[unit.id] ?? undefined}
+                                                                            disabled={disabled}
+                                                                            onChange={value => handleUnitActualCount(selectedItem, unit.id, value)}
+                                                                        />
+                                                                    </div>
+                                                                ) : (
+                                                                    <small>Khớp sẽ dùng đúng số tồn đang hiển thị phía trên, không cần nhập lại.</small>
+                                                                )}
+                                                            </div>
                                                         ) : (
                                                             <div className="stock-check-opened-count">
-                                                                <label>Số {unit.unitName} đếm thực tế</label>
+                                                                <label>Số {unit.unitName} thực tế</label>
                                                                 <InputNumber
                                                                     min={0}
                                                                     precision={0}
-                                                                    placeholder="Nhập số đếm"
-                                                                    value={openedUnitCounts[unit.id] ?? undefined}
+                                                                    max={Number(unit.initialPcs || 0) || undefined}
+                                                                    placeholder={`Tối đa ${Number(unit.initialPcs || 0).toLocaleString('vi-VN')}`}
+                                                                    value={actualUnitCounts[unit.id] ?? undefined}
                                                                     disabled={disabled}
-                                                                    onChange={value => handleOpenedUnitCount(selectedItem, unit.id, value)}
+                                                                    onChange={value => handleUnitActualCount(selectedItem, unit.id, value)}
                                                                 />
-                                                                <small>Tải/thùng đã khui phải đếm trực tiếp phần lẻ còn lại.</small>
+                                                                <small>Nhập số đếm thực tế để đối chiếu với tồn trên Quản lý kiện hàng.</small>
                                                             </div>
                                                         )}
                                                     </article>
@@ -3123,9 +3313,9 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
 
                                     {selectedSkuUnits.length > 0 && (
                                         <div className="stock-check-package-summary">
-                                            <div><span>Kiện nguyên đã xác nhận</span><strong>{selectedSealedUnits.filter(unit => sealedUnitChecks[unit.id]).length}/{selectedSealedUnits.length}</strong></div>
-                                            <div><span>Tổng từ kiện nguyên</span><strong>{selectedSealedUnits.filter(unit => sealedUnitChecks[unit.id]).reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0).toLocaleString('vi-VN')}</strong></div>
-                                            <div><span>Tổng phần đã khui</span><strong>{selectedOpenedUnits.reduce((sum, unit) => sum + Number(openedUnitCounts[unit.id] || 0), 0).toLocaleString('vi-VN')}</strong></div>
+                                            <div><span>Số kiện đã nhập</span><strong>{selectedSkuUnits.filter(unit => actualUnitCounts[unit.id] !== null && actualUnitCounts[unit.id] !== undefined).length}/{selectedSkuUnits.length}</strong></div>
+                                            <div><span>Tổng trên phần mềm</span><strong>{selectedSkuUnits.reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0).toLocaleString('vi-VN')}</strong></div>
+                                            <div><span>Chênh lệch thực tế</span><strong>{selectedItem.actualStock === null ? '—' : `${selectedItem.actualStock - selectedSkuUnits.reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0) > 0 ? '+' : ''}${(selectedItem.actualStock - selectedSkuUnits.reduce((sum, unit) => sum + Number(unit.currentPcs || 0), 0)).toLocaleString('vi-VN')}`}</strong></div>
                                             <div className="total"><span>Tổng kiểm thực tế</span><strong>{selectedItem.actualStock === null ? 'Chưa hoàn tất' : selectedItem.actualStock.toLocaleString('vi-VN')}</strong></div>
                                         </div>
                                     )}
@@ -3136,12 +3326,8 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                             <span>{selectedCatalogItem?.variantName || selectedItem.color || selectedItem.unit}</span>
                                             {selectedItem.actualStock !== null && <Tag color="blue">Đã lưu số đếm</Tag>}
                                             {selectedItem.balanced && <Tag color="green">Đã cân bằng</Tag>}
-                                            {renderDiff(selectedItem)}
                                         </div>
                                         <div>
-                                            {selectedItem.actualStock !== null && !selectedItem.balanced && (
-                                                <Button icon={<EditOutlined />} onClick={() => openNoteModal(selectedItem)}>Ghi chú</Button>
-                                            )}
                                             {!isAdmin && selectedItem.countLocked && selectedItem.requiresNote && !selectedItem.balanced && (
                                                 <Button onClick={() => { const group = productGroups.find(entry => entry.productName === selectedItem.productName); if (group) void openReconciliation(group, selectedItem); }}>
                                                     Đối soát 2 ngày
@@ -3151,10 +3337,14 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                                 type="primary"
                                                 icon={<CheckOutlined />}
                                                 loading={balancing[selectedItem.sku]}
-                                                disabled={selectedItem.balanced || selectedItem.actualStock === null || isLockedDate || (!isAdmin && !isAssignedChecker)}
-                                                onClick={() => selectedItem.requiresNote && selectedItem.countLocked && !selectedItem.note.trim() ? openNoteModal(selectedItem) : void handleCompletePackageSku(selectedItem)}
+                                                disabled={selectedItem.balanced || !selectedPackageCountsComplete || isLockedDate || (!isAdmin && !isAssignedChecker)}
+                                                onClick={() => confirmCompletePackageSku(selectedItem)}
                                             >
-                                                {selectedItem.balanced ? 'SKU đã hoàn tất' : 'Hoàn tất SKU hiện tại'}
+                                                {selectedItem.balanced
+                                                    ? 'SKU đã hoàn tất'
+                                                    : selectedItem.requiresNote
+                                                        ? 'Nhập lý do và cân bằng SKU'
+                                                        : 'Hoàn tất SKU hiện tại'}
                                             </Button>
                                             <Button
                                                 disabled={todaySession.items.findIndex(item => item.sku === selectedItem.sku) >= todaySession.items.length - 1}
@@ -3411,6 +3601,76 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 <Select showSearch value={selectedStaffUsername} onChange={setSelectedStaffUsername}
                     style={{ width: '100%' }}
                     options={assignableManagers.map(s => ({ value: s.username, label: s.username }))} />
+            </Modal>
+
+            <Modal
+                title={packageConfirmation ? `Xác nhận thực tồn ${packageConfirmation.item.color || packageConfirmation.item.sku}` : 'Xác nhận thực tồn'}
+                open={!!packageConfirmation}
+                width={560}
+                okText="Xác nhận và cập nhật tồn"
+                cancelText="Kiểm tra lại"
+                confirmLoading={!!packageConfirmation && !!balancing[packageConfirmation.item.sku]}
+                maskClosable={!packageConfirmation || !balancing[packageConfirmation.item.sku]}
+                onCancel={() => {
+                    if (packageConfirmation && balancing[packageConfirmation.item.sku]) return;
+                    setPackageConfirmation(null);
+                    setPackageConfirmationNote('');
+                }}
+                onOk={async () => {
+                    if (!packageConfirmation) return;
+                    if (packageConfirmation.requiresReason && !packageConfirmationNote.trim()) {
+                        message.warning('Vui lòng nhập lý do chênh lệch trước khi xác nhận.');
+                        return;
+                    }
+                    const completed = await handleCompletePackageSku(packageConfirmation.item, packageConfirmationNote);
+                    if (completed) {
+                        setPackageConfirmation(null);
+                        setPackageConfirmationNote('');
+                    }
+                }}
+            >
+                {packageConfirmation && (
+                    <div className="stock-check-confirm-count">
+                        <p>
+                            Tổng thực tế vừa nhập: <b>{packageConfirmation.actualTotal.toLocaleString('vi-VN')} {packageConfirmation.item.unit}</b>
+                        </p>
+                        {packageConfirmation.changedUnits.length > 0 ? (
+                            <div>
+                                {packageConfirmation.changedUnits.map(unit => (
+                                    <div key={unit.id}>
+                                        <code>{unit.id}</code>
+                                        <span>
+                                            {Number(unit.currentPcs || 0).toLocaleString('vi-VN')} →{' '}
+                                            <b>{Number(actualUnitCounts[unit.id] || 0).toLocaleString('vi-VN')}</b>
+                                        </span>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <Alert type="success" showIcon message="Tất cả kiện đều khớp với số trên phần mềm." />
+                        )}
+                        {packageConfirmation.requiresReason && (
+                            <Alert
+                                type="warning"
+                                showIcon
+                                message="Có chênh lệch tồn, cần ghi rõ lý do"
+                                description={packageConfirmation.stockDifference !== 0
+                                    ? `Chênh lệch SKU: ${packageConfirmation.stockDifference > 0 ? '+' : ''}${packageConfirmation.stockDifference.toLocaleString('vi-VN')} ${packageConfirmation.item.unit}`
+                                    : undefined}
+                            />
+                        )}
+                        <Input.TextArea
+                            value={packageConfirmationNote}
+                            onChange={event => setPackageConfirmationNote(event.target.value)}
+                            placeholder={packageConfirmation.requiresReason
+                                ? 'Nhập lý do chênh lệch (bắt buộc)'
+                                : 'Ghi chú thêm nếu cần'}
+                            status={packageConfirmation.requiresReason && !packageConfirmationNote.trim() ? 'error' : undefined}
+                            autoSize={{ minRows: 2, maxRows: 5 }}
+                        />
+                        <small>Kiện hàng, tồn SKU và lịch sử kiểm sẽ cùng cập nhật một lần. Nếu có lỗi, toàn bộ thao tác được hủy.</small>
+                    </div>
+                )}
             </Modal>
 
             {noteModalSku && (() => {

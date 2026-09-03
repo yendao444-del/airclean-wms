@@ -86,6 +86,10 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "handlingUnits:markQrLabelsPrinted",
   "handlingUnits:markQrLabelsReceived",
   "handlingUnits:exportLabelsPdf",
+  // Stock-check unit reconciliation is role-gated, transactional and uses an
+  // expected-balance guard so a stale screen cannot overwrite a newer count.
+  "handlingUnits:updateUnit",
+  "handlingUnits:finalizePick",
   // Purchase creation claims an idempotency key and commits the receipt,
   // stock ledger, stock values, and metadata in one serializable transaction.
   "purchases:create",
@@ -384,12 +388,12 @@ async function rollbackFreshDailyEvidenceUpload(objectKey) {
   dailyEvidenceR2ImageCache.delete(objectKey);
 }
 
-async function downloadDailyEvidenceFromR2(objectKey, mimeType) {
+async function downloadDailyEvidenceBufferFromR2(objectKey, mimeType) {
   const cached = dailyEvidenceR2ImageCache.get(objectKey);
   if (cached && cached.expiresAt > Date.now() && cached.mimeType === mimeType) {
     dailyEvidenceR2ImageCache.delete(objectKey);
     dailyEvidenceR2ImageCache.set(objectKey, cached);
-    return cached.url;
+    return cached.buffer;
   }
   if (cached) dailyEvidenceR2ImageCache.delete(objectKey);
 
@@ -401,9 +405,8 @@ async function downloadDailyEvidenceFromR2(objectKey, mimeType) {
   if (!isValidEvidenceImage(buffer, mimeType)) {
     throw new Error("Dữ liệu trên R2 không phải ảnh bằng chứng hợp lệ.");
   }
-  const url = `data:${mimeType};base64,${buffer.toString("base64")}`;
   dailyEvidenceR2ImageCache.set(objectKey, {
-    url,
+    buffer,
     mimeType,
     expiresAt: Date.now() + DAILY_EVIDENCE_R2_CACHE_TTL_MS,
   });
@@ -412,7 +415,19 @@ async function downloadDailyEvidenceFromR2(objectKey, mimeType) {
     if (!oldestKey) break;
     dailyEvidenceR2ImageCache.delete(oldestKey);
   }
-  return url;
+  return buffer;
+}
+
+async function downloadDailyEvidenceFromR2(objectKey, mimeType) {
+  const buffer = await downloadDailyEvidenceBufferFromR2(objectKey, mimeType);
+  return `data:${mimeType};base64,${buffer.toString("base64")}`;
+}
+
+function toExactArrayBuffer(buffer) {
+  return buffer.buffer.slice(
+    buffer.byteOffset,
+    buffer.byteOffset + buffer.byteLength,
+  );
 }
 
 function decodeBusinessDocumentBase64(value) {
@@ -6254,7 +6269,7 @@ ipcMain.handle("handlingUnits:exportLabelsPdf", async (event, payload = {}) => {
 
 ipcMain.handle("handlingUnits:getWorkspace", async () => {
   try {
-    requireRole("admin", "manager");
+    requireRole("admin", "manager", "staff");
     if (!prisma) throw new Error("Prisma not available");
 
     const [
@@ -7376,6 +7391,9 @@ ipcMain.handle("handlingUnits:updateUnit", async (_event, payload = {}) => {
     const packagingName = String(payload.packagingName || "").trim();
     const initialQuantity = Math.floor(Number(payload.initialQuantity));
     const remainingQuantity = Math.floor(Number(payload.remainingQuantity));
+    const expectedRemainingQuantity = payload.expectedRemainingQuantity === undefined
+      ? null
+      : Math.floor(Number(payload.expectedRemainingQuantity));
     const location = normalizeHandlingLocation(payload.location || {});
     const editNote = String(payload.note || "").trim();
 
@@ -7392,6 +7410,14 @@ ipcMain.handle("handlingUnits:updateUnit", async (_event, payload = {}) => {
       const before = await tx.handlingUnit.findUnique({ where: { code } });
       if (!before) throw new Error(`Không tìm thấy kiện [${code}].`);
       if (
+        expectedRemainingQuantity !== null &&
+        Number(before.remainingQuantity) !== expectedRemainingQuantity
+      ) {
+        throw new Error(
+          `Tồn kiện [${code}] vừa thay đổi từ ${expectedRemainingQuantity} thành ${before.remainingQuantity}. Vui lòng tải lại trước khi xác nhận.`,
+        );
+      }
+      if (
         before.status === "pending_check" &&
         remainingQuantity !== Number(before.remainingQuantity)
       ) {
@@ -7404,7 +7430,8 @@ ipcMain.handle("handlingUnits:updateUnit", async (_event, payload = {}) => {
       if (remainingQuantity === 0 && status !== "pending_check") status = "empty";
       if (
         remainingQuantity > 0 &&
-        (status === "empty" || status === "pending_check")
+        (remainingQuantity < initialQuantity || status === "empty") &&
+        status !== "pending_check"
       )
         status = "opened";
 
@@ -10305,6 +10332,9 @@ ipcMain.handle("handlingUnits:finalizePick", async (_event, payload = {}) => {
     requireRole("admin", "manager");
     const code = String(payload.code || "").trim().toUpperCase();
     const actualQuantity = Math.max(0, Math.floor(Number(payload.actualQuantity)));
+    const expectedQuantity = payload.expectedQuantity === undefined
+      ? null
+      : Math.max(0, Math.floor(Number(payload.expectedQuantity)));
     const note = String(payload.note || "").trim();
     if (!code || !Number.isFinite(actualQuantity)) {
       throw new Error("Số lượng thực tế không hợp lệ.");
@@ -10313,6 +10343,14 @@ ipcMain.handle("handlingUnits:finalizePick", async (_event, payload = {}) => {
     const recordFinalCheck = async (tx, unit) => {
       if (unit.status !== "pending_check" && unit.status !== "Chờ kiểm") {
         throw new Error(`Kiện [${code}] chưa ở trạng thái chờ kiểm.`);
+      }
+      if (
+        expectedQuantity !== null &&
+        Number(unit.remainingQuantity ?? unit.currentPcs ?? 0) !== expectedQuantity
+      ) {
+        throw new Error(
+          `Tồn kiện [${code}] vừa thay đổi. Vui lòng tải lại và kiểm lại trước khi chốt.`,
+        );
       }
       const maximumQuantity = Math.max(
         0,
@@ -16354,7 +16392,7 @@ ipcMain.handle(
 // avoids repeating user/task database queries for every image in the modal.
 ipcMain.handle(
   "dailyTasks:getR2EvidenceImageUrls",
-  async (_event, taskId, requestedImages = []) => {
+  async (event, taskId, requestedImages = [], requestId = "") => {
     try {
       const task = await getDailyTaskEvidenceAccess(taskId);
       const images = Array.isArray(requestedImages)
@@ -16367,16 +16405,28 @@ ipcMain.handle(
       const allowedKeys = await getAllowedDailyTaskR2Keys(task, requestedKeys);
       const results = await Promise.all(
         images.map(async ({ r2Key, mimeType }) => {
+          let result;
           try {
             if (!r2Key || !allowedKeys.has(r2Key)) {
               throw new Error("Không tìm thấy ảnh R2 trong công việc này.");
             }
-            const url = await downloadDailyEvidenceFromR2(r2Key, mimeType);
-            return { r2Key, success: true, data: { url } };
+            const buffer = await downloadDailyEvidenceBufferFromR2(r2Key, mimeType);
+            result = {
+              r2Key,
+              success: true,
+              data: { bytes: toExactArrayBuffer(buffer), mimeType },
+            };
           } catch (error) {
             console.error("R2 evidence image error:", error);
-            return { r2Key, success: false, error: error.message };
+            result = { r2Key, success: false, error: error.message };
           }
+          if (requestId && !event.sender.isDestroyed()) {
+            event.sender.send("dailyTasks:r2EvidenceImageLoaded", {
+              requestId,
+              result,
+            });
+          }
+          return result;
         }),
       );
       return { success: true, data: { results } };
@@ -24350,6 +24400,124 @@ function buildStockCheckBalanceHistoryItem(item, reference) {
   };
 }
 
+function normalizeStockCheckUnitAdjustments(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
+    throw new Error("Danh sách kiện kiểm thực tế không hợp lệ.");
+  }
+
+  const adjustments = value.map((entry) => ({
+    code: String(entry?.code || "").trim().toUpperCase(),
+    expectedQuantity: Number(entry?.expectedQuantity),
+    actualQuantity: Number(entry?.actualQuantity),
+  }));
+  if (
+    adjustments.some(
+      (entry) =>
+        !entry.code ||
+        !Number.isInteger(entry.expectedQuantity) ||
+        entry.expectedQuantity < 0 ||
+        !Number.isInteger(entry.actualQuantity) ||
+        entry.actualQuantity < 0,
+    )
+  ) {
+    throw new Error("Số lượng kiểm thực tế của kiện không hợp lệ.");
+  }
+  if (new Set(adjustments.map((entry) => entry.code)).size !== adjustments.length) {
+    throw new Error("Danh sách kiểm có mã kiện bị trùng.");
+  }
+  return adjustments;
+}
+
+async function reconcileStockCheckHandlingUnits(
+  tx,
+  sku,
+  adjustments,
+  note,
+  sessionId,
+) {
+  if (!adjustments.length) return [];
+
+  const codes = adjustments.map((entry) => entry.code);
+  await tx.$queryRaw(
+    Prisma.sql`SELECT "id" FROM "HandlingUnit" WHERE "code" IN (${Prisma.join(codes)}) FOR UPDATE`,
+  );
+  const units = await tx.handlingUnit.findMany({ where: { code: { in: codes } } });
+  const unitsByCode = new Map(units.map((unit) => [unit.code.toUpperCase(), unit]));
+  const historyEntries = [];
+  const reconciled = [];
+
+  for (const adjustment of adjustments) {
+    const unit = unitsByCode.get(adjustment.code);
+    if (!unit) throw new Error(`Không tìm thấy kiện [${adjustment.code}].`);
+    if (String(unit.sku || "").trim().toUpperCase() !== sku.toUpperCase()) {
+      throw new Error(`Kiện [${adjustment.code}] không thuộc SKU ${sku}.`);
+    }
+    if (Number(unit.remainingQuantity) !== adjustment.expectedQuantity) {
+      throw new Error(
+        `Tồn kiện [${adjustment.code}] vừa thay đổi từ ${adjustment.expectedQuantity} thành ${unit.remainingQuantity}. Toàn bộ thao tác đã được hủy; vui lòng tải lại và kiểm lại.`,
+      );
+    }
+    if (adjustment.actualQuantity > Number(unit.initialQuantity)) {
+      throw new Error(
+        `Tồn thực tế kiện [${adjustment.code}] không thể lớn hơn số lượng ban đầu ${unit.initialQuantity}.`,
+      );
+    }
+
+    const nextStatus =
+      adjustment.actualQuantity === 0
+        ? "empty"
+        : unit.status === "sealed" &&
+            adjustment.actualQuantity === Number(unit.initialQuantity)
+          ? "sealed"
+          : "opened";
+    const variance = adjustment.actualQuantity - adjustment.expectedQuantity;
+    const updated =
+      variance === 0 && unit.status === nextStatus
+        ? unit
+        : await tx.handlingUnit.update({
+            where: { code: adjustment.code },
+            data: {
+              remainingQuantity: adjustment.actualQuantity,
+              status: nextStatus,
+              updatedAt: new Date(),
+            },
+          });
+
+    historyEntries.push({
+      unitId: adjustment.code,
+      sku: unit.sku,
+      type:
+        variance === 0
+          ? "Kiểm thực tồn - khớp"
+          : "Kiểm thực tồn - điều chỉnh",
+      quantity: variance,
+      remaining: adjustment.actualQuantity,
+      expectedQuantity: adjustment.expectedQuantity,
+      actualQuantity: adjustment.actualQuantity,
+      variance,
+      actor: currentSession?.username || "Renderer",
+      reason: variance === 0 ? "Kiểm khớp" : note || "Kiểm thực tồn SKU",
+      note: [
+        `Phiên ${sessionId}`,
+        `Tồn kiện ${adjustment.expectedQuantity} → ${adjustment.actualQuantity}`,
+        note,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    });
+    reconciled.push({
+      code: adjustment.code,
+      remainingQuantity: adjustment.actualQuantity,
+      status: nextStatus,
+      unit: updated,
+    });
+  }
+
+  await appendHandlingUnitsTransactions(tx, historyEntries);
+  return reconciled;
+}
+
 ipcMain.handle("stockCheck:balanceItems", async (event, payload = {}) => {
   try {
     // Atomic batch balance: reads system/count values from the backend session,
@@ -25309,7 +25477,7 @@ ipcMain.handle(
 
 ipcMain.handle("stockCheck:updateCount", async (event, payload = {}) => {
   try {
-    requireRole("admin", "manager");
+    requireRole("admin", "manager", "staff");
     const clearCount = payload.actualStock === null;
     const actualStock = Number(payload.actualStock);
     if (!clearCount && (!Number.isInteger(actualStock) || actualStock < 0))
@@ -25326,6 +25494,8 @@ ipcMain.handle("stockCheck:updateCount", async (event, payload = {}) => {
           payload.sessionId,
         );
         const storedItem = getStockCheckItemOrThrow(session, payload.sku);
+        if (storedItem.balanced)
+          throw new Error("SKU đã hoàn tất, không thể ghi đè số kiểm.");
         if (storedItem.countLocked)
           throw new Error(
             "Số đếm đang được khóa. Hãy nhập lý do hoặc dùng lượt nhập lại.",
@@ -25377,7 +25547,7 @@ ipcMain.handle("stockCheck:updateCount", async (event, payload = {}) => {
 
 ipcMain.handle("stockCheck:retryCount", async (event, payload = {}) => {
   try {
-    requireRole("admin", "manager");
+    requireRole("admin", "manager", "staff");
     const item = await getPrismaDirectTx().$transaction(
       async (tx) => {
         await lockStockCheckSessions(tx);
@@ -25435,7 +25605,7 @@ ipcMain.handle("stockCheck:retryCount", async (event, payload = {}) => {
 
 ipcMain.handle("stockCheck:updateNote", async (event, payload = {}) => {
   try {
-    requireRole("admin", "manager");
+    requireRole("admin", "manager", "staff");
     const note = String(payload.note || "").trim();
     if (!note) throw new Error("Ghi chú không được để trống.");
     const item = await getPrismaDirectTx().$transaction(
@@ -25565,10 +25735,16 @@ ipcMain.handle("stockCheck:balanceItem", async (event, payload = {}) => {
     // assigned checker may be a staff user; session assignment is still
     // enforced by getStockCheckSessionOrThrow below.
     requireRole("admin", "manager", "staff");
+    const sessionId = String(payload.sessionId || "").trim();
+    const sku = String(payload.sku || "").trim();
     const note = String(payload.note || "").trim();
     const reference = String(
-      payload.reference || `STOCK-CHECK-${payload.sessionId}-${payload.sku}`,
+      payload.reference || `STOCK-CHECK-${sessionId}-${sku}`,
     ).trim();
+    const unitAdjustments = normalizeStockCheckUnitAdjustments(
+      payload.unitAdjustments,
+    );
+    if (!sessionId || !sku) throw new Error("Thiếu phiên kiểm hoặc SKU cần cân bằng.");
     const result = await withStockLock(() =>
       getPrismaDirectTx().$transaction(
         async (tx) => {
@@ -25579,11 +25755,30 @@ ipcMain.handle("stockCheck:balanceItem", async (event, payload = {}) => {
           const sessions = parseStockCheckSessionsFromConfig(record);
           const session = getStockCheckSessionOrThrow(
             sessions,
-            payload.sessionId,
+            sessionId,
             currentSession.role === "admin",
           );
-          const item = getStockCheckItemOrThrow(session, payload.sku);
-          if (!item.stockSnapshotAt) {
+          const item = getStockCheckItemOrThrow(session, sku);
+          if (item.balanced) {
+            const units = unitAdjustments.length
+              ? await tx.handlingUnit.findMany({
+                  where: {
+                    code: { in: unitAdjustments.map((entry) => entry.code) },
+                  },
+                })
+              : [];
+            return {
+              status: "already_balanced",
+              item,
+              session,
+              units: units.map((unit) => ({
+                code: unit.code,
+                remainingQuantity: unit.remainingQuantity,
+                status: unit.status,
+              })),
+            };
+          }
+          if (!item.stockSnapshotAt && !unitAdjustments.length) {
             throw new Error(
               'Phiên kiểm cũ chưa có mốc tồn thực tế. Hãy dùng "Kiểm lại" và nhập lại số trước khi cân bằng.',
             );
@@ -25604,14 +25799,14 @@ ipcMain.handle("stockCheck:balanceItem", async (event, payload = {}) => {
             const historyItem = historyItems.find(
               (entry) =>
                 String(entry?.reference || "") === reference &&
-                String(entry?.sku || "") === String(payload.sku || ""),
+                String(entry?.sku || "") === sku,
             );
             const session = sessions.find(
-              (entry) => String(entry?.id) === String(payload.sessionId),
+              (entry) => String(entry?.id) === sessionId,
             );
             if (historyItem && session) {
               const item = (session.items || []).find(
-                (entry) => String(entry?.sku) === String(payload.sku || ""),
+                (entry) => String(entry?.sku) === sku,
               );
               if (item && !item.balanced) {
                 item.actualStock = Number(historyItem.actualStock);
@@ -25634,20 +25829,53 @@ ipcMain.handle("stockCheck:balanceItem", async (event, payload = {}) => {
                   new Date().toISOString();
                 await writeStockCheckSessions(sessions, tx);
               }
+              const units = unitAdjustments.length
+                ? await tx.handlingUnit.findMany({
+                    where: {
+                      code: { in: unitAdjustments.map((entry) => entry.code) },
+                    },
+                  })
+                : [];
               return {
                 status: "duplicate_repaired",
                 stockBalance: existingBalance,
                 item,
                 session,
+                units: units.map((unit) => ({
+                  code: unit.code,
+                  remainingQuantity: unit.remainingQuantity,
+                  status: unit.status,
+                })),
               };
             }
             return { status: "duplicate", stockBalance: existingBalance };
+          }
+          if (unitAdjustments.length) {
+            const actualTotal = unitAdjustments.reduce(
+              (sum, entry) => sum + entry.actualQuantity,
+              0,
+            );
+            if (!item.stockSnapshotAt) {
+              const liveStock = await readCurrentStockForStockCheck(tx, sku);
+              if (liveStock === null) {
+                throw new Error(`Không thể lấy tồn kho hiện tại cho SKU ${sku}.`);
+              }
+              item.systemStock = liveStock;
+              item.stockSnapshotAt = new Date().toISOString();
+            }
+            item.actualStock = actualTotal;
           }
           if (item.actualStock === null || item.actualStock === undefined)
             return { status: "missing_count" };
           const difference =
             Number(item.actualStock) - Number(item.systemStock || 0);
           item.difference = difference;
+          if (difference !== 0 && !note && unitAdjustments.length) {
+            return {
+              status: "mismatch_requires_note",
+              item: { ...item, requiresNote: true, countLocked: false },
+            };
+          }
           const historyItem = buildStockCheckBalanceHistoryItem(
             { ...item, difference, note, sessionId: session.id },
             reference,
@@ -25657,6 +25885,13 @@ ipcMain.handle("stockCheck:balanceItem", async (event, payload = {}) => {
           item.balanceSystemStock = historyItem.systemStock;
           item.balanceActualStock = historyItem.actualStock;
           item.balanceDifference = historyItem.difference;
+          const reconciledUnits = await reconcileStockCheckHandlingUnits(
+            tx,
+            sku,
+            unitAdjustments,
+            note,
+            sessionId,
+          );
           if (difference === 0) {
             const stockBalance = await tx.stockBalance.create({
               data: {
@@ -25677,22 +25912,23 @@ ipcMain.handle("stockCheck:balanceItem", async (event, payload = {}) => {
               data: {
                 module: "stock_check",
                 action: "BALANCE",
-                description: `Cân bằng SKU ${payload.sku} trong phiên ${payload.sessionId}: khớp tồn - ${reference}`,
+                description: `Cân bằng SKU ${sku} trong phiên ${sessionId}: khớp tồn - ${reference}`,
                 recordId: stockBalance.id,
-                recordName: payload.sku,
+                recordName: sku,
                 changes: JSON.stringify({
                   reference,
-                  sessionId: payload.sessionId,
-                  sku: payload.sku,
+                  sessionId,
+                  sku,
                   before: historyItem.systemStock,
                   after: historyItem.actualStock,
                   difference: 0,
+                  handlingUnits: reconciledUnits.map((entry) => entry.code),
                 }),
                 userName: currentSession.username,
                 severity: "INFO",
               },
             });
-            return { status: "match", item, session };
+            return { status: "match", item, session, units: reconciledUnits };
           }
           if (!note) {
             item.countLocked = true;
@@ -25735,31 +25971,48 @@ ipcMain.handle("stockCheck:balanceItem", async (event, payload = {}) => {
             data: {
               module: "stock_check",
               action: "BALANCE",
-              description: `Cân bằng SKU ${payload.sku} trong phiên ${payload.sessionId}: ${currentSession.username} - ${reference}`,
+              description: `Cân bằng SKU ${sku} trong phiên ${sessionId}: ${currentSession.username} - ${reference}`,
               recordId: stockBalance.id,
-              recordName: payload.sku,
+              recordName: sku,
               changes: JSON.stringify({
                 reference,
-                sessionId: payload.sessionId,
-                sku: payload.sku,
+                sessionId,
+                sku,
                 before: historyItem.systemStock,
                 after: historyItem.actualStock,
                 difference,
+                handlingUnits: reconciledUnits.map((entry) => entry.code),
               }),
               userName: currentSession.username,
               severity: "WARNING",
             },
           });
-          return { status: "balanced_mismatch", item, session };
+          return {
+            status: "balanced_mismatch",
+            item,
+            session,
+            units: reconciledUnits,
+          };
         },
         { timeout: 30000, maxWait: 10000 },
       ),
     );
     if (result.status === "balanced_mismatch") {
       emitStockChanged({
-        sku: payload.sku,
+        sku,
         referenceType: "CAN_BANG",
         reference,
+      });
+    }
+    if (
+      result.units?.length &&
+      (result.status === "match" || result.status === "balanced_mismatch")
+    ) {
+      broadcastHandlingUnitsChanged("STOCK_CHECK_RECONCILE", {
+        sessionId,
+        sku,
+        codes: result.units.map((entry) => entry.code),
+        actor: currentSession?.username || "Renderer",
       });
     }
     return {
@@ -25774,6 +26027,7 @@ ipcMain.handle("stockCheck:balanceItem", async (event, payload = {}) => {
             currentSession.role === "admin",
           )
         : undefined,
+      units: result.units || [],
     };
   } catch (error) {
     return { success: false, error: error.message };
