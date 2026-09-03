@@ -256,6 +256,10 @@ function getEvidenceStorageClient() {
 const EVIDENCE_BUCKET = evidenceStorageConfig.bucket || "daily-task-evidence";
 const MAX_EVIDENCE_STORAGE_BYTES = 500 * 1024;
 const MAX_BUSINESS_DOCUMENT_BYTES = 15 * 1024 * 1024;
+const MAX_PURCHASE_RECEIPT_BYTES = 2 * 1024 * 1024;
+const PURCHASE_RECEIPT_R2_PREFIX = "r2://";
+const PURCHASE_RECEIPT_R2_KEY_PATTERN =
+  /^purchase-receipts\/[A-Za-z0-9_-]{1,120}\/[a-f0-9]{64}\.jpg$/;
 const DAILY_EVIDENCE_R2_CACHE_TTL_MS = 30 * 60 * 1000;
 const DAILY_EVIDENCE_R2_CACHE_MAX_ITEMS = 50;
 const dailyEvidenceR2ImageCache = new Map();
@@ -425,6 +429,75 @@ function decodeBusinessDocumentBase64(value) {
     throw new Error("File tải lên rỗng hoặc vượt quá 15 MB.");
   }
   return buffer;
+}
+
+function getPurchaseReceiptFileInfo(fileName, buffer) {
+  const requestedExt = String(fileName || "")
+    .split(".")
+    .pop()
+    .toLowerCase();
+  const ext = requestedExt === "jpeg" ? "jpg" : requestedExt;
+  if (ext !== "jpg") {
+    throw new Error("Phiếu Nhập Kho chỉ nhận file JPG/JPEG.");
+  }
+  const valid =
+    buffer.length >= 3 &&
+    buffer[0] === 0xff &&
+    buffer[1] === 0xd8 &&
+    buffer[2] === 0xff;
+  if (!valid) {
+    throw new Error(`Nội dung file ${fileName || "Phiếu Nhập Kho"} không đúng định dạng ${ext.toUpperCase()}.`);
+  }
+  return { ext, mimeType: "image/jpeg" };
+}
+
+function toPurchaseReceiptR2Reference(objectKey) {
+  return `${PURCHASE_RECEIPT_R2_PREFIX}${objectKey}`;
+}
+
+function parsePurchaseReceiptR2Reference(reference) {
+  const value = String(reference || "").trim();
+  if (!value.startsWith(PURCHASE_RECEIPT_R2_PREFIX)) return null;
+  const objectKey = value.slice(PURCHASE_RECEIPT_R2_PREFIX.length);
+  return PURCHASE_RECEIPT_R2_KEY_PATTERN.test(objectKey) ? objectKey : null;
+}
+
+async function uploadPurchaseReceiptToR2(namespace, file) {
+  const buffer = decodeBusinessDocumentBase64(file.fileBase64);
+  if (buffer.length > MAX_PURCHASE_RECEIPT_BYTES) {
+    throw new Error("Phiếu Nhập Kho sau nén không được vượt quá 2 MB.");
+  }
+  const { ext, mimeType } = getPurchaseReceiptFileInfo(file.fileName, buffer);
+  const hash = crypto.createHash("sha256").update(buffer).digest("hex");
+  const objectKey = `purchase-receipts/${namespace}/${hash}.${ext}`;
+  await requestDailyEvidenceR2(objectKey, {
+    method: "POST",
+    headers: {
+      "content-type": mimeType,
+      "content-length": String(buffer.length),
+      "x-content-sha256": hash,
+    },
+    body: buffer,
+  });
+  return toPurchaseReceiptR2Reference(objectKey);
+}
+
+async function downloadPurchaseReceiptFromR2(reference) {
+  const objectKey = parsePurchaseReceiptR2Reference(reference);
+  if (!objectKey) throw new Error("Tham chiếu Phiếu Nhập Kho trên R2 không hợp lệ.");
+  const response = await requestDailyEvidenceR2(objectKey, { method: "GET" });
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (!buffer.length || buffer.length > MAX_PURCHASE_RECEIPT_BYTES) {
+    throw new Error("Phiếu Nhập Kho trên R2 bị rỗng hoặc vượt quá 2 MB.");
+  }
+  const fileName = objectKey.split("/").pop();
+  const { ext, mimeType } = getPurchaseReceiptFileInfo(fileName, buffer);
+  return {
+    dataUrl: `data:${mimeType};base64,${buffer.toString("base64")}`,
+    fileName,
+    mimeType,
+    ext,
+  };
 }
 
 function getEvidenceStorageUnavailableMessage() {
@@ -8748,6 +8821,103 @@ const TELEGRAM_MAIN_KEYBOARD = {
   resize_keyboard: true,
 };
 
+const TELEGRAM_KHUI_SKU_PAGE_SIZE = 6;
+const TELEGRAM_KHUI_UNIT_PAGE_SIZE = 6;
+
+function getHandlingUnitCode(unit) {
+  return String(unit?.code || unit?.id || "").trim();
+}
+
+function getHandlingUnitSku(unit) {
+  return String(unit?.sku || unit?.skuName || "").trim();
+}
+
+function compareHandlingUnitsFifo(left, right) {
+  const leftCreatedAt = Date.parse(left?.createdAt || "");
+  const rightCreatedAt = Date.parse(right?.createdAt || "");
+  const leftTime = Number.isFinite(leftCreatedAt) ? leftCreatedAt : Number.MAX_SAFE_INTEGER;
+  const rightTime = Number.isFinite(rightCreatedAt) ? rightCreatedAt : Number.MAX_SAFE_INTEGER;
+  if (leftTime !== rightTime) return leftTime - rightTime;
+
+  const leftId = Number(left?.id);
+  const rightId = Number(right?.id);
+  if (Number.isFinite(leftId) && Number.isFinite(rightId) && leftId !== rightId) {
+    return leftId - rightId;
+  }
+
+  return getHandlingUnitCode(left).localeCompare(getHandlingUnitCode(right), "vi", {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
+function getKhuiKienGroups(list) {
+  const pendingSkus = new Set(
+    list
+      .filter(
+        (unit) =>
+          unit.status === "pending_check" ||
+          unit.status === "Chờ kiểm",
+      )
+      .map((unit) => getHandlingUnitSku(unit).toUpperCase())
+      .filter(Boolean),
+  );
+  const openedGroupKeys = new Set(
+    list
+      .filter((unit) => unit.status === "opened" || unit.status === "Đang sử dụng")
+      .map((unit) => {
+        const skuKey = getHandlingUnitSku(unit).toUpperCase();
+        const category = getHandlingUnitPackageCategory(unit.packagingName || unit.packageType);
+        return skuKey && category !== "LE" ? `${skuKey}:${category}` : "";
+      })
+      .filter(Boolean),
+  );
+  const groups = new Map();
+
+  list
+    .filter((unit) => {
+      if (unit.status !== "sealed" && unit.status !== "Nguyên niêm phong") return false;
+      const skuKey = getHandlingUnitSku(unit).toUpperCase();
+      const category = getHandlingUnitPackageCategory(unit.packagingName || unit.packageType);
+      if (!skuKey || pendingSkus.has(skuKey)) return false;
+      return category === "LE" || !openedGroupKeys.has(`${skuKey}:${category}`);
+    })
+    .forEach((unit) => {
+      const sku = getHandlingUnitSku(unit);
+      const skuKey = sku.toUpperCase();
+      const category = getHandlingUnitPackageCategory(unit.packagingName || unit.packageType);
+      const groupKey = `${skuKey}:${category}`;
+      if (!groups.has(groupKey)) {
+        groups.set(groupKey, {
+          sku,
+          category,
+          packagingName: unit.packagingName || unit.packageType || "Hàng lẻ",
+          units: [],
+        });
+      }
+      groups.get(groupKey).units.push(unit);
+    });
+
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      units: group.units.sort(compareHandlingUnitsFifo),
+    }))
+    .sort((left, right) => {
+      const skuComparison = left.sku.localeCompare(right.sku, "vi", { numeric: true });
+      return skuComparison || left.packagingName.localeCompare(right.packagingName, "vi");
+    });
+}
+
+async function renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard) {
+  const markup = { inline_keyboard: inlineKeyboard };
+  if (messageId) {
+    await editTelegramWmsMessage(chatId, messageId, text, markup);
+  } else {
+    await sendTelegramWmsMessage(chatId, text, markup);
+  }
+}
+
 async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
   const list = await getAllHandlingUnitsFromStore();
   const openedUnits = list.filter(
@@ -8764,22 +8934,11 @@ async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
   );
 
   if (openedUnits.length === 0) {
-    const sealedUnits = list.filter(
-      (u) => u.status === "sealed" || u.status === "Nguyên niêm phong",
-    );
-    const keyboard = sealedUnits.slice(0, 6).map((u) => [
-      {
-        text: `🔓 Khui ${u.code || u.id} (${u.sku || u.skuName})`,
-        callback_data: `unseal_unit:${u.code || u.id}`,
-      },
+    const text = `⚠️ <b>CHƯA CÓ KIỆN NÀO ĐANG MỞ</b>\n\nBot sẽ gom kiện theo SKU và chỉ đề xuất <b>1 kiện nhập trước</b> để khui, tránh hiển thị danh sách quá dài.`;
+    await renderTelegramWmsMenu(chatId, messageId, text, [
+      [{ text: "🔓 Xem kiện được đề xuất", callback_data: "menu_khui" }],
+      [{ text: "📊 Xem báo cáo tồn", callback_data: "menu_ton" }],
     ]);
-    const text = `⚠️ <b>HIỆN CHƯA CÓ KIỆN NÀO ĐANG MỞ ĐỂ RÚT HÀNG!</b>\n\n👉 Bạn hãy chạm vào kiện nguyên bên dưới để <b>khui kiện ngay</b>:`;
-    const markup = { inline_keyboard: keyboard };
-    if (messageId) {
-      await editTelegramWmsMessage(chatId, messageId, text, markup);
-    } else {
-      await sendTelegramWmsMessage(chatId, text, markup);
-    }
     return;
   }
 
@@ -8800,9 +8959,12 @@ async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
     const remaining = u.remainingQuantity ?? u.currentPcs ?? 0;
     const unit = u.baseUnit || u.unitName || "Gói";
     const sku = u.sku || u.skuName || "";
+    const pendingCode = pendingSkuCodes.get(String(sku).trim().toUpperCase());
     return [
       {
-        text: `📦 ${code} · ${sku} (Tồn: ${remaining.toLocaleString("vi-VN")} ${unit})`,
+        text: pendingCode
+          ? `🔒 ${code} · ${sku} (chờ kiểm ${pendingCode})`
+          : `📦 ${code} · ${sku} (Tồn: ${remaining.toLocaleString("vi-VN")} ${unit})`,
         callback_data: `pick_unit:${code}`,
       },
     ];
@@ -8826,50 +8988,143 @@ async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
   }
 }
 
-async function sendKhuiKienMenu(chatId, messageId = null) {
+async function sendKhuiKienMenu(chatId, messageId = null, requestedPage = 0) {
   const list = await getAllHandlingUnitsFromStore();
-  const sealedUnits = list.filter(
-    (u) => u.status === "sealed" || u.status === "Nguyên niêm phong",
-  );
+  const groups = getKhuiKienGroups(list);
 
-  if (sealedUnits.length === 0) {
-    const text = `✅ Tất cả các kiện trong kho hiện đã được khui hoặc đã xuất hết!`;
-    const markup = {
-      inline_keyboard: [
-        [{ text: "📦 Rút hàng từ kiện đang mở", callback_data: "menu_rut" }],
-      ],
-    };
-    if (messageId) {
-      await editTelegramWmsMessage(chatId, messageId, text, markup);
-    } else {
-      await sendTelegramWmsMessage(chatId, text, markup);
-    }
+  if (groups.length === 0) {
+    const text = `⚠️ <b>KHÔNG CÓ KIỆN HỢP LỆ ĐỂ KHUI</b>\n\nCác SKU đang có kiện mở, đang chờ kiểm thực tế hoặc đã hết kiện nguyên niêm phong.`;
+    await renderTelegramWmsMenu(chatId, messageId, text, [
+      [{ text: "📦 Rút hàng từ kiện đang mở", callback_data: "menu_rut" }],
+    ]);
     return;
   }
 
-  const inlineKeyboard = sealedUnits.map((u) => {
-    const code = u.code || u.id;
-    const qty = u.initialQuantity ?? u.initialPcs ?? 0;
-    const unit = u.baseUnit || u.unitName || "Gói";
-    const sku = u.sku || u.skuName || "";
+  if (groups.length === 1) {
+    await sendKhuiKienSuggestion(chatId, getHandlingUnitCode(groups[0].units[0]), messageId);
+    return;
+  }
+
+  const pageCount = Math.ceil(groups.length / TELEGRAM_KHUI_SKU_PAGE_SIZE);
+  const page = Math.min(Math.max(Number(requestedPage) || 0, 0), pageCount - 1);
+  const pageGroups = groups.slice(
+    page * TELEGRAM_KHUI_SKU_PAGE_SIZE,
+    (page + 1) * TELEGRAM_KHUI_SKU_PAGE_SIZE,
+  );
+  const inlineKeyboard = pageGroups.map((group) => {
+    const anchorCode = getHandlingUnitCode(group.units[0]);
     return [
       {
-        text: `🔓 Khui ${code} · ${sku} (${qty.toLocaleString("vi-VN")} ${unit})`,
+        text: `📦 ${group.sku} · ${group.packagingName} · ${group.units.length} kiện`,
+        callback_data: `khui_sku:${anchorCode}`,
+      },
+    ];
+  });
+  const navigation = [];
+  if (page > 0) navigation.push({ text: "◀️ Trước", callback_data: `khui_skus:${page - 1}` });
+  navigation.push({ text: `${page + 1}/${pageCount}`, callback_data: "khui_noop" });
+  if (page < pageCount - 1) navigation.push({ text: "Tiếp ▶️", callback_data: `khui_skus:${page + 1}` });
+  if (pageCount > 1) inlineKeyboard.push(navigation);
+  inlineKeyboard.push([{ text: "🔙 Quay lại", callback_data: "menu_rut" }]);
+
+  const totalUnits = groups.reduce((sum, group) => sum + group.units.length, 0);
+  const skuCount = new Set(groups.map((group) => group.sku.toUpperCase())).size;
+  const text = `🔓 <b>CHỌN SẢN PHẨM CẦN KHUI</b>\n\nCó <b>${totalUnits} kiện</b> hợp lệ thuộc <b>${skuCount} SKU</b>. Bot chỉ hiện nhóm sản phẩm; sau khi chọn sẽ đề xuất 1 kiện theo FIFO.`;
+  await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
+}
+
+async function sendKhuiKienSuggestion(chatId, anchorCode, messageId = null) {
+  const list = await getAllHandlingUnitsFromStore();
+  const anchorUnit = list.find(
+    (unit) => getHandlingUnitCode(unit).toUpperCase() === String(anchorCode).toUpperCase(),
+  );
+  const group = getKhuiKienGroups(list).find(
+    (item) => item.units.some((unit) => getHandlingUnitCode(unit) === getHandlingUnitCode(anchorUnit)),
+  );
+
+  if (!group || group.units.length === 0) {
+    await sendKhuiKienMenu(chatId, messageId);
+    return;
+  }
+
+  const suggested = group.units[0];
+  const code = getHandlingUnitCode(suggested);
+  const quantity = suggested.remainingQuantity ?? suggested.currentPcs ?? 0;
+  const unitName = suggested.baseUnit || suggested.unitName || "Gói";
+  const hiddenCount = Math.max(0, group.units.length - 1);
+  const location = formatLocation(suggested.location || suggested.zone);
+  const text =
+    `🔓 <b>KIỆN ĐƯỢC ĐỀ XUẤT</b>\n\n` +
+    `🏷️ <b>SKU:</b> <code>${group.sku}</code>\n` +
+    `🧺 <b>Loại kiện:</b> ${group.packagingName}\n` +
+    `📦 <b>Mã kiện:</b> <code>${code}</code>\n` +
+    `📊 <b>Số lượng:</b> ${quantity.toLocaleString("vi-VN")} ${unitName}\n` +
+    `📍 <b>Vị trí:</b> ${location}\n` +
+    `🧭 <b>Nguyên tắc:</b> FIFO — kiện nhập kho trước\n\n` +
+    (hiddenCount > 0
+      ? `Còn <b>${hiddenCount} kiện</b> cùng SKU đang được thu gọn.`
+      : `Đây là kiện nguyên niêm phong cuối cùng của SKU này.`);
+  const inlineKeyboard = [
+    [{ text: `✅ Xác nhận khui ${code}`, callback_data: `unseal_unit:${code}` }],
+  ];
+  if (hiddenCount > 0) {
+    inlineKeyboard.push([
+      { text: `📋 Xem ${hiddenCount} kiện khác`, callback_data: `khui_units:${code}:0` },
+    ]);
+  }
+  inlineKeyboard.push([{ text: "🔙 Chọn SKU khác", callback_data: "menu_khui" }]);
+  await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
+}
+
+async function sendKhuiKienUnitPage(chatId, anchorCode, requestedPage = 0, messageId = null) {
+  const list = await getAllHandlingUnitsFromStore();
+  const anchorUnit = list.find(
+    (unit) => getHandlingUnitCode(unit).toUpperCase() === String(anchorCode).toUpperCase(),
+  );
+  const group = getKhuiKienGroups(list).find(
+    (item) => item.units.some((unit) => getHandlingUnitCode(unit) === getHandlingUnitCode(anchorUnit)),
+  );
+
+  if (!group || group.units.length === 0) {
+    await sendKhuiKienMenu(chatId, messageId);
+    return;
+  }
+
+  const pageCount = Math.ceil(group.units.length / TELEGRAM_KHUI_UNIT_PAGE_SIZE);
+  const page = Math.min(Math.max(Number(requestedPage) || 0, 0), pageCount - 1);
+  const pageUnits = group.units.slice(
+    page * TELEGRAM_KHUI_UNIT_PAGE_SIZE,
+    (page + 1) * TELEGRAM_KHUI_UNIT_PAGE_SIZE,
+  );
+  const stableAnchorCode = getHandlingUnitCode(group.units[0]);
+  const inlineKeyboard = pageUnits.map((unit, index) => {
+    const code = getHandlingUnitCode(unit);
+    const quantity = unit.remainingQuantity ?? unit.currentPcs ?? 0;
+    const unitName = unit.baseUnit || unit.unitName || "Gói";
+    const isSuggested = page === 0 && index === 0;
+    return [
+      {
+        text: `${isSuggested ? "⭐" : "🔒"} ${code} · ${quantity.toLocaleString("vi-VN")} ${unitName}`,
         callback_data: `unseal_unit:${code}`,
       },
     ];
   });
-
-  inlineKeyboard.push([{ text: "🔙 Quay lại", callback_data: "menu_rut" }]);
-
-  const text = `🔓 <b>CHỌN KIỆN NGUYÊN ĐỂ MỞ NIÊM PHONG (KHUI KIỆN):</b>\n<i>(Chạm vào kiện để mở lấy lẻ)</i>`;
-  const markup = { inline_keyboard: inlineKeyboard };
-
-  if (messageId) {
-    await editTelegramWmsMessage(chatId, messageId, text, markup);
-  } else {
-    await sendTelegramWmsMessage(chatId, text, markup);
+  const navigation = [];
+  if (page > 0) {
+    navigation.push({ text: "◀️ Trước", callback_data: `khui_units:${stableAnchorCode}:${page - 1}` });
   }
+  navigation.push({ text: `${page + 1}/${pageCount}`, callback_data: "khui_noop" });
+  if (page < pageCount - 1) {
+    navigation.push({ text: "Tiếp ▶️", callback_data: `khui_units:${stableAnchorCode}:${page + 1}` });
+  }
+  if (pageCount > 1) inlineKeyboard.push(navigation);
+  inlineKeyboard.push([
+    { text: "⭐ Về kiện đề xuất", callback_data: `khui_sku:${stableAnchorCode}` },
+  ]);
+  inlineKeyboard.push([{ text: "🔙 Chọn SKU khác", callback_data: "menu_khui" }]);
+
+  const text = `📋 <b>CÁC KIỆN NGUYÊN CỦA ${group.sku}</b>\nLoại: <b>${group.packagingName}</b>\n\nSắp xếp theo FIFO. Kiện có dấu ⭐ là kiện được ưu tiên khui trước.`;
+  await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
 }
 
 async function sendPickQuantityMenu(chatId, code, messageId = null) {
@@ -9028,6 +9283,34 @@ async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = 
         `❌ <b>Lỗi rút hàng:</b> ${err.message}`,
       );
     }
+    return;
+  }
+
+  if (data.startsWith("khui_skus:")) {
+    const page = Number(data.split(":")[1]) || 0;
+    await answerTelegramCallbackQuery(queryId);
+    await sendKhuiKienMenu(chatId, messageId, page);
+    return;
+  }
+
+  if (data.startsWith("khui_sku:")) {
+    const anchorCode = data.slice("khui_sku:".length);
+    await answerTelegramCallbackQuery(queryId);
+    await sendKhuiKienSuggestion(chatId, anchorCode, messageId);
+    return;
+  }
+
+  if (data.startsWith("khui_units:")) {
+    const parts = data.split(":");
+    const anchorCode = parts[1];
+    const page = Number(parts[2]) || 0;
+    await answerTelegramCallbackQuery(queryId);
+    await sendKhuiKienUnitPage(chatId, anchorCode, page, messageId);
+    return;
+  }
+
+  if (data === "khui_noop") {
+    await answerTelegramCallbackQuery(queryId);
     return;
   }
 
@@ -10730,25 +11013,19 @@ async function findCompletedPurchaseCreate(client, idempotencyKey) {
   }
 }
 
-async function cleanupFreshPurchaseReceiptUploads(fileIds) {
-  if (!Array.isArray(fileIds) || fileIds.length === 0) return;
-  try {
-    const drive = getDriveClient();
-    if (!drive) return;
-    await Promise.all(
-      fileIds.map((fileId) => drive.files.delete({ fileId }).catch(() => null)),
-    );
-  } catch (cleanupError) {
-    console.error(
-      "Could not clean up receipt files after failed purchase create:",
-      cleanupError,
-    );
-  }
+async function cleanupFreshPurchaseReceiptUploads(references) {
+  if (!Array.isArray(references) || references.length === 0) return;
+  // R2 is content-addressed and deletion is disabled by data-safety mode.
+  // Keeping an unreferenced upload is safer than deleting a document that may
+  // already be referenced by an idempotent retry from another workstation.
+  console.warn(
+    `[DataSafety] Preserved ${references.length} unreferenced purchase receipt upload(s).`,
+  );
 }
 
 // Create purchase
 ipcMain.handle("purchases:create", async (event, data) => {
-  let uploadedReceiptFileIds = [];
+  let uploadedReceiptReferences = [];
   let duplicatePurchase = false;
   try {
     requireRole("admin", "manager");
@@ -10803,37 +11080,16 @@ ipcMain.handle("purchases:create", async (event, data) => {
       );
     }
 
-    // Upload first, then persist the completed receipt. This avoids a
-    // completed purchase existing without its mandatory document.
-    const driveStatus = await ensureDriveReady();
-    if (!driveStatus.success) throw new Error(driveStatus.error);
-    const drive = driveStatus.drive;
-    const receiptFolderId = await getOrCreateImportReceiptDriveFolder();
-    if (!receiptFolderId)
-      throw new Error(
-        driveLastErrorMessage ||
-          "Không mở được thư mục Phiếu Nhập Kho trên Google Drive.",
-      );
-    const receiptDriveUrls = [];
-    const uploadReference = `${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(36).slice(2, 7)}`;
+    // Upload first, then persist the completed receipt. VAT documents remain
+    // on Google Drive; warehouse receipts use R2 so they do not depend on the
+    // desktop OAuth session.
+    const receiptStorageReferences = [];
+    const uploadNamespace = `create-${idempotencyKey}`;
     for (let index = 0; index < receiptFiles.length; index += 1) {
       const file = receiptFiles[index];
-      const ext = (file.fileName.split(".").pop() || "jpg").toLowerCase();
-      const suffix = receiptFiles.length > 1 ? `_${index + 1}` : "";
-      const uploaded = await uploadToDrive(
-        drive,
-        receiptFolderId,
-        `Phiếu_Nhập_${supplier.name}_${uploadReference}${suffix}.${ext}`,
-        decodeBusinessDocumentBase64(file.fileBase64),
-        ext === "pdf" ? "application/pdf" : "image/jpeg",
-      );
-      if (!uploaded?.fileId || !uploaded?.webViewLink) {
-        throw new Error(
-          `Không thể tải file Phiếu Nhập Kho thứ ${index + 1} lên Google Drive.`,
-        );
-      }
-      uploadedReceiptFileIds.push(uploaded.fileId);
-      receiptDriveUrls.push(uploaded.webViewLink);
+      const reference = await uploadPurchaseReceiptToR2(uploadNamespace, file);
+      uploadedReceiptReferences.push(reference);
+      receiptStorageReferences.push(reference);
     }
 
     // Parse items and validate productIds
@@ -10903,7 +11159,9 @@ ipcMain.handle("purchases:create", async (event, data) => {
               createdBy: data.createdBy || "Admin",
               importReceiptStatus: "uploaded",
               importReceiptFile: null,
-              importReceiptDriveUrl: receiptDriveUrls.join("\n"),
+              // Legacy column name retained to avoid a production migration;
+              // new values are authenticated r2:// object references.
+              importReceiptDriveUrl: receiptStorageReferences.join("\n"),
               vatInvoiceStatus: data.isThht
                 ? "thht"
                 : data.isNoVat
@@ -10987,8 +11245,8 @@ ipcMain.handle("purchases:create", async (event, data) => {
     );
 
     if (duplicatePurchase) {
-      await cleanupFreshPurchaseReceiptUploads(uploadedReceiptFileIds);
-      uploadedReceiptFileIds = [];
+      await cleanupFreshPurchaseReceiptUploads(uploadedReceiptReferences);
+      uploadedReceiptReferences = [];
       return { success: true, data: purchase, duplicate: true };
     }
 
@@ -11013,7 +11271,7 @@ ipcMain.handle("purchases:create", async (event, data) => {
   } catch (error) {
     // The database write did not complete, so remove documents uploaded
     // solely for this failed create attempt.
-    await cleanupFreshPurchaseReceiptUploads(uploadedReceiptFileIds);
+    await cleanupFreshPurchaseReceiptUploads(uploadedReceiptReferences);
     console.error("❌ Create purchase error:", error);
     return { success: false, error: error.message };
   }
@@ -12074,70 +12332,22 @@ ipcMain.handle(
       if (filesList.length === 0)
         throw new Error("Chưa chọn file Phiếu Nhập Kho.");
 
-      const driveUrls = [];
-      const driveFileIds = [];
-      const driveStatus = await ensureDriveReady();
-      if (!driveStatus.success) {
-        return {
-          success: false,
-          error: driveStatus.error,
-          reauthRequired: Boolean(driveStatus.reauthRequired),
-        };
-      }
-      const drive = driveStatus.drive;
-      const folderId = await getOrCreateImportReceiptDriveFolder();
-      if (!folderId)
-        throw new Error(
-          driveLastErrorMessage ||
-            "Không mở được thư mục Phiếu Nhập Kho trên Google Drive.",
-        );
+      const storageReferences = [];
 
-      // 2. Upload trực tiếp lên Drive; Phiếu Nhập Kho không dùng file local.
+      // 2. Phiếu Nhập Kho dùng R2; Google Drive chỉ còn dành cho HĐ VAT.
       for (let i = 0; i < filesList.length; i++) {
-        const { fileBase64: b64, fileName: fn } = filesList[i];
-        const ext = (fn || "jpg").split(".").pop() || "jpg";
-        const suffix = filesList.length > 1 ? `_${i + 1}` : "";
-        const fileBuffer = decodeBusinessDocumentBase64(b64);
-        try {
-          const driveFileName = `Phiếu_Nhập_${purchase.supplier?.name || "NCC"}_PO${purchaseId}${suffix}.${ext}`;
-          const result = await uploadToDrive(
-            drive,
-            folderId,
-            driveFileName,
-            fileBuffer,
-            ext === "pdf" ? "application/pdf" : "image/jpeg",
-          );
-          if (result?.fileId && result?.webViewLink) {
-            driveFileIds.push(result.fileId);
-            driveUrls.push(result.webViewLink);
-            console.log(
-              `☁️ Uploaded Receipt to Drive [${i + 1}]: ${result.webViewLink}`,
-            );
-          }
-        } catch (driveErr) {
-          console.error(
-            `⚠️ Drive upload failed for Receipt file ${i + 1}:`,
-            driveErr.message,
-          );
-        }
+        const reference = await uploadPurchaseReceiptToR2(
+          `purchase-${purchaseId}`,
+          filesList[i],
+        );
+        storageReferences.push(reference);
       }
 
       // 3. Cập nhật DB
-      const driveUploadComplete = driveUrls.length === filesList.length;
-      if (!driveUploadComplete && !DATA_SAFETY_MODE) {
-        // Không giữ một bộ chứng từ thiếu file trên Drive.
-        await Promise.all(
-          driveFileIds.map((fileId) =>
-            drive.files.delete({ fileId }).catch(() => null),
-          ),
-        );
-      }
       const dbUpdate = {
-        importReceiptStatus: driveUploadComplete ? "uploaded" : "pending",
+        importReceiptStatus: "uploaded",
         importReceiptFile: null,
-        importReceiptDriveUrl: driveUploadComplete
-          ? driveUrls.join("\n")
-          : null,
+        importReceiptDriveUrl: storageReferences.join("\n"),
       };
       await prisma.purchaseOrder.update({
         where: { id: purchaseId },
@@ -12151,14 +12361,10 @@ ipcMain.handle(
         userName: "System",
       });
 
-      if (!driveUploadComplete) {
-        return {
-          success: false,
-          data: { localPaths: [], driveUrls: [] },
-          error: `Google Drive chỉ nhận ${driveUrls.length}/${filesList.length} file nên phiếu chưa được ghi nhận là đã upload. Vui lòng tải lại.`,
-        };
-      }
-      return { success: true, data: { localPaths: [], driveUrls } };
+      return {
+        success: true,
+        data: { localPaths: [], driveUrls: [], storageReferences },
+      };
     } catch (error) {
       console.error("❌ Upload Import Receipt error:", error);
       return { success: false, error: error.message };
@@ -12426,15 +12632,35 @@ ipcMain.handle(
       if (!purchase)
         return { success: false, error: "Không tìm thấy phiếu nhập kho." };
 
-      const driveUrls = String(purchase.importReceiptDriveUrl || "")
+      const references = String(purchase.importReceiptDriveUrl || "")
         .split("\n")
-        .map((url) => url.trim())
+        .map((value) => value.trim())
         .filter(Boolean);
+      const r2References = references.filter(parsePurchaseReceiptR2Reference);
+      if (r2References.length > 0) {
+        if (r2References.length !== references.length) {
+          return {
+            success: false,
+            error: "Phiếu Nhập Kho có dữ liệu lưu trữ không đồng nhất. Vui lòng tải lại phiếu.",
+          };
+        }
+        const localFiles = await Promise.all(
+          r2References.map(downloadPurchaseReceiptFromR2),
+        );
+        return {
+          success: true,
+          data: { driveUrls: [], localFiles, storage: "cloudflare-r2" },
+        };
+      }
+      const driveUrls = references.filter((value) => /^https?:\/\//i.test(value));
       if (driveUrls.length > 0)
-        return { success: true, data: { driveUrls, localFiles: [] } };
+        return {
+          success: true,
+          data: { driveUrls, localFiles: [], storage: "google-drive-legacy" },
+        };
       return {
         success: false,
-        error: "Phiếu chưa được upload thành công lên Google Drive.",
+        error: "Phiếu Nhập Kho chưa được upload thành công lên Cloudflare R2.",
       };
     } catch (error) {
       console.error("❌ Get Import Receipt preview data error:", error);

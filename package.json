@@ -1,6 +1,6 @@
 {
   "name": "quan-ly-ban-hang-desktop",
-  "version": "1.0.410",
+  "version": "1.0.411",
   "description": "Hệ thống quản lý bán hàng - Desktop App",
   "main": "electron/main.js",
   "scripts": {
@@ -12,8 +12,8 @@
     "prepare:r2-daily-evidence": "node scripts/prepare-r2-daily-evidence-config.js",
     "db:migrate:deploy": "prisma migrate deploy",
     "electron:dev": "node scripts/start-electron-dev.js",
-    "electron:build": "npm run embed:wms-token && npm run embed:google-oauth && npm run prepare:runtime-db && npx prisma generate && npm run build && electron-builder",
-    "electron:installer": "npm run embed:wms-token && npm run embed:google-oauth && npm run prepare:runtime-db && npx prisma generate && npm run build && electron-builder --win nsis --config.directories.output=release-installer"
+    "electron:build": "npm run embed:wms-token && npm run embed:google-oauth && npm run prepare:r2-daily-evidence && npm run prepare:runtime-db && npx prisma generate && npm run build && electron-builder",
+    "electron:installer": "npm run embed:wms-token && npm run embed:google-oauth && npm run prepare:r2-daily-evidence && npm run prepare:runtime-db && npx prisma generate && npm run build && electron-builder --win nsis --config.directories.output=release-installer"
   },
   "keywords": [
     "pos",

@@ -39,15 +39,24 @@ const legacyBootstrap = readJsonFile(
     "r2-test-bootstrap.json",
   ),
 );
+const currentBootstrap = readJsonFile(
+  path.join(
+    process.env.APPDATA || "",
+    "quan-ly-ban-hang-desktop",
+    "r2-daily-evidence-bootstrap.json",
+  ),
+);
 const endpoint = String(
   process.env.R2_DAILY_EVIDENCE_ENDPOINT ||
     localConfig.R2_DAILY_EVIDENCE_ENDPOINT ||
+    currentBootstrap.endpoint ||
     workerVars.R2_DAILY_EVIDENCE_ENDPOINT ||
     "https://dby-pos-daily-evidence.zicky-iluv.workers.dev",
 ).trim().replace(/\/+$/, "");
 const key = String(
   process.env.R2_DAILY_EVIDENCE_KEY ||
     localConfig.R2_DAILY_EVIDENCE_KEY ||
+    currentBootstrap.key ||
     legacyBootstrap.testKey ||
     workerVars.DAILY_EVIDENCE_KEY ||
     "",
