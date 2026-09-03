@@ -457,6 +457,7 @@ interface PackingOrderItem {
     productName: string;
     variant?: string;
     quantity: number;
+    packingSourceSku?: string;
     packingLevel?: string;
     packingUnit?: string;
     packingUnitPrice?: number;
@@ -541,6 +542,19 @@ const DEFAULT_PACKING_COMMISSION: PackingCommissionConfig = {
 };
 
 const normalizePackingSku = (value: unknown) => String(value || '').trim().toUpperCase();
+
+const parsePackingComboItems = (value: unknown): Array<{ sku: string; quantity: number }> => {
+    try {
+        const parsed = typeof value === 'string' ? JSON.parse(value || '[]') : value;
+        if (!Array.isArray(parsed)) return [];
+        return parsed.map(item => ({
+            sku: normalizePackingSku(item?.sku || item?.variantSku),
+            quantity: Math.max(0, Number(item?.quantity ?? item?.qty ?? 0)),
+        })).filter(item => item.sku && item.quantity > 0);
+    } catch {
+        return [];
+    }
+};
 
 const normalizeCustomPackingLevels = (levels?: CustomPackingLevel[]) => (Array.isArray(levels) ? levels : [])
     .map(level => ({
@@ -984,7 +998,7 @@ function calcPacksFromItems(items: PackingOrderItem[]): number {
 
 function getPackingLevel(item: PackingOrderItem, commission: PackingCommissionConfig): string {
     if (item.packingLevel && getPackingLevelOptions(commission).some(option => option.key === item.packingLevel)) return item.packingLevel;
-    return commission.skuLevels[normalizePackingSku(item.sku)] || 'easy';
+    return commission.skuLevels[normalizePackingSku(item.packingSourceSku || item.sku)] || 'easy';
 }
 
 function getPackingCommissionAt(rawCommission?: PackingCommissionConfig, timestamp?: string): PackingCommissionConfig {
@@ -3482,10 +3496,11 @@ export default function Attendance() {
 
                 // Hai nguồn độc lập được tải song song để rút ngắn thời gian mở trang.
                 let knownUsernames: string[] = [];
-                const [usersRes, rs, productsRes] = await Promise.all([
+                const [usersRes, rs, productsRes, combosRes] = await Promise.all([
                     api.users.getAll().catch(() => null),
                     api.appConfig.get('attendanceData'),
                     api.products?.getAll ? api.products.getAll().catch(() => null) : Promise.resolve(null),
+                    api.combos?.getAll ? api.combos.getAll().catch(() => null) : Promise.resolve(null),
                 ]);
                 const catalogBySku = new Map<string, PackingCatalogItem>();
                 const addCatalogItem = (sku: unknown, productName: unknown, memberSkus: unknown[] = []) => {
@@ -3508,6 +3523,18 @@ export default function Attendance() {
                             if (Array.isArray(parsedVariants)) variants = parsedVariants;
                         } catch { }
                         addCatalogItem(product.sku, product.name, variants.map(variant => variant?.sku));
+                    });
+                }
+                if (combosRes?.success && Array.isArray(combosRes.data)) {
+                    combosRes.data.forEach((combo: any) => {
+                        if (combo?.status === 'inactive') return;
+                        const comboSku = normalizePackingSku(combo?.sku);
+                        const components = parsePackingComboItems(combo?.items);
+                        if (!comboSku || components.length === 0) return;
+                        const parent = [...catalogBySku.values()].find(product =>
+                            components.some(component => product.memberSkus.includes(component.sku))
+                        );
+                        if (parent && !parent.memberSkus.includes(comboSku)) parent.memberSkus.push(comboSku);
                     });
                 }
                 setPackingCatalog([...catalogBySku.values()].sort((a, b) => a.sku.localeCompare(b.sku)));
@@ -3913,21 +3940,37 @@ export default function Attendance() {
                     new Promise((_, reject) => setTimeout(() => reject(`${label} TIMEOUT (${ms}ms)`), ms))
                 ]).catch(e => { console.warn(`[PACKING] ⚠️ ${label} failed:`, e); return { success: false, error: String(e) }; });
 
-            // Chỉ lấy TMDT — POS và Xuất hàng không tính vào nhật ký đóng gói
-            let ecRes = await withTimeout(
-                api.ecommerceExports.getAll({
-                    since: sinceVal,
-                    until: untilVal,
-                    sinceField: 'ecommerceExportDate',
-                    statusIn: ['completed'],
-                    limit: packingFetchLimit,
-                }),
-                'Ecom'
-            );
+            // ComboProducts là nguồn chuẩn để quy đổi một dòng bán thành số gói thực đóng.
+            const [initialEcomRes, combosRes] = await Promise.all([
+                withTimeout(
+                    api.ecommerceExports.getAll({
+                        since: sinceVal,
+                        until: untilVal,
+                        sinceField: 'ecommerceExportDate',
+                        statusIn: ['completed'],
+                        limit: packingFetchLimit,
+                    }),
+                    'Ecom'
+                ),
+                api.combos?.getAll
+                    ? withTimeout(api.combos.getAll(), 'ComboProducts')
+                    : Promise.resolve({ success: false, error: 'Thiếu API ComboProducts' }),
+            ]);
+            let ecRes = initialEcomRes;
             console.log('[PACKING] Ecom done:', ecRes?.data?.length);
             if (!ecRes?.success || !Array.isArray(ecRes.data)) {
                 throw new Error('Không tải được dữ liệu đóng gói từ Supabase. Dữ liệu gần nhất được giữ nguyên để tránh mất thưởng đóng gói.');
             }
+            if (!combosRes?.success || !Array.isArray(combosRes.data)) {
+                throw new Error('Không tải được cấu phần ComboProducts. Chưa tính hoa hồng để tránh ghi nhận thiếu số gói.');
+            }
+            const comboBySku = new Map<string, Array<{ sku: string; quantity: number }>>();
+            combosRes.data.forEach((combo: any) => {
+                if (combo?.status === 'inactive') return;
+                const sku = normalizePackingSku(combo?.sku);
+                const components = parsePackingComboItems(combo?.items);
+                if (sku && components.length > 0) comboBySku.set(sku, components);
+            });
             const ecommerceRows = [...ecRes.data];
             while (ecRes.hasMore && ecommerceRows.length < 50000) {
                 ecRes = await withTimeout(
@@ -3973,12 +4016,20 @@ export default function Attendance() {
 
                 if (validItems.length === 0) return;
 
-                const mappedItems = validItems.map(it => ({
-                    sku: (it.variantSku || it.sku || it.variant_sku || it.product_sku || it.SKU || it.Sku || ''),
-                    productName: it.productName || it.name || '-',
-                    variant: it.variant || '',
-                    quantity: it.quantity || it.qty || 1,
-                }));
+                const mappedItems = validItems.map(it => {
+                    const sku = normalizePackingSku(it.variantSku || it.sku || it.variant_sku || it.product_sku || it.SKU || it.Sku || '');
+                    const quantity = Math.max(0, Number(it.quantity ?? it.qty ?? 1));
+                    const comboComponents = comboBySku.get(sku);
+                    const unitsPerSoldItem = comboComponents?.reduce((sum, component) => sum + component.quantity, 0) || 1;
+                    return {
+                        sku,
+                        productName: it.productName || it.name || '-',
+                        variant: it.variant || '',
+                        quantity,
+                        packingSourceSku: comboComponents?.[0]?.sku,
+                        packingUnits: quantity * unitsPerSoldItem,
+                    };
+                });
 
                 const totalSKU = mappedItems.reduce((acc: number, it: any) => acc + (it.quantity || 1), 0);
                 if (totalSKU === 0) return;
