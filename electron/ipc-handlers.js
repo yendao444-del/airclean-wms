@@ -6923,6 +6923,9 @@ ipcMain.handle("handlingUnits:issueQrLabels", async (_event, payload = {}) => {
           });
         }
       }
+      if (!supplier) {
+        throw new Error("Cần chọn nhà cung cấp trước khi phát hành tem QR.");
+      }
       let spec = specs.find(
         (item) =>
           item?.status === "active" &&
@@ -8183,7 +8186,7 @@ async function executeKhuiKien(
           });
           if (conflict && getHandlingUnitPackageCategory(conflict.packagingName) === packageCategory) {
             throw new Error(
-              `SKU [${unit.sku}] chưa được khui kiện mới: kiện [${conflict.code}] đang mở (còn ${conflict.remainingQuantity} ${conflict.baseUnit}). Hãy kiểm kiện cũ trước.`,
+              `Chưa thể khui kiện mới. SKU ${unit.sku} đang có kiện ${conflict.code} mở và còn ${conflict.remainingQuantity} ${conflict.baseUnit}. Hãy rút hết kiện này; khi kiện chuyển sang Chờ kiểm, nhập số lượng thực tế và chốt kiện trước khi khui kiện mới.`,
             );
           }
         }
@@ -8280,7 +8283,9 @@ async function executeKhuiKien(
       && getHandlingUnitPackageCategory(candidate.packagingName || candidate.packageType) === targetCategory,
     );
     if (openedConflict) {
-      throw new Error(`SKU [${target.sku || target.skuName}] chưa được khui kiện mới: kiện [${openedConflict.code || openedConflict.id}] đang mở. Hãy kiểm kiện cũ trước.`);
+      const openedRemaining = openedConflict.remainingQuantity ?? openedConflict.currentPcs ?? 0;
+      const openedUnitName = openedConflict.baseUnit || openedConflict.unitName || "đơn vị";
+      throw new Error(`Chưa thể khui kiện mới. SKU ${target.sku || target.skuName} đang có kiện ${openedConflict.code || openedConflict.id} mở và còn ${openedRemaining} ${openedUnitName}. Hãy rút hết kiện này; khi kiện chuyển sang Chờ kiểm, nhập số lượng thực tế và chốt kiện trước khi khui kiện mới.`);
     }
   }
   if (target.status === "opened" || target.status === "Đang sử dụng")
@@ -8359,7 +8364,7 @@ function buildPendingHandlingUnitBlockMessage(sku, pendingUnit, action) {
     pendingUnit?.remainingQuantity ?? pendingUnit?.currentPcs ?? 0,
   );
   const baseUnit = pendingUnit?.baseUnit || pendingUnit?.unitName || "đơn vị";
-  return `Không thể ${action}. SKU [${sku}] đang có kiện [${code}] chờ kiểm thực tế (tồn theo sổ: ${remaining} ${baseUnit}). Vui lòng vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước.`;
+  return `Chưa thể ${action}. SKU ${sku} có kiện ${code} đang ở trạng thái Chờ kiểm (tồn theo sổ: ${remaining} ${baseUnit}). Bạn cần vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước; sau đó mới khui được kiện mới cùng SKU.`;
 }
 
 async function getHandlingUnitWithdrawalCodes(tx) {
@@ -8758,15 +8763,6 @@ async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
     !pendingSkuCodes.has(String(unit.sku || unit.skuName || "").trim().toUpperCase()),
   );
 
-  if (openedUnits.length > 0 && availableOpenedUnits.length === 0) {
-    const pendingCodes = [...new Set(pendingSkuCodes.values())].filter(Boolean).join(", ");
-    const text = `⛔ <b>CHƯA THỂ RÚT HÀNG</b>\n\nCác SKU đang mở vẫn còn kiện đã về 0 chờ kiểm thực tế: <b>${pendingCodes || "vui lòng xem tab Chờ kiểm"}</b>.\n\n👉 Vào <b>Quản lý kiện hàng &gt; Chờ kiểm</b>, nhập số lượng thực tế và chốt hết các kiện này trước khi rút tiếp.`;
-    const markup = { inline_keyboard: [[{ text: "📊 Xem báo cáo tồn", callback_data: "menu_ton" }]] };
-    if (messageId) await editTelegramWmsMessage(chatId, messageId, text, markup);
-    else await sendTelegramWmsMessage(chatId, text, markup);
-    return;
-  }
-
   if (openedUnits.length === 0) {
     const sealedUnits = list.filter(
       (u) => u.status === "sealed" || u.status === "Nguyên niêm phong",
@@ -8789,7 +8785,7 @@ async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
 
   // Lối tắt chỉ áp dụng khi mở menu rút hàng lần đầu. Nút "Chọn kiện khác"
   // phải luôn hiện danh sách để người dùng có thể khui hoặc chọn kiện khác.
-  if (availableOpenedUnits.length === 1 && !forceList) {
+  if (openedUnits.length === 1 && availableOpenedUnits.length === 1 && !forceList) {
     await sendPickQuantityMenu(
       chatId,
       availableOpenedUnits[0].code || availableOpenedUnits[0].id,
@@ -8798,7 +8794,8 @@ async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
     return;
   }
 
-  const inlineKeyboard = availableOpenedUnits.map((u) => {
+  // Vẫn hiển thị SKU bị khóa; bước chọn kiện sẽ giải thích yêu cầu kiểm thực tế.
+  const inlineKeyboard = openedUnits.map((u) => {
     const code = u.code || u.id;
     const remaining = u.remainingQuantity ?? u.currentPcs ?? 0;
     const unit = u.baseUnit || u.unitName || "Gói";
@@ -10091,18 +10088,19 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
         const unitHistory = history.filter(
           (entry) => String(entry?.unitId || "").trim().toUpperCase() === item.code,
         );
+        const isPendingCheck = unit.status === "pending_check" || unit.status === "Chờ kiểm";
         const latestWithdrawalAt = unitHistory
           .filter(
             (entry) =>
               isHandlingUnitWithdrawalHistory(entry) &&
-              toLocalDayKey(entry.createdAt) === todayKey,
+              (isPendingCheck || toLocalDayKey(entry.createdAt) === todayKey),
           )
           .reduce((latest, entry) => Math.max(latest, new Date(entry.createdAt).getTime() || 0), 0);
         const latestCheckAt = unitHistory
           .filter(isHandlingUnitCompletedCheckHistory)
           .reduce((latest, entry) => Math.max(latest, new Date(entry.createdAt).getTime() || 0), 0);
-        if (!latestWithdrawalAt || latestCheckAt >= latestWithdrawalAt) {
-          throw new Error(`Kiện [${item.code}] không có lượt rút mới cần kiểm trong hôm nay.`);
+        if (!isPendingCheck && (!latestWithdrawalAt || latestCheckAt >= latestWithdrawalAt)) {
+          throw new Error(`Kiện [${item.code}] không ở trạng thái chờ kiểm và không có lượt rút mới cần kiểm trong hôm nay.`);
         }
 
         const variance = item.actualQuantity - item.expectedQuantity;
