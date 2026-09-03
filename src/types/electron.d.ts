@@ -334,7 +334,7 @@ export interface ElectronAPI {
       baseUnit: string;
       conversionFactor: number;
       quantity: number;
-      supplierId?: number;
+      supplierId: number;
       location: { zone: string; rack?: string };
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
     resolveQrLabel: (
