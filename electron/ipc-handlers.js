@@ -8823,6 +8823,7 @@ const TELEGRAM_MAIN_KEYBOARD = {
 
 const TELEGRAM_KHUI_SKU_PAGE_SIZE = 6;
 const TELEGRAM_KHUI_UNIT_PAGE_SIZE = 6;
+const TELEGRAM_RUT_GROUP_PAGE_SIZE = 7;
 
 function getHandlingUnitCode(unit) {
   return String(unit?.code || unit?.id || "").trim();
@@ -8830,6 +8831,46 @@ function getHandlingUnitCode(unit) {
 
 function getHandlingUnitSku(unit) {
   return String(unit?.sku || unit?.skuName || "").trim();
+}
+
+function displayTelegramProductGroup(name) {
+  return String(name || "Sản phẩm").replace(/^\s*khẩu\s*trang\s*/i, "").trim() || "Sản phẩm";
+}
+
+async function getTelegramHandlingUnitCatalog(units) {
+  const metadataByCode = new Map();
+  const productIds = [...new Set(units.map((unit) => Number(unit.productId)).filter(Number.isFinite))];
+  let products = [];
+  if (prisma && productIds.length > 0) {
+    try {
+      products = await prisma.product.findMany({
+        where: { id: { in: productIds } },
+        select: { id: true, sku: true, name: true, variants: true },
+      });
+    } catch {}
+  }
+  const productById = new Map(products.map((product) => [Number(product.id), product]));
+
+  units.forEach((unit) => {
+    const product = productById.get(Number(unit.productId));
+    let variants = [];
+    try {
+      const parsed = JSON.parse(String(product?.variants || "[]"));
+      if (Array.isArray(parsed)) variants = parsed;
+    } catch {}
+    const sku = getHandlingUnitSku(unit);
+    const variant = variants.find(
+      (item) => String(item?.sku || "").trim().toUpperCase() === sku.toUpperCase(),
+    );
+    const productName = String(product?.name || unit.productGroup || "Sản phẩm").trim();
+    metadataByCode.set(getHandlingUnitCode(unit), {
+      productKey: product?.id ? `product:${product.id}` : `name:${productName.toUpperCase()}`,
+      productName,
+      displayProductName: displayTelegramProductGroup(productName),
+      variantName: String(unit.color || variant?.color || sku).trim() || sku,
+    });
+  });
+  return metadataByCode;
 }
 
 function compareHandlingUnitsFifo(left, right) {
@@ -8918,7 +8959,7 @@ async function renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard) {
   }
 }
 
-async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
+async function sendRutHangMenu(chatId, messageId = null, forceList = false, requestedPage = 0) {
   const list = await getAllHandlingUnitsFromStore();
   const openedUnits = list.filter(
     (u) => u.status === "opened" || u.status === "Đang sử dụng",
@@ -8942,34 +8983,47 @@ async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
     return;
   }
 
-  // Lối tắt chỉ áp dụng khi mở menu rút hàng lần đầu. Nút "Chọn kiện khác"
-  // phải luôn hiện danh sách để người dùng có thể khui hoặc chọn kiện khác.
-  if (openedUnits.length === 1 && availableOpenedUnits.length === 1 && !forceList) {
-    await sendPickQuantityMenu(
-      chatId,
-      availableOpenedUnits[0].code || availableOpenedUnits[0].id,
-      messageId,
-    );
-    return;
-  }
-
-  // Vẫn hiển thị SKU bị khóa; bước chọn kiện sẽ giải thích yêu cầu kiểm thực tế.
-  const inlineKeyboard = openedUnits.map((u) => {
-    const code = u.code || u.id;
-    const remaining = u.remainingQuantity ?? u.currentPcs ?? 0;
-    const unit = u.baseUnit || u.unitName || "Gói";
-    const sku = u.sku || u.skuName || "";
-    const pendingCode = pendingSkuCodes.get(String(sku).trim().toUpperCase());
-    return [
-      {
-        text: pendingCode
-          ? `🔒 ${code} · ${sku} (chờ kiểm ${pendingCode})`
-          : `📦 ${code} · ${sku} (Tồn: ${remaining.toLocaleString("vi-VN")} ${unit})`,
-        callback_data: `pick_unit:${code}`,
-      },
-    ];
+  const metadata = await getTelegramHandlingUnitCatalog(openedUnits);
+  const productGroups = new Map();
+  openedUnits.forEach((unit) => {
+    const code = getHandlingUnitCode(unit);
+    const meta = metadata.get(code);
+    const key = meta?.productKey || `sku:${getHandlingUnitSku(unit).toUpperCase()}`;
+    if (!productGroups.has(key)) {
+      productGroups.set(key, {
+        name: meta?.displayProductName || getHandlingUnitSku(unit),
+        units: [],
+      });
+    }
+    productGroups.get(key).units.push(unit);
   });
-
+  const groups = [...productGroups.values()].sort((left, right) =>
+    left.name.localeCompare(right.name, "vi", { numeric: true }),
+  );
+  const pageCount = Math.ceil(groups.length / TELEGRAM_RUT_GROUP_PAGE_SIZE);
+  const page = Math.min(Math.max(Number(requestedPage) || 0, 0), pageCount - 1);
+  const pageGroups = groups.slice(
+    page * TELEGRAM_RUT_GROUP_PAGE_SIZE,
+    (page + 1) * TELEGRAM_RUT_GROUP_PAGE_SIZE,
+  );
+  const inlineKeyboard = pageGroups.map((group) => {
+    const skuCount = new Set(group.units.map((unit) => getHandlingUnitSku(unit).toUpperCase())).size;
+    const lockedCount = group.units.filter((unit) =>
+      pendingSkuCodes.has(getHandlingUnitSku(unit).toUpperCase()),
+    ).length;
+    const anchorCode = getHandlingUnitCode(group.units[0]);
+    return [{
+      text: `${lockedCount === group.units.length ? "🔒" : "📦"} ${group.name} · ${skuCount} phân loại`,
+      callback_data: `rut_group:${anchorCode}`,
+    }];
+  });
+  if (pageCount > 1) {
+    const navigation = [];
+    if (page > 0) navigation.push({ text: "◀️ Trước", callback_data: `rut_groups:${page - 1}` });
+    navigation.push({ text: `${page + 1}/${pageCount}`, callback_data: "khui_noop" });
+    if (page < pageCount - 1) navigation.push({ text: "Tiếp ▶️", callback_data: `rut_groups:${page + 1}` });
+    inlineKeyboard.push(navigation);
+  }
   inlineKeyboard.push([
     { text: "📊 Xem báo cáo tồn", callback_data: "menu_ton" },
     { text: "🔓 Khui thêm kiện", callback_data: "menu_khui" },
@@ -8978,14 +9032,62 @@ async function sendRutHangMenu(chatId, messageId = null, forceList = false) {
   const blockedNote = openedUnits.length > availableOpenedUnits.length
     ? `\n\n⚠️ Một số SKU đang bị khóa vì còn kiện chờ kiểm thực tế.`
     : "";
-  const text = `📦 <b>CHỌN KIỆN CẦN RÚT HÀNG:</b>\n<i>(Chạm vào kiện bên dưới để chọn nhanh số lượng rút)</i>${blockedNote}`;
-  const markup = { inline_keyboard: inlineKeyboard };
+  const text = `📦 <b>CHỌN DÒNG SẢN PHẨM</b>\n<i>Chọn danh mục cha để xem các màu/phân loại đang mở</i>${blockedNote}`;
+  await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
+}
 
-  if (messageId) {
-    await editTelegramWmsMessage(chatId, messageId, text, markup);
-  } else {
-    await sendTelegramWmsMessage(chatId, text, markup);
+async function sendRutHangVariantMenu(chatId, anchorCode, messageId = null) {
+  const list = await getAllHandlingUnitsFromStore();
+  const openedUnits = list.filter(
+    (unit) => unit.status === "opened" || unit.status === "Đang sử dụng",
+  );
+  const metadata = await getTelegramHandlingUnitCatalog(openedUnits);
+  const anchorMeta = metadata.get(String(anchorCode));
+  const anchorUnit = openedUnits.find(
+    (unit) => getHandlingUnitCode(unit).toUpperCase() === String(anchorCode).toUpperCase(),
+  );
+  if (!anchorUnit || !anchorMeta) {
+    await sendRutHangMenu(chatId, messageId, true);
+    return;
   }
+  const groupUnits = openedUnits.filter((unit) =>
+    metadata.get(getHandlingUnitCode(unit))?.productKey === anchorMeta.productKey,
+  );
+  const pendingSkuCodes = new Map();
+  list.forEach((unit) => {
+    if (unit.status !== "pending_check" && unit.status !== "Chờ kiểm") return;
+    const skuKey = getHandlingUnitSku(unit).toUpperCase();
+    if (skuKey && !pendingSkuCodes.has(skuKey)) pendingSkuCodes.set(skuKey, getHandlingUnitCode(unit));
+  });
+  const inlineKeyboard = groupUnits
+    .sort((left, right) => {
+      const leftName = metadata.get(getHandlingUnitCode(left))?.variantName || getHandlingUnitSku(left);
+      const rightName = metadata.get(getHandlingUnitCode(right))?.variantName || getHandlingUnitSku(right);
+      return leftName.localeCompare(rightName, "vi", { numeric: true });
+    })
+    .map((unit) => {
+      const code = getHandlingUnitCode(unit);
+      const sku = getHandlingUnitSku(unit);
+      const pendingCode = pendingSkuCodes.get(sku.toUpperCase());
+      const variantName = metadata.get(code)?.variantName || sku;
+      const remaining = unit.remainingQuantity ?? unit.currentPcs ?? 0;
+      const unitName = unit.baseUnit || unit.unitName || "Gói";
+      return [{
+        text: pendingCode
+          ? `🔒 ${variantName} · ${remaining.toLocaleString("vi-VN")} ${unitName}`
+          : `📦 ${variantName} · ${remaining.toLocaleString("vi-VN")} ${unitName}`,
+        callback_data: `pick_unit:${code}`,
+      }];
+    });
+  inlineKeyboard.push([{ text: "🔙 Danh mục sản phẩm", callback_data: "menu_rut_list" }]);
+  const lockedCount = groupUnits.filter((unit) =>
+    pendingSkuCodes.has(getHandlingUnitSku(unit).toUpperCase()),
+  ).length;
+  const text =
+    `📦 <b>${anchorMeta.displayProductName}</b>\n` +
+    `<i>Chọn màu/phân loại cần rút</i>` +
+    (lockedCount > 0 ? `\n\n🔒 ${lockedCount} phân loại đang chờ kiểm thực tế.` : "");
+  await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
 }
 
 async function sendKhuiKienMenu(chatId, messageId = null, requestedPage = 0) {
@@ -9141,6 +9243,14 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
     return;
   }
 
+  const unitMetadata = (await getTelegramHandlingUnitCatalog([unit])).get(
+    getHandlingUnitCode(unit),
+  );
+  const backToProductButton = {
+    text: `🔙 Quay lại ${unitMetadata?.displayProductName || "phân loại"}`,
+    callback_data: `rut_group:${getHandlingUnitCode(unit)}`,
+  };
+
   const pendingConflict = list.find((candidate) =>
     String(candidate.code || candidate.id || "").trim().toUpperCase() !== String(code).trim().toUpperCase()
     && String(candidate.sku || candidate.skuName || "").trim().toUpperCase() === String(unit.sku || unit.skuName || "").trim().toUpperCase()
@@ -9149,7 +9259,7 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
   if (pendingConflict || unit.status === "pending_check" || unit.status === "Chờ kiểm") {
     const blocker = pendingConflict || unit;
     const text = `⛔ <b>KHÔNG THỂ RÚT HÀNG</b>\n\n${buildPendingHandlingUnitBlockMessage(unit.sku || unit.skuName, blocker, "rút hàng")}`;
-    const markup = { inline_keyboard: [[{ text: "🔙 Chọn kiện khác", callback_data: "menu_rut_list" }]] };
+    const markup = { inline_keyboard: [[backToProductButton]] };
     if (messageId) await editTelegramWmsMessage(chatId, messageId, text, markup);
     else await sendTelegramWmsMessage(chatId, text, markup);
     return;
@@ -9182,7 +9292,7 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
     { text: "✍️ Nhập số lượng tùy chọn", callback_data: `custom_pick:${code}` },
   ]);
   inlineKeyboard.push([
-    { text: "🔙 Chọn kiện khác", callback_data: "menu_rut_list" },
+    backToProductButton,
   ]);
 
   const text =
@@ -9221,6 +9331,20 @@ async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = 
       queryId,
       "Nhóm này chưa được kết nối với hệ thống kho.",
     );
+    return;
+  }
+
+  if (data.startsWith("rut_groups:")) {
+    const page = Number(data.split(":")[1]) || 0;
+    await answerTelegramCallbackQuery(queryId);
+    await sendRutHangMenu(chatId, messageId, true, page);
+    return;
+  }
+
+  if (data.startsWith("rut_group:")) {
+    const anchorCode = data.slice("rut_group:".length);
+    await answerTelegramCallbackQuery(queryId);
+    await sendRutHangVariantMenu(chatId, anchorCode, messageId);
     return;
   }
 
