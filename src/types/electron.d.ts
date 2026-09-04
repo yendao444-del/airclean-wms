@@ -1118,6 +1118,15 @@ export interface ElectronAPI {
       session?: any;
       error?: string;
     }>;
+    createInspectionSession: (data: {
+      skus: string[];
+      assignedTo: string;
+      reason: string;
+    }) => Promise<{
+      success: boolean;
+      session?: any;
+      error?: string;
+    }>;
     createRecheckSession: (data: {
       sourceSessionId: string;
       scope: "mismatch" | "all";

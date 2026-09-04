@@ -102,6 +102,7 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "stockCheck:ensureDailySession",
   "stockCheck:createFullSession",
   "stockCheck:cancelSession",
+  "stockCheck:createInspectionSession",
   "stockCheck:createRecheckSession",
   "stockCheck:updateCount",
   "stockCheck:retryCount",
@@ -1494,6 +1495,7 @@ const DATA_SAFETY_BLOCKED_CHANNELS = new Map([
   ["stockCheck:balanceItems", "Cân bằng nhiều mặt hàng làm thay đổi tồn kho"],
   ["stockCheck:ensureDailySession", "Tạo hoặc sửa phiên kiểm kho dùng chung"],
   ["stockCheck:cancelSession", "Hủy phiên kiểm kho đang thực hiện"],
+  ["stockCheck:createInspectionSession", "Tạo phiếu kiểm kho độc lập"],
   ["stockCheck:createRecheckSession", "Tạo phiên kiểm lại làm thay đổi luồng kiểm kho"],
   ["stockCheck:adminSaveSessions", "Admin lưu toàn bộ phiên kiểm kho có thể ghi đè dữ liệu"],
   ["stockCheck:updateCount", "Sửa số đếm kiểm kho có thể ghi đè từ máy khác"],
@@ -23633,8 +23635,7 @@ function getStockCheckSessionOrThrow(
     throw new Error("Chỉ được thao tác phiên kiểm hàng hôm nay.");
   if (session.status === "cancelled")
     throw new Error("Phiên kiểm hàng đã bị quản trị viên hủy.");
-  const isDailySession =
-    session.type !== "full" && session.type !== "recheck";
+  const isDailySession = session.type === "daily" || session.type === "weekend";
   const hasFullSession = sessions.some(
     (entry) =>
       entry?.date === session.date &&
@@ -23715,8 +23716,8 @@ function repairTodayCarryOverCounts(sessions) {
   return { sessions: repairedSessions, changed };
 }
 
-// Make an unfinished daily check durable across days. This runs in the main
-// process so the obligation does not depend on an admin opening the React page.
+// Daily checks stay attached to their original date. A new day gets a fresh
+// rotated assignment instead of inheriting unfinished SKUs from yesterday.
 function createDailyCarryOverSession(sessions) {
   const today = getStockCheckTodayKey();
   const nowIso = new Date().toISOString();
@@ -23759,92 +23760,33 @@ function createDailyCarryOverSession(sessions) {
     };
   });
 
-  // Repair an old buggy carry-over: its source has just been auto-completed
-  // and the new-day copy has never received a count. Remove only that empty
-  // duplicate; the normal daily assignment will then be generated normally.
-  const repairedSessions = normalizedSessions.filter((session) => {
-    if (
-      session?.type !== "daily" ||
-      session?.date !== today ||
-      session?.status === "completed" ||
-      isStockCheckSessionCancelled(session)
-    )
-      return true;
-    const isUntouchedCarryOver =
-      String(session?.notes || "").startsWith("Tiếp tục ") &&
-      Array.isArray(session.items) &&
-      session.items.length > 0 &&
-      session.items.every(
-        (item) => item?.actualStock === null || item?.actualStock === undefined,
-      );
-    if (!isUntouchedCarryOver) return true;
-    const hasCompletedSource = normalizedSessions.some(
-      (source) =>
-        source?.type === "daily" &&
-        source?.date < today &&
-        source?.status === "completed" &&
-        String(session.notes || "").includes(
-          String(source.date || "")
-            .split("-")
-            .reverse()
-            .slice(0, 2)
-            .join("/"),
-        ),
-    );
-    if (hasCompletedSource) changed = true;
-    return !hasCompletedSource;
-  });
-
-  if (
-    repairedSessions.some(
-      (session) => session.date === today && session.type === "daily",
-    )
-  ) {
-    return { sessions: repairedSessions, changed };
-  }
-
-  const source = repairedSessions
-    .filter(
-      (session) =>
-        session.type === "daily" &&
-        session.date < today &&
+  // Remove only untouched carry-over sessions already created by older builds.
+  // Partially counted sessions are preserved to avoid deleting user input.
+  const sessionsWithoutUntouchedCarryOver = normalizedSessions.filter(
+    (session) => {
+      const isTodayCarryOver =
+        session?.type === "daily" &&
+        session?.date === today &&
         !isStockCheckSessionCancelled(session) &&
-        session.status !== "completed" &&
-        !session.rolledOverTo &&
-        Array.isArray(session.items) &&
-        session.items.length > 0,
-    )
-    .sort((a, b) => a.date.localeCompare(b.date))[0];
-  if (!source) return { sessions: repairedSessions, changed };
+        (String(session?.runId || "").startsWith("carry-over-") ||
+          String(session?.notes || "").startsWith("Tiếp tục "));
 
-  const remainingItems = source.items.filter((item) => !item.balanced);
-  // Never copy a fully balanced session into the next day.
-  if (remainingItems.length === 0)
-    return { sessions: repairedSessions, changed };
-  const items = remainingItems;
-  const carryOverSession = {
-    id: today,
-    runId: `carry-over-${today}-${Date.now()}`,
-    date: today,
-    type: "daily",
-    assignedTo: source.assignedTo,
-    assignedName: source.assignedName,
-    status: "in_progress",
-    items: items.map(resetCarriedOverStockCheckItem),
-    carryOverCountResetVersion: 1,
-    notes: `Tiếp tục ${items.length} SKU tồn đọng từ ${source.date}.`,
-    createdAt: new Date().toISOString(),
-  };
-  return {
-    sessions: repairedSessions
-      .map((session) =>
-        session.id === source.id
-          ? { ...session, rolledOverTo: today }
-          : session,
-      )
-      .concat(carryOverSession),
-    changed: true,
-  };
+      if (!isTodayCarryOver) return true;
+
+      const untouched =
+        Array.isArray(session.items) &&
+        session.items.every(
+          (item) =>
+            (item?.actualStock === null || item?.actualStock === undefined) &&
+            item?.balanced !== true,
+        );
+
+      if (untouched) changed = true;
+      return !untouched;
+    },
+  );
+
+  return { sessions: sessionsWithoutUntouchedCarryOver, changed };
 }
 
 function hasValidStockCheckConversion(conversionRates, productName) {
@@ -23932,6 +23874,21 @@ const STOCK_CHECK_LARGE_DIFFERENCE = 10;
 const DAILY_STOCK_CHECK_MIN_SKUS = 12;
 const DAILY_STOCK_CHECK_MAX_SKUS = 15;
 const DAILY_STOCK_CHECK_VARIANT_DIVISOR = 3;
+const TEMPORARY_DAILY_ONLY_MODE = false;
+const TEMPORARY_DAILY_PRODUCT_SCOPE = true;
+const TEMPORARY_DAILY_SCOPE_POLICY_VERSION = 4;
+
+function isTemporaryDailyStockCheckProduct(productOrItem) {
+  const name = String(
+    productOrItem?.name || productOrItem?.productName || "",
+  ).toLocaleUpperCase("vi-VN");
+  const sku = String(productOrItem?.sku || "").toLocaleUpperCase("vi-VN");
+  return (
+    (name.includes("5D") && name.includes("UNICARE")) ||
+    (name.includes("UNICARE") && name.includes("UPF") && name.includes("UV")) ||
+    sku.includes("5DUNI")
+  );
+}
 
 function stockCheckScopeHash(value) {
   return Array.from(String(value || "")).reduce(
@@ -24032,7 +23989,9 @@ function getLatestStockCheckVerificationBySku(sessions, today) {
   const candidates = sessions
     .filter(
       (session) =>
-        String(session?.date || "") <= today && Array.isArray(session?.items),
+        String(session?.date || "") <= today &&
+        (session?.type === "daily" || session?.type === "weekend" || session?.type === "full") &&
+        Array.isArray(session?.items),
     )
     .slice()
     .sort((left, right) => {
@@ -24203,6 +24162,49 @@ async function topUpTodayDailyStockCheckProducts(sessions, tx) {
     select: productSelectForCatalog(),
     orderBy: { createdAt: "asc" },
   });
+  if (TEMPORARY_DAILY_PRODUCT_SCOPE) {
+    const temporaryScopeItems = candidates
+      .filter(isTemporaryDailyStockCheckProduct)
+      .flatMap(expandProductForStockCheck);
+    const temporaryScopeSkus = new Set(
+      temporaryScopeItems.map((item) => String(item.sku)),
+    );
+    let temporaryScopeChanged = false;
+    const temporaryScopeSessions = sessions.map((session) => {
+      if (
+        session?.type !== "daily" ||
+        session?.date !== today ||
+        session?.status === "completed" ||
+        isStockCheckSessionCancelled(session)
+      ) {
+        return session;
+      }
+      const items = Array.isArray(session.items) ? session.items : [];
+      const hasStarted = items.some(
+        (item) =>
+          (item?.actualStock !== null && item?.actualStock !== undefined) ||
+          item?.balanced,
+      );
+      if (hasStarted || !temporaryScopeItems.length) return session;
+      const alreadyMatches =
+        items.length === temporaryScopeItems.length &&
+        items.every((item) => temporaryScopeSkus.has(String(item?.sku || "")));
+      if (
+        alreadyMatches &&
+        session.dailyScopePolicyVersion === TEMPORARY_DAILY_SCOPE_POLICY_VERSION
+      ) {
+        return session;
+      }
+      temporaryScopeChanged = true;
+      return {
+        ...session,
+        items: temporaryScopeItems,
+        dailyScopePolicyVersion: TEMPORARY_DAILY_SCOPE_POLICY_VERSION,
+      };
+    });
+    return { sessions: temporaryScopeSessions, changed: temporaryScopeChanged };
+  }
+
   const alwaysCheckUnicare = candidates.find((product) =>
     isMandatoryFullDailyStockCheckProduct(
       product?.name,
@@ -24577,8 +24579,7 @@ ipcMain.handle("stockCheck:balanceItems", async (event, payload = {}) => {
             throw new Error("Phiên kiểm hàng đã bị quản trị viên hủy.");
           }
           if (
-            session.type !== "full" &&
-            session.type !== "recheck" &&
+            (session.type === "daily" || session.type === "weekend") &&
             sessions.some(
               (entry) =>
                 entry?.date === session.date &&
@@ -24621,7 +24622,7 @@ ipcMain.handle("stockCheck:balanceItems", async (event, payload = {}) => {
             if (stored.balanced) continue;
             if (!stored.stockSnapshotAt) {
               throw new Error(
-                `SKU ${sku} thuộc phiên kiểm cũ chưa có mốc tồn thực tế. Hãy dùng "Kiểm lại" và nhập lại số trước khi cân bằng.`,
+                `SKU ${sku} thuộc phiên kiểm cũ chưa có mốc tồn thực tế. Hãy tạo Phiếu kiểm mới và nhập lại số trước khi cân bằng.`,
               );
             }
 
@@ -24805,6 +24806,7 @@ ipcMain.handle("stockCheck:getSessions", async (_event, options = {}) => {
           const storedSessions = parseStockCheckSessionsFromConfig(record);
           const today = getStockCheckTodayKey();
           if (
+            !TEMPORARY_DAILY_ONLY_MODE &&
             storedSessions.some(
               (session) =>
                 session?.date === today &&
@@ -24816,7 +24818,9 @@ ipcMain.handle("stockCheck:getSessions", async (_event, options = {}) => {
           }
           const carried = createDailyCarryOverSession(storedSessions);
           const repaired = repairTodayCarryOverCounts(carried.sessions);
-          const exempted = applySameDayFullCheckExemptions(repaired.sessions);
+          const exempted = TEMPORARY_DAILY_ONLY_MODE
+            ? { sessions: repaired.sessions, changed: false }
+            : applySameDayFullCheckExemptions(repaired.sessions);
           const normalizedScope = normalizeUntouchedDailyStockCheckScope(
             exempted.sessions,
           );
@@ -24846,6 +24850,9 @@ ipcMain.handle("stockCheck:getSessions", async (_event, options = {}) => {
             (session) =>
               session.date === getStockCheckTodayKey() &&
               ((session.type === "full" && !isStockCheckSessionCancelled(session)) ||
+                ((session.type === "inspection" || session.type === "recheck") &&
+                  normalizeStockCheckUsername(session.createdBy) ===
+                    normalizeStockCheckUsername(currentSession.username)) ||
                 isStockCheckAssignee(session)),
           );
     return {
@@ -24865,7 +24872,9 @@ ipcMain.handle("stockCheck:getSessions", async (_event, options = {}) => {
 ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
   try {
     requireRole("admin", "manager");
-    const requestedItems = Array.isArray(payload.items) ? payload.items : [];
+    const requestedItems = Array.isArray(payload.items)
+      ? payload.items.filter(isTemporaryDailyStockCheckProduct)
+      : [];
     if (!requestedItems.length)
       throw new Error("Chưa có SKU để tạo phiên kiểm.");
 
@@ -24878,6 +24887,7 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
         });
         const storedSessions = parseStockCheckSessionsFromConfig(record);
         if (
+          !TEMPORARY_DAILY_ONLY_MODE &&
           storedSessions.some(
             (session) =>
               session?.date === today &&
@@ -25042,6 +25052,9 @@ ipcMain.handle("stockCheck:ensureDailySession", async (event, payload = {}) => {
 ipcMain.handle("stockCheck:createFullSession", async (event, payload = {}) => {
   try {
     requireRole();
+    if (TEMPORARY_DAILY_ONLY_MODE) {
+      throw new Error("Tạm thời hệ thống chỉ cho phép tạo phiên kiểm hàng ngày.");
+    }
     const assignedTo = String(payload.assignedTo || "").trim();
     if (!assignedTo) throw new Error("Chưa chọn người phụ trách phiên kiểm.");
     const requestedItems = normalizeRequestedStockCheckItems(payload.items);
@@ -25207,10 +25220,149 @@ ipcMain.handle(
 );
 
 ipcMain.handle(
+  "stockCheck:createInspectionSession",
+  async (event, payload = {}) => {
+    try {
+      requireRole("admin", "manager");
+      const assignedTo = String(payload.assignedTo || "").trim();
+      const reason = String(payload.reason || "").trim();
+      const selectedSkus = [
+        ...new Set(
+          (Array.isArray(payload.skus) ? payload.skus : [])
+            .map((sku) => String(sku || "").trim())
+            .filter(Boolean),
+        ),
+      ];
+      if (!assignedTo) throw new Error("Cần chọn người phụ trách phiếu kiểm.");
+      if (!reason) throw new Error("Cần nhập lý do tạo phiếu kiểm.");
+      if (!selectedSkus.length)
+        throw new Error("Cần chọn ít nhất một SKU để kiểm.");
+      if (selectedSkus.length > 500)
+        throw new Error("Mỗi phiếu kiểm được chọn tối đa 500 SKU.");
+
+      const result = await getPrismaDirectTx().$transaction(
+        async (tx) => {
+          await lockStockCheckSessions(tx);
+          const record = await tx.appConfig.findUnique({
+            where: { key: "stockCheckSessionsV2" },
+          });
+          const sessions = parseStockCheckSessionsFromConfig(record);
+          const requestedSkuSet = new Set(selectedSkus);
+          const duplicateSession = sessions.find(
+            (session) =>
+              (session?.type === "inspection" || session?.type === "recheck") &&
+              !isStockCheckSessionCancelled(session) &&
+              !isStockCheckSessionCompleted(session) &&
+              (session.items || []).some((item) =>
+                requestedSkuSet.has(String(item?.sku || "")),
+              ),
+          );
+          if (duplicateSession) {
+            const duplicateSkus = (duplicateSession.items || [])
+              .map((item) => String(item?.sku || ""))
+              .filter((sku) => requestedSkuSet.has(sku));
+            throw new Error(
+              `SKU ${duplicateSkus.join(", ")} đang nằm trong một phiếu kiểm chưa hoàn thành. Hãy hoàn tất hoặc hủy phiếu đó trước.`,
+            );
+          }
+
+          const assignee = await tx.user.findUnique({
+            where: { username: assignedTo },
+            select: {
+              username: true,
+              fullName: true,
+              role: true,
+              status: true,
+              permissions: true,
+            },
+          });
+          if (
+            !assignee ||
+            assignee.status !== "active" ||
+            !isOperationalAssignee(assignee) ||
+            assignee.role !== "manager"
+          ) {
+            throw new Error(
+              "Người phụ trách không hợp lệ hoặc không còn hoạt động.",
+            );
+          }
+
+          const products = await tx.product.findMany({
+            select: productSelectForCatalog(),
+          });
+          const currentItemBySku = new Map(
+            products
+              .flatMap(expandProductForStockCheck)
+              .map((item) => [String(item.sku), item]),
+          );
+          const missingSkus = selectedSkus.filter(
+            (sku) => !currentItemBySku.has(sku),
+          );
+          if (missingSkus.length) {
+            throw new Error(
+              `Không tìm thấy SKU trong danh mục hiện tại: ${missingSkus.join(", ")}.`,
+            );
+          }
+
+          const now = new Date();
+          const today = getStockCheckTodayKey();
+          const items = selectedSkus.map((sku) => currentItemBySku.get(sku));
+          const session = {
+            id: `inspection-${today}-${now.getTime()}`,
+            runId: `inspection-${crypto.randomUUID?.() || now.getTime()}`,
+            date: today,
+            type: "inspection",
+            assignedTo: assignee.username,
+            assignedName: assignee.fullName || assignee.username,
+            status: "in_progress",
+            items,
+            notes: reason.slice(0, 500),
+            createdAt: now.toISOString(),
+            createdBy: currentSession.username,
+          };
+          const updatedSessions = [...sessions, session].slice(-90);
+          await writeStockCheckSessions(updatedSessions, tx);
+          await tx.activityLog.create({
+            data: {
+              module: "stock_check",
+              action: "CREATE_INSPECTION",
+              description: `Tạo phiếu kiểm ${session.id}: ${items.length} SKU, giao ${assignee.username}.`,
+              recordName: session.id,
+              changes: JSON.stringify({
+                assignedTo: assignee.username,
+                reason: session.notes,
+                skus: selectedSkus,
+              }),
+              userName: currentSession.username,
+              severity: "INFO",
+            },
+          });
+          return session;
+        },
+        { timeout: 30000, maxWait: 10000 },
+      );
+
+      return {
+        success: true,
+        session: sanitizeStockCheckSession(
+          result,
+          isPrivilegedStockCheckSession(),
+        ),
+      };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  },
+);
+
+ipcMain.handle(
   "stockCheck:createRecheckSession",
   async (event, payload = {}) => {
     try {
       requireRole("admin", "manager");
+      if (TEMPORARY_DAILY_ONLY_MODE) {
+        throw new Error("Tạm thời hệ thống chỉ cho phép tạo phiên kiểm hàng ngày.");
+      }
       const sourceSessionId = String(payload.sourceSessionId || "").trim();
       const assignedTo = String(payload.assignedTo || "").trim();
       const reason = String(payload.reason || "").trim();
@@ -25780,7 +25932,7 @@ ipcMain.handle("stockCheck:balanceItem", async (event, payload = {}) => {
           }
           if (!item.stockSnapshotAt && !unitAdjustments.length) {
             throw new Error(
-              'Phiên kiểm cũ chưa có mốc tồn thực tế. Hãy dùng "Kiểm lại" và nhập lại số trước khi cân bằng.',
+              'Phiên kiểm cũ chưa có mốc tồn thực tế. Hãy tạo Phiếu kiểm mới và nhập lại số trước khi cân bằng.',
             );
           }
           await requireStockCheckConversion(tx, item.productName);
