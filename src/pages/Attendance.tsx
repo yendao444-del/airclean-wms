@@ -342,6 +342,14 @@ interface ReturnOverdueTracking {
     packer?: string;
 }
 
+interface RefundOverdueTracking {
+    id: number;
+    refundCode?: string;
+    orderNumber?: string;
+    refundDate?: string;
+    status?: string;
+}
+
 interface BonusRecord {
     id: string;
     empId: number;
@@ -540,6 +548,9 @@ const DEFAULT_PACKING_COMMISSION: PackingCommissionConfig = {
     rates: { easy: 20, medium: 30, high: 40 },
     skuLevels: {},
 };
+
+const PACKING_WEEKLY_REWARD_AMOUNT = 100000;
+const PACKING_WEEKLY_REWARD_START = dayjs('2026-08-31').startOf('day');
 
 const normalizePackingSku = (value: unknown) => String(value || '').trim().toUpperCase();
 
@@ -828,20 +839,19 @@ const VAT_FIRST_FINE_AFTER_DAYS = 5;
 const VAT_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-11T00:00:00');
 const RETURN_OVERDUE_FINE_FIRST_AMOUNT = 30000;
 const RETURN_OVERDUE_FINE_DAILY_INCREMENT = 10000;
-const RETURN_FIRST_FINE_AFTER_DAYS = 8;
-const RETURN_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-08-24T00:00:00');
-const RETURN_LEGACY_GRACE_NOTICE_AT = dayjs('2026-08-23T00:00:00');
-const RETURN_LEGACY_FIRST_FINE_AT = dayjs('2026-08-27T00:00:00');
+const RETURN_FIRST_FINE_AFTER_DAYS = 10;
+const REFUND_FIRST_FINE_AFTER_DAYS = 8;
+const RETURN_FINE_POLICY_EFFECTIVE_AT = dayjs('2026-09-04T00:00:00');
 const RETURN_OVERDUE_RESPONSIBLE_USERNAME = 'nguyendinhtoan';
+const REFUND_OVERDUE_POLICY_EFFECTIVE_AT = dayjs('2026-09-04T00:00:00');
+const REFUND_OVERDUE_RESPONSIBLE_USERNAME = 'nguyenvankhanh';
 
-const isLegacyReturnOverdueAtRollout = (returnAt: dayjs.Dayjs) =>
-    returnAt.isBefore(RETURN_FINE_POLICY_EFFECTIVE_AT, 'day')
-    && !returnAt.startOf('day').add(5, 'day').isAfter(RETURN_LEGACY_GRACE_NOTICE_AT);
-
-const getRawReturnFirstFineDate = (returnAt: dayjs.Dayjs) =>
-    isLegacyReturnOverdueAtRollout(returnAt)
-        ? RETURN_LEGACY_FIRST_FINE_AT
-        : returnAt.startOf('day').add(RETURN_FIRST_FINE_AFTER_DAYS, 'day');
+const getRawReturnFirstFineDate = (returnAt: dayjs.Dayjs) => {
+    const normalFirstFineAt = returnAt.startOf('day').add(RETURN_FIRST_FINE_AFTER_DAYS, 'day');
+    return normalFirstFineAt.isBefore(RETURN_FINE_POLICY_EFFECTIVE_AT)
+        ? RETURN_FINE_POLICY_EFFECTIVE_AT
+        : normalFirstFineAt;
+};
 
 const moveToNextReturnFineDay = (date: dayjs.Dayjs) => {
     let cursor = date.startOf('day');
@@ -863,17 +873,11 @@ const getReturnFineDate = (returnAt: dayjs.Dayjs, stage: number) =>
     addReturnFineDays(getRawReturnFirstFineDate(returnAt), Math.max(0, stage - 1));
 
 const getReturnFineId = (returnId: number, returnAt: dayjs.Dayjs, stage: number) => {
-    const baseId = `return-overdue-${returnId}-stage-${stage}`;
-    const legacyDate = getRawReturnFirstFineDate(returnAt).add(Math.max(0, stage - 1), 'day');
-    const correctedDate = getReturnFineDate(returnAt, stage);
-    return correctedDate.isSame(legacyDate, 'day')
-        ? baseId
-        : `${baseId}-workday-${correctedDate.format('YYYYMMDD')}`;
+    const penaltyDate = getReturnFineDate(returnAt, stage);
+    return `return-overdue-${returnId}-stage-${stage}-day10-workday-${penaltyDate.format('YYYYMMDD')}`;
 };
 
 const getReturnFineStage = (returnAt: dayjs.Dayjs, now = dayjs()) => {
-    const isNewPolicyReturn = !returnAt.isBefore(RETURN_FINE_POLICY_EFFECTIVE_AT, 'day');
-    if (!isNewPolicyReturn && !isLegacyReturnOverdueAtRollout(returnAt)) return 0;
     const firstFineAt = getReturnFineDate(returnAt, 1);
     if (now.isBefore(firstFineAt)) return 0;
     let stage = 0;
@@ -883,6 +887,29 @@ const getReturnFineStage = (returnAt: dayjs.Dayjs, now = dayjs()) => {
 
 const getReturnFineAmount = (stage: number) =>
     RETURN_OVERDUE_FINE_FIRST_AMOUNT + (Math.max(1, stage) - 1) * RETURN_OVERDUE_FINE_DAILY_INCREMENT;
+
+const getRawRefundFirstFineDate = (refundAt: dayjs.Dayjs) => {
+    const normalFirstFineAt = refundAt.startOf('day').add(REFUND_FIRST_FINE_AFTER_DAYS, 'day');
+    return normalFirstFineAt.isBefore(REFUND_OVERDUE_POLICY_EFFECTIVE_AT)
+        ? REFUND_OVERDUE_POLICY_EFFECTIVE_AT
+        : normalFirstFineAt;
+};
+
+const getRefundFineDate = (refundAt: dayjs.Dayjs, stage: number) =>
+    addReturnFineDays(getRawRefundFirstFineDate(refundAt), Math.max(0, stage - 1));
+
+const getRefundFineStage = (refundAt: dayjs.Dayjs, now = dayjs()) => {
+    const firstFineAt = getRefundFineDate(refundAt, 1);
+    if (now.isBefore(firstFineAt)) return 0;
+    let stage = 0;
+    while (stage < 366 && !now.isBefore(getRefundFineDate(refundAt, stage + 1))) stage += 1;
+    return stage;
+};
+
+const getRefundFineId = (refundId: number, refundAt: dayjs.Dayjs, stage: number) => {
+    const penaltyDate = getRefundFineDate(refundAt, stage);
+    return `refund-overdue-${refundId}-stage-${stage}-workday-${penaltyDate.format('YYYYMMDD')}`;
+};
 
 // Sunday is not a VAT penalty day. The 5-day grace period remains unchanged;
 // if a fine date lands on Sunday it moves to the next chargeable day, and the
@@ -1074,6 +1101,77 @@ const matchPacker = (packerStr: any, emp: any) => {
     if (n && (p === n || p.includes(n))) return true;
     if (f && (p === f || f.includes(p) || p.includes(f))) return true;
     return false;
+};
+
+interface PackingWeeklyResult {
+    weekKey: string;
+    weekStart: dayjs.Dayjs;
+    weekEnd: dayjs.Dayjs;
+    leader?: Employee;
+    units: number;
+    orderCount: number;
+    completed: boolean;
+}
+
+const getPackingWeekStart = (value: dayjs.ConfigType) => {
+    const date = dayjs(value).startOf('day');
+    return date.subtract((date.day() + 6) % 7, 'day');
+};
+
+const getPackingLoadStart = (rangeStart: dayjs.Dayjs) => {
+    const monthStart = rangeStart.startOf('day');
+    const weekStart = getPackingWeekStart(monthStart);
+    return !weekStart.isBefore(PACKING_WEEKLY_REWARD_START) ? weekStart : monthStart;
+};
+
+function buildPackingWeeklyResults(orderLogs: PackingOrderLog[], employeesList: Employee[], asOf: dayjs.Dayjs): PackingWeeklyResult[] {
+    const weeks = new Map<string, Map<number, { employee: Employee; units: number; orderCount: number }>>();
+
+    orderLogs.forEach(order => {
+        const orderTime = dayjs(order.timestamp);
+        if (!orderTime.isValid() || orderTime.isBefore(PACKING_WEEKLY_REWARD_START) || orderTime.isAfter(asOf)) return;
+        const employee = employeesList.find(item => matchPacker(order.packer, item));
+        if (!employee) return;
+        const weekStart = getPackingWeekStart(orderTime);
+        const weekKey = weekStart.format('YYYY-MM-DD');
+        if (!weeks.has(weekKey)) weeks.set(weekKey, new Map());
+        const scores = weeks.get(weekKey)!;
+        const current = scores.get(employee.id) || { employee, units: 0, orderCount: 0 };
+        current.units += calcPacksFromItems(order.items);
+        current.orderCount += 1;
+        scores.set(employee.id, current);
+    });
+
+    return [...weeks.entries()].map(([weekKey, scores]) => {
+        const weekStart = dayjs(weekKey).startOf('day');
+        const weekEnd = weekStart.add(6, 'day');
+        const ranking = [...scores.values()].sort((left, right) =>
+            right.units - left.units || right.orderCount - left.orderCount || left.employee.id - right.employee.id
+        );
+        return {
+            weekKey,
+            weekStart,
+            weekEnd,
+            leader: ranking[0]?.employee,
+            units: ranking[0]?.units || 0,
+            orderCount: ranking[0]?.orderCount || 0,
+            completed: asOf.isAfter(weekEnd.endOf('day')),
+        };
+    }).sort((left, right) => left.weekStart.valueOf() - right.weekStart.valueOf());
+}
+
+const packingWeeklyResultToBonus = (result: PackingWeeklyResult): BonusRecord | null => {
+    if (!result.completed || !result.leader || result.units <= 0) return null;
+    return {
+        id: `auto-packing-week-${result.weekKey}`,
+        empId: result.leader.id,
+        type: 'Thưởng đóng gói tuần',
+        detail: `Top sản lượng đóng gói tuần ${result.weekStart.format('DD/MM')} - ${result.weekEnd.format('DD/MM/YYYY')}`,
+        amount: PACKING_WEEKLY_REWARD_AMOUNT,
+        date: result.weekEnd.endOf('day').toISOString(),
+        createdBy: 'system',
+        createdByName: 'Hệ thống',
+    };
 };
 
 const matchTaskAssigneeToEmployee = (assigneeStr: any, emp: any) => {
@@ -3261,7 +3359,7 @@ export default function Attendance() {
             message.success({ key: loadingKey, content: 'Đang dùng đúng snapshot đã chốt, không tính lại từ dữ liệu nền.', duration: 2 });
         } else {
             try {
-                const freshPackingLogs = await loadPackingOrders(overviewDateRange[0].startOf('day').toISOString(), { strict: true });
+                const freshPackingLogs = await loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { strict: true });
                 freshPayrollData = buildPayrollDataFromPackingLogs(freshPackingLogs);
                 message.success({ key: loadingKey, content: 'Đã đồng bộ dữ liệu đóng gói đầy đủ.', duration: 2 });
             } catch (error: any) {
@@ -3359,7 +3457,7 @@ export default function Attendance() {
     };
 
     const [activeTab, setActiveTab] = useState('overview');
-    const [bonusView, setBonusView] = useState<'personal' | 'manage'>('personal');
+    const [bonusView, setBonusView] = useState<'personal' | 'manage'>(() => isAdmin ? 'manage' : 'personal');
     const [bonusSearch, setBonusSearch] = useState('');
     const [config, setConfig] = useState<PenaltyConfig>({
         graceMinutes: 5,
@@ -3477,6 +3575,7 @@ export default function Attendance() {
     } | null>(null);
     const [purchaseVatTracking, setPurchaseVatTracking] = useState<PurchaseVatTracking[]>([]);
     const [returnOverdueTracking, setReturnOverdueTracking] = useState<ReturnOverdueTracking[]>([]);
+    const [refundOverdueTracking, setRefundOverdueTracking] = useState<RefundOverdueTracking[]>([]);
     const [dailyTaskTracking, setDailyTaskTracking] = useState<any[]>([]);
     const [evidencePenaltyRecords, setEvidencePenaltyRecords] = useState<any[]>([]);
     const [stockCheckSessions, setStockCheckSessions] = useState<any[]>([]);
@@ -3901,6 +4000,7 @@ export default function Attendance() {
 
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);
     const [packingDateRange, setPackingDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
+    const [packingRewardNow, setPackingRewardNow] = useState(() => dayjs());
     const fineSourcesRangeKeyRef = useRef('');
 
     const packingOrderLogsRef = useRef<PackingOrderLog[]>([]);
@@ -3910,8 +4010,14 @@ export default function Attendance() {
     const [packingReadyKey, setPackingReadyKey] = useState('');
     const [packingLoadError, setPackingLoadError] = useState('');
     const [packingOrdersLoading, setPackingOrdersLoading] = useState(false);
+
+    useEffect(() => {
+        const timer = window.setInterval(() => setPackingRewardNow(dayjs()), 60_000);
+        return () => window.clearInterval(timer);
+    }, []);
+
     const loadPackingOrders = async (since?: string, options?: { strict?: boolean }): Promise<PackingOrderLog[]> => {
-        const sinceVal = since || overviewDateRange[0].startOf('day').toISOString();
+        const sinceVal = since || getPackingLoadStart(overviewDateRange[0]).toISOString();
         const untilVal = overviewDateRange[1].endOf('day').toISOString();
         const requestKey = `${dayjs(sinceVal).startOf('day').valueOf()}-${dayjs(untilVal).endOf('day').valueOf()}`;
         packingRequestKeyRef.current = requestKey;
@@ -3929,7 +4035,7 @@ export default function Attendance() {
         const task = (async () => {
         try {
             const api = (window as any).electronAPI;
-            const rangeDays = Math.max(overviewDateRange[1].endOf('day').diff(overviewDateRange[0].startOf('day'), 'day') + 1, 1);
+            const rangeDays = Math.max(overviewDateRange[1].endOf('day').diff(dayjs(sinceVal).startOf('day'), 'day') + 1, 1);
             const packingFetchLimit = Math.min(Math.max(rangeDays * 800, 2000), 10000);
 
             // A timeout is not an empty business result. Keep the last known
@@ -4116,6 +4222,19 @@ export default function Attendance() {
         }
     };
 
+    const loadRefundOverdueTracking = async (requestKey?: string) => {
+        try {
+            const api = (window as any).electronAPI;
+            const result = await api.refunds.getAll();
+            if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) {
+                setRefundOverdueTracking(result?.success && Array.isArray(result.data) ? result.data : []);
+            }
+        } catch (error) {
+            console.error('Lỗi tải dữ liệu hàng hoàn quá hạn:', error);
+            if (!requestKey || fineSourcesRangeKeyRef.current === requestKey) setRefundOverdueTracking([]);
+        }
+    };
+
     const loadDailyTaskTracking = async (requestKey?: string) => {
         const isCurrentRequest = () => !requestKey || fineSourcesRangeKeyRef.current === requestKey;
         try {
@@ -4174,7 +4293,7 @@ export default function Attendance() {
     useEffect(() => {
         if (activeTab !== 'overview' && activeTab !== 'fines') return;
         if (activeTab === 'overview') {
-            loadPackingOrders(overviewDateRange[0].startOf('day').toISOString());
+            loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString());
         }
         fineSourcesRangeKeyRef.current = fineSourcesRangeKey;
         // Supporting indicators are not needed for the first overview paint.
@@ -4183,6 +4302,7 @@ export default function Attendance() {
             void Promise.all([
                 loadPurchaseVatTracking(overviewDateRange[0].subtract(7, 'day').startOf('day').toISOString(), fineSourcesRangeKey),
                 loadReturnOverdueTracking(fineSourcesRangeKey),
+                loadRefundOverdueTracking(fineSourcesRangeKey),
                 loadDailyTaskTracking(fineSourcesRangeKey),
             ]).finally(() => {
                 if (fineSourcesRangeKeyRef.current === fineSourcesRangeKey) {
@@ -4343,7 +4463,7 @@ export default function Attendance() {
                     id: getReturnFineId(record.id, returnAt, stage),
                     empId: employee.id,
                     type: 'Trả hàng quá hạn',
-                    detail: `Phiếu ${complaintCode}${record.orderNumber ? ` - đơn ${record.orderNumber}` : ''} quá 7 ngày chưa Hoàn thành - phạt lần ${stage}`,
+                    detail: `Phiếu ${complaintCode}${record.orderNumber ? ` - đơn ${record.orderNumber}` : ''} quá 10 ngày chưa Hoàn thành - phạt lần ${stage}`,
                     amount: getReturnFineAmount(stage),
                     date: penaltyDate.toISOString(),
                     source: 'returns_overdue' as any,
@@ -4366,7 +4486,8 @@ export default function Attendance() {
             const returnAt = dayjs(record?.complaintDate || record?.returnDate);
             const fineAt = dayjs(fine.date);
             if (!returnAt.isValid() || !fineAt.isValid()) return false;
-            return !fineAt.isSame(getReturnFineDate(returnAt, Number(idMatch[2])), 'day');
+            return !String(fine.id).includes('-day10-')
+                || !fineAt.isSame(getReturnFineDate(returnAt, Number(idMatch[2])), 'day');
         });
         const invalidIds = new Set(invalidFines.map(fine => fine.id).filter(Boolean));
         const retainedFines = extraFines.filter(fine => !invalidIds.has(fine.id));
@@ -4387,7 +4508,7 @@ export default function Attendance() {
             changedBy: actor.username,
             changedByName: actor.displayName,
             before: fine,
-            note: 'Hệ thống gỡ khoản phạt Trả hàng sai lịch: không tính Chủ nhật và ngày lễ toàn quốc.',
+            note: 'Hệ thống gỡ khoản phạt Trả hàng theo hạn cũ; chính sách mới chỉ phạt sau 10 ngày và không tính Chủ nhật/ngày lễ.',
         }));
         const auditEntries: FineAuditLog[] = missing.map(fine => ({
             id: `flog-return-overdue-${fine.id}`,
@@ -4404,6 +4525,71 @@ export default function Attendance() {
         setFineAuditLog(nextAuditLog);
         void persistAttendanceSnapshotNow({ extraFines: nextFines, fineAuditLog: nextAuditLog });
     }, [isAdmin, isDbLoaded, employees.length, autoReturnOverdueFines, extraFines, fineAuditLog, returnOverdueTracking, persistAttendanceSnapshotNow]);
+
+    const autoRefundOverdueFines = useMemo(() => {
+        return refundOverdueTracking.flatMap((record) => {
+            const status = normalizeAttendanceText(record.status || '');
+            if (['completed', 'complete', 'hoan thanh', 'received', 'da nhan', 'lost', 'mat hang', 'cancelled', 'canceled'].includes(status)) return [];
+
+            const refundAt = dayjs(record.refundDate);
+            if (!refundAt.isValid()) return [];
+            const fineStage = getRefundFineStage(refundAt);
+            if (fineStage === 0) return [];
+
+            const employee = employees.find(emp =>
+                normalizeAttendanceText(emp.username) === normalizeAttendanceText(REFUND_OVERDUE_RESPONSIBLE_USERNAME)
+            );
+            if (!employee) return [];
+            const refundCode = record.refundCode || record.orderNumber || `#${record.id}`;
+            const orderSuffix = record.orderNumber && record.orderNumber !== refundCode
+                ? ` - đơn ${record.orderNumber}`
+                : '';
+
+            return Array.from({ length: fineStage }, (_, index) => {
+                const stage = index + 1;
+                const penaltyDate = getRefundFineDate(refundAt, stage);
+                return {
+                    id: getRefundFineId(record.id, refundAt, stage),
+                    empId: employee.id,
+                    type: 'Hàng hoàn quá hạn',
+                    detail: `Phiếu ${refundCode}${orderSuffix} quá 7 ngày chưa nhận hàng - phạt lần ${stage}`,
+                    amount: getReturnFineAmount(stage),
+                    date: penaltyDate.toISOString(),
+                    source: 'refunds_overdue' as any,
+                };
+            }).filter(fine => inOverviewRange(fine.date));
+        });
+    }, [employees, refundOverdueTracking, overviewDateRange]);
+
+    // Persist each chargeable day as a historical deduction. Completing or
+    // receiving the parcel stops future stages without erasing prior fines.
+    useEffect(() => {
+        if (!isAdmin || !isDbLoaded || employees.length === 0 || autoRefundOverdueFines.length === 0) return;
+        const existingIds = new Set(extraFines
+            .filter(fine => fine.source === 'refunds_overdue')
+            .map(fine => fine.id)
+            .filter(Boolean));
+        const deletedIds = new Set(getDeletedFineKeys(fineAuditLog));
+        const missing = autoRefundOverdueFines.filter(fine => fine.id && !existingIds.has(fine.id) && !deletedIds.has(fine.id));
+        if (missing.length === 0) return;
+
+        const now = new Date().toLocaleString('vi-VN');
+        const actor = fineAuditActorRef.current;
+        const auditEntries: FineAuditLog[] = missing.map(fine => ({
+            id: `flog-refund-overdue-${fine.id}`,
+            action: 'create',
+            timestamp: now,
+            changedBy: actor.username,
+            changedByName: actor.displayName,
+            after: fine,
+            note: `Tự động ghi nhận phạt Hàng hoàn quá hạn: ${fine.detail}`,
+        }));
+        const nextFines = [...extraFines, ...missing];
+        const nextAuditLog = [...fineAuditLog, ...auditEntries];
+        setExtraFines(nextFines);
+        setFineAuditLog(nextAuditLog);
+        void persistAttendanceSnapshotNow({ extraFines: nextFines, fineAuditLog: nextAuditLog });
+    }, [isAdmin, isDbLoaded, employees.length, autoRefundOverdueFines, extraFines, fineAuditLog, persistAttendanceSnapshotNow]);
 
     const autoDeadlineOverdueFines = useMemo(() => {
         const officialEmployees = employees.filter(emp => emp.type === 'Official');
@@ -4571,7 +4757,11 @@ export default function Attendance() {
                 .filter(fine => fine.source === 'returns_overdue')
                 .map(fine => fine.id)
                 .filter(Boolean));
-            const rows = [...finesData, ...extraFines, ...autoVatOverdueFines.filter(fine => !fine.id || !persistedVatIds.has(fine.id)), ...autoReturnOverdueFines.filter(fine => !fine.id || !persistedReturnIds.has(fine.id)), ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoStockCheckMissingFines]
+            const persistedRefundIds = new Set(extraFines
+                .filter(fine => fine.source === 'refunds_overdue')
+                .map(fine => fine.id)
+                .filter(Boolean));
+            const rows = [...finesData, ...extraFines, ...autoVatOverdueFines.filter(fine => !fine.id || !persistedVatIds.has(fine.id)), ...autoReturnOverdueFines.filter(fine => !fine.id || !persistedReturnIds.has(fine.id)), ...autoRefundOverdueFines.filter(fine => !fine.id || !persistedRefundIds.has(fine.id)), ...autoDeadlineOverdueFines, ...autoEvidenceOverdueFines, ...autoStockCheckMissingFines]
                 .map(applyFineOverride)
                 .filter(f => !getFineRecordKeys(f).some(key => deletedFineKeys.has(key)))
                 // Auto VAT fines made before the approved rollout are invalid;
@@ -4588,7 +4778,8 @@ export default function Attendance() {
                     const fineAt = dayjs(f.date);
                     return !returnAt.isValid()
                         || !fineAt.isValid()
-                        || fineAt.isSame(getReturnFineDate(returnAt, Number(idMatch[2])), 'day');
+                        || (String(f.id).includes('-day10-')
+                            && fineAt.isSame(getReturnFineDate(returnAt, Number(idMatch[2])), 'day'));
                 })
                 .filter(f => !f.disabled);
             const vatRows = new Map<string, FineRecord>();
@@ -4616,7 +4807,7 @@ export default function Attendance() {
             result.push(...vatRows.values());
             return result;
         },
-        [extraFines, fineAuditLog, returnOverdueTracking, autoVatOverdueFines, autoReturnOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoStockCheckMissingFines, applyFineOverride]
+        [extraFines, fineAuditLog, returnOverdueTracking, autoVatOverdueFines, autoReturnOverdueFines, autoRefundOverdueFines, autoDeadlineOverdueFines, autoEvidenceOverdueFines, autoStockCheckMissingFines, applyFineOverride]
     );
 
     // Helper: lọc theo overviewDateRange
@@ -4634,6 +4825,18 @@ export default function Attendance() {
     );
     const liveOverviewBonuses = useMemo(() => extraBonuses.filter(b => inOverviewRange(b.date)), [extraBonuses, overviewDateRange]);
     const liveOverviewPackingLogs = useMemo(() => packingOrderLogsData.filter(o => inOverviewRange(o.timestamp)), [packingOrderLogsData, overviewDateRange]);
+    const liveWeeklyPackingResults = useMemo(
+        () => buildPackingWeeklyResults(packingOrderLogsData, employees, packingRewardNow),
+        [packingOrderLogsData, employees, packingRewardNow]
+    );
+    const liveOverviewWeeklyBonuses = useMemo(() => liveWeeklyPackingResults
+        .map(packingWeeklyResultToBonus)
+        .filter((bonus): bonus is BonusRecord => Boolean(bonus) && inOverviewRange(bonus.date)),
+    [liveWeeklyPackingResults, overviewDateRange]);
+    const liveOverviewBonusesWithWeekly = useMemo(() => {
+        const manualIds = new Set(liveOverviewBonuses.map(bonus => bonus.id));
+        return [...liveOverviewBonuses, ...liveOverviewWeeklyBonuses.filter(bonus => !manualIds.has(bonus.id))];
+    }, [liveOverviewBonuses, liveOverviewWeeklyBonuses]);
     const packingCommission = useMemo(() => {
         const commission = normalizePackingCommission(config.packingCommission);
         const expandSkuLevels = (source: Record<string, string>) => {
@@ -4661,7 +4864,7 @@ export default function Attendance() {
     ), [lockedPeriods, overviewDateRange]);
     const lockedPayrollSnapshot = currentLockedPeriod?.payrollSnapshot;
     const overviewFines = lockedPayrollSnapshot?.fines || liveOverviewFines;
-    const overviewBonuses = lockedPayrollSnapshot?.bonuses || liveOverviewBonuses;
+    const overviewBonuses = lockedPayrollSnapshot?.bonuses || liveOverviewBonusesWithWeekly;
     const overviewPackingLogs = lockedPayrollSnapshot?.packingLogs || liveOverviewPackingLogs;
     const overviewWareHousePacking = useMemo(() => {
         let totalUnits = 0;
@@ -4675,7 +4878,7 @@ export default function Attendance() {
     const isCurrentPeriodLocked = Boolean(currentLockedPeriod);
     const overviewAttendanceExpectedKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
     const overviewAttendanceReady = isBackgroundSyncComplete && overviewAttendanceLogsKey === overviewAttendanceExpectedKey;
-    const packingExpectedKey = `${overviewDateRange[0].startOf('day').valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}`;
+    const packingExpectedKey = `${getPackingLoadStart(overviewDateRange[0]).valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}`;
     const isPackingDataReady = packingReadyKey === packingExpectedKey && !packingLoadError;
     const isPayrollDataReady = isCurrentPeriodLocked
         ? Boolean(lockedPayrollSnapshot)
@@ -4697,13 +4900,18 @@ export default function Attendance() {
     function buildPayrollDataFromPackingLogs(orderLogs: PackingOrderLog[]) {
         const freshOverviewPackingLogs = orderLogs.filter(o => inOverviewRange(o.timestamp));
         const freshTotalUnits = freshOverviewPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items), 0);
+        const freshWeeklyBonuses = buildPackingWeeklyResults(orderLogs, employees, packingRewardNow)
+            .map(packingWeeklyResultToBonus)
+            .filter((bonus): bonus is BonusRecord => Boolean(bonus) && inOverviewRange(bonus.date));
+        const manualBonusIds = new Set(liveOverviewBonuses.map(bonus => bonus.id));
+        const freshBonuses = [...liveOverviewBonuses, ...freshWeeklyBonuses.filter(bonus => !manualBonusIds.has(bonus.id))];
         return calculatePayroll(
             overviewFines,
             leaveRecords,
             workSchedules,
             { level1Units: freshTotalUnits, level10Units: 0 },
             employees,
-            overviewBonuses,
+            freshBonuses,
             overviewAttendanceLogs,
             overviewDateRange[0].month() + 1,
             overviewDateRange[0].year(),
@@ -5625,10 +5833,15 @@ export default function Attendance() {
                 if (!api?.attendance?.updatePayrollLock) {
                     throw new Error('Ứng dụng chưa có API khóa bảng lương an toàn. Vui lòng khởi động lại app.');
                 }
-                const freshPackingLogs = await loadPackingOrders(overviewDateRange[0].startOf('day').toISOString(), { strict: true });
+                const freshPackingLogs = await loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { strict: true });
                 const freshOverviewPackingLogs = freshPackingLogs.filter(o => inOverviewRange(o.timestamp));
                 const snapshottedPackingLogs = freshOverviewPackingLogs.map(order => snapshotPackingOrder(order, packingCommission));
-                const freshPayrollRows = buildPayrollDataFromPackingLogs(snapshottedPackingLogs);
+                const freshPayrollRows = buildPayrollDataFromPackingLogs(freshPackingLogs);
+                const freshWeeklyBonuses = buildPackingWeeklyResults(freshPackingLogs, employees, packingRewardNow)
+                    .map(packingWeeklyResultToBonus)
+                    .filter((bonus): bonus is BonusRecord => Boolean(bonus) && inOverviewRange(bonus.date));
+                const manualBonusIds = new Set(liveOverviewBonuses.map(bonus => bonus.id));
+                const snapshottedBonuses = [...liveOverviewBonuses, ...freshWeeklyBonuses.filter(bonus => !manualBonusIds.has(bonus.id))];
                 const capturedAt = new Date().toISOString();
                 const newLock: LockedPeriod = {
                     id: 'lock-' + Date.now(),
@@ -5643,7 +5856,7 @@ export default function Attendance() {
                         rows: freshPayrollRows,
                         packingLogs: snapshottedPackingLogs,
                         fines: liveOverviewFines,
-                        bonuses: liveOverviewBonuses,
+                        bonuses: snapshottedBonuses,
                         sourceSummary: {
                             packingOrderCount: snapshottedPackingLogs.length,
                             packingTotalUnits: snapshottedPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items), 0),
@@ -5981,7 +6194,9 @@ export default function Attendance() {
         const today = dayjs().startOf('day');
         const weekStart = today.subtract((today.day() + 6) % 7, 'day');
         const weekEnd = weekStart.add(6, 'day');
-        const reloadPacking = () => loadPackingOrders(overviewDateRange[0].startOf('day').toISOString());
+        const currentWeeklyResult = liveWeeklyPackingResults.find(result => result.weekKey === weekStart.format('YYYY-MM-DD'));
+        const weeklyLeader = currentWeeklyResult?.leader;
+        const reloadPacking = () => loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString());
 
         return (
             <div className="packing-league">
@@ -6043,8 +6258,15 @@ export default function Attendance() {
                                 <span>{weekStart.format('DD/MM')} – {weekEnd.format('DD/MM')}</span>
                                 <small>Nhân viên đóng gói nhiều nhất tuần</small>
                             </div>
-                            <div className="packing-coming-soon"><ClockCircleOutlined /> Sắp ra mắt</div>
-                            <small className="packing-reset-note"><SafetyCertificateOutlined /> Tự động reset vào mỗi Thứ Hai · Chưa tính vào thu nhập</small>
+                            <div className={`packing-week-status ${currentWeeklyResult?.completed ? 'completed' : 'active'}`}>
+                                {currentWeeklyResult?.completed ? <CheckCircleOutlined /> : <TrophyOutlined />}
+                                <span>{weeklyLeader
+                                    ? `${currentWeeklyResult?.completed ? 'Đã chốt' : 'Đang dẫn đầu'}: ${weeklyLeader.name}`
+                                    : 'Đang chờ dữ liệu'}</span>
+                            </div>
+                            <small className="packing-reset-note"><SafetyCertificateOutlined /> {weeklyLeader
+                                ? `${currentWeeklyResult?.units.toLocaleString('vi-VN')} SP · ${currentWeeklyResult?.orderCount.toLocaleString('vi-VN')} đơn`
+                                : 'Chốt 23:59 Chủ nhật'} · Tự động reset Thứ Hai</small>
                         </article>
                     </div>
                 </section>
@@ -6134,7 +6356,7 @@ export default function Attendance() {
                 {/* Toolbar */}
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                     <Text type="secondary" style={{ fontSize: 12 }}>{overviewDateRange[0].format('DD/MM/YYYY')} — {overviewDateRange[1].format('DD/MM/YYYY')}</Text>
-                    <Button size="small" icon={<SyncOutlined />} onClick={() => loadPackingOrders(overviewDateRange[0].startOf('day').toISOString())}>Tải lại</Button>
+                    <Button size="small" icon={<SyncOutlined />} onClick={() => loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString())}>Tải lại</Button>
                 </div>
 
                 {/* Stats + Chart Header */}
@@ -6970,6 +7192,16 @@ export default function Attendance() {
                 const stage = Number(String(fine?.id || '').match(/-stage-(\d+)$/)?.[1]);
                 return Number.isFinite(stage) ? stage : 1;
             }
+            if (fine?.source === 'refunds_overdue') {
+                const refundId = Number(String(fine?.id || '').match(/^refund-overdue-(\d+)/)?.[1]);
+                const trackedRefund = refundOverdueTracking.find(item => Number(item.id) === refundId);
+                const refundAt = dayjs(trackedRefund?.refundDate);
+                if (refundAt.isValid()) {
+                    return Math.max(1, getRefundFineStage(refundAt));
+                }
+                const stage = Number(String(fine?.id || '').match(/-stage-(\d+)/)?.[1]);
+                return Number.isFinite(stage) ? stage : 1;
+            }
             const isVatFine = fine?.source === 'purchase_vat_overdue'
                 || String(fine?.type || '').toLocaleLowerCase('vi-VN').includes('vat')
                 || detail.toLocaleLowerCase('vi-VN').includes('hđ vat');
@@ -7098,14 +7330,31 @@ export default function Attendance() {
                                 render: (d: string, record: any) => {
                                     // 1. Phạt xử lý Trả hàng quá hạn
                                     if (record.source === 'returns_overdue') {
-                                        const code = String(d).match(/^Phiếu\s+(.+?)(?:\s+-\s+đơn\s+|\s+quá 7 ngày)/i)?.[1] || '-';
-                                        const orderNumber = String(d).match(/\s+-\s+đơn\s+(.+?)\s+quá 7 ngày/i)?.[1];
+                                        const code = String(d).match(/^Phiếu\s+(.+?)(?:\s+-\s+đơn\s+|\s+quá \d+ ngày)/i)?.[1] || '-';
+                                        const orderNumber = String(d).match(/\s+-\s+đơn\s+(.+?)\s+quá \d+ ngày/i)?.[1];
                                         const fineStage = String(d).match(/phạt lần\s+(\d+)/i)?.[1] || '1';
                                         return (
                                             <div style={fineDetailCellStyle}>
                                                 <Space size={[4, 4]} wrap>
                                                     <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ xử lý Trả hàng · phạt lần {fineStage}</Text>
                                                     <Tag color="volcano" style={{ margin: 0, fontWeight: 700, fontFamily: 'monospace', fontSize: 11 }}>
+                                                        {code}
+                                                    </Tag>
+                                                </Space>
+                                                {orderNumber && <Text type="secondary" style={{ display: 'block', marginTop: 2, fontSize: 11 }}>Mã đơn: {orderNumber}</Text>}
+                                            </div>
+                                        );
+                                    }
+
+                                    if (record.source === 'refunds_overdue') {
+                                        const code = String(d).match(/^Phiếu\s+(.+?)(?:\s+-\s+đơn\s+|\s+quá \d+ ngày)/i)?.[1] || '-';
+                                        const orderNumber = String(d).match(/\s+-\s+đơn\s+(.+?)\s+quá \d+ ngày/i)?.[1];
+                                        const fineStage = String(d).match(/phạt lần\s+(\d+)/i)?.[1] || '1';
+                                        return (
+                                            <div style={fineDetailCellStyle}>
+                                                <Space size={[4, 4]} wrap>
+                                                    <Text style={{ color: '#595959', fontWeight: 500 }}>Trễ xử lý Hàng hoàn · phạt lần {fineStage}</Text>
+                                                    <Tag color="orange" style={{ margin: 0, fontWeight: 700, fontFamily: 'monospace', fontSize: 11 }}>
                                                         {code}
                                                     </Tag>
                                                 </Space>
@@ -8211,7 +8460,7 @@ export default function Attendance() {
                 <Tabs
                     activeKey={activeTab}
                     onChange={nextTab => {
-                        if (nextTab === 'bonuses') setBonusView('personal');
+                        if (nextTab === 'bonuses') setBonusView(isAdmin ? 'manage' : 'personal');
                         setActiveTab(nextTab);
                     }}
                     items={tabNavItems}

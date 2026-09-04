@@ -62,8 +62,8 @@ dayjs.extend(customParseFormat);
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
 
-const RETURN_SLA_HOURS = 5 * 24;
-const RETURN_POLICY_NOTICE_START = dayjs('2026-08-23T00:00:00');
+const RETURN_SLA_HOURS = 10 * 24;
+const RETURN_POLICY_NOTICE_START = dayjs('2026-09-04T00:00:00');
 const RETURN_POLICY_NOTICE_END = RETURN_POLICY_NOTICE_START.add(7, 'day');
 
 const parseReturnDate = (value: any) => {
@@ -1442,8 +1442,8 @@ export default function ReturnsPage() {
                         className="returns-policy-alert"
                         type="warning"
                         showIcon
-                        message="Quy định xử lý trả hàng mới áp dụng từ 24/08/2026"
-                        description="Hạn xử lý theo dõi trên bảng là 5 ngày. Phiếu phát sinh từ 24/08 nếu quá 7 ngày chưa Hoàn thành sẽ phạt tài khoản nguyendinhtoan từ 30.000đ/đơn và tăng thêm 10.000đ mỗi ngày. Các phiếu cũ đã quá hạn được gia hạn xử lý hết ngày 26/08; từ 27/08 nếu chưa Hoàn thành sẽ áp dụng mức phạt tương tự."
+                        message="Quy định xử lý trả hàng mới áp dụng từ 04/09/2026"
+                        description="Hạn xử lý là 10 ngày. Từ ngày thứ 11, nếu phiếu chưa Hoàn thành sẽ phạt tài khoản nguyendinhtoan từ 30.000đ/đơn và tăng thêm 10.000đ mỗi ngày được phép tính. Chủ nhật và ngày lễ toàn quốc không tính phạt."
                     />
                 )}
                 <div className="returns-page-heading">
