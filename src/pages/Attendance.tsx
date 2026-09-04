@@ -549,6 +549,12 @@ const DEFAULT_PACKING_COMMISSION: PackingCommissionConfig = {
     skuLevels: {},
 };
 
+// The tiered packing policy starts in September 2026. Earlier payroll periods
+// must keep the original flat 20 VND/SKU calculation even if config history or
+// normalized packing fields are edited later.
+const PACKING_COMMISSION_POLICY_START = dayjs('2026-09-01').startOf('day');
+const LEGACY_PACKING_UNIT_PRICE = 20;
+
 const PACKING_WEEKLY_REWARD_AMOUNT = 100000;
 const PACKING_WEEKLY_REWARD_START = dayjs('2026-08-31').startOf('day');
 
@@ -1014,13 +1020,39 @@ const getAssignmentDeadlineRecipients = (task: any): string[] => {
     }
     return task?.assignee ? [String(task.assignee)] : [];
 };
-function calcPackingUnitsFromItem(item: PackingOrderItem): number {
+const usesLegacyPackingPolicy = (timestamp?: string) => {
+    const orderTime = dayjs(timestamp || '');
+    return orderTime.isValid() && orderTime.isBefore(PACKING_COMMISSION_POLICY_START, 'day');
+};
+
+function calcLegacyPackingUnitsFromItem(item: PackingOrderItem): number {
+    const sku = String(item.sku || '').toUpperCase();
+    let packCount = 1;
+
+    if (sku.startsWith('CB-')) {
+        let comboTotal = 0;
+        const productSuffixes = /^(5D|UNI|DUNI|5DUNI)/i;
+        sku.substring(3).split('-').forEach(segment => {
+            const match = segment.match(/^(\d+)(.+)$/);
+            if (match && !productSuffixes.test(match[2])) comboTotal += Number(match[1]);
+        });
+        packCount = comboTotal > 0 ? comboTotal : 1;
+    } else {
+        const prefixMatch = sku.match(/^(\d+)-/);
+        packCount = prefixMatch ? Number(prefixMatch[1]) : 1;
+    }
+
+    return Math.max(0, Number(item.quantity || 1)) * packCount;
+}
+
+function calcPackingUnitsFromItem(item: PackingOrderItem, timestamp?: string): number {
+    if (usesLegacyPackingPolicy(timestamp)) return calcLegacyPackingUnitsFromItem(item);
     if (Number.isFinite(item.packingUnits)) return Math.max(0, Number(item.packingUnits));
     return Math.max(0, Number(item.quantity || 1));
 }
 
-function calcPacksFromItems(items: PackingOrderItem[]): number {
-    return items.reduce((total, item) => total + calcPackingUnitsFromItem(item), 0);
+function calcPacksFromItems(items: PackingOrderItem[], timestamp?: string): number {
+    return items.reduce((total, item) => total + calcPackingUnitsFromItem(item, timestamp), 0);
 }
 
 function getPackingLevel(item: PackingOrderItem, commission: PackingCommissionConfig): string {
@@ -1029,6 +1061,12 @@ function getPackingLevel(item: PackingOrderItem, commission: PackingCommissionCo
 }
 
 function getPackingCommissionAt(rawCommission?: PackingCommissionConfig, timestamp?: string): PackingCommissionConfig {
+    if (usesLegacyPackingPolicy(timestamp)) {
+        return normalizePackingCommission({
+            rates: { easy: LEGACY_PACKING_UNIT_PRICE, medium: LEGACY_PACKING_UNIT_PRICE, high: LEGACY_PACKING_UNIT_PRICE },
+            skuLevels: {},
+        });
+    }
     const commission = normalizePackingCommission(rawCommission);
     if (!timestamp || !dayjs(timestamp).isValid()) return commission;
     const orderTime = dayjs(timestamp).valueOf();
@@ -1041,18 +1079,23 @@ function getPackingCommissionAt(rawCommission?: PackingCommissionConfig, timesta
 
 function calcPackingCommission(items: PackingOrderItem[], rawCommission?: PackingCommissionConfig, timestamp?: string) {
     const commission = getPackingCommissionAt(rawCommission, timestamp);
+    const isLegacyPolicy = usesLegacyPackingPolicy(timestamp);
     const breakdown: Record<string, { units: number; income: number }> = Object.fromEntries(
         getPackingLevelOptions(commission).map(level => [level.key, { units: 0, income: 0 }])
     );
 
     items.forEach(item => {
-        const level = getPackingLevel(item, commission);
+        const level = isLegacyPolicy ? 'easy' : getPackingLevel(item, commission);
         if (!breakdown[level]) breakdown[level] = { units: 0, income: 0 };
-        const units = calcPackingUnitsFromItem(item);
-        const unitPrice = Number.isFinite(item.packingUnitPrice)
+        const units = calcPackingUnitsFromItem(item, timestamp);
+        const unitPrice = isLegacyPolicy
+            ? LEGACY_PACKING_UNIT_PRICE
+            : Number.isFinite(item.packingUnitPrice)
             ? Math.max(0, Number(item.packingUnitPrice))
             : commission.rates[level];
-        const income = Number.isFinite(item.packingIncome)
+        const income = isLegacyPolicy
+            ? units * unitPrice
+            : Number.isFinite(item.packingIncome)
             ? Math.max(0, Number(item.packingIncome))
             : units * unitPrice;
 
@@ -1069,13 +1112,14 @@ function calcPackingCommission(items: PackingOrderItem[], rawCommission?: Packin
 
 function snapshotPackingOrder(order: PackingOrderLog, rawCommission?: PackingCommissionConfig): PackingOrderLog {
     const commission = getPackingCommissionAt(rawCommission, order.timestamp);
+    const isLegacyPolicy = usesLegacyPackingPolicy(order.timestamp);
     return {
         ...order,
         items: order.items.map(item => {
-            const level = getPackingLevel(item, commission);
+            const level = isLegacyPolicy ? 'easy' : getPackingLevel(item, commission);
             const levelOption = getPackingLevelOption(commission, level);
-            const packingUnits = calcPackingUnitsFromItem(item);
-            const packingUnitPrice = commission.rates[level];
+            const packingUnits = calcPackingUnitsFromItem(item, order.timestamp);
+            const packingUnitPrice = isLegacyPolicy ? LEGACY_PACKING_UNIT_PRICE : commission.rates[level];
             return {
                 ...item,
                 packingLevel: level,
@@ -1137,7 +1181,7 @@ function buildPackingWeeklyResults(orderLogs: PackingOrderLog[], employeesList: 
         if (!weeks.has(weekKey)) weeks.set(weekKey, new Map());
         const scores = weeks.get(weekKey)!;
         const current = scores.get(employee.id) || { employee, units: 0, orderCount: 0 };
-        current.units += calcPacksFromItems(order.items);
+        current.units += calcPacksFromItems(order.items, order.timestamp);
         current.orderCount += 1;
         scores.set(employee.id, current);
     });
@@ -4275,7 +4319,7 @@ export default function Attendance() {
     const warehousePacking = useMemo(() => {
         let totalUnits = 0;
         packingOrderLogsData.forEach(order => {
-            totalUnits += calcPacksFromItems(order.items);
+            totalUnits += calcPacksFromItems(order.items, order.timestamp);
         });
         return { level1Units: totalUnits, level10Units: 0 };
     }, [packingOrderLogsData]);
@@ -4869,7 +4913,7 @@ export default function Attendance() {
     const overviewWareHousePacking = useMemo(() => {
         let totalUnits = 0;
         overviewPackingLogs.forEach(order => {
-            totalUnits += calcPacksFromItems(order.items);
+            totalUnits += calcPacksFromItems(order.items, order.timestamp);
         });
         return { level1Units: totalUnits, level10Units: 0 };
     }, [overviewPackingLogs]);
@@ -4899,7 +4943,7 @@ export default function Attendance() {
 
     function buildPayrollDataFromPackingLogs(orderLogs: PackingOrderLog[]) {
         const freshOverviewPackingLogs = orderLogs.filter(o => inOverviewRange(o.timestamp));
-        const freshTotalUnits = freshOverviewPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items), 0);
+        const freshTotalUnits = freshOverviewPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items, order.timestamp), 0);
         const freshWeeklyBonuses = buildPackingWeeklyResults(orderLogs, employees, packingRewardNow)
             .map(packingWeeklyResultToBonus)
             .filter((bonus): bonus is BonusRecord => Boolean(bonus) && inOverviewRange(bonus.date));
@@ -5859,7 +5903,7 @@ export default function Attendance() {
                         bonuses: snapshottedBonuses,
                         sourceSummary: {
                             packingOrderCount: snapshottedPackingLogs.length,
-                            packingTotalUnits: snapshottedPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items), 0),
+                            packingTotalUnits: snapshottedPackingLogs.reduce((sum, order) => sum + calcPacksFromItems(order.items, order.timestamp), 0),
                         },
                     },
                 };
@@ -6339,7 +6383,7 @@ export default function Attendance() {
                                             ? `${firstItem.productName}${firstItem.variant ? ` - ${firstItem.variant}` : ''}`
                                             : 'Không có thông tin';
                                         const extraItems = Math.max(0, record.items.length - 1);
-                                        return <div className="packing-product-summary"><Tooltip title={record.items.map(item => `${item.productName}${item.variant ? ` - ${item.variant}` : ''}`).join('\n')}><span>{productName}</span></Tooltip><small>{calcPacksFromItems(record.items).toLocaleString('vi-VN')} SP{extraItems > 0 ? ` · +${extraItems} sản phẩm` : ''}</small></div>;
+                                        return <div className="packing-product-summary"><Tooltip title={record.items.map(item => `${item.productName}${item.variant ? ` - ${item.variant}` : ''}`).join('\n')}><span>{productName}</span></Tooltip><small>{calcPacksFromItems(record.items, record.timestamp).toLocaleString('vi-VN')} SP{extraItems > 0 ? ` · +${extraItems} sản phẩm` : ''}</small></div>;
                                     } },
                                     { title: 'Hoa hồng', width: 115, align: 'right' as const, render: (_: any, record: PackingOrderLog) => <strong className="packing-order-income">+{fmt(calcPackingCommission(record.items, packingCommission, record.timestamp).income)}</strong> },
                                 ]}

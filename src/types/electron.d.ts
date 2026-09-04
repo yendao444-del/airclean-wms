@@ -292,15 +292,18 @@ export interface ElectronAPI {
     ) => Promise<{ success: boolean; error?: string }>;
     createVatGroup: (data: {
       purchaseIds: number[];
+      purchaseRevisions: Record<string, Date | string | undefined>;
       note?: string;
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
     removeVatGroup: (data: {
       purchaseId: number;
+      expectedUpdatedAt: Date | string | undefined;
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
     markAsThht: (
       purchaseId: number,
       revert?: boolean,
-    ) => Promise<{ success: boolean; error?: string }>;
+      expectedUpdatedAt?: Date | string,
+    ) => Promise<{ success: boolean; data?: any; error?: string }>;
     getImportReceiptFileData: (
       purchaseId: number,
     ) => Promise<{ success: boolean; data?: any[]; error?: string }>;
@@ -351,6 +354,12 @@ export interface ElectronAPI {
     markQrLabelsReceived: (
       codes: string[],
     ) => Promise<{ success: boolean; data?: { count: number; codes: string[] }; error?: string }>;
+    quickReceive: (data: any) => Promise<{
+      success: boolean;
+      duplicate?: boolean;
+      data?: { purchases: any[]; unitCodes: string[] };
+      error?: string;
+    }>;
     saveRegister: (
       records: any[],
     ) => Promise<{ success: boolean; data?: any[]; error?: string }>;
@@ -715,6 +724,15 @@ export interface ElectronAPI {
       id: number,
       data: any,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    saveTelegramSettings: (data: {
+      chatId?: string;
+      apiToken?: string;
+    }) => Promise<{ success: boolean; error?: string }>;
+    nextTelegramOrderCounter: () => Promise<{
+      success: boolean;
+      data?: { date: string; counter: number };
+      error?: string;
+    }>;
     delete: (id: number) => Promise<{ success: boolean; error?: string }>;
     bulkDelete: (
       ids: number[],
@@ -868,7 +886,7 @@ export interface ElectronAPI {
     delete: (id: number) => Promise<{ success: boolean; error?: string }>;
     bulkCreate: (
       records: any[],
-    ) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    ) => Promise<{ success: boolean; data?: any[]; createdCount?: number; duplicateCount?: number; error?: string }>;
   };
   refunds: {
     getAll: (filters?: {
@@ -893,7 +911,7 @@ export interface ElectronAPI {
     ) => Promise<{ success: boolean; data?: number; error?: string }>;
     bulkCreate: (
       records: any[],
-    ) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    ) => Promise<{ success: boolean; data?: any[]; createdCount?: number; duplicateCount?: number; error?: string }>;
     importFromFolder: () => Promise<{
       success: boolean;
       data?: any[];
@@ -995,11 +1013,11 @@ export interface ElectronAPI {
   appConfig: {
     get: (
       key: string,
-    ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    ) => Promise<{ success: boolean; data?: any; updatedAt?: string | null; error?: string }>;
     set: (
       key: string,
       value: any,
-    ) => Promise<{ success: boolean; data?: any; error?: string }>;
+    ) => Promise<{ success: boolean; data?: any; updatedAt?: string | null; error?: string }>;
   };
   attendance: {
     updateLeaveStatus: (data: {

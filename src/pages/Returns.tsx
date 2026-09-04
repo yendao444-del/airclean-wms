@@ -465,7 +465,10 @@ export default function ReturnsPage() {
 
             if (editingReturn) {
                 // EDIT MODE - gọi API update
-                const result = await window.electronAPI.returns.update(editingReturn.id, dbData);
+                const result = await window.electronAPI.returns.update(editingReturn.id, {
+                    ...dbData,
+                    expectedUpdatedAt: editingReturn.updatedAt,
+                });
                 if (!result.success) throw new Error(result.error || 'Không thể cập nhật phiếu trả.');
                 console.log(`✅ Đã cập nhật phiếu trả #${editingReturn.id}`);
                 updatedReturns = returns; // placeholder for activity log
@@ -676,19 +679,9 @@ export default function ReturnsPage() {
                     return;
                 }
 
-                // 🔧 FIX: Lọc trùng theo complaintCode (so với data đã có trong DB)
-                const existingCodes = new Set(returns.map(r => r.complaintCode));
-                const uniqueReturns = newReturns.filter(r => !existingCodes.has(r.complaintCode));
-                const duplicateCount = newReturns.length - uniqueReturns.length;
-
-                if (duplicateCount > 0) {
-                    console.log(`⚠️ Bỏ qua ${duplicateCount} phiếu trùng mã khiếu nại`);
-                }
-
-                if (uniqueReturns.length === 0) {
-                    message.warning(`Tất cả ${newReturns.length} phiếu đều đã tồn tại (trùng mã khiếu nại)!`);
-                    return;
-                }
+                // Database kiểm tra trùng trên toàn bộ dữ liệu trong một transaction.
+                const uniqueReturns = newReturns;
+                const duplicateCount = 0;
 
                 // 🔧 FIX: Lưu vào DATABASE qua bulkCreate API
                 // Map frontend fields → database fields (Prisma schema)
@@ -722,7 +715,9 @@ export default function ReturnsPage() {
                     }));
                     const result = await window.electronAPI.returns.bulkCreate(dbRecords);
                     if (!result.success) throw new Error(result.error || 'Lỗi DB');
-                    console.log(`✅ Đã lưu ${uniqueReturns.length} phiếu trả vào database`);
+                    const createdCount = Number(result.createdCount ?? result.data?.length ?? 0);
+                    const serverDuplicateCount = Number(result.duplicateCount || 0);
+                    console.log(`✅ Đã lưu ${createdCount} phiếu trả vào database`);
 
                     // Reload data từ DB
                     await loadReturns();
@@ -730,11 +725,16 @@ export default function ReturnsPage() {
                     // 🔧 FIX: Đóng popup import
                     setInputMethod('manual');
 
-                    const dupMsg = duplicateCount > 0 ? ` (bỏ qua ${duplicateCount} phiếu trùng)` : '';
-                    message.success(`✅ Đã import ${uniqueReturns.length} phiếu trả hàng từ Excel!${dupMsg}`);
-                } catch (dbError) {
+                    const totalDuplicateCount = duplicateCount + serverDuplicateCount;
+                    const dupMsg = totalDuplicateCount > 0 ? ` (bỏ qua ${totalDuplicateCount} phiếu trùng)` : '';
+                    if (createdCount === 0) {
+                        message.warning(`Không có phiếu mới để import${dupMsg}.`);
+                    } else {
+                        message.success(`✅ Đã import ${createdCount} phiếu trả hàng từ Excel!${dupMsg}`);
+                    }
+                } catch (dbError: any) {
                     console.error('❌ Lỗi lưu vào database:', dbError);
-                    message.error(`Lỗi lưu ${newReturns.length} phiếu trả vào database!`);
+                    message.error(`Lỗi lưu phiếu trả: ${dbError?.message || 'Không rõ lỗi'}`);
                 }
             } catch (error) {
                 console.error('Import error:', error);
