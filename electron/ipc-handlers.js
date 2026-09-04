@@ -7854,7 +7854,7 @@ async function isTelegramWmsGroupManager(chatId, userId) {
         hostname: "api.telegram.org",
         path,
         method: "GET",
-        timeout: 10000,
+        timeout: 7000,
       },
       (res) => {
         let body = "";
@@ -7911,6 +7911,7 @@ async function sendTelegramWmsMessage(chatId, text, replyMarkup = null) {
       },
     );
     req.on("error", (err) => {
+      telegramWmsLastError = `Telegram sendMessage lỗi: ${err.message}`;
       console.warn("[TelegramWMS] Send error:", err.message);
       resolve(null);
     });
@@ -7982,7 +7983,7 @@ function answerTelegramCallbackQuery(callbackQueryId, text = null) {
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(data),
         },
-        timeout: 10000,
+        timeout: 3000,
       },
       (res) => {
         let body = "";
@@ -7996,7 +7997,13 @@ function answerTelegramCallbackQuery(callbackQueryId, text = null) {
         });
       },
     );
-    req.on("error", () => resolve(null));
+    req.on("error", (error) => {
+      console.warn("[TelegramWMS] Answer callback error:", error.message);
+      resolve(null);
+    });
+    req.on("timeout", () => {
+      req.destroy(new Error("Telegram answerCallbackQuery timeout"));
+    });
     req.write(data);
     req.end();
   });
@@ -8023,7 +8030,7 @@ function editTelegramWmsMessage(chatId, messageId, text, replyMarkup = null) {
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(data),
         },
-        timeout: 10000,
+        timeout: 5000,
       },
       (res) => {
         let body = "";
@@ -8037,7 +8044,14 @@ function editTelegramWmsMessage(chatId, messageId, text, replyMarkup = null) {
         });
       },
     );
-    req.on("error", () => resolve(null));
+    req.on("error", (error) => {
+      telegramWmsLastError = `Telegram editMessageText lỗi: ${error.message}`;
+      console.warn("[TelegramWMS] Edit message error:", error.message);
+      resolve(null);
+    });
+    req.on("timeout", () => {
+      req.destroy(new Error("Telegram editMessageText timeout"));
+    });
     req.write(data);
     req.end();
   });
@@ -8068,7 +8082,13 @@ function clearTelegramWmsInlineKeyboard(chatId, messageId) {
         res.on("end", () => resolve(true));
       },
     );
-    req.on("error", () => resolve(null));
+    req.on("error", (error) => {
+      console.warn("[TelegramWMS] Clear keyboard error:", error.message);
+      resolve(null);
+    });
+    req.on("timeout", () => {
+      req.destroy(new Error("Telegram editMessageReplyMarkup timeout"));
+    });
     req.write(data);
     req.end();
   });
@@ -8985,16 +9005,36 @@ function getKhuiKienGroups(list) {
 async function renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard) {
   const markup = { inline_keyboard: inlineKeyboard };
   if (messageId) {
-    await editTelegramWmsMessage(chatId, messageId, text, markup);
-  } else {
-    await sendTelegramWmsMessage(chatId, text, markup);
+    const edited = await editTelegramWmsMessage(chatId, messageId, text, markup);
+    const editError = String(edited?.description || "");
+    if (edited?.ok || editError.includes("message is not modified")) return edited;
+
+    // Telegram can reject an old message or malformed edit. Send a fresh menu
+    // so the employee never taps a button and receives no visible response.
+    console.warn(
+      "[TelegramWMS] Menu edit failed; sending replacement:",
+      editError || "no response",
+    );
   }
+  const sent = await sendTelegramWmsMessage(chatId, text, markup);
+  if (sent?.ok) return sent;
+  const sendError = String(sent?.description || telegramWmsLastError || "Không có phản hồi từ Telegram API");
+  throw new Error(`Không thể hiển thị menu Telegram: ${sendError}`);
 }
 
 async function sendRutHangMenu(chatId, messageId = null, forceList = false, requestedPage = 0) {
   const list = await getAllHandlingUnitsFromStore();
   const openedUnits = list.filter(
     (u) => u.status === "opened" || u.status === "Đang sử dụng",
+  );
+  const catalogUnits = list.filter(
+    (unit) =>
+      unit.status === "opened" ||
+      unit.status === "Đang sử dụng" ||
+      unit.status === "sealed" ||
+      unit.status === "Nguyên niêm phong" ||
+      unit.status === "pending_check" ||
+      unit.status === "Chờ kiểm",
   );
   const pendingSkuCodes = new Map();
   list.forEach((unit) => {
@@ -9006,18 +9046,17 @@ async function sendRutHangMenu(chatId, messageId = null, forceList = false, requ
     !pendingSkuCodes.has(String(unit.sku || unit.skuName || "").trim().toUpperCase()),
   );
 
-  if (openedUnits.length === 0) {
-    const text = `⚠️ <b>CHƯA CÓ KIỆN NÀO ĐANG MỞ</b>\n\nBot sẽ gom kiện theo SKU và chỉ đề xuất <b>1 kiện nhập trước</b> để khui, tránh hiển thị danh sách quá dài.`;
-    await renderTelegramWmsMenu(chatId, messageId, text, [
-      [{ text: "🔓 Xem kiện được đề xuất", callback_data: "menu_khui" }],
-      [{ text: "📊 Xem báo cáo tồn", callback_data: "menu_ton" }],
-    ]);
+  if (catalogUnits.length === 0) {
+    const text = `⚠️ <b>CHƯA CÓ KIỆN NÀO CÓ THỂ THAO TÁC</b>\n\nHiện không có kiện đang mở, chờ kiểm hoặc còn nguyên niêm phong.`;
+    await renderTelegramWmsMenu(chatId, messageId, text, [[
+      { text: "📊 Xem báo cáo tồn", callback_data: "menu_ton" },
+    ]]);
     return;
   }
 
-  const metadata = await getTelegramHandlingUnitCatalog(openedUnits);
+  const metadata = await getTelegramHandlingUnitCatalog(catalogUnits);
   const productGroups = new Map();
-  openedUnits.forEach((unit) => {
+  catalogUnits.forEach((unit) => {
     const code = getHandlingUnitCode(unit);
     const meta = metadata.get(code);
     const key = meta?.productKey || `sku:${getHandlingUnitSku(unit).toUpperCase()}`;
@@ -9056,33 +9095,34 @@ async function sendRutHangMenu(chatId, messageId = null, forceList = false, requ
     if (page < pageCount - 1) navigation.push({ text: "Tiếp ▶️", callback_data: `rut_groups:${page + 1}` });
     inlineKeyboard.push(navigation);
   }
-  inlineKeyboard.push([
-    { text: "📊 Xem báo cáo tồn", callback_data: "menu_ton" },
-    { text: "🔓 Khui thêm kiện", callback_data: "menu_khui" },
-  ]);
-
   const blockedNote = openedUnits.length > availableOpenedUnits.length
     ? `\n\n⚠️ Một số SKU đang bị khóa vì còn kiện chờ kiểm thực tế.`
     : "";
-  const text = `📦 <b>CHỌN DÒNG SẢN PHẨM</b>\n<i>Chọn danh mục cha để xem các màu/phân loại đang mở</i>${blockedNote}`;
+  const text = `📦 <b>CHỌN DÒNG SẢN PHẨM</b>\n<i>Chọn danh mục cha → màu/phân loại → mã kiện</i>${blockedNote}`;
   await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
 }
 
 async function sendRutHangVariantMenu(chatId, anchorCode, messageId = null) {
   const list = await getAllHandlingUnitsFromStore();
-  const openedUnits = list.filter(
-    (unit) => unit.status === "opened" || unit.status === "Đang sử dụng",
+  const catalogUnits = list.filter(
+    (unit) =>
+      unit.status === "opened" ||
+      unit.status === "Đang sử dụng" ||
+      unit.status === "sealed" ||
+      unit.status === "Nguyên niêm phong" ||
+      unit.status === "pending_check" ||
+      unit.status === "Chờ kiểm",
   );
-  const metadata = await getTelegramHandlingUnitCatalog(openedUnits);
+  const metadata = await getTelegramHandlingUnitCatalog(catalogUnits);
   const anchorMeta = metadata.get(String(anchorCode));
-  const anchorUnit = openedUnits.find(
+  const anchorUnit = catalogUnits.find(
     (unit) => getHandlingUnitCode(unit).toUpperCase() === String(anchorCode).toUpperCase(),
   );
   if (!anchorUnit || !anchorMeta) {
     await sendRutHangMenu(chatId, messageId, true);
     return;
   }
-  const groupUnits = openedUnits.filter((unit) =>
+  const groupUnits = catalogUnits.filter((unit) =>
     metadata.get(getHandlingUnitCode(unit))?.productKey === anchorMeta.productKey,
   );
   const pendingSkuCodes = new Map();
@@ -9091,34 +9131,139 @@ async function sendRutHangVariantMenu(chatId, anchorCode, messageId = null) {
     const skuKey = getHandlingUnitSku(unit).toUpperCase();
     if (skuKey && !pendingSkuCodes.has(skuKey)) pendingSkuCodes.set(skuKey, getHandlingUnitCode(unit));
   });
-  const inlineKeyboard = groupUnits
-    .sort((left, right) => {
-      const leftName = metadata.get(getHandlingUnitCode(left))?.variantName || getHandlingUnitSku(left);
-      const rightName = metadata.get(getHandlingUnitCode(right))?.variantName || getHandlingUnitSku(right);
-      return leftName.localeCompare(rightName, "vi", { numeric: true });
-    })
-    .map((unit) => {
-      const code = getHandlingUnitCode(unit);
-      const sku = getHandlingUnitSku(unit);
-      const pendingCode = pendingSkuCodes.get(sku.toUpperCase());
-      const variantName = metadata.get(code)?.variantName || sku;
-      const remaining = unit.remainingQuantity ?? unit.currentPcs ?? 0;
-      const unitName = unit.baseUnit || unit.unitName || "Gói";
+  const variants = new Map();
+  groupUnits.forEach((unit) => {
+    const skuKey = getHandlingUnitSku(unit).toUpperCase();
+    if (!skuKey) return;
+    if (!variants.has(skuKey)) {
+      variants.set(skuKey, {
+        sku: getHandlingUnitSku(unit),
+        name: metadata.get(getHandlingUnitCode(unit))?.variantName || getHandlingUnitSku(unit),
+        units: [],
+      });
+    }
+    variants.get(skuKey).units.push(unit);
+  });
+  const inlineKeyboard = [...variants.values()]
+    .sort((left, right) => left.name.localeCompare(right.name, "vi", { numeric: true }))
+    .map((variant) => {
+      const opened = variant.units.find(
+        (unit) => unit.status === "opened" || unit.status === "Đang sử dụng",
+      );
+      const anchor = opened || variant.units.sort(compareHandlingUnitsFifo)[0];
+      const pendingCode = pendingSkuCodes.get(variant.sku.toUpperCase());
       return [{
-        text: pendingCode
-          ? `🔒 ${variantName} · ${remaining.toLocaleString("vi-VN")} ${unitName}`
-          : `📦 ${variantName} · ${remaining.toLocaleString("vi-VN")} ${unitName}`,
-        callback_data: `pick_unit:${code}`,
+        text: `${pendingCode ? "🔒" : "🎨"} ${variant.name} · ${variant.units.length} kiện`,
+        callback_data: `rut_variant:${getHandlingUnitCode(anchor)}`,
       }];
     });
   inlineKeyboard.push([{ text: "🔙 Danh mục sản phẩm", callback_data: "menu_rut_list" }]);
-  const lockedCount = groupUnits.filter((unit) =>
-    pendingSkuCodes.has(getHandlingUnitSku(unit).toUpperCase()),
+  const lockedCount = [...variants.values()].filter((variant) =>
+    pendingSkuCodes.has(variant.sku.toUpperCase()),
   ).length;
   const text =
     `📦 <b>${anchorMeta.displayProductName}</b>\n` +
     `<i>Chọn màu/phân loại cần rút</i>` +
     (lockedCount > 0 ? `\n\n🔒 ${lockedCount} phân loại đang chờ kiểm thực tế.` : "");
+  await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
+}
+
+async function sendRutHangUnitMenu(chatId, anchorCode, messageId = null, requestedPage = 0) {
+  const list = await getAllHandlingUnitsFromStore();
+  const anchorUnit = list.find(
+    (unit) => getHandlingUnitCode(unit).toUpperCase() === String(anchorCode).toUpperCase(),
+  );
+  if (!anchorUnit) {
+    await sendRutHangMenu(chatId, messageId, true);
+    return;
+  }
+
+  const skuKey = getHandlingUnitSku(anchorUnit).toUpperCase();
+  const units = list
+    .filter((unit) => {
+      const sameSku = getHandlingUnitSku(unit).toUpperCase() === skuKey;
+      const visibleStatus =
+        unit.status === "opened" ||
+        unit.status === "Đang sử dụng" ||
+        unit.status === "sealed" ||
+        unit.status === "Nguyên niêm phong" ||
+        unit.status === "pending_check" ||
+        unit.status === "Chờ kiểm";
+      return sameSku && visibleStatus;
+    })
+    .sort((left, right) => {
+      const rank = (unit) => {
+        if (unit.status === "opened" || unit.status === "Đang sử dụng") return 0;
+        if (unit.status === "pending_check" || unit.status === "Chờ kiểm") return 1;
+        return 2;
+      };
+      return rank(left) - rank(right) || compareHandlingUnitsFifo(left, right);
+    });
+  const pageCount = Math.max(1, Math.ceil(units.length / TELEGRAM_KHUI_UNIT_PAGE_SIZE));
+  const page = Math.min(Math.max(Number(requestedPage) || 0, 0), pageCount - 1);
+  const pageUnits = units.slice(
+    page * TELEGRAM_KHUI_UNIT_PAGE_SIZE,
+    (page + 1) * TELEGRAM_KHUI_UNIT_PAGE_SIZE,
+  );
+  const stableAnchorCode = getHandlingUnitCode(anchorUnit);
+  const inlineKeyboard = pageUnits.map((unit) => {
+    const code = getHandlingUnitCode(unit);
+    const remaining = unit.remainingQuantity ?? unit.currentPcs ?? 0;
+    const unitName = unit.baseUnit || unit.unitName || "Gói";
+    const isOpened = unit.status === "opened" || unit.status === "Đang sử dụng";
+    const isPending = unit.status === "pending_check" || unit.status === "Chờ kiểm";
+    const isSealedBlocked =
+      !isOpened &&
+      !isPending &&
+      units.some((candidate) => {
+        const candidateIsPending =
+          candidate.status === "pending_check" || candidate.status === "Chờ kiểm";
+        const candidateIsOpened =
+          candidate.status === "opened" || candidate.status === "Đang sử dụng";
+        return candidateIsPending || (
+          candidateIsOpened &&
+          getHandlingUnitPackageCategory(candidate.packagingName || candidate.packageType) ===
+            getHandlingUnitPackageCategory(unit.packagingName || unit.packageType)
+        );
+      });
+    return [{
+      text: isOpened
+        ? `📦 ${code} · Đang mở · ${remaining.toLocaleString("vi-VN")} ${unitName}`
+        : isPending
+          ? `⏳ ${code} · Chờ kiểm · ${remaining.toLocaleString("vi-VN")} ${unitName}`
+          : `🔒 ${code} · Niêm phong · ${remaining.toLocaleString("vi-VN")} ${unitName}`,
+      callback_data: isOpened || isPending
+        ? `pick_unit:${code}`
+        : isSealedBlocked
+          ? `locked_unit:${code}`
+          : `rut_khui:${code}`,
+    }];
+  });
+  if (pageCount > 1) {
+    const navigation = [];
+    if (page > 0) {
+      navigation.push({
+        text: "◀️ Trước",
+        callback_data: `rut_units:${stableAnchorCode}:${page - 1}`,
+      });
+    }
+    navigation.push({ text: `${page + 1}/${pageCount}`, callback_data: "khui_noop" });
+    if (page < pageCount - 1) {
+      navigation.push({
+        text: "Tiếp ▶️",
+        callback_data: `rut_units:${stableAnchorCode}:${page + 1}`,
+      });
+    }
+    inlineKeyboard.push(navigation);
+  }
+  inlineKeyboard.push([{
+    text: "🔙 Quay lại danh sách màu",
+    callback_data: `rut_group:${getHandlingUnitCode(anchorUnit)}`,
+  }]);
+  const text =
+    `📦 <b>${anchorUnit.color || getHandlingUnitSku(anchorUnit)}</b>\n` +
+    `<i>Chọn mã kiện cần thao tác</i>\n\n` +
+    `📦 Kiện đang mở được xếp đầu tiên.\n🔒 Kiện còn nguyên niêm phong.`;
   await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
 }
 
@@ -9167,7 +9312,13 @@ async function sendKhuiKienMenu(chatId, messageId = null, requestedPage = 0) {
   await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
 }
 
-async function sendKhuiKienSuggestion(chatId, anchorCode, messageId = null) {
+async function sendKhuiKienSuggestion(
+  chatId,
+  anchorCode,
+  messageId = null,
+  backCallback = "menu_khui",
+  backText = "🔙 Chọn SKU khác",
+) {
   const list = await getAllHandlingUnitsFromStore();
   const anchorUnit = list.find(
     (unit) => getHandlingUnitCode(unit).toUpperCase() === String(anchorCode).toUpperCase(),
@@ -9206,7 +9357,7 @@ async function sendKhuiKienSuggestion(chatId, anchorCode, messageId = null) {
       { text: `📋 Xem ${hiddenCount} kiện khác`, callback_data: `khui_units:${code}:0` },
     ]);
   }
-  inlineKeyboard.push([{ text: "🔙 Chọn SKU khác", callback_data: "menu_khui" }]);
+  inlineKeyboard.push([{ text: backText, callback_data: backCallback }]);
   await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
 }
 
@@ -9268,19 +9419,18 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
   );
 
   if (!unit) {
-    await sendTelegramWmsMessage(
+    await renderTelegramWmsMenu(
       chatId,
+      messageId,
       `❌ Không tìm thấy kiện <code>${code}</code>.`,
+      [[{ text: "🔙 Quay lại danh sách kiện", callback_data: "menu_rut_list" }]],
     );
     return;
   }
 
-  const unitMetadata = (await getTelegramHandlingUnitCatalog([unit])).get(
-    getHandlingUnitCode(unit),
-  );
   const backToProductButton = {
-    text: `🔙 Quay lại ${unitMetadata?.displayProductName || "phân loại"}`,
-    callback_data: `rut_group:${getHandlingUnitCode(unit)}`,
+    text: `🔙 Quay lại ${unit.color || "danh sách kiện"}`,
+    callback_data: `rut_variant:${getHandlingUnitCode(unit)}`,
   };
 
   const pendingConflict = list.find((candidate) =>
@@ -9291,9 +9441,7 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
   if (pendingConflict || unit.status === "pending_check" || unit.status === "Chờ kiểm") {
     const blocker = pendingConflict || unit;
     const text = `⛔ <b>KHÔNG THỂ RÚT HÀNG</b>\n\n${buildPendingHandlingUnitBlockMessage(unit.sku || unit.skuName, blocker, "rút hàng")}`;
-    const markup = { inline_keyboard: [[backToProductButton]] };
-    if (messageId) await editTelegramWmsMessage(chatId, messageId, text, markup);
-    else await sendTelegramWmsMessage(chatId, text, markup);
+    await renderTelegramWmsMenu(chatId, messageId, text, [[backToProductButton]]);
     return;
   }
 
@@ -9334,12 +9482,38 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
     `📍 <b>Vị trí:</b> ${formatTelegramWmsLocation(unit.zone || unit.location)}\n\n` +
     `👉 <b>CHẠM VÀO SỐ LƯỢNG MUỐN RÚT:</b>`;
 
-  const markup = { inline_keyboard: inlineKeyboard };
-  if (messageId) {
-    await editTelegramWmsMessage(chatId, messageId, text, markup);
-  } else {
-    await sendTelegramWmsMessage(chatId, text, markup);
-  }
+  await renderTelegramWmsMenu(chatId, messageId, text, inlineKeyboard);
+}
+
+function renderTelegramCustomPickPrompt(
+  chatId,
+  code,
+  messageId,
+  quantityText = "",
+  errorText = "",
+) {
+  const errorLine = errorText ? `\n\n⚠️ <b>${String(errorText).replace(/[<>]/g, "")}</b>` : "";
+  const displayQuantity = quantityText || "0";
+  return renderTelegramWmsMenu(
+    chatId,
+    messageId,
+    `✍️ <b>NHẬP SỐ LƯỢNG TÙY CHỌN</b>\n\n📦 Kiện: <code>${code}</code>\n🔢 <b>Số lượng: ${displayQuantity}</b>${errorLine}\n\n👉 Chạm các phím số bên dưới rồi bấm <b>Xác nhận rút</b>.`,
+    [
+      [1, 2, 3].map((digit) => ({ text: String(digit), callback_data: `custom_key:${digit}` })),
+      [4, 5, 6].map((digit) => ({ text: String(digit), callback_data: `custom_key:${digit}` })),
+      [7, 8, 9].map((digit) => ({ text: String(digit), callback_data: `custom_key:${digit}` })),
+      [
+        { text: "🗑 Xóa", callback_data: "custom_key:clear" },
+        { text: "0", callback_data: "custom_key:0" },
+        { text: "⌫", callback_data: "custom_key:back" },
+      ],
+      [{ text: "✅ Xác nhận rút", callback_data: "custom_key:confirm" }],
+      [{
+        text: "🔙 Quay lại menu số lượng",
+        callback_data: `cancel_custom_pick:${code}`,
+      }],
+    ],
+  );
 }
 
 async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = null) {
@@ -9380,9 +9554,52 @@ async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = 
     return;
   }
 
+  if (data.startsWith("rut_variant:")) {
+    const anchorCode = data.slice("rut_variant:".length);
+    await answerTelegramCallbackQuery(queryId);
+    await sendRutHangUnitMenu(chatId, anchorCode, messageId);
+    return;
+  }
+
+  if (data.startsWith("rut_units:")) {
+    const parts = data.split(":");
+    const anchorCode = parts[1];
+    const page = Number(parts[2]) || 0;
+    await answerTelegramCallbackQuery(queryId);
+    await sendRutHangUnitMenu(chatId, anchorCode, messageId, page);
+    return;
+  }
+
+  if (data.startsWith("locked_unit:")) {
+    const code = data.slice("locked_unit:".length);
+    await answerTelegramCallbackQuery(
+      queryId,
+      `🔒 Kiện ${code} chưa thể khui. Hãy xử lý kiện đang mở hoặc chờ kiểm trước.`,
+    );
+    return;
+  }
+
   if (data.startsWith("pick_unit:")) {
     const code = data.split(":")[1];
+    const sourceMessageText = String(
+      callbackQuery.message?.text || callbackQuery.message?.caption || "",
+    ).toLocaleLowerCase("vi-VN");
+    if (sourceMessageText.includes("chọn màu/phân loại cần rút")) {
+      await answerTelegramCallbackQuery(queryId);
+      await sendRutHangUnitMenu(chatId, code, messageId);
+      return;
+    }
     await answerTelegramCallbackQuery(queryId, `Đã chọn kiện ${code}`);
+    await sendPickQuantityMenu(chatId, code, messageId);
+    return;
+  }
+
+  if (data.startsWith("cancel_custom_pick:")) {
+    const code = data.slice("cancel_custom_pick:".length);
+    telegramWmsPendingCustomPicks.delete(
+      telegramWmsActorKey(chatId, callbackQuery.from?.id),
+    );
+    await answerTelegramCallbackQuery(queryId, "Đã hủy nhập số lượng");
     await sendPickQuantityMenu(chatId, code, messageId);
     return;
   }
@@ -9390,20 +9607,96 @@ async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = 
   if (data.startsWith("custom_pick:")) {
     const code = data.slice("custom_pick:".length);
     const actorKey = telegramWmsActorKey(chatId, callbackQuery.from?.id);
+    await answerTelegramCallbackQuery(queryId, "Chọn số lượng trên bàn phím");
     telegramWmsPendingCustomPicks.set(actorKey, {
       code,
+      quantityText: "",
+      messageId,
       expiresAt: Date.now() + 5 * 60 * 1000,
     });
-    await answerTelegramCallbackQuery(queryId, "Hãy nhập số lượng muốn rút");
-    await sendTelegramWmsMessage(
-      chatId,
-      `✍️ <b>NHẬP SỐ LƯỢNG TÙY CHỌN</b>\n\n📦 Kiện: <code>${code}</code>\n👉 Hãy trả lời bằng một <b>số nguyên dương không vượt tồn còn lại của kiện</b>.\n<i>Ví dụ: 100, 200, 500...</i>`,
-      {
-        force_reply: true,
-        selective: true,
-        input_field_placeholder: "Nhập số lượng cần rút",
-      },
-    );
+    await renderTelegramCustomPickPrompt(chatId, code, messageId);
+    return;
+  }
+
+  if (data.startsWith("custom_key:")) {
+    const actorKey = telegramWmsActorKey(chatId, callbackQuery.from?.id);
+    const pending = telegramWmsPendingCustomPicks.get(actorKey);
+    if (!pending || pending.expiresAt < Date.now()) {
+      telegramWmsPendingCustomPicks.delete(actorKey);
+      await answerTelegramCallbackQuery(queryId, "Phiên nhập đã hết hạn. Vui lòng chọn lại.");
+      return;
+    }
+
+    const key = data.slice("custom_key:".length);
+    pending.expiresAt = Date.now() + 5 * 60 * 1000;
+    if (/^\d$/.test(key)) {
+      pending.quantityText = `${pending.quantityText || ""}${key}`
+        .replace(/^0+(?=\d)/, "")
+        .slice(0, 7);
+      await answerTelegramCallbackQuery(queryId);
+      await renderTelegramCustomPickPrompt(
+        chatId,
+        pending.code,
+        messageId,
+        pending.quantityText,
+      );
+      return;
+    }
+    if (key === "clear" || key === "back") {
+      pending.quantityText = key === "clear"
+        ? ""
+        : String(pending.quantityText || "").slice(0, -1);
+      await answerTelegramCallbackQuery(queryId);
+      await renderTelegramCustomPickPrompt(
+        chatId,
+        pending.code,
+        messageId,
+        pending.quantityText,
+      );
+      return;
+    }
+    if (key === "confirm") {
+      const qty = Number(pending.quantityText);
+      if (!Number.isInteger(qty) || qty < 1) {
+        await answerTelegramCallbackQuery(queryId, "Hãy nhập số lượng lớn hơn 0.");
+        await renderTelegramCustomPickPrompt(
+          chatId,
+          pending.code,
+          messageId,
+          pending.quantityText,
+          "Số lượng phải lớn hơn 0.",
+        );
+        return;
+      }
+      await answerTelegramCallbackQuery(queryId, "Đang rút hàng...");
+      try {
+        const res = await executeRutHang(
+          pending.code,
+          qty,
+          actor,
+          "",
+          "PACKING",
+          telegramUpdateId,
+        );
+        telegramWmsPendingCustomPicks.delete(actorKey);
+        const markup = buildTelegramWmsPostPickKeyboard(pending.code, res.remaining);
+        await renderTelegramWmsMenu(
+          chatId,
+          messageId,
+          buildTelegramWmsPickResult(pending.code, res, actorLabel),
+          markup.inline_keyboard,
+        );
+      } catch (error) {
+        await renderTelegramCustomPickPrompt(
+          chatId,
+          pending.code,
+          messageId,
+          pending.quantityText,
+          error.message,
+        );
+      }
+      return;
+    }
     return;
   }
 
@@ -9418,6 +9711,7 @@ async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = 
       await sendPickQuantityMenu(chatId, code, messageId);
       return;
     }
+    await answerTelegramCallbackQuery(queryId, "Đang rút hàng...");
     try {
       const res = await executeRutHang(
         code,
@@ -9427,16 +9721,21 @@ async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = 
         "PACKING",
         telegramUpdateId,
       );
-      await answerTelegramCallbackQuery(queryId, `✅ Đã rút ${qty} sản phẩm!`);
       const resHtml = buildTelegramWmsPickResult(code, res, actorLabel);
 
       const markup = buildTelegramWmsPostPickKeyboard(code, res.remaining);
-      await editTelegramWmsMessage(chatId, messageId, resHtml, markup);
-    } catch (err) {
-      await answerTelegramCallbackQuery(queryId, `❌ Lỗi: ${err.message}`);
-      await sendTelegramWmsMessage(
+      await renderTelegramWmsMenu(
         chatId,
+        messageId,
+        resHtml,
+        markup.inline_keyboard,
+      );
+    } catch (err) {
+      await renderTelegramWmsMenu(
+        chatId,
+        messageId,
         `❌ <b>Lỗi rút hàng:</b> ${err.message}`,
+        [[{ text: "🔙 Quay lại menu số lượng", callback_data: `pick_unit:${code}` }]],
       );
     }
     return;
@@ -9446,6 +9745,19 @@ async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = 
     const page = Number(data.split(":")[1]) || 0;
     await answerTelegramCallbackQuery(queryId);
     await sendKhuiKienMenu(chatId, messageId, page);
+    return;
+  }
+
+  if (data.startsWith("rut_khui:")) {
+    const anchorCode = data.slice("rut_khui:".length);
+    await answerTelegramCallbackQuery(queryId);
+    await sendKhuiKienSuggestion(
+      chatId,
+      anchorCode,
+      messageId,
+      `rut_variant:${anchorCode}`,
+      "🔙 Quay lại danh sách kiện",
+    );
     return;
   }
 
@@ -9472,9 +9784,9 @@ async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = 
 
   if (data.startsWith("unseal_unit:")) {
     const code = data.split(":")[1];
+    await answerTelegramCallbackQuery(queryId, "Đang khui kiện...");
     try {
       const unit = await executeKhuiKien(code, actor, telegramUpdateId);
-      await answerTelegramCallbackQuery(queryId, `✅ Đã khui kiện ${code}!`);
       const resHtml =
         `✅ <b>KHUI KIỆN 1 CHẠM THÀNH CÔNG!</b>\n\n` +
         `📦 <b>Mã Kiện:</b> <code>${unit.code || unit.id}</code>\n` +
@@ -9493,12 +9805,18 @@ async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = 
           [{ text: "🔙 Danh sách kiện mở", callback_data: "menu_rut_list" }],
         ],
       };
-      await editTelegramWmsMessage(chatId, messageId, resHtml, markup);
-    } catch (err) {
-      await answerTelegramCallbackQuery(queryId, `❌ Lỗi: ${err.message}`);
-      await sendTelegramWmsMessage(
+      await renderTelegramWmsMenu(
         chatId,
+        messageId,
+        resHtml,
+        markup.inline_keyboard,
+      );
+    } catch (err) {
+      await renderTelegramWmsMenu(
+        chatId,
+        messageId,
         `❌ <b>Lỗi khui kiện:</b> ${err.message}`,
+        [[{ text: "🔙 Quay lại danh sách kiện", callback_data: `rut_variant:${code}` }]],
       );
     }
     return;
@@ -9540,7 +9858,12 @@ async function handleTelegramWmsCallbackQuery(callbackQuery, telegramUpdateId = 
         [{ text: "🔓 Khui thêm kiện", callback_data: "menu_khui" }],
       ],
     };
-    await editTelegramWmsMessage(chatId, messageId, resHtml, markup);
+    await renderTelegramWmsMenu(
+      chatId,
+      messageId,
+      resHtml,
+      markup.inline_keyboard,
+    );
     return;
   }
 
@@ -9623,34 +9946,47 @@ async function handleTelegramWmsIncomingMessage(message, telegramUpdateId = null
 
   const actorKey = telegramWmsActorKey(chatId, message.from?.id);
   const pendingCustomPick = telegramWmsPendingCustomPicks.get(actorKey);
-  if (pendingCustomPick) {
+  // Legacy text-entry sessions are still understood during a rolling update.
+  // New sessions use the inline numeric keypad and never consume chat messages.
+  if (pendingCustomPick?.inputMode === "text") {
     if (pendingCustomPick.expiresAt < Date.now()) {
       telegramWmsPendingCustomPicks.delete(actorKey);
-      await sendTelegramWmsMessage(
+      await sendPickQuantityMenu(
         chatId,
-        "⌛ Yêu cầu nhập số lượng đã hết hạn. Vui lòng chọn lại kiện và bấm <b>Nhập số lượng tùy chọn</b>.",
+        pendingCustomPick.code,
+        pendingCustomPick.messageId,
       );
       return;
     }
     if (cmd === "/huy") {
       telegramWmsPendingCustomPicks.delete(actorKey);
-      await sendTelegramWmsMessage(chatId, "✅ Đã hủy nhập số lượng tùy chọn.");
+      await sendPickQuantityMenu(
+        chatId,
+        pendingCustomPick.code,
+        pendingCustomPick.messageId,
+      );
       return;
     }
     if (!/^\d+$/.test(text)) {
-      await sendTelegramWmsMessage(
+      const rendered = await renderTelegramCustomPickPrompt(
         chatId,
-        "⚠️ Vui lòng chỉ nhập một <b>số nguyên dương</b>, hoặc gửi <code>/huy</code> để hủy.",
+        pendingCustomPick.code,
+        pendingCustomPick.messageId,
+        "Chỉ nhập một số nguyên dương.",
       );
+      pendingCustomPick.messageId = rendered?.result?.message_id || pendingCustomPick.messageId;
       return;
     }
 
     const qty = Number(text);
     if (!Number.isInteger(qty) || qty < 1) {
-      await sendTelegramWmsMessage(
+      const rendered = await renderTelegramCustomPickPrompt(
         chatId,
-        "⚠️ Số lượng rút phải là một <b>số nguyên dương</b>.",
+        pendingCustomPick.code,
+        pendingCustomPick.messageId,
+        "Số lượng rút phải lớn hơn 0.",
       );
+      pendingCustomPick.messageId = rendered?.result?.message_id || pendingCustomPick.messageId;
       return;
     }
 
@@ -9668,19 +10004,24 @@ async function handleTelegramWmsIncomingMessage(message, telegramUpdateId = null
         telegramUpdateId,
       );
       telegramWmsPendingCustomPicks.delete(actorKey);
-      await sendTelegramWmsMessage(
+      const markup = buildTelegramWmsPostPickKeyboard(
+        pendingCustomPick.code,
+        res.remaining,
+      );
+      await renderTelegramWmsMenu(
         chatId,
+        pendingCustomPick.messageId,
         buildTelegramWmsPickResult(pendingCustomPick.code, res, actorLabel),
-        buildTelegramWmsPostPickKeyboard(
-          pendingCustomPick.code,
-          res.remaining,
-        ),
+        markup.inline_keyboard,
       );
     } catch (error) {
-      await sendTelegramWmsMessage(
+      const rendered = await renderTelegramCustomPickPrompt(
         chatId,
-        `❌ <b>Không thể rút hàng:</b> ${error.message}\n👉 Bạn có thể nhập lại số khác hoặc gửi <code>/huy</code>.`,
+        pendingCustomPick.code,
+        pendingCustomPick.messageId,
+        `Không thể rút hàng: ${error.message}`,
       );
+      pendingCustomPick.messageId = rendered?.result?.message_id || pendingCustomPick.messageId;
     }
     return;
   }
@@ -9984,18 +10325,41 @@ function startTelegramWmsPolling() {
                 telegramWmsLastPollAt = new Date().toISOString();
                 telegramWmsLastError = null;
                 for (const update of json.result) {
-                  if (update.callback_query) {
-                    await handleTelegramWmsCallbackQuery(
-                      update.callback_query,
-                      update.update_id,
+                  try {
+                    if (update.callback_query) {
+                      console.log(
+                        `[TelegramWMS] Callback ${update.callback_query.data || "(empty)"} | update ${update.update_id}`,
+                      );
+                      await handleTelegramWmsCallbackQuery(
+                        update.callback_query,
+                        update.update_id,
+                      );
+                    } else if (update.message) {
+                      await handleTelegramWmsIncomingMessage(
+                        update.message,
+                        update.update_id,
+                      );
+                    }
+                  } catch (updateError) {
+                    telegramWmsLastError = `Telegram update ${update.update_id} lỗi: ${updateError.message}`;
+                    console.error(
+                      `[TelegramWMS] Update ${update.update_id} failed:`,
+                      updateError,
                     );
-                  } else if (update.message) {
-                    await handleTelegramWmsIncomingMessage(
-                      update.message,
-                      update.update_id,
-                    );
+                    if (update.callback_query) {
+                      await answerTelegramCallbackQuery(
+                        update.callback_query.id,
+                        "Có lỗi xử lý. Vui lòng thử lại.",
+                      );
+                      await sendTelegramWmsMessage(
+                        update.callback_query.message?.chat?.id,
+                        "❌ <b>Bot gặp lỗi khi xử lý nút vừa chọn.</b> Vui lòng bấm lại hoặc gửi <code>/rut</code> để tải menu mới.",
+                      );
+                    }
+                  } finally {
+                    // Một callback lỗi không được phép chặn toàn bộ hàng đợi bot.
+                    await saveTelegramWmsOffset(update.update_id + 1);
                   }
-                  await saveTelegramWmsOffset(update.update_id + 1);
                 }
               } else {
                 telegramWmsLastError =
