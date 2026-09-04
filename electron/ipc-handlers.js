@@ -9337,7 +9337,7 @@ async function sendKhuiKienSuggestion(
   const quantity = suggested.remainingQuantity ?? suggested.currentPcs ?? 0;
   const unitName = suggested.baseUnit || suggested.unitName || "Gói";
   const hiddenCount = Math.max(0, group.units.length - 1);
-  const location = formatLocation(suggested.location || suggested.zone);
+  const location = formatTelegramWmsLocation(suggested.zone || suggested.location);
   const text =
     `🔓 <b>KIỆN ĐƯỢC ĐỀ XUẤT</b>\n\n` +
     `🏷️ <b>SKU:</b> <code>${group.sku}</code>\n` +

@@ -52,6 +52,8 @@ const LS_KEY = 'stock-check-sessions-v2';
 const DAILY_MAX_SKUS = 15;
 const TEMPORARY_DAILY_ONLY_MODE = false;
 const TEMPORARY_DAILY_PRODUCT_NAMES = ['5D UNICARE', 'UNICARE UPF UV'];
+const FULL_CHECK_OPEN_HOUR = 16;
+const DAILY_CHECK_OPEN_HOUR = 17;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -396,6 +398,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const canViewLedger = isAdmin;
 
     const [currentDate, setCurrentDate] = useState(dayjs());
+    const [clockNow, setClockNow] = useState(dayjs());
     const wallDateKeyRef = useRef(dayjs().format('YYYY-MM-DD'));
     const [activeTab, setActiveTab] = useState<'daily' | 'full' | 'inspection'>('daily');
     const [sessions, setSessions] = useState<CheckSession[]>([]);
@@ -462,6 +465,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     useEffect(() => {
         const detectNewDay = async () => {
             const now = dayjs();
+            setClockNow(now);
             const nextDateKey = now.format('YYYY-MM-DD');
             const previousDateKey = wallDateKeyRef.current;
             if (nextDateKey === previousDateKey) return;
@@ -553,6 +557,13 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const isPast = currentDate.isBefore(dayjs(), 'day');
     const isFuture = currentDate.isAfter(dayjs(), 'day');
     const isLockedDate = isPast || isFuture;
+    const dailyWindowOpen = !isToday || clockNow.hour() >= DAILY_CHECK_OPEN_HOUR;
+    const fullWindowOpen = !isToday || clockNow.hour() >= FULL_CHECK_OPEN_HOUR;
+    const activeWindowOpen = activeTab === 'inspection'
+        || (activeTab === 'full' ? fullWindowOpen : dailyWindowOpen);
+    const isActiveTimeLocked = isToday && !activeWindowOpen;
+    const activeOpeningTime = activeTab === 'full' ? '16:00' : '17:00';
+    const activeTimedLabel = activeTab === 'full' ? 'Kiểm toàn bộ' : 'Kiểm hàng ngày';
     const canCreateInspection = user?.role === 'admin' || user?.role === 'manager' || user?.isTestAccount === true;
     // Only admin can compare the physical count to system stock. A historical
     // session remains blind to non-admin users as well.
@@ -561,8 +572,8 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const loggedInUsername = String(user?.username || currentUser || '').trim().toLowerCase();
     const isAssignedChecker = isAdmin || isTestOperator || (assignedUsername !== '' && assignedUsername === loggedInUsername);
     const isSessionSubmitted = todaySession?.status === 'completed';
-    const canEditCounts = !!todaySession && !isLockedDate && !isSessionSubmitted && isAssignedChecker;
-    const canManageConversions = !!todaySession && !isLockedDate && !isSessionSubmitted && isAssignedChecker;
+    const canEditCounts = !!todaySession && !isLockedDate && !isActiveTimeLocked && !isSessionSubmitted && isAssignedChecker;
+    const canManageConversions = !!todaySession && !isLockedDate && !isActiveTimeLocked && !isSessionSubmitted && isAssignedChecker;
     const resolveAssigneeLabel = (session?: CheckSession) => {
         if (!session) return '';
         const username = String(session.assignedTo || '').trim();
@@ -838,34 +849,45 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 {/* ── Tabs (trái) ── */}
                 <div style={{ display: 'flex', gap: 3, background: '#f1f5f9', padding: 3, borderRadius: 10 }}>
                     <button
-                        disabled={dailyDisabledByFull}
+                        disabled={dailyDisabledByFull || !dailyWindowOpen}
                         onClick={() => {
-                            if (dailyDisabledByFull) return;
+                            if (dailyDisabledByFull || !dailyWindowOpen) return;
                             setActiveTab('daily');
                             setCurrentDate(dayjs());
                         }}
                         style={{
                             padding: '5px 14px', borderRadius: 7, fontWeight: 600, fontSize: 12,
                             background: activeTab === 'daily' ? '#10b981' : 'transparent',
-                            color: dailyDisabledByFull ? '#94a3b8' : activeTab === 'daily' ? '#fff' : '#64748b',
-                            border: 'none', cursor: dailyDisabledByFull ? 'not-allowed' : 'pointer',
-                            opacity: dailyDisabledByFull ? 0.65 : 1, transition: 'all 0.15s',
+                            color: dailyDisabledByFull || !dailyWindowOpen ? '#94a3b8' : activeTab === 'daily' ? '#fff' : '#64748b',
+                            border: 'none', cursor: dailyDisabledByFull || !dailyWindowOpen ? 'not-allowed' : 'pointer',
+                            opacity: dailyDisabledByFull || !dailyWindowOpen ? 0.65 : 1, transition: 'all 0.15s',
                         }}
-                        title={dailyDisabledByFull ? 'Hôm nay đã có phiên kiểm toàn bộ' : undefined}
+                        title={dailyDisabledByFull
+                            ? 'Hôm nay đã có phiên kiểm toàn bộ'
+                            : !dailyWindowOpen ? 'Kiểm hàng ngày mở lúc 17:00' : undefined}
                     >
-                        {dailyDisabledByFull ? 'Kiểm hàng ngày · Tạm dừng' : 'Kiểm hàng ngày'}
+                        {dailyDisabledByFull
+                            ? 'Kiểm hàng ngày · Tạm dừng'
+                            : !dailyWindowOpen ? 'Kiểm hàng ngày · 17:00' : 'Kiểm hàng ngày'}
                     </button>
                     {!TEMPORARY_DAILY_ONLY_MODE && <>
                         <button
-                            onClick={() => { setActiveTab('full'); setCurrentDate(dayjs()); }}
+                            disabled={!fullWindowOpen}
+                            onClick={() => {
+                                if (!fullWindowOpen) return;
+                                setActiveTab('full');
+                                setCurrentDate(dayjs());
+                            }}
                             style={{
                                 padding: '5px 14px', borderRadius: 7, fontWeight: 600, fontSize: 12,
                                 background: activeTab === 'full' ? '#10b981' : 'transparent',
-                                color: activeTab === 'full' ? '#fff' : '#64748b',
-                                border: 'none', cursor: 'pointer', transition: 'all 0.15s',
+                                color: !fullWindowOpen ? '#94a3b8' : activeTab === 'full' ? '#fff' : '#64748b',
+                                border: 'none', cursor: !fullWindowOpen ? 'not-allowed' : 'pointer',
+                                opacity: !fullWindowOpen ? 0.65 : 1, transition: 'all 0.15s',
                             }}
+                            title={!fullWindowOpen ? 'Kiểm toàn bộ mở lúc 16:00' : undefined}
                         >
-                            Kiểm toàn bộ
+                            {!fullWindowOpen ? 'Kiểm toàn bộ · 16:00' : 'Kiểm toàn bộ'}
                         </button>
                         <button
                             onClick={() => { setActiveTab('inspection'); setCurrentDate(dayjs()); }}
@@ -884,7 +906,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 </div>
 
                 {/* ── Assignee (phải) ── */}
-                {todaySession && (
+                {todaySession && !isActiveTimeLocked && (
                     <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
                         <Dropdown
                             trigger={['click']}
@@ -977,7 +999,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             </div>
         );
         return () => clearHeaderExtra();
-    }, [activeTab, todaySession, todayAssigneeInitial, todayAssigneeLabel, isAdmin, isToday, canManage, isSessionSubmitted, sessions, dailyDisabledByFull, setHeaderExtra, clearHeaderExtra, handleUndoSession, handleCancelSession]);
+    }, [activeTab, todaySession, todayAssigneeInitial, todayAssigneeLabel, isAdmin, isToday, canManage, isSessionSubmitted, sessions, dailyDisabledByFull, dailyWindowOpen, fullWindowOpen, isActiveTimeLocked, setHeaderExtra, clearHeaderExtra, handleUndoSession, handleCancelSession]);
 
     const fetchStaff = async () => {
         try {
@@ -1323,7 +1345,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     // Auto-assign người phụ trách khi page load — nếu hôm nay chưa có session thì gán ngay,
     // không cần chờ nhân viên bấm "Tạo phiên kiểm". Chính sách phạt được điều khiển riêng.
     useEffect(() => {
-        if (!isAdmin || !sessionsLoaded || !isToday || activeTab !== 'daily' || dailyDisabledByFull || cancelledDailyForDate || !assignableManagers.length) return;
+        if (!isAdmin || !sessionsLoaded || !isToday || !dailyWindowOpen || activeTab !== 'daily' || dailyDisabledByFull || cancelledDailyForDate || !assignableManagers.length) return;
         if (isVietnamRestDay(dayjs())) return;
         const current = sessions;
         const existingDailySession = current.find(s =>
@@ -1347,13 +1369,13 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         };
         const updated = current.filter(s => s.id !== todayStr).concat(preSession);
         persistSessions(updated);
-    }, [isAdmin, sessionsLoaded, isToday, activeTab, dailyDisabledByFull, cancelledDailyForDate, assignableManagers, todayStr, sessions]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [isAdmin, sessionsLoaded, isToday, dailyWindowOpen, activeTab, dailyDisabledByFull, cancelledDailyForDate, assignableManagers, todayStr, sessions]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Assignment and item generation must be one continuous workflow. Previously
     // the automatic step only created an empty assignment; a manager then saw a
     // blank page until an admin manually pressed "Tạo danh sách kiểm".
     useEffect(() => {
-        if (!isAdmin || !isToday || activeTab !== 'daily' || dailyDisabledByFull || !todaySession || todaySession.items.length > 0 || !stockCheckActivityLoaded) return;
+        if (!isAdmin || !isToday || !dailyWindowOpen || activeTab !== 'daily' || dailyDisabledByFull || !todaySession || todaySession.items.length > 0 || !stockCheckActivityLoaded) return;
         if (!contextProducts.length || autoGeneratedSessionRef.current === todaySession.id) return;
 
         let cancelled = false;
@@ -1373,13 +1395,13 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             persistSessions(sessions.map(session => session.id === todaySession.id ? completedSession : session));
         })();
         return () => { cancelled = true; };
-    }, [isAdmin, isToday, activeTab, dailyDisabledByFull, todaySession, contextProducts, topSellingProducts, stockCheckActivityLoaded, stockCheckActivity, sessions, loadTopSellingProducts]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [isAdmin, isToday, dailyWindowOpen, activeTab, dailyDisabledByFull, todaySession, contextProducts, topSellingProducts, stockCheckActivityLoaded, stockCheckActivity, sessions, loadTopSellingProducts]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Quản lý cần có thể khởi tạo phiên của ngày hiện tại khi không có admin
     // mở màn hình. Việc tạo thực hiện ở main process: client chỉ gửi danh sách
     // SKU, còn máy chủ tự chọn người theo vòng và khóa giao dịch.
     useEffect(() => {
-        if (isAdmin || user?.role !== 'manager' || !isToday || isVietnamRestDay(dayjs()) || activeTab !== 'daily' || dailyDisabledByFull || cancelledDailyForDate || todaySession || !stockCheckActivityLoaded) return;
+        if (isAdmin || user?.role !== 'manager' || !isToday || !dailyWindowOpen || isVietnamRestDay(dayjs()) || activeTab !== 'daily' || dailyDisabledByFull || cancelledDailyForDate || todaySession || !stockCheckActivityLoaded) return;
         if (!contextProducts.length || autoGeneratedSessionRef.current === `manager-${todayStr}`) return;
 
         let cancelled = false;
@@ -1397,7 +1419,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             if (result.session) setSessions(previous => [...previous.filter(session => session.id !== result.session.id), result.session]);
         })();
         return () => { cancelled = true; };
-    }, [isAdmin, user?.role, isToday, activeTab, dailyDisabledByFull, cancelledDailyForDate, todaySession, contextProducts, topSellingProducts, stockCheckActivityLoaded, todayStr, loadTopSellingProducts]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [isAdmin, user?.role, isToday, dailyWindowOpen, activeTab, dailyDisabledByFull, cancelledDailyForDate, todaySession, contextProducts, topSellingProducts, stockCheckActivityLoaded, todayStr, loadTopSellingProducts]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleGenerate = async () => {
         if (isPast) {
@@ -1409,6 +1431,14 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             return;
         }
         const useFullInventory = activeTab === 'full';
+        if (useFullInventory && !fullWindowOpen) {
+            message.info('Kiểm toàn bộ chỉ mở từ 16:00.');
+            return;
+        }
+        if (!useFullInventory && !dailyWindowOpen) {
+            message.info('Kiểm hàng ngày chỉ mở từ 17:00.');
+            return;
+        }
         if (!useFullInventory && isVietnamRestDay(dayjs())) {
             message.info('Chủ nhật và ngày lễ không tạo phiên kiểm hàng ngày.');
             return;
