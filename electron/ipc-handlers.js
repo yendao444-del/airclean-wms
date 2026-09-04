@@ -73,6 +73,10 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "update:check",
   "update:download",
   "update:restart",
+  // Opening a handling unit is a single transactional status transition.
+  // The database path uses row/advisory locks and safety mode disables the
+  // legacy JSON fallback, so this operation cannot partially update stock.
+  "handlingUnits:unsealUnit",
   // These handlers enforce admin access. They are required for issuing
   // temporary passwords and maintaining active employee accounts.
   "users:update",
@@ -1390,7 +1394,6 @@ const DATA_SAFETY_BLOCKED_CHANNELS = new Map([
   ["handlingUnits:allocate", "Phân bổ kiện chưa có đối soát phục hồi đã kiểm chứng"],
   ["handlingUnits:move", "Di chuyển kiện chưa có đối soát phục hồi đã kiểm chứng"],
   ["handlingUnits:updateUnit", "Sửa kiện có thể ghi đè trạng thái dùng chung"],
-  ["handlingUnits:unsealUnit", "Khui kiện có đường fallback có thể làm lệch dữ liệu"],
   ["handlingUnits:sealUnit", "Niêm phong kiện có thể ghi lệch hai nguồn dữ liệu"],
   ["handlingUnits:pickUnit", "Rút hàng khỏi kiện chưa có đối soát phục hồi đã kiểm chứng"],
   ["handlingUnits:requestFinalCheck", "Chuyển trạng thái chờ chốt kiện chưa có rollback đã kiểm chứng"],
