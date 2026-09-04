@@ -64,10 +64,16 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "returns:updateWorkflow",
   "returns:updateWorkflowBulk",
   "returns:saveStatusList",
+  "returns:update",
+  // Excel imports are validated before writing, serialized across machines,
+  // deduplicated against the database, and committed as one transaction.
+  "returns:bulkCreate",
+  "refunds:bulkCreate",
   // Refund status transitions are validated separately from full record edits
   // and serialized under a row lock; inventory restoration remains in its
   // dedicated transactional handler.
   "refunds:updateStatus",
+  "refunds:update",
   // Updates are restricted to the official GitHub repository, require a
   // matching SHA-256 asset, and require an authenticated session to install.
   "update:check",
@@ -90,16 +96,42 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "handlingUnits:markQrLabelsPrinted",
   "handlingUnits:markQrLabelsReceived",
   "handlingUnits:exportLabelsPdf",
+  "handlingUnits:quickReceive",
   // Stock-check unit reconciliation is role-gated, transactional and uses an
   // expected-balance guard so a stale screen cannot overwrite a newer count.
   "handlingUnits:updateUnit",
   "handlingUnits:finalizePick",
+  // Daily package operations are serialized by package code and persist an
+  // idempotency result in the same transaction as the balance/history change.
+  "handlingUnits:sealUnit",
+  "handlingUnits:pickUnit",
+  "handlingUnits:requestFinalCheck",
+  "handlingUnits:finalizeShiftCheck",
   // Purchase creation claims an idempotency key and commits the receipt,
   // stock ledger, stock values, and metadata in one serializable transaction.
   "purchases:create",
+  "purchases:update",
+  "purchases:repairMissingPrices",
+  "purchases:uploadVATInvoice",
+  "purchases:uploadImportReceipt",
+  "purchases:uploadCompanyVATInvoice",
+  "purchases:setCompanyVatStatus",
+  // VAT grouping is serialized through the shared AppConfig row, validates
+  // stale purchase/group revisions, and never detaches an uploaded invoice.
+  "purchases:createVatGroup",
+  "purchases:uploadVatGroupInvoice",
+  "purchases:removeVatGroup",
+  "purchases:markAsThht",
   // This workflow uses the stock mutex and one database transaction for the
   // export, stock ledger changes, and linked marketplace order.
   "ecommerceExports:create",
+  "ecommerceExports:update",
+  "ecommerceExports:saveTelegramSettings",
+  "ecommerceExports:nextTelegramOrderCounter",
+  "exportOrders:saveWithStock",
+  // POS creation claims a durable operation key before creating the order,
+  // payment, stock movements and inventory logs in one transaction.
+  "posOrder:create",
   // Stock-check mutations operate on a server-validated session under the
   // shared session lock. Stock adjustments also use the stock mutex and the
   // same database transaction as their immutable balance history.
@@ -114,6 +146,20 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "stockCheck:balanceItems",
   "stockCheck:balanceItem",
   "stockCheck:submitSession",
+  // These JSON-backed catalog writes use a shared advisory lock and only
+  // mutate the requested company/product association.
+  "goodsCompanies:create",
+  "goodsCompanies:update",
+  "goodsCompanies:setProductCompany",
+  // Profile updates are limited to the authenticated user's name/avatar.
+  "users:updateProfile",
+  // Refund restoration updates stock, logs and status atomically.
+  "refunds:completeAndRestore",
+  // Creating a recurring daily task is a single validated row insert.
+  "dailyTasks:create",
+  // Offline replay keeps failed files, is single-flight, user-bound and calls
+  // the same stale-write guarded ecommerce transaction as the online path.
+  "offlineQueue:sync",
 ]);
 
 // Local config is a development convenience only. Production builds must
@@ -1394,6 +1440,7 @@ const DATA_SAFETY_BLOCKED_CHANNELS = new Map([
   ["handlingUnits:allocate", "Phân bổ kiện chưa có đối soát phục hồi đã kiểm chứng"],
   ["handlingUnits:move", "Di chuyển kiện chưa có đối soát phục hồi đã kiểm chứng"],
   ["handlingUnits:updateUnit", "Sửa kiện có thể ghi đè trạng thái dùng chung"],
+  ["handlingUnits:unsealUnit", "Khui kiện có đường fallback có thể làm lệch dữ liệu"],
   ["handlingUnits:sealUnit", "Niêm phong kiện có thể ghi lệch hai nguồn dữ liệu"],
   ["handlingUnits:pickUnit", "Rút hàng khỏi kiện chưa có đối soát phục hồi đã kiểm chứng"],
   ["handlingUnits:requestFinalCheck", "Chuyển trạng thái chờ chốt kiện chưa có rollback đã kiểm chứng"],
@@ -1513,7 +1560,28 @@ const DATA_SAFETY_BLOCKED_CHANNELS = new Map([
   ["update:restart", "Khởi động lại có thể áp dụng gói cập nhật đang chờ"],
 ]);
 
+// These keys are independent user-facing preferences or narrowly scoped
+// operational settings. Shared ledgers and whole-state documents remain
+// blocked and must use their dedicated transactional APIs.
+const DATA_SAFETY_MUTABLE_CONFIG_KEYS = new Set([
+  "variantMinStocks",
+  "pausedVariants",
+  "stockConversionRates",
+  "pickupWatchFolder",
+  "statusList",
+  "calculator_inputs_v2",
+  "shopee_fees_v3",
+  "tiktok_fees_v3",
+  "pnlConfig",
+]);
+
 function getDataSafetyBlockedOperation(channel, args) {
+  if (
+    channel === "appConfig:set" &&
+    DATA_SAFETY_MUTABLE_CONFIG_KEYS.has(String(args?.[1] || ""))
+  ) {
+    return null;
+  }
   const operation = DATA_SAFETY_BLOCKED_CHANNELS.get(channel);
   if (operation) return operation;
   return null;
@@ -4352,6 +4420,12 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
     const response = await withStockLock(() =>
       getPrismaDirectTx().$transaction(
         async (tx) => {
+          const lockedRows = await tx.$queryRaw`
+            SELECT id FROM "Refund" WHERE id = ${refundId} FOR UPDATE
+          `;
+          if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+            throw new Error("Không tìm thấy phiếu hàng hoàn.");
+          }
           const refund = await tx.refund.findUnique({
             where: { id: refundId },
           });
@@ -4955,6 +5029,24 @@ async function normalizePosOrderItems(db, rawItems, { allowPriceOverride = false
 ipcMain.handle("posOrder:create", async (event, data) => {
   try {
     if (!prisma) throw new Error("Database chưa được khởi tạo.");
+    const idempotencyKey = String(data?.idempotencyKey || "").trim();
+    if (!/^[A-Za-z0-9_-]{8,100}$/.test(idempotencyKey)) {
+      throw new Error("Mã chống tạo trùng đơn POS không hợp lệ.");
+    }
+    const operationKey = `posOrderOperation:${idempotencyKey}`;
+    const completedOperation = await prisma.appConfig.findUnique({
+      where: { key: operationKey },
+      select: { value: true },
+    });
+    if (completedOperation?.value && completedOperation.value !== "pending") {
+      const saved = JSON.parse(completedOperation.value);
+      const existingOrder = await prisma.order.findUnique({
+        where: { id: Number(saved.orderId) },
+      });
+      if (existingOrder) {
+        return { success: true, duplicate: true, data: existingOrder };
+      }
+    }
     console.log(
       `💰 [POS] Creating order with ${Array.isArray(data.items) ? data.items.length : 0} items`,
     );
@@ -4993,6 +5085,31 @@ ipcMain.handle("posOrder:create", async (event, data) => {
       getPrismaDirectTx().$transaction(
         async (tx) => {
           await lockGlobalInventoryMutation(tx);
+          const claim = await tx.appConfig.createMany({
+            data: { key: operationKey, value: "pending" },
+            skipDuplicates: true,
+          });
+          if (claim.count === 0) {
+            const completed = await tx.appConfig.findUnique({
+              where: { key: operationKey },
+              select: { value: true },
+            });
+            if (completed?.value && completed.value !== "pending") {
+              const saved = JSON.parse(completed.value);
+              const existingOrder = await tx.order.findUnique({
+                where: { id: Number(saved.orderId) },
+              });
+              if (existingOrder) {
+                return {
+                  order: existingOrder,
+                  orderNumber: existingOrder.orderNumber,
+                  stockUpdates: [],
+                  duplicate: true,
+                };
+              }
+            }
+            throw new Error("Đơn POS này đang được xử lý ở máy khác. Vui lòng thử lại sau.");
+          }
           const today = new Date();
           const dateStr = today.toISOString().slice(0, 10).replace(/-/g, "");
           const prefix = `POS-${dateStr}-`;
@@ -5068,6 +5185,35 @@ ipcMain.handle("posOrder:create", async (event, data) => {
             }
           }
 
+          await tx.appConfig.update({
+            where: { key: operationKey },
+            data: {
+              value: JSON.stringify({
+                orderId: newOrder.id,
+                orderNumber,
+                completedAt: new Date().toISOString(),
+              }),
+            },
+          });
+          await tx.activityLog.create({
+            data: {
+              module: "sales",
+              action: "CREATE",
+              description: `Bán hàng POS: ${orderNumber} - ${items.length} SP - ${new Intl.NumberFormat("vi-VN").format(total)}đ (${data.paymentMethod || "cash"})`,
+              recordName: orderNumber,
+              userName: data.userName || currentSession?.username || "System",
+              userId: createdByUserId,
+              severity: "INFO",
+              details: JSON.stringify({
+                orderNumber,
+                itemCount: items.length,
+                total,
+                profit,
+                paymentMethod: data.paymentMethod,
+              }),
+            },
+          });
+
           return { order: newOrder, orderNumber, stockUpdates };
         },
         { timeout: 30000, maxWait: 10000 },
@@ -5082,28 +5228,6 @@ ipcMain.handle("posOrder:create", async (event, data) => {
       },
     );
     dashboardSummaryCache.clear();
-
-    // 5. Activity Log
-    try {
-      await prisma.activityLog.create({
-        data: {
-          module: "sales",
-          action: "CREATE",
-          description: `Bán hàng POS: ${result.orderNumber} - ${items.length} SP - ${new Intl.NumberFormat("vi-VN").format(total)}đ (${data.paymentMethod || "cash"})`,
-          userName: data.userName || "System",
-          severity: "INFO",
-          details: JSON.stringify({
-            orderNumber: result.orderNumber,
-            itemCount: items.length,
-            total,
-            profit,
-            paymentMethod: data.paymentMethod,
-          }),
-        },
-      });
-    } catch (logErr) {
-      console.error("  ⚠️ Activity log failed:", logErr.message);
-    }
 
     console.log(`✅ [POS] Order created: ${result.orderNumber}, Total: ${total}`);
     return {
@@ -5739,9 +5863,9 @@ async function savePurchaseItemPackaging(purchaseId, items, client = prisma) {
 // VAT belongs to a goods company within a purchase receipt.  Keep this
 // separate from the legacy receipt-level VAT fields so one receipt can have
 // one warehouse receipt but several independent supplier invoices.
-async function getPurchaseCompanyVat() {
-  if (!prisma) return {};
-  const config = await prisma.appConfig.findUnique({
+async function getPurchaseCompanyVat(client = prisma) {
+  if (!client) return {};
+  const config = await client.appConfig.findUnique({
     where: { key: PURCHASE_COMPANY_VAT_KEY },
   });
   if (!config?.value) return {};
@@ -5753,9 +5877,9 @@ async function getPurchaseCompanyVat() {
   }
 }
 
-async function savePurchaseCompanyVat(companyVat) {
-  if (!prisma) throw new Error("Prisma not available");
-  await prisma.appConfig.upsert({
+async function savePurchaseCompanyVat(companyVat, client = prisma) {
+  if (!client) throw new Error("Prisma not available");
+  await client.appConfig.upsert({
     where: { key: PURCHASE_COMPANY_VAT_KEY },
     update: { value: JSON.stringify(companyVat) },
     create: {
@@ -5765,9 +5889,9 @@ async function savePurchaseCompanyVat(companyVat) {
   });
 }
 
-async function getPurchaseVatGroups() {
-  if (!prisma) return {};
-  const config = await prisma.appConfig.findUnique({
+async function getPurchaseVatGroups(client = prisma) {
+  if (!client) return {};
+  const config = await client.appConfig.findUnique({
     where: { key: PURCHASE_VAT_GROUPS_KEY },
   });
   if (!config?.value) return {};
@@ -5778,18 +5902,18 @@ async function getPurchaseVatGroups() {
   }
 }
 
-async function savePurchaseVatGroups(groups) {
-  if (!prisma) throw new Error("Prisma not available");
-  await prisma.appConfig.upsert({
+async function savePurchaseVatGroups(groups, client = prisma) {
+  if (!client) throw new Error("Prisma not available");
+  await client.appConfig.upsert({
     where: { key: PURCHASE_VAT_GROUPS_KEY },
     update: { value: JSON.stringify(groups) },
     create: { key: PURCHASE_VAT_GROUPS_KEY, value: JSON.stringify(groups) },
   });
 }
 
-async function getPurchaseVatFileMeta() {
-  if (!prisma) return {};
-  const config = await prisma.appConfig.findUnique({
+async function getPurchaseVatFileMeta(client = prisma) {
+  if (!client) return {};
+  const config = await client.appConfig.findUnique({
     where: { key: PURCHASE_VAT_FILE_META_KEY },
   });
   if (!config?.value) return {};
@@ -5800,9 +5924,9 @@ async function getPurchaseVatFileMeta() {
   }
 }
 
-async function savePurchaseVatFileMeta(meta) {
-  if (!prisma) throw new Error("Prisma not available");
-  await prisma.appConfig.upsert({
+async function savePurchaseVatFileMeta(meta, client = prisma) {
+  if (!client) throw new Error("Prisma not available");
+  await client.appConfig.upsert({
     where: { key: PURCHASE_VAT_FILE_META_KEY },
     update: { value: JSON.stringify(meta) },
     create: { key: PURCHASE_VAT_FILE_META_KEY, value: JSON.stringify(meta) },
@@ -5812,10 +5936,13 @@ async function savePurchaseVatFileMeta(meta) {
 function generatePurchaseVatGroupId(existingGroups = {}) {
   const now = new Date();
   const datePart = now.toISOString().slice(0, 10).replace(/-/g, "");
-  const sameDayCount = Object.keys(existingGroups).filter((id) =>
-    String(id).startsWith(`VATG-${datePart}-`),
-  ).length;
-  return `VATG-${datePart}-${String(sameDayCount + 1).padStart(3, "0")}`;
+  const prefix = `VATG-${datePart}-`;
+  const largestSuffix = Object.keys(existingGroups).reduce((largest, id) => {
+    if (!String(id).startsWith(prefix)) return largest;
+    const suffix = Number(String(id).slice(prefix.length));
+    return Number.isInteger(suffix) ? Math.max(largest, suffix) : largest;
+  }, 0);
+  return `${prefix}${String(largestSuffix + 1).padStart(3, "0")}`;
 }
 
 function generateVatIdFromFile(fileName = "", fileSize = 0) {
@@ -5869,6 +5996,7 @@ ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
           createdBy: true,
           receivedAt: true,
           createdAt: true,
+          updatedAt: true,
           vatInvoiceStatus: true,
           vatInvoiceNumber: true,
           vatInvoiceDate: true,
@@ -6064,6 +6192,7 @@ ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
           vatGroupInvoiceNumber: group?.vatInvoiceNumber || null,
           vatGroupInvoiceDate: group?.vatInvoiceDate || null,
           vatGroupDriveUrl: group?.vatInvoiceDriveUrl || null,
+          vatGroupUpdatedAt: group?.updatedAt || group?.createdAt || null,
         });
       });
     });
@@ -6211,6 +6340,7 @@ ipcMain.handle("purchases:getAll", async (event, { since, limit } = {}) => {
         vatGroupInvoiceNumber: vatGroupMeta.vatGroupInvoiceNumber || null,
         vatGroupInvoiceDate: vatGroupMeta.vatGroupInvoiceDate || null,
         vatGroupDriveUrl: vatGroupMeta.vatGroupDriveUrl || null,
+        vatGroupUpdatedAt: vatGroupMeta.vatGroupUpdatedAt || null,
         vatGroupVatId: vatGroups[vatGroupMeta.vatGroupId]?.vatId || null,
         vatGroupVatFileName:
           vatGroups[vatGroupMeta.vatGroupId]?.vatFileName || null,
@@ -7083,6 +7213,308 @@ ipcMain.handle("handlingUnits:issueQrLabels", async (_event, payload = {}) => {
     return { success: true, data: result };
   } catch (error) {
     console.error("Issue QR labels error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Quick receiving uploads the evidence first, then commits purchase receipts,
+// stock, physical units, QR status and metadata in one database transaction.
+ipcMain.handle("handlingUnits:quickReceive", async (_event, payload = {}) => {
+  let uploadedReference = null;
+  try {
+    requireRole("admin", "manager");
+    await requireHandlingUnitsFoundation();
+    const idempotencyKey = String(payload.idempotencyKey || "").trim();
+    if (!/^[A-Za-z0-9_-]{8,100}$/.test(idempotencyKey)) {
+      throw new Error("Mã chống tạo trùng lần nhập nhanh không hợp lệ.");
+    }
+    const operationKey = `handlingQuickReceiveOperation:${idempotencyKey}`;
+    const completed = await prisma.appConfig.findUnique({
+      where: { key: operationKey },
+      select: { value: true },
+    });
+    if (completed?.value && completed.value !== "pending") {
+      return { success: true, duplicate: true, data: JSON.parse(completed.value) };
+    }
+
+    const rawLines = Array.isArray(payload.lines) ? payload.lines : [];
+    if (!rawLines.length || rawLines.length > 500) {
+      throw new Error("Danh sách hàng nhập nhanh phải có từ 1 đến 500 dòng.");
+    }
+    if (!payload.receiptFile?.fileBase64 || !payload.receiptFile?.fileName) {
+      throw new Error("Cần tải Phiếu nhập kho trước khi xác nhận.");
+    }
+    const lines = rawLines.map((line, index) => {
+      const source = line?.source === "MANUAL" ? "MANUAL" : "QR";
+      const sku = String(line?.sku || "").trim();
+      const supplierId = Number(line?.supplierId);
+      const quantity = Math.floor(Number(line?.quantity));
+      const unitPrice = Number(line?.unitPrice);
+      const qrCode = String(line?.qrCode || "").trim().toUpperCase();
+      if (!sku || !Number.isInteger(supplierId) || supplierId <= 0) {
+        throw new Error(`Dòng ${index + 1}: thiếu SKU hoặc nhà cung cấp.`);
+      }
+      if (!Number.isInteger(quantity) || quantity <= 0 || quantity > 1000000) {
+        throw new Error(`Dòng ${index + 1}: số lượng không hợp lệ.`);
+      }
+      if (!Number.isFinite(unitPrice) || unitPrice <= 0 || unitPrice > 1000000000000) {
+        throw new Error(`Dòng ${index + 1}: giá nhập không hợp lệ.`);
+      }
+      if (source === "QR" && !qrCode) {
+        throw new Error(`Dòng ${index + 1}: thiếu mã QR.`);
+      }
+      return {
+        source,
+        sku,
+        supplierId,
+        quantity,
+        unitPrice,
+        qrCode,
+        companyGroup: String(line?.companyGroup || "").trim(),
+        packagingName: String(line?.packagingName || "").trim(),
+        baseUnit: String(line?.baseUnit || "").trim() || "đơn vị",
+        conversionFactor: Math.floor(Number(line?.conversionFactor || quantity)),
+        location: normalizeHandlingLocation(line?.location || {}),
+      };
+    });
+    if (new Set(lines.filter((line) => line.source === "QR").map((line) => line.qrCode)).size !== lines.filter((line) => line.source === "QR").length) {
+      throw new Error("Danh sách nhập nhanh có mã QR bị trùng.");
+    }
+    const missingCompany = lines.find((line) => !line.companyGroup);
+    if (missingCompany) throw new Error(`SKU ${missingCompany.sku} chưa được gán công ty hàng hóa.`);
+
+    uploadedReference = await uploadPurchaseReceiptToR2(
+      `quick-${idempotencyKey}`,
+      payload.receiptFile,
+    );
+
+    const result = await withStockLock(() =>
+      getPrismaDirectTx().$transaction(
+        async (tx) => {
+          await lockGlobalInventoryMutation(tx);
+          await lockPurchaseMetadata(tx);
+          await lockHandlingConfigKeys(tx, [HANDLING_QR_LABELS_KEY]);
+          const claim = await tx.appConfig.createMany({
+            data: { key: operationKey, value: "pending" },
+            skipDuplicates: true,
+          });
+          if (claim.count === 0) {
+            const existing = await tx.appConfig.findUnique({ where: { key: operationKey } });
+            if (existing?.value && existing.value !== "pending") {
+              return { ...JSON.parse(existing.value), duplicate: true };
+            }
+            throw new Error("Lần nhập nhanh này đang được xử lý ở máy khác. Vui lòng thử lại sau.");
+          }
+
+          const supplierIds = [...new Set(lines.map((line) => line.supplierId))];
+          const suppliers = await tx.supplier.findMany({
+            where: { id: { in: supplierIds }, status: "active" },
+            select: { id: true, name: true },
+          });
+          if (suppliers.length !== supplierIds.length) {
+            throw new Error("Có nhà cung cấp không tồn tại hoặc đã ngừng sử dụng.");
+          }
+          const supplierNameById = new Map(suppliers.map((supplier) => [supplier.id, supplier.name]));
+          const products = await tx.product.findMany({
+            select: { id: true, name: true, sku: true, variants: true },
+          });
+          const productBySku = new Map();
+          products.forEach((product) => {
+            productBySku.set(String(product.sku), { productId: product.id, name: product.name });
+            parseJsonArray(product.variants).forEach((variant) => {
+              if (variant?.sku) productBySku.set(String(variant.sku), { productId: product.id, name: product.name, color: variant.color || null });
+            });
+          });
+          for (const line of lines) {
+            if (!productBySku.has(line.sku)) throw new Error(`Không tìm thấy SKU ${line.sku}.`);
+          }
+          const goodsCompanies = await readGoodsCompanies(tx);
+          for (const line of lines) {
+            const productId = productBySku.get(line.sku).productId;
+            const company = goodsCompanies.find(
+              (item) =>
+                String(item?.name || "").trim() === line.companyGroup &&
+                Array.isArray(item?.productIds) &&
+                item.productIds.map(Number).includes(Number(productId)),
+            );
+            if (!company) {
+              throw new Error(
+                `Công ty hàng hóa của SKU ${line.sku} đã thay đổi. Vui lòng tải lại trước khi nhập.`,
+              );
+            }
+          }
+
+          const registry = await readHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY);
+          const labelByCode = new Map(registry.map((label) => [String(label?.code || "").toUpperCase(), label]));
+          for (const line of lines.filter((item) => item.source === "QR")) {
+            const label = labelByCode.get(line.qrCode);
+            if (!label || !["issued", "printed"].includes(label.status)) {
+              throw new Error(`Mã QR ${line.qrCode} không hợp lệ, đã dùng hoặc chưa được phát hành.`);
+            }
+            if (
+              String(label.sku) !== line.sku ||
+              Number(label.supplierId) !== line.supplierId ||
+              Number(label.conversionFactor) !== line.quantity
+            ) {
+              throw new Error(`Thông tin mã QR ${line.qrCode} không khớp dữ liệu phát hành.`);
+            }
+            line.packagingName = String(label.packagingName || "").trim();
+            line.baseUnit = String(label.baseUnit || "").trim() || "đơn vị";
+            line.conversionFactor = Number(label.conversionFactor);
+            line.location = normalizeHandlingLocation(label.location || {});
+          }
+
+          const grouped = new Map();
+          lines.forEach((line) => {
+            const group = grouped.get(line.supplierId) || [];
+            group.push(line);
+            grouped.set(line.supplierId, group);
+          });
+          const purchases = [];
+          const unitRows = [];
+          const purchaseItemCompanies = await getPurchaseItemCompanies(tx);
+          for (const [supplierId, supplierLines] of grouped) {
+            const itemMap = new Map();
+            supplierLines.forEach((line) => {
+              const current = itemMap.get(line.sku);
+              if (current) {
+                if (
+                  current.unitPrice !== line.unitPrice ||
+                  current.companyGroup !== line.companyGroup ||
+                  current.baseUnit !== line.baseUnit
+                ) {
+                  throw new Error(
+                    `SKU ${line.sku} có giá, công ty hoặc đơn vị không đồng nhất trong cùng phiếu.`,
+                  );
+                }
+                current.quantity += line.quantity;
+              } else itemMap.set(line.sku, { ...line });
+            });
+            const items = [...itemMap.values()];
+            const prefix = `PN-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-`;
+            const lastOrder = await tx.purchaseOrder.findFirst({
+              where: { poNumber: { startsWith: prefix } },
+              orderBy: { poNumber: "desc" },
+              select: { poNumber: true },
+            });
+            const lastNumber = Number(String(lastOrder?.poNumber || "").replace(prefix, ""));
+            const poNumber = `${prefix}${String(Number.isFinite(lastNumber) ? lastNumber + 1 : 1).padStart(3, "0")}`;
+            const totalAmount = items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
+            const purchase = await tx.purchaseOrder.create({
+              data: {
+                poNumber,
+                supplierId,
+                status: "completed",
+                subtotal: totalAmount,
+                total: totalAmount,
+                note: lines.some((line) => line.source === "MANUAL")
+                  ? "Tạo từ Quản lý kiện hàng · Nhập nhanh có hàng thủ công không QR"
+                  : "Tạo từ Quản lý kiện hàng · Tạo kiện nhanh",
+                receivedAt: new Date(),
+                createdBy: currentSession?.username || "Admin",
+                importReceiptStatus: "uploaded",
+                importReceiptDriveUrl: uploadedReference,
+                items: {
+                  create: items.map((item) => ({
+                    productId: productBySku.get(item.sku).productId,
+                    quantity: item.quantity,
+                    price: item.unitPrice,
+                    subtotal: item.quantity * item.unitPrice,
+                    variantSku: item.sku,
+                    color: productBySku.get(item.sku).color || null,
+                  })),
+                },
+              },
+              include: { supplier: true, items: true },
+            });
+            const savedItemsBySku = new Map(purchase.items.map((item) => [String(item.variantSku || ""), item]));
+            for (const item of items) {
+              await updateProductStockInTx(tx, item.sku, item.quantity, {
+                type: "purchase",
+                referenceType: "NHAP",
+                reference: poNumber,
+                note: `Nhập nhanh ${item.sku} x${item.quantity}`,
+                createdBy: currentSession?.username || "Admin",
+              });
+            }
+            purchaseItemCompanies[String(purchase.id)] = {
+              byItemId: Object.fromEntries(
+                purchase.items.map((savedItem) => [
+                  getPurchaseItemCompanyKey(savedItem),
+                  items.find((item) => item.sku === savedItem.variantSku)?.companyGroup || "",
+                ]),
+              ),
+            };
+            await savePurchaseItemPackaging(purchase.id, items, tx);
+            supplierLines.filter((line) => line.source === "QR").forEach((line) => {
+              const product = productBySku.get(line.sku);
+              const purchaseItem = savedItemsBySku.get(line.sku);
+              const label = labelByCode.get(line.qrCode);
+              unitRows.push({
+                code: line.qrCode,
+                purchaseOrderId: purchase.id,
+                purchaseItemId: purchaseItem.id,
+                productId: product.productId,
+                sku: line.sku,
+                color: product.color || null,
+                packagingName: String(label.packagingName),
+                baseUnit: String(label.baseUnit),
+                conversionFactor: Number(label.conversionFactor),
+                initialQuantity: line.quantity,
+                remainingQuantity: line.quantity,
+                status: "sealed",
+                zone: toHandlingUnitLocationCode(
+                  normalizeHandlingLocation(label.location || line.location),
+                ),
+              });
+              label.status = "received";
+              label.receivedAt = new Date().toISOString();
+              label.handlingUnitCode = line.qrCode;
+            });
+            await tx.activityLog.create({
+              data: {
+                module: "purchases",
+                action: "QUICK_RECEIVE",
+                description: `Nhập nhanh ${poNumber}: ${items.length} SKU`,
+                recordName: poNumber,
+                userName: currentSession?.username || "Admin",
+                userId: currentSession?.id || null,
+              },
+            });
+            purchases.push(purchase);
+          }
+          await savePurchaseItemCompanies(purchaseItemCompanies, tx);
+          if (unitRows.length) {
+            await tx.handlingUnit.createMany({ data: unitRows });
+            await appendHandlingUnitsTransactions(tx, unitRows.map((unit) => ({
+              unitId: unit.code,
+              type: "Nhập kiện",
+              quantity: unit.initialQuantity,
+              remaining: unit.remainingQuantity,
+              actor: currentSession?.username || "Renderer",
+              note: `Nhập nhanh từ tem QR ${unit.code}`,
+            })));
+          }
+          await writeHandlingConfigArray(tx, HANDLING_QR_LABELS_KEY, registry);
+          const operationResult = {
+            purchases: purchases.map((purchase) => ({ id: purchase.id, poNumber: purchase.poNumber, supplierName: supplierNameById.get(purchase.supplierId) })),
+            unitCodes: unitRows.map((unit) => unit.code),
+          };
+          await tx.appConfig.update({
+            where: { key: operationKey },
+            data: { value: JSON.stringify(operationResult) },
+          });
+          return operationResult;
+        },
+        { timeout: 60000, maxWait: 10000, isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      ),
+    );
+    emitStockChangedForSkus(lines.map((line) => line.sku), { referenceType: "NHAP", reference: "QUICK_RECEIVE" });
+    broadcastHandlingUnitsChanged("QUICK_RECEIVE", { codes: result.unitCodes });
+    return { success: true, duplicate: Boolean(result.duplicate), data: result };
+  } catch (error) {
+    if (uploadedReference) await cleanupFreshPurchaseReceiptUploads([uploadedReference]);
+    console.error("Quick handling-unit receiving error:", error);
     return { success: false, error: error.message };
   }
 });
@@ -8246,6 +8678,17 @@ function buildTelegramWmsOperationKey(updateId, action, code) {
   return `telegramWmsOperation:${normalizedUpdateId}:${safeAction}:${safeCode}`;
 }
 
+function buildRendererHandlingOperationKey(idempotencyKey, action, code) {
+  const key = String(idempotencyKey || "").trim();
+  if (!/^[A-Za-z0-9_-]{8,120}$/.test(key)) return "";
+  const safeAction = String(action || "operation").replace(/[^a-z0-9_-]/gi, "");
+  const safeCode = String(code || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, "");
+  return `handlingUnitOperation:${safeAction}:${safeCode}:${key}`;
+}
+
 async function executeKhuiKien(
   code,
   actor = "Telegram Bot",
@@ -8563,6 +9006,7 @@ async function executeRutHang(
   note = "",
   destination = "PACKING",
   telegramUpdateId = null,
+  rendererIdempotencyKey = null,
 ) {
   const normalizedCode = String(code || "")
     .trim()
@@ -8573,11 +9017,16 @@ async function executeRutHang(
   if (!normalizedCode || qty <= 0)
     throw new Error("Vui lòng nhập mã kiện và số lượng cần rút hợp lệ.");
   if (!prisma) throw new Error("Database chưa sẵn sàng để rút hàng.");
-  const operationKey = buildTelegramWmsOperationKey(
-    telegramUpdateId,
-    "pick",
-    normalizedCode,
-  );
+  const operationKey = rendererIdempotencyKey
+    ? buildRendererHandlingOperationKey(
+        rendererIdempotencyKey,
+        "pick",
+        normalizedCode,
+      )
+    : buildTelegramWmsOperationKey(telegramUpdateId, "pick", normalizedCode);
+  if (rendererIdempotencyKey && !operationKey) {
+    throw new Error("Mã chống rút hàng trùng không hợp lệ.");
+  }
 
   if (prisma) {
     try {
@@ -10438,39 +10887,36 @@ ipcMain.handle("handlingUnits:sealUnit", async (_event, payload = {}) => {
     const code = String(payload.code || "")
       .trim()
       .toUpperCase();
-    const current = await prisma.handlingUnit.findUnique({
-      where: { code },
-      select: { status: true },
-    });
-    if (!current) throw new Error(`Không tìm thấy kiện [${code}].`);
-    if (current.status === "pending_check") {
-      throw new Error(
-        `Kiện [${code}] đang chờ kiểm thực tế. Hãy nhập số lượng thực tế và chốt kiện trước, không thể đóng niêm phong để bỏ qua bước kiểm.`,
-      );
-    }
-    try {
-      await prisma.handlingUnit.update({
-        where: { code },
-        data: { status: "sealed" },
-      });
-    } catch {}
-    try {
-      const cfg = await prisma.appConfig.findUnique({
-        where: { key: "handlingUnitsRegisterJson" },
-      });
-      if (cfg?.value) {
-        const arr = JSON.parse(cfg.value);
-        const item = arr.find((u) => (u.code || u.id) === code);
-        if (item) {
-          item.status = "sealed";
-          await prisma.appConfig.update({
-            where: { key: "handlingUnitsRegisterJson" },
-            data: { value: JSON.stringify(arr) },
-          });
-        }
+    if (!code) throw new Error("Mã kiện không hợp lệ.");
+    const updated = await getPrismaDirectTx().$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${code}`}))`;
+      const current = await tx.handlingUnit.findUnique({ where: { code } });
+      if (!current) throw new Error(`Không tìm thấy kiện [${code}].`);
+      if (current.status === "pending_check") {
+        throw new Error(
+          `Kiện [${code}] đang chờ kiểm thực tế. Hãy nhập số lượng thực tế và chốt kiện trước, không thể đóng niêm phong để bỏ qua bước kiểm.`,
+        );
       }
-    } catch {}
-    return { success: true };
+      if (current.status === "sealed") return current;
+      if (current.status !== "opened") {
+        throw new Error(`Kiện [${code}] không ở trạng thái đang sử dụng.`);
+      }
+      const record = await tx.handlingUnit.update({
+        where: { code },
+        data: { status: "sealed", updatedAt: new Date() },
+      });
+      await appendHandlingUnitsTransaction(tx, {
+        unitId: code,
+        type: "Niêm phong kiện",
+        quantity: 0,
+        remaining: record.remainingQuantity,
+        actor: currentSession?.username || "Renderer",
+        note: "Đóng lại kiện từ màn hình quản lý kiện hàng",
+      });
+      return record;
+    });
+    broadcastHandlingUnitsChanged("SEAL", { code, status: "sealed" });
+    return { success: true, data: updated };
   } catch (error) {
     console.error("Seal handling unit error:", error);
     return { success: false, error: error.message };
@@ -10597,6 +11043,8 @@ ipcMain.handle("handlingUnits:pickUnit", async (_event, payload = {}) => {
       actor,
       note,
       destination,
+      null,
+      idempotencyKey,
     );
     const telegram = await notifyTelegramWmsPickFromDesktop({
       code,
@@ -10632,8 +11080,20 @@ ipcMain.handle("handlingUnits:requestFinalCheck", async (_event, payload = {}) =
     requireRole("admin", "manager");
     const code = String(payload.code || "").trim().toUpperCase();
     if (!code) throw new Error("Mã kiện không hợp lệ.");
+    const operationKey = buildRendererHandlingOperationKey(
+      idempotencyKey,
+      "request-final-check",
+      code,
+    );
+    if (!operationKey) throw new Error("Mã chống gửi chờ kiểm trùng không hợp lệ.");
     if (prisma) {
       const result = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${code}`}))`;
+        const completed = await tx.appConfig.findUnique({ where: { key: operationKey } });
+        if (completed) {
+          const unit = await tx.handlingUnit.findUnique({ where: { code } });
+          return unit ? { unit, duplicate: true } : null;
+        }
         const unit = await tx.handlingUnit.findUnique({ where: { code } });
         if (!unit) return null;
         if (unit.status !== "opened") {
@@ -10647,15 +11107,24 @@ ipcMain.handle("handlingUnits:requestFinalCheck", async (_event, payload = {}) =
           actor: currentSession?.username || "Renderer",
           note: `Chờ kiểm thực tế ${unit.remainingQuantity} ${unit.baseUnit} trước khi chốt hết kiện`,
         });
-        return tx.handlingUnit.update({
+        const updated = await tx.handlingUnit.update({
           where: { code },
           data: { status: "pending_check", updatedAt: new Date() },
         });
+        await tx.appConfig.create({
+          data: { key: operationKey, value: JSON.stringify({ code, completedAt: new Date().toISOString() }) },
+        });
+        return { unit: updated, duplicate: false };
       });
       if (result) {
-        broadcastHandlingUnitsChanged("PENDING_FINAL_CHECK", { code, status: "pending_check" });
-        return { success: true, data: { unit: result } };
+        if (!result.duplicate) {
+          broadcastHandlingUnitsChanged("PENDING_FINAL_CHECK", { code, status: "pending_check" });
+        }
+        return { success: true, data: result };
       }
+    }
+    if (DATA_SAFETY_MODE) {
+      throw new Error(`Không tìm thấy kiện [${code}] trong dữ liệu kiện hàng hiện tại.`);
     }
     const list = await getAllHandlingUnitsFromStore();
     const index = list.findIndex((unit) => String(unit.code || unit.id || "").toUpperCase() === code);
@@ -10708,6 +11177,12 @@ ipcMain.handle("handlingUnits:finalizePick", async (_event, payload = {}) => {
     if (!code || !Number.isFinite(actualQuantity)) {
       throw new Error("Số lượng thực tế không hợp lệ.");
     }
+    const operationKey = buildRendererHandlingOperationKey(
+      idempotencyKey,
+      "final-pick",
+      code,
+    );
+    if (!operationKey) throw new Error("Mã chống chốt kiện trùng không hợp lệ.");
 
     const recordFinalCheck = async (tx, unit) => {
       if (unit.status !== "pending_check" && unit.status !== "Chờ kiểm") {
@@ -10748,6 +11223,12 @@ ipcMain.handle("handlingUnits:finalizePick", async (_event, payload = {}) => {
 
     if (prisma) {
       const result = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${code}`}))`;
+        const completed = await tx.appConfig.findUnique({ where: { key: operationKey } });
+        if (completed) {
+          const unit = await tx.handlingUnit.findUnique({ where: { code } });
+          return unit ? { unit, actualQuantity: unit.remainingQuantity, duplicate: true } : null;
+        }
         const unit = await tx.handlingUnit.findUnique({ where: { code } });
         if (!unit) return null;
         await recordFinalCheck(tx, unit);
@@ -10760,18 +11241,27 @@ ipcMain.handle("handlingUnits:finalizePick", async (_event, payload = {}) => {
             updatedAt: new Date(),
           },
         });
-        return { unit: updated, actualQuantity };
+        await tx.appConfig.create({
+          data: { key: operationKey, value: JSON.stringify({ code, actualQuantity, completedAt: new Date().toISOString() }) },
+        });
+        return { unit: updated, actualQuantity, duplicate: false };
       });
       if (result) {
-        broadcastHandlingUnitsChanged("FINAL_CHECK", {
-          code,
-          remaining: actualQuantity,
-          status: actualQuantity > 0 ? "opened" : "empty",
-          actualQuantity,
-          actor: currentSession?.username || "Renderer",
-        });
+        if (!result.duplicate) {
+          broadcastHandlingUnitsChanged("FINAL_CHECK", {
+            code,
+            remaining: actualQuantity,
+            status: actualQuantity > 0 ? "opened" : "empty",
+            actualQuantity,
+            actor: currentSession?.username || "Renderer",
+          });
+        }
         return { success: true, data: result };
       }
+    }
+
+    if (DATA_SAFETY_MODE) {
+      throw new Error(`Không tìm thấy kiện [${code}] trong dữ liệu kiện hàng hiện tại.`);
     }
 
     const list = await getAllHandlingUnitsFromStore();
@@ -10870,8 +11360,21 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
     if (new Set(normalizedItems.map((item) => item.code)).size !== normalizedItems.length) {
       throw new Error("Danh sách kiểm có mã kiện bị trùng.");
     }
+    const operationKey = buildRendererHandlingOperationKey(
+      idempotencyKey,
+      "shift-check",
+      "BATCH",
+    );
+    if (!operationKey) throw new Error("Mã chống kiểm cuối ca trùng không hợp lệ.");
 
     const result = await prisma.$transaction(async (tx) => {
+      const completed = await tx.appConfig.findUnique({ where: { key: operationKey } });
+      if (completed) {
+        return { items: JSON.parse(completed.value || "[]"), duplicate: true };
+      }
+      await tx.$queryRaw(
+        Prisma.sql`SELECT "id" FROM "HandlingUnit" WHERE "code" IN (${Prisma.join(normalizedItems.map((item) => item.code))}) FOR UPDATE`,
+      );
       const historyConfig = await tx.appConfig.findUnique({
         where: { key: "handlingUnitsTransactionsJson" },
         select: { value: true },
@@ -10964,15 +11467,20 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
       }
 
       await appendHandlingUnitsTransactions(tx, historyEntries);
-      return checked;
+      await tx.appConfig.create({
+        data: { key: operationKey, value: JSON.stringify(checked) },
+      });
+      return { items: checked, duplicate: false };
     });
 
-    broadcastHandlingUnitsChanged("SHIFT_CHECK", {
-      codes: result.map((item) => item.code),
-      checkedCount: result.length,
-      actor: currentSession?.username || "Renderer",
-    });
-    return { success: true, data: { items: result } };
+    if (!result.duplicate) {
+      broadcastHandlingUnitsChanged("SHIFT_CHECK", {
+        codes: result.items.map((item) => item.code),
+        checkedCount: result.items.length,
+        actor: currentSession?.username || "Renderer",
+      });
+    }
+    return { success: true, data: result };
   } catch (error) {
     console.error("Finalize handling-unit shift check error:", error);
     return { success: false, error: error.message };
@@ -11210,70 +11718,112 @@ ipcMain.handle("purchases:getMyVatPenaltyAlerts", async () => {
 
 ipcMain.handle(
   "purchases:createVatGroup",
-  async (event, { purchaseIds = [], note = "" } = {}) => {
+  async (event, { purchaseIds = [], purchaseRevisions = {}, note = "" } = {}) => {
     try {
       requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
-      requireRole("admin", "manager", "staff");
 
       const normalizedIds = [
-        ...new Set((purchaseIds || []).map((id) => Number(id)).filter(Boolean)),
+        ...new Set(
+          (purchaseIds || [])
+            .map((id) => Number(id))
+            .filter((id) => Number.isInteger(id) && id > 0),
+        ),
       ];
       if (normalizedIds.length < 2)
         throw new Error("Cần chọn ít nhất 2 phiếu để gộp hóa đơn");
+      const expectedRevisions = new Map(
+        normalizedIds.map((id) => {
+          const revision = purchaseRevisions?.[String(id)] || purchaseRevisions?.[id];
+          const parsed = revision ? new Date(revision) : null;
+          if (!parsed || Number.isNaN(parsed.getTime())) {
+            throw new Error("Vui lòng tải lại danh sách phiếu nhập trước khi gộp HĐ VAT.");
+          }
+          return [id, parsed];
+        }),
+      );
 
-      const purchases = await prisma.purchaseOrder.findMany({
-        where: { id: { in: normalizedIds }, status: { not: "cancelled" } },
-        select: { id: true, poNumber: true },
-      });
-      if (purchases.length !== normalizedIds.length) {
-        throw new Error("Có phiếu nhập không hợp lệ hoặc đã bị hủy");
-      }
-
-      const vatGroups = await getPurchaseVatGroups();
-      Object.keys(vatGroups).forEach((groupId) => {
-        const currentIds = Array.isArray(vatGroups[groupId]?.purchaseIds)
-          ? vatGroups[groupId].purchaseIds.map(Number)
-          : [];
-        const remainingIds = currentIds.filter(
-          (id) => !normalizedIds.includes(id),
+      const result = await getPrismaDirectTx().$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${PURCHASE_VAT_GROUPS_KEY}))`;
+        const vatGroups = await getPurchaseVatGroups(tx);
+        const previouslyLinkedIds = Object.values(vatGroups).flatMap((group) => {
+          const ids = Array.isArray(group?.purchaseIds) ? group.purchaseIds : [];
+          return ids.map(Number).filter((id) => normalizedIds.includes(id));
+        });
+        const impactedGroupIds = new Set(previouslyLinkedIds);
+        Object.values(vatGroups).forEach((group) => {
+          const ids = Array.isArray(group?.purchaseIds)
+            ? group.purchaseIds.map(Number).filter(Number.isInteger)
+            : [];
+          if (ids.some((id) => normalizedIds.includes(id))) {
+            ids.forEach((id) => impactedGroupIds.add(id));
+          }
+        });
+        normalizedIds.forEach((id) => impactedGroupIds.add(id));
+        const lockedIds = [...impactedGroupIds].sort((a, b) => a - b);
+        await tx.$queryRaw(
+          Prisma.sql`SELECT "id" FROM "PurchaseOrder" WHERE "id" IN (${Prisma.join(lockedIds)}) FOR UPDATE`,
         );
-        if (remainingIds.length >= 2) {
-          vatGroups[groupId].purchaseIds = remainingIds;
-        } else {
-          delete vatGroups[groupId];
+        const purchases = await tx.purchaseOrder.findMany({
+          where: { id: { in: normalizedIds }, status: { not: "cancelled" } },
+          select: { id: true, poNumber: true, updatedAt: true },
+        });
+        if (purchases.length !== normalizedIds.length) {
+          throw new Error("Có phiếu nhập không hợp lệ hoặc đã bị hủy");
         }
-      });
+        purchases.forEach((purchase) => {
+          if (purchase.updatedAt.getTime() !== expectedRevisions.get(purchase.id).getTime()) {
+            throw new Error("Có phiếu nhập vừa thay đổi ở máy khác. Vui lòng tải lại trước khi gộp HĐ VAT.");
+          }
+        });
 
-      const newGroupId = generatePurchaseVatGroupId(vatGroups);
-      vatGroups[newGroupId] = {
-        purchaseIds: normalizedIds,
-        note: note || "",
-        createdAt: new Date().toISOString(),
-        vatInvoiceStatus: "pending",
-        vatInvoiceNumber: null,
-        vatInvoiceDate: null,
-        vatInvoiceFile: null,
-        vatInvoiceDriveUrl: null,
-        vatId: null,
-        vatFileName: null,
-        vatFileSize: null,
-      };
-      await savePurchaseVatGroups(vatGroups);
+        Object.keys(vatGroups).forEach((groupId) => {
+          const currentIds = Array.isArray(vatGroups[groupId]?.purchaseIds)
+            ? vatGroups[groupId].purchaseIds.map(Number)
+            : [];
+          const remainingIds = currentIds.filter((id) => !normalizedIds.includes(id));
+          if (remainingIds.length >= 2) vatGroups[groupId].purchaseIds = remainingIds;
+          else delete vatGroups[groupId];
+        });
+
+        const now = new Date();
+        const newGroupId = generatePurchaseVatGroupId(vatGroups);
+        vatGroups[newGroupId] = {
+          purchaseIds: normalizedIds,
+          note: String(note || "").trim(),
+          createdAt: now.toISOString(),
+          updatedAt: now.toISOString(),
+          vatInvoiceStatus: "pending",
+          vatInvoiceNumber: null,
+          vatInvoiceDate: null,
+          vatInvoiceFile: null,
+          vatInvoiceDriveUrl: null,
+          vatId: null,
+          vatFileName: null,
+          vatFileSize: null,
+        };
+        await savePurchaseVatGroups(vatGroups, tx);
+        await tx.purchaseOrder.updateMany({
+          where: { id: { in: lockedIds } },
+          data: { updatedAt: now },
+        });
+        return { newGroupId, purchases, updatedAt: now.toISOString() };
+      });
 
       void logActivity({
         module: "purchases",
         action: "VAT_GROUP_CREATE",
-        description: `Tạo nhóm HĐ gộp ${newGroupId} cho ${purchases.map((p) => p.poNumber || `#${p.id}`).join(", ")}`,
+        description: `Tạo nhóm HĐ gộp ${result.newGroupId} cho ${result.purchases.map((p) => p.poNumber || `#${p.id}`).join(", ")}`,
         userName: "System",
       });
 
       return {
         success: true,
         data: {
-          vatGroupId: newGroupId,
+          vatGroupId: result.newGroupId,
           purchaseIds: normalizedIds,
-          note: note || "",
+          note: String(note || "").trim(),
+          updatedAt: result.updatedAt,
         },
       };
     } catch (error) {
@@ -11294,15 +11844,36 @@ ipcMain.handle(
       files = [],
       fileBase64,
       fileName,
+      expectedGroupUpdatedAt,
     },
   ) => {
     try {
       if (!prisma) throw new Error("Prisma not available");
       requireRole("admin", "manager", "staff");
 
+      const normalizedGroupId = String(vatGroupId || "").trim();
+      const expectedGroupRevision = expectedGroupUpdatedAt
+        ? new Date(expectedGroupUpdatedAt)
+        : null;
+      if (!normalizedGroupId) throw new Error("Thiếu mã nhóm HĐ VAT");
+      if (!expectedGroupRevision || Number.isNaN(expectedGroupRevision.getTime())) {
+        throw new Error("Vui lòng tải lại danh sách phiếu nhập trước khi upload HĐ VAT nhóm.");
+      }
+      const parsedInvoiceDate = new Date(invoiceDate);
+      if (Number.isNaN(parsedInvoiceDate.getTime())) {
+        throw new Error("Ngày hóa đơn VAT không hợp lệ.");
+      }
+
       const vatGroups = await getPurchaseVatGroups();
-      const group = vatGroups[String(vatGroupId)];
+      const group = vatGroups[normalizedGroupId];
       if (!group) throw new Error(`Không tìm thấy nhóm HĐ VAT ${vatGroupId}`);
+      const currentGroupRevision = new Date(group.updatedAt || group.createdAt || 0);
+      if (
+        Number.isNaN(currentGroupRevision.getTime()) ||
+        currentGroupRevision.getTime() !== expectedGroupRevision.getTime()
+      ) {
+        throw new Error("Nhóm HĐ VAT vừa thay đổi ở máy khác. Vui lòng tải lại trước khi upload.");
+      }
 
       const purchaseIds = Array.isArray(group.purchaseIds)
         ? group.purchaseIds.map(Number).filter(Boolean)
@@ -11313,13 +11884,24 @@ ipcMain.handle(
         where: { id: { in: purchaseIds }, status: { not: "cancelled" } },
         include: { supplier: true },
       });
-      if (purchases.length === 0)
-        throw new Error("Không tìm thấy phiếu nhập trong nhóm VAT");
+      if (purchases.length !== purchaseIds.length)
+        throw new Error("Có phiếu nhập trong nhóm VAT không còn hợp lệ hoặc đã bị hủy");
 
       const filesList =
         files.length > 0 ? files : fileBase64 ? [{ fileBase64, fileName }] : [];
       if (filesList.length === 0)
         throw new Error("Vui lòng chọn ít nhất 1 file HĐ VAT cho nhóm");
+      if (filesList.length > 10)
+        throw new Error("Mỗi lần chỉ được upload tối đa 10 file Hóa đơn VAT.");
+
+      const driveStatus = await ensureDriveReady();
+      if (!driveStatus.success) throw new Error(driveStatus.error);
+      const vatFolderId = await getOrCreateVatDriveFolder();
+      if (!vatFolderId) {
+        throw new Error(
+          driveLastErrorMessage || "Không mở được thư mục Hóa đơn VAT trên Google Drive.",
+        );
+      }
 
       const userDataPath = app.getPath("userData");
       const vatDir = path.join(userDataPath, "vat-invoices");
@@ -11355,38 +11937,27 @@ ipcMain.handle(
           };
         }
 
-        try {
-          const drive = getDriveClient();
-          if (drive) {
-            const folderId = await getOrCreateVatDriveFolder();
-            if (folderId) {
-              const supplierName = purchases[0]?.supplier?.name || "NCC";
-              const driveFileName = `HĐ_VAT_${supplierName}_${vatGroupId}_${invoiceNumber}${suffix}.${ext}`;
-              const result = await uploadToDrive(
-                drive,
-                folderId,
-                driveFileName,
-                fileBuffer,
-                ext === "pdf" ? "application/pdf" : "image/jpeg",
-              );
-              if (result) {
-                driveUrls.push(result.webViewLink);
-              }
-            }
-          }
-        } catch (driveErr) {
-          console.error(
-            `⚠️ Drive upload group VAT failed for file ${i + 1}:`,
-            driveErr.message,
-          );
+        const supplierName = purchases[0]?.supplier?.name || "NCC";
+        const driveFileName = `HĐ_VAT_${supplierName}_${normalizedGroupId}_${invoiceNumber}${suffix}.${ext}`;
+        const uploaded = await uploadToDrive(
+          driveStatus.drive,
+          vatFolderId,
+          driveFileName,
+          fileBuffer,
+          ext.toLowerCase() === "pdf" ? "application/pdf" : "image/jpeg",
+        );
+        if (!uploaded?.webViewLink) {
+          throw new Error(`Không tải được file HĐ VAT thứ ${i + 1} lên Google Drive.`);
         }
+        driveUrls.push(uploaded.webViewLink);
       }
 
-      vatGroups[String(vatGroupId)] = {
+      const now = new Date();
+      const nextGroup = {
         ...group,
         vatInvoiceStatus: "uploaded",
-        vatInvoiceNumber: invoiceNumber,
-        vatInvoiceDate: new Date(invoiceDate).toISOString(),
+        vatInvoiceNumber: String(invoiceNumber || "").trim(),
+        vatInvoiceDate: parsedInvoiceDate.toISOString(),
         vatInvoiceFile:
           localPaths.length === 1 ? localPaths[0] : JSON.stringify(localPaths),
         vatInvoiceDriveUrl:
@@ -11398,9 +11969,43 @@ ipcMain.handle(
         vatId: primaryVatMeta?.vatId || null,
         vatFileName: primaryVatMeta?.fileName || null,
         vatFileSize: primaryVatMeta?.fileSize || null,
-        updatedAt: new Date().toISOString(),
+        updatedAt: now.toISOString(),
       };
-      await savePurchaseVatGroups(vatGroups);
+      await getPrismaDirectTx().$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${PURCHASE_VAT_GROUPS_KEY}))`;
+        const freshGroups = await getPurchaseVatGroups(tx);
+        const freshGroup = freshGroups[normalizedGroupId];
+        if (!freshGroup) throw new Error(`Không tìm thấy nhóm HĐ VAT ${normalizedGroupId}`);
+        const freshRevision = new Date(freshGroup.updatedAt || freshGroup.createdAt || 0);
+        if (
+          Number.isNaN(freshRevision.getTime()) ||
+          freshRevision.getTime() !== expectedGroupRevision.getTime()
+        ) {
+          throw new Error("Nhóm HĐ VAT vừa thay đổi ở máy khác. File đã được giữ an toàn trên Drive; vui lòng tải lại trước khi thử lại.");
+        }
+        const freshPurchaseIds = Array.isArray(freshGroup.purchaseIds)
+          ? freshGroup.purchaseIds.map(Number).filter(Number.isInteger).sort((a, b) => a - b)
+          : [];
+        const expectedPurchaseIds = [...purchaseIds].sort((a, b) => a - b);
+        if (JSON.stringify(freshPurchaseIds) !== JSON.stringify(expectedPurchaseIds)) {
+          throw new Error("Danh sách phiếu trong nhóm vừa thay đổi. File đã được giữ an toàn trên Drive; vui lòng tải lại.");
+        }
+        await tx.$queryRaw(
+          Prisma.sql`SELECT "id" FROM "PurchaseOrder" WHERE "id" IN (${Prisma.join(freshPurchaseIds)}) FOR UPDATE`,
+        );
+        const activeCount = await tx.purchaseOrder.count({
+          where: { id: { in: freshPurchaseIds }, status: { not: "cancelled" } },
+        });
+        if (activeCount !== freshPurchaseIds.length) {
+          throw new Error("Có phiếu trong nhóm đã bị hủy. File đã được giữ an toàn trên Drive; vui lòng tải lại.");
+        }
+        freshGroups[normalizedGroupId] = nextGroup;
+        await savePurchaseVatGroups(freshGroups, tx);
+        await tx.purchaseOrder.updateMany({
+          where: { id: { in: freshPurchaseIds } },
+          data: { updatedAt: now },
+        });
+      });
 
       const purchaseNames = purchases
         .map((p) => p.poNumber || `#${p.id}`)
@@ -11409,7 +12014,7 @@ ipcMain.handle(
       const telegramMsg = [
         `🧾 <b>HĐ VAT gộp mới</b>`,
         ``,
-        `🔗 Nhóm VAT: <b>${vatGroupId}</b>`,
+        `🔗 Nhóm VAT: <b>${normalizedGroupId}</b>`,
         `🏢 NCC: <b>${supplierName}</b>`,
         `📋 Phiếu nhập: <b>${purchaseNames}</b>`,
         `🔢 Số HĐ: <b>${invoiceNumber}</b>`,
@@ -11429,7 +12034,7 @@ ipcMain.handle(
         sendVatTelegramDocument(
           savedBuffers[i],
           savedFileNames[i],
-          `HĐ VAT nhóm ${vatGroupId} #${invoiceNumber}${savedBuffers.length > 1 ? ` [${i + 1}/${savedBuffers.length}]` : ""}`,
+          `HĐ VAT nhóm ${normalizedGroupId} #${invoiceNumber}${savedBuffers.length > 1 ? ` [${i + 1}/${savedBuffers.length}]` : ""}`,
         ).catch((err) => console.error("Telegram group VAT doc error:", err));
       }
 
@@ -11452,25 +12057,21 @@ ipcMain.handle(
       void logActivity({
         module: "purchases",
         action: "VAT_GROUP_UPLOAD",
-        description: `Upload ${filesList.length} file HĐ VAT cho nhóm ${vatGroupId} (${purchaseNames})`,
+        description: `Upload ${filesList.length} file HĐ VAT cho nhóm ${normalizedGroupId} (${purchaseNames})`,
         userName: "System",
       });
-
-      const driveWarning =
-        driveUrls.length === 0
-          ? "⚠️ File nhóm đã lưu local + Telegram, nhưng Google Drive upload thất bại. Kiểm tra lại Google Drive."
-          : null;
 
       return {
         success: true,
         data: {
-          vatGroupId,
+          vatGroupId: normalizedGroupId,
           localPaths,
           driveUrls,
           invoiceNumber,
           vatId: primaryVatMeta?.vatId || null,
+          updatedAt: now.toISOString(),
         },
-        driveWarning,
+        driveWarning: null,
       };
     } catch (error) {
       console.error("❌ Upload group VAT invoice error:", error);
@@ -11481,43 +12082,81 @@ ipcMain.handle(
 
 ipcMain.handle(
   "purchases:removeVatGroup",
-  async (event, { purchaseId } = {}) => {
+  async (event, { purchaseId, expectedUpdatedAt } = {}) => {
     try {
       requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
-      requireRole("admin", "manager", "staff");
       const targetId = Number(purchaseId);
-      if (!targetId) throw new Error("Thiếu purchaseId");
+      const expectedRevision = expectedUpdatedAt ? new Date(expectedUpdatedAt) : null;
+      if (!Number.isInteger(targetId) || targetId <= 0) throw new Error("Thiếu purchaseId");
+      if (!expectedRevision || Number.isNaN(expectedRevision.getTime())) {
+        throw new Error("Vui lòng tải lại phiếu nhập trước khi tách nhóm HĐ VAT.");
+      }
 
-      const vatGroups = await getPurchaseVatGroups();
-      let removedGroupId = null;
-
-      Object.keys(vatGroups).forEach((groupId) => {
-        const currentIds = Array.isArray(vatGroups[groupId]?.purchaseIds)
-          ? vatGroups[groupId].purchaseIds.map(Number)
-          : [];
-        if (!currentIds.includes(targetId)) return;
-        removedGroupId = groupId;
-        const remainingIds = currentIds.filter((id) => id !== targetId);
-        if (remainingIds.length >= 2) {
-          vatGroups[groupId].purchaseIds = remainingIds;
-        } else {
-          delete vatGroups[groupId];
+      const result = await getPrismaDirectTx().$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${PURCHASE_VAT_GROUPS_KEY}))`;
+        const vatGroups = await getPurchaseVatGroups(tx);
+        const entry = Object.entries(vatGroups).find(([, group]) =>
+          Array.isArray(group?.purchaseIds) && group.purchaseIds.map(Number).includes(targetId),
+        );
+        if (!entry) throw new Error("Phiếu này chưa nằm trong nhóm HĐ gộp");
+        const [removedGroupId, group] = entry;
+        if (
+          group?.vatInvoiceStatus === "uploaded" ||
+          group?.vatInvoiceFile ||
+          group?.vatInvoiceDriveUrl
+        ) {
+          throw new Error("Không thể tách một nhóm đã có HĐ VAT vì sẽ làm mất liên kết chứng từ.");
         }
+        const currentIds = group.purchaseIds
+          .map(Number)
+          .filter((id) => Number.isInteger(id) && id > 0)
+          .sort((a, b) => a - b);
+        await tx.$queryRaw(
+          Prisma.sql`SELECT "id" FROM "PurchaseOrder" WHERE "id" IN (${Prisma.join(currentIds)}) FOR UPDATE`,
+        );
+        const targetPurchase = await tx.purchaseOrder.findUnique({
+          where: { id: targetId },
+          select: { updatedAt: true },
+        });
+        if (!targetPurchase) throw new Error("Không tìm thấy phiếu nhập.");
+        if (targetPurchase.updatedAt.getTime() !== expectedRevision.getTime()) {
+          throw new Error("Phiếu nhập vừa thay đổi ở máy khác. Vui lòng tải lại trước khi tách nhóm.");
+        }
+        const remainingIds = currentIds.filter((id) => id !== targetId);
+        const now = new Date();
+        if (remainingIds.length >= 2) {
+          vatGroups[removedGroupId] = {
+            ...group,
+            purchaseIds: remainingIds,
+            updatedAt: now.toISOString(),
+          };
+        } else {
+          delete vatGroups[removedGroupId];
+        }
+        await savePurchaseVatGroups(vatGroups, tx);
+        await tx.purchaseOrder.updateMany({
+          where: { id: { in: currentIds } },
+          data: { updatedAt: now },
+        });
+        return { removedGroupId, updatedAt: now.toISOString() };
       });
-
-      if (!removedGroupId)
-        throw new Error("Phiếu này chưa nằm trong nhóm HĐ gộp");
-      await savePurchaseVatGroups(vatGroups);
 
       void logActivity({
         module: "purchases",
         action: "VAT_GROUP_REMOVE",
-        description: `Tách phiếu nhập #${targetId} khỏi nhóm HĐ gộp ${removedGroupId}`,
+        description: `Tách phiếu nhập #${targetId} khỏi nhóm HĐ gộp ${result.removedGroupId}`,
         userName: "System",
       });
 
-      return { success: true, data: { purchaseId: targetId, removedGroupId } };
+      return {
+        success: true,
+        data: {
+          purchaseId: targetId,
+          removedGroupId: result.removedGroupId,
+          updatedAt: result.updatedAt,
+        },
+      };
     } catch (error) {
       console.error("❌ Remove VAT group error:", error);
       return { success: false, error: error.message };
@@ -11645,6 +12284,7 @@ ipcMain.handle("purchases:create", async (event, data) => {
     const purchase = await withStockLock(() =>
       getPrismaDirectTx().$transaction(
         async (tx) => {
+          await lockGlobalInventoryMutation(tx);
           const operationKey = `purchaseCreateOperation:${idempotencyKey}`;
           const claim = await tx.appConfig.createMany({
             data: { key: operationKey, value: "pending" },
@@ -11810,6 +12450,7 @@ ipcMain.handle("purchases:create", async (event, data) => {
 
 // Update purchase
 ipcMain.handle("purchases:update", async (event, { id, data }) => {
+  let uploadedReceiptReferences = [];
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
@@ -11823,7 +12464,7 @@ ipcMain.handle("purchases:update", async (event, { id, data }) => {
     const [existingPurchase, supplier] = await Promise.all([
       prisma.purchaseOrder.findUnique({
         where: { id: Number(id) },
-        select: { id: true },
+        select: { id: true, updatedAt: true },
       }),
       prisma.supplier.findUnique({
         where: { id: supplierId },
@@ -11833,6 +12474,15 @@ ipcMain.handle("purchases:update", async (event, { id, data }) => {
     if (!existingPurchase) throw new Error("Không tìm thấy phiếu nhập.");
     if (!supplier || supplier.status === "inactive")
       throw new Error("Nhà cung cấp không tồn tại hoặc đã ngừng sử dụng.");
+    const expectedUpdatedAt = data?.expectedUpdatedAt
+      ? new Date(data.expectedUpdatedAt)
+      : null;
+    if (!expectedUpdatedAt || Number.isNaN(expectedUpdatedAt.getTime())) {
+      throw new Error("Vui lòng tải lại phiếu nhập trước khi lưu thay đổi.");
+    }
+    if (existingPurchase.updatedAt?.getTime() !== expectedUpdatedAt.getTime()) {
+      throw new Error("Phiếu nhập vừa được sửa ở máy khác. Vui lòng tải lại trước khi lưu.");
+    }
 
     let nextItems;
     try {
@@ -11853,6 +12503,25 @@ ipcMain.handle("purchases:update", async (event, { id, data }) => {
       throw new Error("Mỗi sản phẩm phải có mã hợp lệ và số lượng lớn hơn 0.");
     }
 
+    const replacementReceiptFiles = Array.isArray(data?.importReceiptFiles)
+      ? data.importReceiptFiles
+      : [];
+    if (replacementReceiptFiles.length > 10) {
+      throw new Error("Mỗi lần chỉ được thay tối đa 10 file Phiếu Nhập Kho.");
+    }
+    for (let index = 0; index < replacementReceiptFiles.length; index += 1) {
+      const file = replacementReceiptFiles[index];
+      if (!file?.fileBase64 || !file?.fileName) {
+        throw new Error("File Phiếu Nhập Kho thay thế không hợp lệ.");
+      }
+      uploadedReceiptReferences.push(
+        await uploadPurchaseReceiptToR2(
+          `update-${Number(id)}-${expectedUpdatedAt.getTime()}`,
+          file,
+        ),
+      );
+    }
+
     // Reconcile stock by the net change (new quantity minus the previous
     // quantity) and replace the receipt lines in the same transaction.
     // The former implementation only updated the header, so edits to a
@@ -11860,11 +12529,21 @@ ipcMain.handle("purchases:update", async (event, { id, data }) => {
     const purchase = await withStockLock(() =>
       getPrismaDirectTx().$transaction(
         async (tx) => {
+          await lockGlobalInventoryMutation(tx);
+          const lockedRows = await tx.$queryRaw`
+            SELECT id FROM "PurchaseOrder" WHERE id = ${Number(id)} FOR UPDATE
+          `;
+          if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+            throw new Error("Không tìm thấy phiếu nhập.");
+          }
           const order = await tx.purchaseOrder.findUnique({
             where: { id: Number(id) },
             include: { items: true },
           });
           if (!order) throw new Error("Không tìm thấy phiếu nhập.");
+          if (order.updatedAt?.getTime() !== expectedUpdatedAt.getTime()) {
+            throw new Error("Phiếu nhập vừa được sửa ở máy khác. Vui lòng tải lại trước khi lưu.");
+          }
           if (order.status === "cancelled")
             throw new Error("Không thể sửa phiếu nhập đã hủy.");
           await lockPurchaseMetadata(tx);
@@ -11923,6 +12602,13 @@ ipcMain.handle("purchases:update", async (event, { id, data }) => {
               total: Number(data.totalAmount || 0),
               note: data.notes,
               receivedAt: new Date(data.purchaseDate),
+              ...(uploadedReceiptReferences.length > 0
+                ? {
+                    importReceiptStatus: "uploaded",
+                    importReceiptFile: null,
+                    importReceiptDriveUrl: uploadedReceiptReferences.join("\n"),
+                  }
+                : {}),
               // Only an explicit positive flag changes VAT state. A normal
               // edit must preserve an already-uploaded invoice.
               ...(data.isThht === true
@@ -11986,6 +12672,7 @@ ipcMain.handle("purchases:update", async (event, { id, data }) => {
     });
     return { success: true, data: purchase };
   } catch (error) {
+    await cleanupFreshPurchaseReceiptUploads(uploadedReceiptReferences);
     console.error("❌ Update purchase error:", error);
     return { success: false, error: error.message };
   }
@@ -12442,24 +13129,32 @@ ipcMain.handle(
   "purchases:uploadCompanyVATInvoice",
   async (
     event,
-    { purchaseId, companyGroup, invoiceNumber, invoiceDate, files = [] },
+    { purchaseId, companyGroup, invoiceNumber, invoiceDate, files = [], expectedUpdatedAt },
   ) => {
     try {
       if (!prisma) throw new Error("Prisma not available");
       requireRole("admin", "manager", "staff");
+      const normalizedPurchaseId = Number(purchaseId);
+      const expectedRevision = expectedUpdatedAt ? new Date(expectedUpdatedAt) : null;
       const company = String(companyGroup || "").trim();
-      if (!purchaseId || !company)
+      if (!Number.isInteger(normalizedPurchaseId) || normalizedPurchaseId <= 0 || !company)
         throw new Error("Thiếu phiếu nhập hoặc công ty hàng hóa");
       if (!Array.isArray(files) || files.length === 0)
         throw new Error("Vui lòng chọn ít nhất 1 file hóa đơn VAT");
+      if (files.length > 10) throw new Error("Mỗi lần chỉ được upload tối đa 10 file Hóa đơn VAT.");
+      if (!expectedRevision || Number.isNaN(expectedRevision.getTime())) {
+        throw new Error("Vui lòng tải lại phiếu nhập trước khi upload HĐ VAT theo công ty.");
+      }
 
       const purchase = await prisma.purchaseOrder.findUnique({
-        where: { id: Number(purchaseId) },
+        where: { id: normalizedPurchaseId },
         include: { supplier: true },
       });
       if (!purchase)
         throw new Error(`Không tìm thấy phiếu nhập #${purchaseId}`);
-
+      if (purchase.updatedAt?.getTime() !== expectedRevision.getTime()) {
+        throw new Error("Phiếu nhập vừa thay đổi ở máy khác. Vui lòng tải lại trước khi upload HĐ VAT theo công ty.");
+      }
       // VAT must be reachable by every machine. Do not save an "uploaded"
       // company invoice locally when Drive authentication has expired.
       const driveStatus = await ensureDriveReady();
@@ -12514,9 +13209,7 @@ ipcMain.handle(
         }
       }
 
-      const companyVat = await getPurchaseCompanyVat();
-      const receiptVat = companyVat[String(purchaseId)] || {};
-      receiptVat[company] = {
+      const savedInvoice = {
         status: "uploaded",
         invoiceNumber: String(invoiceNumber || "").trim(),
         invoiceDate: invoiceDate ? new Date(invoiceDate).toISOString() : null,
@@ -12525,8 +13218,32 @@ ipcMain.handle(
         fileCount: files.length,
         updatedAt: new Date().toISOString(),
       };
-      companyVat[String(purchaseId)] = receiptVat;
-      await savePurchaseCompanyVat(companyVat);
+      const updatedPurchase = await getPrismaDirectTx().$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw`
+          SELECT id FROM "PurchaseOrder" WHERE id = ${normalizedPurchaseId} FOR UPDATE
+        `;
+        if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+          throw new Error("Không tìm thấy phiếu nhập.");
+        }
+        const freshPurchase = await tx.purchaseOrder.findUnique({
+          where: { id: normalizedPurchaseId },
+          select: { updatedAt: true },
+        });
+        if (freshPurchase?.updatedAt?.getTime() !== expectedRevision.getTime()) {
+          throw new Error("Phiếu nhập vừa thay đổi ở máy khác. Vui lòng tải lại trước khi upload HĐ VAT theo công ty.");
+        }
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${PURCHASE_COMPANY_VAT_KEY}))`;
+        const companyVat = await getPurchaseCompanyVat(tx);
+        const receiptVat = companyVat[String(normalizedPurchaseId)] || {};
+        receiptVat[company] = savedInvoice;
+        companyVat[String(normalizedPurchaseId)] = receiptVat;
+        await savePurchaseCompanyVat(companyVat, tx);
+        return tx.purchaseOrder.update({
+          where: { id: normalizedPurchaseId },
+          data: { updatedAt: new Date() },
+          select: { updatedAt: true },
+        });
+      });
 
       void logActivity({
         module: "purchases",
@@ -12539,7 +13256,8 @@ ipcMain.handle(
         data: {
           localPaths,
           driveUrls,
-          invoiceNumber: receiptVat[company].invoiceNumber,
+          invoiceNumber: savedInvoice.invoiceNumber,
+          updatedAt: updatedPurchase.updatedAt?.toISOString() || null,
         },
         driveWarning:
           driveUrls.length === 0
@@ -12555,26 +13273,59 @@ ipcMain.handle(
 
 ipcMain.handle(
   "purchases:setCompanyVatStatus",
-  async (event, { purchaseId, companyGroup, status }) => {
+  async (event, { purchaseId, companyGroup, companyGroups, status, expectedUpdatedAt }) => {
     try {
       if (!prisma) throw new Error("Prisma not available");
       requireRole("admin", "manager", "staff");
-      const company = String(companyGroup || "").trim();
+      const normalizedPurchaseId = Number(purchaseId);
+      const expectedRevision = expectedUpdatedAt ? new Date(expectedUpdatedAt) : null;
+      const companies = [...new Set(
+        (Array.isArray(companyGroups) ? companyGroups : [companyGroup])
+          .map((value) => String(value || "").trim())
+          .filter(Boolean),
+      )];
       const nextStatus = ["pending", "no_vat"].includes(status)
         ? status
         : "pending";
-      if (!purchaseId || !company)
+      if (!Number.isInteger(normalizedPurchaseId) || normalizedPurchaseId <= 0 || companies.length === 0)
         throw new Error("Thiếu phiếu nhập hoặc công ty hàng hóa");
-      const companyVat = await getPurchaseCompanyVat();
-      const receiptVat = companyVat[String(purchaseId)] || {};
-      receiptVat[company] = {
-        ...(receiptVat[company] || {}),
-        status: nextStatus,
-        updatedAt: new Date().toISOString(),
-      };
-      companyVat[String(purchaseId)] = receiptVat;
-      await savePurchaseCompanyVat(companyVat);
-      return { success: true };
+      if (!expectedRevision || Number.isNaN(expectedRevision.getTime())) {
+        throw new Error("Vui lòng tải lại phiếu nhập trước khi đổi trạng thái VAT.");
+      }
+      const updatedPurchase = await getPrismaDirectTx().$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw`
+          SELECT id FROM "PurchaseOrder" WHERE id = ${normalizedPurchaseId} FOR UPDATE
+        `;
+        if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+          throw new Error("Không tìm thấy phiếu nhập.");
+        }
+        const purchase = await tx.purchaseOrder.findUnique({
+          where: { id: normalizedPurchaseId },
+          select: { updatedAt: true },
+        });
+        if (purchase?.updatedAt?.getTime() !== expectedRevision.getTime()) {
+          throw new Error("Phiếu nhập vừa thay đổi ở máy khác. Vui lòng tải lại trước khi đổi trạng thái VAT.");
+        }
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${PURCHASE_COMPANY_VAT_KEY}))`;
+        const companyVat = await getPurchaseCompanyVat(tx);
+        const receiptVat = companyVat[String(normalizedPurchaseId)] || {};
+        const updatedAt = new Date().toISOString();
+        companies.forEach((company) => {
+          receiptVat[company] = {
+            ...(receiptVat[company] || {}),
+            status: nextStatus,
+            updatedAt,
+          };
+        });
+        companyVat[String(normalizedPurchaseId)] = receiptVat;
+        await savePurchaseCompanyVat(companyVat, tx);
+        return tx.purchaseOrder.update({
+          where: { id: normalizedPurchaseId },
+          data: { updatedAt: new Date() },
+          select: { updatedAt: true },
+        });
+      });
+      return { success: true, data: { updatedAt: updatedPurchase.updatedAt?.toISOString() || null } };
     } catch (error) {
       return { success: false, error: error.message };
     }
@@ -12627,26 +13378,45 @@ ipcMain.handle(
       files = [],
       fileBase64,
       fileName,
+      expectedUpdatedAt,
     },
   ) => {
     try {
       requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
-      const vatFileMeta = await getPurchaseVatFileMeta();
+      const normalizedPurchaseId = Number(purchaseId);
+      const expectedRevision = expectedUpdatedAt ? new Date(expectedUpdatedAt) : null;
+      const parsedInvoiceDate = new Date(invoiceDate);
+      if (!Number.isInteger(normalizedPurchaseId) || normalizedPurchaseId <= 0) {
+        throw new Error("Phiếu nhập không hợp lệ.");
+      }
+      if (expectedRevision && Number.isNaN(expectedRevision.getTime())) {
+        throw new Error("Phiên bản phiếu nhập không hợp lệ.");
+      }
+      if (!expectedRevision) {
+        throw new Error("Vui lòng tải lại phiếu nhập trước khi upload Hóa đơn VAT.");
+      }
+      if (Number.isNaN(parsedInvoiceDate.getTime())) {
+        throw new Error("Ngày hóa đơn VAT không hợp lệ.");
+      }
 
       // 1. Lấy thông tin phiếu nhập
       const purchase = await prisma.purchaseOrder.findUnique({
-        where: { id: purchaseId },
+        where: { id: normalizedPurchaseId },
         include: { supplier: true },
       });
       if (!purchase)
         throw new Error(`Không tìm thấy phiếu nhập #${purchaseId}`);
+      if (purchase.updatedAt?.getTime() !== expectedRevision.getTime()) {
+        throw new Error("Phiếu nhập vừa được thay đổi ở máy khác. Vui lòng tải lại trước khi upload HĐ VAT.");
+      }
 
       // Normalize: hỗ trợ cả nhiều file (files[]) và 1 file (fileBase64/fileName)
       const filesList =
         files.length > 0 ? files : fileBase64 ? [{ fileBase64, fileName }] : [];
       if (filesList.length === 0)
         throw new Error("Chưa chọn file Hóa đơn VAT.");
+      if (filesList.length > 10) throw new Error("Mỗi lần chỉ được upload tối đa 10 file Hóa đơn VAT.");
 
       const vatDriveStatus = await ensureDriveReady();
       if (!vatDriveStatus.success) throw new Error(vatDriveStatus.error);
@@ -12743,15 +13513,11 @@ ipcMain.handle(
         );
       }
 
-      if (primaryVatMeta) {
-        vatFileMeta[String(purchaseId)] = primaryVatMeta;
-        await savePurchaseVatFileMeta(vatFileMeta);
-      }
-
-      // 3. Cập nhật DB
+      // 3. Cập nhật metadata và phiếu trong cùng một transaction. Các file
+      // ngoài DB có thể bị bỏ mồ côi khi lỗi, nhưng không được để DB ghi nửa vời.
       const dbUpdate = {
         vatInvoiceNumber: invoiceNumber,
-        vatInvoiceDate: new Date(invoiceDate),
+        vatInvoiceDate: parsedInvoiceDate,
         vatInvoiceStatus: "uploaded",
       };
       if (localPaths.length > 0) {
@@ -12762,9 +13528,34 @@ ipcMain.handle(
         dbUpdate.vatInvoiceDriveUrl =
           driveUrls.length === 1 ? driveUrls[0] : driveUrls.join("\n");
       }
-      await prisma.purchaseOrder.update({
-        where: { id: purchaseId },
-        data: dbUpdate,
+      const updatedPurchase = await getPrismaDirectTx().$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw`
+          SELECT id FROM "PurchaseOrder" WHERE id = ${normalizedPurchaseId} FOR UPDATE
+        `;
+        if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+          throw new Error("Không tìm thấy phiếu nhập.");
+        }
+        const freshPurchase = await tx.purchaseOrder.findUnique({
+          where: { id: normalizedPurchaseId },
+          select: { updatedAt: true },
+        });
+        if (
+          expectedRevision &&
+          freshPurchase?.updatedAt?.getTime() !== expectedRevision.getTime()
+        ) {
+          throw new Error("Phiếu nhập vừa được thay đổi ở máy khác. Vui lòng tải lại trước khi upload HĐ VAT.");
+        }
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${PURCHASE_VAT_FILE_META_KEY}))`;
+        if (primaryVatMeta) {
+          const vatFileMeta = await getPurchaseVatFileMeta(tx);
+          vatFileMeta[String(normalizedPurchaseId)] = primaryVatMeta;
+          await savePurchaseVatFileMeta(vatFileMeta, tx);
+        }
+        return tx.purchaseOrder.update({
+          where: { id: normalizedPurchaseId },
+          data: dbUpdate,
+          select: { updatedAt: true },
+        });
       });
 
       // 4. Gá»­i Telegram
@@ -12831,6 +13622,7 @@ ipcMain.handle(
           driveUrls,
           invoiceNumber,
           vatId: primaryVatMeta?.vatId || null,
+          updatedAt: updatedPurchase.updatedAt?.toISOString() || null,
         },
         driveWarning,
       };
@@ -12844,31 +13636,46 @@ ipcMain.handle(
 // Upload Phiếu Nhập Kho
 ipcMain.handle(
   "purchases:uploadImportReceipt",
-  async (event, { purchaseId, files = [], fileBase64, fileName }) => {
+  async (event, { purchaseId, files = [], fileBase64, fileName, expectedUpdatedAt }) => {
     try {
       requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
+      const normalizedPurchaseId = Number(purchaseId);
+      const expectedRevision = expectedUpdatedAt ? new Date(expectedUpdatedAt) : null;
+      if (!Number.isInteger(normalizedPurchaseId) || normalizedPurchaseId <= 0) {
+        throw new Error("Phiếu nhập không hợp lệ.");
+      }
+      if (expectedRevision && Number.isNaN(expectedRevision.getTime())) {
+        throw new Error("Phiên bản phiếu nhập không hợp lệ.");
+      }
+      if (!expectedRevision) {
+        throw new Error("Vui lòng tải lại phiếu nhập trước khi thay Phiếu Nhập Kho.");
+      }
 
       // 1. Lấy thông tin phiếu nhập
       const purchase = await prisma.purchaseOrder.findUnique({
-        where: { id: purchaseId },
+        where: { id: normalizedPurchaseId },
         include: { supplier: true },
       });
       if (!purchase)
         throw new Error(`Không tìm thấy phiếu nhập #${purchaseId}`);
+      if (purchase.updatedAt?.getTime() !== expectedRevision.getTime()) {
+        throw new Error("Phiếu nhập vừa được thay đổi ở máy khác. Vui lòng tải lại trước khi thay Phiếu Nhập Kho.");
+      }
 
       // Normalize: hỗ trợ cả nhiều file (files[]) và 1 file (fileBase64/fileName)
       const filesList =
         files.length > 0 ? files : fileBase64 ? [{ fileBase64, fileName }] : [];
       if (filesList.length === 0)
         throw new Error("Chưa chọn file Phiếu Nhập Kho.");
+      if (filesList.length > 10) throw new Error("Mỗi lần chỉ được upload tối đa 10 file Phiếu Nhập Kho.");
 
       const storageReferences = [];
 
       // 2. Phiếu Nhập Kho dùng R2; Google Drive chỉ còn dành cho HĐ VAT.
       for (let i = 0; i < filesList.length; i++) {
         const reference = await uploadPurchaseReceiptToR2(
-          `purchase-${purchaseId}`,
+          `purchase-${normalizedPurchaseId}`,
           filesList[i],
         );
         storageReferences.push(reference);
@@ -12880,9 +13687,28 @@ ipcMain.handle(
         importReceiptFile: null,
         importReceiptDriveUrl: storageReferences.join("\n"),
       };
-      await prisma.purchaseOrder.update({
-        where: { id: purchaseId },
-        data: dbUpdate,
+      const updatedPurchase = await getPrismaDirectTx().$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw`
+          SELECT id FROM "PurchaseOrder" WHERE id = ${normalizedPurchaseId} FOR UPDATE
+        `;
+        if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+          throw new Error("Không tìm thấy phiếu nhập.");
+        }
+        const freshPurchase = await tx.purchaseOrder.findUnique({
+          where: { id: normalizedPurchaseId },
+          select: { updatedAt: true },
+        });
+        if (
+          expectedRevision &&
+          freshPurchase?.updatedAt?.getTime() !== expectedRevision.getTime()
+        ) {
+          throw new Error("Phiếu nhập vừa được thay đổi ở máy khác. Vui lòng tải lại trước khi thay Phiếu Nhập Kho.");
+        }
+        return tx.purchaseOrder.update({
+          where: { id: normalizedPurchaseId },
+          data: dbUpdate,
+          select: { updatedAt: true },
+        });
       });
 
       void logActivity({
@@ -12894,7 +13720,12 @@ ipcMain.handle(
 
       return {
         success: true,
-        data: { localPaths: [], driveUrls: [], storageReferences },
+        data: {
+          localPaths: [],
+          driveUrls: [],
+          storageReferences,
+          updatedAt: updatedPurchase.updatedAt?.toISOString() || null,
+        },
       };
     } catch (error) {
       console.error("❌ Upload Import Receipt error:", error);
@@ -12983,22 +13814,48 @@ ipcMain.handle("purchases:deleteVatInvoice", async (event, purchaseId) => {
 
 ipcMain.handle(
   "purchases:markAsThht",
-  async (event, { purchaseId, revert }) => {
+  async (event, { purchaseId, revert, expectedUpdatedAt }) => {
     try {
       requireRole("admin", "manager");
       if (!prisma) throw new Error("Prisma not available");
-      requireRole("admin", "manager", "staff");
-      await prisma.purchaseOrder.update({
-        where: { id: purchaseId },
-        data: { vatInvoiceStatus: revert ? "pending" : "thht" },
+      const normalizedPurchaseId = Number(purchaseId);
+      const expectedRevision = expectedUpdatedAt ? new Date(expectedUpdatedAt) : null;
+      if (!Number.isInteger(normalizedPurchaseId) || normalizedPurchaseId <= 0) {
+        throw new Error("Phiếu nhập không hợp lệ.");
+      }
+      if (!expectedRevision || Number.isNaN(expectedRevision.getTime())) {
+        throw new Error("Vui lòng tải lại phiếu nhập trước khi đổi trạng thái THHT.");
+      }
+      const updatedPurchase = await getPrismaDirectTx().$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw`
+          SELECT id FROM "PurchaseOrder" WHERE id = ${normalizedPurchaseId} FOR UPDATE
+        `;
+        if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+          throw new Error("Không tìm thấy phiếu nhập.");
+        }
+        const purchase = await tx.purchaseOrder.findUnique({
+          where: { id: normalizedPurchaseId },
+          select: { updatedAt: true },
+        });
+        if (purchase.updatedAt.getTime() !== expectedRevision.getTime()) {
+          throw new Error("Phiếu nhập vừa thay đổi ở máy khác. Vui lòng tải lại trước khi đổi trạng thái THHT.");
+        }
+        return tx.purchaseOrder.update({
+          where: { id: normalizedPurchaseId },
+          data: { vatInvoiceStatus: revert ? "pending" : "thht" },
+          select: { updatedAt: true },
+        });
       });
       void logActivity({
         module: "purchases",
         action: revert ? "THHT_REVERT" : "THHT_MARK",
-        description: `${revert ? "Hoàn tác" : "Đánh dấu"} phiếu nhập #${purchaseId} là Đơn THHT`,
+        description: `${revert ? "Hoàn tác" : "Đánh dấu"} phiếu nhập #${normalizedPurchaseId} là Đơn THHT`,
         userName: "System",
       });
-      return { success: true };
+      return {
+        success: true,
+        data: { updatedAt: updatedPurchase.updatedAt?.toISOString() || null },
+      };
     } catch (error) {
       return { success: false, error: error.message };
     }
@@ -18403,6 +19260,7 @@ async function performDailyTaskReset() {
 
     return {
       success: true,
+      duplicate: Boolean(result.duplicate),
       data: {
         reset: completedTasks.length > 0,
         dayChanged: true,
@@ -20018,10 +20876,29 @@ async function execEcommerceExportUpdate(id, data) {
   const result = await withStockLock(() =>
     prisma.$transaction(
       async (tx) => {
+        const exportId = Number(id);
+        if (!Number.isSafeInteger(exportId) || exportId <= 0) {
+          throw new Error("Mã phiếu xuất TMĐT không hợp lệ.");
+        }
+        const expectedUpdatedAt = data?.updatedAt
+          ? new Date(data.updatedAt)
+          : null;
+        if (!expectedUpdatedAt || Number.isNaN(expectedUpdatedAt.getTime())) {
+          throw new Error("Vui lòng tải lại phiếu xuất TMĐT trước khi cập nhật.");
+        }
+        const lockedRows = await tx.$queryRaw`
+          SELECT id FROM "EcommerceExport" WHERE id = ${exportId} FOR UPDATE
+        `;
+        if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+          throw new Error("Không tìm thấy phiếu xuất.");
+        }
         const oldRecord = await tx.ecommerceExport.findUnique({
-          where: { id },
+          where: { id: exportId },
         });
         if (!oldRecord) throw new Error("Khong tim thay phieu xuat.");
+        if (oldRecord.updatedAt?.getTime() !== expectedUpdatedAt.getTime()) {
+          throw new Error("Phiếu xuất TMĐT vừa được thay đổi ở máy khác. Vui lòng tải lại.");
+        }
         const nextOrderKey = String(
           data.orderNumber ||
             data.ecommerceExportCode ||
@@ -20098,7 +20975,7 @@ async function execEcommerceExportUpdate(id, data) {
         }
 
         const newRecord = await tx.ecommerceExport.update({
-          where: { id },
+          where: { id: exportId },
           data: {
             customerName: data.customerName,
             ecommerceExportCode: data.ecommerceExportCode || null,
@@ -20168,6 +21045,82 @@ async function execEcommerceExportUpdate(id, data) {
   );
   return result;
 }
+
+ipcMain.handle("ecommerceExports:saveTelegramSettings", async (_event, payload = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const chatId = String(payload.chatId || "").trim();
+    const apiToken = String(payload.apiToken || "").trim();
+    if (chatId.length > 100 || apiToken.length > 300) {
+      throw new Error("Cấu hình Telegram không hợp lệ.");
+    }
+
+    await getPrismaDirectTx().$transaction(async (tx) => {
+      for (const key of ["telegramApiToken", "telegramChatId"].sort()) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-config:${key}`}))`;
+      }
+      await tx.appConfig.upsert({
+        where: { key: "telegramChatId" },
+        update: { value: JSON.stringify(chatId) },
+        create: { key: "telegramChatId", value: JSON.stringify(chatId) },
+      });
+      await tx.appConfig.upsert({
+        where: { key: "telegramApiToken" },
+        update: { value: JSON.stringify(apiToken) },
+        create: { key: "telegramApiToken", value: JSON.stringify(apiToken) },
+      });
+    });
+    void logActivity({
+      module: "app_config",
+      action: "UPDATE_SENSITIVE_CONFIG",
+      description: "Updated ecommerce Telegram settings",
+      recordName: "telegram-settings",
+      severity: "WARNING",
+    });
+    return { success: true };
+  } catch (error) {
+    console.error("Save ecommerce Telegram settings error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("ecommerceExports:nextTelegramOrderCounter", async () => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Prisma not available");
+    const date = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Bangkok" });
+    const counter = await getPrismaDirectTx().$transaction(async (tx) => {
+      for (const key of ["telegramOrderCounter", "telegramOrderCounterDate"].sort()) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-config:${key}`}))`;
+      }
+      const [dateRow, counterRow] = await Promise.all([
+        tx.appConfig.findUnique({ where: { key: "telegramOrderCounterDate" } }),
+        tx.appConfig.findUnique({ where: { key: "telegramOrderCounter" } }),
+      ]);
+      let savedDate = "";
+      let savedCounter = 0;
+      try { savedDate = String(JSON.parse(dateRow?.value || '""') || ""); } catch {}
+      try { savedCounter = Number(JSON.parse(counterRow?.value || "0")) || 0; } catch {}
+      const nextCounter = savedDate === date ? savedCounter + 1 : 1;
+      await tx.appConfig.upsert({
+        where: { key: "telegramOrderCounterDate" },
+        update: { value: JSON.stringify(date) },
+        create: { key: "telegramOrderCounterDate", value: JSON.stringify(date) },
+      });
+      await tx.appConfig.upsert({
+        where: { key: "telegramOrderCounter" },
+        update: { value: JSON.stringify(String(nextCounter)) },
+        create: { key: "telegramOrderCounter", value: JSON.stringify(String(nextCounter)) },
+      });
+      return nextCounter;
+    });
+    return { success: true, data: { date, counter } };
+  } catch (error) {
+    console.error("Advance Telegram order counter error:", error);
+    return { success: false, error: error.message };
+  }
+});
 
 ipcMain.handle("ecommerceExports:update", async (event, id, data) => {
   try {
@@ -21799,6 +22752,19 @@ ipcMain.handle("returns:update", async (event, id, data) => {
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
+    const returnId = Number(id);
+    if (!Number.isSafeInteger(returnId) || returnId <= 0) {
+      throw new Error("Mã phiếu trả không hợp lệ.");
+    }
+    const expectedUpdatedAt = data?.expectedUpdatedAt
+      ? new Date(data.expectedUpdatedAt)
+      : null;
+    if (!expectedUpdatedAt) {
+      throw new Error("Vui lòng tải lại phiếu trả trước khi lưu thay đổi.");
+    }
+    if (expectedUpdatedAt && Number.isNaN(expectedUpdatedAt.getTime())) {
+      throw new Error("Phiên bản phiếu trả không hợp lệ.");
+    }
     // 🔧 FIX: Chỉ update field được gửi, không ghi đè null các field khác
     const updateData = {};
     if (data.customerName !== undefined)
@@ -21825,9 +22791,24 @@ ipcMain.handle("returns:update", async (event, id, data) => {
       updateData.faultParty =
         data.faultParty === "customer" ? "customer" : "warehouse"; // ✅ Cập nhật lý do lỗi
 
-    const record = await prisma.return.update({
-      where: { id },
-      data: updateData,
+    const record = await getPrismaDirectTx().$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw`
+        SELECT id FROM "Return" WHERE id = ${returnId} FOR UPDATE
+      `;
+      if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+        throw new Error("Không tìm thấy phiếu trả.");
+      }
+      const current = await tx.return.findUnique({ where: { id: returnId } });
+      if (
+        expectedUpdatedAt &&
+        current?.updatedAt?.getTime() !== expectedUpdatedAt.getTime()
+      ) {
+        throw new Error("Phiếu trả vừa được sửa ở máy khác. Vui lòng tải lại trước khi lưu.");
+      }
+      return tx.return.update({
+        where: { id: returnId },
+        data: updateData,
+      });
     });
     console.log(`✅ Updated return #${record.id}`);
     void logActivity({
@@ -21861,60 +22842,175 @@ ipcMain.handle("returns:delete", async (event, id) => {
   }
 });
 
+function normalizeImportText(value, maxLength = 1000) {
+  const normalized = String(value ?? "").trim();
+  return normalized ? normalized.slice(0, maxLength) : null;
+}
+
+function normalizeImportDate(value, rowNumber, fieldLabel) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`Dòng ${rowNumber}: ${fieldLabel} không hợp lệ.`);
+  }
+  return parsed;
+}
+
+function normalizeImportItems(value, rowNumber) {
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value || "[]");
+    } catch {
+      throw new Error(`Dòng ${rowNumber}: danh sách sản phẩm không phải JSON hợp lệ.`);
+    }
+  }
+  if (!Array.isArray(parsed ?? [])) {
+    throw new Error(`Dòng ${rowNumber}: danh sách sản phẩm phải là một mảng.`);
+  }
+  const serialized = JSON.stringify(parsed ?? []);
+  if (Buffer.byteLength(serialized, "utf8") > 2 * 1024 * 1024) {
+    throw new Error(`Dòng ${rowNumber}: danh sách sản phẩm vượt quá 2 MB.`);
+  }
+  return serialized;
+}
+
+function normalizeImportAmount(value, rowNumber) {
+  const amount = Number(value || 0);
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new Error(`Dòng ${rowNumber}: tổng tiền không hợp lệ.`);
+  }
+  return amount;
+}
+
+function importFingerprint(parts) {
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify(parts.map((part) => String(part ?? "").trim().toLowerCase())))
+    .digest("hex");
+}
+
+function returnImportKey(record) {
+  const returnCode = normalizeImportText(record.returnCode, 255);
+  if (returnCode && !/^AUTO-\d+-\d+$/i.test(returnCode)) {
+    return `return-row:${importFingerprint([
+      returnCode,
+      record.orderNumber,
+      record.customerName,
+    ])}`;
+  }
+  return `return-fallback:${importFingerprint([
+    record.orderNumber,
+    record.returnDate instanceof Date ? record.returnDate.toISOString().slice(0, 10) : record.returnDate,
+    record.customerName,
+    record.returnReason,
+    record.items,
+  ])}`;
+}
+
+function refundImportKey(record) {
+  const orderNumber = normalizeImportText(record.orderNumber, 255);
+  if (orderNumber) return `refund-order:${orderNumber.toUpperCase()}`;
+  const refundCode = normalizeImportText(record.refundCode, 255);
+  if (refundCode) return `refund-code:${refundCode.toUpperCase()}`;
+  return `refund-fallback:${importFingerprint([
+    record.refundDate instanceof Date ? record.refundDate.toISOString().slice(0, 10) : record.refundDate,
+    record.customerName,
+    record.refundReason,
+    record.items,
+    record.totalAmount,
+  ])}`;
+}
+
+async function runAtomicImportTransaction(lockKey, callback) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await getPrismaDirectTx().$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+          return callback(tx);
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30_000, maxWait: 10_000 },
+      );
+    } catch (error) {
+      if (error?.code !== "P2034" || attempt === 3) throw error;
+    }
+  }
+  throw new Error("Không thể hoàn tất import sau nhiều lần thử.");
+}
+
 ipcMain.handle("returns:bulkCreate", async (event, records) => {
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
-    console.log(`📦 returns:bulkCreate called with ${records.length} records`);
-    const created = [];
-    for (let i = 0; i < records.length; i++) {
-      const data = records[i];
-      try {
-        // 🔧 Safe date parsing
-        let returnDate = new Date(data.returnDate);
-        if (isNaN(returnDate.getTime())) {
-          console.warn(
-            `⚠️ Record ${i}: Invalid returnDate: "${data.returnDate}", using current date`,
-          );
-          returnDate = new Date();
+    if (!Array.isArray(records) || records.length === 0 || records.length > 5000) {
+      throw new Error("Danh sách phiếu trả import phải có từ 1 đến 5.000 dòng.");
+    }
+    const normalized = records.map((data, index) => {
+      const rowNumber = index + 1;
+      const customerName = normalizeImportText(data?.customerName, 500);
+      if (!customerName) throw new Error(`Dòng ${rowNumber}: thiếu tên sản phẩm.`);
+      return {
+        customerName,
+        returnCode: normalizeImportText(data?.returnCode, 255),
+        orderNumber: normalizeImportText(data?.orderNumber, 255),
+        returnReason: normalizeImportText(data?.returnReason, 2000),
+        returnDate: normalizeImportDate(data?.returnDate, rowNumber, "ngày trả hàng"),
+        items: normalizeImportItems(data?.items, rowNumber),
+        totalAmount: normalizeImportAmount(data?.totalAmount, rowNumber),
+        notes: normalizeImportText(data?.notes, 10_000),
+        status: normalizeImportText(data?.status, 60) || "pending",
+        packer: normalizeImportText(data?.packer, 120),
+        faultParty: data?.faultParty === "customer" ? "customer" : "warehouse",
+        createdBy: currentSession?.username || null,
+      };
+    });
+
+    const result = await runAtomicImportTransaction("returns:bulkCreate", async (tx) => {
+      const existing = await tx.return.findMany({
+        select: {
+          returnCode: true,
+          orderNumber: true,
+          returnDate: true,
+          customerName: true,
+          returnReason: true,
+          items: true,
+        },
+      });
+      const knownKeys = new Set(existing.map(returnImportKey));
+      const pending = [];
+      let duplicateCount = 0;
+      for (const record of normalized) {
+        const key = returnImportKey(record);
+        if (knownKeys.has(key)) {
+          duplicateCount += 1;
+          continue;
         }
-        const record = await prisma.return.create({
+        knownKeys.add(key);
+        pending.push(record);
+      }
+      const created = [];
+      for (const record of pending) created.push(await tx.return.create({ data: record }));
+      if (created.length > 0) {
+        await tx.activityLog.create({
           data: {
-            customerName: data.customerName || "N/A",
-            returnCode: data.returnCode || null,
-            orderNumber: data.orderNumber || null,
-            returnReason: data.returnReason || null,
-            returnDate: returnDate,
-            items:
-              typeof data.items === "string"
-                ? data.items
-                : JSON.stringify(data.items || []),
-            totalAmount: data.totalAmount || 0,
-            notes: data.notes || null,
-            status: data.status || "pending",
-            packer: data.packer || null,
-            faultParty:
-              data.faultParty === "customer" ? "customer" : "warehouse", // ✅ Lưu lý do lỗi (bulkCreate)
-            createdBy: data.createdBy || null,
+            module: "returns",
+            action: "IMPORT",
+            description: `Import ${created.length} phiếu trả; bỏ qua ${duplicateCount} dòng trùng`,
+            changes: JSON.stringify({ received: normalized.length, created: created.length, duplicateCount }),
+            userName: currentSession?.username || "Admin",
+            userId: currentSession?.id || null,
           },
         });
-        created.push(record);
-      } catch (recordError) {
-        console.error(
-          `❌ Record ${i} failed:`,
-          recordError.message,
-          "Data:",
-          JSON.stringify(data),
-        );
       }
-    }
-    console.log(`✅ Bulk created ${created.length}/${records.length} returns`);
-    void logActivity({
-      module: "returns",
-      action: "CREATE",
-      description: `Tạo hàng loạt ${created.length} trả hàng`,
+      return { created, duplicateCount };
     });
-    return { success: true, data: created };
+    console.log(`✅ Atomically imported ${result.created.length}/${records.length} returns`);
+    return {
+      success: true,
+      data: result.created,
+      createdCount: result.created.length,
+      duplicateCount: result.duplicateCount,
+    };
   } catch (error) {
     console.error("❌ Bulk create returns error:", error);
     return { success: false, error: error.message };
@@ -21993,6 +23089,19 @@ ipcMain.handle("refunds:update", async (event, id, data) => {
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
+    const refundId = Number(id);
+    if (!Number.isSafeInteger(refundId) || refundId <= 0) {
+      throw new Error("Mã phiếu hoàn không hợp lệ.");
+    }
+    const expectedUpdatedAt = data?.expectedUpdatedAt
+      ? new Date(data.expectedUpdatedAt)
+      : null;
+    if (!expectedUpdatedAt) {
+      throw new Error("Vui lòng tải lại phiếu hoàn trước khi lưu thay đổi.");
+    }
+    if (expectedUpdatedAt && Number.isNaN(expectedUpdatedAt.getTime())) {
+      throw new Error("Phiên bản phiếu hoàn không hợp lệ.");
+    }
     // 🔧 FIX: Chỉ update các field được gửi lên, KHÔNG overwrite field không có
     const updateData = {};
     if (data.customerName !== undefined)
@@ -22019,9 +23128,24 @@ ipcMain.handle("refunds:update", async (event, id, data) => {
       `📝 Updating refund #${id} with fields:`,
       Object.keys(updateData),
     );
-    const record = await prisma.refund.update({
-      where: { id },
-      data: updateData,
+    const record = await getPrismaDirectTx().$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw`
+        SELECT id FROM "Refund" WHERE id = ${refundId} FOR UPDATE
+      `;
+      if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+        throw new Error("Không tìm thấy phiếu hoàn.");
+      }
+      const current = await tx.refund.findUnique({ where: { id: refundId } });
+      if (
+        expectedUpdatedAt &&
+        current?.updatedAt?.getTime() !== expectedUpdatedAt.getTime()
+      ) {
+        throw new Error("Phiếu hoàn vừa được sửa ở máy khác. Vui lòng tải lại trước khi lưu.");
+      }
+      return tx.refund.update({
+        where: { id: refundId },
+        data: updateData,
+      });
     });
     console.log(`✅ Updated refund #${record.id}`);
     void logActivity({
@@ -22133,59 +23257,74 @@ ipcMain.handle("refunds:bulkCreate", async (event, records) => {
   try {
     requireRole("admin", "manager");
     if (!prisma) throw new Error("Prisma not available");
-    console.log(`📦 refunds:bulkCreate called with ${records.length} records`);
-    const created = [];
-    for (let i = 0; i < records.length; i++) {
-      const data = records[i];
-      try {
-        // 🔧 Safe date parsing
-        let refundDate;
-        try {
-          refundDate = new Date(data.refundDate);
-          if (isNaN(refundDate.getTime())) {
-            console.warn(
-              `⚠️ Invalid refundDate for record ${i}: "${data.refundDate}", using current date`,
-            );
-            refundDate = new Date();
-          }
-        } catch {
-          refundDate = new Date();
-        }
+    if (!Array.isArray(records) || records.length === 0 || records.length > 5000) {
+      throw new Error("Danh sách hàng hoàn import phải có từ 1 đến 5.000 dòng.");
+    }
+    const normalized = records.map((data, index) => {
+      const rowNumber = index + 1;
+      const customerName = normalizeImportText(data?.customerName, 500);
+      if (!customerName) throw new Error(`Dòng ${rowNumber}: thiếu nguồn đơn hàng.`);
+      return {
+        customerName,
+        refundCode: normalizeImportText(data?.refundCode, 255),
+        orderNumber: normalizeImportText(data?.orderNumber, 255),
+        refundReason: normalizeImportText(data?.refundReason, 2000),
+        refundDate: normalizeImportDate(data?.refundDate, rowNumber, "ngày hoàn"),
+        items: normalizeImportItems(data?.items, rowNumber),
+        totalAmount: normalizeImportAmount(data?.totalAmount, rowNumber),
+        notes: normalizeImportText(data?.notes, 10_000),
+        status: normalizeImportText(data?.status, 60) || "processing",
+        createdBy: currentSession?.username || null,
+      };
+    });
 
-        const record = await prisma.refund.create({
+    const result = await runAtomicImportTransaction("refunds:bulkCreate", async (tx) => {
+      const existing = await tx.refund.findMany({
+        select: {
+          refundCode: true,
+          orderNumber: true,
+          refundDate: true,
+          customerName: true,
+          refundReason: true,
+          items: true,
+          totalAmount: true,
+        },
+      });
+      const knownKeys = new Set(existing.map(refundImportKey));
+      const pending = [];
+      let duplicateCount = 0;
+      for (const record of normalized) {
+        const key = refundImportKey(record);
+        if (knownKeys.has(key)) {
+          duplicateCount += 1;
+          continue;
+        }
+        knownKeys.add(key);
+        pending.push(record);
+      }
+      const created = [];
+      for (const record of pending) created.push(await tx.refund.create({ data: record }));
+      if (created.length > 0) {
+        await tx.activityLog.create({
           data: {
-            customerName: data.customerName || "N/A",
-            refundCode: data.refundCode || null,
-            orderNumber: data.orderNumber || null,
-            refundReason: data.refundReason || null,
-            refundDate: refundDate,
-            items:
-              typeof data.items === "string"
-                ? data.items
-                : JSON.stringify(data.items || []),
-            totalAmount: data.totalAmount || 0,
-            notes: data.notes || null,
-            status: data.status || "processing",
-            createdBy: data.createdBy || null,
+            module: "refunds",
+            action: "IMPORT",
+            description: `Import ${created.length} hàng hoàn; bỏ qua ${duplicateCount} dòng trùng`,
+            changes: JSON.stringify({ received: normalized.length, created: created.length, duplicateCount }),
+            userName: currentSession?.username || "Admin",
+            userId: currentSession?.id || null,
           },
         });
-        created.push(record);
-      } catch (itemError) {
-        console.error(
-          `❌ Error creating refund record ${i}:`,
-          itemError.message,
-        );
-        console.error(`   Data:`, JSON.stringify(data).substring(0, 200));
-        // Continue with other records
       }
-    }
-    console.log(`✅ Bulk created ${created.length}/${records.length} refunds`);
-    void logActivity({
-      module: "refunds",
-      action: "CREATE",
-      description: `Tạo hàng loạt ${created.length} hàng hoàn`,
+      return { created, duplicateCount };
     });
-    return { success: true, data: created };
+    console.log(`✅ Atomically imported ${result.created.length}/${records.length} refunds`);
+    return {
+      success: true,
+      data: result.created,
+      createdCount: result.created.length,
+      duplicateCount: result.duplicateCount,
+    };
   } catch (error) {
     console.error("❌ Bulk create refunds error:", error);
     return { success: false, error: error.message };
@@ -23105,23 +24244,14 @@ const CONFIG_ACCESS = Object.freeze({
   },
   dailyTasksHistory: { read: ["admin"], write: ["admin"], sensitive: true },
   dailyTasksSnapshots: { read: ["admin"], write: ["admin"], sensitive: true },
-  telegramApiToken: { read: ["admin"], write: ["admin"], sensitive: true },
-  telegramChatId: { read: ["admin"], write: ["admin"], sensitive: true },
+  telegramApiToken: { read: ["admin"], write: [], sensitive: true },
+  telegramChatId: { read: ["admin"], write: [], sensitive: true },
   // Nhặt hàng là công cụ vận hành chung: mọi tài khoản được chọn và khôi phục thư mục theo dõi.
   pickupWatchFolder: {
     read: ["admin", "manager", "staff"],
     write: ["admin", "manager", "staff"],
   },
   statusList: { read: ["admin", "manager"], write: ["admin", "manager"] },
-  activePacker: { read: ["admin", "manager"], write: ["admin", "manager"] },
-  telegramOrderCounter: {
-    read: ["admin", "manager"],
-    write: ["admin", "manager"],
-  },
-  telegramOrderCounterDate: {
-    read: ["admin", "manager"],
-    write: ["admin", "manager"],
-  },
   dailyTasksCategories: {
     read: ["admin", "manager"],
     write: ["admin", "manager"],
@@ -23165,9 +24295,13 @@ ipcMain.handle("appConfig:get", async (event, key) => {
       where: { key },
     });
     if (config) {
-      return { success: true, data: JSON.parse(config.value) };
+      return {
+        success: true,
+        data: JSON.parse(config.value),
+        updatedAt: config.updatedAt?.toISOString() || null,
+      };
     }
-    return { success: true, data: null };
+    return { success: true, data: null, updatedAt: null };
   } catch (error) {
     console.error(`❌ Get config "${key}" error:`, error);
     return { success: false, error: error.message };
@@ -23193,7 +24327,7 @@ function isTransactionWriteConflict(error) {
 const waitForRetry = (attempt) =>
   new Promise((resolve) => setTimeout(resolve, 75 * (attempt + 1)));
 
-ipcMain.handle("appConfig:set", async (event, key, value) => {
+ipcMain.handle("appConfig:set", async (event, key, value, expectedUpdatedAt) => {
   try {
     const policy = requireConfigAccess(key, "write");
     if (key === "stockCheckSessionsV2" && currentSession?.role !== "admin") {
@@ -23266,10 +24400,30 @@ ipcMain.handle("appConfig:set", async (event, key, value) => {
         );
       });
     } else {
-      config = await prisma.appConfig.upsert({
-        where: { key },
-        update: { value: JSON.stringify(value) },
-        create: { key, value: JSON.stringify(value) },
+      config = await getPrismaDirectTx().$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-config:${key}`}))`;
+        const current = await tx.appConfig.findUnique({ where: { key } });
+        if (expectedUpdatedAt === undefined && current) {
+          throw new Error(`Cấu hình ${key} chưa được tải trước khi lưu. Vui lòng tải lại màn hình.`);
+        }
+        const expectedRevision = expectedUpdatedAt
+          ? new Date(expectedUpdatedAt)
+          : null;
+        if (expectedRevision && Number.isNaN(expectedRevision.getTime())) {
+          throw new Error(`Phiên bản cấu hình ${key} không hợp lệ.`);
+        }
+        if (
+          (current && !expectedRevision) ||
+          (!current && expectedRevision) ||
+          (current && expectedRevision && current.updatedAt.getTime() !== expectedRevision.getTime())
+        ) {
+          throw new Error(`Cấu hình ${key} vừa được thay đổi ở máy khác. Vui lòng tải lại.`);
+        }
+        return tx.appConfig.upsert({
+          where: { key },
+          update: { value: JSON.stringify(value) },
+          create: { key, value: JSON.stringify(value) },
+        });
       });
     }
     if (policy.sensitive) {
@@ -23282,7 +24436,11 @@ ipcMain.handle("appConfig:set", async (event, key, value) => {
       });
     }
     console.log(`✅ Set config "${key}"`);
-    return { success: true, data: config };
+    return {
+      success: true,
+      data: config,
+      updatedAt: config.updatedAt?.toISOString() || null,
+    };
   } catch (error) {
     console.error(`❌ Set config "${key}" error:`, error);
     return { success: false, error: error.message };

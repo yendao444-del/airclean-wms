@@ -1,5 +1,38 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+const appConfigRevisions = new Map();
+const appConfigWriteTails = new Map();
+
+async function getAppConfig(key) {
+    const pendingWrite = appConfigWriteTails.get(key);
+    if (pendingWrite) await pendingWrite.catch(() => undefined);
+    const result = await ipcRenderer.invoke('appConfig:get', key);
+    if (result?.success) appConfigRevisions.set(key, result.updatedAt || null);
+    return result;
+}
+
+function setAppConfig(key, value) {
+    const previous = appConfigWriteTails.get(key) || Promise.resolve();
+    const write = previous.catch(() => undefined).then(async () => {
+        const hasRevision = appConfigRevisions.has(key);
+        const result = await ipcRenderer.invoke(
+            'appConfig:set',
+            key,
+            value,
+            hasRevision ? appConfigRevisions.get(key) : undefined,
+        );
+        if (result?.success) appConfigRevisions.set(key, result.updatedAt || null);
+        return result;
+    });
+    appConfigWriteTails.set(key, write);
+    void write.then(() => {
+        if (appConfigWriteTails.get(key) === write) appConfigWriteTails.delete(key);
+    }, () => {
+        if (appConfigWriteTails.get(key) === write) appConfigWriteTails.delete(key);
+    });
+    return write;
+}
+
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -62,7 +95,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         deleteVatInvoice: (id) => ipcRenderer.invoke('purchases:deleteVatInvoice', id),
         createVatGroup: (data) => ipcRenderer.invoke('purchases:createVatGroup', data),
         removeVatGroup: (data) => ipcRenderer.invoke('purchases:removeVatGroup', data),
-        markAsThht: (purchaseId, revert) => ipcRenderer.invoke('purchases:markAsThht', { purchaseId, revert }),
+        markAsThht: (purchaseId, revert, expectedUpdatedAt) => ipcRenderer.invoke('purchases:markAsThht', { purchaseId, revert, expectedUpdatedAt }),
         getVATFileData: (purchaseId) => ipcRenderer.invoke('purchases:getVATFileData', { purchaseId }),
         getImportReceiptFileData: (purchaseId) => ipcRenderer.invoke('purchases:getImportReceiptFileData', { purchaseId }),
         getImportReceiptPreviewData: (purchaseId) => ipcRenderer.invoke('purchases:getImportReceiptPreviewData', { purchaseId }),
@@ -75,6 +108,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         exportLabelsPdf: (data) => ipcRenderer.invoke('handlingUnits:exportLabelsPdf', data),
         markQrLabelsPrinted: (codes) => ipcRenderer.invoke('handlingUnits:markQrLabelsPrinted', codes),
         markQrLabelsReceived: (codes) => ipcRenderer.invoke('handlingUnits:markQrLabelsReceived', codes),
+        quickReceive: (data) => ipcRenderer.invoke('handlingUnits:quickReceive', data),
         saveRegister: (records) => ipcRenderer.invoke('handlingUnits:saveRegister', records),
         unsealUnit: (data) => ipcRenderer.invoke('handlingUnits:unsealUnit', data),
         sealUnit: (data) => ipcRenderer.invoke('handlingUnits:sealUnit', data),
@@ -186,6 +220,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getAll: (args) => ipcRenderer.invoke('ecommerceExports:getAll', args),
         create: (data) => ipcRenderer.invoke('ecommerceExports:create', data),
         update: (id, data) => ipcRenderer.invoke('ecommerceExports:update', id, data),
+        saveTelegramSettings: (data) => ipcRenderer.invoke('ecommerceExports:saveTelegramSettings', data),
+        nextTelegramOrderCounter: () => ipcRenderer.invoke('ecommerceExports:nextTelegramOrderCounter'),
         delete: (id) => ipcRenderer.invoke('ecommerceExports:delete', id),
         bulkDelete: (ids) => ipcRenderer.invoke('ecommerceExports:bulkDelete', ids),
         deleteAll: () => ipcRenderer.invoke('ecommerceExports:deleteAll'),
@@ -306,8 +342,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // App Config (CẤU HÌNH)
     appConfig: {
-        get: (key) => ipcRenderer.invoke('appConfig:get', key),
-        set: (key, value) => ipcRenderer.invoke('appConfig:set', key, value),
+        get: getAppConfig,
+        set: setAppConfig,
     },
     r2Test: {
         getBootstrap: () => ipcRenderer.invoke('r2Test:getBootstrap'),

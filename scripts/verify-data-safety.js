@@ -6,12 +6,16 @@ const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), 'u
 const ipc = read('electron/ipc-handlers.js');
 const normalizedIpc = ipc.replace(/\r\n/g, '\n');
 const main = read('electron/main.js');
+const preload = read('electron/preload.js');
 const offlineQueue = read('electron/offline-queue.js');
 const ecommerce = read('src/pages/EcommerceExport.tsx');
 const stockBalance = read('src/pages/StockBalance.tsx');
 const returnsPage = read('src/pages/Returns.tsx');
+const refundsPage = read('src/pages/Refunds.tsx');
 const handlingUnitsPage = read('src/pages/HandlingUnits.tsx');
+const purchasePage = read('src/pages/Purchase.tsx');
 const stockCheckPage = read('src/pages/StockCheck.tsx');
+const posPage = read('src/pages/POS.tsx');
 const r2Lab = read('src/pages/R2StorageLab.tsx');
 const r2TestWorker = read('cloudflare/r2-test-worker/src/index.ts');
 const evidenceWorker = read('cloudflare/r2-daily-evidence-worker/src/index.ts');
@@ -42,6 +46,8 @@ if (!allowedChannelsMatch) {
   requireText(allowedChannelsMatch[1], '"dailyTasks:reviewEvidence",', 'Evidence review must remain available');
   requireText(allowedChannelsMatch[1], '"returns:updateWorkflow",', 'Narrow return workflow updates must remain available');
   requireText(allowedChannelsMatch[1], '"refunds:updateStatus",', 'Narrow refund status updates must remain available');
+  requireText(allowedChannelsMatch[1], '"returns:bulkCreate",', 'Atomic return imports must remain available');
+  requireText(allowedChannelsMatch[1], '"refunds:bulkCreate",', 'Atomic refund imports must remain available');
   for (const channel of [
     'dailyTasks:addNote',
     'dailyTasks:reopen',
@@ -67,6 +73,35 @@ if (!allowedChannelsMatch) {
     'handlingUnits:markQrLabelsReceived',
     'handlingUnits:exportLabelsPdf',
     'purchases:create',
+    'purchases:update',
+    'purchases:repairMissingPrices',
+    'purchases:uploadVATInvoice',
+    'purchases:uploadImportReceipt',
+    'purchases:uploadCompanyVATInvoice',
+    'purchases:setCompanyVatStatus',
+    'purchases:createVatGroup',
+    'purchases:uploadVatGroupInvoice',
+    'purchases:removeVatGroup',
+    'purchases:markAsThht',
+    'handlingUnits:quickReceive',
+    'handlingUnits:sealUnit',
+    'handlingUnits:pickUnit',
+    'handlingUnits:requestFinalCheck',
+    'handlingUnits:finalizeShiftCheck',
+    'posOrder:create',
+    'exportOrders:saveWithStock',
+    'refunds:completeAndRestore',
+    'returns:update',
+    'refunds:update',
+    'goodsCompanies:create',
+    'goodsCompanies:update',
+    'goodsCompanies:setProductCompany',
+    'users:updateProfile',
+    'dailyTasks:create',
+    'ecommerceExports:update',
+    'ecommerceExports:saveTelegramSettings',
+    'ecommerceExports:nextTelegramOrderCounter',
+    'offlineQueue:sync',
   ]) {
     requireText(allowedChannelsMatch[1], `"${channel}",`, `${channel} must remain available`);
   }
@@ -304,6 +339,12 @@ requireText(ipc, 'missingWithdrawalCodes.length > 0 && !DATA_SAFETY_MODE', 'Hand
 requireText(ipc, 'ipcMain.handle("stockBalance:apply"', 'Atomic stock balance handler is missing');
 requireText(ipc, 'ipcMain.handle("returns:updateWorkflow"', 'Narrow return workflow handler is missing');
 requireText(ipc, 'ipcMain.handle("refunds:updateStatus"', 'Narrow refund status handler is missing');
+requireText(ipc, 'runAtomicImportTransaction("returns:bulkCreate"', 'Return imports must use the atomic import transaction');
+requireText(ipc, 'runAtomicImportTransaction("refunds:bulkCreate"', 'Refund imports must use the atomic import transaction');
+requireText(ipc, 'pg_advisory_xact_lock(hashtext(${lockKey}))', 'Bulk imports must serialize across application instances');
+requireText(ipc, 'Prisma.TransactionIsolationLevel.Serializable', 'Bulk imports must use serializable transactions');
+requireText(ipc, 'const knownKeys = new Set(existing.map(returnImportKey));', 'Return imports must deduplicate against database records');
+requireText(ipc, 'const knownKeys = new Set(existing.map(refundImportKey));', 'Refund imports must deduplicate against database records');
 requireText(ipc, 'async function writeDailyTaskHistory(tx, entry)', 'Serialized daily-task history writer is missing');
 requireText(ipc, "pg_advisory_xact_lock(hashtext('dailyTasksHistory'))", 'Daily-task history writes must be serialized');
 requireText(ipc, 'ipcMain.handle("dailyTasks:addNote"', 'Append-only daily-task note handler is missing');
@@ -318,7 +359,49 @@ requireText(ipc, 'Công việc đã được thay đổi trên máy khác. Vui l
 requireText(ipc, 'purchaseCreateOperation:', 'Purchase create idempotency claim is missing');
 requireText(ipc, 'findCompletedPurchaseCreate(tx, idempotencyKey)', 'Purchase retries must recover the already-created receipt');
 requireText(ipc, "pg_advisory_xact_lock(hashtext('handling-units-create'))", 'Handling-unit batch creation must be serialized');
-requireText(handlingUnitsPage, 'idempotencyKey: `${operationBaseKey}-${supplierGroupIndex}`', 'Quick QR receiving must provide stable purchase idempotency keys');
+requireText(handlingUnitsPage, 'handlingUnits?.quickReceive?.({', 'Quick QR receiving must use its atomic backend command');
+rejectText(handlingUnitsPage.slice(handlingUnitsPage.indexOf('const confirmQuickReceiving = async'), handlingUnitsPage.indexOf('if (isWorkspaceLoading)')), 'purchases?.create({', 'Quick QR receiving must not create purchases in separate renderer requests');
+requireText(ipc, 'handlingQuickReceiveOperation:', 'Quick QR receiving idempotency claim is missing');
+requireText(ipc, 'ipcMain.handle("handlingUnits:quickReceive"', 'Atomic quick QR receiving handler is missing');
+requireText(ipc, 'Công ty hàng hóa của SKU ${line.sku} đã thay đổi.', 'Quick receiving must validate company assignment against the database');
+requireText(ipc, 'SKU ${line.sku} có giá, công ty hoặc đơn vị không đồng nhất', 'Quick receiving must reject inconsistent duplicate SKU lines');
+requireText(ipc, 'line.location = normalizeHandlingLocation(label.location || {});', 'Quick receiving must use authoritative QR location data');
+requireText(ipc, 'buildRendererHandlingOperationKey(', 'Handling-unit renderer idempotency keys are missing');
+requireText(ipc, 'posOrderOperation:', 'POS durable idempotency claim is missing');
+requireText(posPage, 'idempotencyKey: paymentOperationKeyRef.current', 'POS renderer must send a stable idempotency key');
+requireText(handlingUnitsPage, 'if (!isPendingCheck && withdrawals.length === 0) return null;', 'End-of-shift count must include pending packages carried over from earlier days');
+requireText(ipc, 'DATA_SAFETY_MUTABLE_CONFIG_KEYS', 'Narrow mutable AppConfig allowlist is missing');
+requireText(preload, 'const appConfigWriteTails = new Map();', 'AppConfig writes must be serialized per key in preload');
+requireText(preload, 'hasRevision ? appConfigRevisions.get(key) : undefined', 'AppConfig writes must include the last read revision');
+requireText(preload, 'if (pendingWrite) await pendingWrite.catch(() => undefined);', 'AppConfig reads must not race a queued write');
+rejectText(preload, 'write.finally(() => {', 'AppConfig cleanup must not create an unhandled rejected promise');
+requireText(ipc, 'current.updatedAt.getTime() !== expectedRevision.getTime()', 'AppConfig writes must reject stale revisions');
+requireText(ipc, 'ipcMain.handle("ecommerceExports:saveTelegramSettings"', 'Telegram settings must use a dedicated atomic handler');
+requireText(ipc, 'ipcMain.handle("ecommerceExports:nextTelegramOrderCounter"', 'Telegram order numbering must use a dedicated atomic handler');
+rejectText(ecommerce, "appConfig.set('activePacker'", 'Per-shift packer selection must not fail through shared AppConfig');
+rejectText(ecommerce, "appConfig.set('telegramChatId'", 'Telegram credentials must not be saved through split AppConfig writes');
+rejectText(ecommerce, "appConfig.set('telegramOrderCounter'", 'Telegram numbering must not use split AppConfig writes');
+requireText(purchasePage, 'const importReceiptFiles = pendingImportFiles.length > 0', 'Purchase edits must include replacement receipts in the guarded update request');
+requireText(ipc, 'updatedAt: true,\n          vatInvoiceStatus: true,', 'Purchase list must expose the revision required by guarded edits and uploads');
+requireText(ipc, 'importReceiptDriveUrl: uploadedReceiptReferences.join("\\n")', 'Purchase update must commit replacement receipt references with the edited receipt');
+requireText(purchasePage, 'expectedUpdatedAt: documentRevision', 'VAT upload after a purchase edit must send the latest row revision');
+requireText(purchasePage, 'expectedUpdatedAt: existingPurchase?.updatedAt', 'Manual VAT upload must reject stale purchase rows');
+requireText(ipc, 'Vui lòng tải lại phiếu nhập trước khi thay Phiếu Nhập Kho.', 'Receipt replacement must require an expected purchase revision');
+requireText(ipc, 'Vui lòng tải lại phiếu nhập trước khi upload Hóa đơn VAT.', 'VAT replacement must require an expected purchase revision');
+requireText(ipc, 'Vui lòng tải lại phiếu nhập trước khi upload HĐ VAT theo công ty.', 'Company VAT upload must require an expected purchase revision');
+requireText(ipc, 'companyGroups, status, expectedUpdatedAt', 'Company VAT status changes must support one guarded bulk update');
+requireText(purchasePage, 'companyGroups: companyNames', 'Bulk no-VAT actions must use one atomic backend request');
+requireText(ipc, 'pg_advisory_xact_lock(hashtext(${PURCHASE_VAT_GROUPS_KEY}))', 'VAT group mutations must hold the shared configuration lock');
+requireText(ipc, 'expectedGroupUpdatedAt', 'VAT group uploads must reject stale group state');
+requireText(ipc, 'Không thể tách một nhóm đã có HĐ VAT', 'Uploaded VAT groups must not be detached destructively');
+requireText(purchasePage, 'purchaseRevisions: Object.fromEntries(', 'VAT group creation must send purchase revisions');
+requireText(purchasePage, 'expectedGroupUpdatedAt: effectiveGroupUpdatedAt', 'VAT group upload must send the current group revision');
+requireText(purchasePage, 'purchase.updatedAt,', 'THHT and VAT group actions must send the current purchase revision');
+rejectText(refundsPage, 'refunds.adjustStock(', 'Refund UI must not use the legacy split stock/status workflow');
+requireText(handlingUnitsPage, 'note: "Rút hàng từ cửa sổ Telegram trong ứng dụng"', 'Telegram command simulation must persist picks through the guarded backend');
+requireText(handlingUnitsPage, 'message: "Chọn nhà cung cấp trước khi tạo mã QR"', 'QR creation must require a supplier in the form');
+requireText(ipc, 'SELECT id FROM "EcommerceExport" WHERE id = ${exportId} FOR UPDATE', 'Ecommerce updates must lock the row before applying stock changes');
+requireText(ipc, 'Phiếu xuất TMĐT vừa được thay đổi ở máy khác.', 'Ecommerce updates must reject stale queued or renderer writes');
 requireText(ipc, 'stockBalanceOperation:', 'Stock balance idempotency claim is missing');
 const balanceItemStart = ipc.indexOf('ipcMain.handle("stockCheck:balanceItem"');
 const balanceItemEnd = ipc.indexOf('ipcMain.handle("stockCheck:submitSession"', balanceItemStart);
