@@ -30,6 +30,21 @@ const rejectText = (source, text, label) => {
   if (source.includes(text)) failures.push(label);
 };
 
+const posCreateStart = ipc.indexOf('ipcMain.handle("posOrder:create"');
+const posCreateEnd = ipc.indexOf('ipcMain.handle("posOrder:getAll"', posCreateStart);
+const posCreateHandler = posCreateStart >= 0 && posCreateEnd > posCreateStart
+  ? ipc.slice(posCreateStart, posCreateEnd)
+  : '';
+const dailyTaskUpdateStart = ipc.indexOf('ipcMain.handle("dailyTasks:update"');
+const dailyTaskUpdateEnd = ipc.indexOf('ipcMain.handle("dailyTasks:updateStatus"', dailyTaskUpdateStart);
+const dailyTaskUpdateHandler = dailyTaskUpdateStart >= 0 && dailyTaskUpdateEnd > dailyTaskUpdateStart
+  ? ipc.slice(dailyTaskUpdateStart, dailyTaskUpdateEnd)
+  : '';
+rejectText(posCreateHandler, 'details:', 'POS activity logs must not use the removed ActivityLog.details field');
+rejectText(posCreateHandler, 'tx.activityLog.create', 'A secondary POS activity log must not roll back the sale transaction');
+requireText(posCreateHandler, 'void logActivity({', 'POS creation must write its audit log after the sale transaction commits');
+requireText(posCreateHandler, 'changes: {', 'POS activity logs must persist structured data through ActivityLog.changes');
+
 requireText(ipc, 'const DATA_SAFETY_MODE = true;', 'DATA_SAFETY_MODE must default to true');
 requireText(ipc, 'path.join(__dirname, "r2-daily-evidence-bootstrap.json")', 'Daily evidence R2 must support bundled production bootstrap configuration');
 requireText(r2BootstrapScript, 'DAILY_EVIDENCE_KEY', 'R2 bootstrap preparation must read the worker key');
@@ -44,6 +59,7 @@ if (!allowedChannelsMatch) {
   requireText(allowedChannelsMatch[1], '"dailyTasks:requestAssignmentCompletion",', 'Assignment completion requests must remain available');
   requireText(allowedChannelsMatch[1], '"dailyTasks:completeRegularTask",', 'Regular task completion must remain available');
   requireText(allowedChannelsMatch[1], '"dailyTasks:reviewEvidence",', 'Evidence review must remain available');
+  requireText(allowedChannelsMatch[1], '"dailyTasks:update",', 'Atomic daily-task editing must remain available');
   requireText(allowedChannelsMatch[1], '"returns:updateWorkflow",', 'Narrow return workflow updates must remain available');
   requireText(allowedChannelsMatch[1], '"refunds:updateStatus",', 'Narrow refund status updates must remain available');
   requireText(allowedChannelsMatch[1], '"returns:bulkCreate",', 'Atomic return imports must remain available');
@@ -347,6 +363,10 @@ requireText(ipc, 'const knownKeys = new Set(existing.map(returnImportKey));', 'R
 requireText(ipc, 'const knownKeys = new Set(existing.map(refundImportKey));', 'Refund imports must deduplicate against database records');
 requireText(ipc, 'async function writeDailyTaskHistory(tx, entry)', 'Serialized daily-task history writer is missing');
 requireText(ipc, "pg_advisory_xact_lock(hashtext('dailyTasksHistory'))", 'Daily-task history writes must be serialized');
+requireText(dailyTaskUpdateHandler, 'FOR UPDATE', 'Daily-task editing must lock the task row');
+requireText(dailyTaskUpdateHandler, 'expectedUpdatedAt', 'Daily-task editing must reject stale renderer revisions');
+requireText(dailyTaskUpdateHandler, 'await writeDailyTaskHistory(tx, {', 'Daily-task edits and status history must share one transaction');
+requireText(dailyTaskUpdateHandler, 'isolationLevel: "Serializable"', 'Daily-task editing must use a serializable transaction');
 requireText(ipc, 'ipcMain.handle("dailyTasks:addNote"', 'Append-only daily-task note handler is missing');
 requireText(ipc, 'ipcMain.handle("dailyTasks:reopen"', 'Transactional daily-task reopen handler is missing');
 requireText(ipc, 'ipcMain.handle("dailyTasks:completeAssignment"', 'Transactional assignment completion handler is missing');

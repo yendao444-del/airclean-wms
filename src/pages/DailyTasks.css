@@ -1327,6 +1327,8 @@
 .daily-task-row-actions {
     flex-wrap: nowrap;
     justify-content: flex-end;
+    position: relative;
+    z-index: 2;
 }
 
 .daily-task-deadline-pill {
@@ -1358,6 +1360,9 @@
     border-color: #dbe3ec;
     border-radius: 7px;
     background: #fff;
+    pointer-events: auto;
+    position: relative;
+    z-index: 3;
 }
 
 .daily-task-overflow-button.ant-btn:hover {

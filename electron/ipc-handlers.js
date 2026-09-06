@@ -42,6 +42,9 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "dailyTasks:requestAssignmentCompletion",
   "dailyTasks:completeRegularTask",
   "dailyTasks:reviewEvidence",
+  // Task edits lock the row, reject stale revisions, and commit the task plus
+  // its status history in one serializable transaction.
+  "dailyTasks:update",
   "dailyTasks:addNote",
   "dailyTasks:reopen",
   "dailyTasks:completeAssignment",
@@ -5195,25 +5198,6 @@ ipcMain.handle("posOrder:create", async (event, data) => {
               }),
             },
           });
-          await tx.activityLog.create({
-            data: {
-              module: "sales",
-              action: "CREATE",
-              description: `Bán hàng POS: ${orderNumber} - ${items.length} SP - ${new Intl.NumberFormat("vi-VN").format(total)}đ (${data.paymentMethod || "cash"})`,
-              recordName: orderNumber,
-              userName: data.userName || currentSession?.username || "System",
-              userId: createdByUserId,
-              severity: "INFO",
-              details: JSON.stringify({
-                orderNumber,
-                itemCount: items.length,
-                total,
-                profit,
-                paymentMethod: data.paymentMethod,
-              }),
-            },
-          });
-
           return { order: newOrder, orderNumber, stockUpdates };
         },
         { timeout: 30000, maxWait: 10000 },
@@ -5228,6 +5212,26 @@ ipcMain.handle("posOrder:create", async (event, data) => {
       },
     );
     dashboardSummaryCache.clear();
+
+    // ActivityLog is secondary audit data. A logging/schema problem must not
+    // roll back an otherwise valid sale, payment, and inventory transaction.
+    void logActivity({
+      module: "sales",
+      action: "CREATE",
+      description: `Bán hàng POS: ${result.orderNumber} - ${items.length} SP - ${new Intl.NumberFormat("vi-VN").format(total)}đ (${data.paymentMethod || "cash"})`,
+      recordId: result.order.id,
+      recordName: result.orderNumber,
+      userName: data.userName || currentSession?.username || "System",
+      userId: createdByUserId,
+      severity: "INFO",
+      changes: {
+        orderNumber: result.orderNumber,
+        itemCount: items.length,
+        total,
+        profit,
+        paymentMethod: data.paymentMethod || "cash",
+      },
+    });
 
     console.log(`✅ [POS] Order created: ${result.orderNumber}, Total: ${total}`);
     return {
@@ -16008,6 +16012,7 @@ ipcMain.handle("system:deleteBackup", async (event, backupPath) => {
 const MAX_EVIDENCE_IMAGES = 5;
 const TASK_PENALTY_KEY_PREFIX = "dailyTaskEvidencePenalty:";
 const ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX = "assignmentEvidencePenalty:";
+const REJECTED_EVIDENCE_PENALTY_KEY_PREFIX = "rejectedEvidencePenalty:";
 const getDailyTaskReferenceCode = (taskId) =>
   `CV-${String(taskId ?? "").padStart(4, "0")}`;
 const DAILY_TASK_REST_DAY_HOLIDAYS = new Set([
@@ -16098,7 +16103,15 @@ async function writeDailyTaskHistory(tx, entry) {
     const parsed = historyConfig?.value ? JSON.parse(historyConfig.value) : [];
     history = Array.isArray(parsed) ? parsed : [];
   } catch {}
-  const updatedHistory = [entry, ...history].slice(0, 500);
+  const normalizedEntry = {
+    ...entry,
+    type:
+      entry?.type ||
+      (String(entry?.category || "").trim().toLocaleLowerCase("vi-VN") === "bàn giao"
+        ? "assignment"
+        : "daily"),
+  };
+  const updatedHistory = [normalizedEntry, ...history].slice(0, 500);
   await tx.appConfig.upsert({
     where: { key: "dailyTasksHistory" },
     update: { value: JSON.stringify(updatedHistory) },
@@ -16241,6 +16254,10 @@ function clearEvidenceSubmission(attachments) {
     submittedImages,
     reviewedAt,
     reviewedBy,
+    rejectionReason,
+    rejectionPenaltyAt,
+    rejectionPenaltyAmount,
+    rejectionPenaltyCycle,
     ...evidenceConfig
   } = evidence;
   return {
@@ -16265,18 +16282,101 @@ function getSubmittedEvidenceImages(evidence) {
     : [];
 }
 
+function getSubmittedEvidenceKeys(evidence) {
+  return getSubmittedEvidenceImages(evidence)
+    .map((image) => String(
+      image?.r2Key || image?.storagePath || image?.driveUrl || image?.hash || "",
+    ).trim())
+    .filter(Boolean);
+}
+
 // Keep a self-contained proof snapshot in the audit trail before daily reset
 // clears the active task for the next assignee.
 function getEvidenceHistoryPayload(evidence) {
   if (!evidence?.required) return null;
   return {
+    required: true,
+    method: evidence.method || "image",
+    penaltyAmount: Number(evidence.penaltyAmount) || 0,
     submittedAt: evidence.submittedAt || null,
     submittedBy: evidence.submittedBy || "",
     submittedImages: getSubmittedEvidenceImages(evidence),
     status: evidence.status || "pending",
     reviewedAt: evidence.reviewedAt || null,
     reviewedBy: evidence.reviewedBy || "",
+    rejectionReason: evidence.rejectionReason || "",
+    rejectionPenaltyAt: evidence.rejectionPenaltyAt || null,
+    rejectionPenaltyAmount: Number(evidence.rejectionPenaltyAmount) || 0,
+    rejectionPenaltyCycle: Number(evidence.rejectionPenaltyCycle) || 0,
   };
+}
+
+async function buildRejectedEvidencePenalties(task, attachments, evidence, reviewedAt, reviewedBy, rejectionReason) {
+  const recipients = await getActiveTaskRecipients(
+    getTaskRecipients(task, attachments),
+  );
+  if (recipients.length === 0) {
+    throw new Error("Không xác định được nhân viên để ghi nhận phạt.");
+  }
+
+  const configuredAmount = task.type === "assignment"
+    ? getAssignmentEvidencePenaltyAmount(attachments, evidence)
+    : Number(evidence.penaltyAmount) || 30000;
+  const dueAt = new Date(task.dueDate).toISOString();
+  const existingRows = await prisma.appConfig.findMany({
+    where: {
+      key: { startsWith: `${REJECTED_EVIDENCE_PENALTY_KEY_PREFIX}${task.id}:` },
+    },
+    select: { value: true },
+  });
+  const previousPenalties = existingRows.flatMap((row) => {
+    try {
+      const penalty = JSON.parse(row.value);
+      return penalty?.source === "daily_task_evidence_rejected" && penalty?.dueAt === dueAt
+        ? [penalty]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const existingSubmission = previousPenalties.find(
+    (penalty) => String(penalty?.submissionAt || "") === String(evidence.submittedAt || ""),
+  );
+  const cycle = existingSubmission
+    ? Number(existingSubmission.cycle) || 1
+    : Math.max(0, ...previousPenalties.map((penalty) => Number(penalty.cycle) || 1)) + 1;
+  const escalatedAmount = configuredAmount * cycle;
+  const baseFine = task.type === "assignment"
+    ? escalatedAmount
+    : Math.floor(escalatedAmount / recipients.length);
+  const remainder = task.type === "assignment" ? 0 : escalatedAmount % recipients.length;
+  const submissionKey = crypto
+    .createHash("sha256")
+    .update(`${task.id}|${evidence.submittedAt || "unknown-submission"}`)
+    .digest("hex")
+    .slice(0, 24);
+
+  return recipients.map((assignee, index) => {
+    const key = `${REJECTED_EVIDENCE_PENALTY_KEY_PREFIX}${task.id}:${submissionKey}:${assignee}`;
+    return {
+      id: key,
+      taskId: task.id,
+      taskCode: getDailyTaskReferenceCode(task.id),
+      taskTitle: task.title,
+      assignee,
+      amount: baseFine + (index < remainder ? 1 : 0),
+      baseAmount: configuredAmount,
+      dueAt,
+      penaltyAt: reviewedAt,
+      submissionAt: evidence.submittedAt || null,
+      cycle,
+      multiplier: cycle,
+      type: "Bằng chứng công việc không hợp lệ",
+      detail: `${task.title} - bằng chứng bị ${reviewedBy} từ chối lần ${cycle}, phạt x${cycle}. Lý do: ${rejectionReason}`,
+      rejectionReason,
+      source: "daily_task_evidence_rejected",
+    };
+  });
 }
 
 function actorOwnsTask(actor, task) {
@@ -17198,6 +17298,10 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
       submittedBy: actor.fullName,
       reviewedAt: submittedAt,
       reviewedBy: "Hệ thống",
+      rejectionPenaltyAt: undefined,
+      rejectionPenaltyAmount: undefined,
+      rejectionPenaltyCycle: undefined,
+      rejectionReason: undefined,
     };
     const completedAt = new Date();
     await prisma.$transaction(async (tx) => {
@@ -17269,7 +17373,7 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
 
 ipcMain.handle(
   "dailyTasks:reviewEvidence",
-  async (_event, taskId, approved) => {
+  async (_event, taskId, approved, reviewContext = {}) => {
     try {
       const actor = await getCurrentActor();
       if (!["admin", "manager"].includes(actor.role))
@@ -17280,59 +17384,229 @@ ipcMain.handle(
       });
       if (!task) throw new Error("Không tìm thấy công việc.");
       const attachments = parseTaskAttachments(task.attachments);
-      const evidence = attachments.evidence || {};
-      if (!evidence.required || evidence.status !== "submitted")
+      const currentEvidence = attachments.evidence || {};
+      const requestedSubmittedAt = String(
+        reviewContext?.submittedAt || reviewContext?.evidence?.submittedAt || "",
+      ).trim();
+      const requestedEvidenceKeys = [
+        ...new Set(
+          (Array.isArray(reviewContext?.evidenceKeys)
+            ? reviewContext.evidenceKeys
+            : getSubmittedEvidenceKeys(reviewContext?.evidence)
+          ).map((value) => String(value || "").trim()).filter(Boolean),
+        ),
+      ];
+      const rejectionReason = String(reviewContext?.rejectionReason || "").trim();
+      if (!approved && rejectionReason.length < 3) {
+        throw new Error("Vui lòng nhập lý do từ chối ít nhất 3 ký tự.");
+      }
+      if (!approved && rejectionReason.length > 500) {
+        throw new Error("Lý do từ chối không được vượt quá 500 ký tự.");
+      }
+      let evidence = currentEvidence;
+      let reviewTask = task;
+      let historicalSubmission = false;
+
+      const currentEvidenceKeys = getSubmittedEvidenceKeys(currentEvidence);
+      const requestedHistoryByTime = requestedSubmittedAt &&
+        String(currentEvidence.submittedAt || "") !== requestedSubmittedAt;
+      const requestedHistoryByImage = requestedEvidenceKeys.length > 0 &&
+        !requestedEvidenceKeys.some((key) => currentEvidenceKeys.includes(key));
+      if (requestedHistoryByTime || requestedHistoryByImage) {
+        if (approved) {
+          throw new Error("Chỉ có thể từ chối bằng chứng trong lịch sử.");
+        }
+        const historyConfig = await prisma.appConfig.findUnique({
+          where: { key: "dailyTasksHistory" },
+        });
+        let history = [];
+        try {
+          history = historyConfig?.value ? JSON.parse(historyConfig.value) : [];
+        } catch {
+          history = [];
+        }
+        const historyEntry = (Array.isArray(history) ? history : []).find((entry) => {
+          if (Number(entry?.taskId) !== task.id || !entry?.evidence) return false;
+          if (
+            requestedSubmittedAt &&
+            String(entry.evidence.submittedAt || "") === requestedSubmittedAt
+          ) return true;
+          const storedKeys = getSubmittedEvidenceKeys(entry.evidence);
+          return requestedEvidenceKeys.length > 0 &&
+            requestedEvidenceKeys.some((key) => storedKeys.includes(key));
+        });
+        if (!historyEntry?.evidence) {
+          throw new Error("Không tìm thấy lần nộp bằng chứng trong lịch sử.");
+        }
+        // Older history snapshots did not persist `required`, even though
+        // they retained the image list. Rebuild that invariant from the
+        // active task so a valid historical proof can still be reviewed.
+        evidence = {
+          ...currentEvidence,
+          ...historyEntry.evidence,
+          required: true,
+          method: historyEntry.evidence.method || currentEvidence.method || "image",
+        };
+        const historicalDueAt = new Date(requestedSubmittedAt);
+        reviewTask = {
+          ...task,
+          assignee: historyEntry.assignee || task.assignee,
+          dueDate:
+            task.type === "daily" && !Number.isNaN(historicalDueAt.getTime())
+              ? getDailyTaskEndOfDay(historicalDueAt)
+              : task.dueDate,
+        };
+        historicalSubmission = true;
+      }
+
+      const submittedImages = getSubmittedEvidenceImages(evidence);
+      if (!evidence.required || submittedImages.length === 0)
+        throw new Error("Công việc không có ảnh bằng chứng để duyệt.");
+      if (approved && evidence.status !== "submitted")
         throw new Error("Công việc không có bằng chứng chờ duyệt.");
+      if (!approved && !["submitted", "approved"].includes(evidence.status))
+        throw new Error("Bằng chứng này không còn ở trạng thái có thể từ chối.");
 
       const reviewedAt = new Date().toISOString();
+      const rejectedPenalties = approved
+        ? []
+        : await buildRejectedEvidencePenalties(
+            reviewTask,
+            { ...attachments, evidence },
+            evidence,
+            reviewedAt,
+            actor.fullName,
+            rejectionReason,
+          );
+      const rejectionPenaltyAmount = rejectedPenalties.reduce(
+        (total, penalty) => total + penalty.amount,
+        0,
+      );
+      const rejectionPenaltyCycle = Math.max(
+        0,
+        ...rejectedPenalties.map((penalty) => Number(penalty.cycle) || 1),
+      );
       const reviewedEvidence = {
         ...evidence,
         status: approved ? "approved" : "rejected",
         reviewedAt,
         reviewedBy: actor.fullName,
+        ...(approved
+          ? {}
+          : {
+              rejectionPenaltyAt: reviewedAt,
+              rejectionPenaltyAmount,
+              rejectionPenaltyCycle,
+              rejectionReason,
+            }),
       };
       const updatedTask = await getPrismaDirectTx().$transaction(async (tx) => {
-        const lockedRows = await tx.$queryRaw`
-          SELECT id FROM "DailyTask" WHERE id = ${task.id} FOR UPDATE
-        `;
-        if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
-          throw new Error("Không tìm thấy công việc.");
+        let updated = task;
+        if (!historicalSubmission) {
+          const lockedRows = await tx.$queryRaw`
+            SELECT id FROM "DailyTask" WHERE id = ${task.id} FOR UPDATE
+          `;
+          if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+            throw new Error("Không tìm thấy công việc.");
+          }
+          const current = await tx.dailyTask.findUnique({ where: { id: task.id } });
+          if (!current || current.updatedAt.getTime() !== task.updatedAt.getTime()) {
+            throw new Error("Công việc đã được thay đổi trên máy khác. Vui lòng tải lại và thử lại.");
+          }
+          updated = await tx.dailyTask.update({
+            where: { id: task.id },
+            data: {
+              attachments: JSON.stringify({
+                ...attachments,
+                evidence: reviewedEvidence,
+              }),
+              status: approved ? "completed" : "pending",
+              completedAt: approved ? new Date() : null,
+              verifier: approved ? actor.fullName : "",
+            },
+          });
         }
-        const current = await tx.dailyTask.findUnique({ where: { id: task.id } });
-        if (!current || current.updatedAt.getTime() !== task.updatedAt.getTime()) {
-          throw new Error("Công việc đã được thay đổi trên máy khác. Vui lòng tải lại và thử lại.");
+        if (rejectedPenalties.length > 0) {
+          await tx.appConfig.createMany({
+            data: rejectedPenalties.map((penalty) => ({
+              key: penalty.id,
+              value: JSON.stringify(penalty),
+            })),
+            skipDuplicates: true,
+          });
         }
-        const updated = await tx.dailyTask.update({
-          where: { id: task.id },
-          data: {
-            attachments: JSON.stringify({
-              ...attachments,
-              evidence: reviewedEvidence,
-            }),
-            status: approved ? "completed" : "pending",
-            completedAt: approved ? new Date() : null,
-            verifier: approved ? actor.fullName : "",
-          },
-        });
-        await writeDailyTaskHistory(tx, {
+        const historyEntry = {
           taskId: task.id,
           taskTitle: task.title,
           category: task.category,
-          assignee: task.assignee,
+          type: task.type || "daily",
+          assignee: reviewTask.assignee,
           verifier: actor.fullName,
           action: approved ? "evidence_approved" : "evidence_rejected",
-          timestamp: reviewedAt,
+          timestamp: historicalSubmission
+            ? getDailyTaskEndOfDay(evidence.submittedAt).toISOString()
+            : reviewedAt,
           evidence: getEvidenceHistoryPayload(reviewedEvidence),
           description: approved
             ? `Đã duyệt bằng chứng: "${task.title}"`
-            : `Đã từ chối bằng chứng: "${task.title}"`,
-        });
+            : `Đã từ chối bằng chứng lần ${rejectionPenaltyCycle} và ghi nhận phạt ${rejectionPenaltyAmount}đ: "${task.title}". Lý do: ${rejectionReason}`,
+        };
+        if (historicalSubmission) {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('dailyTasksHistory'))`;
+          const historyConfig = await tx.appConfig.findUnique({
+            where: { key: "dailyTasksHistory" },
+          });
+          let history = [];
+          try {
+            const parsed = historyConfig?.value ? JSON.parse(historyConfig.value) : [];
+            history = Array.isArray(parsed) ? parsed : [];
+          } catch {
+            history = [];
+          }
+          const stillExists = history.some(
+            (entry) =>
+              Number(entry?.taskId) === task.id &&
+              String(entry?.evidence?.submittedAt || "") === String(evidence.submittedAt || ""),
+          );
+          if (!stillExists) {
+            throw new Error("Lịch sử bằng chứng đã thay đổi. Vui lòng tải lại.");
+          }
+          const updatedHistory = [
+            historyEntry,
+            ...history.map((entry) =>
+              Number(entry?.taskId) === task.id &&
+              String(entry?.evidence?.submittedAt || "") === String(evidence.submittedAt || "")
+                ? { ...entry, evidence: getEvidenceHistoryPayload(reviewedEvidence) }
+                : entry,
+            ),
+          ].slice(0, 500);
+          await tx.appConfig.upsert({
+            where: { key: "dailyTasksHistory" },
+            update: { value: JSON.stringify(updatedHistory) },
+            create: { key: "dailyTasksHistory", value: JSON.stringify(updatedHistory) },
+          });
+        } else {
+          await writeDailyTaskHistory(tx, historyEntry);
+        }
         return updated;
       });
 
-      let penalty = null;
-      if (!approved) penalty = await createEvidencePenaltyIfDue(updatedTask);
-      return { success: true, data: { task: updatedTask, penalty } };
+      if (!approved) {
+        rejectedPenalties.forEach((penalty) => {
+          void logActivity({
+            module: "daily_tasks",
+            action: "PENALTY",
+            recordId: task.id,
+            recordName: task.title,
+            description: `Phạt ${penalty.assignee}: ${penalty.amount}đ vì bằng chứng bị từ chối lần ${penalty.cycle} (x${penalty.multiplier}). Lý do: ${rejectionReason}`,
+            severity: "WARNING",
+          });
+        });
+      }
+      return {
+        success: true,
+        data: { task: updatedTask, penalties: rejectedPenalties },
+      };
     } catch (error) {
       return { success: false, error: error.message };
     }
@@ -17772,6 +18046,7 @@ ipcMain.handle("dailyTasks:listEvidencePenalties", async (_event, options = {}) 
         OR: [
           { key: { startsWith: TASK_PENALTY_KEY_PREFIX } },
           { key: { startsWith: ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX } },
+          { key: { startsWith: REJECTED_EVIDENCE_PENALTY_KEY_PREFIX } },
         ],
       },
     });
@@ -18205,6 +18480,9 @@ async function reconcileRecurringAssignments(now = new Date()) {
           submittedImages,
           reviewedAt,
           reviewedBy,
+          rejectionPenaltyAt,
+          rejectionPenaltyAmount,
+          rejectionPenaltyCycle,
           penaltyCycle,
           penaltyCount,
           penaltyEscalation,
@@ -18563,11 +18841,22 @@ ipcMain.handle("dailyTasks:saveCategories", async (_event, payload = {}) => {
 ipcMain.handle("dailyTasks:update", async (event, id, updates) => {
   try {
     const actor = await getCurrentActor();
+    const taskId = Number(id);
+    if (!Number.isSafeInteger(taskId) || taskId <= 0) {
+      throw new Error("Mã công việc không hợp lệ.");
+    }
+    const expectedUpdatedAt = updates?.expectedUpdatedAt
+      ? new Date(updates.expectedUpdatedAt)
+      : null;
+    if (expectedUpdatedAt && Number.isNaN(expectedUpdatedAt.getTime())) {
+      throw new Error("Phiên bản công việc không hợp lệ. Vui lòng tải lại.");
+    }
     const updateData = { ...updates };
+    delete updateData.expectedUpdatedAt;
     const existingTask = await prisma.dailyTask.findUnique({
-      where: { id: Number(id) },
+      where: { id: taskId },
     });
-    if (!existingTask) throw new Error("KhÃ´ng tÃ¬m tháº¥y cÃ´ng viá»‡c.");
+    if (!existingTask) throw new Error("Không tìm thấy công việc.");
     const existingAttachments = parseTaskAttachments(existingTask.attachments);
     if (existingAttachments?.archive?.archivedAt) {
       throw new Error("Công việc đã được lưu trữ, không thể cập nhật từ cửa sổ cũ.");
@@ -18633,12 +18922,18 @@ ipcMain.handle("dailyTasks:update", async (event, id, updates) => {
           : new Date(updates.dueDate);
     }
 
-    if (updates.tags) {
-      updateData.tags = JSON.stringify(updates.tags);
+    if (updates.tags !== undefined) {
+      updateData.tags = typeof updates.tags === "string"
+        ? updates.tags
+        : updates.tags == null
+          ? null
+          : JSON.stringify(updates.tags);
     }
 
-    if (updates.attachments) {
-      updateData.attachments = JSON.stringify(updates.attachments);
+    if (updates.attachments !== undefined) {
+      updateData.attachments = typeof updates.attachments === "string"
+        ? updates.attachments
+        : JSON.stringify(updates.attachments);
     }
 
     if (
@@ -18683,30 +18978,51 @@ ipcMain.handle("dailyTasks:update", async (event, id, updates) => {
       );
     }
 
-    const task = await prisma.dailyTask.update({
-      where: { id },
-      data: updateData,
-    });
+    const task = await getPrismaDirectTx().$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw`
+        SELECT id FROM "DailyTask" WHERE id = ${taskId} FOR UPDATE
+      `;
+      if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+        throw new Error("Không tìm thấy công việc.");
+      }
+      const currentTask = await tx.dailyTask.findUnique({ where: { id: taskId } });
+      const requiredRevision = expectedUpdatedAt || existingTask.updatedAt;
+      if (
+        !currentTask ||
+        currentTask.updatedAt.getTime() !== requiredRevision.getTime()
+      ) {
+        throw new Error("Công việc đã được thay đổi trên máy khác. Vui lòng tải lại và thử lại.");
+      }
+      if (parseTaskAttachments(currentTask.attachments)?.archive?.archivedAt) {
+        throw new Error("Công việc đã được lưu trữ, không thể cập nhật.");
+      }
 
-    if (
-      (existingTask.type === "daily" || existingTask.type === "assignment") &&
-      updates.status &&
-      updates.status !== existingTask.status
-    ) {
-      await appendDailyTaskHistory({
-        taskId: task.id,
-        taskTitle: task.title,
-        category: task.category,
-        assignee: task.assignee,
-        verifier: task.verifier || "",
-        action: updates.status === "completed" ? "completed" : "pending",
-        timestamp: new Date().toISOString(),
-        description:
-          updates.status === "completed"
-            ? `Đã hoàn thành ${existingTask.type === "assignment" ? "bàn giao" : "công việc"}: "${task.title}"`
-            : `Đã mở lại ${existingTask.type === "assignment" ? "bàn giao" : "công việc"}: "${task.title}"`,
+      const updatedTask = await tx.dailyTask.update({
+        where: { id: taskId },
+        data: updateData,
       });
-    }
+
+      if (
+        (currentTask.type === "daily" || currentTask.type === "assignment") &&
+        updates.status &&
+        updates.status !== currentTask.status
+      ) {
+        await writeDailyTaskHistory(tx, {
+          taskId: updatedTask.id,
+          taskTitle: updatedTask.title,
+          category: updatedTask.category,
+          assignee: updatedTask.assignee,
+          verifier: updatedTask.verifier || "",
+          action: updates.status === "completed" ? "completed" : "pending",
+          timestamp: new Date().toISOString(),
+          description:
+            updates.status === "completed"
+              ? `Đã hoàn thành ${currentTask.type === "assignment" ? "bàn giao" : "công việc"}: "${updatedTask.title}"`
+              : `Đã mở lại ${currentTask.type === "assignment" ? "bàn giao" : "công việc"}: "${updatedTask.title}"`,
+        });
+      }
+      return updatedTask;
+    }, { isolationLevel: "Serializable", timeout: 10000, maxWait: 10000 });
 
     void logActivity({
       module: "system",
@@ -18865,7 +19181,13 @@ ipcMain.handle("dailyTasks:deleteAssignment", async (event, payload = {}) => {
       }
 
       await tx.appConfig.deleteMany({
-        where: { key: { startsWith: `${TASK_PENALTY_KEY_PREFIX}${taskId}:` } },
+        where: {
+          OR: [
+            { key: { startsWith: `${TASK_PENALTY_KEY_PREFIX}${taskId}:` } },
+            { key: { startsWith: `${ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX}${taskId}:` } },
+            { key: { startsWith: `${REJECTED_EVIDENCE_PENALTY_KEY_PREFIX}${taskId}:` } },
+          ],
+        },
       });
       return tx.dailyTask.delete({ where: { id: taskId } });
     });
@@ -18891,7 +19213,13 @@ ipcMain.handle("dailyTasks:delete", async (event, id) => {
     await prisma.$transaction([
       // System fines are derived from this task; manual fines are not affected.
       prisma.appConfig.deleteMany({
-        where: { key: { startsWith: `${TASK_PENALTY_KEY_PREFIX}${taskId}:` } },
+        where: {
+          OR: [
+            { key: { startsWith: `${TASK_PENALTY_KEY_PREFIX}${taskId}:` } },
+            { key: { startsWith: `${ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX}${taskId}:` } },
+            { key: { startsWith: `${REJECTED_EVIDENCE_PENALTY_KEY_PREFIX}${taskId}:` } },
+          ],
+        },
       }),
       prisma.dailyTask.delete({ where: { id: taskId } }),
     ]);

@@ -588,6 +588,7 @@ export interface ElectronAPI {
     reviewEvidence: (
       taskId: number,
       approved: boolean,
+      reviewContext?: { submittedAt?: string; evidenceKeys?: string[]; rejectionReason?: string },
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
     requestAssignmentCompletion: (
       taskId: number,
