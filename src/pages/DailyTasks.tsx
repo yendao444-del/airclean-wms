@@ -154,6 +154,7 @@ interface Task {
     dueTime: string;
     dueDate?: string;
     createdAt?: string;
+    updatedAt?: string;
     status: 'pending' | 'completed';
     tags?: string[];
     description?: string;
@@ -163,6 +164,9 @@ interface Task {
     penaltyDueKey?: string;
     evidencePenaltyRecorded?: boolean;
     evidencePenaltyCount?: number;
+    evidencePenaltyTotal?: number;
+    evidenceRejectionPenaltyCount?: number;
+    evidenceRejectionPenaltyTotal?: number;
 }
 
 interface EvidenceImage {
@@ -187,6 +191,10 @@ interface EvidenceMeta {
     submittedImages?: EvidenceImage[];
     reviewedAt?: string;
     reviewedBy?: string;
+    rejectionReason?: string;
+    rejectionPenaltyAt?: string;
+    rejectionPenaltyAmount?: number;
+    rejectionPenaltyCycle?: number;
 }
 
 const parseAttachments = (attachments?: unknown): Record<string, any> => {
@@ -664,10 +672,14 @@ const DailyTasks = () => {
 
             setTasks(prev => prev.map(task => {
                 const penalties = penaltiesByTaskDeadline.get(`${task.id}:${task.penaltyDueKey}`) || [];
+                const rejectedPenalties = penalties.filter((penalty: any) => penalty.source === 'daily_task_evidence_rejected');
                 return {
                     ...task,
                     evidencePenaltyRecorded: penalties.length > 0,
                     evidencePenaltyCount: Math.max(0, ...penalties.map((penalty: any) => Number(penalty.cycle) || 1)),
+                    evidencePenaltyTotal: penalties.reduce((total: number, penalty: any) => total + Number(penalty.amount || 0), 0),
+                    evidenceRejectionPenaltyCount: Math.max(0, ...rejectedPenalties.map((penalty: any) => Number(penalty.cycle) || 1)),
+                    evidenceRejectionPenaltyTotal: rejectedPenalties.reduce((total: number, penalty: any) => total + Number(penalty.amount || 0), 0),
                 };
             }));
         } catch (error) {
@@ -686,6 +698,9 @@ const DailyTasks = () => {
                     ...t,
                     evidencePenaltyRecorded: false,
                     evidencePenaltyCount: 0,
+                    evidencePenaltyTotal: 0,
+                    evidenceRejectionPenaltyCount: 0,
+                    evidenceRejectionPenaltyTotal: 0,
                     tags: t.tags ? JSON.parse(t.tags) : [],
                     attachments: parseAttachments(t.attachments),
                     // Daily tasks keep the same ID across days, so retain the
@@ -1034,7 +1049,11 @@ const DailyTasks = () => {
 
             let result;
             if (editingAssignment) {
-                result = await window.electronAPI.dailyTasks.update(editingAssignment.id, { ...taskData, assignee: assignees[0] });
+                result = await window.electronAPI.dailyTasks.update(editingAssignment.id, {
+                    ...taskData,
+                    assignee: assignees[0],
+                    expectedUpdatedAt: editingAssignment.updatedAt,
+                });
                 if (result.success) message.success('Đã cập nhật!');
             } else {
                 const createAssignments = window.electronAPI.dailyTasks.createAssignments;
@@ -1627,7 +1646,10 @@ const DailyTasks = () => {
 
             let result;
             if (editingTask) {
-                result = await window.electronAPI.dailyTasks.update(editingTask.id, taskData);
+                result = await window.electronAPI.dailyTasks.update(editingTask.id, {
+                    ...taskData,
+                    expectedUpdatedAt: editingTask.updatedAt,
+                });
             } else {
                 result = await window.electronAPI.dailyTasks.create(taskData);
             }
@@ -1858,16 +1880,90 @@ const DailyTasks = () => {
         });
     };
 
-    const handleReviewEvidence = async (task: Task, approved: boolean) => {
+    const submitEvidenceReview = async (task: Task, approved: boolean, evidenceOverride?: EvidenceMeta, rejectionReason?: string) => {
         try {
-            const result = await window.electronAPI.dailyTasks.reviewEvidence(task.id, approved);
+            const evidence = evidenceOverride || getEvidence(task);
+            const evidenceKeys = (evidence.submittedImages?.length
+                ? evidence.submittedImages
+                : evidence.submittedImage ? [evidence.submittedImage] : [])
+                .map(image => image.r2Key || image.storagePath || image.driveUrl || image.hash)
+                .filter((key): key is string => Boolean(key));
+            const result = await window.electronAPI.dailyTasks.reviewEvidence(
+                task.id,
+                approved,
+                {
+                    submittedAt: evidence.submittedAt || evidence.reviewedAt,
+                    evidenceKeys,
+                    rejectionReason,
+                },
+            );
             if (!result.success) throw new Error(result.error || 'Không thể duyệt bằng chứng.');
             await loadTasks();
             if (activeTab === 'history' || activeTab === 'triage') await loadHistory();
-            message.success(approved ? 'Đã duyệt bằng chứng.' : 'Đã từ chối bằng chứng.');
+            const penalties = Array.isArray(result.data?.penalties) ? result.data.penalties : [];
+            const penaltyTotal = penalties.reduce((total: number, penalty: any) => total + Number(penalty.amount || 0), 0);
+            const penaltyCycle = Math.max(0, ...penalties.map((penalty: any) => Number(penalty.cycle) || 1));
+            message.success(approved
+                ? 'Đã duyệt bằng chứng.'
+                : `Đã từ chối lần ${penaltyCycle} và ghi nhận phạt ${formatPenaltyAmount(penaltyTotal)}đ.`);
+            return true;
         } catch (error: any) {
             message.error(error.message || 'Không thể duyệt bằng chứng.');
+            return false;
         }
+    };
+
+    const handleReviewEvidence = (task: Task, approved: boolean, onSuccess?: () => void, evidenceOverride?: EvidenceMeta) => {
+        if (approved) {
+            void submitEvidenceReview(task, true, evidenceOverride).then(success => {
+                if (success) onSuccess?.();
+            });
+            return;
+        }
+        const evidence = evidenceOverride || getEvidence(task);
+        const basePenaltyAmount = normalizePenaltyAmount(evidence.penaltyAmount);
+        const nextPenaltyCycle = Math.max(
+            Number(evidence.rejectionPenaltyCycle || 0),
+            Number(task.evidenceRejectionPenaltyCount || 0),
+        ) + 1;
+        const penaltyAmount = basePenaltyAmount * nextPenaltyCycle;
+        let rejectionReason = 'Không đạt';
+        Modal.confirm({
+            title: 'Từ chối bằng chứng và ghi nhận phạt?',
+            content: (
+                <div>
+                    <p>Đây là lần từ chối thứ {nextPenaltyCycle}. Mức phạt = {formatPenaltyAmount(basePenaltyAmount)}đ × {nextPenaltyCycle} = {formatPenaltyAmount(penaltyAmount)}đ. Mỗi lần từ chối là một khoản phạt riêng trong Bảng công.</p>
+                    <label style={{ display: 'block', marginBottom: 6, fontWeight: 700 }}>
+                        Lý do từ chối <span style={{ color: '#dc2626' }}>*</span>
+                    </label>
+                    <Input.TextArea
+                        autoFocus
+                        rows={4}
+                        maxLength={500}
+                        showCount
+                        defaultValue="Không đạt"
+                        placeholder="Ví dụ: Ảnh không đúng khu vực, chưa thể hiện công việc đã hoàn tất..."
+                        onChange={event => { rejectionReason = event.target.value; }}
+                    />
+                    <div style={{ marginTop: 6, color: '#64748b', fontSize: 12 }}>
+                        Lý do này sẽ hiển thị cho nhân viên và được lưu vào module Phạt.
+                    </div>
+                </div>
+            ),
+            okText: `Từ chối lần ${nextPenaltyCycle} · Phạt ${formatPenaltyAmount(penaltyAmount)}đ`,
+            okType: 'danger',
+            cancelText: 'Hủy',
+            onOk: async () => {
+                const normalizedReason = rejectionReason.trim();
+                if (normalizedReason.length < 3) {
+                    message.error('Vui lòng nhập lý do từ chối ít nhất 3 ký tự.');
+                    throw new Error('Thiếu lý do từ chối.');
+                }
+                const success = await submitEvidenceReview(task, false, evidenceOverride, normalizedReason);
+                if (!success) throw new Error('Không thể từ chối bằng chứng.');
+                onSuccess?.();
+            },
+        });
     };
 
     // Task Card - GRADIENT STYLE
@@ -2313,6 +2409,34 @@ const DailyTasks = () => {
                 )}
                 {!loading && submittedImages.length === 0 && 'Nhân viên chưa nộp bằng chứng.'}
                 {evidence.submittedAt && <p style={{ marginTop: 12, color: '#64748b' }}>Đã nộp lúc {dayjs(evidence.submittedAt).format('DD/MM/YYYY HH:mm')}</p>}
+                {evidence.status === 'rejected' && (
+                    <Alert
+                        type="error"
+                        showIcon
+                        style={{ marginTop: 12 }}
+                        message={`Bằng chứng bị từ chối lần ${evidence.rejectionPenaltyCycle || 1} · Phạt ${formatPenaltyAmount(evidence.rejectionPenaltyAmount || evidence.penaltyAmount)}đ`}
+                        description={(
+                            <div>
+                                {evidence.rejectionReason && <div><strong>Lý do:</strong> {evidence.rejectionReason}</div>}
+                                {evidence.reviewedBy && <div style={{ marginTop: evidence.rejectionReason ? 4 : 0 }}>Người từ chối: {evidence.reviewedBy}</div>}
+                            </div>
+                        )}
+                    />
+                )}
+                {canReviewEvidence && (evidence.status === 'approved' || evidence.status === 'submitted') && submittedImages.length > 0 && (
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14, paddingTop: 12, borderTop: '1px solid #e2e8f0' }}>
+                        <Tooltip title={loading ? 'Vui lòng chờ tải xong toàn bộ ảnh bằng chứng trước khi từ chối.' : undefined}>
+                            <Button
+                                danger
+                                disabled={loading}
+                                loading={loading}
+                                onClick={() => handleReviewEvidence(task, false, () => modal.destroy(), evidence)}
+                            >
+                                {loading ? 'Đang tải bằng chứng…' : 'Từ chối & ghi nhận phạt lũy tiến'}
+                            </Button>
+                        </Tooltip>
+                    </div>
+                )}
             </div>
         );
 
@@ -2907,9 +3031,55 @@ const DailyTasks = () => {
                     attachments: parseAttachments(task.attachments),
                 } as Task))
                 : [];
+        const selectedDateEvents = history
+            .filter(entry => entry?.timestamp && dayjs(entry.timestamp).format('YYYY-MM-DD') === selectedDateKey)
+            .sort((left, right) => dayjs(right.timestamp).valueOf() - dayjs(left.timestamp).valueOf());
+        const historicalAssignmentEvents = new Map<number, any[]>();
+        selectedDateEvents.forEach(entry => {
+            const isAssignmentEvent = entry?.type === 'assignment'
+                || String(entry?.category || '').trim().toLocaleLowerCase('vi-VN') === 'bàn giao';
+            const taskId = Number(entry?.taskId);
+            if (!isAssignmentEvent || !Number.isFinite(taskId)) return;
+            historicalAssignmentEvents.set(taskId, [
+                ...(historicalAssignmentEvents.get(taskId) || []),
+                entry,
+            ]);
+        });
+        const historicalAssignments = Array.from(historicalAssignmentEvents.entries()).map(([taskId, events]) => {
+            const latestEvent = events[0];
+            const evidenceEvent = events.find(entry => entry?.evidence);
+            const storedTask = assignmentTasks.find(task => Number(task.id) === taskId);
+            const evidence = mergeHistoryEvidence(storedTask ? getEvidence(storedTask) : {}, evidenceEvent?.evidence);
+            const completed = storedTask?.status === 'completed'
+                || ['completed', 'daily_reset', 'evidence_approved'].includes(latestEvent?.action)
+                || evidence.status === 'approved';
+            return {
+                ...(storedTask || {}),
+                id: taskId,
+                title: storedTask?.title || latestEvent?.taskTitle || 'Công việc bàn giao',
+                category: 'Bàn giao',
+                assignee: latestEvent?.assignee || storedTask?.assignee || '',
+                verifier: latestEvent?.verifier || storedTask?.verifier || '',
+                priority: storedTask?.priority || 'normal',
+                dueTime: storedTask?.dueTime || dayjs(latestEvent?.timestamp).format('HH:mm'),
+                dueDate: storedTask?.dueDate || selectedDateKey,
+                status: completed ? 'completed' : 'pending',
+                type: 'assignment',
+                tags: storedTask?.tags || [],
+                attachments: {
+                    ...parseAttachments(storedTask?.attachments),
+                    evidence,
+                },
+            } as Task;
+        });
         const selectedAssignments = isCurrentWorkDate
             ? assignmentTasks
-            : assignmentTasks.filter(task => dayjs(task.dueDate).format('YYYY-MM-DD') === selectedDateKey);
+            : Array.from(new Map([
+                ...assignmentTasks
+                    .filter(task => dayjs(task.dueDate).format('YYYY-MM-DD') === selectedDateKey)
+                    .map(task => [Number(task.id), task] as const),
+                ...historicalAssignments.map(task => [Number(task.id), task] as const),
+            ]).values());
         const completedDeadlineCount = selectedAssignments.filter(task => task.status === 'completed').length;
         const visibleDeadlineTasks = deadlineViewFilter === 'all'
             ? selectedAssignments
@@ -2979,9 +3149,12 @@ const DailyTasks = () => {
         };
         const hasConcurrentRecurrences = pendingTasks.some(task => Boolean(getOpenRecurrenceInfo(task)));
         const sidebarTaskById = new Map([...selectedDailyTasks, ...selectedAssignments].map(task => [Number(task.id), task]));
-        const sidebarEvents = history
-            .filter(entry => entry?.timestamp && dayjs(entry.timestamp).format('YYYY-MM-DD') === selectedDateKey)
-            .sort((left, right) => dayjs(right.timestamp).valueOf() - dayjs(left.timestamp).valueOf());
+        const sidebarEvents = selectedDateEvents.filter(entry => {
+            if (scope === 'all') return true;
+            const isAssignmentEvent = entry?.type === 'assignment'
+                || String(entry?.category || '').trim().toLocaleLowerCase('vi-VN') === 'bàn giao';
+            return scope === 'deadline' ? isAssignmentEvent : !isAssignmentEvent;
+        });
         const sidebarEventsByTask = new Map<number, any[]>();
         sidebarEvents.forEach(entry => {
             const taskId = Number(entry.taskId);
@@ -3015,8 +3188,11 @@ const DailyTasks = () => {
                 assignee: latestEvent.assignee || task?.assignee || 'Chưa phân công',
                 time: dayjs(latestEvent.timestamp).format('HH:mm'),
                 completed,
+                rejected: evidence.status === 'rejected' || latestEvent.action === 'evidence_rejected',
                 evidence,
                 imageCount: images.length,
+                rejectionPenaltyAmount: Number(evidence.rejectionPenaltyAmount) || 0,
+                rejectionPenaltyCycle: Number(evidence.rejectionPenaltyCycle) || 0,
             };
         }).slice(0, 12);
 
@@ -3033,9 +3209,12 @@ const DailyTasks = () => {
                 : getDailyDeadlineText(task);
             const sourceLabel = isAssignment ? 'Bàn giao' : 'Hàng ngày';
             const needsEvidence = evidence.required && evidence.status !== 'submitted' && evidence.status !== 'approved';
-            const hasEvidence = evidence.required && (evidence.status === 'submitted' || evidence.status === 'approved');
+            const hasEvidence = evidence.required && ['submitted', 'approved', 'rejected'].includes(evidence.status || '');
             const evidencePenaltyRecorded = Boolean(task.evidencePenaltyRecorded);
             const evidencePenaltyAmount = isAssignment ? getAssignmentDeadlinePenalty(task) : evidence.penaltyAmount;
+            const evidencePenaltyTotal = Number(task.evidencePenaltyTotal || 0);
+            const rejectionPenaltyCount = Number(task.evidenceRejectionPenaltyCount || 0);
+            const rejectionPenaltyTotal = Number(task.evidenceRejectionPenaltyTotal || 0);
             const nextAssignmentEvidencePenalty = getNextAssignmentEvidencePenalty(task);
             const recurrenceInfo = getOpenRecurrenceInfo(task);
             const adminActions = isAdmin ? (
@@ -3103,7 +3282,9 @@ const DailyTasks = () => {
                 <Tag style={{ width: 'fit-content', margin: 0, color: isAssignment ? '#2563eb' : '#15803d', background: isAssignment ? '#eff6ff' : '#ecfdf5', borderColor: isAssignment ? '#bfdbfe' : '#bbf7d0', fontWeight: 700 }}>{sourceLabel}</Tag>
                 <div className={`daily-task-evidence-summary${evidencePenaltyRecorded ? ' daily-task-evidence-escalation' : ''}`} style={{ color: evidence.required ? '#c2410c' : '#64748b' }}>
                     {evidencePenaltyRecorded ? <>
-                        <span className="daily-task-evidence-penalty"><WarningOutlined /> Đã phạt lần {task.evidencePenaltyCount}: {formatPenaltyAmount(evidencePenaltyAmount * Number(task.evidencePenaltyCount || 1))}đ</span>
+                        <span className="daily-task-evidence-penalty"><WarningOutlined /> {rejectionPenaltyCount > 0
+                            ? `Từ chối ${rejectionPenaltyCount} lần · Tổng phạt ${formatPenaltyAmount(rejectionPenaltyTotal)}đ`
+                            : `Đã phạt lần ${task.evidencePenaltyCount}: ${formatPenaltyAmount(evidencePenaltyTotal)}đ`}</span>
                         {nextAssignmentEvidencePenalty && (
                             <Tooltip title={`Nếu chưa nộp bằng chứng trước mốc này, hệ thống sẽ ghi phạt lần ${nextAssignmentEvidencePenalty.cycle}.`}>
                                 <span className="daily-task-evidence-next"><ClockCircleOutlined /> Tiếp: {nextAssignmentEvidencePenalty.deadline.format('HH:mm DD/MM')} · {formatPenaltyAmount(nextAssignmentEvidencePenalty.amount)}đ</span>
@@ -3114,6 +3295,11 @@ const DailyTasks = () => {
                         : isAssignment
                             ? <><WarningOutlined /> Phạt trễ deadline {formatPenaltyAmount(getAssignmentDeadlinePenalty(task))}đ</>
                             : 'Không bắt buộc bằng chứng'}</span>}
+                    {evidence.status === 'rejected' && evidence.rejectionReason && (
+                        <span style={{ color: '#b91c1c', fontWeight: 700 }} title={evidence.rejectionReason}>
+                            Lý do: {evidence.rejectionReason}
+                        </span>
+                    )}
                 </div>
                 {isAssignment ? (
                     <Space size={6} className="daily-task-row-actions">
@@ -3188,14 +3374,28 @@ const DailyTasks = () => {
                                 <time style={{ color: '#64748b', fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap' }}>{row.time}</time>
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 7, flexWrap: 'wrap' }}>
-                                <Tag color={row.completed ? 'green' : 'orange'} style={{ margin: 0 }}>{row.completed ? 'Hoàn thành' : 'Đang xử lý'}</Tag>
+                                <Tag color={row.rejected ? 'red' : row.completed ? 'green' : 'orange'} style={{ margin: 0 }}>
+                                    {row.rejected ? 'Bằng chứng bị từ chối' : row.completed ? 'Hoàn thành' : 'Đang xử lý'}
+                                </Tag>
                                 <span style={{ color: '#64748b', fontSize: 12 }}><UserOutlined /> {row.assignee}</span>
                             </div>
                             <div style={{ marginTop: 8 }}>
                                 {row.imageCount > 0 ? (
-                                    <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => openEvidence(row.task, row.evidence)} style={{ padding: 0, height: 24, fontWeight: 700 }}>
-                                        Xem {row.imageCount} ảnh bằng chứng
-                                    </Button>
+                                    <>
+                                        <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => openEvidence(row.task, row.evidence)} style={{ padding: 0, height: 24, fontWeight: 700 }}>
+                                            Xem {row.imageCount} ảnh bằng chứng
+                                        </Button>
+                                        {row.rejectionPenaltyAmount > 0 && (
+                                            <Tag color="red" style={{ marginLeft: 8, fontWeight: 700 }}>
+                                                Lần {row.rejectionPenaltyCycle || 1} · Phạt {formatPenaltyAmount(row.rejectionPenaltyAmount)}đ
+                                            </Tag>
+                                        )}
+                                        {row.rejected && row.evidence.rejectionReason && (
+                                            <div style={{ marginTop: 5, color: '#b91c1c', fontSize: 12, lineHeight: 1.45 }}>
+                                                <strong>Lý do:</strong> {row.evidence.rejectionReason}
+                                            </div>
+                                        )}
+                                    </>
                                 ) : row.evidence.required ? (
                                     <span style={{ color: '#dc2626', fontSize: 12, fontWeight: 650 }}><WarningOutlined /> Thiếu ảnh bằng chứng · bị phạt sau hạn</span>
                                 ) : <span style={{ color: '#94a3b8', fontSize: 12 }}>Công việc không yêu cầu bằng chứng</span>}
@@ -4507,6 +4707,8 @@ const HistoryListView = ({
             status,
             evidence,
             canViewEvidence,
+            rejectionPenaltyAmount: Number(evidence.rejectionPenaltyAmount) || 0,
+            rejectionPenaltyCycle: Number(evidence.rejectionPenaltyCycle) || 0,
             sortValue: latestEvent?.timestamp
                 ? dayjs(latestEvent.timestamp).valueOf()
                 : dayjs(`${dateKey} ${task?.dueTime || '23:59'}`, 'YYYY-MM-DD HH:mm').valueOf(),
@@ -4533,7 +4735,7 @@ const HistoryListView = ({
         completed: { label: 'Hoàn thành', className: 'is-completed' },
         pending: { label: 'Chưa làm', className: 'is-pending' },
         submitted: { label: 'Chờ duyệt', className: 'is-submitted' },
-        reopened: { label: 'Đã mở lại', className: 'is-reopened' },
+        reopened: { label: 'Bằng chứng bị từ chối', className: 'is-reopened' },
     };
     const initials = (name: string) => name
         .split(/\s+/)
@@ -4609,15 +4811,28 @@ const HistoryListView = ({
                                     <div><span className={`history-status ${meta.className}`}>{meta.label}</span></div>
                                     <div>
                                         {row.canViewEvidence ? (
-                                            <Button
-                                                type="link"
-                                                size="small"
-                                                icon={<EyeOutlined />}
-                                                onClick={() => onOpenEvidence(row.task, row.evidence)}
-                                                className="history-evidence-link"
-                                            >
-                                                Xem bằng chứng
-                                            </Button>
+                                            <div>
+                                                <Button
+                                                    type="link"
+                                                    size="small"
+                                                    icon={<EyeOutlined />}
+                                                    onClick={() => onOpenEvidence(row.task, row.evidence)}
+                                                    className="history-evidence-link"
+                                                >
+                                                    Xem bằng chứng
+                                                </Button>
+                                                {row.rejectionPenaltyAmount > 0 && (
+                                                    <div style={{ marginTop: 3, color: '#dc2626', fontSize: 12, fontWeight: 750 }}>
+                                                        <WarningOutlined /> Đã phạt {formatPenaltyAmount(row.rejectionPenaltyAmount)}đ
+                                                        {' '}· Lần {row.rejectionPenaltyCycle || 1}
+                                                    </div>
+                                                )}
+                                                {row.status === 'reopened' && row.evidence.rejectionReason && (
+                                                    <div style={{ marginTop: 3, color: '#b91c1c', fontSize: 12 }}>
+                                                        <strong>Lý do:</strong> {row.evidence.rejectionReason}
+                                                    </div>
+                                                )}
+                                            </div>
                                         ) : row.evidence.required ? (
                                             <span className="history-no-evidence" style={{ color: '#dc2626', fontWeight: 650 }}>Thiếu ảnh · bị phạt</span>
                                         ) : <span className="history-no-evidence">Không yêu cầu</span>}

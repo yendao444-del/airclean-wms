@@ -187,7 +187,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         deleteAssignment: (id) => ipcRenderer.invoke('dailyTasks:deleteAssignment', { id }),
         uploadEvidenceImage: (payload) => ipcRenderer.invoke('dailyTasks:uploadEvidenceImage', payload),
         submitEvidence: (payload) => ipcRenderer.invoke('dailyTasks:submitEvidence', payload),
-        reviewEvidence: (taskId, approved) => ipcRenderer.invoke('dailyTasks:reviewEvidence', taskId, approved),
+        reviewEvidence: (taskId, approved, reviewContext) => ipcRenderer.invoke('dailyTasks:reviewEvidence', taskId, approved, reviewContext),
         requestAssignmentCompletion: (taskId) => ipcRenderer.invoke('dailyTasks:requestAssignmentCompletion', taskId),
         completeRegularTask: (taskId, payload) => ipcRenderer.invoke('dailyTasks:completeRegularTask', taskId, payload),
         addNote: (taskId, note) => ipcRenderer.invoke('dailyTasks:addNote', { taskId, note }),
@@ -491,7 +491,7 @@ window.addEventListener('DOMContentLoaded', () => {
     // position override below intermittently moved a newly opened dropdown to
     // the top-left before rc-trigger completed its own alignment.
     // Keep the legacy implementation in place for rollback, but do not run it.
-    const useLegacyDropdownPositionFix = true;
+    const useLegacyDropdownPositionFix = false;
     if (!useLegacyDropdownPositionFix) return;
 
     // 2. Dynamic style tag — CSS rules sẽ override React inline styles

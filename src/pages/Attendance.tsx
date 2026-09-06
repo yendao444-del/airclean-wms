@@ -161,8 +161,10 @@ interface FineRecord {
     disabled?: boolean;
     taskId?: number | string;
     taskCode?: string;
+    taskTitle?: string;
     cycle?: number;
     multiplier?: number;
+    rejectionReason?: string;
 }
 
 const ensureFineId = (fine: FineRecord, index = 0): FineRecord => ({
@@ -4689,7 +4691,10 @@ export default function Attendance() {
                 normalizeAttendanceText(item?.username) === taskUsername
             );
             const employee = officialEmployees.find(emp =>
-                normalizeAttendanceText(emp.username) === taskUsername
+                // Rejection records store the assignee as either their login
+                // or their display name. Resolve both forms before omitting a
+                // valid system fine from the Attendance > Phạt sheet.
+                matchTaskAssigneeToEmployee(penalty.assignee, emp)
                 || (account && matchTaskAssigneeToEmployee(account.fullName, emp))
             );
             if (!employee) return [];
@@ -4703,11 +4708,13 @@ export default function Attendance() {
                 detail: penalty.detail || 'Quá hạn nộp bằng chứng',
                 amount: Number(penalty.amount) || 0,
                 date: penaltyAt.toISOString(),
-                source: 'daily_task_evidence_overdue' as any,
+                source: (penalty.source || 'daily_task_evidence_overdue') as any,
                 taskId: penalty.taskId,
                 taskCode: penalty.taskCode,
+                taskTitle: penalty.taskTitle,
                 cycle: Number(penalty.cycle) || undefined,
                 multiplier: Number(penalty.multiplier) || undefined,
+                rejectionReason: penalty.rejectionReason,
             }];
         });
     }, [employees, evidencePenaltyRecords, overviewDateRange, systemUsers]);
@@ -7475,11 +7482,13 @@ export default function Attendance() {
                                     // 5. Trễ deadline công việc (Daily Task Overdue)
                                     const isEvidenceTaskFine = record.source === 'daily_task_evidence_overdue'
                                         || record.source === 'assignment_evidence_overdue'
+                                        || record.source === 'daily_task_evidence_rejected'
                                         || String(record.id || '').startsWith('dailyTaskEvidencePenalty:')
-                                        || String(record.id || '').startsWith('assignmentEvidencePenalty:');
+                                        || String(record.id || '').startsWith('assignmentEvidencePenalty:')
+                                        || String(record.id || '').startsWith('rejectedEvidencePenalty:');
                                     if (isEvidenceTaskFine) {
                                         const taskId = record.taskId
-                                            || String(record.id || '').match(/^(?:dailyTaskEvidencePenalty|assignmentEvidencePenalty):(\d+):/)?.[1];
+                                            || String(record.id || '').match(/^(?:dailyTaskEvidencePenalty|assignmentEvidencePenalty|rejectedEvidencePenalty):(\d+):/)?.[1];
                                         const taskCode = record.taskCode
                                             || (taskId ? `CV-${String(taskId).padStart(4, '0')}` : 'CV-KHÔNG-RÕ');
                                         const cycle = Number(record.cycle)
@@ -7488,10 +7497,13 @@ export default function Attendance() {
                                         const multiplier = Number(record.multiplier)
                                             || Number(String(d).match(/phạt\s+x(\d+)/i)?.[1])
                                             || cycle;
-                                        const taskTitle = String(d)
+                                        const taskTitle = record.taskTitle || String(d)
                                             .replace(/\s*-\s*lần\s+\d+\s*:\s*chưa nộp bằng chứng(?:,\s*phạt\s*x\d+)?\s*$/i, '')
                                             .replace(/\s*-\s*hết ngày chưa nộp bằng chứng\s*$/i, '')
+                                            .replace(/\s*-\s*bằng chứng bị .* từ chối(?:\s+lần\s+\d+)?(?:,\s*phạt\s*x\d+)?\s*$/i, '')
                                             .trim();
+                                        const rejectedEvidence = record.source === 'daily_task_evidence_rejected'
+                                            || String(record.id || '').startsWith('rejectedEvidencePenalty:');
                                         return (
                                             <div style={fineDetailCellStyle}>
                                                 <Space size={[6, 4]} wrap>
@@ -7503,8 +7515,15 @@ export default function Attendance() {
                                                     </Tag>
                                                 </Space>
                                                 <Text type="secondary" style={{ display: 'block', marginTop: 2, fontSize: 11 }}>
-                                                    Chưa nộp bằng chứng · lần {cycle} · mức phạt x{multiplier}
+                                                    {rejectedEvidence
+                                                        ? `Bằng chứng không hợp lệ · từ chối lần ${cycle} · mức phạt x${multiplier}`
+                                                        : `Chưa nộp bằng chứng · lần ${cycle} · mức phạt x${multiplier}`}
                                                 </Text>
+                                                {rejectedEvidence && record.rejectionReason && (
+                                                    <Text style={{ display: 'block', marginTop: 3, color: '#b91c1c', fontSize: 11, fontWeight: 650 }}>
+                                                        Lý do: {record.rejectionReason}
+                                                    </Text>
+                                                )}
                                             </div>
                                         );
                                     }
