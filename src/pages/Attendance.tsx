@@ -76,7 +76,6 @@ import {
     SearchOutlined,
     TrophyOutlined,
     BarChartOutlined,
-    InboxOutlined,
     TagsOutlined,
     CrownOutlined,
     ArrowUpOutlined,
@@ -1192,7 +1191,7 @@ function buildPackingWeeklyResults(orderLogs: PackingOrderLog[], employeesList: 
         const weekStart = dayjs(weekKey).startOf('day');
         const weekEnd = weekStart.add(6, 'day');
         const ranking = [...scores.values()].sort((left, right) =>
-            right.units - left.units || right.orderCount - left.orderCount || left.employee.id - right.employee.id
+            right.orderCount - left.orderCount || right.units - left.units || left.employee.id - right.employee.id
         );
         return {
             weekKey,
@@ -1212,7 +1211,7 @@ const packingWeeklyResultToBonus = (result: PackingWeeklyResult): BonusRecord | 
         id: `auto-packing-week-${result.weekKey}`,
         empId: result.leader.id,
         type: 'Thưởng đóng gói tuần',
-        detail: `Top sản lượng đóng gói tuần ${result.weekStart.format('DD/MM')} - ${result.weekEnd.format('DD/MM/YYYY')}`,
+        detail: `Top số đơn đóng gói tuần ${result.weekStart.format('DD/MM')} - ${result.weekEnd.format('DD/MM/YYYY')}`,
         amount: PACKING_WEEKLY_REWARD_AMOUNT,
         date: result.weekEnd.endOf('day').toISOString(),
         createdBy: 'system',
@@ -3633,20 +3632,44 @@ export default function Attendance() {
     const [systemUsernames, setSystemUsernames] = useState<string[]>([]);
     const [systemUsers, setSystemUsers] = useState<any[]>([]);
 
-    // 1. Tải dữ liệu từ DB lúc mở component
+    const [packingCatalogReady, setPackingCatalogReady] = useState(false);
+    const [packingCatalogError, setPackingCatalogError] = useState('');
+    const [packingCatalogAttempt, setPackingCatalogAttempt] = useState(0);
+    const packingComponentsRequestRef = useRef<Promise<any> | null>(null);
+    const loadPackingComponents = useCallback(() => {
+        if (packingComponentsRequestRef.current) return packingComponentsRequestRef.current;
+        const api = (window as any).electronAPI;
+        const request = Promise.resolve().then(() =>
+            api.combos.getPackingComponents
+                ? api.combos.getPackingComponents()
+                : api.combos.getAll()
+        );
+        packingComponentsRequestRef.current = request;
+        const clear = () => {
+            if (packingComponentsRequestRef.current === request) packingComponentsRequestRef.current = null;
+        };
+        void request.then(clear, clear);
+        return request;
+    }, []);
+
+    // Catalog loading must not delay employee data or the monthly log query.
     useEffect(() => {
-        const loadData = async () => {
+        if (!isDbLoaded) return;
+        let cancelled = false;
+        const loadCatalog = async () => {
+            const startedAt = performance.now();
+            setPackingCatalogError('');
             try {
                 const api = (window as any).electronAPI;
-
-                // Hai nguồn độc lập được tải song song để rút ngắn thời gian mở trang.
-                let knownUsernames: string[] = [];
-                const [usersRes, rs, productsRes, combosRes] = await Promise.all([
-                    api.users.getAll().catch(() => null),
-                    api.appConfig.get('attendanceData'),
-                    api.products?.getAll ? api.products.getAll().catch(() => null) : Promise.resolve(null),
-                    api.combos?.getAll ? api.combos.getAll().catch(() => null) : Promise.resolve(null),
+                const [productsRes, combosRes] = await Promise.all([
+                    api.products.getAll(),
+                    loadPackingComponents(),
                 ]);
+                if (cancelled) return;
+                if (!productsRes?.success || !Array.isArray(productsRes.data) ||
+                    !combosRes?.success || !Array.isArray(combosRes.data)) {
+                    throw new Error('Không tải đủ danh mục tính thưởng đóng gói.');
+                }
                 const catalogBySku = new Map<string, PackingCatalogItem>();
                 const addCatalogItem = (sku: unknown, productName: unknown, memberSkus: unknown[] = []) => {
                     const normalizedSku = normalizePackingSku(sku);
@@ -3683,6 +3706,38 @@ export default function Attendance() {
                     });
                 }
                 setPackingCatalog([...catalogBySku.values()].sort((a, b) => a.sku.localeCompare(b.sku)));
+                setPackingCatalogReady(true);
+                console.info('[Attendance:load] catalog ms:', Math.round(performance.now() - startedAt));
+            } catch (error) {
+                console.error('Không thể tải danh mục đóng gói:', error);
+                if (!cancelled) setPackingCatalogError('Chưa tải đủ danh mục đóng gói. Chưa thể chốt hoặc gửi lương kỳ đang mở.');
+            }
+        };
+        void loadCatalog();
+        return () => { cancelled = true; };
+    }, [isDbLoaded, loadPackingComponents, packingCatalogAttempt]);
+
+    // 1. Tải dữ liệu từ DB lúc mở component
+    useEffect(() => {
+        const loadData = async () => {
+            const startedAt = performance.now();
+            try {
+                const api = (window as any).electronAPI;
+
+                // Hai nguồn độc lập được tải song song để rút ngắn thời gian mở trang.
+                let knownUsernames: string[] = [];
+                const measurePrimary = async (label: string, request: Promise<any>) => {
+                    const requestedAt = performance.now();
+                    try {
+                        return await request;
+                    } finally {
+                        console.info(`[Attendance:load] ${label} ms:`, Math.round(performance.now() - requestedAt));
+                    }
+                };
+                const [usersRes, rs] = await Promise.all([
+                    measurePrimary('users', api.users.getAll()).catch(() => null),
+                    measurePrimary('attendanceData', api.appConfig.get('attendanceData')),
+                ]);
                 try {
                     if (usersRes?.success && usersRes.data) {
                         setSystemUsers(usersRes.data);
@@ -3753,6 +3808,7 @@ export default function Attendance() {
                 console.error('Lỗi tải dữ liệu chấm công từ DB:', err);
             } finally {
                 setIsDbLoaded(true);
+                console.info('[Attendance:load] primary ms:', Math.round(performance.now() - startedAt));
             }
         };
         void loadData();
@@ -4105,7 +4161,7 @@ export default function Attendance() {
                     'Ecom'
                 ),
                 api.combos?.getAll
-                    ? withTimeout(api.combos.getAll(), 'ComboProducts')
+                    ? withTimeout(loadPackingComponents(), 'ComboProducts')
                     : Promise.resolve({ success: false, error: 'Thiếu API ComboProducts' }),
             ]);
             let ecRes = initialEcomRes;
@@ -4337,6 +4393,7 @@ export default function Attendance() {
 
     // Tải các nguồn tổng hợp phạt khi mở Tổng quan hoặc Phạt.
     useEffect(() => {
+        if (!isDbLoaded) return;
         if (activeTab !== 'overview' && activeTab !== 'fines') return;
         if (activeTab === 'overview') {
             loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString());
@@ -4363,7 +4420,7 @@ export default function Attendance() {
             window.clearTimeout(deferredLoad);
             window.clearInterval(taskTrackingTimer);
         };
-    }, [overviewDateRange, activeTab, fineSourcesRangeKey]);
+    }, [isDbLoaded, overviewDateRange, activeTab, fineSourcesRangeKey]);
 
     // Gộp finesData gốc + extraFines
     const autoVatOverdueFines = useMemo(() => {
@@ -4930,7 +4987,7 @@ export default function Attendance() {
     const overviewAttendanceExpectedKey = `${overviewDateRange[0].year()}-${String(overviewDateRange[0].month() + 1).padStart(2, '0')}`;
     const overviewAttendanceReady = isBackgroundSyncComplete && overviewAttendanceLogsKey === overviewAttendanceExpectedKey;
     const packingExpectedKey = `${getPackingLoadStart(overviewDateRange[0]).valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}`;
-    const isPackingDataReady = packingReadyKey === packingExpectedKey && !packingLoadError;
+    const isPackingDataReady = packingCatalogReady && packingReadyKey === packingExpectedKey && !packingLoadError;
     const isPayrollDataReady = isCurrentPeriodLocked
         ? Boolean(lockedPayrollSnapshot)
         : (overviewAttendanceReady && areFineSourcesReady && isPackingDataReady);
@@ -6247,6 +6304,21 @@ export default function Attendance() {
         const weekEnd = weekStart.add(6, 'day');
         const currentWeeklyResult = liveWeeklyPackingResults.find(result => result.weekKey === weekStart.format('YYYY-MM-DD'));
         const weeklyLeader = currentWeeklyResult?.leader;
+        const completedWeeklyAwards = liveWeeklyPackingResults.filter(result =>
+            result.completed
+            && result.leader
+            && result.units > 0
+            && !result.weekEnd.isBefore(overviewDateRange[0], 'day')
+            && !result.weekEnd.isAfter(overviewDateRange[1], 'day')
+        );
+        const latestCompletedWeeklyAward = completedWeeklyAwards[completedWeeklyAwards.length - 1];
+        const weeklyAwardsByEmployee = completedWeeklyAwards.reduce((awards, result) => {
+            const employeeId = result.leader!.id;
+            const employeeAwards = awards.get(employeeId) || [];
+            employeeAwards.push(result);
+            awards.set(employeeId, employeeAwards);
+            return awards;
+        }, new Map<number, PackingWeeklyResult[]>());
         const reloadPacking = () => loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString());
 
         return (
@@ -6267,7 +6339,7 @@ export default function Attendance() {
                             </div>
                             <div className="packing-champion-medal"><CrownOutlined /><b>1</b></div>
                         </div>
-                        <div className="packing-champion-copy">
+                        <div className={`packing-champion-copy ${latestCompletedWeeklyAward?.leader ? 'has-week-winner' : ''}`}>
                             <div className="packing-top-label"><CrownOutlined /> Top 1</div>
                             <span className="packing-leading-label">Dẫn đầu tháng</span>
                             <h3>{leader?.orderCount ? leader.name : 'Chưa có nhân viên dẫn đầu'}</h3>
@@ -6275,6 +6347,17 @@ export default function Attendance() {
                             {leader && <Tag className={leader.type === 'Official' ? 'packing-staff-tag official' : 'packing-staff-tag seasonal'}>
                                 <CheckCircleOutlined /> {leader.type === 'Official' ? 'Chính thức' : 'Thời vụ'}
                             </Tag>}
+                            {latestCompletedWeeklyAward?.leader && (
+                                <div className="packing-champion-week-winner">
+                                    <span className="packing-champion-week-icon"><TrophyOutlined /></span>
+                                    <div>
+                                        <span>VÔ ĐỊCH TUẦN {latestCompletedWeeklyAward.weekStart.format('DD/MM')}–{latestCompletedWeeklyAward.weekEnd.format('DD/MM')}</span>
+                                        <strong>{latestCompletedWeeklyAward.leader.name}</strong>
+                                        <small>{latestCompletedWeeklyAward.orderCount.toLocaleString('vi-VN')} đơn · {latestCompletedWeeklyAward.units.toLocaleString('vi-VN')} SP</small>
+                                    </div>
+                                    <b>+{fmt(PACKING_WEEKLY_REWARD_AMOUNT)}</b>
+                                </div>
+                            )}
                             <div className="packing-champion-metrics">
                                 <div><strong>{leader?.orderCount.toLocaleString('vi-VN') || 0}</strong><span>đơn</span></div>
                                 <div><strong>{leader?.units.toLocaleString('vi-VN') || 0}</strong><span>SP</span></div>
@@ -6284,15 +6367,6 @@ export default function Attendance() {
                     </article>
 
                     <div className="packing-summary-stack">
-                        <article className="packing-month-summary">
-                            <h3>TỔNG KẾT THÁNG <span>(toàn đội)</span></h3>
-                            <div className="packing-summary-metrics">
-                                <div><InboxOutlined /><strong>{orderLogs.length.toLocaleString('vi-VN')}</strong><span>đơn</span></div>
-                                <div><BarChartOutlined /><strong>{totalUnits.toLocaleString('vi-VN')}</strong><span>SP</span></div>
-                                <div><DollarOutlined /><strong>{fmt(totalIncome)}</strong></div>
-                            </div>
-                        </article>
-
                         <article className="packing-income-summary">
                             <div className="packing-income-icon"><DollarOutlined /></div>
                             <div><span>Tổng thu nhập sản lượng</span><strong>{fmt(totalIncome)}</strong></div>
@@ -6307,7 +6381,7 @@ export default function Attendance() {
                             <div className="packing-week-copy">
                                 <strong>Thưởng tuần <b>100.000đ</b></strong>
                                 <span>{weekStart.format('DD/MM')} – {weekEnd.format('DD/MM')}</span>
-                                <small>Nhân viên đóng gói nhiều nhất tuần</small>
+                                <small>Nhân viên đóng gói nhiều đơn nhất tuần</small>
                             </div>
                             <div className={`packing-week-status ${currentWeeklyResult?.completed ? 'completed' : 'active'}`}>
                                 {currentWeeklyResult?.completed ? <CheckCircleOutlined /> : <TrophyOutlined />}
@@ -6316,7 +6390,7 @@ export default function Attendance() {
                                     : 'Đang chờ dữ liệu'}</span>
                             </div>
                             <small className="packing-reset-note"><SafetyCertificateOutlined /> {weeklyLeader
-                                ? `${currentWeeklyResult?.units.toLocaleString('vi-VN')} SP · ${currentWeeklyResult?.orderCount.toLocaleString('vi-VN')} đơn`
+                                ? `${currentWeeklyResult?.orderCount.toLocaleString('vi-VN')} đơn · ${currentWeeklyResult?.units.toLocaleString('vi-VN')} SP`
                                 : 'Chốt 23:59 Chủ nhật'} · Tự động reset Thứ Hai</small>
                         </article>
                     </div>
@@ -6334,10 +6408,15 @@ export default function Attendance() {
                                     <thead><tr><th>Hạng</th><th>Nhân viên</th><th>Đơn</th><th>Sản phẩm</th><th>Thu nhập</th><th>Tỷ trọng</th><th>Xu hướng</th></tr></thead>
                                     <tbody>
                                         {leaderboard.map((entry, index) => {
-                                            const share = totalUnits > 0 ? Math.round(entry.units / totalUnits * 100) : 0;
+                                            const share = totalOrders > 0 ? Math.round(entry.orderCount / totalOrders * 100) : 0;
+                                            const weeklyAwards = weeklyAwardsByEmployee.get(entry.id) || [];
                                             return <tr key={entry.id} className={`packing-rank-row packing-rank-${index + 1}`}>
                                                 <td><span className={`packing-rank-number rank-${index + 1}`}>{index < 3 && <CrownOutlined />}{index + 1}</span></td>
-                                                <td><div className="packing-person"><span className={`packing-avatar ${index === 0 ? 'leader' : ''}`}>{rankingMascots[index] ? <img src={rankingMascots[index]} alt="" /> : <UserOutlined />}</span><div><strong>{entry.name}</strong><small>@{entry.username || '—'}</small><em className={entry.type === 'Official' ? 'official' : 'seasonal'}>{entry.type === 'Official' ? 'Chính thức' : 'Thời vụ'}</em></div></div></td>
+                                                <td><div className="packing-person"><span className={`packing-avatar ${index === 0 ? 'leader' : ''}`}>{rankingMascots[index] ? <img src={rankingMascots[index]} alt="" /> : <UserOutlined />}</span><div><strong>{entry.name}</strong><small>@{entry.username || '—'}</small><em className={entry.type === 'Official' ? 'official' : 'seasonal'}>{entry.type === 'Official' ? 'Chính thức' : 'Thời vụ'}</em>{weeklyAwards.length > 0 && (
+                                                    <Tooltip title={<div>{weeklyAwards.map(award => <div key={award.weekKey}>Tuần {award.weekStart.format('DD/MM')}–{award.weekEnd.format('DD/MM/YYYY')}: {award.orderCount.toLocaleString('vi-VN')} đơn · {award.units.toLocaleString('vi-VN')} SP · +{fmt(PACKING_WEEKLY_REWARD_AMOUNT)}</div>)}</div>}>
+                                                        <span className="packing-week-award-badge"><TrophyOutlined /><span>{weeklyAwards.length === 1 ? `Thắng tuần ${weeklyAwards[0].weekStart.format('DD/MM')}–${weeklyAwards[0].weekEnd.format('DD/MM')}` : `Thắng ${weeklyAwards.length} tuần`}</span><b>+{fmt(PACKING_WEEKLY_REWARD_AMOUNT * weeklyAwards.length)}</b></span>
+                                                    </Tooltip>
+                                                )}</div></div></td>
                                                 <td><strong className="packing-blue-number">{entry.orderCount}</strong><small> đơn</small></td>
                                                 <td><strong>{entry.units.toLocaleString('vi-VN')}</strong><small> SP</small></td>
                                                 <td><strong className="packing-income">{fmt(entry.income)}</strong></td>
@@ -6415,8 +6494,16 @@ export default function Attendance() {
                     const CHART_COLORS = ['#00ab56', '#1890ff', '#fa8c16', '#722ed1', '#10b981', '#f5222d', '#13c2c2'];
                     const chartData = [...payrollData]
                         .filter((d: any) => (d.packOrderCount || 0) > 0)
-                        .sort((a: any, b: any) => (b.packOrderCount || 0) - (a.packOrderCount || 0))
-                        .map((d: any) => ({ name: d.name, value: d.packOrderCount || 0, income: d.packIncome || 0 }));
+                        .sort((a: any, b: any) => (b.packOrderCount || 0) - (a.packOrderCount || 0)
+                            || (b.packTotalUnits || 0) - (a.packTotalUnits || 0)
+                            || a.id - b.id)
+                        .map((d: any) => ({
+                            name: d.name,
+                            value: d.packOrderCount || 0,
+                            units: d.packTotalUnits || 0,
+                            income: d.packIncome || 0,
+                        }));
+                    const chartTotalOrders = chartData.reduce((sum: number, entry: any) => sum + entry.value, 0);
                     return (
                         <div style={{ background: '#fff', border: '1px solid #e8e8e8', borderRadius: 12, overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
                             {/* Title bar */}
@@ -6477,7 +6564,7 @@ export default function Attendance() {
                                                 </Pie>
                                                 <ReTooltip
                                                     formatter={(value: any, name: any, props: any) => [
-                                                        <span><b>{value} đơn</b> — {fmt(props.payload.income)}</span>, name
+                                                        <span><b>{value} đơn</b> · {props.payload.units} SP — {fmt(props.payload.income)}</span>, name
                                                     ]}
                                                     contentStyle={{ fontSize: 12, borderRadius: 8 }}
                                                 />
@@ -6486,7 +6573,7 @@ export default function Attendance() {
                                         {/* Custom legend bên dưới */}
                                         <div style={{ display: 'flex', flexDirection: 'column', gap: 5, paddingLeft: 4 }}>
                                             {chartData.map((entry: any, i: number) => {
-                                                const pct = totalOrders > 0 ? Math.round(entry.value / totalOrders * 100) : 0;
+                                                const pct = chartTotalOrders > 0 ? Math.round(entry.value / chartTotalOrders * 100) : 0;
                                                 return (
                                                     <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                                         <div style={{ width: 10, height: 10, borderRadius: '50%', background: CHART_COLORS[i % CHART_COLORS.length], flexShrink: 0 }} />
@@ -6514,7 +6601,9 @@ export default function Attendance() {
                 >
                     <Table
                         dataSource={[...payrollData]
-                            .sort((a, b) => (b.packOrderCount || 0) - (a.packOrderCount || 0))
+                            .sort((a, b) => (b.packOrderCount || 0) - (a.packOrderCount || 0)
+                                || (b.packTotalUnits || 0) - (a.packTotalUnits || 0)
+                                || a.id - b.id)
                             .map((d, index) => ({ ...d, key: d.id, _rank: index + 1 }))}
                         pagination={false}
                         size="middle"
@@ -6540,8 +6629,8 @@ export default function Attendance() {
                             },
                             { title: 'Loại HĐ', dataIndex: 'type', key: 'type', width: 120, render: (t: string) => <Tag color={t === 'Official' ? 'green' : 'orange'} style={{ border: 'none' }}>{t === 'Official' ? 'Chính thức' : 'Thời vụ'}</Tag> },
                             {
-                                title: <Text strong style={{ color: '#1890ff' }}>SL đóng gói</Text>,
-                                dataIndex: 'packOrderCount', key: 'packCount', width: 140, align: 'center' as const,
+                                title: <Text strong style={{ color: '#1890ff' }}>Đơn đóng gói</Text>,
+                                dataIndex: 'packOrderCount', key: 'packCount', width: 160, align: 'center' as const,
                                 render: (count: number, r: any) => (
                                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
                                         <span style={{ fontSize: r._rank <= 3 && count > 0 ? 24 : 18, fontWeight: 900, color: count > 0 ? '#1890ff' : '#d9d9d9' }}>{count || 0}</span>
@@ -6755,6 +6844,25 @@ export default function Attendance() {
     // TAB 3: THƯỞNG
     // ============================================
     const renderBonuses = () => {
+        const creatorLabel = (bonus: BonusRecord) => {
+            const createLog = [...bonusAuditLog].reverse().find(log => log.bonusId === bonus.id && log.action === 'create');
+            const creatorUsername = bonus.createdBy || createLog?.changedBy || '';
+            const creatorAccount = systemUsers.find((account: any) =>
+                normalizeAttendanceText(account?.username || '') === normalizeAttendanceText(creatorUsername)
+            );
+            const creatorName = bonus.createdByName
+                || createLog?.changedByName
+                || creatorAccount?.fullName
+                || creatorUsername
+                || 'Admin';
+            const isCreatorAdmin = creatorAccount?.role === 'admin'
+                || normalizeAttendanceText(creatorUsername) === 'admin'
+                || (!creatorUsername && !bonus.createdByName && !createLog?.changedByName);
+            return isCreatorAdmin && !/\(admin\)$/i.test(creatorName) && normalizeAttendanceText(creatorName) !== 'admin'
+                ? `${creatorName} (Admin)`
+                : creatorName;
+        };
+
         if (bonusView === 'personal' || !canManageBonuses) {
             const currentEmployee = currentEmployeePayroll;
             const allPersonalBonuses = currentEmployee
@@ -6762,24 +6870,6 @@ export default function Attendance() {
                     .filter(bonus => bonus.empId === currentEmployee.id)
                     .sort((a, b) => dayjs(b.date || 0).valueOf() - dayjs(a.date || 0).valueOf())
                 : [];
-            const creatorLabel = (bonus: BonusRecord) => {
-                const createLog = [...bonusAuditLog].reverse().find(log => log.bonusId === bonus.id && log.action === 'create');
-                const creatorUsername = bonus.createdBy || createLog?.changedBy || '';
-                const creatorAccount = systemUsers.find((account: any) =>
-                    normalizeAttendanceText(account?.username || '') === normalizeAttendanceText(creatorUsername)
-                );
-                const creatorName = bonus.createdByName
-                    || createLog?.changedByName
-                    || creatorAccount?.fullName
-                    || creatorUsername
-                    || 'Admin';
-                const isCreatorAdmin = creatorAccount?.role === 'admin'
-                    || normalizeAttendanceText(creatorUsername) === 'admin'
-                    || (!creatorUsername && !bonus.createdByName && !createLog?.changedByName);
-                return isCreatorAdmin && !/\(admin\)$/i.test(creatorName) && normalizeAttendanceText(creatorName) !== 'admin'
-                    ? `${creatorName} (Admin)`
-                    : creatorName;
-            };
             const normalizedSearch = normalizeAttendanceText(bonusSearch);
             const personalBonuses = normalizedSearch
                 ? allPersonalBonuses.filter(bonus => normalizeAttendanceText([
@@ -6909,131 +6999,154 @@ export default function Attendance() {
                 return empId !== undefined && privatePayrollData.some(emp => emp.id === empId);
             });
 
-        const bonusTabsItems = privatePayrollData.map(emp => {
-            const empBonusRows: any[] = [];
-            overviewBonuses.filter(b => b.empId === emp.id).forEach((b) => {
-                empBonusRows.push({ key: `bonus-${b.id}`, name: emp.name, source: b.type, sourceColor: 'blue', detail: b.detail, amount: b.amount, isManual: true, bonusRef: b });
+        const normalizedManageSearch = normalizeAttendanceText(bonusSearch);
+        const allManagedBonuses = [...overviewBonuses]
+            .sort((a, b) => dayjs(b.date || 0).valueOf() - dayjs(a.date || 0).valueOf())
+            .map(bonus => ({
+                ...bonus,
+                key: bonus.id,
+                employeeName: employees.find(employee => employee.id === bonus.empId)?.name || 'Nhân viên không còn hoạt động',
+                isAutomatic: String(bonus.id).startsWith('auto-packing-week-') || bonus.createdBy === 'system',
+            }));
+        const managedBonuses = normalizedManageSearch
+            ? allManagedBonuses.filter(bonus => normalizeAttendanceText([
+                bonus.employeeName,
+                bonus.type,
+                bonus.detail,
+                creatorLabel(bonus),
+                bonus.amount,
+                bonus.date ? dayjs(bonus.date).format('DD/MM/YYYY') : '',
+            ].join(' ')).includes(normalizedManageSearch))
+            : allManagedBonuses;
+        const managedBonusTotal = allManagedBonuses.reduce((sum, bonus) => sum + bonus.amount, 0);
+        const filteredManagedBonusTotal = managedBonuses.reduce((sum, bonus) => sum + bonus.amount, 0);
+        const rewardedEmployeeCount = new Set(allManagedBonuses.map(bonus => bonus.empId)).size;
+        const latestManagedBonusDate = allManagedBonuses.find(bonus => bonus.date && dayjs(bonus.date).isValid())?.date;
+
+        const openBonusEditor = (bonus: BonusRecord) => {
+            setEditingBonus(bonus);
+            bonusForm.setFieldsValue({
+                empId: bonus.empId,
+                bonusKind: bonus.type === 'Thưởng tăng ca' ? 'overtime' : 'manual',
+                amount: bonus.amount,
+                overtimeHours: bonus.overtimeHours,
+                detail: bonus.detail,
             });
-
-            const totalEmpBonus = empBonusRows.reduce((sum, r) => sum + r.amount, 0);
-
-            return {
-                key: String(emp.id),
-                label: (
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, width: 'max-content' }}>
-                        <span style={{ fontWeight: 700, fontSize: 13, color: '#1f2937', whiteSpace: 'nowrap' }}>{emp.name}</span>
-                        <div style={{
-                            background: 'linear-gradient(to right, #1890ff, #36cfc9)',
-                            padding: '2px 12px',
-                            borderRadius: 12,
-                            boxShadow: '0 2px 6px rgba(24,144,255,0.2)'
-                        }}>
-                            <span style={{ fontSize: 12, color: '#fff', fontWeight: 800, whiteSpace: 'nowrap' }}>+{fmt(totalEmpBonus)}</span>
-                        </div>
-                    </div>
-                ),
-                children: (
-                    <div style={{ padding: '0' }}>
-                        <div style={{
-                            background: '#fff',
-                            padding: '16px',
-                            borderRadius: '0 0 16px 16px'
-                        }}>
-                            <Table
-                                dataSource={empBonusRows}
-                                pagination={false}
-                                size="middle"
-                                style={{ border: '1px solid #f0f0f0', borderRadius: 8, overflow: 'hidden' }}
-                                columns={[
-                                    { title: 'Nguồn tiền', dataIndex: 'source', key: 'src', width: 160, render: (s: string, r: any) => <Tag color={s === 'Thưởng tăng ca' ? 'orange' : r.sourceColor} style={{ fontWeight: 800, fontSize: 11, textTransform: 'uppercase', padding: '2px 8px' }}>{s}</Tag> },
-                                    { title: 'Nội dung', dataIndex: 'detail', key: 'detail', render: (d: string) => <Text style={{ fontStyle: 'italic', color: '#4b5563' }}>{d}</Text> },
-                                    { title: <Text style={{ color: '#1890ff', fontWeight: 700 }}>SỐ TIỀN NHẬN</Text>, dataIndex: 'amount', key: 'amount', width: 160, align: 'right' as const, render: (v: number) => <Text strong style={{ color: '#1890ff', fontSize: 15 }}>+ {fmt(v)}</Text> },
-                                    {
-                                        title: '', key: 'actions', width: 100, align: 'center' as const,
-                                        render: (_: any, r: any) => (r.isManual && canManageBonuses && !isCurrentPeriodLocked) ? (
-                                            <Space size={8}>
-                                                <Tooltip title="Sửa">
-                                                    <Button size="small" type="primary" ghost icon={<EditOutlined />} onClick={() => {
-                                                        setEditingBonus(r.bonusRef);
-                                                        bonusForm.setFieldsValue({
-                                                            empId: r.bonusRef.empId,
-                                                            bonusKind: r.bonusRef.type === 'Thưởng tăng ca' ? 'overtime' : 'manual',
-                                                            amount: r.bonusRef.amount,
-                                                            overtimeHours: r.bonusRef.overtimeHours,
-                                                            detail: r.bonusRef.detail
-                                                        });
-                                                        setBonusModalOpen(true);
-                                                    }} />
-                                                </Tooltip>
-                                                <Tooltip title="Xóa">
-                                                    <Button size="small" type="primary" danger ghost icon={<DeleteOutlined />} onClick={() => {
-                                                        Modal.confirm({
-                                                            title: 'Xóa khoản thưởng?',
-                                                            content: 'Thao tác sẽ được ghi vào lịch sử dù đã xóa.',
-                                                            okText: 'Xóa', okType: 'danger', cancelText: 'Hủy',
-                                                            onOk: () => handleDeleteBonus(r.bonusRef),
-                                                        });
-                                                    }} />
-                                                </Tooltip>
-                                            </Space>
-                                        ) : null,
-                                    },
-                                ]}
-                            />
-                        </div>
-                    </div>
-                )
-            };
-        });
+            setBonusModalOpen(true);
+        };
 
         return (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                        <div style={{ background: 'linear-gradient(135deg, #1890ff 0%, #36cfc9 100%)', width: 8, height: 24, borderRadius: 4 }} />
+            <div className="att-personal-bonus att-bonus-manage">
+                <div className="att-personal-bonus-head">
+                    <div>
+                        <Title level={3} style={{ margin: 0 }}>Quản lý thưởng</Title>
+                        <Text type="secondary">Theo dõi, phân bổ và điều chỉnh thưởng cho nhân viên</Text>
+                    </div>
+                    <div className="att-personal-bonus-actions">
+                        <Input
+                            allowClear
+                            prefix={<SearchOutlined />}
+                            placeholder="Tìm nhân viên, nội dung"
+                            value={bonusSearch}
+                            onChange={event => setBonusSearch(event.target.value)}
+                        />
+                        {currentEmployeePayroll && <Button onClick={() => setBonusView('personal')}>Thưởng của tôi</Button>}
+                        {canManageBonuses && !isCurrentPeriodLocked && (
+                            <Button className="att-bonus-primary" type="primary" icon={<PlusOutlined />} onClick={() => {
+                                setEditingBonus(null);
+                                bonusForm.resetFields();
+                                bonusForm.setFieldsValue({ bonusKind: 'manual' });
+                                setBonusModalOpen(true);
+                            }}>Thêm thưởng</Button>
+                        )}
+                    </div>
+                </div>
+
+                <div className="att-personal-bonus-summary">
+                    <div className="att-personal-bonus-stat att-personal-bonus-stat--total">
+                        <span className="att-personal-bonus-stat-icon"><WalletOutlined /></span>
                         <div>
-                            <Title level={4} style={{ margin: 0, color: '#1f2937' }}>Quản lý thưởng</Title>
-                            <Text type="secondary">Phân bổ và điều chỉnh thưởng cho nhân viên</Text>
+                            <span>Tổng thưởng trong kỳ</span>
+                            <strong>{fmt(managedBonusTotal)} đ</strong>
                         </div>
                     </div>
-                    <Space>
-                        <Button onClick={() => setBonusView('personal')}>Thưởng của tôi</Button>
-                        {canManageBonuses && !isCurrentPeriodLocked && <Button type="primary" icon={<PlusOutlined />} style={{ fontWeight: 700, borderRadius: 8, height: 38, background: 'linear-gradient(to right, #1890ff, #36cfc9)', border: 'none', boxShadow: '0 4px 10px rgba(24,144,255,0.3)' }} onClick={() => { setEditingBonus(null); bonusForm.resetFields(); bonusForm.setFieldsValue({ bonusKind: 'manual' }); setBonusModalOpen(true); }}>Thêm thưởng thủ công</Button>}
-                    </Space>
-                </div>
-                <Card
-                    bodyStyle={{ padding: 0 }}
-                    style={{
-                        border: 'none',
-                        borderRadius: 16,
-                        overflow: 'hidden',
-                        boxShadow: '0 4px 24px rgba(24, 144, 255, 0.12)'
-                    }}
-                >
-                    <div style={{
-                        background: 'linear-gradient(135deg, #e6f7ff 0%, #f0f5ff 100%)',
-                        padding: '16px 16px 0',
-                        borderBottom: '1px solid #bae0ff'
-                    }}>
-                        <Tabs
-                            defaultActiveKey={privatePayrollData[0] ? String(privatePayrollData[0].id) : "1"}
-                            items={bonusTabsItems}
-                            type="line"
-                            tabBarStyle={{ margin: 0, border: 'none' }}
-                            animated={{ inkBar: true, tabPane: true }}
-                        />
+                    <div className="att-personal-bonus-stat">
+                        <TeamOutlined />
+                        <strong>{rewardedEmployeeCount}</strong>
+                        <span>nhân viên được thưởng</span>
                     </div>
-                </Card>
+                    <div className="att-personal-bonus-stat">
+                        <ClockCircleOutlined />
+                        <div>
+                            <span>Cập nhật gần nhất</span>
+                            <strong>{latestManagedBonusDate ? dayjs(latestManagedBonusDate).format('DD/MM/YYYY') : '—'}</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <Table
+                    className="att-personal-bonus-table att-bonus-manage-table"
+                    rowKey="id"
+                    dataSource={managedBonuses}
+                    pagination={managedBonuses.length > 10 ? { pageSize: 10, size: 'small' } : false}
+                    tableLayout="fixed"
+                    locale={{ emptyText: normalizedManageSearch ? 'Không tìm thấy khoản thưởng phù hợp' : 'Chưa có khoản thưởng nào trong kỳ này' }}
+                    columns={[
+                        {
+                            title: 'Ngày', dataIndex: 'date', width: 105,
+                            render: (date?: string) => date && dayjs(date).isValid() ? dayjs(date).format('DD/MM/YYYY') : '—',
+                        },
+                        { title: 'Nhân viên', dataIndex: 'employeeName', width: 145, ellipsis: true, render: (name: string) => <Tooltip title={name}><Text strong>{name}</Text></Tooltip> },
+                        {
+                            title: 'Nguồn thưởng', dataIndex: 'type', width: 155,
+                            render: (type: string, bonus: any) => <Tag className={`att-personal-bonus-source ${bonus.isAutomatic ? 'automatic' : ''}`}>{type?.replace(/\s*\(Admin\)$/i, '') || 'Thưởng'}</Tag>,
+                        },
+                        { title: 'Nội dung', dataIndex: 'detail', render: (detail: string) => <Tooltip title={detail || '—'}><span className="att-bonus-detail-text">{detail || '—'}</span></Tooltip> },
+                        { title: 'Người tạo', width: 105, ellipsis: true, render: (_: unknown, bonus: BonusRecord) => <Tooltip title={creatorLabel(bonus)}>{creatorLabel(bonus)}</Tooltip> },
+                        {
+                            title: 'Số tiền', dataIndex: 'amount', width: 125, align: 'right' as const,
+                            render: (amount: number) => <Text strong style={{ color: '#00ab56' }}>+{fmt(amount)} đ</Text>,
+                        },
+                        {
+                            title: '', key: 'actions', width: 82, align: 'center' as const,
+                            render: (_: unknown, bonus: any) => {
+                                if (bonus.isAutomatic) return <Tooltip title="Khoản thưởng tự động theo kết quả tuần"><LockOutlined className="att-bonus-auto-lock" /></Tooltip>;
+                                if (!canManageBonuses || isCurrentPeriodLocked) return null;
+                                return (
+                                    <Space size={6}>
+                                        <Tooltip title="Sửa"><Button size="small" icon={<EditOutlined />} onClick={() => openBonusEditor(bonus)} /></Tooltip>
+                                        <Tooltip title="Xóa"><Button size="small" danger icon={<DeleteOutlined />} onClick={() => Modal.confirm({
+                                            title: 'Xóa khoản thưởng?',
+                                            content: 'Thao tác sẽ được ghi vào lịch sử dù đã xóa.',
+                                            okText: 'Xóa', okType: 'danger', cancelText: 'Hủy',
+                                            onOk: () => handleDeleteBonus(bonus),
+                                        })} /></Tooltip>
+                                    </Space>
+                                );
+                            },
+                        },
+                    ]}
+                    summary={() => managedBonuses.length > 0 ? (
+                        <Table.Summary.Row>
+                            <Table.Summary.Cell index={0} colSpan={5}><Text strong>{normalizedManageSearch ? 'Tổng kết quả tìm kiếm' : 'Tổng cộng'}</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell index={5} align="right"><Text strong style={{ color: '#00ab56' }}>+{fmt(filteredManagedBonusTotal)} đ</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell index={6} />
+                        </Table.Summary.Row>
+                    ) : null}
+                />
+
                 {visibleBonusAuditLog.length > 0 && (
-                    <Card
-                        bodyStyle={{ padding: 0 }}
-                        style={{ borderTop: '3px solid #faad14' }}
-                        title={<Space><HistoryOutlined style={{ color: '#faad14' }} /><Text strong>Lịch sử chỉnh sửa thưởng</Text><Tag color="gold">{visibleBonusAuditLog.length} thao tác</Tag></Space>}
-                    >
+                    <section className="att-bonus-audit">
+                        <div className="att-bonus-audit-head">
+                            <div><HistoryOutlined /><Text strong>Lịch sử chỉnh sửa thưởng</Text></div>
+                            <Tag>{visibleBonusAuditLog.length} thao tác</Tag>
+                        </div>
                         <Table
+                            className="att-personal-bonus-table att-bonus-audit-table"
                             dataSource={[...visibleBonusAuditLog].reverse().map(l => ({ ...l, key: l.id }))}
                             pagination={visibleBonusAuditLog.length > 5 ? { pageSize: 5, size: 'small' } : false}
                             size="small"
+                            scroll={{ x: 850 }}
                             columns={[
                                 { title: 'Thời gian', dataIndex: 'timestamp', key: 'ts', width: 150, render: (t: string) => <Text type="secondary" style={{ fontSize: 11 }}>{t}</Text> },
                                 {
@@ -7062,7 +7175,7 @@ export default function Attendance() {
                                 },
                             ]}
                         />
-                    </Card>
+                    </section>
                 )}
             </div>
         );
@@ -8518,6 +8631,16 @@ export default function Attendance() {
 
     return (
         <div className="attendance-module">
+            {!packingCatalogReady && (
+                <div role="status" style={{ padding: '8px 16px' }}>
+                    {packingCatalogError ? (
+                        <Space>
+                            <Text type="danger">{packingCatalogError}</Text>
+                            <Button size="small" onClick={() => setPackingCatalogAttempt(value => value + 1)}>Thử lại</Button>
+                        </Space>
+                    ) : <Text type="secondary">Đang tải danh mục tính thưởng đóng gói...</Text>}
+                </div>
+            )}
             {/* Tab Nav - Sticky on top */}
             <div className="att-tabs-sticky">
                 <Tabs
