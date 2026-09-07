@@ -19770,6 +19770,21 @@ async function validateComboItems(rawItems) {
   return { items: canonicalItems, cost: calculatedCost };
 }
 
+// Payroll needs components only, without inventory and cost calculations.
+ipcMain.handle("combos:getPackingComponents", async () => {
+  try {
+    requireRole();
+    if (!prisma) throw new Error("Database chưa sẵn sàng.");
+    const data = await prisma.comboProduct.findMany({
+      select: { id: true, sku: true, name: true, items: true, status: true },
+      orderBy: { createdAt: "desc" },
+    });
+    return { success: true, data };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle("combos:getAll", async () => {
   try {
     if (!prisma) return { success: true, data: [] };
@@ -24610,6 +24625,8 @@ function requireConfigAccess(key, operation) {
   return policy;
 }
 
+let attendanceReadCache = null;
+
 ipcMain.handle("appConfig:get", async (event, key) => {
   try {
     requireConfigAccess(key, "read");
@@ -24619,15 +24636,29 @@ ipcMain.handle("appConfig:get", async (event, key) => {
       );
     }
     if (!prisma) throw new Error("Prisma not available");
+    // Validate against the database on every read; never use a time-based
+    // payroll cache. Access checks above also apply to cached responses.
+    if (key === "attendanceData" && attendanceReadCache) {
+      const revision = await prisma.appConfig.findUnique({
+        where: { key },
+        select: { updatedAt: true },
+      });
+      if (revision?.updatedAt?.toISOString() === attendanceReadCache.updatedAt) {
+        return attendanceReadCache;
+      }
+      attendanceReadCache = null;
+    }
     const config = await prisma.appConfig.findUnique({
       where: { key },
     });
     if (config) {
-      return {
+      const response = {
         success: true,
         data: JSON.parse(config.value),
         updatedAt: config.updatedAt?.toISOString() || null,
       };
+      if (key === "attendanceData" && response.updatedAt) attendanceReadCache = response;
+      return response;
     }
     return { success: true, data: null, updatedAt: null };
   } catch (error) {

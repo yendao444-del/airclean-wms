@@ -1310,6 +1310,7 @@ export interface ElectronAPI {
     heartbeat: () => Promise<{ success: boolean }>;
   };
   combos: {
+    getPackingComponents: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
     getAll: () => Promise<{
       success: boolean;
       data?: ComboProduct[];

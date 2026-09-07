@@ -170,6 +170,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // Combo Products
     combos: {
+        getPackingComponents: () => ipcRenderer.invoke('combos:getPackingComponents'),
         getAll: () => ipcRenderer.invoke('combos:getAll'),
         create: (data) => ipcRenderer.invoke('combos:create', data),
         update: (id, data) => ipcRenderer.invoke('combos:update', id, data),
