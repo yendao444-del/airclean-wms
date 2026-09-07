@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer, Legend } from 'recharts';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
+import { usePageHeader } from '../contexts/PageHeaderContext';
 import {
     STOCK_CHECK_MISSING_FINE_ENABLED,
     STOCK_CHECK_MISSING_FINE,
@@ -3123,6 +3124,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
 // ===============================================
 export default function Attendance() {
     const { user } = useAuth();
+    const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const currentUser = useCurrentUser();
     const isAdmin = currentUser === 'admin' || user?.role === 'admin';
     const isManager = user?.role === 'manager';
@@ -4100,6 +4102,63 @@ export default function Attendance() {
         dayjs().endOf('month'),
     ]);
 
+    const attendancePeriodSelector = useMemo(() => {
+        const now = dayjs();
+        const [start, end] = overviewDateRange;
+        const rangeLabel = (() => {
+            if (start.isSame(now.startOf('month'), 'day') && end.isSame(now.endOf('month'), 'day')) return 'Tháng này';
+            if (start.isSame(now.subtract(1, 'month').startOf('month'), 'day') && end.isSame(now.subtract(1, 'month').endOf('month'), 'day')) return 'Tháng trước';
+            if (start.isSame(now.subtract(6, 'day'), 'day') && end.isSame(now, 'day')) return 'Trong 7 ngày qua';
+            if (start.isSame(now.subtract(29, 'day'), 'day') && end.isSame(now, 'day')) return 'Trong 30 ngày qua';
+            if (start.isSame(end, 'day')) return start.format('DD/MM/YYYY');
+            if (start.isSame(start.startOf('month'), 'day') && end.isSame(start.endOf('month'), 'day')) return `Tháng ${start.format('MM/YYYY')}`;
+            return `${start.format('DD/MM/YYYY')} — ${end.format('DD/MM/YYYY')}`;
+        })();
+        const setRange = (nextStart: dayjs.Dayjs, nextEnd: dayjs.Dayjs) => setOverviewDateRange([nextStart, nextEnd]);
+        const presets = [
+            { label: 'Tháng này', fn: () => setRange(now.startOf('month'), now.endOf('month')) },
+            { label: 'Tháng trước', fn: () => setRange(now.subtract(1, 'month').startOf('month'), now.subtract(1, 'month').endOf('month')) },
+            { label: 'Trong 7 ngày qua', fn: () => setRange(now.subtract(6, 'day').startOf('day'), now.endOf('day')) },
+            { label: 'Trong 30 ngày qua', fn: () => setRange(now.subtract(29, 'day').startOf('day'), now.endOf('day')) },
+        ];
+
+        return (
+            <div className="att-header-period">
+                <Dropdown
+                    trigger={['click']}
+                    popupRender={() => <div style={{ background: '#fff', borderRadius: 8, boxShadow: '0 6px 16px rgba(0,0,0,.12)', padding: '8px 0', minWidth: 300, border: '1px solid #f0f0f0' }}>
+                        {presets.map(option => <div key={option.label} onClick={option.fn} style={{ padding: '8px 16px', cursor: 'pointer', fontSize: 13, fontWeight: 500, color: rangeLabel === option.label ? '#1677ff' : '#262626', background: rangeLabel === option.label ? '#e6f4ff' : 'transparent' }}>{option.label}</div>)}
+                        <Divider style={{ margin: '6px 0' }} />
+                        <div style={{ padding: '4px 16px' }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Theo ngày</div>
+                            <DatePicker size="small" format="DD/MM/YYYY" placeholder="Chọn ngày..." style={{ width: '100%' }} onChange={date => date && setRange(date.startOf('day'), date.endOf('day'))} />
+                        </div>
+                        <div style={{ padding: '4px 16px' }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Theo tháng</div>
+                            <DatePicker picker="month" size="small" format="MM/YYYY" placeholder="Chọn tháng..." style={{ width: '100%' }} onChange={date => date && setRange(date.startOf('month'), date.endOf('month'))} />
+                        </div>
+                        <div style={{ padding: '4px 16px 8px' }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Tùy chỉnh khoảng</div>
+                            <DatePicker.RangePicker size="small" format="DD/MM/YYYY" allowClear={false} style={{ width: '100%' }} onChange={dates => dates?.[0] && dates?.[1] && setRange(dates[0], dates[1])} />
+                        </div>
+                    </div>}
+                >
+                    <Button className="att-header-period__button">
+                        <CalendarOutlined className="att-header-period__icon" />
+                        <span className="att-header-period__label">{rangeLabel}</span>
+                        <span className="att-header-period__range">{start.format('DD/MM')} → {end.format('DD/MM/YYYY')}</span>
+                        <DownOutlined className="att-header-period__arrow" />
+                    </Button>
+                </Dropdown>
+            </div>
+        );
+    }, [overviewDateRange]);
+
+    useEffect(() => {
+        setHeaderExtra(attendancePeriodSelector);
+        return clearHeaderExtra;
+    }, [attendancePeriodSelector, clearHeaderExtra, setHeaderExtra]);
+
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);
     const [packingDateRange, setPackingDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
     const [packingRewardNow, setPackingRewardNow] = useState(() => dayjs());
@@ -4974,6 +5033,52 @@ export default function Attendance() {
     const overviewFines = lockedPayrollSnapshot?.fines || liveOverviewFines;
     const overviewBonuses = lockedPayrollSnapshot?.bonuses || liveOverviewBonusesWithWeekly;
     const overviewPackingLogs = lockedPayrollSnapshot?.packingLogs || liveOverviewPackingLogs;
+    const packingDashboardData = useMemo(() => {
+        const midpoint = overviewDateRange[0].add(
+            Math.floor(overviewDateRange[1].diff(overviewDateRange[0], 'day') / 2),
+            'day'
+        );
+        const employeeScores = new Map(employees.map(employee => [employee.id, {
+            employee,
+            orderCount: 0,
+            units: 0,
+            income: 0,
+            trend: 0,
+        }]));
+        const matchedEmployeesByPacker = new Map<string, Employee[]>();
+
+        overviewPackingLogs.forEach(order => {
+            const packing = calcPackingCommission(order.items, packingCommission, order.timestamp);
+            const packerKey = String(order.packer || '');
+            let matchedEmployees = matchedEmployeesByPacker.get(packerKey);
+            if (!matchedEmployees) {
+                matchedEmployees = employees.filter(employee => matchPacker(order.packer, employee));
+                matchedEmployeesByPacker.set(packerKey, matchedEmployees);
+            }
+            const isSecondHalf = !dayjs(order.timestamp).isBefore(midpoint, 'day');
+            matchedEmployees.forEach(employee => {
+                const score = employeeScores.get(employee.id);
+                if (!score) return;
+                score.orderCount += 1;
+                score.units += packing.units;
+                score.income += packing.income;
+                score.trend += isSecondHalf ? 1 : -1;
+            });
+        });
+
+        const leaderboard = [...employeeScores.values()]
+            .map(score => ({ ...score.employee, ...score }))
+            .sort((a, b) => b.orderCount - a.orderCount || b.units - a.units || a.id - b.id);
+
+        return {
+            orderLogs: overviewPackingLogs,
+            tableRows: overviewPackingLogs.map(order => ({ ...order, key: order.id })),
+            leaderboard,
+            totalOrders: overviewPackingLogs.length,
+            totalUnits: leaderboard.reduce((sum, entry) => sum + entry.units, 0),
+            totalIncome: leaderboard.reduce((sum, entry) => sum + entry.income, 0),
+        };
+    }, [employees, overviewDateRange, overviewPackingLogs, packingCommission]);
     const overviewWareHousePacking = useMemo(() => {
         let totalUnits = 0;
         overviewPackingLogs.forEach(order => {
@@ -6012,12 +6117,6 @@ export default function Attendance() {
             const periodLabel = overviewDateRange[0].isSame(overviewDateRange[1], 'month')
                 ? `Tháng ${overviewDateRange[0].format('MM/YYYY')}`
                 : `${overviewDateRange[0].format('DD/MM/YYYY')} — ${overviewDateRange[1].format('DD/MM/YYYY')}`;
-            const initials = employee.name
-                .split(/\s+/)
-                .filter(Boolean)
-                .slice(-2)
-                .map(part => part.charAt(0).toUpperCase())
-                .join('') || '?';
             const detailPopover = (hint: string, items: Array<{ label: string; amount: number }>, total: number, positive: boolean) => (
                 <div className="att-staff-breakdown-popover">
                     <div className="att-staff-popover-hint">{hint}</div>
@@ -6073,48 +6172,62 @@ export default function Attendance() {
                     items: employee.leaveDeduction > 0 ? [{ label: `${employee.absentDays || 0} ngày/ca nghỉ`, amount: employee.leaveDeduction || 0 }] : [],
                 },
             ];
-            const maxValue = Math.max(...rows.map(row => row.value), employee.salaryBase || 0, 1);
-
             return (
                 <div className="att-staff-overview">
-                    <div style={{ background: '#fff', border: '1px solid #e8edf4', borderRadius: 24, padding: '30px 34px', boxShadow: '0 12px 30px rgba(31, 58, 95, 0.06)' }}>
-                        <div className="att-staff-identity">
-                            <div className="att-staff-avatar">{initials}</div>
+                    <div className="att-staff-editorial">
+                        <aside className="att-staff-sidebar">
+                            <div className="att-staff-period">
+                                <span>Kỳ lương</span>
+                                <strong>{periodLabel}</strong>
+                            </div>
+
                             <div className="att-staff-person">
-                                <span className="att-staff-eyebrow">Bảng lương cá nhân</span>
+                                <span>Nhân viên</span>
                                 <strong>{employee.name}</strong>
-                                <span className="att-staff-eyebrow">@{employee.username || 'chưa liên kết'}</span>
+                                <small>@{employee.username || 'chưa liên kết'} · {employee.type === 'Seasonal' ? 'Thời vụ' : 'Chính thức'}</small>
                             </div>
-                            <div className="att-staff-meta">
-                                <div className="att-staff-meta-item"><span>Kỳ xem</span><strong>{periodLabel}</strong></div>
-                                <div className="att-staff-meta-item"><span>Loại nhân viên</span><strong>{employee.type === 'Seasonal' ? 'Thời vụ' : 'Chính thức'}</strong></div>
-                                <div className="att-staff-meta-item"><span>Trạng thái</span><strong className={isCurrentPeriodLocked ? 'is-locked' : 'is-open'}>{isCurrentPeriodLocked ? 'Đã chốt' : 'Đang mở'}</strong></div>
+
+                            <div className="att-staff-status">
+                                <span>Trạng thái kỳ lương</span>
+                                <strong className={isCurrentPeriodLocked ? 'is-locked' : 'is-open'}>{isCurrentPeriodLocked ? 'Đã chốt' : 'Đang tổng hợp'}</strong>
                             </div>
-                        </div>
 
-                        <div className="att-staff-net-pay">
-                            <span>Thực lĩnh cuối kỳ</span>
-                            <strong>{isPayrollDataReady ? fmt(employee.finalSalary || 0) : 'Đang tổng hợp...'}</strong>
-                        </div>
-
-                        <div className="att-staff-breakdown">
-                            {rows.map(row => (
-                                <Popover key={row.label} trigger="click" placement="top" content={detailPopover(row.label, row.items, row.value, row.positive)}>
-                                    <div className={`att-staff-breakdown-row ${row.positive ? 'is-positive' : 'is-negative'}`} role="button" tabIndex={0}>
-                                        <div className="att-staff-row-copy"><strong>{row.label}<EyeOutlined className="att-staff-row-detail-icon" /></strong><span>{row.note}</span></div>
-                                        <div className="att-staff-row-track"><span style={{ width: `${Math.min(100, Math.max(4, (row.value / maxValue) * 100))}%` }} /></div>
-                                        <div className="att-staff-row-value">{row.positive ? '+' : '-'} {fmt(Math.abs(row.value))}<EyeOutlined className="att-staff-row-value-icon" /></div>
-                                    </div>
-                                </Popover>
-                            ))}
-                        </div>
-
-                        <div className="att-staff-footer">
-                            <div className="att-staff-equation">
-                                <span>{fmt(employee.salaryBase || 0)}</span><i>+</i><span className="is-positive">{fmt(employee.packIncome || 0)}</span><i>+</i><span className="is-positive">{fmt(employee.totalBonus || 0)}</span><i>−</i><span className="is-negative">{fmt((employee.myFines || 0) + (employee.leaveDeduction || 0))}</span><i>=</i><strong>{fmt(employee.finalSalary || 0)}</strong>
+                            <div className="att-staff-stat-list">
+                                <div><strong>{employee.packTotalUnits || 0}</strong><span>gói</span></div>
+                                <div><strong>{employee.packOrderCount || 0}</strong><span>đơn</span></div>
+                                <div className={employeeFines.length > 0 ? 'has-warning' : ''}><strong>{employeeFines.length}</strong><span>khoản phạt</span></div>
                             </div>
-                            <Button type="primary" icon={<FileTextOutlined />} disabled={!isPayrollDataReady} onClick={() => { setPayslipPdfDetailOpen(false); setPayslipModal(employee); }}>Xem phiếu lương</Button>
-                        </div>
+
+                            <span className="att-staff-updated">Dữ liệu theo kỳ đang chọn</span>
+                        </aside>
+
+                        <main className="att-staff-main">
+                            <div className="att-staff-net-pay">
+                                <span>Thực nhận</span>
+                                <strong>{isPayrollDataReady ? fmt(employee.finalSalary || 0) : 'Đang tổng hợp...'}</strong>
+                            </div>
+
+                            <div className="att-staff-breakdown">
+                                {rows.map(row => (
+                                    <Popover key={row.label} trigger="click" placement="top" content={detailPopover(row.label, row.items, row.value, row.positive)}>
+                                        <button type="button" className={`att-staff-breakdown-row ${row.positive ? 'is-positive' : 'is-negative'}`}>
+                                            <div className="att-staff-row-copy">
+                                                <strong>{row.label}</strong>
+                                                <span>{row.note}</span>
+                                            </div>
+                                            <div className="att-staff-row-value">{row.positive ? '+' : '−'} {fmt(Math.abs(row.value))}<EyeOutlined className="att-staff-row-value-icon" /></div>
+                                        </button>
+                                    </Popover>
+                                ))}
+                            </div>
+
+                            <div className="att-staff-footer">
+                                <div className="att-staff-equation">
+                                    <span>{fmt(employee.salaryBase || 0)}</span><i>+</i><span className="is-positive">{fmt(employee.packIncome || 0)}</span><i>+</i><span className="is-positive">{fmt(employee.totalBonus || 0)}</span><i>−</i><span className="is-negative">{fmt((employee.myFines || 0) + (employee.leaveDeduction || 0))}</span><i>=</i><strong>{fmt(employee.finalSalary || 0)}</strong>
+                                </div>
+                                <Button type="primary" icon={<FileTextOutlined />} disabled={!isPayrollDataReady} onClick={() => { setPayslipPdfDetailOpen(false); setPayslipModal(employee); }}>Xem phiếu lương</Button>
+                            </div>
+                        </main>
                     </div>
                 </div>
             );
@@ -6254,20 +6367,11 @@ export default function Attendance() {
     // ============================================
     const renderPackaging = () => {
         const unitPrice = 20;
-        const orderLogs = overviewPackingLogs;
-
-        const filteredPacking = orderLogs.reduce((total, order) => {
-            const result = calcPackingCommission(order.items, packingCommission, order.timestamp);
-            return { units: total.units + result.units, income: total.income + result.income };
-        }, { units: 0, income: 0 });
-        const filteredTotalSP = filteredPacking.units;
-        const filteredPackValue = filteredPacking.income;
-        const filteredTotalUnits = orderLogs.length; // Tổng đơn hàng
-
-        const totalOrders = orderLogs.length;
-        const totalPackedSKU = orderLogs.reduce((s, o) => s + o.totalSKU, 0);
-        const issueCount = orderLogs.filter(o => o.status === 'issue').length;
-        const uniquePackers = [...new Set(orderLogs.map(o => o.packer))].length;
+        const { orderLogs, tableRows, leaderboard, totalOrders, totalUnits, totalIncome } = packingDashboardData;
+        // Compatibility aliases for the unreachable legacy layout kept below.
+        const filteredTotalSP = totalUnits;
+        const filteredPackValue = totalIncome;
+        const uniquePackers = 0;
 
         const platformColor: Record<string, string> = {
             Shopee: '#ee4d2d', TikTok: '#000000', POS: '#1890ff', Web: '#722ed1', 'Khác': '#8c8c8c',
@@ -6276,28 +6380,7 @@ export default function Attendance() {
             Shopee: <ShoppingCartOutlined />, TikTok: <VideoCameraOutlined />, POS: <DollarOutlined />, Web: <GlobalOutlined />, 'Khác': <FileTextOutlined />,
         };
 
-        const leaderboard = employees.map((emp, employeeIndex) => {
-            const logs = orderLogs.filter(order => matchPacker(order.packer, emp));
-            const packing = logs.reduce((total, order) => {
-                const result = calcPackingCommission(order.items, packingCommission, order.timestamp);
-                return { units: total.units + result.units, income: total.income + result.income };
-            }, { units: 0, income: 0 });
-            const midpoint = overviewDateRange[0].add(Math.floor(overviewDateRange[1].diff(overviewDateRange[0], 'day') / 2), 'day');
-            const firstHalf = logs.filter(order => dayjs(order.timestamp).isBefore(midpoint, 'day')).length;
-            const secondHalf = logs.length - firstHalf;
-            return {
-                ...emp,
-                employeeIndex,
-                orderCount: logs.length,
-                units: packing.units,
-                income: packing.income,
-                trend: secondHalf - firstHalf,
-                form: Array.from({ length: 7 }, (_, index) => logs.some(order => dayjs(order.timestamp).isSame(overviewDateRange[1].subtract(6 - index, 'day'), 'day'))),
-            };
-        }).sort((a, b) => b.orderCount - a.orderCount || b.units - a.units || a.id - b.id);
         const leader = leaderboard[0];
-        const totalIncome = leaderboard.reduce((sum, entry) => sum + entry.income, 0);
-        const totalUnits = leaderboard.reduce((sum, entry) => sum + entry.units, 0);
         const rankingMascots = [packingFoxMascot, packingPandaMascot, packingTigerMascot];
         const today = dayjs().startOf('day');
         const weekStart = today.subtract((today.day() + 6) % 7, 'day');
@@ -6434,7 +6517,7 @@ export default function Attendance() {
                             <div className="packing-panel-title"><div><FileTextOutlined /> Nhật ký đóng gói theo đơn hàng</div><Tag color="blue">{orderLogs.length} đơn</Tag></div>
                             <Table
                                 className="packing-log-table"
-                                dataSource={orderLogs.map(order => ({ ...order, key: order.id }))}
+                                dataSource={tableRows}
                                 pagination={orderLogs.length > 8 ? { pageSize: 8, size: 'small' } : false}
                                 size="small"
                                 tableLayout="fixed"
@@ -7329,20 +7412,28 @@ export default function Attendance() {
         // Never return NaN from the comparator: one legacy malformed date
         // used to preserve insertion order and put older fines above 13/08.
         combinedFines.sort((a, b) => getFineSortTime(b) - getFineSortTime(a));
+        const scopedFines = canViewAllPayroll
+            ? combinedFines
+            : currentEmployeePayroll
+                ? combinedFines.filter(fine => fine.empId === currentEmployeePayroll.id)
+                : [];
         const fineEmployeeOptions = Array.from(new Map(
-            combinedFines.map(f => [
+            scopedFines.map(f => [
                 f.empId,
                 employees.find(e => e.id === f.empId)?.name || f.empName || `Nhân viên #${f.empId}`,
             ])
         ).entries())
             .map(([id, name]) => ({ value: id, label: name }))
             .sort((a, b) => a.label.localeCompare(b.label, 'vi'));
-        const filteredFines = fineEmployeeFilter === 'all'
-            ? combinedFines
-            : combinedFines.filter(f => f.empId === fineEmployeeFilter);
-        const selectedFineEmployeeName = fineEmployeeFilter === 'all'
-            ? ''
-            : fineEmployeeOptions.find(option => option.value === fineEmployeeFilter)?.label || '';
+        const effectiveFineEmployeeFilter = canViewAllPayroll ? fineEmployeeFilter : currentEmployeePayroll?.id ?? 'all';
+        const filteredFines = effectiveFineEmployeeFilter === 'all'
+            ? scopedFines
+            : scopedFines.filter(f => f.empId === effectiveFineEmployeeFilter);
+        const selectedFineEmployeeName = canViewAllPayroll
+            ? (effectiveFineEmployeeFilter === 'all'
+                ? ''
+                : fineEmployeeOptions.find(option => option.value === effectiveFineEmployeeFilter)?.label || '')
+            : currentEmployeePayroll?.name || '';
         const totalFineAmount = filteredFines.reduce((sum, f) => sum + ((f as any).isWaived ? 0 : f.amount), 0);
         const getCurrentVatOverdueDays = (fine: any) => {
             const detail = String(fine?.detail || '');
@@ -7399,23 +7490,27 @@ export default function Attendance() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                         <Title level={4} style={{ margin: 0, color: '#ff4d4f' }}>Khấu trừ & Phạt</Title>
                         <Tag color="error" style={{ fontWeight: 800, fontSize: 13, padding: '2px 12px' }}>
-                            {fineEmployeeFilter === 'all' ? `${combinedFines.length} khoản` : `${filteredFines.length}/${combinedFines.length} khoản`}
+                            {canViewAllPayroll && effectiveFineEmployeeFilter !== 'all'
+                                ? `${filteredFines.length}/${scopedFines.length} khoản`
+                                : `${filteredFines.length} khoản`}
                         </Tag>
-                        <Space size={8}>
-                            <Text type="secondary" style={{ fontSize: 12, fontWeight: 700 }}>Lọc nhân viên</Text>
-                            <Select
-                                size="middle"
-                                value={fineEmployeeFilter}
-                                onChange={(value) => setFineEmployeeFilter(value as number | 'all')}
-                                showSearch
-                                optionFilterProp="label"
-                                style={{ width: 220 }}
-                                options={[
-                                    { value: 'all', label: 'Tất cả nhân viên' },
-                                    ...fineEmployeeOptions,
-                                ]}
-                            />
-                        </Space>
+                        {canViewAllPayroll && (
+                            <Space size={8}>
+                                <Text type="secondary" style={{ fontSize: 12, fontWeight: 700 }}>Lọc nhân viên</Text>
+                                <Select
+                                    size="middle"
+                                    value={fineEmployeeFilter}
+                                    onChange={(value) => setFineEmployeeFilter(value as number | 'all')}
+                                    showSearch
+                                    optionFilterProp="label"
+                                    style={{ width: 220 }}
+                                    options={[
+                                        { value: 'all', label: 'Tất cả nhân viên' },
+                                        ...fineEmployeeOptions,
+                                    ]}
+                                />
+                            </Space>
+                        )}
                     </div>
                     {isAdmin && !isCurrentPeriodLocked && (
                         <Button
@@ -7440,7 +7535,9 @@ export default function Attendance() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <WarningOutlined style={{ color: '#ff4d4f', fontSize: 16 }} />
                         <Text strong style={{ color: '#cf1322', fontSize: 13 }}>
-                            {fineEmployeeFilter === 'all' ? 'Tổng khấu trừ tháng này' : `Tổng khấu trừ của ${selectedFineEmployeeName}`}
+                            {canViewAllPayroll && effectiveFineEmployeeFilter === 'all'
+                                ? 'Tổng khấu trừ tháng này'
+                                : `Tổng khấu trừ của ${selectedFineEmployeeName || 'bạn'}`}
                         </Text>
                     </div>
                     <Text strong style={{ color: '#cf1322', fontSize: 18 }}>- {fmt(totalFineAmount)}</Text>
@@ -8578,14 +8675,14 @@ export default function Attendance() {
     // TABS CONFIG (nav-only, no children)
     // ============================================
     const tabNavItems = [
-        { key: 'overview', label: <><ProfileOutlined /> Tổng quát</> },
-        { key: 'packaging', label: <><TeamOutlined /> Đóng gói</> },
-        { key: 'bonuses', label: <><GiftOutlined /> Thưởng</> },
+        { key: 'overview', label: isAdmin ? <><ProfileOutlined /> Tổng quát</> : 'TỔNG QUÁT' },
+        { key: 'packaging', label: isAdmin ? <><TeamOutlined /> Đóng gói</> : 'ĐÓNG GÓI' },
+        { key: 'bonuses', label: isAdmin ? <><GiftOutlined /> Thưởng</> : 'THƯỞNG' },
         { key: 'fines', label: 'Phạt' },
-        { key: 'attendance', label: <><CalendarOutlined /> Điểm danh</> },
+        { key: 'attendance', label: isAdmin ? <><CalendarOutlined /> Điểm danh</> : 'ĐIỂM DANH' },
         {
             key: 'fund',
-            label: (
+            label: isAdmin ? (
                 <div style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -8602,7 +8699,7 @@ export default function Attendance() {
                     <CoffeeOutlined style={{ fontSize: 16 }} />
                     <span>QUẢN LÝ QUỸ</span>
                 </div>
-            )
+            ) : 'QUẢN LÝ QUỸ'
         },
     ];
 
@@ -8630,7 +8727,7 @@ export default function Attendance() {
     }
 
     return (
-        <div className="attendance-module">
+        <div className={`attendance-module${!isAdmin ? ' attendance-module--staff' : ''}`}>
             {!packingCatalogReady && (
                 <div role="status" style={{ padding: '8px 16px' }}>
                     {packingCatalogError ? (
@@ -8662,53 +8759,6 @@ export default function Attendance() {
                             Đang đồng bộ dữ liệu nền
                         </Tag>
                     )}
-                    {/* Shared period selector for every attendance tab. */}
-                    {(() => {
-                        const now = dayjs();
-                        const rangeLabel = (() => {
-                            const [start, end] = overviewDateRange;
-                            if (start.isSame(now.startOf('month'), 'day') && end.isSame(now.endOf('month'), 'day')) return 'Tháng này';
-                            if (start.isSame(now.subtract(1, 'month').startOf('month'), 'day') && end.isSame(now.subtract(1, 'month').endOf('month'), 'day')) return 'Tháng trước';
-                            if (start.isSame(now.subtract(6, 'day'), 'day') && end.isSame(now, 'day')) return 'Trong 7 ngày qua';
-                            if (start.isSame(now.subtract(29, 'day'), 'day') && end.isSame(now, 'day')) return 'Trong 30 ngày qua';
-                            if (start.isSame(end, 'day')) return start.format('DD/MM/YYYY');
-                            if (start.isSame(start.startOf('month'), 'day') && end.isSame(start.endOf('month'), 'day')) return `Tháng ${start.format('MM/YYYY')}`;
-                            return `${start.format('DD/MM/YYYY')} — ${end.format('DD/MM/YYYY')}`;
-                        })();
-                        const setRange = (start: dayjs.Dayjs, end: dayjs.Dayjs) => setOverviewDateRange([start, end]);
-                        const presets = [
-                            { label: 'Tháng này', fn: () => setRange(now.startOf('month'), now.endOf('month')) },
-                            { label: 'Tháng trước', fn: () => setRange(now.subtract(1, 'month').startOf('month'), now.subtract(1, 'month').endOf('month')) },
-                            { label: 'Trong 7 ngày qua', fn: () => setRange(now.subtract(6, 'day').startOf('day'), now.endOf('day')) },
-                            { label: 'Trong 30 ngày qua', fn: () => setRange(now.subtract(29, 'day').startOf('day'), now.endOf('day')) },
-                        ];
-                        return <Dropdown
-                            trigger={['click']}
-                            popupRender={() => <div style={{ background: '#fff', borderRadius: 8, boxShadow: '0 6px 16px rgba(0,0,0,.12)', padding: '8px 0', minWidth: 300, border: '1px solid #f0f0f0' }}>
-                                {presets.map(option => <div key={option.label} onClick={option.fn} style={{ padding: '8px 16px', cursor: 'pointer', fontSize: 13, fontWeight: 500, color: rangeLabel === option.label ? '#1677ff' : '#262626', background: rangeLabel === option.label ? '#e6f4ff' : 'transparent' }}>{option.label}</div>)}
-                                <Divider style={{ margin: '6px 0' }} />
-                                <div style={{ padding: '4px 16px' }}>
-                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Theo ngày</div>
-                                    <DatePicker size="small" format="DD/MM/YYYY" placeholder="Chọn ngày..." style={{ width: '100%' }} onChange={date => date && setRange(date.startOf('day'), date.endOf('day'))} />
-                                </div>
-                                <div style={{ padding: '4px 16px' }}>
-                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Theo tháng</div>
-                                    <DatePicker picker="month" size="small" format="MM/YYYY" placeholder="Chọn tháng..." style={{ width: '100%' }} onChange={date => date && setRange(date.startOf('month'), date.endOf('month'))} />
-                                </div>
-                                <div style={{ padding: '4px 16px 8px' }}>
-                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Tùy chỉnh khoảng</div>
-                                    <DatePicker.RangePicker size="small" format="DD/MM/YYYY" allowClear={false} style={{ width: '100%' }} onChange={dates => dates?.[0] && dates?.[1] && setRange(dates[0], dates[1])} />
-                                </div>
-                            </div>}
-                        >
-                            <Button style={{ borderRadius: 8, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, padding: '4px 14px', height: 'auto' }}>
-                                <CalendarOutlined style={{ color: '#1677ff' }} />
-                                <span style={{ color: '#1677ff', fontWeight: 700 }}>{rangeLabel}</span>
-                                <span style={{ color: '#8c8c8c', fontSize: 12 }}>{overviewDateRange[0].format('DD/MM')} → {overviewDateRange[1].format('DD/MM/YYYY')}</span>
-                                <DownOutlined style={{ fontSize: 10, color: '#8c8c8c' }} />
-                            </Button>
-                        </Dropdown>;
-                    })()}
                     {showPayrollManagementControls && isCurrentPeriodLocked && !lockedPayrollSnapshot && (
                         <Tooltip title="Kỳ này được khóa bằng cơ chế cũ, chưa có snapshot bất biến. Admin cần mở khóa rồi Chốt & Khóa lại sau khi kiểm tra số liệu.">
                             <Tag color="warning" icon={<WarningOutlined />}>Cần chốt lại an toàn</Tag>
@@ -8785,7 +8835,7 @@ export default function Attendance() {
             </div>
 
             {/* Tab Content */}
-            <div className="att-tab-content">
+            <div className={`att-tab-content${!isAdmin ? ' att-tab-content--staff' : ''}`}>
                 {renderActiveTabContent()}
             </div>
 

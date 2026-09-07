@@ -459,7 +459,8 @@ requireText(r2Lab, 'disabled={DATA_SAFETY_MODE || Boolean(deletingKeys[item.key]
 requireText(r2TestWorker, 'Deletion is disabled by data-safety mode', 'R2 test worker still permits deletion');
 requireText(evidenceWorker, 'Deletion is disabled by data-safety mode', 'Evidence worker still permits deletion');
 requireText(devLauncher, 'acquireLauncherLock', 'Development launcher duplicate lock is missing');
-requireText(devLauncher, 'Skipped Electron cache quarantine', 'Development launcher must not move app cache in safety mode');
+requireText(devLauncher, 'electron-resource-app-quarantine', 'Development launcher must preserve a generated resources/app before starting');
+requireText(devLauncher, "startNode(electronEntry, [projectRoot]", 'Development launcher must pass the absolute working-tree path to Electron');
 rejectText(devLauncher, 'fs.rm(', 'Development launcher still deletes quarantined Electron cache');
 
 if (failures.length > 0) {

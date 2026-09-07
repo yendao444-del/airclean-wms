@@ -11,7 +11,6 @@ import {
     Progress,
     Empty,
     Divider,
-    Dropdown,
     Modal,
     Form,
     Input,
@@ -556,6 +555,23 @@ const DailyTasks = () => {
     const dismissTaskActionGuide = () => {
         setShowTaskActionGuide(false);
     };
+
+    useEffect(() => {
+        if (openTaskMenuId === null) return;
+        const closeTaskMenu = (event: PointerEvent) => {
+            const target = event.target as HTMLElement | null;
+            if (!target?.closest('[data-task-admin-actions]')) setOpenTaskMenuId(null);
+        };
+        const closeOnEscape = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') setOpenTaskMenuId(null);
+        };
+        document.addEventListener('pointerdown', closeTaskMenu);
+        document.addEventListener('keydown', closeOnEscape);
+        return () => {
+            document.removeEventListener('pointerdown', closeTaskMenu);
+            document.removeEventListener('keydown', closeOnEscape);
+        };
+    }, [openTaskMenuId]);
 
     const handleTaskRowClick = (event: MouseEvent<HTMLDivElement>) => {
         const target = event.target as HTMLElement;
@@ -3234,34 +3250,34 @@ const DailyTasks = () => {
             const nextAssignmentEvidencePenalty = getNextAssignmentEvidencePenalty(task);
             const recurrenceInfo = getOpenRecurrenceInfo(task);
             const adminActions = isAdmin ? (
-                <Dropdown
-                    trigger={[]}
-                    placement="bottomRight"
-                    open={openTaskMenuId === task.id}
-                    onOpenChange={open => {
-                        if (!open) setOpenTaskMenuId(null);
-                    }}
-                    destroyOnHidden
-                    menu={{
-                        items: [
-                            { key: 'edit', icon: <EditOutlined />, label: 'Chỉnh sửa' },
-                            { type: 'divider' },
-                            { key: 'delete', icon: <DeleteOutlined />, label: 'Xóa công việc', danger: true },
-                        ],
-                        onClick: ({ key, domEvent }) => {
-                            domEvent.stopPropagation();
-                            setOpenTaskMenuId(null);
-                            if (key === 'edit') {
-                                if (isAssignment) handleEditAssignment(task);
-                                else handleEditTask(task);
-                            }
-                            if (key === 'delete') {
-                                if (isAssignment) handleDeleteAssignment(task.id);
-                                else handleDeleteTask(task.id);
-                            }
-                        },
-                    }}
-                >
+                <div className="daily-task-admin-actions" data-task-admin-actions>
+                    {openTaskMenuId === task.id && (
+                        <div className="daily-task-inline-admin-menu" onClick={event => event.stopPropagation()}>
+                            <Button
+                                size="small"
+                                icon={<EditOutlined />}
+                                onClick={() => {
+                                    setOpenTaskMenuId(null);
+                                    if (isAssignment) handleEditAssignment(task);
+                                    else handleEditTask(task);
+                                }}
+                            >
+                                Sửa
+                            </Button>
+                            <Button
+                                size="small"
+                                danger
+                                icon={<DeleteOutlined />}
+                                onClick={() => {
+                                    setOpenTaskMenuId(null);
+                                    if (isAssignment) handleDeleteAssignment(task.id);
+                                    else handleDeleteTask(task.id);
+                                }}
+                            >
+                                Xóa
+                            </Button>
+                        </div>
+                    )}
                     <Button
                         className="daily-task-overflow-button"
                         size="small"
@@ -3274,7 +3290,7 @@ const DailyTasks = () => {
                             setOpenTaskMenuId(current => current === task.id ? null : task.id);
                         }}
                     />
-                </Dropdown>
+                </div>
             ) : null;
             return <div
                 key={`${task.type}-${task.id}`}
