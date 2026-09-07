@@ -536,6 +536,7 @@ const DailyTasks = () => {
     }, [activeTab, selectedWorkDate]);
 
     const [showTaskActionGuide, setShowTaskActionGuide] = useState(false);
+    const [openTaskMenuId, setOpenTaskMenuId] = useState<number | null>(null);
     const hasShownRowActionHintRef = useRef(false);
     const evidenceImageUrlCacheRef = useRef(new Map<string, { url: string; expiresAt: number }>());
 
@@ -3219,8 +3220,13 @@ const DailyTasks = () => {
             const recurrenceInfo = getOpenRecurrenceInfo(task);
             const adminActions = isAdmin ? (
                 <Dropdown
-                    trigger={['click']}
+                    trigger={[]}
                     placement="bottomRight"
+                    open={openTaskMenuId === task.id}
+                    onOpenChange={open => {
+                        if (!open) setOpenTaskMenuId(null);
+                    }}
+                    destroyOnHidden
                     menu={{
                         items: [
                             { key: 'edit', icon: <EditOutlined />, label: 'Chỉnh sửa' },
@@ -3229,6 +3235,7 @@ const DailyTasks = () => {
                         ],
                         onClick: ({ key, domEvent }) => {
                             domEvent.stopPropagation();
+                            setOpenTaskMenuId(null);
                             if (key === 'edit') {
                                 if (isAssignment) handleEditAssignment(task);
                                 else handleEditTask(task);
@@ -3245,7 +3252,12 @@ const DailyTasks = () => {
                         size="small"
                         icon={<MoreOutlined />}
                         aria-label="Mở menu công việc"
-                        onClick={event => event.stopPropagation()}
+                        onClick={event => {
+                            event.stopPropagation();
+                            // Control the popup explicitly so the action does
+                            // not depend on rc-trigger's delegated click timing.
+                            setOpenTaskMenuId(current => current === task.id ? null : task.id);
+                        }}
                     />
                 </Dropdown>
             ) : null;
