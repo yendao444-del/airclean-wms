@@ -184,6 +184,7 @@ interface EvidenceMeta {
     method?: 'link' | 'image' | 'both';
     status?: 'pending' | 'submitted' | 'approved' | 'rejected';
     penaltyAmount?: number;
+    minImages?: number;
     submittedAt?: string;
     submittedBy?: string;
     submittedUrl?: string;
@@ -293,6 +294,11 @@ const TARGET_EVIDENCE_IMAGE_BYTES = 200 * 1024;
 const MAX_EVIDENCE_IMAGE_BYTES = 500 * 1024;
 const MAX_EVIDENCE_SOURCE_BYTES = 15 * 1024 * 1024;
 const MAX_EVIDENCE_IMAGES = 5;
+
+const getRequiredEvidenceImageCount = (evidence?: EvidenceMeta): number => {
+    const configured = Math.floor(Number(evidence?.minImages) || 1);
+    return Math.max(1, Math.min(MAX_EVIDENCE_IMAGES, configured));
+};
 
 const getEvidenceImageMimeType = (file: File): string | null => {
     if (['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return file.type;
@@ -970,6 +976,7 @@ const DailyTasks = () => {
             deadlinePenaltyAmount: DEADLINE_OVERDUE_FINE_OFFICIAL,
             evidenceRequired: true,
             evidencePenaltyAmount: DEFAULT_EVIDENCE_PENALTY,
+            evidenceMinImages: 1,
             recurrenceDays: 0,
             assignees: [],
         });
@@ -992,6 +999,7 @@ const DailyTasks = () => {
             deadlinePenaltyAmount: getAssignmentDeadlinePenalty(task),
             evidenceRequired: getEvidence(task).required || false,
             evidencePenaltyAmount: normalizePenaltyAmount(getEvidence(task).penaltyAmount),
+            evidenceMinImages: getRequiredEvidenceImageCount(getEvidence(task)),
             recurrenceDays: Number(parseAttachments(task.attachments).assignment?.recurrenceDays) || 0,
             note: task.note || '',
         });
@@ -1044,6 +1052,7 @@ const DailyTasks = () => {
                         method: 'image',
                         status: existingEvidence.status || 'pending',
                         penaltyAmount: assignmentPenaltyAmount,
+                        minImages: Math.max(1, Math.min(MAX_EVIDENCE_IMAGES, Math.floor(Number(values.evidenceMinImages) || 1))),
                     },
                 },
             };
@@ -1521,6 +1530,7 @@ const DailyTasks = () => {
             assignmentMode: 'fixed',
             rotationAssignees: [],
             penaltyAmount: DEFAULT_EVIDENCE_PENALTY,
+            evidenceMinImages: 1,
             evidenceDeadlineTime: DAILY_EVIDENCE_DEADLINE,
             dueDate: dayjs().endOf('day')
         });
@@ -1548,6 +1558,7 @@ const DailyTasks = () => {
             assignmentMode: mode,
             rotationAssignees,
             penaltyAmount: normalizePenaltyAmount(getEvidence(task).penaltyAmount),
+            evidenceMinImages: getRequiredEvidenceImageCount(getEvidence(task)),
             evidenceDeadlineTime: DAILY_EVIDENCE_DEADLINE,
         });
         setTaskModalVisible(true);
@@ -1641,6 +1652,9 @@ const DailyTasks = () => {
                         penaltyAmount: isAdmin
                             ? normalizePenaltyAmount(values.penaltyAmount)
                             : normalizePenaltyAmount(existingEvidence.penaltyAmount),
+                        minImages: isAdmin
+                            ? Math.max(1, Math.min(MAX_EVIDENCE_IMAGES, Math.floor(Number(values.evidenceMinImages) || 1)))
+                            : getRequiredEvidenceImageCount(existingEvidence),
                     } : undefined,
                 }
             };
@@ -1782,6 +1796,7 @@ const DailyTasks = () => {
 
     const handleSubmitEvidence = (task: Task) => {
         let selectedImages: File[] = [];
+        const minimumImages = getRequiredEvidenceImageCount(getEvidence(task));
 
         Modal.confirm({
             title: 'Nộp bằng chứng',
@@ -1810,15 +1825,15 @@ const DailyTasks = () => {
                             <Button icon={<UploadOutlined />}>Chọn ảnh từ máy</Button>
                         </Upload>
                         <div style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>
-                            Tối đa {MAX_EVIDENCE_IMAGES} ảnh JPG, PNG hoặc WebP. Ảnh gốc tối đa 15 MB, ưu tiên nén khoảng 100–200 KB và luôn dưới 500 KB trước khi tải lên R2.
+                            Công việc này yêu cầu tối thiểu {minimumImages} ảnh, tối đa {MAX_EVIDENCE_IMAGES} ảnh JPG, PNG hoặc WebP. Ảnh gốc tối đa 15 MB, ưu tiên nén khoảng 100–200 KB và luôn dưới 500 KB trước khi tải lên R2.
                         </div>
                     </div>
                 </div>
             ),
             okText: 'Gửi bằng chứng', cancelText: 'Hủy',
             onOk: async () => {
-                if (selectedImages.length === 0) {
-                    message.warning('Vui lòng chọn ảnh bằng chứng từ máy.');
+                if (selectedImages.length < minimumImages) {
+                    message.warning(`Công việc này yêu cầu ít nhất ${minimumImages} ảnh bằng chứng. Bạn mới chọn ${selectedImages.length} ảnh.`);
                     return Promise.reject();
                 }
                 const invalidImage = selectedImages.find(image => !getEvidenceImageMimeType(image) || image.size > MAX_EVIDENCE_SOURCE_BYTES);
@@ -2635,7 +2650,7 @@ const DailyTasks = () => {
                             </div>
                             <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                                 <Tag style={{ margin: 0, whiteSpace: 'nowrap', color: '#fff', background: categoryColor, borderColor: categoryColor }}>{task.category}</Tag>
-                                {isEvidenceTask && <Tag icon={<UploadOutlined />} style={{ margin: 0, whiteSpace: 'nowrap', color: '#fff', background: '#ee4d2d', borderColor: '#ee4d2d', fontWeight: 600 }}>Cần bằng chứng</Tag>}
+                                {isEvidenceTask && <Tag icon={<UploadOutlined />} style={{ margin: 0, whiteSpace: 'nowrap', color: '#fff', background: '#ee4d2d', borderColor: '#ee4d2d', fontWeight: 600 }}>Ít nhất {getRequiredEvidenceImageCount(evidence)} ảnh</Tag>}
                                 {isEvidenceTask && <Tag icon={evidenceMethodMeta.icon} style={{ margin: 0, whiteSpace: 'nowrap', color: '#fff', background: evidenceMethodMeta.color, borderColor: evidenceMethodMeta.color }}>{evidenceMethodMeta.label}</Tag>}
                             </div>
                         </div>
@@ -3303,7 +3318,7 @@ const DailyTasks = () => {
                             </Tooltip>
                         )}
                     </> : <span>{evidence.required
-                        ? <><UploadOutlined /> Cần bằng chứng {evidencePenaltyAmount ? `· Phạt ${formatPenaltyAmount(evidencePenaltyAmount)}đ` : ''}</>
+                        ? <><UploadOutlined /> Cần ít nhất {getRequiredEvidenceImageCount(evidence)} ảnh {evidencePenaltyAmount ? `· Phạt ${formatPenaltyAmount(evidencePenaltyAmount)}đ` : ''}</>
                         : isAssignment
                             ? <><WarningOutlined /> Phạt trễ deadline {formatPenaltyAmount(getAssignmentDeadlinePenalty(task))}đ</>
                             : 'Không bắt buộc bằng chứng'}</span>}
@@ -4056,10 +4071,18 @@ const DailyTasks = () => {
                     <Form.Item name="recurrenceDays" label="Tự lặp lại sau (ngày)" extra="0 = không lặp; ví dụ 2 = tự sinh lại sau 2 ngày. Nếu rơi vào Chủ nhật/ngày lễ, tự dời sang ngày làm việc kế tiếp." style={{ marginBottom: 18 }}>
                         <InputNumber min={0} max={365} precision={0} controls style={{ width: 180 }} />
                     </Form.Item>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, padding: '10px 12px', border: '1px solid #bbf7d0', borderRadius: 7, background: '#f0fdf4' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 14, padding: '10px 12px', border: '1px solid #bbf7d0', borderRadius: 7, background: '#f0fdf4' }}>
                         <Form.Item name="evidenceRequired" hidden initialValue={true}><Input /></Form.Item>
                         <PictureOutlined style={{ color: '#16a34a' }} />
-                        <span style={{ color: '#166534', fontWeight: 650 }}>Bàn giao bắt buộc nộp bằng chứng ảnh trước khi hoàn thành</span>
+                        <span style={{ color: '#166534', fontWeight: 650, flex: 1 }}>Bàn giao bắt buộc nộp bằng chứng ảnh trước khi hoàn thành</span>
+                        <Form.Item
+                            name="evidenceMinImages"
+                            label="Số ảnh tối thiểu"
+                            rules={[{ required: true, message: 'Nhập số ảnh.' }]}
+                            style={{ margin: 0, width: 145, maxWidth: '100%' }}
+                        >
+                            <InputNumber min={1} max={MAX_EVIDENCE_IMAGES} precision={0} controls style={{ width: '100%' }} />
+                        </Form.Item>
                         <Form.Item noStyle shouldUpdate={(previous, current) => previous.evidenceRequired !== current.evidenceRequired}>
                             {({ getFieldValue }) => false && getFieldValue('evidenceRequired') ? (
                                 <Form.Item name="evidencePenaltyAmount" label="Phạt không nộp (đ)" style={{ margin: 0, marginLeft: 'auto', width: 185 }}>
@@ -4359,14 +4382,17 @@ const DailyTasks = () => {
                     {!isAdmin && <div style={{ marginTop: -12, marginBottom: 16, fontSize: 12, color: '#64748b' }}>Chỉ admin được đổi loại hoàn thành.</div>}
                     <Form.Item noStyle shouldUpdate={(prev, current) => prev.evidenceRequired !== current.evidenceRequired}>
                         {({ getFieldValue }) => getFieldValue('evidenceRequired') ? (
-                            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(104px, 0.75fr) minmax(120px, 0.9fr)', gap: 10, padding: 12, marginBottom: 16, border: '1px solid #fed7aa', borderRadius: 8, background: '#fffaf5' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10, padding: 12, marginBottom: 16, border: '1px solid #fed7aa', borderRadius: 8, background: '#fffaf5' }}>
                                 <Form.Item name="evidenceDeadlineTime" label="Hạn chót" rules={[{ required: true }]} style={{ marginBottom: 0 }}>
                                     <Select size="middle" disabled options={[{ value: DAILY_EVIDENCE_DEADLINE, label: '23:59 cuối ngày' }]} />
+                                </Form.Item>
+                                <Form.Item name="evidenceMinImages" label="Ảnh tối thiểu" rules={[{ required: true, message: 'Nhập số ảnh.' }]} style={{ marginBottom: 0 }}>
+                                    <InputNumber min={1} max={MAX_EVIDENCE_IMAGES} precision={0} controls disabled={!isAdmin} style={{ width: '100%' }} />
                                 </Form.Item>
                                 <Form.Item name="penaltyAmount" label="Phạt (đ)" style={{ marginBottom: 0 }}>
                                     <InputNumber min={0} precision={0} controls={false} suffix="đ" disabled={!isAdmin} style={{ width: '100%' }} formatter={formatPenaltyAmount} parser={(value) => String(value || '').replace(/[^\d]/g, '')} />
                                 </Form.Item>
-                                <div style={{ gridColumn: '1 / -1', fontSize: 12, color: '#c2410c' }}>Bằng chứng bằng ảnh, tối đa {MAX_EVIDENCE_IMAGES} ảnh mỗi lần nộp. Hệ thống chỉ ghi nhận phạt từ 00:00 ngày kế tiếp.</div>
+                                <div style={{ gridColumn: '1 / -1', fontSize: 12, color: '#c2410c' }}>Mỗi công việc có thể yêu cầu từ 1 đến {MAX_EVIDENCE_IMAGES} ảnh. Hệ thống chỉ ghi nhận phạt từ 00:00 ngày kế tiếp.</div>
                             </div>
                         ) : null}
                     </Form.Item>

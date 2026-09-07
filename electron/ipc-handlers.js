@@ -16600,6 +16600,11 @@ const ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX = "assignmentEvidencePenalty:";
 const REJECTED_EVIDENCE_PENALTY_KEY_PREFIX = "rejectedEvidencePenalty:";
 const getDailyTaskReferenceCode = (taskId) =>
   `CV-${String(taskId ?? "").padStart(4, "0")}`;
+
+function getRequiredEvidenceImageCount(evidence) {
+  const configured = Math.floor(Number(evidence?.minImages) || 1);
+  return Math.max(1, Math.min(MAX_EVIDENCE_IMAGES, configured));
+}
 const DAILY_TASK_REST_DAY_HOLIDAYS = new Set([
   "01-01",
   "04-30",
@@ -16883,6 +16888,7 @@ function getEvidenceHistoryPayload(evidence) {
     required: true,
     method: evidence.method || "image",
     penaltyAmount: Number(evidence.penaltyAmount) || 0,
+    minImages: getRequiredEvidenceImageCount(evidence),
     submittedAt: evidence.submittedAt || null,
     submittedBy: evidence.submittedBy || "",
     submittedImages: getSubmittedEvidenceImages(evidence),
@@ -17776,8 +17782,11 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
       : payload?.image
         ? [payload.image]
         : [];
-    if (images.length === 0)
-      throw new Error("Vui lòng chọn ít nhất một ảnh bằng chứng.");
+    const minimumImages = getRequiredEvidenceImageCount(attachments.evidence);
+    if (images.length < minimumImages)
+      throw new Error(
+        `Công việc này yêu cầu ít nhất ${minimumImages} ảnh bằng chứng. Bạn mới gửi ${images.length} ảnh.`,
+      );
     if (images.length > MAX_EVIDENCE_IMAGES) {
       throw new Error(
         `Chỉ được nộp tối đa ${MAX_EVIDENCE_IMAGES} ảnh bằng chứng.`,
@@ -18754,6 +18763,10 @@ ipcMain.handle("dailyTasks:create", async (event, taskData) => {
   try {
     requireRole("admin");
     const attachments = parseTaskAttachments(taskData.attachments);
+    if (attachments.evidence?.required) {
+      attachments.evidence.minImages =
+        getRequiredEvidenceImageCount(attachments.evidence);
+    }
     const rotationAssignee = getDailyRotationAssignee(attachments);
     if (rotationAssignee)
       taskData = { ...taskData, assignee: rotationAssignee };
@@ -18768,9 +18781,7 @@ ipcMain.handle("dailyTasks:create", async (event, taskData) => {
         type: "daily",
         dueDate: getDailyTaskEndOfDay(taskData.dueDate),
         tags: taskData.tags ? JSON.stringify(taskData.tags) : null,
-        attachments: taskData.attachments
-          ? JSON.stringify(taskData.attachments)
-          : null,
+        attachments: taskData.attachments ? JSON.stringify(attachments) : null,
       },
     });
 
@@ -18815,6 +18826,7 @@ ipcMain.handle(
         required: true,
         method: "image",
         status: attachments.evidence?.status || "pending",
+        minImages: getRequiredEvidenceImageCount(attachments.evidence),
         penaltyAmount:
           Number(attachments.evidence?.penaltyAmount) ||
           assignmentPenaltyAmount,
@@ -19469,6 +19481,10 @@ ipcMain.handle("dailyTasks:update", async (event, id, updates) => {
       updates.attachments !== undefined
         ? parseTaskAttachments(updates.attachments)
         : existingAttachments;
+    if (attachments.evidence?.required) {
+      attachments.evidence.minImages =
+        getRequiredEvidenceImageCount(attachments.evidence);
+    }
     const rotationAssignee = getDailyRotationAssignee(attachments);
     if (rotationAssignee) {
       updates = { ...updates, assignee: rotationAssignee };
@@ -19516,9 +19532,7 @@ ipcMain.handle("dailyTasks:update", async (event, id, updates) => {
     }
 
     if (updates.attachments !== undefined) {
-      updateData.attachments = typeof updates.attachments === "string"
-        ? updates.attachments
-        : JSON.stringify(updates.attachments);
+      updateData.attachments = JSON.stringify(attachments);
     }
 
     if (
