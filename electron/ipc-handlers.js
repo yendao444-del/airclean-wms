@@ -100,6 +100,7 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "handlingUnits:markQrLabelsReceived",
   "handlingUnits:exportLabelsPdf",
   "handlingUnits:quickReceive",
+  "handlingUnits:splitUnit",
   // Stock-check unit reconciliation is role-gated, transactional and uses an
   // expected-balance guard so a stale screen cannot overwrite a newer count.
   "handlingUnits:updateUnit",
@@ -108,6 +109,7 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   // idempotency result in the same transaction as the balance/history change.
   "handlingUnits:sealUnit",
   "handlingUnits:pickUnit",
+  "handlingUnits:mergeReturnUnit",
   "handlingUnits:requestFinalCheck",
   "handlingUnits:finalizeShiftCheck",
   // Purchase creation claims an idempotency key and commits the receipt,
@@ -1440,6 +1442,7 @@ const DATA_SAFETY_BLOCKED_CHANNELS = new Map([
   ["handlingUnits:issueQrLabels", "Phát hành tem kiện chưa có rollback đã kiểm chứng"],
   ["handlingUnits:markQrLabelsPrinted", "Cập nhật hàng loạt trạng thái tem chưa có rollback"],
   ["handlingUnits:markQrLabelsReceived", "Cập nhật hàng loạt trạng thái tem chưa có rollback"],
+  ["handlingUnits:splitUnit", "Tách kiện vật lý và khóa mã kiện cha"],
   ["handlingUnits:allocate", "Phân bổ kiện chưa có đối soát phục hồi đã kiểm chứng"],
   ["handlingUnits:move", "Di chuyển kiện chưa có đối soát phục hồi đã kiểm chứng"],
   ["handlingUnits:updateUnit", "Sửa kiện có thể ghi đè trạng thái dùng chung"],
@@ -4473,6 +4476,28 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
           if (normalizedItems.length === 0)
             throw new Error("Phiếu hoàn không có SKU hợp lệ để cộng kho.");
 
+          const physicalReturnBySku = new Map();
+          for (const item of normalizedItems) {
+            const combo = await tx.comboProduct.findUnique({ where: { sku: item.sku } });
+            const components = combo ? parseJsonArray(combo.items) : [];
+            const physicalItems = components.length > 0
+              ? components.map((component) => ({
+                  sku: String(component?.sku || "").trim(),
+                  quantity: Number(component?.quantity || 0) * item.quantity,
+                }))
+              : [item];
+            for (const physicalItem of physicalItems) {
+              if (!physicalItem.sku || !Number.isFinite(physicalItem.quantity) || physicalItem.quantity <= 0) continue;
+              physicalReturnBySku.set(
+                physicalItem.sku,
+                Number(physicalReturnBySku.get(physicalItem.sku) || 0) + physicalItem.quantity,
+              );
+            }
+          }
+          const physicalReturnItems = [...physicalReturnBySku.entries()].map(([sku, quantity]) => ({ sku, quantity }));
+          if (physicalReturnItems.length === 0)
+            throw new Error("Không xác định được SKU vật lý của hàng hoàn.");
+
           const reference = String(
             refund.orderNumber || refund.refundCode || `P.Hoan ${refund.id}`,
           ).trim();
@@ -4490,13 +4515,49 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
             });
           }
 
+          const returnUnits = [];
+          for (let index = 0; index < physicalReturnItems.length; index += 1) {
+            const item = physicalReturnItems[index];
+            const product = await resolveProductForHandlingSku(tx, item.sku);
+            const code = newRefundHandlingUnitCode(refund.id, item.sku, index + 1);
+            const unit = await tx.handlingUnit.create({
+              data: {
+                code,
+                productId: product.productId,
+                sku: item.sku,
+                color: product.color,
+                packagingName: "Hàng hoàn",
+                baseUnit: product.baseUnit,
+                conversionFactor: 1,
+                initialQuantity: item.quantity,
+                remainingQuantity: item.quantity,
+                status: "opened",
+                zone: JSON.stringify({ zone: "Hàng hoàn", rack: "Chờ gộp" }),
+              },
+            });
+            returnUnits.push(unit);
+          }
+          await appendHandlingUnitsTransactions(
+            tx,
+            returnUnits.map((unit) => ({
+              unitId: unit.code,
+              sku: unit.sku,
+              type: "Tạo kiện hàng hoàn",
+              quantity: unit.initialQuantity,
+              remaining: unit.remainingQuantity,
+              actor: currentSession.username,
+              reference,
+              note: `Tạo kiện hàng hoàn từ ${reference}`,
+            })),
+          );
+
           const nextNotes =
             data.notes === undefined ? refund.notes : String(data.notes || "");
           const updatedRefund = await tx.refund.update({
             where: { id: refund.id },
             data: { status: "completed", notes: nextNotes },
           });
-          return { refund: updatedRefund, items: normalizedItems, reference };
+          return { refund: updatedRefund, items: normalizedItems, reference, returnUnits };
         },
         { timeout: 30000, maxWait: 10000 },
       ),
@@ -4511,6 +4572,11 @@ ipcMain.handle("refunds:completeAndRestore", async (event, data = {}) => {
         reference: response.reference,
       });
     }
+    broadcastHandlingUnitsChanged("REFUND_UNITS_CREATED", {
+      refundId,
+      reference: response.reference,
+      codes: response.returnUnits.map((unit) => unit.code),
+    });
     return { success: true, data: response };
   } catch (error) {
     return { success: false, error: error.message };
@@ -6419,6 +6485,7 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
       packagingSpecsCfg,
       qrLabelsCfg,
       suppliers,
+      splitRecords,
     ] = await Promise.all([
         prisma.product.findMany({
           where: {
@@ -6467,6 +6534,10 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
           where: { status: "active" },
           select: { id: true, code: true, name: true },
           orderBy: { name: "asc" },
+        }),
+        prisma.appConfig.findMany({
+          where: { key: { startsWith: "handlingUnitSplitParent:" } },
+          select: { key: true, value: true },
         }),
       ]);
 
@@ -6528,6 +6599,21 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
       } catch {}
       return { zone: value || "Chưa phân khu", rack: "", level: "", bin: "" };
     };
+    const splitByParent = new Map();
+    const parentByChild = new Map();
+    (Array.isArray(splitRecords) ? splitRecords : []).forEach((record) => {
+      try {
+        const parsed = JSON.parse(record.value || "{}");
+        const parentCode = String(parsed?.parentCode || "").trim().toUpperCase();
+        const children = Array.isArray(parsed?.children) ? parsed.children : [];
+        if (!parentCode || !children.length) return;
+        splitByParent.set(parentCode, children);
+        children.forEach((child) => {
+          const childCode = String(child?.code || "").trim().toUpperCase();
+          if (childCode) parentByChild.set(childCode, parentCode);
+        });
+      } catch {}
+    });
     let register = dbRegister.map((row) => ({
       id: row.code,
       productId: row.productId,
@@ -6546,14 +6632,18 @@ ipcMain.handle("handlingUnits:getWorkspace", async () => {
               ? "Đang sử dụng"
               : row.status === "pending_check"
                 ? "Chờ kiểm"
-              : row.status === "empty"
-            ? "Đã hết"
-            : "Nguyên niêm phong",
+                : row.status === "empty"
+                  ? "Đã hết"
+                  : row.status === "split"
+                    ? "Đã tách"
+                    : "Nguyên niêm phong",
       location: decodeLocation(row.zone),
       initialPcs: row.initialQuantity,
       currentPcs: row.remainingQuantity,
       note: "",
       updatedAt: row.updatedAt,
+      parentUnitCode: parentByChild.get(String(row.code).toUpperCase()) || undefined,
+      childUnits: splitByParent.get(String(row.code).toUpperCase()) || undefined,
     }));
     let recentTransactions = [];
     try {
@@ -6699,9 +6789,11 @@ ipcMain.handle("handlingUnits:saveRegister", async (_event, records = []) => {
             ? "opened"
             : item.status === "Chờ kiểm"
               ? "pending_check"
-            : item.status === "Đã hết"
-              ? "empty"
-              : "sealed";
+              : item.status === "Đã hết"
+                ? "empty"
+                : item.status === "Đã tách"
+                  ? "split"
+                  : "sealed";
         await tx.handlingUnit.upsert({
           where: { code: item.id },
           update: {
@@ -6960,13 +7052,16 @@ function toHandlingUnitLocationCode(location) {
 
 async function resolveProductForHandlingSku(tx, sku) {
   const products = await tx.product.findMany({
-    select: { id: true, sku: true, stock: true, variants: true },
+    select: { id: true, name: true, sku: true, unit: true, stock: true, variants: true },
   });
   const normalizedSku = String(sku || "").trim();
   for (const product of products) {
     if (String(product.sku) === normalizedSku) {
       return {
         productId: product.id,
+        productName: product.name,
+        color: null,
+        baseUnit: product.unit || "Cái",
         stock: Math.max(0, Number(product.stock || 0)),
       };
     }
@@ -6977,12 +7072,24 @@ async function resolveProductForHandlingSku(tx, sku) {
     if (variant)
       return {
         productId: product.id,
+        productName: product.name,
+        color: String(variant?.color || "").trim() || null,
+        baseUnit: product.unit || "Cái",
         stock: Math.max(0, Number(variant?.stock || 0)),
       };
   }
   throw new Error(
     `Không tìm thấy SKU ${normalizedSku} trong danh mục sản phẩm.`,
   );
+}
+
+function newRefundHandlingUnitCode(refundId, sku, position) {
+  const compactSku =
+    String(sku || "SKU")
+      .replace(/[^A-Za-z0-9]/g, "")
+      .slice(-16)
+      .toUpperCase() || "SKU";
+  return `HH-${refundId}-${compactSku}-${String(position).padStart(2, "0")}`;
 }
 
 function newHandlingUnitCode(sku, position) {
@@ -6996,6 +7103,37 @@ function newHandlingUnitCode(sku, position) {
     .replace(/[-:.TZ]/g, "")
     .slice(0, 14);
   return `HU-${compactSku}-${stamp}-${String(position).padStart(3, "0")}`;
+}
+
+function newSplitHandlingUnitCodes(count) {
+  const day = new Date().toISOString().slice(2, 10).replace(/-/g, "");
+  const batch = crypto.randomBytes(3).toString("hex").toUpperCase();
+  return Array.from(
+    { length: count },
+    (_unused, index) => `SPL-${day}-${batch}-${String(index + 1).padStart(3, "0")}`,
+  );
+}
+
+function splitParentConfigKey(code) {
+  return `handlingUnitSplitParent:${String(code || "").trim().toUpperCase()}`;
+}
+
+async function buildSplitHandlingUnitMessage(client, code) {
+  const normalizedCode = String(code || "").trim().toUpperCase();
+  const record = await client.appConfig.findUnique({
+    where: { key: splitParentConfigKey(normalizedCode) },
+    select: { value: true },
+  });
+  let children = [];
+  try {
+    children = JSON.parse(record?.value || "{}")?.children || [];
+  } catch {}
+  const childText = children
+    .map((child) => `${child.code} (${child.quantity})`)
+    .join(", ");
+  return childText
+    ? `Kiện [${normalizedCode}] đã được tách thành ${children.length} kiện nhỏ: ${childText}. Mã QR cũ chỉ dùng để tra cứu lịch sử, không thể khui hoặc rút hàng.`
+    : `Kiện [${normalizedCode}] đã được tách. Mã QR cũ chỉ dùng để tra cứu lịch sử, không thể tiếp tục thao tác.`;
 }
 
 ipcMain.handle("handlingUnits:createLocation", async (_event, payload = {}) => {
@@ -7529,6 +7667,16 @@ ipcMain.handle("handlingUnits:resolveQrLabel", async (_event, code) => {
     await requireHandlingUnitsFoundation();
     const normalizedCode = String(code || "").trim().toUpperCase();
     if (!normalizedCode) throw new Error("Mã QR trống.");
+    const existingUnit = await prisma.handlingUnit.findUnique({
+      where: { code: normalizedCode },
+      select: { code: true, status: true },
+    });
+    if (existingUnit?.status === "split") {
+      throw new Error(await buildSplitHandlingUnitMessage(prisma, normalizedCode));
+    }
+    if (existingUnit) {
+      throw new Error(`Mã QR [${normalizedCode}] đã gắn với kiện hàng trong kho, không thể nhập lại.`);
+    }
     const registry = await readHandlingConfigArray(prisma, HANDLING_QR_LABELS_KEY);
     const label = registry.find(
       (item) => String(item?.code || "").trim().toUpperCase() === normalizedCode,
@@ -7783,6 +7931,9 @@ ipcMain.handle("handlingUnits:move", async (_event, payload = {}) => {
     const updated = await prisma.$transaction(async (tx) => {
       const existing = await tx.handlingUnit.findUnique({ where: { code } });
       if (!existing) throw new Error("Không tìm thấy kiện hàng.");
+      if (existing.status === "split") {
+        throw new Error(await buildSplitHandlingUnitMessage(tx, code));
+      }
       const before = existing.zone;
       const moved = await tx.handlingUnit.update({
         where: { code },
@@ -7850,6 +8001,9 @@ ipcMain.handle("handlingUnits:updateUnit", async (_event, payload = {}) => {
     const result = await prisma.$transaction(async (tx) => {
       const before = await tx.handlingUnit.findUnique({ where: { code } });
       if (!before) throw new Error(`Không tìm thấy kiện [${code}].`);
+      if (before.status === "split") {
+        throw new Error(await buildSplitHandlingUnitMessage(tx, code));
+      }
       if (
         expectedRemainingQuantity !== null &&
         Number(before.remainingQuantity) !== expectedRemainingQuantity
@@ -7913,6 +8067,227 @@ ipcMain.handle("handlingUnits:updateUnit", async (_event, payload = {}) => {
     return { success: true, data: result };
   } catch (error) {
     console.error("Update handling unit error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("handlingUnits:splitUnit", async (_event, payload = {}) => {
+  try {
+    requireRole("admin", "manager");
+    await requireHandlingUnitsFoundation();
+
+    const code = String(payload.code || "").trim().toUpperCase();
+    const childQuantities = (Array.isArray(payload.childQuantities)
+      ? payload.childQuantities
+      : []
+    ).map((quantity) => Math.floor(Number(quantity)));
+    const expectedRemainingQuantity = Math.floor(
+      Number(payload.expectedRemainingQuantity),
+    );
+    const idempotencyKey = String(payload.idempotencyKey || "").trim();
+    const operationKey = buildRendererHandlingOperationKey(
+      idempotencyKey,
+      "split",
+      code,
+    );
+
+    if (!code) throw new Error("Mã kiện cần tách không hợp lệ.");
+    if (!operationKey) throw new Error("Mã chống tách kiện trùng không hợp lệ.");
+    if (childQuantities.length < 2 || childQuantities.length > 20) {
+      throw new Error("Mỗi lần tách phải tạo từ 2 đến 20 kiện con.");
+    }
+    if (childQuantities.some((quantity) => !Number.isInteger(quantity) || quantity <= 0)) {
+      throw new Error("Số lượng của từng kiện con phải là số nguyên lớn hơn 0.");
+    }
+    if (!Number.isInteger(expectedRemainingQuantity) || expectedRemainingQuantity <= 1) {
+      throw new Error("Tồn kiện trước khi tách không hợp lệ.");
+    }
+
+    const result = await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${code}`}))`;
+
+        const completed = await tx.appConfig.findUnique({
+          where: { key: operationKey },
+          select: { value: true },
+        });
+        if (completed?.value) {
+          const saved = JSON.parse(completed.value);
+          const childCodes = Array.isArray(saved.childCodes) ? saved.childCodes : [];
+          const [parent, children] = await Promise.all([
+            tx.handlingUnit.findUnique({ where: { code } }),
+            tx.handlingUnit.findMany({
+              where: { code: { in: childCodes } },
+              orderBy: { createdAt: "asc" },
+            }),
+          ]);
+          return { parent, children, childCodes, duplicate: true };
+        }
+
+        const parent = await tx.handlingUnit.findUnique({ where: { code } });
+        if (!parent) throw new Error(`Không tìm thấy kiện [${code}].`);
+        if (parent.status === "split") {
+          throw new Error(await buildSplitHandlingUnitMessage(tx, code));
+        }
+        if (parent.status === "pending_check") {
+          throw new Error(`Kiện [${code}] đang chờ kiểm thực tế, cần chốt kiểm trước khi tách.`);
+        }
+        if (parent.status === "empty" || Number(parent.remainingQuantity) <= 1) {
+          throw new Error(`Kiện [${code}] không còn đủ hàng để tách thành nhiều kiện.`);
+        }
+        if (!['sealed', 'opened'].includes(parent.status)) {
+          throw new Error(`Trạng thái hiện tại của kiện [${code}] không cho phép tách.`);
+        }
+        if (Number(parent.remainingQuantity) !== expectedRemainingQuantity) {
+          throw new Error(
+            `Tồn kiện [${code}] vừa thay đổi từ ${expectedRemainingQuantity} thành ${parent.remainingQuantity}. Vui lòng tải lại trước khi tách.`,
+          );
+        }
+
+        const totalChildren = childQuantities.reduce(
+          (total, quantity) => total + quantity,
+          0,
+        );
+        if (totalChildren !== Number(parent.remainingQuantity)) {
+          throw new Error(
+            `Tổng các kiện con (${totalChildren}) phải đúng bằng tồn hiện tại của kiện cha (${parent.remainingQuantity} ${parent.baseUnit}).`,
+          );
+        }
+
+        let childCodes = [];
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          const candidates = newSplitHandlingUnitCodes(childQuantities.length);
+          const collision = await tx.handlingUnit.findFirst({
+            where: { code: { in: candidates } },
+            select: { code: true },
+          });
+          if (!collision) {
+            childCodes = candidates;
+            break;
+          }
+        }
+        if (childCodes.length !== childQuantities.length) {
+          throw new Error("Không tạo được mã kiện con duy nhất. Vui lòng thử lại.");
+        }
+
+        const location = normalizeHandlingLocation(payload.location || (() => {
+          try {
+            return JSON.parse(parent.zone || "{}");
+          } catch {
+            return { zone: parent.zone || "Chưa phân khu" };
+          }
+        })());
+        const packagingName = String(payload.packagingName || parent.packagingName || "Kiện")
+          .trim() || "Kiện";
+        const childRows = childCodes.map((childCode, index) => ({
+          code: childCode,
+          purchaseOrderId: parent.purchaseOrderId,
+          purchaseItemId: parent.purchaseItemId,
+          productId: parent.productId,
+          sku: parent.sku,
+          color: parent.color,
+          packagingName,
+          baseUnit: parent.baseUnit,
+          conversionFactor: childQuantities[index],
+          initialQuantity: childQuantities[index],
+          remainingQuantity: childQuantities[index],
+          status: "sealed",
+          zone: JSON.stringify(location),
+        }));
+
+        await tx.handlingUnit.createMany({ data: childRows });
+        const updatedParent = await tx.handlingUnit.update({
+          where: { code },
+          data: {
+            remainingQuantity: 0,
+            status: "split",
+            updatedAt: new Date(),
+          },
+        });
+
+        const actor = currentSession?.username || "Renderer";
+        const children = childRows.map((child, index) => ({
+          code: child.code,
+          quantity: childQuantities[index],
+        }));
+        const splitRecord = {
+          parentCode: code,
+          sku: parent.sku,
+          originalRemainingQuantity: parent.remainingQuantity,
+          children,
+          splitAt: new Date().toISOString(),
+          actor,
+        };
+        await appendHandlingUnitsTransactions(tx, [
+          {
+            unitId: code,
+            sku: parent.sku,
+            type: "Tách kiện",
+            quantity: -Number(parent.remainingQuantity),
+            remaining: 0,
+            actor,
+            childUnitCodes: childCodes,
+            note: `Tách ${parent.remainingQuantity} ${parent.baseUnit} thành ${children.map((child) => `${child.code}: ${child.quantity}`).join(" · ")}`,
+          },
+          ...children.map((child) => ({
+            unitId: child.code,
+            sku: parent.sku,
+            type: "Nhận từ tách kiện",
+            quantity: child.quantity,
+            remaining: child.quantity,
+            actor,
+            parentUnitCode: code,
+            note: `Tạo từ kiện cha ${code}`,
+          })),
+        ]);
+        await tx.appConfig.create({
+          data: {
+            key: splitParentConfigKey(code),
+            value: JSON.stringify(splitRecord),
+          },
+        });
+        await tx.appConfig.create({
+          data: {
+            key: operationKey,
+            value: JSON.stringify({
+              parentCode: code,
+              childCodes,
+              completedAt: splitRecord.splitAt,
+            }),
+          },
+        });
+        const createdChildren = await tx.handlingUnit.findMany({
+          where: { code: { in: childCodes } },
+          orderBy: { createdAt: "asc" },
+        });
+        return {
+          parent: updatedParent,
+          children: createdChildren,
+          childCodes,
+          duplicate: false,
+        };
+      },
+      {
+        timeout: 60000,
+        maxWait: 10000,
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      },
+    );
+
+    if (!result.duplicate) {
+      broadcastHandlingUnitsChanged("SPLIT", {
+        parentCode: code,
+        childCodes: result.childCodes,
+        sku: result.parent?.sku,
+      });
+    }
+    return {
+      success: true,
+      duplicate: Boolean(result.duplicate),
+      data: result,
+    };
+  } catch (error) {
+    console.error("Split handling unit error:", error);
     return { success: false, error: error.message };
   }
 });
@@ -8768,6 +9143,8 @@ async function executeKhuiKien(
           throw new Error(`Kiện [${normalizedCode}] đang chờ kiểm thực tế.`);
         if (unit.status === "empty")
           throw new Error(`Kiện [${normalizedCode}] đã hết hàng.`);
+        if (unit.status === "split")
+          throw new Error(await buildSplitHandlingUnitMessage(tx, normalizedCode));
 
         const updated = await tx.handlingUnit.update({
           where: { code: normalizedCode },
@@ -8866,6 +9243,8 @@ async function executeKhuiKien(
     throw new Error(`Kiện [${normalizedCode}] đang chờ kiểm thực tế.`);
   if (target.status === "empty" || target.status === "Đã hết")
     throw new Error(`Kiện [${normalizedCode}] đã hết hàng.`);
+  if (target.status === "split" || target.status === "Đã tách")
+    throw new Error(`Kiện [${normalizedCode}] đã được tách. Mã cũ không thể khui hoặc rút hàng.`);
 
   target.status = "opened";
   target.updatedAt = new Date();
@@ -9060,6 +9439,13 @@ async function executeRutHang(
           where: { code: normalizedCode },
         });
         if (!unit) return null;
+        const normalizedPackagingName = String(unit.packagingName || "")
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase();
+        if (normalizedPackagingName.includes("hang hoan")) {
+          throw new Error(`Kiện hàng hoàn [${normalizedCode}] phải được gộp vào kiện đang khui cùng SKU, không được rút trực tiếp.`);
+        }
         try {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-open:${unit.sku}`}))`;
         } catch {
@@ -9082,6 +9468,9 @@ async function executeRutHang(
         }
         if (unit.status === "pending_check") {
           throw new Error(buildPendingHandlingUnitBlockMessage(unit.sku, unit, "rút hàng"));
+        }
+        if (unit.status === "split") {
+          throw new Error(await buildSplitHandlingUnitMessage(tx, normalizedCode));
         }
         if (unit.status !== "opened")
           throw new Error(
@@ -9169,7 +9558,8 @@ async function executeRutHang(
     } catch (dbErr) {
       if (
         dbErr.message.includes("chưa khui") ||
-        dbErr.message.includes("lớn hơn tồn")
+        dbErr.message.includes("lớn hơn tồn") ||
+        dbErr.message.includes("hàng hoàn")
       )
         throw dbErr;
       if (dbErr?.code === "P2002" && operationKey) {
@@ -9201,6 +9591,13 @@ async function executeRutHang(
     throw new Error(`Không tìm thấy kiện [${normalizedCode}] trong kho.`);
 
   const target = list[idx];
+  const normalizedTargetPackaging = String(target.packagingName || target.packageType || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  if (normalizedTargetPackaging.includes("hang hoan")) {
+    throw new Error(`Kiện hàng hoàn [${normalizedCode}] phải được gộp vào kiện đang khui cùng SKU, không được rút trực tiếp.`);
+  }
   const currentStatus = target.status;
   const targetSku = String(target.sku || target.skuName || "").trim();
   const pendingConflict = list.find((candidate) =>
@@ -9213,6 +9610,9 @@ async function executeRutHang(
   }
   if (currentStatus === "pending_check" || currentStatus === "Chờ kiểm") {
     throw new Error(buildPendingHandlingUnitBlockMessage(targetSku, target, "rút hàng"));
+  }
+  if (currentStatus === "split" || currentStatus === "Đã tách") {
+    throw new Error(`Kiện [${normalizedCode}] đã được tách. Mã cũ không thể khui hoặc rút hàng.`);
   }
   if (currentStatus !== "opened" && currentStatus !== "Đang sử dụng") {
     throw new Error(
@@ -9283,7 +9683,9 @@ async function executeRutHang(
 
 async function executeBaoCaoTon() {
   const list = await getAllHandlingUnitsFromStore();
-  const totalPkgs = list.length;
+  const totalPkgs = list.filter(
+    (u) => u.status !== "split" && u.status !== "Đã tách",
+  ).length;
   const sealed = list.filter(
     (u) => u.status === "sealed" || u.status === "Nguyên niêm phong",
   ).length;
@@ -9885,6 +10287,19 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
     text: `🔙 Quay lại ${unit.color || "danh sách kiện"}`,
     callback_data: `rut_variant:${getHandlingUnitCode(unit)}`,
   };
+
+  if (unit.status === "split" || unit.status === "Đã tách") {
+    const splitMessage = prisma
+      ? await buildSplitHandlingUnitMessage(prisma, code)
+      : `Kiện [${code}] đã được tách và mã cũ không thể tiếp tục thao tác.`;
+    await renderTelegramWmsMenu(
+      chatId,
+      messageId,
+      `⛔ <b>KIỆN ĐÃ TÁCH</b>\n\n${splitMessage}`,
+      [[backToProductButton]],
+    );
+    return;
+  }
 
   const pendingConflict = list.find((candidate) =>
     String(candidate.code || candidate.id || "").trim().toUpperCase() !== String(code).trim().toUpperCase()
@@ -10525,7 +10940,9 @@ async function handleTelegramWmsIncomingMessage(message, telegramUpdateId = null
     let body = `📦 <b>DANH SÁCH TẤT CẢ KIỆN HÀNG (${list.length}):</b>\n\n`;
     list.forEach((u, i) => {
       const st =
-        u.status === "opened" || u.status === "Đang sử dụng"
+        u.status === "split" || u.status === "Đã tách"
+          ? "🔵"
+          : u.status === "opened" || u.status === "Đang sử dụng"
           ? "🟠"
           : u.status === "empty"
             ? "⚪"
@@ -10534,7 +10951,7 @@ async function handleTelegramWmsIncomingMessage(message, telegramUpdateId = null
         "vi-VN",
       );
       const unit = u.baseUnit || u.unitName || "Gói";
-      body += `${st} <code>${u.code || u.id}</code> · ${u.sku || u.skuName} (${qty} ${unit})\n`;
+      body += `${st} <code>${u.code || u.id}</code> · ${u.sku || u.skuName} (${qty} ${unit})${u.status === "split" || u.status === "Đã tách" ? " · Đã tách" : ""}\n`;
     });
     const markup = {
       inline_keyboard: [
@@ -10901,6 +11318,9 @@ ipcMain.handle("handlingUnits:sealUnit", async (_event, payload = {}) => {
           `Kiện [${code}] đang chờ kiểm thực tế. Hãy nhập số lượng thực tế và chốt kiện trước, không thể đóng niêm phong để bỏ qua bước kiểm.`,
         );
       }
+      if (current.status === "split") {
+        throw new Error(await buildSplitHandlingUnitMessage(tx, code));
+      }
       if (current.status === "sealed") return current;
       if (current.status !== "opened") {
         throw new Error(`Kiện [${code}] không ở trạng thái đang sử dụng.`);
@@ -10938,6 +11358,16 @@ ipcMain.handle("handlingUnits:deleteUnit", async (_event, payload = {}) => {
     const deleted = await prisma.$transaction(async (tx) => {
       const unit = await tx.handlingUnit.findUnique({ where: { code } });
       if (!unit) throw new Error(`Không tìm thấy kiện [${code}].`);
+      if (unit.status === "split") {
+        throw new Error(await buildSplitHandlingUnitMessage(tx, code));
+      }
+      const normalizedPackagingName = String(unit.packagingName || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase();
+      if (normalizedPackagingName.includes("hang hoan")) {
+        throw new Error(`Không thể xóa kiện hàng hoàn [${code}]. Hãy gộp vào kiện đang khui cùng SKU để bảo toàn tồn kho.`);
+      }
       if (currentSession?.role !== "admin") {
         const withdrawalCodes = await getHandlingUnitWithdrawalCodes(tx);
         let hasWithdrawalHistory = withdrawalCodes.has(code);
@@ -11073,6 +11503,152 @@ ipcMain.handle("handlingUnits:pickUnit", async (_event, payload = {}) => {
   }
 });
 
+ipcMain.handle("handlingUnits:mergeReturnUnit", async (_event, payload = {}) => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Không kết nối được cơ sở dữ liệu kiện hàng.");
+
+    const sourceCode = String(payload.sourceCode || "").trim().toUpperCase();
+    const targetCode = String(payload.targetCode || "").trim().toUpperCase();
+    const quantity = Math.floor(Number(payload.quantity || 0));
+    const idempotencyKey = String(payload.idempotencyKey || "").trim();
+    if (!sourceCode || !targetCode || sourceCode === targetCode)
+      throw new Error("Kiện nguồn và kiện đích không hợp lệ.");
+    if (!Number.isInteger(quantity) || quantity <= 0)
+      throw new Error("Số lượng gộp phải là số nguyên lớn hơn 0.");
+
+    const operationKey = buildRendererHandlingOperationKey(
+      idempotencyKey,
+      "merge-return",
+      `${sourceCode}-${targetCode}`,
+    );
+    if (!operationKey) throw new Error("Mã chống gộp kiện trùng không hợp lệ.");
+
+    const result = await prisma.$transaction(async (tx) => {
+      for (const code of [sourceCode, targetCode].sort()) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`handling-unit-code:${code}`}))`;
+      }
+      const completed = await tx.appConfig.findUnique({ where: { key: operationKey } });
+      if (completed) {
+        const [source, target] = await Promise.all([
+          tx.handlingUnit.findUnique({ where: { code: sourceCode } }),
+          tx.handlingUnit.findUnique({ where: { code: targetCode } }),
+        ]);
+        return { source, target, quantity, duplicate: true };
+      }
+
+      const [source, target] = await Promise.all([
+        tx.handlingUnit.findUnique({ where: { code: sourceCode } }),
+        tx.handlingUnit.findUnique({ where: { code: targetCode } }),
+      ]);
+      if (!source) throw new Error(`Không tìm thấy kiện hàng hoàn [${sourceCode}].`);
+      if (!target) throw new Error(`Không tìm thấy kiện đích [${targetCode}].`);
+
+      const normalizedSourceType = String(source.packagingName || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/đ/g, "d")
+        .toLowerCase();
+      const normalizedTargetType = String(target.packagingName || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/đ/g, "d")
+        .toLowerCase();
+      if (!normalizedSourceType.includes("hang hoan"))
+        throw new Error(`Kiện [${sourceCode}] không phải kiện hàng hoàn.`);
+      if (normalizedTargetType.includes("hang hoan"))
+        throw new Error("Kiện đích phải là kiện thường đang khui, không phải kiện hàng hoàn khác.");
+      if (source.status !== "opened")
+        throw new Error(`Kiện hàng hoàn [${sourceCode}] không ở trạng thái đang sử dụng.`);
+      if (target.status !== "opened")
+        throw new Error(`Kiện đích [${targetCode}] chưa được khui hoặc không còn sử dụng.`);
+      if (String(source.sku).trim().toUpperCase() !== String(target.sku).trim().toUpperCase())
+        throw new Error(`Không thể gộp khác SKU phân loại: ${source.sku} và ${target.sku}.`);
+      if (String(source.baseUnit).trim().toLowerCase() !== String(target.baseUnit).trim().toLowerCase())
+        throw new Error(`Hai kiện khác đơn vị cơ sở: ${source.baseUnit} và ${target.baseUnit}.`);
+      const pendingConflict = await tx.handlingUnit.findFirst({
+        where: {
+          sku: source.sku,
+          status: "pending_check",
+          code: { notIn: [sourceCode, targetCode] },
+        },
+        select: { code: true },
+      });
+      if (pendingConflict) {
+        throw new Error(`SKU ${source.sku} đang có kiện [${pendingConflict.code}] chờ kiểm thực tế. Hãy chốt kiện đó trước khi gộp hàng hoàn.`);
+      }
+      if (quantity > Number(source.remainingQuantity))
+        throw new Error(`Kiện hàng hoàn chỉ còn ${source.remainingQuantity} ${source.baseUnit}.`);
+
+      const availableCapacity = Number(target.initialQuantity) - Number(target.remainingQuantity);
+      if (quantity > availableCapacity) {
+        throw new Error(`Kiện đích [${targetCode}] chỉ còn sức chứa ${Math.max(0, availableCapacity)} ${target.baseUnit}.`);
+      }
+
+      const nextSourceQuantity = Number(source.remainingQuantity) - quantity;
+      const nextTargetQuantity = Number(target.remainingQuantity) + quantity;
+      const [updatedSource, updatedTarget] = await Promise.all([
+        tx.handlingUnit.update({
+          where: { code: sourceCode },
+          data: {
+            remainingQuantity: nextSourceQuantity,
+            status: nextSourceQuantity === 0 ? "empty" : "opened",
+            updatedAt: new Date(),
+          },
+        }),
+        tx.handlingUnit.update({
+          where: { code: targetCode },
+          data: { remainingQuantity: nextTargetQuantity, updatedAt: new Date() },
+        }),
+      ]);
+
+      const actor = currentSession?.username || "Renderer";
+      await appendHandlingUnitsTransactions(tx, [
+        {
+          unitId: sourceCode,
+          sku: source.sku,
+          type: "Gộp hàng hoàn - chuyển đi",
+          quantity: -quantity,
+          remaining: nextSourceQuantity,
+          actor,
+          reference: targetCode,
+          note: `Chuyển ${quantity} ${source.baseUnit} sang kiện đang khui ${targetCode}`,
+        },
+        {
+          unitId: targetCode,
+          sku: target.sku,
+          type: "Nhận gộp hàng hoàn",
+          quantity,
+          remaining: nextTargetQuantity,
+          actor,
+          reference: sourceCode,
+          note: `Nhận ${quantity} ${target.baseUnit} từ kiện hàng hoàn ${sourceCode}`,
+        },
+      ]);
+      await tx.appConfig.create({
+        data: {
+          key: operationKey,
+          value: JSON.stringify({ sourceCode, targetCode, quantity, completedAt: new Date().toISOString() }),
+        },
+      });
+      return { source: updatedSource, target: updatedTarget, quantity, duplicate: false };
+    });
+
+    if (!result.duplicate) {
+      broadcastHandlingUnitsChanged("RETURN_UNIT_MERGED", {
+        sourceCode,
+        targetCode,
+        quantity,
+        sku: result.source?.sku,
+      });
+    }
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("Merge return handling unit error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle("handlingUnits:requestFinalCheck", async (_event, payload = {}) => {
   const idempotencyKey = String(payload.idempotencyKey || "").trim();
   const requestKey = idempotencyKey ? `request-final-check:${idempotencyKey}` : null;
@@ -11100,6 +11676,9 @@ ipcMain.handle("handlingUnits:requestFinalCheck", async (_event, payload = {}) =
         }
         const unit = await tx.handlingUnit.findUnique({ where: { code } });
         if (!unit) return null;
+        if (unit.status === "split") {
+          throw new Error(await buildSplitHandlingUnitMessage(tx, code));
+        }
         if (unit.status !== "opened") {
           throw new Error(`Kiện [${code}] chưa ở trạng thái đang sử dụng.`);
         }
@@ -11189,6 +11768,9 @@ ipcMain.handle("handlingUnits:finalizePick", async (_event, payload = {}) => {
     if (!operationKey) throw new Error("Mã chống chốt kiện trùng không hợp lệ.");
 
     const recordFinalCheck = async (tx, unit) => {
+      if (unit.status === "split" || unit.status === "Đã tách") {
+        throw new Error(await buildSplitHandlingUnitMessage(tx, code));
+      }
       if (unit.status !== "pending_check" && unit.status !== "Chờ kiểm") {
         throw new Error(`Kiện [${code}] chưa ở trạng thái chờ kiểm.`);
       }
@@ -11395,6 +11977,9 @@ ipcMain.handle("handlingUnits:finalizeShiftCheck", async (_event, payload = {}) 
       for (const item of normalizedItems) {
         const unit = await tx.handlingUnit.findUnique({ where: { code: item.code } });
         if (!unit) throw new Error(`Không tìm thấy kiện [${item.code}].`);
+        if (unit.status === "split" || unit.status === "Đã tách") {
+          throw new Error(await buildSplitHandlingUnitMessage(tx, item.code));
+        }
         if (Number(unit.remainingQuantity) !== item.expectedQuantity) {
           throw new Error(
             `Tồn kiện [${item.code}] vừa thay đổi từ ${item.expectedQuantity} thành ${unit.remainingQuantity}. Vui lòng tải lại và kiểm lại.`,
