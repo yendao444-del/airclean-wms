@@ -360,6 +360,19 @@ export interface ElectronAPI {
       data?: { purchases: any[]; unitCodes: string[] };
       error?: string;
     }>;
+    splitUnit: (data: {
+      code: string;
+      childQuantities: number[];
+      packagingName?: string;
+      location?: { zone?: string; rack?: string };
+      expectedRemainingQuantity: number;
+      idempotencyKey: string;
+    }) => Promise<{
+      success: boolean;
+      duplicate?: boolean;
+      data?: { parent: any; children: any[]; childCodes: string[] };
+      error?: string;
+    }>;
     saveRegister: (
       records: any[],
     ) => Promise<{ success: boolean; data?: any[]; error?: string }>;
@@ -375,6 +388,12 @@ export interface ElectronAPI {
       destination?: "PACKING" | "LOOSE" | "OUTBOUND" | "QUARANTINE";
       note?: string;
       idempotencyKey?: string;
+    }) => Promise<{ success: boolean; data?: any; error?: string }>;
+    mergeReturnUnit: (data: {
+      sourceCode: string;
+      targetCode: string;
+      quantity: number;
+      idempotencyKey: string;
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
     requestFinalCheck: (data: {
       code: string;

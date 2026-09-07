@@ -148,6 +148,19 @@ interface HandlingCatalogItem {
     unitName: string;
 }
 
+interface HandlingUnitTransaction {
+    id: string;
+    unitId?: string;
+    sku?: string;
+    createdAt: string;
+    type?: string;
+    quantity?: number;
+    remaining?: number;
+    destination?: string;
+    actor?: string;
+    note?: string;
+}
+
 interface PackageSkuConfirmation {
     item: CheckItem;
     actualTotal: number;
@@ -244,6 +257,7 @@ interface ReconciliationLogPage {
 }
 
 type ProductTabKey = 'check' | 'ledger' | 'reconciliation' | 'conversion';
+type SkuHistoryTabKey = 'check-history' | 'ledger';
 
 const createStockCheckRunId = () =>
     globalThis.crypto?.randomUUID?.() || `stock-check-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -382,6 +396,9 @@ function normalizeBalanceItems(items: BalanceHistoryRecord['items']): BalanceHis
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function StockCheck({ onExit }: { onExit?: () => void }) {
+    const onExitRef = useRef(onExit);
+    onExitRef.current = onExit;
+
     const { user } = useAuth();
     const currentUser = useCurrentUser();
     const { products: contextProducts } = useAppData();
@@ -425,6 +442,9 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const [countingInputs, setCountingInputs] = useState<Record<string, { unitCounts: number[]; le: number; unitTouched?: boolean[]; leTouched?: boolean }>>({});
     const countingInputsRef = useRef<Record<string, { unitCounts: number[]; le: number; unitTouched?: boolean[]; leTouched?: boolean }>>({});
     const [balanceRecords, setBalanceRecords] = useState<BalanceHistoryRecord[]>([]);
+    const [skuHistoryTab, setSkuHistoryTab] = useState<SkuHistoryTabKey>('check-history');
+    const [skuLedgerLogs, setSkuLedgerLogs] = useState<Record<string, InventoryLogItem[]>>({});
+    const [skuLedgerLoading, setSkuLedgerLoading] = useState<Record<string, boolean>>({});
     const [productTabs, setProductTabs] = useState<Record<string, ProductTabKey>>({});
     const [ledgerLogsByProduct, setLedgerLogsByProduct] = useState<Record<string, InventoryLogItem[]>>({});
     const [ledgerLoadingByProduct, setLedgerLoadingByProduct] = useState<Record<string, boolean>>({});
@@ -447,6 +467,8 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     const [stockCheckSearch, setStockCheckSearch] = useState('');
     const [handlingCatalog, setHandlingCatalog] = useState<HandlingCatalogItem[]>([]);
     const [handlingUnits, setHandlingUnits] = useState<HandlingUnitRow[]>([]);
+    const [handlingTransactions, setHandlingTransactions] = useState<HandlingUnitTransaction[]>([]);
+    const [handlingHistoryLoading, setHandlingHistoryLoading] = useState(false);
     const [handlingWorkspaceLoading, setHandlingWorkspaceLoading] = useState(true);
     const [handlingWorkspaceError, setHandlingWorkspaceError] = useState('');
     const [actualUnitCounts, setActualUnitCounts] = useState<Record<string, number | null>>({});
@@ -516,6 +538,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 }
                 setHandlingCatalog(Array.isArray(result.data.catalog) ? result.data.catalog : []);
                 setHandlingUnits(Array.isArray(result.data.register) ? result.data.register : []);
+                setHandlingTransactions(Array.isArray(result.data.recentTransactions) ? result.data.recentTransactions : []);
             })
             .catch(() => {
                 if (!cancelled) setHandlingWorkspaceError('Không tải được dữ liệu quản lý kiện hàng.');
@@ -524,6 +547,23 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 if (!cancelled) setHandlingWorkspaceLoading(false);
             });
         return () => { cancelled = true; };
+    }, []);
+
+    const refreshHandlingHistory = useCallback(async () => {
+        setHandlingHistoryLoading(true);
+        try {
+            const result = await window.electronAPI.handlingUnits.getWorkspace();
+            if (!result?.success || !result.data) {
+                throw new Error(result?.error || 'Không tải được lịch sử kiện hàng.');
+            }
+            setHandlingCatalog(Array.isArray(result.data.catalog) ? result.data.catalog : []);
+            setHandlingUnits(Array.isArray(result.data.register) ? result.data.register : []);
+            setHandlingTransactions(Array.isArray(result.data.recentTransactions) ? result.data.recentTransactions : []);
+        } catch (error: any) {
+            message.error(error?.message || 'Không tải được lịch sử kiện hàng.');
+        } finally {
+            setHandlingHistoryLoading(false);
+        }
     }, []);
 
     const todayStr = currentDate.format('YYYY-MM-DD');
@@ -641,6 +681,33 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             // Lịch sử chỉ phục vụ hiển thị phụ, lỗi tải không chặn phiên kiểm.
         }
     }, []);
+
+    const loadSkuLedger = useCallback(async (sku: string, force = false) => {
+        const normalizedSku = normalizeSku(sku);
+        if (!normalizedSku) return;
+
+        const cacheKey = `${currentDate.format('YYYY-MM-DD')}::${normalizedSku}`;
+        if (!force && Object.prototype.hasOwnProperty.call(skuLedgerLogs, cacheKey)) return;
+
+        setSkuLedgerLoading(prev => ({ ...prev, [cacheKey]: true }));
+        try {
+            const result = await (window as any).electronAPI.inventoryLogs.getAll({
+                sku,
+                startDate: currentDate.startOf('day').toISOString(),
+                endDate: currentDate.endOf('day').toISOString(),
+            });
+            if (!result?.success) throw new Error(result?.error || 'Không thể tải thẻ kho.');
+
+            const logs = (Array.isArray(result.data) ? result.data : [])
+                .filter((log: InventoryLogItem) => normalizeSku(log.sku) === normalizedSku)
+                .sort((a: InventoryLogItem, b: InventoryLogItem) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            setSkuLedgerLogs(prev => ({ ...prev, [cacheKey]: logs }));
+        } catch (error: any) {
+            message.error(error?.message || 'Lỗi khi tải thẻ kho');
+        } finally {
+            setSkuLedgerLoading(prev => ({ ...prev, [cacheKey]: false }));
+        }
+    }, [currentDate, skuLedgerLogs]);
 
     const loadGroupLedger = useCallback(async (group: ProductGroup, force = false) => {
         if (!force && ledgerLogsByProduct[group.productName]) return;
@@ -845,65 +912,210 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
 
     useEffect(() => {
         setHeaderExtra(
-            <div style={{ display: 'flex', alignItems: 'center', width: '100%' }}>
-                {/* ── Tabs (trái) ── */}
-                <div style={{ display: 'flex', gap: 3, background: '#f1f5f9', padding: 3, borderRadius: 10 }}>
-                    <button
-                        disabled={dailyDisabledByFull || !dailyWindowOpen}
-                        onClick={() => {
-                            if (dailyDisabledByFull || !dailyWindowOpen) return;
-                            setActiveTab('daily');
-                            setCurrentDate(dayjs());
-                        }}
+            <div style={{ display: 'flex', alignItems: 'center', width: '100%', gap: 12 }}>
+                {/* ── Nút Quay lại / Breadcrumb (trên thanh tiêu đề) ── */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                    <Button
+                        type="text"
+                        size="small"
+                        icon={<ArrowLeftOutlined style={{ fontSize: 13 }} />}
+                        onClick={() => onExitRef.current?.()}
+                        disabled={!onExit}
                         style={{
-                            padding: '5px 14px', borderRadius: 7, fontWeight: 600, fontSize: 12,
-                            background: activeTab === 'daily' ? '#10b981' : 'transparent',
-                            color: dailyDisabledByFull || !dailyWindowOpen ? '#94a3b8' : activeTab === 'daily' ? '#fff' : '#64748b',
-                            border: 'none', cursor: dailyDisabledByFull || !dailyWindowOpen ? 'not-allowed' : 'pointer',
-                            opacity: dailyDisabledByFull || !dailyWindowOpen ? 0.65 : 1, transition: 'all 0.15s',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 5,
+                            padding: '4px 8px',
+                            borderRadius: 6,
+                            fontWeight: 600,
+                            fontSize: 13,
+                            color: '#334155',
+                            height: 32,
                         }}
-                        title={dailyDisabledByFull
-                            ? 'Hôm nay đã có phiên kiểm toàn bộ'
-                            : !dailyWindowOpen ? 'Kiểm hàng ngày mở lúc 17:00' : undefined}
                     >
-                        {dailyDisabledByFull
-                            ? 'Kiểm hàng ngày · Tạm dừng'
-                            : !dailyWindowOpen ? 'Kiểm hàng ngày · 17:00' : 'Kiểm hàng ngày'}
-                    </button>
-                    {!TEMPORARY_DAILY_ONLY_MODE && <>
-                        <button
-                            disabled={!fullWindowOpen}
-                            onClick={() => {
-                                if (!fullWindowOpen) return;
-                                setActiveTab('full');
-                                setCurrentDate(dayjs());
-                            }}
-                            style={{
-                                padding: '5px 14px', borderRadius: 7, fontWeight: 600, fontSize: 12,
-                                background: activeTab === 'full' ? '#10b981' : 'transparent',
-                                color: !fullWindowOpen ? '#94a3b8' : activeTab === 'full' ? '#fff' : '#64748b',
-                                border: 'none', cursor: !fullWindowOpen ? 'not-allowed' : 'pointer',
-                                opacity: !fullWindowOpen ? 0.65 : 1, transition: 'all 0.15s',
-                            }}
-                            title={!fullWindowOpen ? 'Kiểm toàn bộ mở lúc 16:00' : undefined}
-                        >
-                            {!fullWindowOpen ? 'Kiểm toàn bộ · 16:00' : 'Kiểm toàn bộ'}
-                        </button>
-                        <button
-                            onClick={() => { setActiveTab('inspection'); setCurrentDate(dayjs()); }}
-                            style={{
-                                padding: '5px 14px', borderRadius: 7, fontWeight: 600, fontSize: 12,
-                                background: activeTab === 'inspection' ? '#10b981' : 'transparent',
-                                color: activeTab === 'inspection' ? '#fff' : '#64748b',
-                                border: 'none', cursor: 'pointer', transition: 'all 0.15s',
-                            }}
-                        >
-                            Phiếu kiểm {sessions.filter(session => (session.type === 'inspection' || session.type === 'recheck') && session.status !== 'cancelled' && session.date === dayjs().format('YYYY-MM-DD')).length > 0
-                                ? `(${sessions.filter(session => (session.type === 'inspection' || session.type === 'recheck') && session.status !== 'cancelled' && session.date === dayjs().format('YYYY-MM-DD')).length})`
-                                : ''}
-                        </button>
-                    </>}
+                        Quản lý kho
+                    </Button>
+                    <span style={{ color: '#cbd5e1', fontSize: 13 }}>/</span>
+                    <b style={{ color: '#0f172a', fontSize: 13, fontWeight: 700 }}>Kiểm hàng</b>
                 </div>
+
+                <div style={{ width: 1, height: 18, background: '#e2e8f0', flexShrink: 0 }} />
+
+                {/* ── Tabs (trái) ── */}
+                {(() => {
+                    const activeInspectionCount = sessions.filter(session =>
+                        (session.type === 'inspection' || session.type === 'recheck') &&
+                        session.status !== 'cancelled' &&
+                        session.date === dayjs().format('YYYY-MM-DD')
+                    ).length;
+
+                    const getTabButtonStyle = (isActive: boolean, isDisabled?: boolean): React.CSSProperties => ({
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        padding: '6px 14px',
+                        borderRadius: 7,
+                        fontWeight: isActive ? 700 : 600,
+                        fontSize: 13,
+                        background: isActive ? '#10b981' : 'transparent',
+                        color: isActive ? '#ffffff' : isDisabled ? '#64748b' : '#334155',
+                        border: 'none',
+                        cursor: isDisabled ? 'not-allowed' : 'pointer',
+                        opacity: isDisabled ? 0.65 : 1,
+                        transition: 'all 0.15s ease',
+                        boxShadow: isActive ? '0 1px 3px rgba(16, 185, 129, 0.28)' : 'none',
+                    });
+
+                    const getBadgeStyle = (isActive: boolean, variant?: 'time' | 'alert' | 'count'): React.CSSProperties => {
+                        if (isActive) {
+                            return {
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                padding: '1px 6px',
+                                borderRadius: variant === 'count' ? 10 : 4,
+                                fontSize: 11,
+                                fontWeight: 700,
+                                background: 'rgba(255, 255, 255, 0.22)',
+                                color: '#ffffff',
+                                border: '1px solid rgba(255, 255, 255, 0.35)',
+                                lineHeight: 1.2,
+                            };
+                        }
+                        if (variant === 'alert') {
+                            return {
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                padding: '1px 6px',
+                                borderRadius: 4,
+                                fontSize: 11,
+                                fontWeight: 600,
+                                background: '#fee2e2',
+                                color: '#dc2626',
+                                border: '1px solid #fecaca',
+                                lineHeight: 1.2,
+                            };
+                        }
+                        if (variant === 'count') {
+                            return {
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                padding: '1px 6px',
+                                borderRadius: 10,
+                                fontSize: 11,
+                                fontWeight: 700,
+                                background: '#dcfce7',
+                                color: '#15803d',
+                                border: '1px solid #bbf7d0',
+                                lineHeight: 1.2,
+                            };
+                        }
+                        return {
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            padding: '1px 6px',
+                            borderRadius: 4,
+                            fontSize: 11,
+                            fontWeight: 600,
+                            background: '#e2e8f0',
+                            color: '#475569',
+                            border: '1px solid #cbd5e1',
+                            lineHeight: 1.2,
+                        };
+                    };
+
+                    return (
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: '#f1f5f9', padding: '3px 4px', borderRadius: 10, border: '1px solid #e2e8f0' }}>
+                            <button
+                                disabled={dailyDisabledByFull}
+                                onClick={() => {
+                                    if (dailyDisabledByFull) return;
+                                    setActiveTab('daily');
+                                    setCurrentDate(dayjs());
+                                }}
+                                style={getTabButtonStyle(activeTab === 'daily', dailyDisabledByFull)}
+                                onMouseEnter={e => {
+                                    if (activeTab !== 'daily' && !dailyDisabledByFull) {
+                                        e.currentTarget.style.background = '#ffffff';
+                                        e.currentTarget.style.color = '#0f172a';
+                                    }
+                                }}
+                                onMouseLeave={e => {
+                                    if (activeTab !== 'daily' && !dailyDisabledByFull) {
+                                        e.currentTarget.style.background = 'transparent';
+                                        e.currentTarget.style.color = '#334155';
+                                    }
+                                }}
+                                title={dailyDisabledByFull
+                                    ? 'Hôm nay đã có phiên kiểm toàn bộ'
+                                    : !dailyWindowOpen ? 'Kiểm hàng ngày mở lúc 17:00' : undefined}
+                            >
+                                <span>Kiểm hàng ngày</span>
+                                {dailyDisabledByFull ? (
+                                    <span style={getBadgeStyle(activeTab === 'daily', 'alert')}>Tạm dừng</span>
+                                ) : !dailyWindowOpen ? (
+                                    <span style={getBadgeStyle(activeTab === 'daily', 'time')}>17:00</span>
+                                ) : null}
+                            </button>
+
+                            {!TEMPORARY_DAILY_ONLY_MODE && (
+                                <>
+                                    <button
+                                        onClick={() => {
+                                            setActiveTab('full');
+                                            setCurrentDate(dayjs());
+                                        }}
+                                        style={getTabButtonStyle(activeTab === 'full')}
+                                        onMouseEnter={e => {
+                                            if (activeTab !== 'full') {
+                                                e.currentTarget.style.background = '#ffffff';
+                                                e.currentTarget.style.color = '#0f172a';
+                                            }
+                                        }}
+                                        onMouseLeave={e => {
+                                            if (activeTab !== 'full') {
+                                                e.currentTarget.style.background = 'transparent';
+                                                e.currentTarget.style.color = '#334155';
+                                            }
+                                        }}
+                                        title={!fullWindowOpen ? 'Kiểm toàn bộ mở lúc 16:00' : undefined}
+                                    >
+                                        <span>Kiểm toàn bộ</span>
+                                        {!fullWindowOpen && (
+                                            <span style={getBadgeStyle(activeTab === 'full', 'time')}>16:00</span>
+                                        )}
+                                    </button>
+
+                                    <button
+                                        onClick={() => {
+                                            setActiveTab('inspection');
+                                            setCurrentDate(dayjs());
+                                        }}
+                                        style={getTabButtonStyle(activeTab === 'inspection')}
+                                        onMouseEnter={e => {
+                                            if (activeTab !== 'inspection') {
+                                                e.currentTarget.style.background = '#ffffff';
+                                                e.currentTarget.style.color = '#0f172a';
+                                            }
+                                        }}
+                                        onMouseLeave={e => {
+                                            if (activeTab !== 'inspection') {
+                                                e.currentTarget.style.background = 'transparent';
+                                                e.currentTarget.style.color = '#334155';
+                                            }
+                                        }}
+                                    >
+                                        <span>Phiếu kiểm</span>
+                                        {activeInspectionCount > 0 && (
+                                            <span style={getBadgeStyle(activeTab === 'inspection', 'count')}>
+                                                {activeInspectionCount}
+                                            </span>
+                                        )}
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                    );
+                })()}
 
                 {/* ── Assignee (phải) ── */}
                 {todaySession && !isActiveTimeLocked && (
@@ -2023,6 +2235,77 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         || todaySession?.items.find(item => !item.balanced)
         || todaySession?.items[0];
     const selectedSku = selectedItem?.sku || '';
+    const selectedSkuBalanceRows = useMemo(() => sessionBalanceRecords.flatMap(record =>
+        record.items
+            .filter(item => normalizeSku(item.sku) === normalizeSku(selectedSku))
+            .map((item, index) => ({
+                key: `${record.id || record.date}-${item.sku}-${index}`,
+                time: record.date,
+                adjustedBy: record.adjustedBy,
+                productName: item.productName
+                    || record.notes?.replace(/^Kiểm hàng:\s*/, '').replace(/^Cân bằng hàng loạt theo sản phẩm\s*/, '')
+                    || '-',
+                sku: item.sku,
+                systemStock: item.systemStock,
+                actualStock: item.actualStock,
+                difference: item.difference,
+                reason: item.note?.trim() || (
+                    record.items.length === 1
+                        ? record.notes?.replace(/^Kiểm hàng:\s*/, '').trim()
+                        : ''
+                ),
+            }))
+    ), [selectedSku, sessionBalanceRecords]);
+    const selectedSkuWithdrawalHistory = useMemo(() => {
+        const skuByUnitCode = new Map(
+            handlingUnits.map(unit => [normalizeSku(unit.id), normalizeSku(unit.skuName)])
+        );
+        return handlingTransactions
+            .filter(transaction => {
+                const text = `${transaction.type || ''} ${transaction.note || ''}`;
+                const isCompletedCheck = /kiểm cuối ca|kiểm khớp|kiểm lệch|kiểm thực tồn/i.test(text);
+                const isWithdrawal = !isCompletedCheck && (
+                    Number(transaction.quantity || 0) < 0
+                    || /rút hàng|rút\s+\d+|chuyển khu đóng gói|chuyển hàng lẻ|chuyển chờ xuất kho|chờ kiểm chốt hết kiện/i.test(text)
+                );
+                const transactionSku = normalizeSku(transaction.sku)
+                    || skuByUnitCode.get(normalizeSku(transaction.unitId))
+                    || '';
+                return isWithdrawal
+                    && transactionSku === normalizeSku(selectedSku)
+                    && dayjs(transaction.createdAt).isSame(currentDate, 'day');
+            })
+            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    }, [currentDate, handlingTransactions, handlingUnits, selectedSku]);
+    const selectedSkuActivityRows = useMemo(() => [
+        ...selectedSkuBalanceRows.map(row => ({
+            ...row,
+            activityType: 'check' as const,
+            source: 'Kiểm hàng',
+        })),
+        ...selectedSkuWithdrawalHistory.map(transaction => {
+            const isTelegram = /^telegram(?:\s|:|$)/i.test(String(transaction.actor || '').trim());
+            return {
+                key: `handling-${transaction.id}`,
+                time: transaction.createdAt,
+                activityType: 'withdrawal' as const,
+                source: isTelegram ? 'Telegram' : 'Quản lý kiện hàng',
+                adjustedBy: transaction.actor || 'Hệ thống',
+                type: transaction.type || 'Rút hàng',
+                unitId: transaction.unitId,
+                quantity: Math.abs(Number(transaction.quantity || 0)),
+                remaining: transaction.remaining,
+                reason: transaction.note || transaction.destination || '',
+            };
+        }),
+    ].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()), [selectedSkuBalanceRows, selectedSkuWithdrawalHistory]);
+
+    useEffect(() => {
+        if (skuHistoryTab === 'ledger' && selectedSku) {
+            void loadSkuLedger(selectedSku);
+        }
+    }, [loadSkuLedger, selectedSku, skuHistoryTab]);
+
     const selectedSkuUnits = useMemo(() => handlingUnits.filter(unit =>
         normalizeSku(unit.skuName) === normalizeSku(selectedSku) && unit.status !== 'Đã hết'
     ), [handlingUnits, selectedSku]);
@@ -2675,6 +2958,232 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         );
     };
 
+    const renderSelectedSkuLedger = (item: CheckItem) => {
+        const cacheKey = `${currentDate.format('YYYY-MM-DD')}::${normalizeSku(item.sku)}`;
+        const logs = skuLedgerLogs[cacheKey] || [];
+        const loading = !!skuLedgerLoading[cacheKey];
+
+        return (
+            <div style={{ paddingTop: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <Tag color="cyan" style={{ margin: 0, fontWeight: 800 }}>{item.sku}</Tag>
+                        <span style={{ color: '#64748b', fontSize: 12 }}>
+                            Biến động tồn ngày {currentDate.format('DD/MM/YYYY')} của đúng SKU đang chọn
+                        </span>
+                    </div>
+                    <Button
+                        size="small"
+                        icon={<SyncOutlined />}
+                        loading={loading}
+                        onClick={() => { void loadSkuLedger(item.sku, true); }}
+                    >
+                        Làm mới
+                    </Button>
+                </div>
+                {!loading && logs.length === 0 ? (
+                    <Empty description={`SKU ${item.sku} chưa có biến động tồn kho trong ngày này`} style={{ padding: 32 }} />
+                ) : (
+                    <Table
+                        dataSource={logs}
+                        loading={loading}
+                        rowKey="id"
+                        size="small"
+                        pagination={{ pageSize: 30, showSizeChanger: false }}
+                        onRow={record => ({
+                            onClick: () => {
+                                if (record.reference) toggleLedgerRefDetail(record);
+                            },
+                            style: { cursor: record.reference ? 'pointer' : 'default' },
+                        })}
+                        expandable={{
+                            expandedRowKeys: expandedRefId ? [expandedRefId] : [],
+                            showExpandColumn: false,
+                            expandedRowRender: renderLedgerRefDetail,
+                        }}
+                        columns={[
+                            {
+                                title: 'Thời gian / Nhân sự',
+                                dataIndex: 'createdAt',
+                                width: 155,
+                                render: (date: string, record: InventoryLogItem) => (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                        <span style={{ fontSize: 12, color: '#334155', fontWeight: 700 }}>{dayjs(date).format('DD/MM/YY HH:mm')}</span>
+                                        <span style={{ fontSize: 11, color: '#1677ff' }}>👤 {record.userName || 'Hệ thống'}</span>
+                                    </div>
+                                ),
+                            },
+                            {
+                                title: 'Loại',
+                                dataIndex: 'referenceType',
+                                width: 115,
+                                render: (referenceType: string, record: InventoryLogItem) => {
+                                    const map: Record<string, { color: string; label: string }> = {
+                                        NHAP: { color: 'green', label: '📦 Nhập' },
+                                        POS: { color: 'blue', label: '💰 POS' },
+                                        TMDT: { color: 'purple', label: '🛒 TMĐT' },
+                                        XUAT: { color: 'orange', label: '📤 Xuất' },
+                                        TRA: { color: 'gold', label: '🔄 Trả' },
+                                        HOAN: { color: 'cyan', label: '↩ Hoàn' },
+                                        CAN_BANG: { color: 'geekblue', label: '⚖ CB' },
+                                    };
+                                    const info = map[referenceType || ''] || { color: 'default', label: record.type };
+                                    return <Tag color={info.color} style={{ fontSize: 11 }}>{info.label}</Tag>;
+                                },
+                            },
+                            {
+                                title: 'Mã chứng từ',
+                                dataIndex: 'reference',
+                                width: 150,
+                                render: (reference: string, record: InventoryLogItem) => reference ? (
+                                    <span
+                                        onClick={event => { event.stopPropagation(); toggleLedgerRefDetail(record); }}
+                                        style={{ fontSize: 11, fontFamily: 'monospace', color: '#1890ff', cursor: 'pointer', textDecoration: 'underline' }}
+                                    >
+                                        {reference}
+                                    </span>
+                                ) : <span style={{ color: '#cbd5e1' }}>—</span>,
+                            },
+                            { title: 'Tồn đầu', dataIndex: 'oldStock', width: 85, align: 'right' as const, render: (stock: number) => <span style={{ color: '#64748b', fontWeight: 600 }}>{Number(stock || 0).toLocaleString('vi-VN')}</span> },
+                            { title: 'Thay đổi', dataIndex: 'quantity', width: 90, align: 'right' as const, render: (qty: number) => <b style={{ color: qty > 0 ? '#1677ff' : qty < 0 ? '#dc2626' : '#94a3b8' }}>{qty > 0 ? `+${qty.toLocaleString('vi-VN')}` : qty.toLocaleString('vi-VN')}</b> },
+                            { title: 'Tồn cuối', dataIndex: 'newStock', width: 85, align: 'right' as const, render: (stock: number) => <b style={{ color: '#166534' }}>{Number(stock || 0).toLocaleString('vi-VN')}</b> },
+                            { title: 'Ghi chú', dataIndex: 'note', ellipsis: true, render: (note: string) => note || <span style={{ color: '#cbd5e1' }}>—</span> },
+                        ]}
+                    />
+                )}
+            </div>
+        );
+    };
+
+    const renderSkuActivityHistory = (item: CheckItem) => {
+        return (
+            <div style={{ paddingTop: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <Tag color="green" style={{ margin: 0, fontWeight: 800 }}>Lịch sử tổng hợp</Tag>
+                        <span style={{ color: '#64748b', fontSize: 12 }}>
+                            Kiểm hàng và các lượt rút kiện của SKU {item.sku} ngày {currentDate.format('DD/MM/YYYY')}
+                        </span>
+                    </div>
+                    <Button
+                        size="small"
+                        icon={<SyncOutlined />}
+                        loading={handlingHistoryLoading}
+                        onClick={() => { void refreshHandlingHistory(); }}
+                    >
+                        Làm mới
+                    </Button>
+                </div>
+                {!handlingHistoryLoading && selectedSkuActivityRows.length === 0 ? (
+                    <Empty description={`SKU ${item.sku} chưa có lịch sử kiểm hàng hoặc rút kiện trong ngày này`} style={{ padding: 32 }} />
+                ) : (
+                    <Table<any>
+                        dataSource={selectedSkuActivityRows}
+                        loading={handlingHistoryLoading}
+                        rowKey="key"
+                        size="small"
+                        pagination={{ pageSize: 30, showSizeChanger: false }}
+                        columns={[
+                            {
+                                title: 'Thời gian',
+                                dataIndex: 'time',
+                                width: 135,
+                                render: (date: string) => (
+                                    <div style={{ lineHeight: 1.4 }}>
+                                        <b style={{ color: '#166534' }}>{dayjs(date).format('HH:mm')}</b>
+                                        <div style={{ color: '#64748b', fontSize: 11 }}>{dayjs(date).format('DD/MM/YYYY')}</div>
+                                    </div>
+                                ),
+                            },
+                            {
+                                title: 'Nguồn',
+                                dataIndex: 'source',
+                                width: 145,
+                                render: (source: string) => (
+                                    <Tag
+                                        color={source === 'Kiểm hàng' ? 'green' : source === 'Telegram' ? 'blue' : 'orange'}
+                                        style={{ margin: 0, fontWeight: 700 }}
+                                    >
+                                        {source}
+                                    </Tag>
+                                ),
+                            },
+                            {
+                                title: 'Người thao tác',
+                                dataIndex: 'adjustedBy',
+                                width: 165,
+                                render: (actor: string, row) => (
+                                    <span style={{ color: row.source === 'Telegram' ? '#1677ff' : '#334155', fontWeight: 700 }}>
+                                        {actor || 'Hệ thống'}
+                                    </span>
+                                ),
+                            },
+                            {
+                                title: 'Nội dung',
+                                width: 250,
+                                render: (_, row) => {
+                                    if (row.activityType === 'check') {
+                                        return (
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                                <b style={{ color: '#166534' }}>Đối chiếu tồn thực tế</b>
+                                                <small style={{ color: '#64748b' }}>{row.productName || item.productName}</small>
+                                            </div>
+                                        );
+                                    }
+                                    const unit = handlingUnits.find(candidate => normalizeSku(candidate.id) === normalizeSku(row.unitId));
+                                    return (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                            <b style={{ color: '#334155' }}>{row.type || 'Rút hàng'}</b>
+                                            <code style={{ width: 'fit-content', background: '#fff7e6', color: '#ad4e00', padding: '2px 7px', borderRadius: 4, fontSize: 11 }}>{row.unitId || '—'}</code>
+                                            {unit?.packageType && <small style={{ color: '#64748b' }}>{unit.packageType}</small>}
+                                        </div>
+                                    );
+                                },
+                            },
+                            {
+                                title: 'Số lượng',
+                                width: 175,
+                                align: 'right' as const,
+                                render: (_, row) => {
+                                    if (row.activityType === 'check') {
+                                        return (
+                                            <div style={{ lineHeight: 1.5 }}>
+                                                <b style={{ color: '#166534' }}>
+                                                    {canRevealSystemStock
+                                                        ? `${Number(row.systemStock || 0).toLocaleString('vi-VN')} → ${Number(row.actualStock || 0).toLocaleString('vi-VN')}`
+                                                        : `Thực tế: ${Number(row.actualStock || 0).toLocaleString('vi-VN')}`}
+                                                </b>
+                                                {canRevealSystemStock && (
+                                                    <div style={{ color: row.difference > 0 ? '#16a34a' : row.difference < 0 ? '#dc2626' : '#94a3b8', fontSize: 11, fontWeight: 700 }}>
+                                                        Chênh: {row.difference > 0 ? '+' : ''}{Number(row.difference || 0).toLocaleString('vi-VN')}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    }
+                                    return (
+                                        <div style={{ lineHeight: 1.5 }}>
+                                            <b style={{ color: '#dc2626' }}>Rút {Number(row.quantity || 0).toLocaleString('vi-VN')}</b>
+                                            {row.remaining !== null && row.remaining !== undefined && (
+                                                <div style={{ color: '#166534', fontSize: 11, fontWeight: 700 }}>Còn {Number(row.remaining).toLocaleString('vi-VN')}</div>
+                                            )}
+                                        </div>
+                                    );
+                                },
+                            },
+                            {
+                                title: 'Ghi chú / điểm đến',
+                                dataIndex: 'reason',
+                                ellipsis: true,
+                                render: (note: string) => note || <span style={{ color: '#cbd5e1' }}>—</span>,
+                            },
+                        ]}
+                    />
+                )}
+            </div>
+        );
+    };
+
     // ── Styles ────────────────────────────────────────────────────────────────
     const S = {
         page: { padding: '16px 20px', fontSize: 13, background: '#fcfcfc', minHeight: '100vh' } as React.CSSProperties,
@@ -2704,13 +3213,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
     return (
         <div style={{ background: '#F8FAFC', minHeight: '100vh' }}>
             <main style={{ width: '100%', maxWidth: 'none', margin: 0, padding: '16px 28px 0' }}>
-                <nav className="stock-check-module-nav" aria-label="Điều hướng kiểm hàng">
-                    <Button type="text" size="small" icon={<ArrowLeftOutlined />} onClick={onExit} disabled={!onExit}>
-                        Quản lý kho
-                    </Button>
-                    <span>/</span>
-                    <b>Kiểm hàng</b>
-                </nav>
                 {isToday && activeTab === 'daily' && fullCheckExemptions.length > 0 && (
                     <Alert
                         type="success"
@@ -3489,134 +3991,42 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                             </div>
                         )}
 
-                        {isAdmin && sessionBalanceRecords.length > 0 && (() => {
-                            // Flatten tất cả records → mỗi SKU là 1 dòng
-                            const flatRows = sessionBalanceRecords.flatMap(record =>
-                                record.items.map(item => ({
-                                    key: `${record.id || record.date}-${item.sku}`,
-                                    time: record.date,
-                                    adjustedBy: record.adjustedBy,
-                                    productName: item.productName
-                                        || record.notes?.replace(/^Kiểm hàng:\s*/, '').replace(/^Cân bằng hàng loạt theo sản phẩm\s*/, '')
-                                        || '-',
-                                    sku: item.sku,
-                                    systemStock: item.systemStock,
-                                    actualStock: item.actualStock,
-                                    difference: item.difference,
-                                    reason: item.note?.trim() || (
-                                        record.items.length === 1
-                                            ? record.notes?.replace(/^Kiểm hàng:\s*/, '').trim()
-                                            : ''
-                                    ),
-                                }))
-                            );
-                            return (
-                                <div style={{
-                                    background: '#fff', border: '1px solid #d9f7be',
-                                    borderRadius: 10, padding: '12px 16px', marginTop: 12,
-                                    boxShadow: '0 1px 4px rgba(0,0,0,0.04)',
-                                }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                                        <span>🧾</span>
-                                        <span style={{ fontWeight: 800, fontSize: 12, color: '#166534', textTransform: 'uppercase', letterSpacing: 1 }}>
-                                            Lịch sử cân bằng trong ngày
-                                        </span>
-                                        <Tag color="green" style={{ margin: 0, fontWeight: 700 }}>{flatRows.length} dòng</Tag>
-                                    </div>
-                                    <Table
-                                        dataSource={flatRows}
-                                        rowKey="key"
-                                        size="small"
-                                        pagination={false}
-                                        style={{ fontSize: 12 }}
-                                        columns={[
-                                            {
-                                                title: 'Thời gian',
-                                                dataIndex: 'time',
-                                                width: 100,
-                                                render: (t: string) => (
-                                                    <div style={{ lineHeight: 1.4 }}>
-                                                        <div style={{ fontWeight: 800, color: '#166534', fontSize: 13 }}>{dayjs(t).format('HH:mm')}</div>
-                                                        <div style={{ color: '#64748b', fontSize: 11 }}>{dayjs(t).format('DD/MM/YYYY')}</div>
-                                                    </div>
-                                                ),
-                                            },
-                                            {
-                                                title: 'Người được phân công',
-                                                dataIndex: 'adjustedBy',
-                                                width: 130,
-                                                render: (name: string) => (
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                        <div style={{
-                                                            width: 26, height: 26, borderRadius: '50%',
-                                                            background: 'linear-gradient(135deg,#10b981,#059669)',
-                                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                            fontWeight: 800, fontSize: 11, color: '#fff', flexShrink: 0,
-                                                        }}>
-                                                            {name?.charAt(0).toUpperCase() || '?'}
-                                                        </div>
-                                                        <span style={{ fontWeight: 600, color: '#1e293b', fontSize: 12 }}>{name}</span>
-                                                    </div>
-                                                ),
-                                            },
-                                            {
-                                                title: 'Sản phẩm',
-                                                dataIndex: 'productName',
-                                                ellipsis: true,
-                                                render: (name: string) => <span style={{ fontWeight: 600, color: '#334155' }}>{name}</span>,
-                                            },
-                                            {
-                                                title: 'SKU',
-                                                dataIndex: 'sku',
-                                                width: 180,
-                                                render: (sku: string) => (
-                                                    <code style={{ background: '#e6f4ff', color: '#0958d9', padding: '2px 7px', borderRadius: 4, fontSize: 11 }}>
-                                                        {sku}
-                                                    </code>
-                                                ),
-                                            },
-                                            {
-                                                title: 'Tồn cũ',
-                                                dataIndex: 'systemStock',
-                                                width: 80,
-                                                align: 'right' as const,
-                                                render: (v: number) => canRevealSystemStock ? <span style={{ color: '#64748b', fontWeight: 600 }}>{v}</span> : <span style={{ color: '#cbd5e1', fontWeight: 600 }}>***</span>,
-                                            },
-                                            {
-                                                title: 'Tồn mới',
-                                                dataIndex: 'actualStock',
-                                                width: 80,
-                                                align: 'right' as const,
-                                                render: (v: number) => <b style={{ color: '#166534' }}>{v}</b>,
-                                            },
-                                            {
-                                                title: 'Chênh',
-                                                dataIndex: 'difference',
-                                                width: 80,
-                                                align: 'right' as const,
-                                                render: (diff: number) => canRevealSystemStock ? (
-                                                    <b style={{ fontSize: 13, color: diff > 0 ? '#16a34a' : diff < 0 ? '#dc2626' : '#94a3b8' }}>
-                                                        {diff > 0 ? `+${diff}` : diff === 0 ? '—' : diff}
-                                                    </b>
-                                                ) : <span style={{ color: '#cbd5e1', fontWeight: 600 }}>***</span>,
-                                            },
-                                            {
-                                                title: 'Ghi chú / lý do chênh lệch',
-                                                dataIndex: 'reason',
-                                                width: 240,
-                                                render: (reason: string, row: { difference: number }) => {
-                                                    if (row.difference === 0) return <span style={{ color: '#cbd5e1' }}>—</span>;
-                                                    if (!reason) {
-                                                        return <Tag color="default" style={{ margin: 0 }}>Dữ liệu cũ chưa có lý do</Tag>;
-                                                    }
-                                                    return <span style={{ color: '#92400e', fontSize: 12 }}>{reason}</span>;
-                                                },
-                                            },
-                                        ]}
-                                    />
+                        {isAdmin && todaySession && selectedItem && (
+                            <div style={{
+                                background: '#fff', border: '1px solid #d9f7be',
+                                borderRadius: 10, padding: '12px 16px', marginTop: 12,
+                                boxShadow: '0 1px 4px rgba(0,0,0,0.04)',
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <span>🧾</span>
+                                    <span style={{ fontWeight: 800, fontSize: 12, color: '#166534', textTransform: 'uppercase', letterSpacing: 1 }}>
+                                        Lịch sử SKU đang chọn
+                                    </span>
+                                    <Tag color="green" style={{ margin: 0, fontWeight: 800 }}>{selectedItem.sku}</Tag>
+                                    <span style={{ color: '#64748b', fontSize: 12 }}>{selectedItem.color || selectedCatalogItem?.variantName || ''}</span>
                                 </div>
-                            );
-                        })()}
+                                <Tabs
+                                    activeKey={skuHistoryTab}
+                                    onChange={key => {
+                                        const nextTab = key as SkuHistoryTabKey;
+                                        setSkuHistoryTab(nextTab);
+                                        if (nextTab === 'ledger') void loadSkuLedger(selectedItem.sku);
+                                    }}
+                                    items={[
+                                        {
+                                            key: 'check-history',
+                                            label: `Lịch sử kiểm hàng (${selectedSkuActivityRows.length})`,
+                                            children: renderSkuActivityHistory(selectedItem),
+                                        },
+                                        {
+                                            key: 'ledger',
+                                            label: 'Thẻ kho',
+                                            children: renderSelectedSkuLedger(selectedItem),
+                                        },
+                                    ]}
+                                />
+                            </div>
+                        )}
                     </>
                 )}
 
