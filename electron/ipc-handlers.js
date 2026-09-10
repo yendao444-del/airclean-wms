@@ -25,6 +25,12 @@ const DATA_SAFETY_MODE = true;
 // The daily rollover is transactional, idempotent, and preserves a snapshot
 // before changing task state, so it remains available in safety mode.
 const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
+  // Notification state is scoped to the authenticated user and written with
+  // an idempotent compound upsert, so retries cannot affect another account.
+  "notifications:markRead",
+  "notifications:acknowledge",
+  "notifications:snooze",
+  "notifications:publish",
   "dailyTasks:resetDaily",
   // One assignment group is stored as a single DailyTask row after every
   // recipient has been validated, so creation cannot leave a partial group.
@@ -35,6 +41,7 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "dailyTasks:archive",
   // Evidence uploads are compensated on failure, while the evidence hashes
   // and task completion are committed together in one database transaction.
+  "dailyTasks:validateEvidenceSource",
   "dailyTasks:submitEvidence",
   // Completion requests and regular-task completion only transition a task
   // after ownership/evidence checks; handlers use a row lock and stale-write
@@ -130,6 +137,8 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   // This workflow uses the stock mutex and one database transaction for the
   // export, stock ledger changes, and linked marketplace order.
   "ecommerceExports:create",
+  // Idempotently records source order timestamps without changing stock/status.
+  "ecommerceExports:syncOrderPlacedAt",
   "ecommerceExports:update",
   "ecommerceExports:saveTelegramSettings",
   "ecommerceExports:nextTelegramOrderCounter",
@@ -315,6 +324,10 @@ function getEvidenceStorageClient() {
 }
 const EVIDENCE_BUCKET = evidenceStorageConfig.bucket || "daily-task-evidence";
 const MAX_EVIDENCE_STORAGE_BYTES = 500 * 1024;
+const MAX_EVIDENCE_SOURCE_BYTES = 15 * 1024 * 1024;
+const EVIDENCE_SOURCE_TOKEN_TTL_MS = 10 * 60 * 1000;
+const EVIDENCE_SOURCE_TOKEN_MAX_ITEMS = 500;
+const evidenceSourceValidationTokens = new Map();
 const MAX_BUSINESS_DOCUMENT_BYTES = 15 * 1024 * 1024;
 const MAX_PURCHASE_RECEIPT_BYTES = 2 * 1024 * 1024;
 const PURCHASE_RECEIPT_R2_PREFIX = "r2://";
@@ -1641,6 +1654,48 @@ function cacheSessionStatus(user) {
   };
 }
 
+const TRANSIENT_PRISMA_CONNECTION_CODES = new Set([
+  "P1001",
+  "P1002",
+  "P1008",
+  "P1017",
+  "P2024",
+  "P2028",
+]);
+
+function isTransientPrismaConnectionError(error) {
+  if (TRANSIENT_PRISMA_CONNECTION_CODES.has(String(error?.code || ""))) {
+    return true;
+  }
+  const message = String(error?.message || error || "").toLowerCase();
+  return [
+    "server has closed the connection",
+    "connection reset",
+    "forcibly closed by the remote host",
+    "unable to start a transaction",
+    "transaction already closed",
+  ].some((fragment) => message.includes(fragment));
+}
+
+function waitForPrismaRetry(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+async function findSessionStatusUserWithRetry(userId) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, status: true },
+      });
+    } catch (error) {
+      if (!isTransientPrismaConnectionError(error) || attempt === 1) throw error;
+      await waitForPrismaRetry(300);
+    }
+  }
+  return null;
+}
+
 async function getSessionStatusUser(userId) {
   const now = Date.now();
   if (
@@ -1654,8 +1709,7 @@ async function getSessionStatusUser(userId) {
   }
 
   let checkPromise;
-  checkPromise = prisma.user
-    .findUnique({ where: { id: userId }, select: { id: true, status: true } })
+  checkPromise = findSessionStatusUserWithRetry(userId)
     .then((user) => {
       if (currentSession?.id === userId) cacheSessionStatus(user);
       return user;
@@ -8344,116 +8398,123 @@ function parseTelegramWmsLease(value) {
 async function tryAcquireTelegramWmsLease() {
   if (!prisma) return false;
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      const acquired = await prisma.$transaction(async (tx) => {
-        const clockRows = await tx.$queryRaw`
-          SELECT CURRENT_TIMESTAMP AS "dbNow"
-        `;
-        const dbNow = new Date(clockRows?.[0]?.dbNow || Date.now()).getTime();
-        const nextLease = {
-          ownerId: TELEGRAM_WMS_INSTANCE_ID,
-          ownerLabel: `${os.hostname()} (PID ${process.pid})`,
-          ownerRole: TELEGRAM_WMS_NODE_ROLE,
-          priority: TELEGRAM_WMS_NODE_PRIORITY,
-          expiresAt: new Date(
-            dbNow + TELEGRAM_WMS_LEASE_DURATION_MS,
-          ).toISOString(),
-        };
-        const rows = await tx.$queryRaw`
-          SELECT "value"
-          FROM "AppConfig"
-          WHERE "key" = ${TELEGRAM_WMS_LEASE_KEY}
-          FOR UPDATE
-        `;
-        const currentRow = Array.isArray(rows) ? rows[0] : null;
+      const acquired = await getPrismaDirectTx().$transaction(
+        async (tx) => {
+          const clockRows = await tx.$queryRaw`
+            SELECT CURRENT_TIMESTAMP AS "dbNow"
+          `;
+          const dbNow = new Date(clockRows?.[0]?.dbNow || Date.now()).getTime();
+          const nextLease = {
+            ownerId: TELEGRAM_WMS_INSTANCE_ID,
+            ownerLabel: `${os.hostname()} (PID ${process.pid})`,
+            ownerRole: TELEGRAM_WMS_NODE_ROLE,
+            priority: TELEGRAM_WMS_NODE_PRIORITY,
+            expiresAt: new Date(
+              dbNow + TELEGRAM_WMS_LEASE_DURATION_MS,
+            ).toISOString(),
+          };
+          const rows = await tx.$queryRaw`
+            SELECT "value"
+            FROM "AppConfig"
+            WHERE "key" = ${TELEGRAM_WMS_LEASE_KEY}
+            FOR UPDATE
+          `;
+          const currentRow = Array.isArray(rows) ? rows[0] : null;
 
-        if (!currentRow) {
-          await tx.appConfig.create({
-            data: {
-              key: TELEGRAM_WMS_LEASE_KEY,
-              value: JSON.stringify(nextLease),
-            },
-          });
-          telegramWmsLeaseOwnerLabel = nextLease.ownerLabel;
-          return true;
-        }
+          if (!currentRow) {
+            await tx.appConfig.create({
+              data: {
+                key: TELEGRAM_WMS_LEASE_KEY,
+                value: JSON.stringify(nextLease),
+              },
+            });
+            telegramWmsLeaseOwnerLabel = nextLease.ownerLabel;
+            return true;
+          }
 
-        const currentLease = parseTelegramWmsLease(currentRow.value);
-        const expiresAt = Date.parse(String(currentLease.expiresAt || ""));
-        const isCurrentOwner = currentLease.ownerId === TELEGRAM_WMS_INSTANCE_ID;
-        const isExpired = !Number.isFinite(expiresAt) || expiresAt <= dbNow;
+          const currentLease = parseTelegramWmsLease(currentRow.value);
+          const expiresAt = Date.parse(String(currentLease.expiresAt || ""));
+          const isCurrentOwner = currentLease.ownerId === TELEGRAM_WMS_INSTANCE_ID;
+          const isExpired = !Number.isFinite(expiresAt) || expiresAt <= dbNow;
 
-        // A higher-priority node asks the current owner to yield on its next
-        // lease renewal. This avoids two desktop clients polling Telegram at
-        // the same time while still allowing production to take over from dev.
-        const candidateSeenAt = Date.parse(
-          String(currentLease.candidateSeenAt || ""),
-        );
-        const candidateIsAlive =
-          Number.isFinite(candidateSeenAt) &&
-          candidateSeenAt > dbNow - TELEGRAM_WMS_LEASE_DURATION_MS;
-        const candidatePriority = candidateIsAlive
-          ? Number(currentLease.candidatePriority || 0)
-          : 0;
-
-        if (
-          isCurrentOwner &&
-          candidateIsAlive &&
-          candidatePriority > TELEGRAM_WMS_NODE_PRIORITY
-        ) {
-          telegramWmsLeaseOwnerLabel = String(
-            currentLease.candidateLabel || "máy production",
+          // A higher-priority node asks the current owner to yield on its next
+          // lease renewal. This avoids two desktop clients polling Telegram at
+          // the same time while still allowing production to take over from dev.
+          const candidateSeenAt = Date.parse(
+            String(currentLease.candidateSeenAt || ""),
           );
-          await tx.appConfig.update({
-            where: { key: TELEGRAM_WMS_LEASE_KEY },
-            data: {
-              value: JSON.stringify({
-                ...currentLease,
-                expiresAt: new Date(0).toISOString(),
-              }),
-            },
-          });
-          return false;
-        }
+          const candidateIsAlive =
+            Number.isFinite(candidateSeenAt) &&
+            candidateSeenAt > dbNow - TELEGRAM_WMS_LEASE_DURATION_MS;
+          const candidatePriority = candidateIsAlive
+            ? Number(currentLease.candidatePriority || 0)
+            : 0;
 
-        if (!isCurrentOwner && !isExpired) {
-          telegramWmsLeaseOwnerLabel = String(
-            currentLease.ownerLabel || currentLease.ownerId || "máy khác",
-          );
-          const currentPriority = Number(currentLease.priority || 0);
-          const shouldRequestHandoff =
-            TELEGRAM_WMS_NODE_PRIORITY > currentPriority &&
-            TELEGRAM_WMS_NODE_PRIORITY >= candidatePriority;
-          if (shouldRequestHandoff) {
+          if (
+            isCurrentOwner &&
+            candidateIsAlive &&
+            candidatePriority > TELEGRAM_WMS_NODE_PRIORITY
+          ) {
+            telegramWmsLeaseOwnerLabel = String(
+              currentLease.candidateLabel || "máy production",
+            );
             await tx.appConfig.update({
               where: { key: TELEGRAM_WMS_LEASE_KEY },
               data: {
                 value: JSON.stringify({
                   ...currentLease,
-                  candidateOwnerId: TELEGRAM_WMS_INSTANCE_ID,
-                  candidateLabel: nextLease.ownerLabel,
-                  candidateRole: TELEGRAM_WMS_NODE_ROLE,
-                  candidatePriority: TELEGRAM_WMS_NODE_PRIORITY,
-                  candidateSeenAt: new Date(dbNow).toISOString(),
+                  expiresAt: new Date(0).toISOString(),
                 }),
               },
             });
+            return false;
           }
-          return false;
-        }
 
-        await tx.appConfig.update({
-          where: { key: TELEGRAM_WMS_LEASE_KEY },
-          data: { value: JSON.stringify(nextLease) },
-        });
-        telegramWmsLeaseOwnerLabel = nextLease.ownerLabel;
-        return true;
-      });
+          if (!isCurrentOwner && !isExpired) {
+            telegramWmsLeaseOwnerLabel = String(
+              currentLease.ownerLabel || currentLease.ownerId || "máy khác",
+            );
+            const currentPriority = Number(currentLease.priority || 0);
+            const shouldRequestHandoff =
+              TELEGRAM_WMS_NODE_PRIORITY > currentPriority &&
+              TELEGRAM_WMS_NODE_PRIORITY >= candidatePriority;
+            if (shouldRequestHandoff) {
+              await tx.appConfig.update({
+                where: { key: TELEGRAM_WMS_LEASE_KEY },
+                data: {
+                  value: JSON.stringify({
+                    ...currentLease,
+                    candidateOwnerId: TELEGRAM_WMS_INSTANCE_ID,
+                    candidateLabel: nextLease.ownerLabel,
+                    candidateRole: TELEGRAM_WMS_NODE_ROLE,
+                    candidatePriority: TELEGRAM_WMS_NODE_PRIORITY,
+                    candidateSeenAt: new Date(dbNow).toISOString(),
+                  }),
+                },
+              });
+            }
+            return false;
+          }
+
+          await tx.appConfig.update({
+            where: { key: TELEGRAM_WMS_LEASE_KEY },
+            data: { value: JSON.stringify(nextLease) },
+          });
+          telegramWmsLeaseOwnerLabel = nextLease.ownerLabel;
+          return true;
+        },
+        { maxWait: 10_000, timeout: 15_000 },
+      );
       return acquired;
     } catch (error) {
-      // Hai máy có thể cùng tạo bản ghi lease lần đầu; máy thua thử đọc lại.
-      if (error?.code === "P2002" && attempt === 0) continue;
+      const retryable =
+        error?.code === "P2002" || isTransientPrismaConnectionError(error);
+      if (retryable && attempt < 2) {
+        await waitForPrismaRetry(350 * (attempt + 1));
+        continue;
+      }
       telegramWmsLastError = `Không thể giành quyền Telegram bot: ${error.message}`;
       console.warn("[TelegramWMS] Lease error:", error.message);
       return false;
@@ -17071,6 +17132,110 @@ function isValidEvidenceImage(buffer, mimeType) {
   return false;
 }
 
+function getJpegExifCameraMetadata(buffer) {
+  if (!isValidEvidenceImage(buffer, "image/jpeg")) return null;
+
+  const isRangeValid = (offset, length) =>
+    Number.isInteger(offset) && offset >= 0 && length >= 0 && offset + length <= buffer.length;
+  let offset = 2;
+  while (offset + 4 <= buffer.length) {
+    while (offset < buffer.length && buffer[offset] === 0xff) offset += 1;
+    if (offset >= buffer.length) break;
+    const marker = buffer[offset];
+    offset += 1;
+    if (marker === 0xda || marker === 0xd9) break;
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (!isRangeValid(offset, 2)) break;
+    const segmentLength = buffer.readUInt16BE(offset);
+    if (segmentLength < 2 || !isRangeValid(offset, segmentLength)) break;
+    const segmentStart = offset + 2;
+    const segmentEnd = offset + segmentLength;
+
+    if (
+      marker === 0xe1 &&
+      segmentEnd - segmentStart >= 14 &&
+      buffer.subarray(segmentStart, segmentStart + 6).equals(Buffer.from("Exif\0\0", "binary"))
+    ) {
+      const tiffStart = segmentStart + 6;
+      if (!isRangeValid(tiffStart, 8)) return null;
+      const byteOrder = buffer.subarray(tiffStart, tiffStart + 2).toString("ascii");
+      const littleEndian = byteOrder === "II";
+      if (!littleEndian && byteOrder !== "MM") return null;
+      const readUInt16 = (position) => {
+        if (!isRangeValid(position, 2)) return null;
+        return littleEndian
+          ? buffer.readUInt16LE(position)
+          : buffer.readUInt16BE(position);
+      };
+      const readUInt32 = (position) => {
+        if (!isRangeValid(position, 4)) return null;
+        return littleEndian
+          ? buffer.readUInt32LE(position)
+          : buffer.readUInt32BE(position);
+      };
+      if (readUInt16(tiffStart + 2) !== 42) return null;
+
+      const metadata = { make: "", model: "", dateTimeOriginal: "" };
+      const visitedIfds = new Set();
+      const readAsciiEntry = (entryOffset, count) => {
+        if (!Number.isInteger(count) || count <= 0 || count > 1024) return "";
+        const valueOffset = count <= 4
+          ? entryOffset + 8
+          : tiffStart + (readUInt32(entryOffset + 8) ?? -1);
+        if (!isRangeValid(valueOffset, count)) return "";
+        return buffer
+          .subarray(valueOffset, valueOffset + count)
+          .toString("utf8")
+          .replace(/\0.*$/, "")
+          .trim()
+          .slice(0, 160);
+      };
+      const parseIfd = (relativeOffset) => {
+        if (!Number.isInteger(relativeOffset) || relativeOffset < 0 || visitedIfds.has(relativeOffset)) return;
+        visitedIfds.add(relativeOffset);
+        const ifdOffset = tiffStart + relativeOffset;
+        const entryCount = readUInt16(ifdOffset);
+        if (entryCount === null || entryCount > 256) return;
+        for (let index = 0; index < entryCount; index += 1) {
+          const entryOffset = ifdOffset + 2 + index * 12;
+          if (!isRangeValid(entryOffset, 12)) return;
+          const tag = readUInt16(entryOffset);
+          const type = readUInt16(entryOffset + 2);
+          const count = readUInt32(entryOffset + 4);
+          if (type === 2 && (tag === 0x010f || tag === 0x0110 || tag === 0x9003)) {
+            const value = readAsciiEntry(entryOffset, count);
+            if (tag === 0x010f) metadata.make = value;
+            if (tag === 0x0110) metadata.model = value;
+            if (tag === 0x9003) metadata.dateTimeOriginal = value;
+          }
+          if (tag === 0x8769) {
+            const exifIfdOffset = readUInt32(entryOffset + 8);
+            if (exifIfdOffset !== null) parseIfd(exifIfdOffset);
+          }
+        }
+      };
+
+      const firstIfdOffset = readUInt32(tiffStart + 4);
+      if (firstIfdOffset === null) return null;
+      parseIfd(firstIfdOffset);
+      return metadata;
+    }
+    offset = segmentEnd;
+  }
+  return null;
+}
+
+function pruneEvidenceSourceValidationTokens(now = Date.now()) {
+  for (const [token, validation] of evidenceSourceValidationTokens) {
+    if (validation.expiresAt <= now) evidenceSourceValidationTokens.delete(token);
+  }
+  while (evidenceSourceValidationTokens.size > EVIDENCE_SOURCE_TOKEN_MAX_ITEMS) {
+    const oldestToken = evidenceSourceValidationTokens.keys().next().value;
+    if (!oldestToken) break;
+    evidenceSourceValidationTokens.delete(oldestToken);
+  }
+}
+
 // SHA-256 only catches byte-for-byte duplicates. Browser compression can make
 // the exact same photo produce different bytes, so use a small difference hash
 // decoded by Electron as a second, server-side anti-reuse signal.
@@ -17751,9 +17916,81 @@ ipcMain.handle("users:forcePasswordChange", async (event, userId) => {
   }
 });
 
+ipcMain.handle("dailyTasks:validateEvidenceSource", async (_event, payload) => {
+  try {
+    const actor = await getCurrentActor();
+    const task = await prisma.dailyTask.findUnique({
+      where: { id: Number(payload?.taskId) },
+    });
+    if (!task || task.status === "completed")
+      throw new Error("Công việc không còn ở trạng thái chờ nộp bằng chứng.");
+    const attachments = parseTaskAttachments(task.attachments);
+    if (!attachments?.evidence?.required)
+      throw new Error("Công việc này không yêu cầu bằng chứng.");
+    if (
+      actor.role !== "admin" &&
+      !isTestOperatorActor(actor) &&
+      !actorOwnsTask(actor, task)
+    ) {
+      throw new Error("Bạn chỉ có thể nộp bằng chứng cho công việc được giao cho mình.");
+    }
+
+    const mimeType = String(payload?.mimeType || "").toLowerCase();
+    const fileName = String(payload?.name || "").trim();
+    if (mimeType !== "image/jpeg") {
+      throw new Error(
+        "Không chấp nhận ảnh chụp màn hình hoặc ảnh tải về. Chỉ dùng ảnh JPG/JPEG chụp từ camera.",
+      );
+    }
+    if (/screenshot|screen[\s_-]*shot|snipping|screen[\s_-]*capture|ảnh[\s_-]*chụp[\s_-]*màn[\s_-]*hình|anh[\s_-]*chup[\s_-]*man[\s_-]*hinh/i.test(fileName)) {
+      throw new Error("Không được sử dụng ảnh chụp màn hình làm bằng chứng.");
+    }
+    const base64 = String(payload?.data || "").replace(/^data:[^;]+;base64,/, "");
+    const buffer = Buffer.from(base64, "base64");
+    if (!buffer.length || buffer.length > MAX_EVIDENCE_SOURCE_BYTES) {
+      throw new Error("Ảnh gốc phải có dung lượng không quá 15 MB.");
+    }
+    if (!isValidEvidenceImage(buffer, "image/jpeg")) {
+      throw new Error("File đã chọn không phải ảnh JPG/JPEG hợp lệ.");
+    }
+    const camera = getJpegExifCameraMetadata(buffer);
+    if (!camera?.make || !camera?.model) {
+      throw new Error(
+        "Ảnh không có thông tin thiết bị chụp. Không chấp nhận ảnh chụp màn hình, ảnh tải về hoặc ảnh đã bị xóa EXIF.",
+      );
+    }
+    const visualHash = getEvidenceVisualHash(buffer);
+    if (!visualHash) throw new Error("Không thể xác minh nội dung ảnh gốc.");
+
+    pruneEvidenceSourceValidationTokens();
+    const validationToken = crypto.randomBytes(32).toString("base64url");
+    evidenceSourceValidationTokens.set(validationToken, {
+      taskId: task.id,
+      actorId: actor.id,
+      visualHash,
+      sourceHash: crypto.createHash("sha256").update(buffer).digest("hex"),
+      expiresAt: Date.now() + EVIDENCE_SOURCE_TOKEN_TTL_MS,
+      inUse: false,
+    });
+    pruneEvidenceSourceValidationTokens();
+    return {
+      success: true,
+      data: {
+        validationToken,
+        camera: [camera.make, camera.model].filter(Boolean).join(" "),
+      },
+    };
+  } catch (error) {
+    const errorMessage = error?.message || "Không thể xác minh ảnh gốc.";
+    console.error("Validate daily-task evidence source error:", errorMessage);
+    return { success: false, error: errorMessage };
+  }
+});
+
 ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
   const uploadedR2Keys = [];
   const imageRegistryEntries = [];
+  const reservedValidationTokens = [];
   try {
     const actor = await getCurrentActor();
     const task = await prisma.dailyTask.findUnique({
@@ -17793,6 +18030,32 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
       );
     }
 
+    pruneEvidenceSourceValidationTokens();
+    const requestValidationTokens = new Set();
+    for (const image of images) {
+      const validationToken = String(image?.validationToken || "").trim();
+      if (!validationToken) {
+        throw new Error("Ảnh chưa được xác minh là ảnh chụp từ camera.");
+      }
+      if (requestValidationTokens.has(validationToken)) {
+        throw new Error("Mỗi ảnh bằng chứng phải là một ảnh gốc riêng biệt.");
+      }
+      const validation = evidenceSourceValidationTokens.get(validationToken);
+      if (!validation || validation.expiresAt <= Date.now()) {
+        evidenceSourceValidationTokens.delete(validationToken);
+        throw new Error("Phiên xác minh ảnh đã hết hạn. Vui lòng chọn lại ảnh.");
+      }
+      if (validation.taskId !== task.id || validation.actorId !== actor.id) {
+        throw new Error("Ảnh đã xác minh không thuộc công việc hoặc người nộp hiện tại.");
+      }
+      if (validation.inUse) {
+        throw new Error("Ảnh này đang được gửi ở một yêu cầu khác.");
+      }
+      validation.inUse = true;
+      requestValidationTokens.add(validationToken);
+      reservedValidationTokens.push(validationToken);
+    }
+
     const existingEvidenceHashes = await prisma.appConfig.findMany({
       where: { key: { startsWith: "dailyEvidenceHash:" } },
       select: { value: true },
@@ -17827,6 +18090,18 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
         throw new Error("Dữ liệu tải lên không phải ảnh hợp lệ.");
       const hash = crypto.createHash("sha256").update(buffer).digest("hex");
       const visualHash = getEvidenceVisualHash(buffer);
+      const validation = evidenceSourceValidationTokens.get(
+        String(image.validationToken || "").trim(),
+      );
+      if (
+        !visualHash ||
+        !validation?.visualHash ||
+        evidenceVisualHashDistance(visualHash, validation.visualHash) > 10
+      ) {
+        throw new Error(
+          "Ảnh sau xử lý không khớp với ảnh camera đã xác minh. Vui lòng chọn lại ảnh gốc.",
+        );
+      }
       if (
         visualHash &&
         knownVisualHashes.some(
@@ -17944,11 +18219,18 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
       evidence: getEvidenceHistoryPayload(evidence),
       description: `Đã nộp bằng chứng và tự động hoàn thành: "${task.title}"`,
     });
+    reservedValidationTokens.forEach((token) =>
+      evidenceSourceValidationTokens.delete(token),
+    );
     return {
       success: true,
       data: { evidence, autoCompleted: autoCompleteEvidenceTask },
     };
   } catch (error) {
+    reservedValidationTokens.forEach((token) => {
+      const validation = evidenceSourceValidationTokens.get(token);
+      if (validation) validation.inUse = false;
+    });
     await Promise.all(
       uploadedR2Keys.map((objectKey) =>
         rollbackFreshDailyEvidenceUpload(objectKey).catch((cleanupError) => {
@@ -21423,6 +21705,62 @@ ipcMain.handle(
   },
 );
 
+ipcMain.handle("ecommerceExports:syncOrderPlacedAt", async (event, records = []) => {
+  try {
+    requireRole("admin", "manager");
+    if (!prisma) throw new Error("Prisma not available");
+    if (!Array.isArray(records) || records.length > 5000) {
+      throw new Error("Danh sách thời gian phát sinh đơn không hợp lệ.");
+    }
+
+    const normalized = new Map();
+    for (const record of records) {
+      const orderNumber = String(record?.orderNumber || "").trim();
+      const orderPlacedAt = getMarketplaceOrderPlacedAt(record);
+      if (orderNumber && orderPlacedAt) normalized.set(orderNumber, orderPlacedAt);
+    }
+    if (normalized.size === 0) {
+      return { success: true, data: { ecommerceExports: 0, orders: 0 } };
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      let ecommerceExports = 0;
+      let orders = 0;
+      for (const [orderNumber, orderPlacedAt] of normalized) {
+        const timestampRecord = { orderPlacedAt: orderPlacedAt.toISOString() };
+        const [exportRows, orderRows] = await Promise.all([
+          tx.ecommerceExport.findMany({
+            where: { OR: [{ orderNumber }, { ecommerceExportCode: orderNumber }] },
+            select: { id: true, notes: true },
+          }),
+          tx.order.findMany({
+            where: { orderNumber, source: { in: ORDER_MARKETPLACE_SOURCES } },
+            select: { id: true, note: true },
+          }),
+        ]);
+        await Promise.all([
+          ...exportRows.map((row) => tx.ecommerceExport.update({
+            where: { id: row.id },
+            data: { notes: withMarketplaceOrderPlacedAtNote(row.notes, timestampRecord) },
+          })),
+          ...orderRows.map((row) => tx.order.update({
+            where: { id: row.id },
+            data: { note: withMarketplaceOrderPlacedAtNote(row.note, timestampRecord) },
+          })),
+        ]);
+        ecommerceExports += exportRows.length;
+        orders += orderRows.length;
+      }
+      return { ecommerceExports, orders };
+    }, { timeout: 60000, maxWait: 10000 });
+
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("Sync marketplace order placed times error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle("ecommerceExports:create", async (event, data) => {
   try {
     requireRole("admin", "manager");
@@ -21493,7 +21831,7 @@ ipcMain.handle("ecommerceExports:create", async (event, data) => {
               ecommerceExportDate: new Date(data.ecommerceExportDate),
               items: JSON.stringify(resolvedItems),
               totalAmount: data.totalAmount || 0,
-              notes: data.notes || null,
+              notes: withMarketplaceOrderPlacedAtNote(data.notes, data),
               status: data.status || "processing",
               createdBy: data.createdBy || null,
               pickedBy: data.pickedBy || null,
@@ -21720,6 +22058,25 @@ async function loadExistingTmdtSkus(tx, items) {
   return existingSkus;
 }
 
+function getMarketplaceOrderPlacedAt(record) {
+  const noteMatch = String(record?.notes || record?.note || "").match(
+    /OrderPlacedAt:\s*([^|]+)/i,
+  );
+  const rawValue = record?.orderPlacedAt || noteMatch?.[1]?.trim();
+  if (!rawValue) return null;
+  const value = new Date(rawValue);
+  return Number.isNaN(value.getTime()) ? null : value;
+}
+
+function withMarketplaceOrderPlacedAtNote(notes, record) {
+  const orderPlacedAt = getMarketplaceOrderPlacedAt(record);
+  const cleaned = String(notes || "")
+    .replace(/\s*OrderPlacedAt:\s*[^|]+\|?\s*/i, "")
+    .trim();
+  if (!orderPlacedAt) return cleaned || null;
+  return `OrderPlacedAt: ${orderPlacedAt.toISOString()}${cleaned ? ` | ${cleaned}` : ""}`;
+}
+
 function assertTmdtItemsSkusExistInSet(items, refCode, existingSkus) {
   const missingSku = (items || [])
     .map((item) => String(item?.variantSku || "").trim())
@@ -21746,9 +22103,18 @@ async function ensureMarketplaceOrderInTx(tx, record, actorName) {
 
   const existing = await tx.order.findUnique({
     where: { orderNumber },
-    select: { id: true },
+    select: { id: true, note: true },
   });
-  if (existing) return;
+  const orderPlacedAt = getMarketplaceOrderPlacedAt(record);
+  if (existing) {
+    if (orderPlacedAt) {
+      await tx.order.update({
+        where: { id: existing.id },
+        data: { note: withMarketplaceOrderPlacedAtNote(existing.note, record) },
+      });
+    }
+    return;
+  }
 
   let createdByUserId = null;
   if (actorName) {
@@ -21786,7 +22152,7 @@ async function ensureMarketplaceOrderInTx(tx, record, actorName) {
       total,
       profit: 0,
       trackingNumber,
-      note: record.notes || null,
+      note: withMarketplaceOrderPlacedAtNote(record.notes, record),
       createdBy: createdByUserId,
       createdAt: record.updatedAt || new Date(),
     },
@@ -21928,7 +22294,10 @@ async function execEcommerceExportUpdate(id, data) {
               : undefined,
             items: resolvedItems ? JSON.stringify(resolvedItems) : undefined,
             totalAmount: data.totalAmount,
-            notes: data.notes || null,
+            notes: withMarketplaceOrderPlacedAtNote(
+              data.notes !== undefined ? data.notes : oldRecord.notes,
+              data,
+            ),
             status: data.status,
             createdBy:
               data.createdBy !== undefined ? data.createdBy : undefined,
@@ -22443,7 +22812,7 @@ ipcMain.handle("ecommerceExports:bulkCreate", async (event, records) => {
                 : new Date(),
             items: data.items,
             totalAmount: data.totalAmount || 0,
-            notes: data.notes || null,
+            notes: withMarketplaceOrderPlacedAtNote(data.notes, data),
             status: data.status || "processing",
             createdBy: data.createdBy || null,
           }));
@@ -22540,6 +22909,20 @@ ipcMain.handle("ecommerceExports:bulkCancel", async (event, ids) => {
 });
 
 const ORDER_MARKETPLACE_SOURCES = ["shopee", "tiktok", "lazada", "tmdt"];
+
+function getUnifiedMarketplaceOrderTimeSql(alias = "o") {
+  const tableRef = alias === "o" ? "o" : '"Order"';
+  const noteColumn = Prisma.raw(`${tableRef}."note"`);
+  const sourceColumn = Prisma.raw(`${tableRef}."source"`);
+  const createdAtColumn = Prisma.raw(`${tableRef}."createdAt"`);
+  return Prisma.sql`CASE
+    WHEN ${sourceColumn} IN (${Prisma.join(ORDER_MARKETPLACE_SOURCES)}) THEN COALESCE(
+      NULLIF(BTRIM(substring(${noteColumn} from 'OrderPlacedAt: ([^|]+)')), '')::timestamptz AT TIME ZONE 'UTC',
+      ${createdAtColumn}
+    )
+    ELSE ${createdAtColumn}
+  END`;
+}
 
 function getUnifiedOrderRange(args, previous = false) {
   return {
@@ -22673,7 +23056,9 @@ function mapUnifiedDatabaseOrder(order) {
     ),
     totalAmount: order.total || 0,
     status: order.status,
-    date: order.createdAt.toISOString(),
+    date: (marketplace && getMarketplaceOrderPlacedAt(order)
+      ? getMarketplaceOrderPlacedAt(order)
+      : order.createdAt).toISOString(),
     tracking: order.trackingNumber || undefined,
     shipping: order.note?.match(/Shipping: ([^|]+)/)?.[1]?.trim(),
     notes: order.note || "",
@@ -22726,9 +23111,10 @@ function buildUnifiedOrderSqlCondition(args, previous = false, ignoreSource = fa
   const sourceCondition = getUnifiedOrderSqlSourceCondition(args, ignoreSource);
   if (!sourceCondition) return null;
   const range = getUnifiedOrderRange(args, previous);
+  const orderTime = getUnifiedMarketplaceOrderTimeSql("o");
   const parts = [
-    Prisma.sql`o."createdAt" >= ${range.gte}`,
-    Prisma.sql`o."createdAt" <= ${range.lte}`,
+    Prisma.sql`(${orderTime}) >= ${range.gte}`,
+    Prisma.sql`(${orderTime}) <= ${range.lte}`,
     sourceCondition,
   ];
   const search = String(args.search || "").trim();
@@ -22769,6 +23155,7 @@ function buildUnifiedExportSqlCondition(args, previous = false, ignoreSource = f
 
 function buildUnifiedPageQuery(args, page, pageSize) {
   const branches = [];
+  const orderTime = getUnifiedMarketplaceOrderTimeSql("o");
   const orderCondition = buildUnifiedOrderSqlCondition(args);
   const exportCondition = buildUnifiedExportSqlCondition(args);
   if (orderCondition) {
@@ -22802,12 +23189,12 @@ function buildUnifiedPageQuery(args, page, pageSize) {
         ), '[]'::jsonb)::text AS "items",
         o."total"::double precision AS "totalAmount",
         o."status" AS "status",
-        o."createdAt" AS "date",
+        TO_CHAR(${orderTime}, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "date",
         o."trackingNumber" AS "tracking",
         substring(o."note" from 'Shipping: ([^|]+)') AS "shipping",
         COALESCE(o."note", '') AS "notes",
         COALESCE(u."username", u."fullName", '') AS "createdBy",
-        o."createdAt" AS "_sortDate"
+        ${orderTime} AS "_sortDate"
       FROM "Order" o
       LEFT JOIN "Customer" c ON c."id" = o."customerId"
       LEFT JOIN "User" u ON u."id" = o."createdBy"
@@ -22826,7 +23213,7 @@ function buildUnifiedPageQuery(args, page, pageSize) {
         COALESCE(e."items", '[]') AS "items",
         e."totalAmount"::double precision AS "totalAmount",
         COALESCE(e."status", 'completed') AS "status",
-        e."exportDate" AS "date",
+        TO_CHAR(e."exportDate", 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "date",
         NULL::text AS "tracking",
         NULL::text AS "shipping",
         COALESCE(e."notes", '') AS "notes",
@@ -23007,6 +23394,7 @@ ipcMain.handle("orders:getDailyStats", async (event, args = {}) => {
 
     const sourceFilter = args.sourceFilter || "all";
     const platformFilter = args.platformFilter || "all";
+    const granularity = args.granularity === "hour" ? "hour" : "day";
     const includeOrders = sourceFilter !== "export";
     const includeExports = sourceFilter === "all" || sourceFilter === "export";
     const orderSourceCondition = sourceFilter === "pos"
@@ -23019,23 +23407,32 @@ ipcMain.handle("orders:getDailyStats", async (event, args = {}) => {
             ORDER_MARKETPLACE_SOURCES,
           )}) AND "status" = 'completed'))`;
 
-    // Aggregate inside PostgreSQL so the renderer never receives thousands of
-    // raw orders merely to draw a few daily chart points.
+    const orderTime = getUnifiedMarketplaceOrderTimeSql("Order");
+    const localOrderTime = Prisma.sql`(${orderTime}) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Bangkok'`;
+    const orderBucket = granularity === "hour"
+      ? Prisma.sql`TO_CHAR(DATE_TRUNC('hour', ${localOrderTime}), 'YYYY-MM-DD HH24:00')`
+      : Prisma.sql`TO_CHAR((${localOrderTime})::date, 'YYYY-MM-DD')`;
+    const localExportTime = Prisma.sql`"exportDate" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Bangkok'`;
+    const exportBucket = granularity === "hour"
+      ? Prisma.sql`TO_CHAR(DATE_TRUNC('hour', ${localExportTime}), 'YYYY-MM-DD HH24:00')`
+      : Prisma.sql`TO_CHAR((${localExportTime})::date, 'YYYY-MM-DD')`;
+
+    // Aggregate inside PostgreSQL so the renderer only receives chart buckets.
     const branches = [];
     if (includeOrders) {
       branches.push(Prisma.sql`
         SELECT
-          TO_CHAR(("createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Bangkok')::date, 'YYYY-MM-DD') AS "date",
+          ${orderBucket} AS "date",
           "total"::double precision AS "revenue"
         FROM "Order"
-        WHERE "createdAt" >= ${from} AND "createdAt" <= ${to}
+        WHERE (${orderTime}) >= ${from} AND (${orderTime}) <= ${to}
           AND ${orderSourceCondition}
       `);
     }
     if (includeExports) {
       branches.push(Prisma.sql`
         SELECT
-          TO_CHAR(("exportDate" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Bangkok')::date, 'YYYY-MM-DD') AS "date",
+          ${exportBucket} AS "date",
           "totalAmount"::double precision AS "revenue"
         FROM "ExportOrder"
         WHERE "exportDate" >= ${from} AND "exportDate" <= ${to}
@@ -25225,6 +25622,114 @@ function requireConfigAccess(key, operation) {
 }
 
 let attendanceReadCache = null;
+
+ipcMain.handle("policies:getCurrent", async () => {
+  try {
+    requireRole();
+    if (!prisma) throw new Error("Prisma not available");
+
+    const record = await prisma.appConfig.findUnique({
+      where: { key: "attendanceData" },
+      select: { value: true, updatedAt: true },
+    });
+    let attendanceData = {};
+    try {
+      attendanceData = record?.value ? JSON.parse(record.value) : {};
+    } catch {
+      throw new Error("Cấu hình chính sách hiện hành không hợp lệ.");
+    }
+
+    const config = attendanceData?.config || {};
+    const packingCommission = config?.packingCommission || {};
+    const attendanceLateFine = {
+      graceMinutes: Number(config.graceMinutes ?? 5),
+      official: [
+        Number(config.officialFineLevel1 ?? 30000),
+        Number(config.officialFineLevel2 ?? 70000),
+        Number(config.officialFineLevel3 ?? 150000),
+      ],
+      seasonal: [
+        Number(config.seasonalFineLevel1 ?? 10000),
+        Number(config.seasonalFineLevel2 ?? 30000),
+        Number(config.seasonalFineLevel3 ?? 60000),
+      ],
+      morningStart: String(config.morningStart || "08:00"),
+      afternoonStart: String(config.afternoonStart || "13:30"),
+    };
+    return {
+      success: true,
+      data: {
+        config: {
+          wrongOrderFineOfficial: Number(config.wrongOrderFineOfficial ?? 30000),
+          wrongOrderFineSeasonal: Number(config.wrongOrderFineSeasonal ?? 15000),
+          packingCommission: {
+            rates: packingCommission.rates || {},
+            skuLevels: packingCommission.skuLevels || {},
+            customLevels: Array.isArray(packingCommission.customLevels) ? packingCommission.customLevels : [],
+            history: Array.isArray(packingCommission.history) ? packingCommission.history : [],
+            updatedAt: packingCommission.updatedAt || record?.updatedAt?.toISOString() || null,
+            updatedBy: packingCommission.updatedBy || "admin",
+          },
+        },
+        packingWeeklyReward: {
+          amount: 100000,
+          effectiveAt: "2026-08-31",
+        },
+        legacyPackingCommission: {
+          unitPrice: 20,
+          endsAt: "2026-09-01",
+        },
+        mechanisms: {
+          attendanceLateFine,
+          overtimeReward: {
+            firstHourRate: 30000,
+            nextHourRate: 40000,
+          },
+          vatInvoiceFine: {
+            firstFineAfterDays: 5,
+            firstAmount: 30000,
+            stageIncrement: 10000,
+            effectiveAt: "2026-08-11",
+            excludesSunday: true,
+          },
+          returnOverdueFine: {
+            firstFineAfterDays: 10,
+            firstAmount: 30000,
+            dailyIncrement: 10000,
+            effectiveAt: "2026-09-04",
+            excludesRestDays: true,
+          },
+          refundOverdueFine: {
+            firstFineAfterDays: 8,
+            firstAmount: 30000,
+            dailyIncrement: 10000,
+            effectiveAt: "2026-09-04",
+            excludesRestDays: true,
+          },
+          taskDeadlineFine: {
+            defaultAmount: 50000,
+            configurablePerTask: true,
+            splitBetweenRecipients: true,
+          },
+          taskEvidenceFine: {
+            defaultAmount: 30000,
+            configurablePerTask: true,
+            escalatesByCycle: true,
+          },
+          stockCheckMissingFine: {
+            enabled: true,
+            amount: 50000,
+            effectiveAt: "2026-05-06",
+            excludesRestDays: true,
+          },
+        },
+      },
+    };
+  } catch (error) {
+    console.error("❌ Get current policies error:", error);
+    return { success: false, error: error.message };
+  }
+});
 
 ipcMain.handle("appConfig:get", async (event, key) => {
   try {
@@ -29434,6 +29939,572 @@ ipcMain.handle("users:ensureAdmin", async () => {
         };
   } catch (error) {
     console.error("❌ Ensure admin error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ========================================
+// COMPANY ANNOUNCEMENTS / NOTIFICATIONS
+// ========================================
+
+const FALLBACK_ANNOUNCEMENTS = [
+  {
+    id: 900001,
+    title: "Tăng hoa hồng đóng gói và thưởng thắng tuần",
+    summary: "Cập nhật đơn giá hoa hồng đóng gói cùng thưởng cho nhân viên đứng đầu tuần.",
+    content: "Công ty cập nhật cơ chế thưởng dành cho nhân viên đóng gói. Đơn giá trong thông báo được lấy từ cấu hình hiện hành của phần mềm.\n\n• Hoa hồng đóng gói được tính theo mức độ của sản phẩm/kiện.\n• Thưởng thắng tuần dành cho nhân viên có kết quả đóng gói cao nhất trong tuần.\n• Xem chi tiết tại Thông báo → Chính sách → Hoa hồng đóng gói / Thưởng thắng tuần.",
+    category: "policy",
+    severity: "reward",
+    status: "published",
+    audienceRoles: '["manager","staff"]',
+    effectiveAt: "2026-09-01T00:00:00.000Z",
+    publishedAt: "2026-09-01T00:00:00.000Z",
+    requireAcknowledgement: true,
+    version: 3,
+    policyCode: "PKG-REWARD-WEEKLY",
+    issuer: "Phòng vận hành",
+    createdByName: "Thúy Lê (Admin)",
+  },
+];
+
+const FALLBACK_PACKING_LEVELS = [
+  { key: "easy", label: "Dễ", unit: "gói", defaultRate: 20 },
+  { key: "medium", label: "Trung bình", unit: "gói", defaultRate: 30 },
+  { key: "high", label: "Cao", unit: "gói", defaultRate: 40 },
+];
+const FALLBACK_WEEKLY_PACKING_REWARD = 100000;
+
+function formatFallbackVnd(value) {
+  return `${Math.round(Number(value) || 0).toLocaleString("vi-VN")}đ`;
+}
+
+// Announcements still work before the Announcement migration is deployed. Their
+// figures intentionally come from the same attendance config as payroll.
+async function getFallbackAnnouncements() {
+  const fallback = FALLBACK_ANNOUNCEMENTS[0];
+  let attendanceData = {};
+  let record;
+  try {
+    record = await prisma.appConfig.findUnique({
+      where: { key: "attendanceData" },
+      select: { value: true, updatedAt: true },
+    });
+    attendanceData = record?.value ? JSON.parse(record.value) : {};
+  } catch (error) {
+    console.warn("[Notifications] Không đọc được cấu hình thưởng đóng gói:", error.message);
+  }
+
+  const packingCommission = attendanceData?.config?.packingCommission || {};
+  // Support the current { rates, customLevels } format and older direct-rate data.
+  const rates = packingCommission?.rates && typeof packingCommission.rates === "object"
+    ? packingCommission.rates
+    : packingCommission;
+  const customLevels = Array.isArray(packingCommission?.customLevels)
+    ? packingCommission.customLevels
+    : [];
+  const standardRates = FALLBACK_PACKING_LEVELS.map((level) => ({
+    ...level,
+    rate: Number.isFinite(Number(rates?.[level.key])) ? Number(rates[level.key]) : level.defaultRate,
+  }));
+  const customRates = customLevels
+    .map((level) => ({
+      key: String(level?.key || "").trim(),
+      label: String(level?.label || "").trim(),
+      unit: String(level?.unit || "gói").trim() || "gói",
+    }))
+    .filter((level) => level.key && level.label)
+    .map((level) => ({
+      ...level,
+      rate: Number.isFinite(Number(rates?.[level.key])) ? Number(rates[level.key]) : 0,
+    }));
+  const rateLines = [...standardRates, ...customRates]
+    .map((level) => `${level.label}: ${formatFallbackVnd(level.rate)}/${level.unit}`);
+  const updatedAt = packingCommission?.updatedAt || record?.updatedAt?.toISOString();
+  const effectiveAt = updatedAt || fallback.effectiveAt;
+  const publication = await getFallbackAudienceConfig(fallback.id);
+
+  return [{
+    ...fallback,
+    summary: `Đơn giá hiện hành: ${rateLines.join(" · ")}. Thưởng thắng tuần: ${formatFallbackVnd(FALLBACK_WEEKLY_PACKING_REWARD)}.`,
+    content: [
+      "Công ty tăng hoa hồng đóng gói và áp dụng thưởng thắng tuần cho nhân viên đóng gói.",
+      "",
+      "Hoa hồng đóng gói hiện hành",
+      ...rateLines.map((line) => `• ${line}`),
+      "",
+      "Thưởng thắng tuần",
+      `• ${formatFallbackVnd(FALLBACK_WEEKLY_PACKING_REWARD)}/tuần cho nhân viên có kết quả đóng gói cao nhất tuần, căn cứ dữ liệu ghi nhận trên hệ thống.`,
+      "",
+      "Xem chi tiết tại Thông báo → Chính sách → Hoa hồng đóng gói / Thưởng thắng tuần.",
+    ].join("\n"),
+    effectiveAt,
+    publishedAt: publication?.publishedAt || effectiveAt,
+    createdByName: publication?.publishedBy || packingCommission?.updatedBy || fallback.createdByName,
+  }];
+}
+
+function isAnnouncementSchemaUnavailable(error) {
+  const text = `${error?.message || ""} ${error?.meta?.message || ""}`;
+  return error?.code === "P2010" || /Announcement.*does not exist|relation .*Announcement/i.test(text);
+}
+
+let announcementSchemaCache = { available: null, checkedAt: 0 };
+const ANNOUNCEMENT_SCHEMA_CACHE_MS = 60 * 1000;
+
+async function hasAnnouncementSchema() {
+  const now = Date.now();
+  if (
+    announcementSchemaCache.available !== null &&
+    now - announcementSchemaCache.checkedAt < ANNOUNCEMENT_SCHEMA_CACHE_MS
+  ) {
+    return announcementSchemaCache.available;
+  }
+  const rows = await prisma.$queryRaw`
+    SELECT
+      to_regclass('public."Announcement"')::text AS "announcementTable",
+      to_regclass('public."AnnouncementRecipient"')::text AS "recipientTable"
+  `;
+  const available = Boolean(rows[0]?.announcementTable && rows[0]?.recipientTable);
+  announcementSchemaCache = { available, checkedAt: now };
+  return available;
+}
+
+function parseFallbackRecipientState(value) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function getFallbackRecipientState(userId) {
+  const row = await prisma.appConfig.findUnique({
+    where: { key: `announcementRecipient:${userId}` },
+  });
+  return parseFallbackRecipientState(row?.value);
+}
+
+async function mutateFallbackRecipientState(userId, announcementId, updater) {
+  const key = `announcementRecipient:${userId}`;
+  return getPrismaDirectTx().$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+    const row = await tx.appConfig.findUnique({ where: { key } });
+    const state = parseFallbackRecipientState(row?.value);
+    state[String(announcementId)] = updater(state[String(announcementId)] || {});
+    await tx.appConfig.upsert({
+      where: { key },
+      update: { value: JSON.stringify(state) },
+      create: { key, value: JSON.stringify(state) },
+    });
+    return state[String(announcementId)];
+  }, { isolationLevel: "Serializable", timeout: 10000, maxWait: 10000 });
+}
+
+async function listFallbackAnnouncements(actor) {
+  const announcements = await getFallbackAnnouncements();
+  const visibleAnnouncements = await Promise.all(announcements.map(async (item) => (
+    (await canReceiveFallbackAnnouncement(item, actor)) ? item : null
+  )));
+  const recipientState = await getFallbackRecipientState(actor.id);
+  return visibleAnnouncements
+    .filter(Boolean)
+    .map((item) => ({
+      ...item,
+      // Admins can always read and oversee a policy, but never become an
+      // acknowledgement recipient themselves.
+      recipient: actor.role === "admin"
+        ? { ...(recipientState[String(item.id)] || {}), acknowledgementRequired: false }
+        : recipientState[String(item.id)] || null,
+    }));
+}
+
+function announcementIsVisibleToRole(announcement, role) {
+  if (!announcement?.audienceRoles) return true;
+  try {
+    const roles = JSON.parse(announcement.audienceRoles);
+    return !Array.isArray(roles) || roles.length === 0 || roles.includes(role);
+  } catch {
+    return true;
+  }
+}
+
+async function getOfficialEmployeeUsernames() {
+  try {
+    const record = await prisma.appConfig.findUnique({
+      where: { key: "attendanceData" },
+      select: { value: true },
+    });
+    const attendanceData = record?.value ? JSON.parse(record.value) : {};
+    return new Set(
+      (Array.isArray(attendanceData?.employees) ? attendanceData.employees : [])
+        .filter((employee) => employee?.type === "Official")
+        .map((employee) => normalizeActorName(employee?.username))
+        .filter(Boolean),
+    );
+  } catch (error) {
+    console.warn("[Notifications] Không đọc được danh sách nhân viên chính thức:", error.message);
+    return new Set();
+  }
+}
+
+function parseFallbackAudienceConfig(value) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function getFallbackAudienceConfig(announcementId) {
+  const record = await prisma.appConfig.findUnique({
+    where: { key: `announcementAudience:${announcementId}` },
+    select: { value: true },
+  });
+  return parseFallbackAudienceConfig(record?.value);
+}
+
+async function getFallbackRequiredRecipients(announcementId) {
+  const officialUsernames = await getOfficialEmployeeUsernames();
+  if (officialUsernames.size === 0) return [];
+  const users = await prisma.user.findMany({
+    where: {
+      status: "active",
+      role: { not: "admin" },
+      username: { in: [...officialUsernames] },
+    },
+    select: { id: true, username: true, fullName: true, role: true },
+    orderBy: [{ role: "asc" }, { fullName: "asc" }],
+  });
+  const audienceConfig = await getFallbackAudienceConfig(announcementId);
+  const selectedIds = Array.isArray(audienceConfig?.userIds)
+    ? new Set(audienceConfig.userIds.map(Number).filter(Number.isSafeInteger))
+    : null;
+  // Until an admin saves a selection, every current official employee is required.
+  return users.map((user) => ({ ...user, required: !selectedIds || selectedIds.has(user.id) }));
+}
+
+async function canReceiveFallbackAnnouncement(announcement, actor) {
+  // Admin access is intentionally broader than the acknowledgement audience.
+  if (actor?.role === "admin") return true;
+  if (!announcementIsVisibleToRole(announcement, actor?.role)) return false;
+  const recipients = await getFallbackRequiredRecipients(announcement.id);
+  return recipients.some((recipient) => recipient.required && recipient.id === actor?.id);
+}
+
+function broadcastNotificationChange(userId) {
+  try {
+    const { BrowserWindow } = require("electron");
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed()) {
+        win.webContents.send("notifications:changed", { userId });
+      }
+    });
+  } catch (error) {
+    console.warn("[Notifications] Không thể phát sự kiện cập nhật:", error.message);
+  }
+}
+
+async function getVisibleAnnouncement(announcementId, actor) {
+  const id = Number(announcementId);
+  if (!Number.isInteger(id) || id <= 0) throw new Error("Thông báo không hợp lệ.");
+  if (!(await hasAnnouncementSchema())) {
+    const fallback = (await getFallbackAnnouncements()).find((item) => item.id === id);
+    if (!fallback || !(await canReceiveFallbackAnnouncement(fallback, actor))) {
+      throw new Error("Thông báo không tồn tại hoặc không thuộc phạm vi của bạn.");
+    }
+    return { ...fallback, _fallback: true };
+  }
+  let announcement;
+  try {
+    const rows = await prisma.$queryRaw`
+      SELECT * FROM "Announcement"
+      WHERE "id" = ${id}
+        AND "status" = 'published'
+        AND "publishedAt" <= NOW()
+        AND ("expiresAt" IS NULL OR "expiresAt" > NOW())
+      LIMIT 1
+    `;
+    announcement = rows[0];
+  } catch (error) {
+    if (!isAnnouncementSchemaUnavailable(error)) throw error;
+    announcement = (await getFallbackAnnouncements()).find((item) => item.id === id);
+    if (announcement) announcement = { ...announcement, _fallback: true };
+  }
+  if (!announcement || (announcement._fallback
+    ? !(await canReceiveFallbackAnnouncement(announcement, actor))
+    : !announcementIsVisibleToRole(announcement, actor.role))) {
+    throw new Error("Thông báo không tồn tại hoặc không thuộc phạm vi của bạn.");
+  }
+  return announcement;
+}
+
+ipcMain.handle("notifications:list", async () => {
+  try {
+    const actor = await getCurrentActor();
+    if (!(await hasAnnouncementSchema())) {
+      return { success: true, data: await listFallbackAnnouncements(actor) };
+    }
+    let announcements;
+    try {
+      announcements = await prisma.$queryRaw`
+        SELECT
+          a.*,
+          r."deliveredAt" AS "recipientDeliveredAt",
+          r."readAt" AS "recipientReadAt",
+          r."acknowledgedAt" AS "recipientAcknowledgedAt",
+          r."snoozedUntil" AS "recipientSnoozedUntil"
+        FROM "Announcement" a
+        LEFT JOIN "AnnouncementRecipient" r
+          ON r."announcementId" = a."id" AND r."userId" = ${actor.id}
+        WHERE a."status" = 'published'
+          AND a."publishedAt" <= NOW()
+          AND (a."expiresAt" IS NULL OR a."expiresAt" > NOW())
+        ORDER BY a."publishedAt" DESC, a."id" DESC
+      `;
+    } catch (error) {
+      if (!isAnnouncementSchemaUnavailable(error)) throw error;
+      return { success: true, data: await listFallbackAnnouncements(actor) };
+    }
+    const visible = announcements
+      .filter((announcement) => announcementIsVisibleToRole(announcement, actor.role))
+      .map((announcement) => {
+        const {
+          recipientDeliveredAt,
+          recipientReadAt,
+          recipientAcknowledgedAt,
+          recipientSnoozedUntil,
+          ...data
+        } = announcement;
+        return {
+          ...data,
+          recipient: recipientDeliveredAt || recipientReadAt || recipientAcknowledgedAt || recipientSnoozedUntil
+            ? {
+                deliveredAt: recipientDeliveredAt,
+                readAt: recipientReadAt,
+                acknowledgedAt: recipientAcknowledgedAt,
+                snoozedUntil: recipientSnoozedUntil,
+              }
+            : null,
+        };
+      });
+    return { success: true, data: visible };
+  } catch (error) {
+    console.error("❌ Get notifications error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("notifications:recipients", async (_event, announcementId) => {
+  try {
+    requireRole("admin");
+    const id = Number(announcementId);
+    if (!Number.isInteger(id) || id <= 0) throw new Error("Thông báo không hợp lệ.");
+    if (!(await hasAnnouncementSchema())) {
+      const announcement = (await getFallbackAnnouncements()).find((item) => Number(item.id) === id);
+      if (!announcement) throw new Error("Không tìm thấy thông báo.");
+      const users = await getFallbackRequiredRecipients(announcement.id);
+      const data = await Promise.all(users.map(async (user) => {
+        const state = await getFallbackRecipientState(user.id);
+        return { ...user, ...(state[String(id)] || {}) };
+      }));
+      return { success: true, data };
+    }
+    const announcement = await prisma.announcement.findUnique({
+      where: { id },
+      select: { audienceRoles: true },
+    });
+    if (!announcement) throw new Error("Không tìm thấy thông báo.");
+    let roles = [];
+    try {
+      roles = JSON.parse(announcement.audienceRoles || "[]");
+    } catch {}
+    const users = await prisma.user.findMany({
+      where: {
+        status: "active",
+        ...(Array.isArray(roles) && roles.length > 0 ? { role: { in: roles } } : {}),
+      },
+      select: { id: true, username: true, fullName: true, role: true },
+      orderBy: [{ role: "asc" }, { fullName: "asc" }],
+    });
+    const states = await prisma.announcementRecipient.findMany({
+      where: { announcementId: id, userId: { in: users.map((user) => user.id) } },
+      select: { userId: true, deliveredAt: true, readAt: true, acknowledgedAt: true },
+    });
+    const stateByUser = new Map(states.map((state) => [state.userId, state]));
+    return {
+      success: true,
+      data: users.map((user) => ({ ...user, ...(stateByUser.get(user.id) || {}) })),
+    };
+  } catch (error) {
+    console.error("❌ Get notification recipients error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("notifications:publish", async (_event, announcementId, userIds) => {
+  try {
+    requireRole("admin");
+    const id = Number(announcementId);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error("Thông báo không hợp lệ.");
+    if (await hasAnnouncementSchema()) {
+      throw new Error("Luồng phát hành này chỉ áp dụng cho thông báo chính sách hiện hành.");
+    }
+    const announcement = (await getFallbackAnnouncements()).find((item) => item.id === id);
+    if (!announcement) throw new Error("Không tìm thấy thông báo.");
+    const eligibleRecipients = await getFallbackRequiredRecipients(id);
+    const eligibleIds = new Set(eligibleRecipients.map((user) => user.id));
+    const selectedIds = [...new Set((Array.isArray(userIds) ? userIds : []).map(Number))]
+      .filter((userId) => Number.isSafeInteger(userId) && eligibleIds.has(userId));
+    if (selectedIds.length === 0) {
+      throw new Error("Hãy chọn ít nhất một nhân viên chính thức cần xác nhận.");
+    }
+    if (selectedIds.length !== (Array.isArray(userIds) ? userIds.length : 0)) {
+      throw new Error("Danh sách người nhận có tài khoản không hợp lệ.");
+    }
+    const publishedAt = new Date().toISOString();
+    await getPrismaDirectTx().$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`announcementPublication:${id}`}))`;
+      const audienceValue = JSON.stringify({
+        userIds: selectedIds,
+        publishedAt,
+        publishedBy: currentSession.username,
+      });
+      await tx.appConfig.upsert({
+        where: { key: `announcementAudience:${id}` },
+        update: { value: audienceValue },
+        create: { key: `announcementAudience:${id}`, value: audienceValue },
+      });
+
+      // Each publication is a new delivery cycle, even when the policy ID stays stable.
+      for (const userId of selectedIds) {
+        const recipientKey = `announcementRecipient:${userId}`;
+        const recipientRow = await tx.appConfig.findUnique({ where: { key: recipientKey } });
+        const recipientState = parseFallbackRecipientState(recipientRow?.value);
+        recipientState[String(id)] = {};
+        await tx.appConfig.upsert({
+          where: { key: recipientKey },
+          update: { value: JSON.stringify(recipientState) },
+          create: { key: recipientKey, value: JSON.stringify(recipientState) },
+        });
+      }
+    }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 });
+    broadcastNotificationChange();
+    return { success: true, data: { userIds: selectedIds, publishedAt } };
+  } catch (error) {
+    console.error("❌ Publish notification error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("notifications:markRead", async (_event, announcementId) => {
+  try {
+    const actor = await getCurrentActor();
+    const announcement = await getVisibleAnnouncement(announcementId, actor);
+    const now = new Date();
+    if (announcement._fallback) {
+      await mutateFallbackRecipientState(actor.id, announcement.id, (state) => ({
+        ...state,
+        deliveredAt: state.deliveredAt || now.toISOString(),
+        readAt: state.readAt || now.toISOString(),
+      }));
+      broadcastNotificationChange(actor.id);
+      return { success: true };
+    }
+    await prisma.$executeRaw`
+      INSERT INTO "AnnouncementRecipient" ("announcementId", "userId", "readAt", "updatedAt")
+      VALUES (${Number(announcementId)}, ${actor.id}, ${now}, ${now})
+      ON CONFLICT ("announcementId", "userId") DO UPDATE
+      SET "readAt" = COALESCE("AnnouncementRecipient"."readAt", EXCLUDED."readAt"),
+          "updatedAt" = EXCLUDED."updatedAt"
+    `;
+    broadcastNotificationChange(actor.id);
+    return { success: true };
+  } catch (error) {
+    console.error("❌ Mark notification read error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("notifications:acknowledge", async (_event, announcementId) => {
+  try {
+    const actor = await getCurrentActor();
+    const announcement = await getVisibleAnnouncement(announcementId, actor);
+    if (!announcement.requireAcknowledgement) {
+      throw new Error("Thông báo này không yêu cầu xác nhận.");
+    }
+    const now = new Date();
+    if (announcement._fallback) {
+      await mutateFallbackRecipientState(actor.id, announcement.id, (state) => ({
+        ...state,
+        deliveredAt: state.deliveredAt || now.toISOString(),
+        readAt: now.toISOString(),
+        acknowledgedAt: now.toISOString(),
+        snoozedUntil: null,
+      }));
+      broadcastNotificationChange(actor.id);
+      return { success: true };
+    }
+    await prisma.$executeRaw`
+      INSERT INTO "AnnouncementRecipient" ("announcementId", "userId", "readAt", "acknowledgedAt", "updatedAt")
+      VALUES (${Number(announcementId)}, ${actor.id}, ${now}, ${now}, ${now})
+      ON CONFLICT ("announcementId", "userId") DO UPDATE
+      SET "readAt" = EXCLUDED."readAt",
+          "acknowledgedAt" = EXCLUDED."acknowledgedAt",
+          "snoozedUntil" = NULL,
+          "updatedAt" = EXCLUDED."updatedAt"
+    `;
+    void logActivity({
+      module: "notifications",
+      action: "ACKNOWLEDGE",
+      recordId: announcement.id,
+      recordName: announcement.title,
+      description: `Đã xác nhận thông báo ${announcement.policyCode || announcement.id}`,
+      userId: actor.id,
+      userName: actor.fullName,
+    });
+    broadcastNotificationChange(actor.id);
+    return { success: true };
+  } catch (error) {
+    console.error("❌ Acknowledge notification error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("notifications:snooze", async (_event, announcementId) => {
+  try {
+    const actor = await getCurrentActor();
+    const announcement = await getVisibleAnnouncement(announcementId, actor);
+    const now = new Date();
+    const effectiveAt = announcement.effectiveAt ? new Date(announcement.effectiveAt) : null;
+    if (!announcement.requireAcknowledgement || !effectiveAt || effectiveAt <= now) {
+      throw new Error("Thông báo đã có hiệu lực và cần được xác nhận ngay.");
+    }
+    const nextDay = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const snoozedUntil = nextDay < effectiveAt ? nextDay : effectiveAt;
+    if (announcement._fallback) {
+      await mutateFallbackRecipientState(actor.id, announcement.id, (state) => ({
+        ...state,
+        deliveredAt: state.deliveredAt || now.toISOString(),
+        readAt: state.readAt || now.toISOString(),
+        snoozedUntil: snoozedUntil.toISOString(),
+      }));
+      broadcastNotificationChange(actor.id);
+      return { success: true, data: { snoozedUntil } };
+    }
+    await prisma.$executeRaw`
+      INSERT INTO "AnnouncementRecipient" ("announcementId", "userId", "readAt", "snoozedUntil", "updatedAt")
+      VALUES (${Number(announcementId)}, ${actor.id}, ${now}, ${snoozedUntil}, ${now})
+      ON CONFLICT ("announcementId", "userId") DO UPDATE
+      SET "readAt" = COALESCE("AnnouncementRecipient"."readAt", EXCLUDED."readAt"),
+          "snoozedUntil" = EXCLUDED."snoozedUntil",
+          "updatedAt" = EXCLUDED."updatedAt"
+    `;
+    broadcastNotificationChange(actor.id);
+    return { success: true, data: { snoozedUntil } };
+  } catch (error) {
+    console.error("❌ Snooze notification error:", error);
     return { success: false, error: error.message };
   }
 });

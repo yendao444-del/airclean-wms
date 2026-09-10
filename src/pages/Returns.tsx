@@ -97,6 +97,10 @@ const parseReturnDate = (value: any) => {
 const normalizeReturnAssignee = (value: string) =>
     String(value || '').normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 
+const getReturnsPopupContainer = (triggerNode: HTMLElement) => {
+    return triggerNode.parentElement || document.body;
+};
+
 const compactReturnAssignee = (value: string) =>
     normalizeReturnAssignee(value).replace(/[^a-z0-9]/g, '');
 
@@ -186,6 +190,7 @@ export default function ReturnsPage() {
     const [packerFilter, setPackerFilter] = useState<string>('all');
     const [slaFilter, setSlaFilter] = useState<'all' | 'overdue'>('all');
     const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
+    const [filtersExpanded, setFiltersExpanded] = useState(false);
 
     // ✨ State cho collapse/expand logs
     const [collapsedLogs, setCollapsedLogs] = useState<Record<number, boolean>>({});
@@ -903,14 +908,15 @@ export default function ReturnsPage() {
         {
             title: 'Mã KN / Đơn hàng / Sản phẩm',
             key: 'info',
-            width: 360,
+            width: 310,
+            className: 'returns-cell returns-cell--info',
             render: (_, record) => {
                 return (
                     <div className="returns-order-cell" style={{ lineHeight: 1.7, fontSize: 12 }}>
                         <div style={{ display: 'flex', gap: 12, marginBottom: 4 }}>
                             <div>
                                 <Text type="secondary" style={{ fontSize: 11 }}>Mã KN:</Text>
-                                <div><Tag className="returns-complaint-code" bordered={false}>{record.complaintCode}</Tag></div>
+                                <div><Tag className="returns-complaint-code" variant="filled">{record.complaintCode}</Tag></div>
                             </div>
                             <div>
                                 <Text type="secondary" style={{ fontSize: 11 }}>Ngày:</Text>
@@ -936,7 +942,8 @@ export default function ReturnsPage() {
         {
             title: 'Ghi chú xử lý',
             key: 'processNotes',
-            width: 280,
+            width: 250,
+            className: 'returns-cell returns-cell--notes',
             render: (_, record) => {
                 // Parse process notes
                 let logs: ProcessLog[] = [];
@@ -1001,11 +1008,11 @@ export default function ReturnsPage() {
 
                         {displayLogs.map((log, index) => (
                             <div key={index} className="returns-note-entry">
-                                <Tag className="returns-note-time" bordered={false}>
+                                <Tag className="returns-note-time" variant="filled">
                                     {log.timestamp}
                                 </Tag>
                                 {log.createdBy && (
-                                    <Tag className="returns-note-user" bordered={false}>
+                                    <Tag className="returns-note-user" variant="filled">
                                         @{log.createdBy}
                                     </Tag>
                                 )}
@@ -1071,7 +1078,8 @@ export default function ReturnsPage() {
             title: 'NV đóng gói',
             dataIndex: 'packer',
             key: 'packer',
-            width: 170,
+            width: 155,
+            className: 'returns-cell returns-cell--packer',
             render: (packer, record) => {
                 // Disable packer change in history tab
                 const isInHistory = !isAdmin;
@@ -1079,6 +1087,7 @@ export default function ReturnsPage() {
                 return (
                     <Select
                         className="returns-packer-select"
+                        getPopupContainer={getReturnsPopupContainer}
                         value={packer || undefined}
                         placeholder="Chọn nhân viên..."
                         disabled={isInHistory}
@@ -1123,12 +1132,14 @@ export default function ReturnsPage() {
             title: 'Lỗi do',
             key: 'faultParty',
             dataIndex: 'faultParty',
-            width: 140,
+            width: 130,
+            className: 'returns-cell returns-cell--fault',
             render: (faultParty: string | undefined, record: Return) => {
                 const isCompleted = !isAdmin && (record.status === 'completed' || isFinalStatus(record.status));
                 return (
                     <Select
                         className="returns-fault-select"
+                        getPopupContainer={getReturnsPopupContainer}
                         value={faultParty === 'customer' ? 'customer' : 'warehouse'}
                         size="small"
                         style={{ width: '100%' }}
@@ -1165,7 +1176,8 @@ export default function ReturnsPage() {
             title: 'Trạng thái',
             dataIndex: 'status',
             key: 'status',
-            width: 170,
+            width: 150,
+            className: 'returns-cell returns-cell--status',
             render: (status, record) => {
                 const getStatusTag = (statusValue: string) => {
                     const statusConfig = statusList.find(s => s.value === statusValue);
@@ -1181,6 +1193,7 @@ export default function ReturnsPage() {
                 return (
                     <Select
                         className="returns-status-select"
+                        getPopupContainer={getReturnsPopupContainer}
                         value={status}
                         disabled={isInHistory}
                         onChange={async (newStatus) => {
@@ -1227,7 +1240,7 @@ export default function ReturnsPage() {
                         labelRender={({ value, label }) => (
                             <span className={`returns-status-chip returns-status-chip--${getStatusTone(String(value))}`}>{label}</span>
                         )}
-                        dropdownRender={(menu) => (
+                        popupRender={(menu) => (
                             <>
                                 {menu}
                                 <div style={{ padding: '8px 12px', borderTop: '1px solid #f0f0f0', marginTop: 4 }}>
@@ -1324,7 +1337,8 @@ export default function ReturnsPage() {
         {
             title: 'Hạn xử lý',
             key: 'sla',
-            width: 120,
+            width: 105,
+            className: 'returns-cell returns-cell--sla',
             render: (_, record) => {
                 const sla = getReturnSla(record);
                 return <span className={`returns-sla returns-sla--${sla.tone}`}>{sla.label}</span>;
@@ -1333,8 +1347,9 @@ export default function ReturnsPage() {
         {
             title: '',
             key: 'actions',
-            width: 58,
+            width: 52,
             fixed: 'right',
+            className: 'returns-cell returns-cell--actions',
             render: (_, record) => {
                 // Check if in history tab and completed
                 const isHistoryCompleted = record.status === 'completed' && activeTab === 'history';
@@ -1361,7 +1376,7 @@ export default function ReturnsPage() {
                     });
                 }
 
-                return <Dropdown menu={{ items }} trigger={['click']}><Button aria-label="Xem thêm" icon={<MoreOutlined />} size="small" /></Dropdown>;
+                return <Dropdown getPopupContainer={getReturnsPopupContainer} menu={{ items }} trigger={['click']}><Button aria-label="Xem thêm" icon={<MoreOutlined />} size="small" /></Dropdown>;
             },
         },
     ];
@@ -1402,17 +1417,24 @@ export default function ReturnsPage() {
     const waitingCount = waitingStatus ? activeReturns.filter(item => item.status === waitingStatus.value).length : 0;
     const completedToday = historyReturns.filter(item => parseReturnDate(item.complaintDate).isSame(dayjs(), 'day')).length;
     const hasActiveFilters = Boolean(searchText.trim()) || statusFilter !== 'all' || faultFilter !== 'all' || packerFilter !== 'all' || slaFilter !== 'all' || Boolean(dateRange);
+    const secondaryFilterCount = [
+        statusFilter !== 'all',
+        faultFilter !== 'all',
+        packerFilter !== 'all',
+        slaFilter !== 'all',
+        Boolean(dateRange),
+    ].filter(Boolean).length;
 
     const renderReturnsTable = (data: Return[], allowSelection = true) => (
         <Table
-            className="returns-table"
+            className={`returns-table ${allowSelection ? 'returns-table--selectable' : 'returns-table--readonly'}`}
             columns={columns}
             dataSource={data}
             rowKey="id"
             loading={loading}
             size="middle"
             sticky
-            scroll={{ x: 1510 }}
+            scroll={{ x: 1200 }}
             rowSelection={allowSelection ? {
                 selectedRowKeys,
                 onChange: selectedKeys => setSelectedRowKeys(selectedKeys as number[]),
@@ -1442,7 +1464,7 @@ export default function ReturnsPage() {
                         className="returns-policy-alert"
                         type="warning"
                         showIcon
-                        message="Quy định xử lý trả hàng mới áp dụng từ 04/09/2026"
+                        title="Quy định xử lý trả hàng mới áp dụng từ 04/09/2026"
                         description="Hạn xử lý là 10 ngày. Từ ngày thứ 11, nếu phiếu chưa Hoàn thành sẽ phạt tài khoản nguyendinhtoan từ 30.000đ/đơn và tăng thêm 10.000đ mỗi ngày được phép tính. Chủ nhật và ngày lễ toàn quốc không tính phạt."
                     />
                 )}
@@ -1456,10 +1478,16 @@ export default function ReturnsPage() {
                     </div>
                     <div className="returns-heading-actions">
                         <Tooltip title="Làm mới dữ liệu">
-                            <Button icon={<ReloadOutlined />} onClick={() => loadReturns()} loading={loading}>Tải lại</Button>
+                            <Button className="returns-action returns-action--icon" aria-label="Tải lại dữ liệu" icon={<ReloadOutlined />} onClick={() => loadReturns()} loading={loading}>
+                                <span className="returns-action-label">Tải lại</span>
+                            </Button>
                         </Tooltip>
-                        <Button icon={<FileExcelOutlined />} onClick={handleExportDisplayed}>Xuất Excel</Button>
-                        <Button type="primary" icon={<PlusOutlined />} size="large" onClick={handleAdd}>Tạo phiếu trả</Button>
+                        <Button className="returns-action returns-action--icon" aria-label="Xuất Excel" icon={<FileExcelOutlined />} onClick={handleExportDisplayed}>
+                            <span className="returns-action-label">Xuất Excel</span>
+                        </Button>
+                        <Button className="returns-action returns-action--primary" type="primary" icon={<PlusOutlined />} size="large" onClick={handleAdd}>
+                            <span>Tạo phiếu trả</span>
+                        </Button>
                     </div>
                 </div>
 
@@ -1482,8 +1510,8 @@ export default function ReturnsPage() {
                     </button>
                 </div>
 
-                <Card className="returns-workspace" bordered={false}>
-                    <div className="returns-filter-bar">
+                <Card className="returns-workspace" variant="borderless">
+                    <div className={`returns-filter-bar ${filtersExpanded ? 'returns-filter-bar--expanded' : ''}`}>
                         <Input
                             className="returns-search"
                             placeholder="Tìm mã KN, mã đơn, sản phẩm, lý do, nhân viên..."
@@ -1492,29 +1520,40 @@ export default function ReturnsPage() {
                             value={searchText}
                             onChange={event => setSearchText(event.target.value)}
                         />
-                        <RangePicker
-                            className="returns-date-filter"
-                            value={dateRange}
-                            format="DD/MM/YYYY"
-                            placeholder={['Từ ngày', 'Đến ngày']}
-                            prefix={<CalendarOutlined />}
-                            onChange={value => setDateRange(value ? [value[0]!, value[1]!] : null)}
-                        />
-                        <Select className="returns-filter" value={statusFilter} onChange={setStatusFilter} options={[
-                            { value: 'all', label: 'Tất cả trạng thái' },
-                            ...statusList.map(status => ({ value: status.value, label: status.label })),
-                        ]} />
-                        <Select className="returns-filter" value={faultFilter} onChange={setFaultFilter} options={[
-                            { value: 'all', label: 'Tất cả lỗi do' },
-                            { value: 'warehouse', label: 'Lỗi do kho' },
-                            { value: 'customer', label: 'Lỗi do khách hàng' },
-                        ]} />
-                        <Select className="returns-filter" value={packerFilter} onChange={setPackerFilter} options={[
-                            { value: 'all', label: 'Tất cả nhân viên' },
-                            ...employees.map(employee => ({ value: employee.username, label: employee.displayName || employee.username })),
-                        ]} />
-                        <Button type="primary" icon={<FilterOutlined />}>Lọc</Button>
-                        {hasActiveFilters && <Button type="text" onClick={clearReturnFilters}>Xóa lọc</Button>}
+                        <Button
+                            className="returns-filter-toggle"
+                            icon={<FilterOutlined />}
+                            type={secondaryFilterCount > 0 ? 'primary' : 'default'}
+                            onClick={() => setFiltersExpanded(expanded => !expanded)}
+                        >
+                            Bộ lọc{secondaryFilterCount > 0 ? ` (${secondaryFilterCount})` : ''}
+                        </Button>
+                        <div className="returns-filter-controls">
+                            <RangePicker
+                                className="returns-date-filter"
+                                getPopupContainer={getReturnsPopupContainer}
+                                value={dateRange}
+                                format="DD/MM/YYYY"
+                                placeholder={['Từ ngày', 'Đến ngày']}
+                                prefix={<CalendarOutlined />}
+                                onChange={value => setDateRange(value ? [value[0]!, value[1]!] : null)}
+                            />
+                            <Select className="returns-filter" getPopupContainer={getReturnsPopupContainer} value={statusFilter} onChange={setStatusFilter} options={[
+                                { value: 'all', label: 'Tất cả trạng thái' },
+                                ...statusList.map(status => ({ value: status.value, label: status.label })),
+                            ]} />
+                            <Select className="returns-filter" getPopupContainer={getReturnsPopupContainer} value={faultFilter} onChange={setFaultFilter} options={[
+                                { value: 'all', label: 'Tất cả lỗi do' },
+                                { value: 'warehouse', label: 'Lỗi do kho' },
+                                { value: 'customer', label: 'Lỗi do khách hàng' },
+                            ]} />
+                            <Select className="returns-filter" getPopupContainer={getReturnsPopupContainer} value={packerFilter} onChange={setPackerFilter} options={[
+                                { value: 'all', label: 'Tất cả nhân viên' },
+                                ...employees.map(employee => ({ value: employee.username, label: employee.displayName || employee.username })),
+                            ]} />
+                            <Button className="returns-filter-apply" type="primary" icon={<FilterOutlined />} onClick={() => setFiltersExpanded(false)}>Áp dụng</Button>
+                            {hasActiveFilters && <Button className="returns-filter-clear" type="text" onClick={clearReturnFilters}>Xóa lọc</Button>}
+                        </div>
                     </div>
 
                     <Tabs
@@ -1530,10 +1569,10 @@ export default function ReturnsPage() {
                     {selectedRowKeys.length > 0 && (
                         <div className="returns-bulk-bar">
                             <strong>Đã chọn {selectedRowKeys.length} phiếu</strong>
-                            <Dropdown menu={{ items: employees.map(employee => ({ key: employee.username, label: employee.displayName || employee.username, onClick: () => handleBulkPackerChange(employee.username) })) }}>
+                            <Dropdown getPopupContainer={getReturnsPopupContainer} menu={{ items: employees.map(employee => ({ key: employee.username, label: employee.displayName || employee.username, onClick: () => handleBulkPackerChange(employee.username) })) }}>
                                 <Button icon={<UserAddOutlined />}>Gán nhân viên</Button>
                             </Dropdown>
-                            <Dropdown menu={{ items: statusList.map(status => ({ key: status.value, label: status.label, onClick: () => handleBulkStatusChange(status.value) })) }}>
+                            <Dropdown getPopupContainer={getReturnsPopupContainer} menu={{ items: statusList.map(status => ({ key: status.value, label: status.label, onClick: () => handleBulkStatusChange(status.value) })) }}>
                                 <Button icon={<SwapOutlined />}>Đổi trạng thái</Button>
                             </Dropdown>
                             <Button icon={<CommentOutlined />} onClick={() => setShowInputRows(prev => ({ ...prev, ...Object.fromEntries(selectedRowKeys.map(id => [id, true])) }))}>Thêm ghi chú</Button>
@@ -1640,7 +1679,7 @@ export default function ReturnsPage() {
                                 name="reason"
                                 rules={[{ required: true, message: 'Vui lòng nhập lý do!' }]}
                             >
-                                <Select size="large" placeholder="Chọn lý do">
+                                <Select size="large" placeholder="Chọn lý do" getPopupContainer={getReturnsPopupContainer}>
                                     <Select.Option value="Lỗi sản phẩm">Lỗi sản phẩm</Select.Option>
                                     <Select.Option value="Không đúng mô tả">Không đúng mô tả</Select.Option>
                                     <Select.Option value="Giao nhầm">Giao nhầm</Select.Option>
@@ -1662,7 +1701,7 @@ export default function ReturnsPage() {
                             initialValue="warehouse"
                             rules={[{ required: true, message: 'Vui lòng chọn!' }]}
                         >
-                            <Select size="large">
+                            <Select size="large" getPopupContainer={getReturnsPopupContainer}>
                                 <Select.Option value="warehouse">
                                     <Tag color="red">🏭 Lỗi do kho</Tag>
                                     &nbsp;— Sẽ tự động ghi phạt nhân viên đóng gói
@@ -1689,7 +1728,7 @@ export default function ReturnsPage() {
                                 name="status"
                                 initialValue="pending"
                             >
-                                <Select size="large" placeholder="Chọn trạng thái...">
+                                <Select size="large" placeholder="Chọn trạng thái..." getPopupContainer={getReturnsPopupContainer}>
                                     {statusList.map(status => (
                                         <Select.Option key={status.value} value={status.value}>
                                             <Tag color={status.color}>{status.label}</Tag>
@@ -1699,7 +1738,7 @@ export default function ReturnsPage() {
                             </Form.Item>
 
                             <Form.Item label="Nhân viên đóng gói" name="packer" initialValue={currentUser} rules={[{ required: true, message: 'Vui lòng chọn nhân viên đóng gói!' }]}>
-                                <Select size="large" placeholder="Chọn nhân viên..." showSearch allowClear>
+                                <Select size="large" placeholder="Chọn nhân viên..." showSearch allowClear getPopupContainer={getReturnsPopupContainer}>
                                     {employees.map(emp => (
                                         <Select.Option key={emp.username} value={emp.username}>
                                             👤 {emp.displayName || emp.username}

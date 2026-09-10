@@ -300,13 +300,18 @@ const getRequiredEvidenceImageCount = (evidence?: EvidenceMeta): number => {
 };
 
 const getEvidenceImageMimeType = (file: File): string | null => {
-    if (['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return file.type;
+    if (file.type === 'image/jpeg') return file.type;
     const extension = file.name.split('.').pop()?.toLowerCase();
     if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
-    if (extension === 'png') return 'image/png';
-    if (extension === 'webp') return 'image/webp';
     return null;
 };
+
+const readFileAsDataUrl = (file: File): Promise<string> => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('Không thể đọc ảnh.'));
+    reader.readAsDataURL(file);
+});
 
 const getDriveImageUrl = (url: string) => {
     const fileId = url.match(/[-\w]{25,}/)?.[0];
@@ -328,8 +333,8 @@ const compressEvidenceImage = async (file: File): Promise<File> => {
         let height = Math.round(image.naturalHeight * (width / image.naturalWidth));
         let fallback: Blob | null = null;
 
-        // Continue reducing extreme screenshots/photos instead of rejecting
-        // them while a usable proof image can still be produced.
+        // Source validation happens before compression; this loop only keeps
+        // verified camera photos within the R2 upload limit.
         while (width >= 160 && height >= 120) {
             const canvas = document.createElement('canvas');
             canvas.width = width;
@@ -1491,7 +1496,7 @@ const DailyTasks = () => {
                 onOk: async () => {
                     try {
                         for (const task of orphanTasks) {
-                            const result = await window.electronAPI.dailyTasks.delete(task.id);
+                            const result = await window.electronAPI.dailyTasks.archive(task.id, 'Admin xóa công việc trong cột Khác');
                             if (!result?.success) throw new Error(result?.error || `Không thể xóa công việc #${task.id}.`);
                         }
                         await loadTasks();
@@ -1507,15 +1512,15 @@ const DailyTasks = () => {
         const tasksInCategory = dailyTasks.filter(t => t.category === categoryKey);
         Modal.confirm({
             title: 'Xóa danh mục?',
-            content: `Bạn có chắc muốn xóa danh mục "${categoryKey}"? ${tasksInCategory.length > 0 ? `⚠️ ${tasksInCategory.length} công việc trong danh mục này cũng sẽ bị xóa!` : 'Danh mục này đang trống.'}`,
+            content: `Bạn có chắc muốn xóa danh mục "${categoryKey}"? ${tasksInCategory.length > 0 ? `⚠️ ${tasksInCategory.length} công việc trong danh mục này cũng sẽ được ẩn khỏi danh sách!` : 'Danh mục này đang trống.'}`,
             okText: 'Xóa',
             okType: 'danger',
             cancelText: 'Hủy',
             onOk: async () => {
                 try {
-                    // Xóa tất cả tasks trong danh mục này trên DATABASE
+                    // Archive each task so its evidence, fines, and history remain recoverable.
                     for (const task of tasksInCategory) {
-                        const result = await window.electronAPI.dailyTasks.delete(task.id);
+                        const result = await window.electronAPI.dailyTasks.archive(task.id, `Admin xóa danh mục ${categoryKey}`);
                         if (!result?.success) throw new Error(result?.error || `Không thể xóa công việc #${task.id}.`);
                     }
                     // Xóa danh mục khỏi config
@@ -1584,16 +1589,16 @@ const DailyTasks = () => {
     const handleDeleteTask = (taskId: number) => {
         Modal.confirm({
             title: 'Xóa công việc?',
-            content: 'Bạn có chắc muốn xóa công việc này?',
+            content: 'Công việc sẽ được ẩn khỏi danh sách. Lịch sử, ảnh bằng chứng và dữ liệu phạt vẫn được giữ an toàn.',
             okText: 'Xóa',
             okType: 'danger',
             cancelText: 'Hủy',
             onOk: async () => {
                 try {
-                    const result = await window.electronAPI.dailyTasks.delete(taskId);
+                    const result = await window.electronAPI.dailyTasks.archive(taskId, 'Admin xóa khỏi danh sách công việc');
                     if (result.success) {
-                        message.success('Đã xóa!');
-                        loadTasks();
+                        message.success('Đã xóa công việc khỏi danh sách!');
+                        await loadTasks();
                     } else {
                         throw new Error(result.error || 'Không thể xóa công việc.');
                     }
@@ -1822,12 +1827,16 @@ const DailyTasks = () => {
                     <p style={{ marginBottom: 12, color: '#475569' }}><strong>{task.title}</strong></p>
                     <div>
                         <Upload
-                            accept="image/png,image/jpeg,image/webp"
+                            accept="image/jpeg,.jpg,.jpeg"
                             multiple
                             maxCount={MAX_EVIDENCE_IMAGES}
                             beforeUpload={(file) => {
                                 if (selectedImages.length >= MAX_EVIDENCE_IMAGES) {
                                     message.warning(`Chỉ được chọn tối đa ${MAX_EVIDENCE_IMAGES} ảnh.`);
+                                    return Upload.LIST_IGNORE;
+                                }
+                                if (!getEvidenceImageMimeType(file as unknown as File)) {
+                                    message.error('Không chấp nhận ảnh chụp màn hình hoặc ảnh tải về. Chỉ chọn ảnh JPG/JPEG chụp từ camera.');
                                     return Upload.LIST_IGNORE;
                                 }
                                 selectedImages = [...selectedImages, file as unknown as File];
@@ -1841,7 +1850,7 @@ const DailyTasks = () => {
                             <Button icon={<UploadOutlined />}>Chọn ảnh từ máy</Button>
                         </Upload>
                         <div style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>
-                            Công việc này yêu cầu tối thiểu {minimumImages} ảnh, tối đa {MAX_EVIDENCE_IMAGES} ảnh JPG, PNG hoặc WebP. Ảnh gốc tối đa 15 MB, ưu tiên nén khoảng 100–200 KB và luôn dưới 500 KB trước khi tải lên R2.
+                            Công việc này yêu cầu tối thiểu {minimumImages} ảnh, tối đa {MAX_EVIDENCE_IMAGES} ảnh JPG/JPEG chụp trực tiếp từ camera và còn thông tin thiết bị. Không chấp nhận ảnh chụp màn hình hoặc ảnh tải về. Ảnh gốc tối đa 15 MB.
                         </div>
                     </div>
                 </div>
@@ -1854,7 +1863,7 @@ const DailyTasks = () => {
                 }
                 const invalidImage = selectedImages.find(image => !getEvidenceImageMimeType(image) || image.size > MAX_EVIDENCE_SOURCE_BYTES);
                 if (invalidImage) {
-                    message.warning(`Ảnh "${invalidImage.name}" phải là JPG, PNG hoặc WebP và không vượt quá 15 MB.`);
+                    message.warning(`Ảnh "${invalidImage.name}" phải là JPG/JPEG chụp từ camera và không vượt quá 15 MB.`);
                     return Promise.reject();
                 }
                 try {
@@ -1862,23 +1871,29 @@ const DailyTasks = () => {
                     const images = [];
                     for (let index = 0; index < selectedImages.length; index += 1) {
                         const selectedImage = selectedImages[index];
+                        message.loading({ key: 'evidence-upload', content: `Đang xác minh ảnh gốc ${index + 1}/${selectedImages.length}...`, duration: 0 });
+                        const sourceData = await readFileAsDataUrl(selectedImage);
+                        const validation = await window.electronAPI.dailyTasks.validateEvidenceSource({
+                            taskId: task.id,
+                            name: selectedImage.name,
+                            mimeType: getEvidenceImageMimeType(selectedImage) || selectedImage.type,
+                            data: sourceData,
+                        });
+                        if (!validation.success || !validation.data?.validationToken) {
+                            throw new Error(validation.error || `Không thể xác minh ảnh "${selectedImage.name}".`);
+                        }
                         message.loading({ key: 'evidence-upload', content: `Đang nén ảnh ${index + 1}/${selectedImages.length}...`, duration: 0 });
                         const compressedImage = await compressEvidenceImage(selectedImage);
                         if (compressedImage.size >= MAX_EVIDENCE_IMAGE_BYTES) {
                             throw new Error(`Ảnh "${selectedImage.name}" sau nén vượt quá 500 KB.`);
                         }
-                        const data = await new Promise<string>((resolve, reject) => {
-                            const reader = new FileReader();
-                            reader.onload = () => resolve(String(reader.result));
-                            reader.onerror = () => reject(new Error('Không thể đọc ảnh.'));
-                            reader.readAsDataURL(compressedImage);
-                        });
-                        images.push({ name: compressedImage.name, mimeType: compressedImage.type, data, size: compressedImage.size });
+                        const data = await readFileAsDataUrl(compressedImage);
+                        images.push({ name: compressedImage.name, mimeType: compressedImage.type, data, size: compressedImage.size, validationToken: validation.data.validationToken });
                     }
                     message.loading({ key: 'evidence-upload', content: 'Đang tải bằng chứng lên hệ thống...', duration: 0 });
                     const result = await window.electronAPI.dailyTasks.submitEvidence({
                         taskId: task.id,
-                        images: images.map(({ name, mimeType, data }) => ({ name, mimeType, data })),
+                        images: images.map(({ name, mimeType, data, validationToken }) => ({ name, mimeType, data, validationToken })),
                     });
                     if (!result.success) {
                         if (result.reauthRequired) {
@@ -3409,7 +3424,7 @@ const DailyTasks = () => {
                     </div>
                     <Badge count={sidebarHistoryRows.length} showZero style={{ background: '#dcfce7', color: '#15803d', boxShadow: 'none' }} />
                 </div>
-                <div style={{ maxHeight: 640, overflowY: 'auto' }}>
+                <div className="daily-tasks-history-list">
                     {sidebarHistoryRows.length > 0 ? sidebarHistoryRows.map(row => (
                         <div key={`history-side-${row.taskId}`} style={{ padding: '13px 16px', borderBottom: '1px solid #eef2f7' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
