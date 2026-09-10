@@ -67,6 +67,9 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   // Face attendance is an intended kiosk workflow. Blocking this channel
   // makes the ready AI service unusable because recognition writes the log.
   "attendance:recognize",
+  // Fine reconciliation now runs in a serializable transaction with an
+  // advisory lock and merges only the fine/audit fields of attendanceData.
+  "attendance:reconcileLateFines",
   // Process notes are append-only and serialized under a row lock.
   "returns:addProcessNote",
   // Workflow-only return updates expose just operational fields. Full record
@@ -217,6 +220,14 @@ for (const key of runtimeConfigKeys) {
   }
 }
 const { reconcileLateAttendanceFines } = require("./attendance-fines");
+const {
+  calculateAllAttendanceRewardSummaries,
+  calculateAttendanceRewardSummary,
+  DEFAULT_ATTENDANCE_REWARD_CONFIG,
+  addDays: addAttendanceRewardDays,
+  normalizeConfig: normalizeAttendanceRewardConfig,
+  resolveEmployeeId,
+} = require("./attendance-rewards");
 
 // 📦 Offline Queue — lưu scan khi mất mạng, sync lại khi có mạng
 const offlineQueue = require("./offline-queue");
@@ -21635,6 +21646,55 @@ ipcMain.handle(
 );
 
 ipcMain.handle(
+  "ecommerceExports:getPackingRevision",
+  async (_event, { since, until } = {}) => {
+    try {
+      requireRole("admin", "manager");
+      if (!prisma) throw new Error("Prisma not available");
+
+      const dateFilter = {};
+      if (since) {
+        const start = new Date(since);
+        if (Number.isNaN(start.getTime())) throw new Error("Thời gian bắt đầu không hợp lệ.");
+        dateFilter.gte = start;
+      }
+      if (until) {
+        const end = new Date(until);
+        if (Number.isNaN(end.getTime())) throw new Error("Thời gian kết thúc không hợp lệ.");
+        dateFilter.lte = end;
+      }
+
+      const aggregate = await prisma.ecommerceExport.aggregate({
+        where: {
+          status: "completed",
+          ...(Object.keys(dateFilter).length > 0
+            ? { ecommerceExportDate: dateFilter }
+            : {}),
+        },
+        _count: { _all: true },
+        _max: { id: true, updatedAt: true },
+      });
+      const count = Number(aggregate._count?._all || 0);
+      const latestId = Number(aggregate._max?.id || 0);
+      const updatedAt = aggregate._max?.updatedAt?.toISOString() || null;
+
+      return {
+        success: true,
+        data: {
+          count,
+          latestId,
+          updatedAt,
+          revision: `${count}:${latestId}:${updatedAt || "none"}`,
+        },
+      };
+    } catch (error) {
+      console.error("Get packing live revision error:", error);
+      return { success: false, error: error.message };
+    }
+  },
+);
+
+ipcMain.handle(
   "ecommerceExports:checkExistingKeys",
   async (event, { orderNumbers = [], ecommerceExportCodes = [] } = {}) => {
     try {
@@ -21723,36 +21783,87 @@ ipcMain.handle("ecommerceExports:syncOrderPlacedAt", async (event, records = [])
       return { success: true, data: { ecommerceExports: 0, orders: 0 } };
     }
 
-    const result = await prisma.$transaction(async (tx) => {
-      let ecommerceExports = 0;
-      let orders = 0;
-      for (const [orderNumber, orderPlacedAt] of normalized) {
-        const timestampRecord = { orderPlacedAt: orderPlacedAt.toISOString() };
-        const [exportRows, orderRows] = await Promise.all([
-          tx.ecommerceExport.findMany({
-            where: { OR: [{ orderNumber }, { ecommerceExportCode: orderNumber }] },
-            select: { id: true, notes: true },
-          }),
-          tx.order.findMany({
-            where: { orderNumber, source: { in: ORDER_MARKETPLACE_SOURCES } },
-            select: { id: true, note: true },
-          }),
-        ]);
-        await Promise.all([
-          ...exportRows.map((row) => tx.ecommerceExport.update({
-            where: { id: row.id },
-            data: { notes: withMarketplaceOrderPlacedAtNote(row.notes, timestampRecord) },
-          })),
-          ...orderRows.map((row) => tx.order.update({
-            where: { id: row.id },
-            data: { note: withMarketplaceOrderPlacedAtNote(row.note, timestampRecord) },
-          })),
-        ]);
-        ecommerceExports += exportRows.length;
-        orders += orderRows.length;
+    const entries = Array.from(normalized.entries());
+    const result = { ecommerceExports: 0, orders: 0 };
+
+    // Most imported rows are still local pending rows. Resolve all persisted
+    // matches in batches so large marketplace files do not run hundreds of
+    // sequential queries inside one long transaction.
+    for (let offset = 0; offset < entries.length; offset += 500) {
+      const entryChunk = entries.slice(offset, offset + 500);
+      const timestampByOrder = new Map(entryChunk);
+      const orderNumbers = entryChunk.map(([orderNumber]) => orderNumber);
+      const [exportRows, orderRows] = await Promise.all([
+        prisma.ecommerceExport.findMany({
+          where: {
+            OR: [
+              { orderNumber: { in: orderNumbers } },
+              { ecommerceExportCode: { in: orderNumbers } },
+            ],
+          },
+          select: {
+            id: true,
+            orderNumber: true,
+            ecommerceExportCode: true,
+            notes: true,
+          },
+        }),
+        prisma.order.findMany({
+          where: {
+            orderNumber: { in: orderNumbers },
+            source: { in: ORDER_MARKETPLACE_SOURCES },
+          },
+          select: { id: true, orderNumber: true, note: true },
+        }),
+      ]);
+
+      const updates = [];
+      for (const row of exportRows) {
+        const orderPlacedAt =
+          timestampByOrder.get(String(row.orderNumber || "").trim()) ||
+          timestampByOrder.get(String(row.ecommerceExportCode || "").trim());
+        if (!orderPlacedAt) continue;
+        const notes = withMarketplaceOrderPlacedAtNote(row.notes, {
+          orderPlacedAt: orderPlacedAt.toISOString(),
+        });
+        if (notes === (row.notes || null)) continue;
+        updates.push({ type: "export", id: row.id, value: notes });
       }
-      return { ecommerceExports, orders };
-    }, { timeout: 60000, maxWait: 10000 });
+      for (const row of orderRows) {
+        const orderPlacedAt = timestampByOrder.get(
+          String(row.orderNumber || "").trim(),
+        );
+        if (!orderPlacedAt) continue;
+        const note = withMarketplaceOrderPlacedAtNote(row.note, {
+          orderPlacedAt: orderPlacedAt.toISOString(),
+        });
+        if (note === (row.note || null)) continue;
+        updates.push({ type: "order", id: row.id, value: note });
+      }
+
+      for (let updateOffset = 0; updateOffset < updates.length; updateOffset += 100) {
+        const updateChunk = updates.slice(updateOffset, updateOffset + 100);
+        await prisma.$transaction(
+          updateChunk.map((update) =>
+            update.type === "export"
+              ? prisma.ecommerceExport.update({
+                  where: { id: update.id },
+                  data: { notes: update.value },
+                })
+              : prisma.order.update({
+                  where: { id: update.id },
+                  data: { note: update.value },
+                }),
+          ),
+          { timeout: 15000, maxWait: 10000 },
+        );
+      }
+
+      result.ecommerceExports += updates.filter(
+        (update) => update.type === "export",
+      ).length;
+      result.orders += updates.filter((update) => update.type === "order").length;
+    }
 
     return { success: true, data: result };
   } catch (error) {
@@ -25640,6 +25751,7 @@ ipcMain.handle("policies:getCurrent", async () => {
     }
 
     const config = attendanceData?.config || {};
+    const attendanceReward = normalizeAttendanceRewardConfig(config);
     const packingCommission = config?.packingCommission || {};
     const attendanceLateFine = {
       graceMinutes: Number(config.graceMinutes ?? 5),
@@ -25681,6 +25793,14 @@ ipcMain.handle("policies:getCurrent", async () => {
         },
         mechanisms: {
           attendanceLateFine,
+          attendanceReward: {
+            enabled: attendanceReward.enabled !== false,
+            badgeStreakDays: attendanceReward.badgeStreakDays,
+            monthlyRequiredDays: attendanceReward.monthlyRequiredDays,
+            standardWorkDays: attendanceReward.standardWorkDays,
+            monthlyRewardAmount: attendanceReward.monthlyRewardAmount,
+            graceMinutes: attendanceReward.graceMinutes,
+          },
           overtimeReward: {
             firstHourRate: 30000,
             nextHourRate: 40000,
@@ -29965,6 +30085,23 @@ const FALLBACK_ANNOUNCEMENTS = [
     issuer: "Phòng vận hành",
     createdByName: "Thúy Lê (Admin)",
   },
+  {
+    id: 900002,
+    title: "Chính sách thưởng chuyên cần",
+    summary: "Duy trì đúng giờ để mở huy hiệu và nhận thưởng tháng 100.000đ.",
+    content: "Công ty áp dụng cơ chế thưởng chuyên cần theo kết quả chấm công thực tế.\n\n• Đúng giờ 3 ngày liên tiếp: mở huy hiệu Đúng giờ.\n• Hoàn tất kỳ làm việc và đạt ít nhất 24/26 ngày đúng giờ: thưởng 100.000đ vào kỳ lương tương ứng.\n• 5 phút đầu mỗi ca vẫn được tính đúng giờ; đi muộn sau grace time vẫn xử lý phạt độc lập.\n• Nghỉ phép được duyệt không làm đứt chuỗi; ngày nghỉ, ngày lễ và ngày không có lịch làm không tính vào chuỗi.",
+    category: "policy",
+    severity: "reward",
+    status: "published",
+    audienceRoles: '["manager","staff","viewer"]',
+    effectiveAt: "2026-09-10T00:00:00.000Z",
+    publishedAt: "2026-09-10T00:00:00.000Z",
+    requireAcknowledgement: false,
+    version: 1,
+    policyCode: "ATT-REWARD-2026.09",
+    issuer: "Phòng nhân sự",
+    createdByName: "Thúy Lê (Admin)",
+  },
 ];
 
 const FALLBACK_PACKING_LEVELS = [
@@ -29982,6 +30119,7 @@ function formatFallbackVnd(value) {
 // figures intentionally come from the same attendance config as payroll.
 async function getFallbackAnnouncements() {
   const fallback = FALLBACK_ANNOUNCEMENTS[0];
+  const attendancePolicy = FALLBACK_ANNOUNCEMENTS.find((item) => item.policyCode === "ATT-REWARD-2026.09");
   let attendanceData = {};
   let record;
   try {
@@ -30023,7 +30161,7 @@ async function getFallbackAnnouncements() {
   const effectiveAt = updatedAt || fallback.effectiveAt;
   const publication = await getFallbackAudienceConfig(fallback.id);
 
-  return [{
+  const packingAnnouncement = {
     ...fallback,
     summary: `Đơn giá hiện hành: ${rateLines.join(" · ")}. Thưởng thắng tuần: ${formatFallbackVnd(FALLBACK_WEEKLY_PACKING_REWARD)}.`,
     content: [
@@ -30040,7 +30178,8 @@ async function getFallbackAnnouncements() {
     effectiveAt,
     publishedAt: publication?.publishedAt || effectiveAt,
     createdByName: publication?.publishedBy || packingCommission?.updatedBy || fallback.createdByName,
-  }];
+  };
+  return attendancePolicy ? [packingAnnouncement, attendancePolicy] : [packingAnnouncement];
 }
 
 function isAnnouncementSchemaUnavailable(error) {
@@ -30189,6 +30328,9 @@ async function canReceiveFallbackAnnouncement(announcement, actor) {
   // Admin access is intentionally broader than the acknowledgement audience.
   if (actor?.role === "admin") return true;
   if (!announcementIsVisibleToRole(announcement, actor?.role)) return false;
+  // The attendance policy is informational and applies to every active
+  // employee, including seasonal staff who are not in the official roster.
+  if (announcement?.policyCode === "ATT-REWARD-2026.09") return true;
   const recipients = await getFallbackRequiredRecipients(announcement.id);
   return recipients.some((recipient) => recipient.required && recipient.id === actor?.id);
 }
@@ -30204,6 +30346,401 @@ function broadcastNotificationChange(userId) {
   } catch (error) {
     console.warn("[Notifications] Không thể phát sự kiện cập nhật:", error.message);
   }
+}
+
+let userNotificationSchemaCache = { available: null, checkedAt: 0 };
+const USER_NOTIFICATION_SCHEMA_CACHE_MS = 60 * 1000;
+
+async function hasUserNotificationSchema() {
+  const now = Date.now();
+  if (
+    userNotificationSchemaCache.available !== null &&
+    now - userNotificationSchemaCache.checkedAt < USER_NOTIFICATION_SCHEMA_CACHE_MS
+  ) {
+    return userNotificationSchemaCache.available;
+  }
+  try {
+    const rows = await prisma.$queryRaw`
+      SELECT to_regclass('public."UserNotification"')::text AS "notificationTable"
+    `;
+    const available = Boolean(rows[0]?.notificationTable);
+    userNotificationSchemaCache = { available, checkedAt: now };
+    return available;
+  } catch (error) {
+    if (!isAnnouncementSchemaUnavailable(error)) throw error;
+    userNotificationSchemaCache = { available: false, checkedAt: now };
+    return false;
+  }
+}
+
+function parseAttendanceDataValue(value) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function parseFallbackPersonalNotifications(value) {
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === "object") : [];
+  } catch {
+    return [];
+  }
+}
+
+function toNotificationIso(value, fallback = null) {
+  if (value === null || value === undefined || value === "") return fallback;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
+}
+
+async function listFallbackPersonalNotifications(userId) {
+  const row = await prisma.appConfig.findUnique({
+    where: { key: `userNotifications:${Number(userId)}` },
+    select: { value: true },
+  });
+  return parseFallbackPersonalNotifications(row?.value);
+}
+
+async function createFallbackPersonalNotification({ userId, eventKey, title, summary, content, severity, metadata }) {
+  const key = `userNotifications:${Number(userId)}`;
+  const created = await getPrismaDirectTx().$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+    const row = await tx.appConfig.findUnique({ where: { key }, select: { value: true } });
+    const notifications = parseFallbackPersonalNotifications(row?.value);
+    if (notifications.some((item) => item.eventKey === eventKey)) return null;
+    const nextId = Math.max(
+      Date.now(),
+      ...notifications.map((item) => Number(item.id) || 0),
+    ) + 1;
+    const notification = {
+      id: nextId,
+      eventKey,
+      title,
+      summary,
+      content,
+      category: "attendance",
+      severity,
+      metadata: JSON.stringify(metadata || {}),
+      createdAt: new Date().toISOString(),
+      readAt: null,
+    };
+    await tx.appConfig.upsert({
+      where: { key },
+      update: { value: JSON.stringify([notification, ...notifications].slice(0, 500)) },
+      create: { key, value: JSON.stringify([notification]) },
+    });
+    return notification;
+  }, { isolationLevel: "Serializable", timeout: 10000, maxWait: 10000 });
+  if (created) broadcastNotificationChange(Number(userId));
+  return Boolean(created);
+}
+
+async function markFallbackPersonalNotificationRead(userId, notificationId) {
+  const key = `userNotifications:${Number(userId)}`;
+  return getPrismaDirectTx().$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+    const row = await tx.appConfig.findUnique({ where: { key }, select: { value: true } });
+    const notifications = parseFallbackPersonalNotifications(row?.value);
+    const targetId = Math.abs(Number(notificationId));
+    let changed = false;
+    const next = notifications.map((item) => {
+      if (Number(item.id) !== targetId || item.readAt) return item;
+      changed = true;
+      return { ...item, readAt: new Date().toISOString() };
+    });
+    if (changed) {
+      await tx.appConfig.upsert({
+        where: { key },
+        update: { value: JSON.stringify(next) },
+        create: { key, value: JSON.stringify(next) },
+      });
+    }
+    return changed;
+  }, { isolationLevel: "Serializable", timeout: 10000, maxWait: 10000 });
+}
+
+async function migrateFallbackPersonalNotifications(userId) {
+  const numericUserId = Number(userId);
+  if (!Number.isSafeInteger(numericUserId) || numericUserId <= 0) return;
+  const key = `userNotifications:${numericUserId}`;
+  try {
+    const migrated = await getPrismaDirectTx().$transaction(async (tx) => {
+      // Serialize migration with fallback writes so a new row cannot be
+      // appended after the read and then removed by the cleanup below.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+      const configRow = await tx.appConfig.findUnique({ where: { key }, select: { value: true } });
+      const fallbackRows = parseFallbackPersonalNotifications(configRow?.value);
+      if (fallbackRows.length === 0) return false;
+
+      const seenEventKeys = new Set();
+      const notifications = [];
+      for (const [index, row] of fallbackRows.entries()) {
+        const rowId = Number(row.id);
+        const eventKey = String(row.eventKey || `attendance:fallback:${numericUserId}:${Number.isSafeInteger(rowId) ? rowId : index}`)
+          .trim()
+          .slice(0, 250);
+        if (!eventKey || seenEventKeys.has(eventKey)) continue;
+        seenEventKeys.add(eventKey);
+        const title = String(row.title || "Thông báo cá nhân").slice(0, 250);
+        const summary = String(row.summary || title).slice(0, 1000);
+        const content = String(row.content || summary).slice(0, 10000);
+        const metadata = typeof row.metadata === "string" ? row.metadata : JSON.stringify(row.metadata || {});
+        const createdAt = toNotificationIso(row.createdAt, new Date().toISOString());
+        const readAt = row.readAt ? toNotificationIso(row.readAt) : null;
+        notifications.push({
+          userId: numericUserId,
+          eventKey,
+          title,
+          summary,
+          content,
+          category: String(row.category || "attendance").slice(0, 40),
+          severity: String(row.severity || "info").slice(0, 40),
+          metadata: metadata.slice(0, 10000),
+          createdAt: new Date(createdAt),
+          readAt: readAt ? new Date(readAt) : null,
+        });
+      }
+      if (notifications.length > 0) {
+        // Skip rows already migrated by a concurrent/previous attempt without
+        // aborting the surrounding transaction on a unique-key conflict.
+        await tx.userNotification.createMany({ data: notifications, skipDuplicates: true });
+      }
+      await tx.appConfig.delete({ where: { key } });
+      return true;
+    }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 });
+    if (migrated) broadcastNotificationChange(numericUserId);
+  } catch (error) {
+    console.warn("[Notifications] Không thể chuyển notification tạm sang bảng chính:", error.message);
+  }
+}
+
+async function loadAttendanceRewardContext(periodKey) {
+  const row = await prisma.appConfig.findUnique({
+    where: { key: "attendanceData" },
+    select: { value: true },
+  });
+  const attendanceData = parseAttendanceDataValue(row?.value);
+  const config = normalizeAttendanceRewardConfig(attendanceData.config || {});
+  const employees = Array.isArray(attendanceData.employees) ? attendanceData.employees : [];
+  const now = new Date();
+  const nowKey = getBangkokDateKey(now);
+  const fromKey = addAttendanceRewardDays(nowKey, -config.historyDays);
+  const logs = await prisma.attendanceLog.findMany({
+    where: { date: { gte: fromKey } },
+    orderBy: { timestamp: "asc" },
+  });
+  const faceProfiles = await prisma.faceProfile.findMany({
+    select: { faceId: true, userId: true, userName: true },
+  });
+  const employeeUsernames = employees
+    .map((employee) => String(employee?.username || "").trim())
+    .filter(Boolean);
+  const users = employeeUsernames.length > 0
+    ? await prisma.user.findMany({
+        where: { username: { in: employeeUsernames } },
+        select: { id: true, username: true, fullName: true, role: true, status: true },
+      })
+    : [];
+  const requestedPeriod = /^\d{4}-\d{2}$/.test(String(periodKey || ""))
+    ? String(periodKey)
+    : nowKey.slice(0, 7);
+  return { attendanceData, config, employees, logs, faceProfiles, users, periodKey: requestedPeriod, now };
+}
+
+function findAttendanceEmployeeUser(employee, users) {
+  const username = normalizeActorName(employee?.username);
+  if (username) {
+    const byUsername = users.find((user) => normalizeActorName(user.username) === username);
+    if (byUsername) return byUsername;
+  }
+  const fullName = normalizeActorName(employee?.name);
+  const byFullName = users.find((user) => normalizeActorName(user.fullName) === fullName);
+  if (byFullName) return byFullName;
+
+  // Legacy attendanceData may contain a payroll employee id in userId. Only
+  // use that field after stable username/name matching has been exhausted.
+  const linkedUserId = Number(employee?.userId);
+  if (Number.isSafeInteger(linkedUserId) && linkedUserId > 0) {
+    return users.find((user) => Number(user.id) === linkedUserId) || null;
+  }
+  return null;
+}
+
+async function createAttendanceUserNotification({ userId, eventKey, title, summary, content, severity = "info", metadata = {} }) {
+  if (!userId) return false;
+  if (!(await hasUserNotificationSchema())) {
+    return createFallbackPersonalNotification({ userId, eventKey, title, summary, content, severity, metadata });
+  }
+  try {
+    await prisma.userNotification.create({
+      data: {
+        userId: Number(userId),
+        eventKey: String(eventKey).slice(0, 250),
+        title: String(title).slice(0, 250),
+        summary: String(summary).slice(0, 1000),
+        content: String(content).slice(0, 10000),
+        category: "attendance",
+        severity: String(severity).slice(0, 40),
+        metadata: JSON.stringify(metadata || {}),
+      },
+    });
+    broadcastNotificationChange(Number(userId));
+    return true;
+  } catch (error) {
+    if (error?.code === "P2002") return false;
+    console.warn("[Attendance Rewards] Không tạo được notification cá nhân:", error.message);
+    return false;
+  }
+}
+
+async function reconcileAttendanceRewardNotifications(options = {}) {
+  const context = await loadAttendanceRewardContext(options.periodKey);
+  if (context.config.enabled === false) return { created: 0 };
+  const summaries = calculateAllAttendanceRewardSummaries({
+    employees: context.employees,
+    logs: context.logs,
+    faceProfiles: context.faceProfiles,
+    workSchedules: context.attendanceData.workSchedules || [],
+    leaveRecords: context.attendanceData.leaveRecords || [],
+    config: { ...context.config, graceMinutes: context.config.graceMinutes },
+    now: context.now,
+    periodKey: context.periodKey,
+  });
+  const onlyEmployeeId = options.employeeId == null ? null : Number(options.employeeId);
+  let created = 0;
+  for (const summary of summaries) {
+    if (onlyEmployeeId != null && summary.employeeId !== onlyEmployeeId) continue;
+    const employee = context.employees.find((item) => Number(item.id) === summary.employeeId);
+    const user = findAttendanceEmployeeUser(employee, context.users);
+    if (!employee || !user || user.status !== "active") continue;
+    if (summary.currentStreak >= summary.badgeStreakDays && summary.currentStreakStartDate) {
+      const wasCreated = await createAttendanceUserNotification({
+        userId: user.id,
+        eventKey: `attendance:streak:${summary.employeeId}:${summary.currentStreakStartDate}:${summary.badgeStreakDays}`,
+        title: `Bạn đã đạt chuỗi đúng giờ ${summary.badgeStreakDays} ngày`,
+        summary: `Chuỗi hiện tại: ${summary.currentStreak} ngày liên tiếp.`,
+        content: `Chúc mừng! Bạn đã mở huy hiệu Đúng giờ ${summary.badgeStreakDays} ngày. Hãy tiếp tục duy trì để bảo vệ thành tích của mình.`,
+        severity: "reward",
+        metadata: { event: "streak_unlocked", streak: summary.currentStreak, date: summary.currentStreakStartDate },
+      });
+      if (wasCreated) created += 1;
+    }
+    const nearTarget = Math.max(1, summary.monthly.targetDays - 4);
+    if (!summary.monthly.qualified && summary.monthly.onTimeDays >= nearTarget && summary.monthly.targetDays > 0) {
+      const wasCreated = await createAttendanceUserNotification({
+        userId: user.id,
+        eventKey: `attendance:monthly-near:${summary.employeeId}:${summary.periodKey}:${nearTarget}`,
+        title: "Bạn đang rất gần thưởng chuyên cần",
+        summary: `${summary.monthly.onTimeDays}/${summary.monthly.targetDays} ngày đúng giờ trong tháng.`,
+        content: `Bạn chỉ còn ${Math.max(0, summary.monthly.targetDays - summary.monthly.onTimeDays)} ngày đúng giờ để đủ điều kiện nhận thưởng chuyên cần ${summary.monthly.targetDays}/${summary.monthly.scheduledDays} ngày.`,
+        severity: "info",
+        metadata: { event: "monthly_near_target", periodKey: summary.periodKey, onTimeDays: summary.monthly.onTimeDays, targetDays: summary.monthly.targetDays },
+      });
+      if (wasCreated) created += 1;
+    }
+    if (summary.monthly.qualified) {
+      const wasCreated = await createAttendanceUserNotification({
+        userId: user.id,
+        eventKey: `attendance:monthly-qualified:${summary.employeeId}:${summary.periodKey}`,
+        title: "Bạn đã đủ điều kiện nhận thưởng chuyên cần",
+        summary: `${summary.monthly.onTimeDays}/${summary.monthly.targetDays} ngày đúng giờ — thưởng ${summary.monthly.rewardAmount.toLocaleString("vi-VN")}đ.`,
+        content: `Kết quả chuyên cần tháng ${summary.periodKey}: ${summary.monthly.onTimeDays}/${summary.monthly.targetDays} ngày đúng giờ. Khoản thưởng dự kiến là ${summary.monthly.rewardAmount.toLocaleString("vi-VN")}đ và sẽ được đưa vào kỳ lương tương ứng.`,
+        severity: "reward",
+        metadata: { event: "monthly_qualified", periodKey: summary.periodKey, onTimeDays: summary.monthly.onTimeDays, targetDays: summary.monthly.targetDays, amount: summary.monthly.rewardAmount },
+      });
+      if (wasCreated) created += 1;
+    }
+  }
+  return { created };
+}
+
+async function createAttendanceLateNotification(log, lateFine) {
+  if (!log) return false;
+  // A normal check-in still triggers reward reconciliation, but must not look
+  // like a late-arrival notification when no late fine was created.
+  if (!lateFine) return false;
+  const context = await loadAttendanceRewardContext();
+  const employeeId = resolveEmployeeId(log, context.employees, context.faceProfiles);
+  const employee = context.employees.find((item) => Number(item.id) === Number(employeeId));
+  const user = findAttendanceEmployeeUser(employee, context.users);
+  if (!employee || !user) return false;
+  const summary = calculateAttendanceRewardSummary({
+    employee,
+    employees: context.employees,
+    logs: context.logs,
+    faceProfiles: context.faceProfiles,
+    workSchedules: context.attendanceData.workSchedules || [],
+    leaveRecords: context.attendanceData.leaveRecords || [],
+    config: context.config,
+    now: context.now,
+    periodKey: context.periodKey,
+  });
+  const dateKey = log.date || getBangkokDateKey(log.timestamp);
+  const lateMinutes = lateFine?.detail?.match(/(\d+) phút/)?.[1] || "";
+  return createAttendanceUserNotification({
+    userId: user.id,
+    eventKey: `attendance:late:${employee.id}:${dateKey}:${log.checkType}`,
+    title: "Hệ thống ghi nhận bạn đi muộn",
+    summary: `Ca ${log.checkType === "morning_in" ? "sáng" : "chiều"} ngày ${dateKey}${lateMinutes ? `: ${lateMinutes} phút` : ""}.`,
+    content: `Lần chấm công này đã được ghi nhận là đi muộn. Chuỗi đúng giờ hiện tại của bạn: ${summary.currentStreak} ngày. Khoản xử lý liên quan được hiển thị riêng trong Bảng công.`,
+    severity: "warning",
+    metadata: { event: "late_recorded", dateKey, checkType: log.checkType, lateMinutes: Number(lateMinutes || 0), fineId: lateFine?.id || null },
+  });
+}
+
+async function listPersonalNotifications(actor) {
+  const schemaAvailable = await hasUserNotificationSchema();
+  if (schemaAvailable) await migrateFallbackPersonalNotifications(actor.id);
+  const rows = schemaAvailable
+    ? await prisma.userNotification.findMany({
+        where: { userId: Number(actor.id) },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      })
+    : await listFallbackPersonalNotifications(actor.id);
+  const fallbackCreatedAt = new Date().toISOString();
+  return rows.map((row, index) => {
+    const createdAt = toNotificationIso(row.createdAt, fallbackCreatedAt);
+    const readAt = row.readAt ? toNotificationIso(row.readAt) : null;
+    const numericId = Number(row.id);
+    return {
+      id: Number.isSafeInteger(numericId) && numericId > 0 ? -numericId : -(index + 1),
+      source: "personal",
+      eventKey: row.eventKey,
+      title: row.title,
+      summary: row.summary,
+      content: row.content,
+      category: row.category,
+      severity: row.severity,
+      status: "published",
+      audienceRoles: null,
+      effectiveAt: null,
+      publishedAt: createdAt,
+      expiresAt: null,
+      requireAcknowledgement: false,
+      version: 1,
+      policyCode: row.eventKey,
+      issuer: "Hệ thống chấm công",
+      createdByName: "Hệ thống",
+      metadata: parseAttendanceDataValue(row.metadata),
+      recipient: {
+        deliveredAt: createdAt,
+        readAt,
+        acknowledgedAt: null,
+        snoozedUntil: null,
+      },
+    };
+  });
+}
+
+function sortNotifications(items) {
+  return [...items].sort((left, right) => {
+    const byPublished = new Date(right?.publishedAt || 0).getTime() - new Date(left?.publishedAt || 0).getTime();
+    return byPublished || Number(right?.id || 0) - Number(left?.id || 0);
+  });
 }
 
 async function getVisibleAnnouncement(announcementId, actor) {
@@ -30244,7 +30781,11 @@ ipcMain.handle("notifications:list", async () => {
   try {
     const actor = await getCurrentActor();
     if (!(await hasAnnouncementSchema())) {
-      return { success: true, data: await listFallbackAnnouncements(actor) };
+      const [fallbackAnnouncements, personalNotifications] = await Promise.all([
+        listFallbackAnnouncements(actor),
+        listPersonalNotifications(actor),
+      ]);
+      return { success: true, data: sortNotifications([...personalNotifications, ...fallbackAnnouncements]) };
     }
     let announcements;
     try {
@@ -30265,7 +30806,11 @@ ipcMain.handle("notifications:list", async () => {
       `;
     } catch (error) {
       if (!isAnnouncementSchemaUnavailable(error)) throw error;
-      return { success: true, data: await listFallbackAnnouncements(actor) };
+      const [fallbackAnnouncements, personalNotifications] = await Promise.all([
+        listFallbackAnnouncements(actor),
+        listPersonalNotifications(actor),
+      ]);
+      return { success: true, data: sortNotifications([...personalNotifications, ...fallbackAnnouncements]) };
     }
     const visible = announcements
       .filter((announcement) => announcementIsVisibleToRole(announcement, actor.role))
@@ -30289,7 +30834,8 @@ ipcMain.handle("notifications:list", async () => {
             : null,
         };
       });
-    return { success: true, data: visible };
+    const personalNotifications = await listPersonalNotifications(actor);
+    return { success: true, data: sortNotifications([...personalNotifications, ...visible]) };
   } catch (error) {
     console.error("❌ Get notifications error:", error);
     return { success: false, error: error.message };
@@ -30364,24 +30910,53 @@ ipcMain.handle("notifications:publish", async (_event, announcementId, userIds) 
       throw new Error("Danh sách người nhận có tài khoản không hợp lệ.");
     }
     const publishedAt = new Date().toISOString();
-    await getPrismaDirectTx().$transaction(async (tx) => {
+    const finalAudienceIds = await getPrismaDirectTx().$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`announcementPublication:${id}`}))`;
+
+      const sortedSelectedIds = [...selectedIds].sort((left, right) => left - right);
+      for (const userId of sortedSelectedIds) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`announcementRecipient:${userId}`}))`;
+      }
+
+      const recipientStates = new Map();
+      const alreadyReadUsers = [];
+      for (const userId of sortedSelectedIds) {
+        const recipientKey = `announcementRecipient:${userId}`;
+        const recipientRow = await tx.appConfig.findUnique({ where: { key: recipientKey } });
+        const recipientState = parseFallbackRecipientState(recipientRow?.value);
+        const notificationState = recipientState[String(id)] || {};
+        if (notificationState.readAt || notificationState.acknowledgedAt) {
+          const recipient = eligibleRecipients.find((user) => user.id === userId);
+          alreadyReadUsers.push(recipient?.fullName || recipient?.username || `ID ${userId}`);
+        }
+        recipientStates.set(userId, recipientState);
+      }
+      if (alreadyReadUsers.length > 0) {
+        throw new Error(`Không thể phát hành lại cho nhân viên đã đọc: ${alreadyReadUsers.join(", ")}.`);
+      }
+
+      const audienceKey = `announcementAudience:${id}`;
+      const existingAudienceRow = await tx.appConfig.findUnique({ where: { key: audienceKey } });
+      const existingAudience = parseFallbackAudienceConfig(existingAudienceRow?.value);
+      const existingAudienceIds = Array.isArray(existingAudience?.userIds)
+        ? existingAudience.userIds.map(Number).filter(Number.isSafeInteger)
+        : [];
+      const audienceIds = [...new Set([...existingAudienceIds, ...sortedSelectedIds])].sort((left, right) => left - right);
       const audienceValue = JSON.stringify({
-        userIds: selectedIds,
+        userIds: audienceIds,
         publishedAt,
         publishedBy: currentSession.username,
       });
       await tx.appConfig.upsert({
-        where: { key: `announcementAudience:${id}` },
+        where: { key: audienceKey },
         update: { value: audienceValue },
-        create: { key: `announcementAudience:${id}`, value: audienceValue },
+        create: { key: audienceKey, value: audienceValue },
       });
 
-      // Each publication is a new delivery cycle, even when the policy ID stays stable.
-      for (const userId of selectedIds) {
+      // Only unread recipients can begin a new delivery cycle.
+      for (const userId of sortedSelectedIds) {
         const recipientKey = `announcementRecipient:${userId}`;
-        const recipientRow = await tx.appConfig.findUnique({ where: { key: recipientKey } });
-        const recipientState = parseFallbackRecipientState(recipientRow?.value);
+        const recipientState = recipientStates.get(userId) || {};
         recipientState[String(id)] = {};
         await tx.appConfig.upsert({
           where: { key: recipientKey },
@@ -30389,9 +30964,10 @@ ipcMain.handle("notifications:publish", async (_event, announcementId, userIds) 
           create: { key: recipientKey, value: JSON.stringify(recipientState) },
         });
       }
+      return audienceIds;
     }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 });
     broadcastNotificationChange();
-    return { success: true, data: { userIds: selectedIds, publishedAt } };
+    return { success: true, data: { userIds: finalAudienceIds, publishedAt } };
   } catch (error) {
     console.error("❌ Publish notification error:", error);
     return { success: false, error: error.message };
@@ -30401,6 +30977,19 @@ ipcMain.handle("notifications:publish", async (_event, announcementId, userIds) 
 ipcMain.handle("notifications:markRead", async (_event, announcementId) => {
   try {
     const actor = await getCurrentActor();
+    const notificationId = Number(announcementId);
+    if (notificationId < 0 && Number.isSafeInteger(notificationId)) {
+      if (await hasUserNotificationSchema()) {
+        await prisma.userNotification.updateMany({
+          where: { id: Math.abs(notificationId), userId: Number(actor.id) },
+          data: { readAt: new Date() },
+        });
+      } else {
+        await markFallbackPersonalNotificationRead(actor.id, notificationId);
+      }
+      broadcastNotificationChange(actor.id);
+      return { success: true };
+    }
     const announcement = await getVisibleAnnouncement(announcementId, actor);
     const now = new Date();
     if (announcement._fallback) {
@@ -33512,13 +34101,14 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
       },
     });
 
-    const fineResult = DATA_SAFETY_MODE
-      ? { created: [] }
-      : await reconcileLateAttendanceFines(prisma, {
-          logIds: [log.id],
-          actor: "system",
-        });
+    const fineResult = await reconcileLateAttendanceFines(prisma, {
+      logIds: [log.id],
+      actor: "system",
+    });
     const lateFine = fineResult.created[0] || null;
+    void createAttendanceLateNotification(log, lateFine)
+      .then(() => reconcileAttendanceRewardNotifications())
+      .catch((error) => console.warn("[Attendance Rewards] Không đồng bộ notification:", error.message));
 
     return {
       success: true,
@@ -33538,6 +34128,51 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
   }
 });
 
+ipcMain.handle("attendance:getRewardSummary", async (_event, periodKey) => {
+  try {
+    const actor = await getCurrentActor();
+    const context = await loadAttendanceRewardContext(periodKey);
+    const summaries = calculateAllAttendanceRewardSummaries({
+      employees: context.employees,
+      logs: context.logs,
+      faceProfiles: context.faceProfiles,
+      workSchedules: context.attendanceData.workSchedules || [],
+      leaveRecords: context.attendanceData.leaveRecords || [],
+      config: context.config,
+      now: context.now,
+      periodKey: context.periodKey,
+    });
+    const canViewAll = ["admin", "manager"].includes(actor.role);
+    const visibleSummaries = canViewAll
+      ? summaries
+      : summaries.filter((summary) => {
+          const employee = context.employees.find((item) => Number(item.id) === summary.employeeId);
+          const user = findAttendanceEmployeeUser(employee, context.users);
+          return Number(user?.id) === Number(actor.id);
+        });
+    void reconcileAttendanceRewardNotifications({ periodKey: context.periodKey })
+      .catch((error) => console.warn("[Attendance Rewards] Không đồng bộ summary notification:", error.message));
+    return {
+      success: true,
+      data: {
+        config: {
+          enabled: context.config.enabled !== false,
+          badgeStreakDays: context.config.badgeStreakDays,
+          monthlyRequiredDays: context.config.monthlyRequiredDays,
+          standardWorkDays: context.config.standardWorkDays,
+          monthlyRewardAmount: context.config.monthlyRewardAmount,
+          graceMinutes: context.config.graceMinutes,
+        },
+        periodKey: context.periodKey,
+        summaries: visibleSummaries,
+      },
+    };
+  } catch (error) {
+    console.error("❌ Get attendance reward summary error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 // Đăng ký khuôn mặt nhân viên
 ipcMain.handle(
   "attendance:register",
@@ -33545,6 +34180,19 @@ ipcMain.handle(
     try {
       requireRole("admin");
       face_id = normalizeFaceProfileId(face_id);
+      // Face profiles should store the real User id. Payroll employee ids are
+      // local JSON ids and may coincidentally overlap with account ids.
+      const requestedUserId = Number(user_id);
+      const accounts = await prisma.user.findMany({
+        where: { status: { in: ["active", USER_STATUS_RESIGNED] } },
+        select: { id: true, username: true, fullName: true },
+      });
+      const normalizedUserName = normalizeActorName(user_name);
+      const linkedAccount = accounts.find((account) =>
+        normalizeActorName(account.username) === normalizedUserName
+        || normalizeActorName(account.fullName) === normalizedUserName
+      ) || accounts.find((account) => Number(account.id) === requestedUserId);
+      const linkedUserId = linkedAccount?.id || null;
       await ensureFaceService();
       resetFaceServiceIdleTimer();
       const result = await faceServiceFetch("/register", {
@@ -33558,14 +34206,14 @@ ipcMain.handle(
         where: { faceId: face_id },
         update: {
           userName: user_name,
-          userId: user_id || null,
+          userId: linkedUserId,
           photoCount: result.saved,
           isActive: true,
         },
         create: {
           faceId: face_id,
           userName: user_name,
-          userId: user_id || null,
+          userId: linkedUserId,
           photoCount: result.saved,
         },
       });
