@@ -189,6 +189,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         archive: (id, reason) => ipcRenderer.invoke('dailyTasks:archive', { id, reason }),
         deleteAssignment: (id) => ipcRenderer.invoke('dailyTasks:deleteAssignment', { id }),
         uploadEvidenceImage: (payload) => ipcRenderer.invoke('dailyTasks:uploadEvidenceImage', payload),
+        validateEvidenceSource: (payload) => ipcRenderer.invoke('dailyTasks:validateEvidenceSource', payload),
         submitEvidence: (payload) => ipcRenderer.invoke('dailyTasks:submitEvidence', payload),
         reviewEvidence: (taskId, approved, reviewContext) => ipcRenderer.invoke('dailyTasks:reviewEvidence', taskId, approved, reviewContext),
         requestAssignmentCompletion: (taskId) => ipcRenderer.invoke('dailyTasks:requestAssignmentCompletion', taskId),
@@ -231,6 +232,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         deleteCancelled: () => ipcRenderer.invoke('ecommerceExports:deleteCancelled'),
         getCompletedKeys: () => ipcRenderer.invoke('ecommerceExports:getCompletedKeys'),
         checkExistingKeys: (data) => ipcRenderer.invoke('ecommerceExports:checkExistingKeys', data),
+        syncOrderPlacedAt: (records) => ipcRenderer.invoke('ecommerceExports:syncOrderPlacedAt', records),
         getPackersByOrderNumbers: (orderNumbers) => ipcRenderer.invoke('ecommerceExports:getPackersByOrderNumbers', orderNumbers),
         bulkCreate: (records) => ipcRenderer.invoke('ecommerceExports:bulkCreate', records),
         bulkCancel: (ids) => ipcRenderer.invoke('ecommerceExports:bulkCancel', ids),
@@ -348,6 +350,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
         get: getAppConfig,
         set: setAppConfig,
     },
+    policies: {
+        getCurrent: () => ipcRenderer.invoke('policies:getCurrent'),
+    },
     r2Test: {
         getBootstrap: () => ipcRenderer.invoke('r2Test:getBootstrap'),
     },
@@ -391,6 +396,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getCurrentSession: () => ipcRenderer.invoke('users:getCurrentSession'),
         heartbeat: () => ipcRenderer.invoke('users:heartbeat'),
         ensureAdmin: () => ipcRenderer.invoke('users:ensureAdmin'),
+    },
+
+    notifications: {
+        list: () => ipcRenderer.invoke('notifications:list'),
+        getRecipients: (announcementId) => ipcRenderer.invoke('notifications:recipients', announcementId),
+        publish: (announcementId, userIds) => ipcRenderer.invoke('notifications:publish', announcementId, userIds),
+        markRead: (announcementId) => ipcRenderer.invoke('notifications:markRead', announcementId),
+        acknowledge: (announcementId) => ipcRenderer.invoke('notifications:acknowledge', announcementId),
+        snooze: (announcementId) => ipcRenderer.invoke('notifications:snooze', announcementId),
+        onChanged: (callback) => {
+            const handler = (_event, data) => callback(data);
+            ipcRenderer.on('notifications:changed', handler);
+            return () => ipcRenderer.removeListener('notifications:changed', handler);
+        },
     },
 
     // Shell - Open external links in browser
@@ -473,233 +492,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
     menu: {
         popup: (menuName) => ipcRenderer.invoke('menu:popup', menuName),
     },
-});
-
-// ============================================
-// FIX v6: Dropdown positioning bug in Electron
-// Root cause: @rc-component/trigger's useAlign re-renders popup via React
-//   inline styles, overwriting any element.style.setProperty() fixes.
-// Fix: Use dynamic <style> tag with CSS !important rules.
-//   CSS !important in <style> ALWAYS wins over React inline styles.
-// ============================================
-window.addEventListener('DOMContentLoaded', () => {
-    console.log('[preload-fix] Installing dropdown fix v6...');
-
-    // 1. Base styles: chặn scroll feedback loop
-    const baseStyle = document.createElement('style');
-    baseStyle.textContent = 'html, body { overflow: hidden !important; }';
-    document.head.appendChild(baseStyle);
-
-    // Ant Design v6 aligns portals correctly by itself. The old global
-    // position override below intermittently moved a newly opened dropdown to
-    // the top-left before rc-trigger completed its own alignment.
-    // Keep the legacy implementation in place for rollback, but do not run it.
-    const useLegacyDropdownPositionFix = false;
-    if (!useLegacyDropdownPositionFix) return;
-
-    // 2. Dynamic style tag — CSS rules sẽ override React inline styles
-    const dynamicStyle = document.createElement('style');
-    dynamicStyle.id = 'electron-dropdown-fix';
-    document.head.appendChild(dynamicStyle);
-
-    // 3. State
-    let triggerSnapshot = null;
-    let fixIdCounter = 0;
-    const POPUP_SEL = '.ant-select-dropdown, .ant-picker-dropdown, .ant-cascader-dropdown, .ant-dropdown';
-
-    // Xóa tất cả fix cũ
-    function clearAllFixes() {
-        dynamicStyle.textContent = '';
-        document.querySelectorAll('[data-electron-pos]').forEach(el => {
-            el.removeAttribute('data-electron-pos');
-        });
-    }
-
-    // rc-trigger may briefly paint a new portal at (0, 0) before its first
-    // alignment pass. Prime the expected position on mousedown so that frame
-    // is never visible, then let the normal alignment/fallback refine it.
-    function primePopupPosition() {
-        if (!triggerSnapshot) return;
-
-        dynamicStyle.textContent = `${POPUP_SEL} {
-  top: ${Math.round(triggerSnapshot.bottom + 4)}px !important;
-  left: ${Math.round(triggerSnapshot.left)}px !important;
-  right: auto !important;
-  bottom: auto !important;
-  z-index: 99999 !important;
-}`;
-    }
-
-    // Fix popup bị off-screen bằng CSS rule
-    function fixPopup(popup) {
-        if (!triggerSnapshot) return;
-
-        const winW = window.innerWidth;
-        const winH = window.innerHeight;
-
-        const tr = triggerSnapshot;
-
-        // Compute height — dùng scrollHeight nếu offsetHeight = 0
-        const pH = popup.offsetHeight || popup.scrollHeight || 200;
-        let targetTop = tr.bottom + 4;
-        if (targetTop + pH > winH) {
-            targetTop = Math.max(4, tr.top - pH - 4);
-        }
-
-        let targetLeft = tr.left;
-        const pW = popup.offsetWidth || popup.scrollWidth || tr.width;
-        if (targetLeft + pW > winW) {
-            targetLeft = Math.max(4, winW - pW - 4);
-        }
-
-        // Assign unique ID qua attribute
-        const fixId = 'efix-' + (++fixIdCounter);
-        popup.setAttribute('data-electron-pos', fixId);
-
-        // Append CSS rule — !important trong <style> tag sẽ WIN over React inline style
-        const rule = `
-[data-electron-pos="${fixId}"] {
-  top: ${Math.round(targetTop)}px !important;
-  left: ${Math.round(targetLeft)}px !important;
-  right: auto !important;
-  bottom: auto !important;
-  z-index: 99999 !important;
-}`;
-        dynamicStyle.textContent += rule;
-
-        console.log('[preload-fix] Fixed popup', fixId,
-            'at:', Math.round(targetLeft), Math.round(targetTop),
-            'size:', Math.round(pW) + 'x' + Math.round(pH));
-    }
-
-    function checkAndFixPopups() {
-        if (!triggerSnapshot) return;
-
-        const popups = document.querySelectorAll(POPUP_SEL);
-        const winW = window.innerWidth;
-        const winH = window.innerHeight;
-
-        popups.forEach(popup => {
-            const cs = window.getComputedStyle(popup);
-            if (cs.display === 'none') return;
-
-            // Đã fix rồi → kiểm tra xem vẫn OK không
-            if (popup.hasAttribute('data-electron-pos')) return;
-
-            const rect = popup.getBoundingClientRect();
-
-            // On-screen → OK, skip
-            const isOnScreen = rect.left > -100 && rect.top > -100 &&
-                rect.right < winW + 100 && rect.bottom < winH + 100;
-            const isDetachedFromTrigger =
-                (Math.abs(rect.left - triggerSnapshot.left) > Math.max(120, triggerSnapshot.width + 40)) ||
-                (Math.abs(rect.top - triggerSnapshot.bottom) > Math.max(180, triggerSnapshot.height + 120));
-            if (isOnScreen && !isDetachedFromTrigger) return;
-
-            // Off-screen → fix nó
-            console.log('[preload-fix] Off-screen popup detected at:',
-                Math.round(rect.left), Math.round(rect.top));
-            fixPopup(popup);
-        });
-    }
-
-    setTimeout(() => {
-        console.log('[preload-fix] Listeners active');
-
-        // Capture trigger element từ mousedown
-        document.addEventListener('mousedown', (e) => {
-            // ⚠️ QUAN TRỌNG: Nếu click vào BÊN TRONG popup (chọn option) → KHÔNG can thiệp
-            // Để Ant Design tự xử lý selection
-            const clickedInsidePopup = e.target.closest &&
-                e.target.closest('.ant-select-dropdown, .ant-picker-dropdown, .ant-cascader-dropdown, .ant-picker-panel, .ant-dropdown, .ant-dropdown-menu');
-            if (clickedInsidePopup) {
-                console.log('[preload-fix] Click inside popup — letting Ant Design handle it');
-                return; // Không làm gì cả
-            }
-
-            const el = e.target.closest && (
-                e.target.closest('.ant-select') ||
-                e.target.closest('.ant-picker') ||
-                e.target.closest('.ant-cascader') ||
-                e.target.closest('.ant-dropdown-trigger')
-            );
-
-            if (el) {
-                // Click vào trigger element (Select box)
-                // Kiểm tra: có popup đang hiển thị không?
-                const visiblePopups = document.querySelectorAll(POPUP_SEL);
-                let hasVisibleFixedPopup = false;
-                visiblePopups.forEach(p => {
-                    if (p.hasAttribute('data-electron-pos') &&
-                        window.getComputedStyle(p).display !== 'none') {
-                        hasVisibleFixedPopup = true;
-                    }
-                });
-
-                if (hasVisibleFixedPopup) {
-                    // ĐÓNG dropdown: click vào trigger khi đã mở → đóng lại
-                    console.log('[preload-fix] Closing dropdown — hiding popups immediately');
-                    dynamicStyle.textContent = `${POPUP_SEL} { display: none !important; }`;
-                    setTimeout(() => {
-                        clearAllFixes();
-                        triggerSnapshot = null;
-                    }, 300);
-                    return;
-                }
-
-                // MỞ dropdown mới
-                clearAllFixes();
-
-                const r = el.getBoundingClientRect();
-                triggerSnapshot = {
-                    left: r.left, top: r.top,
-                    right: r.right, bottom: r.bottom,
-                    width: r.width, height: r.height
-                };
-                console.log('[preload-fix] Trigger at:', Math.round(r.left), Math.round(r.top),
-                    Math.round(r.width) + 'x' + Math.round(r.height));
-
-                // Prevent the first portal frame from flashing at the top-left.
-                // Schedule initial fix attempts
-                [0, 16, 50, 100, 200].forEach(d =>
-                    setTimeout(() => requestAnimationFrame(checkAndFixPopups), d)
-                );
-            } else {
-                // Click bên ngoài → ẩn popup ngay, xóa fix sau
-                const hasFixedPopup = document.querySelector('[data-electron-pos]');
-                if (hasFixedPopup) {
-                    dynamicStyle.textContent = `${POPUP_SEL} { display: none !important; }`;
-                    setTimeout(() => {
-                        clearAllFixes();
-                        triggerSnapshot = null;
-                    }, 300);
-                } else {
-                    setTimeout(() => {
-                        clearAllFixes();
-                        triggerSnapshot = null;
-                    }, 300);
-                }
-            }
-        }, true);
-
-        // MutationObserver — liên tục detect popup off-screen
-        // Key: KHÔNG dừng sau timeout — chạy liên tục để bắt React re-render
-        new MutationObserver((mutations) => {
-            if (!triggerSnapshot) return;
-
-            // Chỉ react khi có style/class change hoặc child thêm mới
-            const hasRelevantChange = mutations.some(m =>
-                m.type === 'childList' ||
-                (m.type === 'attributes' && m.attributeName === 'style')
-            );
-            if (hasRelevantChange) {
-                requestAnimationFrame(checkAndFixPopups);
-            }
-        }).observe(document.body, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['style', 'class']
-        });
-    }, 2000);
 });

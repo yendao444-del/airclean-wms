@@ -837,6 +837,14 @@ const getFundTxCreatedMs = (tx: FundTransaction) => {
 
 // ===== HELPERS =====
 const fmt = (v: number) => new Intl.NumberFormat('vi-VN').format(Math.round(v)) + ' đ';
+const fmtCompactMoney = (v: number) => {
+    const absoluteValue = Math.abs(Math.round(v));
+    if (absoluteValue < 1000) return `${absoluteValue}đ`;
+    if (absoluteValue >= 1000000) {
+        return `${new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 2 }).format(absoluteValue / 1000000)}Tr`;
+    }
+    return `${new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 1 }).format(absoluteValue / 1000)}K`;
+};
 
 // Hoa hồng đóng gói tính theo số gói thực tế trên từng dòng đơn hàng.
 const VAT_OVERDUE_FINE_FIRST_AMOUNT = 30000;
@@ -3119,6 +3127,144 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
     );
 }
 
+type AttendancePeriod = [dayjs.Dayjs, dayjs.Dayjs];
+type AttendancePeriodPickerMode = 'day' | 'month' | 'range';
+
+const AttendancePeriodSelector = ({
+    value,
+    onChange,
+}: {
+    value: AttendancePeriod;
+    onChange: (value: AttendancePeriod) => void;
+}) => {
+    const [pickerMode, setPickerMode] = useState<AttendancePeriodPickerMode | null>(null);
+    const [draftRange, setDraftRange] = useState<AttendancePeriod>(value);
+    const now = dayjs();
+    const [start, end] = value;
+
+    const activePresetKey = (() => {
+        if (start.isSame(now.startOf('month'), 'day') && end.isSame(now.endOf('month'), 'day')) return 'this-month';
+        if (start.isSame(now.subtract(1, 'month').startOf('month'), 'day') && end.isSame(now.subtract(1, 'month').endOf('month'), 'day')) return 'previous-month';
+        if (start.isSame(now.subtract(6, 'day'), 'day') && end.isSame(now, 'day')) return 'last-7-days';
+        if (start.isSame(now.subtract(29, 'day'), 'day') && end.isSame(now, 'day')) return 'last-30-days';
+        return '';
+    })();
+
+    const rangeLabel = (() => {
+        if (activePresetKey === 'this-month') return 'Tháng này';
+        if (activePresetKey === 'previous-month') return 'Tháng trước';
+        if (activePresetKey === 'last-7-days') return 'Trong 7 ngày qua';
+        if (activePresetKey === 'last-30-days') return 'Trong 30 ngày qua';
+        if (start.isSame(end, 'day')) return start.format('DD/MM/YYYY');
+        if (start.isSame(start.startOf('month'), 'day') && end.isSame(start.endOf('month'), 'day')) return `Tháng ${start.format('MM/YYYY')}`;
+        return `${start.format('DD/MM/YYYY')} — ${end.format('DD/MM/YYYY')}`;
+    })();
+
+    const openPicker = (mode: AttendancePeriodPickerMode) => {
+        setDraftRange([start, end]);
+        setPickerMode(mode);
+    };
+
+    const applyPreset = (nextStart: dayjs.Dayjs, nextEnd: dayjs.Dayjs) => {
+        onChange([nextStart, nextEnd]);
+    };
+
+    const pickerTitle = pickerMode === 'day'
+        ? 'Chọn ngày chấm công'
+        : pickerMode === 'month'
+            ? 'Chọn tháng chấm công'
+            : 'Chọn khoảng chấm công';
+
+    return (
+        <>
+            <div className="att-header-period">
+                <Dropdown
+                    trigger={['click']}
+                    placement="bottomRight"
+                    menu={{
+                        selectedKeys: activePresetKey ? [activePresetKey] : [],
+                        style: { minWidth: 286 },
+                        items: [
+                            { key: 'this-month', label: 'Tháng này' },
+                            { key: 'previous-month', label: 'Tháng trước' },
+                            { key: 'last-7-days', label: 'Trong 7 ngày qua' },
+                            { key: 'last-30-days', label: 'Trong 30 ngày qua' },
+                            { type: 'divider' },
+                            { key: 'pick-day', label: <span className="att-period-menu-choice"><strong>Theo ngày</strong><small>Chọn một ngày cụ thể</small></span> },
+                            { key: 'pick-month', label: <span className="att-period-menu-choice"><strong>Theo tháng</strong><small>Chọn trọn một tháng</small></span> },
+                            { key: 'pick-range', label: <span className="att-period-menu-choice"><strong>Tùy chỉnh khoảng</strong><small>Chọn ngày bắt đầu và kết thúc</small></span> },
+                        ],
+                        onClick: ({ key }) => {
+                            if (key === 'this-month') applyPreset(now.startOf('month'), now.endOf('month'));
+                            if (key === 'previous-month') applyPreset(now.subtract(1, 'month').startOf('month'), now.subtract(1, 'month').endOf('month'));
+                            if (key === 'last-7-days') applyPreset(now.subtract(6, 'day').startOf('day'), now.endOf('day'));
+                            if (key === 'last-30-days') applyPreset(now.subtract(29, 'day').startOf('day'), now.endOf('day'));
+                            if (key === 'pick-day') openPicker('day');
+                            if (key === 'pick-month') openPicker('month');
+                            if (key === 'pick-range') openPicker('range');
+                        },
+                    }}
+                >
+                    <Button className="att-header-period__button" aria-label={`Kỳ chấm công: ${rangeLabel}`}>
+                        <CalendarOutlined className="att-header-period__icon" />
+                        <span className="att-header-period__label">{rangeLabel}</span>
+                        <span className="att-header-period__range">{start.format('DD/MM')} → {end.format('DD/MM/YYYY')}</span>
+                        <DownOutlined className="att-header-period__arrow" />
+                    </Button>
+                </Dropdown>
+            </div>
+
+            <Modal
+                className="att-period-picker-modal"
+                title={pickerTitle}
+                open={pickerMode !== null}
+                width={pickerMode === 'range' ? 680 : 420}
+                okText="Áp dụng"
+                cancelText="Hủy"
+                destroyOnHidden
+                centered
+                onCancel={() => setPickerMode(null)}
+                onOk={() => {
+                    onChange(draftRange);
+                    setPickerMode(null);
+                }}
+            >
+                <div className="att-period-picker-control">
+                    {pickerMode === 'range' ? (
+                        <DatePicker.RangePicker
+                            value={draftRange}
+                            format="DD/MM/YYYY"
+                            allowClear={false}
+                            inputReadOnly
+                            getPopupContainer={() => document.body}
+                            onChange={(dates) => {
+                                if (dates?.[0] && dates[1]) {
+                                    setDraftRange([dates[0].startOf('day'), dates[1].endOf('day')]);
+                                }
+                            }}
+                        />
+                    ) : (
+                        <DatePicker
+                            value={draftRange[0]}
+                            picker={pickerMode === 'month' ? 'month' : 'date'}
+                            format={pickerMode === 'month' ? 'MM/YYYY' : 'DD/MM/YYYY'}
+                            allowClear={false}
+                            inputReadOnly
+                            getPopupContainer={() => document.body}
+                            onChange={(date) => {
+                                if (!date) return;
+                                setDraftRange(pickerMode === 'month'
+                                    ? [date.startOf('month'), date.endOf('month')]
+                                    : [date.startOf('day'), date.endOf('day')]);
+                            }}
+                        />
+                    )}
+                </div>
+            </Modal>
+        </>
+    );
+};
+
 // ===============================================
 // ===== MAIN COMPONENT =====
 // ===============================================
@@ -3141,6 +3287,13 @@ export default function Attendance() {
     const [pdfExporting, setPdfExporting] = useState(false);
     const [payslipPdfDetailOpen, setPayslipPdfDetailOpen] = useState(false);
     const [gmailSending, setGmailSending] = useState(false);
+    const [staffBreakdownDetail, setStaffBreakdownDetail] = useState<{
+        label: string;
+        note: string;
+        value: number;
+        positive: boolean;
+        items: Array<{ label: string; amount: number }>;
+    } | null>(null);
 
     const [leaveRecords, setLeaveRecords] = useState<LeaveRequest[]>(() => {
         try {
@@ -4097,62 +4250,14 @@ export default function Attendance() {
     const [editingEmp, setEditingEmp] = useState<Employee | null>(null);
 
     // State cho lọc kỳ lương Tổng quát — mặc định theo tháng hiện tại
-    const [overviewDateRange, setOverviewDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs]>([
+    const [overviewDateRange, setOverviewDateRange] = useState<AttendancePeriod>([
         dayjs().startOf('month'),
         dayjs().endOf('month'),
     ]);
 
-    const attendancePeriodSelector = useMemo(() => {
-        const now = dayjs();
-        const [start, end] = overviewDateRange;
-        const rangeLabel = (() => {
-            if (start.isSame(now.startOf('month'), 'day') && end.isSame(now.endOf('month'), 'day')) return 'Tháng này';
-            if (start.isSame(now.subtract(1, 'month').startOf('month'), 'day') && end.isSame(now.subtract(1, 'month').endOf('month'), 'day')) return 'Tháng trước';
-            if (start.isSame(now.subtract(6, 'day'), 'day') && end.isSame(now, 'day')) return 'Trong 7 ngày qua';
-            if (start.isSame(now.subtract(29, 'day'), 'day') && end.isSame(now, 'day')) return 'Trong 30 ngày qua';
-            if (start.isSame(end, 'day')) return start.format('DD/MM/YYYY');
-            if (start.isSame(start.startOf('month'), 'day') && end.isSame(start.endOf('month'), 'day')) return `Tháng ${start.format('MM/YYYY')}`;
-            return `${start.format('DD/MM/YYYY')} — ${end.format('DD/MM/YYYY')}`;
-        })();
-        const setRange = (nextStart: dayjs.Dayjs, nextEnd: dayjs.Dayjs) => setOverviewDateRange([nextStart, nextEnd]);
-        const presets = [
-            { label: 'Tháng này', fn: () => setRange(now.startOf('month'), now.endOf('month')) },
-            { label: 'Tháng trước', fn: () => setRange(now.subtract(1, 'month').startOf('month'), now.subtract(1, 'month').endOf('month')) },
-            { label: 'Trong 7 ngày qua', fn: () => setRange(now.subtract(6, 'day').startOf('day'), now.endOf('day')) },
-            { label: 'Trong 30 ngày qua', fn: () => setRange(now.subtract(29, 'day').startOf('day'), now.endOf('day')) },
-        ];
-
-        return (
-            <div className="att-header-period">
-                <Dropdown
-                    trigger={['click']}
-                    popupRender={() => <div style={{ background: '#fff', borderRadius: 8, boxShadow: '0 6px 16px rgba(0,0,0,.12)', padding: '8px 0', minWidth: 300, border: '1px solid #f0f0f0' }}>
-                        {presets.map(option => <div key={option.label} onClick={option.fn} style={{ padding: '8px 16px', cursor: 'pointer', fontSize: 13, fontWeight: 500, color: rangeLabel === option.label ? '#1677ff' : '#262626', background: rangeLabel === option.label ? '#e6f4ff' : 'transparent' }}>{option.label}</div>)}
-                        <Divider style={{ margin: '6px 0' }} />
-                        <div style={{ padding: '4px 16px' }}>
-                            <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Theo ngày</div>
-                            <DatePicker size="small" format="DD/MM/YYYY" placeholder="Chọn ngày..." style={{ width: '100%' }} onChange={date => date && setRange(date.startOf('day'), date.endOf('day'))} />
-                        </div>
-                        <div style={{ padding: '4px 16px' }}>
-                            <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Theo tháng</div>
-                            <DatePicker picker="month" size="small" format="MM/YYYY" placeholder="Chọn tháng..." style={{ width: '100%' }} onChange={date => date && setRange(date.startOf('month'), date.endOf('month'))} />
-                        </div>
-                        <div style={{ padding: '4px 16px 8px' }}>
-                            <div style={{ fontSize: 11, fontWeight: 700, color: '#8c8c8c', marginBottom: 4, textTransform: 'uppercase' }}>Tùy chỉnh khoảng</div>
-                            <DatePicker.RangePicker size="small" format="DD/MM/YYYY" allowClear={false} style={{ width: '100%' }} onChange={dates => dates?.[0] && dates?.[1] && setRange(dates[0], dates[1])} />
-                        </div>
-                    </div>}
-                >
-                    <Button className="att-header-period__button">
-                        <CalendarOutlined className="att-header-period__icon" />
-                        <span className="att-header-period__label">{rangeLabel}</span>
-                        <span className="att-header-period__range">{start.format('DD/MM')} → {end.format('DD/MM/YYYY')}</span>
-                        <DownOutlined className="att-header-period__arrow" />
-                    </Button>
-                </Dropdown>
-            </div>
-        );
-    }, [overviewDateRange]);
+    const attendancePeriodSelector = useMemo(() => (
+        <AttendancePeriodSelector value={overviewDateRange} onChange={setOverviewDateRange} />
+    ), [overviewDateRange]);
 
     useEffect(() => {
         setHeaderExtra(attendancePeriodSelector);
@@ -6162,7 +6267,10 @@ export default function Attendance() {
                     note: employeeFines.length > 0 ? `${employeeFines.length} khoản phạt trong kỳ` : 'Không có khấu trừ phạt',
                     value: employee.myFines || 0,
                     positive: false,
-                    items: employeeFines.map(fine => ({ label: `${fine.date ? dayjs(fine.date).format('DD/MM') : 'Không ngày'} · ${fine.type || 'Phạt'}`, amount: fine.amount || 0 })),
+                    items: employeeFines.map(fine => ({
+                        label: `${fine.date ? dayjs(fine.date).format('DD/MM') : 'Không ngày'} · ${fine.type || 'Phạt'}${fine.detail ? ` · ${fine.detail}` : ''}`,
+                        amount: fine.amount || 0,
+                    })),
                 },
                 {
                     label: 'Khấu trừ nghỉ',
@@ -6173,6 +6281,7 @@ export default function Attendance() {
                 },
             ];
             return (
+                <>
                 <div className="att-staff-overview">
                     <div className="att-staff-editorial">
                         <aside className="att-staff-sidebar">
@@ -6209,15 +6318,19 @@ export default function Attendance() {
 
                             <div className="att-staff-breakdown">
                                 {rows.map(row => (
-                                    <Popover key={row.label} trigger="click" placement="top" content={detailPopover(row.label, row.items, row.value, row.positive)}>
-                                        <button type="button" className={`att-staff-breakdown-row ${row.positive ? 'is-positive' : 'is-negative'}`}>
-                                            <div className="att-staff-row-copy">
-                                                <strong>{row.label}</strong>
-                                                <span>{row.note}</span>
-                                            </div>
-                                            <div className="att-staff-row-value">{row.positive ? '+' : '−'} {fmt(Math.abs(row.value))}<EyeOutlined className="att-staff-row-value-icon" /></div>
-                                        </button>
-                                    </Popover>
+                                    <button
+                                        key={row.label}
+                                        type="button"
+                                        className={`att-staff-breakdown-row ${row.positive ? 'is-positive' : 'is-negative'}`}
+                                        onClick={() => setStaffBreakdownDetail(row)}
+                                        aria-label={`Xem chi tiết ${row.label}`}
+                                    >
+                                        <div className="att-staff-row-copy">
+                                            <strong>{row.label}</strong>
+                                            <span>{row.note}</span>
+                                        </div>
+                                        <div className="att-staff-row-value">{row.positive ? '+' : '−'} {fmt(Math.abs(row.value))}<EyeOutlined className="att-staff-row-value-icon" /></div>
+                                    </button>
                                 ))}
                             </div>
 
@@ -6230,6 +6343,23 @@ export default function Attendance() {
                         </main>
                     </div>
                 </div>
+                <Modal
+                    open={Boolean(staffBreakdownDetail)}
+                    title={staffBreakdownDetail ? `Chi tiết ${staffBreakdownDetail.label.toLowerCase()}` : 'Chi tiết'}
+                    footer={null}
+                    width={520}
+                    centered
+                    destroyOnHidden
+                    onCancel={() => setStaffBreakdownDetail(null)}
+                >
+                    {staffBreakdownDetail && detailPopover(
+                        staffBreakdownDetail.note,
+                        staffBreakdownDetail.items,
+                        staffBreakdownDetail.value,
+                        staffBreakdownDetail.positive,
+                    )}
+                </Modal>
+                </>
             );
         }
 
@@ -6241,12 +6371,14 @@ export default function Attendance() {
         const totalFinalSalary = privatePayrollData.reduce((sum, item) => sum + (item.finalSalary || 0), 0);
 
         return (
-        <div className="att-table-card">
+        <div className="att-table-card att-overview-table-card">
             <Table
+                className="att-overview-table"
                 dataSource={privatePayrollData.map(d => ({ ...d, key: d.id }))}
                 pagination={false}
                 size="middle"
-                scroll={{ x: 1180 }}
+                tableLayout="fixed"
+                rowClassName={() => 'att-overview-row'}
                 summary={() => (
                     <Table.Summary fixed>
                         <Table.Summary.Row className="att-overview-total-row">
@@ -6273,7 +6405,10 @@ export default function Attendance() {
                             <Table.Summary.Cell index={5} align="right" className="att-overview-total-cell">
                                 <span className="att-overview-total-value-fine">
                                     {areFineSourcesReady
-                                        ? (totalFines > 0 ? `- ${fmt(totalFines)}` : fmt(0))
+                                        ? <>
+                                            <span className="att-overview-full-only">{totalFines > 0 ? `- ${fmt(totalFines)}` : fmt(0)}</span>
+                                            <span className="att-overview-compact-only">{totalFines > 0 ? `-${fmtCompactMoney(totalFines)}` : '0đ'}</span>
+                                        </>
                                         : <Tooltip title="Đang tổng hợp các khoản phạt"><SyncOutlined spin /></Tooltip>}
                                 </span>
                             </Table.Summary.Cell>
@@ -6295,47 +6430,51 @@ export default function Attendance() {
                 )}
                 columns={[
                     {
-                        title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 200, fixed: 'left' as const,
-                        render: (name: string) => {
-                            const initial = name.split(' ').pop()?.charAt(0) || '';
-                            return (
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                                    <div className="att-avatar">{initial}</div>
-                                    <span className="att-emp-name">{name}</span>
-                                </div>
-                            );
-                        },
+                        title: 'Nhân viên', dataIndex: 'name', key: 'name', width: '16%', className: 'att-overview-cell att-overview-cell--employee',
+                        render: (name: string) => <div className="att-overview-employee"><span className="att-emp-name">{name}</span></div>,
                     },
                     {
-                        title: 'Loại', dataIndex: 'type', key: 'type', width: 100, align: 'center' as const,
+                        title: 'Loại', dataIndex: 'type', key: 'type', width: '8%', align: 'center' as const, className: 'att-overview-cell att-overview-cell--type',
                         render: (t: string) => (
-                            <span className={t === 'Official' ? 'att-tag-green' : 'att-tag-orange'}>
-                                {t === 'Official' ? 'CHÍNH THỨC' : 'THỜI VỤ'}
-                            </span>
+                            <>
+                                <span className={`att-overview-full-only ${t === 'Official' ? 'att-tag-green' : 'att-tag-orange'}`}>
+                                    {t === 'Official' ? 'CHÍNH THỨC' : 'THỜI VỤ'}
+                                </span>
+                                <Tooltip title={t === 'Official' ? 'Nhân viên chính thức' : 'Nhân viên thời vụ'}>
+                                    <span className={`att-overview-compact-only att-overview-type-icon ${t === 'Official' ? 'is-official' : 'is-seasonal'}`} aria-label={t === 'Official' ? 'Chính thức' : 'Thời vụ'}>
+                                        {t === 'Official' ? <SafetyCertificateOutlined /> : <ClockCircleOutlined />}
+                                    </span>
+                                </Tooltip>
+                            </>
                         ),
                     },
                     {
-                        title: 'Lương cơ bản', dataIndex: 'salaryBase', key: 'base', align: 'right' as const, width: 150,
+                        title: 'Lương cơ bản', dataIndex: 'salaryBase', key: 'base', align: 'right' as const, width: '11%', className: 'att-overview-cell att-overview-cell--base',
                         render: (v: number) => (
                             <span className="att-money-gray">{fmt(v)}</span>
                         ),
                     },
                     {
-                        title: 'Thưởng đóng gói', dataIndex: 'packIncome', key: 'pack', align: 'right' as const, width: 160,
+                        title: 'Thưởng đóng gói', dataIndex: 'packIncome', key: 'pack', align: 'right' as const, width: '12%', className: 'att-overview-cell att-overview-cell--pack',
                         render: (v: number, r: any) => <Tooltip title={`${r.packTotalUnits || 0} gói · tính theo mức Dễ / Trung bình / Cao`}><span className="att-money-emerald">+ {fmt(v)}</span></Tooltip>,
                     },
                     {
-                        title: 'Thưởng', dataIndex: 'totalBonus', key: 'bonus', align: 'right' as const, width: 120,
+                        title: 'Thưởng', dataIndex: 'totalBonus', key: 'bonus', align: 'right' as const, width: '9%', className: 'att-overview-cell att-overview-cell--bonus',
                         render: (v: number) => <span className="att-money-emerald">+ {fmt(v)}</span>,
                     },
                     {
-                        title: 'Phạt', dataIndex: 'myFines', key: 'fine', align: 'right' as const, width: 120,
+                        title: 'Phạt', dataIndex: 'myFines', key: 'fine', align: 'right' as const, width: '9%', className: 'att-overview-cell att-overview-cell--fine',
                         render: (v: number) => areFineSourcesReady
-                            ? <span className="att-money-red">{v > 0 ? `- ${fmt(v)}` : `${fmt(0)}`}</span>
+                            ? <>
+                                <span className="att-overview-full-only att-money-red">{v > 0 ? `- ${fmt(v)}` : fmt(0)}</span>
+                                <Tooltip title={v > 0 ? `Phạt: - ${fmt(v)}` : 'Không có khoản phạt'}>
+                                    <span className="att-overview-compact-only att-money-red">{v > 0 ? `-${fmtCompactMoney(v)}` : '0đ'}</span>
+                                </Tooltip>
+                            </>
                             : <Tooltip title="Đang tổng hợp các khoản phạt"><SyncOutlined spin style={{ color: '#ff4d4f' }} /></Tooltip>,
                     },
                     {
-                        title: 'Nghỉ', dataIndex: 'leaveDeduction', key: 'leaveDeduction', align: 'right' as const, width: 120,
+                        title: 'Nghỉ', dataIndex: 'leaveDeduction', key: 'leaveDeduction', align: 'right' as const, width: '8%', className: 'att-overview-cell att-overview-cell--leave',
                         render: (v: number, r: any) => (
                             <Tooltip title={r.absentDays > 0 ? `${r.absentDays} ngày/ca nghỉ đã tính` : 'Không có khoản trừ nghỉ'}>
                                 <span className="att-money-red">{v > 0 ? `- ${fmt(v)}` : `${fmt(0)}`}</span>
@@ -6343,13 +6482,13 @@ export default function Attendance() {
                         ),
                     },
                     {
-                        title: 'Tổng lương', dataIndex: 'finalSalary', key: 'final', align: 'right' as const, width: 150,
+                        title: 'Tổng lương', dataIndex: 'finalSalary', key: 'final', align: 'right' as const, width: '12%', className: 'att-overview-cell att-overview-cell--final',
                         render: (v: number) => isPayrollDataReady
                             ? <span className="att-money-final">{fmt(v)}</span>
                             : <Tooltip title="Đang tổng hợp lương hoàn chỉnh"><SyncOutlined spin style={{ color: '#1677ff' }} /></Tooltip>,
                     },
                     {
-                        title: 'Chi tiết', key: 'detail', align: 'center' as const, width: 130, fixed: 'right' as const,
+                        title: 'Chi tiết', key: 'detail', align: 'center' as const, width: '15%', className: 'att-overview-cell att-overview-cell--action',
                         render: (_: any, record: any) => (
                             <Button size="small" disabled={!isPayrollDataReady} icon={<EyeOutlined />} onClick={() => { setPayslipPdfDetailOpen(false); setPayslipModal(record); }}>
                                 Xem chi tiết
@@ -6358,6 +6497,20 @@ export default function Attendance() {
                     },
                 ]}
             />
+            <div className="att-overview-responsive-total" aria-label="Tổng bảng lương">
+                <div className="att-overview-responsive-total__heading">
+                    <span className="att-overview-total-label">Tổng cộng</span>
+                    <span>{privatePayrollData.length} nhân viên</span>
+                </div>
+                <div className="att-overview-responsive-total__grid">
+                    <div><span>Lương cơ bản</span><strong className="att-overview-total-value-base">{fmt(totalBaseSalary)}</strong></div>
+                    <div><span>Thưởng đóng gói</span><strong className="att-overview-total-value-pack">+ {fmt(totalPackIncome)}</strong></div>
+                    <div><span>Thưởng</span><strong className="att-overview-total-value-bonus">+ {fmt(totalBonus)}</strong></div>
+                    <div><span>Phạt</span><strong className="att-overview-total-value-fine">{areFineSourcesReady ? (totalFines > 0 ? `- ${fmt(totalFines)}` : fmt(0)) : <SyncOutlined spin />}</strong></div>
+                    <div><span>Nghỉ</span><strong className="att-overview-total-value-fine">{totalLeaveDeduction > 0 ? `- ${fmt(totalLeaveDeduction)}` : fmt(0)}</strong></div>
+                    <div className="att-overview-responsive-total__final"><span>Tổng lương</span><strong>{isPayrollDataReady ? fmt(totalFinalSalary) : <SyncOutlined spin />}</strong></div>
+                </div>
+            </div>
         </div>
         );
     };
@@ -8683,18 +8836,16 @@ export default function Attendance() {
         {
             key: 'fund',
             label: isAdmin ? (
-                <div style={{
+                <div className="att-fund-tab-label" style={{
                     display: 'flex',
                     alignItems: 'center',
                     gap: 6,
                     fontWeight: 800,
                     textTransform: 'uppercase',
                     letterSpacing: 0.5,
-                    background: 'linear-gradient(90deg, #00b09b 0%, #96c93d 100%)',
                     color: '#fff',
                     padding: '4px 12px',
                     borderRadius: '6px',
-                    boxShadow: '0 4px 12px rgba(0, 176, 155, 0.2)'
                 }}>
                     <CoffeeOutlined style={{ fontSize: 16 }} />
                     <span>QUẢN LÝ QUỸ</span>
@@ -8753,7 +8904,7 @@ export default function Attendance() {
 
             {/* Page Header */}
             <div className="att-page-header">
-                <Space size={8} wrap style={{ justifyContent: 'flex-end', width: '100%' }}>
+                <Space className="att-page-actions" size={8} wrap style={{ justifyContent: 'flex-end', width: '100%' }}>
                     {!isBackgroundSyncComplete && (
                         <Tag color="processing" icon={<SyncOutlined spin />} style={{ margin: 0 }}>
                             Đang đồng bộ dữ liệu nền

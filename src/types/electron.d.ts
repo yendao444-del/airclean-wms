@@ -99,6 +99,45 @@ export interface StockMutationPayload {
   };
 }
 
+export interface AnnouncementRecipientState {
+  deliveredAt?: string;
+  readAt?: string | null;
+  acknowledgedAt?: string | null;
+  snoozedUntil?: string | null;
+  acknowledgementRequired?: boolean;
+}
+
+export interface Announcement {
+  id: number;
+  title: string;
+  summary: string;
+  content: string;
+  category: string;
+  severity: string;
+  status: string;
+  audienceRoles?: string | null;
+  effectiveAt?: string | null;
+  publishedAt: string;
+  expiresAt?: string | null;
+  requireAcknowledgement: boolean;
+  version: number;
+  policyCode?: string | null;
+  issuer?: string | null;
+  createdByName?: string | null;
+  recipient?: AnnouncementRecipientState | null;
+}
+
+export interface AnnouncementRecipientAudit {
+  id: number;
+  username: string;
+  fullName: string;
+  role: string;
+  required?: boolean;
+  deliveredAt?: string | null;
+  readAt?: string | null;
+  acknowledgedAt?: string | null;
+}
+
 export interface StockMutationResult {
   success: boolean;
   skipped?: boolean;
@@ -596,6 +635,16 @@ export interface ElectronAPI {
       data?: { storagePath: string };
       error?: string;
     }>;
+    validateEvidenceSource: (payload: {
+      taskId: number;
+      name: string;
+      mimeType: string;
+      data: string;
+    }) => Promise<{
+      success: boolean;
+      data?: { validationToken: string; camera?: string };
+      error?: string;
+    }>;
     submitEvidence: (
       payload: any,
     ) => Promise<{
@@ -773,6 +822,13 @@ export interface ElectronAPI {
     }) => Promise<{
       success: boolean;
       data?: { orderNumbers: string[]; ecommerceExportCodes: string[] };
+      error?: string;
+    }>;
+    syncOrderPlacedAt: (
+      records: Array<{ orderNumber: string; orderPlacedAt: string }>,
+    ) => Promise<{
+      success: boolean;
+      data?: { ecommerceExports: number; orders: number };
       error?: string;
     }>;
     getPackersByOrderNumbers: (
@@ -1038,6 +1094,9 @@ export interface ElectronAPI {
       key: string,
       value: any,
     ) => Promise<{ success: boolean; data?: any; updatedAt?: string | null; error?: string }>;
+  };
+  policies: {
+    getCurrent: () => Promise<{ success: boolean; data?: any; error?: string }>;
   };
   attendance: {
     updateLeaveStatus: (data: {
@@ -1327,6 +1386,15 @@ export interface ElectronAPI {
     getCurrentSession: () => Promise<{ success: boolean; data?: any }>;
     ensureAdmin: () => Promise<{ success: boolean; error?: string }>;
     heartbeat: () => Promise<{ success: boolean }>;
+  };
+  notifications: {
+    list: () => Promise<{ success: boolean; data?: Announcement[]; error?: string }>;
+    getRecipients: (announcementId: number) => Promise<{ success: boolean; data?: AnnouncementRecipientAudit[]; error?: string }>;
+    publish: (announcementId: number, userIds: number[]) => Promise<{ success: boolean; data?: { userIds: number[]; publishedAt: string }; error?: string }>;
+    markRead: (announcementId: number) => Promise<{ success: boolean; error?: string }>;
+    acknowledge: (announcementId: number) => Promise<{ success: boolean; error?: string }>;
+    snooze: (announcementId: number) => Promise<{ success: boolean; data?: { snoozedUntil: string }; error?: string }>;
+    onChanged: (callback: (data: { userId: number }) => void) => () => void;
   };
   combos: {
     getPackingComponents: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
