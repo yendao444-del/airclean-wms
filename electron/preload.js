@@ -222,6 +222,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Ecommerce Export (XUẤT HÀNG TMDT)
     ecommerceExports: {
         getAll: (args) => ipcRenderer.invoke('ecommerceExports:getAll', args),
+        getPackingRevision: (args) => ipcRenderer.invoke('ecommerceExports:getPackingRevision', args),
         create: (data) => ipcRenderer.invoke('ecommerceExports:create', data),
         update: (id, data) => ipcRenderer.invoke('ecommerceExports:update', id, data),
         saveTelegramSettings: (data) => ipcRenderer.invoke('ecommerceExports:saveTelegramSettings', data),
@@ -468,6 +469,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         detect: (image) => ipcRenderer.invoke('attendance:detect', { image }),
         register: (data) => ipcRenderer.invoke('attendance:register', data),
         getLogs: (filters) => ipcRenderer.invoke('attendance:getLogs', filters),
+        getRewardSummary: (periodKey) => ipcRenderer.invoke('attendance:getRewardSummary', periodKey),
         updateLeaveStatus: (data) => ipcRenderer.invoke('attendance:updateLeaveStatus', data),
         updatePayrollOverride: (data) => ipcRenderer.invoke('attendance:updatePayrollOverride', data),
         updatePayrollLock: (data) => ipcRenderer.invoke('attendance:updatePayrollLock', data),

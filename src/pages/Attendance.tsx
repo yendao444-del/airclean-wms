@@ -1,8 +1,9 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer, Legend } from 'recharts';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
 import { usePageHeader } from '../contexts/PageHeaderContext';
+import type { AttendanceRewardSummary } from '../types/electron';
 import {
     STOCK_CHECK_MISSING_FINE_ENABLED,
     STOCK_CHECK_MISSING_FINE,
@@ -84,10 +85,16 @@ import {
     ShoppingCartOutlined,
     VideoCameraOutlined,
     GlobalOutlined,
+    ThunderboltOutlined,
+    FlagOutlined,
+    InboxOutlined,
 } from '@ant-design/icons';
 import packingFoxMascot from '../assets/packing/fox-mascot.jpg';
 import packingPandaMascot from '../assets/packing/panda-mascot.jpg';
 import packingTigerMascot from '../assets/packing/tiger-mascot.jpg';
+import packingRaceLeaderFox from '../assets/packing/race-leader-fox.png';
+import packingRaceRunnerPanda from '../assets/packing/race-runner-panda.png';
+import packingRaceWinnerHeader from '../assets/packing/race-previous-winner-header.png';
 
 // Dùng chung Audio Context trong màn hình chấm công để phát âm báo Ting.
 let sharedAudioCtx: AudioContext | null = null;
@@ -1178,6 +1185,18 @@ const getPackingLoadStart = (rangeStart: dayjs.Dayjs) => {
     return !weekStart.isBefore(PACKING_WEEKLY_REWARD_START) ? weekStart : monthStart;
 };
 
+// Compare the selected period with the equivalent elapsed slice immediately
+// before it. For an active week, Monday–today is compared with the previous
+// week's Monday–same weekday, so future days cannot create a false decrease.
+const getPackingComparisonRange = (range: AttendancePeriod): AttendancePeriod => {
+    const now = dayjs();
+    const periodDays = Math.max(range[1].startOf('day').diff(range[0].startOf('day'), 'day') + 1, 1);
+    const observedEnd = range[1].isAfter(now, 'day') ? now.endOf('day') : range[1].endOf('day');
+    const elapsedDays = Math.min(periodDays, Math.max(1, observedEnd.diff(range[0].startOf('day'), 'day') + 1));
+    const comparisonEnd = range[0].subtract(1, 'day').endOf('day');
+    return [comparisonEnd.subtract(elapsedDays - 1, 'day').startOf('day'), comparisonEnd];
+};
+
 function buildPackingWeeklyResults(orderLogs: PackingOrderLog[], employeesList: Employee[], asOf: dayjs.Dayjs): PackingWeeklyResult[] {
     const weeks = new Map<string, Map<number, { employee: Employee; units: number; orderCount: number }>>();
 
@@ -1975,14 +1994,28 @@ const CHECK_TYPE_LABELS: Record<string, { label: string; color: string }> = {
     evening_out: { label: 'Tối ra', color: '#722ed1' },
 };
 
-function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine, isAdmin }: {
+export interface FaceAttendanceTabHandle {
+    toggleCamera: () => void;
+    openRegister: () => void;
+}
+
+interface FaceAttendanceRewardProps {
+    summary?: AttendanceRewardSummary | null;
+    rewardAmount?: number;
+    requiredDays?: number;
+    standardWorkDays?: number;
+}
+
+const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     employees: any[],
+    systemUsers?: any[],
     children?: React.ReactNode,
     onLogAdded?: () => void,
     config?: PenaltyConfig,
     onLateFine?: (fine: FineRecord) => void,
     isAdmin?: boolean,
-}) {
+    reward?: FaceAttendanceRewardProps,
+}>(({ employees, systemUsers = [], children, onLogAdded, config, onLateFine, isAdmin, reward }, ref) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);       // capture frame (hidden)
     const overlayCanvasRef = useRef<HTMLCanvasElement>(null); // vẽ bounding box realtime
@@ -2004,6 +2037,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
     const [lastResult, setLastResult] = useState<any>(null);
     const [todayLogs, setTodayLogs] = useState<any[]>([]);
     const [profiles, setProfiles] = useState<any[]>([]);
+    const [profilesDrawerOpen, setProfilesDrawerOpen] = useState(false);
     const [faceBox, setFaceBox] = useState<{ top: number; right: number; bottom: number; left: number } | null>(null);
     const [regFaceStatus, setRegFaceStatus] = useState<'no_face' | 'too_far' | 'not_centered' | 'ok'>('no_face');
 
@@ -2447,6 +2481,28 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
         }
     }, []);
 
+    const toggleCamera = useCallback(async () => {
+        if (cameraExpanded) {
+            if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+            closeAttendanceRef.current = null;
+            stopRecognizing();
+            stopCamera();
+            setCameraExpanded(false);
+            return;
+        }
+
+        setCameraExpanded(true);
+        closeAttendanceRef.current = () => {
+            stopRecognizing();
+            stopCamera();
+            setCameraExpanded(false);
+            closeAttendanceRef.current = null;
+        };
+        await startCamera();
+        startRecognizing();
+        resetIdleTimer();
+    }, [cameraExpanded, resetIdleTimer, startCamera, startRecognizing, stopCamera, stopRecognizing]);
+
     useEffect(() => () => {
         stopCamera();
     }, [stopCamera]);
@@ -2697,10 +2753,14 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
             emp.username === regFaceId ||
             normalizeAttendanceText(emp.name) === normalizeAttendanceText(regUserName)
         );
+        const linkedAccount = systemUsers.find((account: any) =>
+            normalizeAttendanceText(account?.username) === normalizeAttendanceText(matchedEmployee?.username || regFaceId)
+            || normalizeAttendanceText(account?.fullName) === normalizeAttendanceText(regUserName)
+        );
         const res = await api.register({
             face_id: regFaceId,
             user_name: regUserName,
-            user_id: matchedEmployee?.id,
+            user_id: linkedAccount?.id,
             images: regImages,
         });
         setRegLoading(false);
@@ -2718,7 +2778,18 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
         } else {
             message.error(res.error || 'Đăng ký thất bại');
         }
-    }, [api, regFaceId, regUserName, regImages, loadData, employees]);
+    }, [api, regFaceId, regUserName, regImages, loadData, employees, systemUsers]);
+
+    const openRegister = useCallback(() => {
+        setRegFaceId('');
+        setRegUserName('');
+        setRegImages([]);
+        setRegCapturedCount(0);
+        autoCaptureFiredRef.current = false;
+        setRegisterOpen(true);
+    }, []);
+
+    useImperativeHandle(ref, () => ({ toggleCamera, openRegister }), [openRegister, toggleCamera]);
 
     const logColumns = [
         { title: 'Nhân viên', dataIndex: 'displayUserName', key: 'userName', render: (v: string) => <Text strong>{v}</Text> },
@@ -2727,10 +2798,17 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
         { title: 'Độ chính xác', dataIndex: 'confidence', key: 'confidence', width: 150, render: (v: number) => <Text type="secondary">{Math.round((v || 0) * 100)}%</Text> },
     ];
 
+    const rewardSummary = reward?.summary;
+    const rewardTargetDays = rewardSummary?.monthly.targetDays || reward?.requiredDays || 24;
+    const rewardOnTimeDays = rewardSummary?.monthly.onTimeDays || 0;
+    const rewardStreak = rewardSummary?.currentStreak || 0;
+    const rewardPercent = Math.min(100, Math.round((rewardOnTimeDays / Math.max(1, rewardTargetDays)) * 100));
+    const rewardValue = reward?.rewardAmount || 100000;
+
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-            {/* Header: Status + 2 nút luôn hiển thị */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            {/* Compact service row; primary actions live with the page-level controls. */}
+            <div className="att-face-toolbar">
                 <Space>
                     <Badge
                         status={serviceStatus === 'ready' ? 'success' : serviceStatus === 'initializing' ? 'processing' : 'error'}
@@ -2741,48 +2819,13 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                         }</Text>}
                     />
                     <Button size="small" icon={<SyncOutlined />} onClick={() => { checkService(); loadData(); }}>Làm mới</Button>
-                </Space>
-                <Space>
                     <Button
-                        icon={<SmileOutlined />}
-                        type={cameraExpanded ? 'default' : 'primary'}
-                        disabled={serviceStatus !== 'ready'}
-                        style={cameraExpanded ? {} : { background: '#52c41a', borderColor: '#52c41a', color: '#fff' }}
-                        onClick={async () => {
-                            if (cameraExpanded) {
-                                if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
-                                closeAttendanceRef.current = null;
-                                stopRecognizing();
-                                stopCamera();
-                                setCameraExpanded(false);
-                            } else {
-                                setCameraExpanded(true);
-                                closeAttendanceRef.current = () => {
-                                    stopRecognizing();
-                                    stopCamera();
-                                    setCameraExpanded(false);
-                                    closeAttendanceRef.current = null;
-                                };
-                                await startCamera();
-                                startRecognizing();
-                                resetIdleTimer(); // bắt đầu đếm 15s ngay khi mở
-                            }
-                        }}
+                        size="small"
+                        icon={<UserOutlined />}
+                        onClick={() => setProfilesDrawerOpen(true)}
                     >
-                        {cameraExpanded ? 'Đóng camera' : 'Chấm công'}
+                        Quản lý khuôn mặt ({profiles.length})
                     </Button>
-                    {isAdmin && (
-                        <Button icon={<PlusOutlined />} type="primary" disabled={serviceStatus !== 'ready'} onClick={() => {
-                            setRegFaceId('');
-                            setRegUserName('');
-                            setRegImages([]);
-                            setRegCapturedCount(0);
-                            autoCaptureFiredRef.current = false;
-                            setRegisterOpen(true);
-                        }}>
-                            Đăng ký khuôn mặt mới
-                        </Button>
-                    )}
                 </Space>
             </div>
 
@@ -2798,7 +2841,7 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
 
             <Row gutter={20}>
                 {/* Camera Panel — ẩn mặc định, hiện khi cameraExpanded */}
-                {cameraExpanded && <Col span={14}>
+                {cameraExpanded && <Col span={24}>
                     <Card
                         title={<Space><CameraOutlined style={{ color: '#1677ff' }} /><Text strong>Camera nhận diện</Text></Space>}
                         style={{ borderTop: '3px solid #1677ff' }}
@@ -2900,48 +2943,71 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
                     </Card>
                 </Col>}
 
-                {/* Profiles Panel */}
-                <Col span={cameraExpanded ? 10 : 24}>
-                    <Card
-                        title={<Space><UserOutlined style={{ color: '#722ed1' }} /><Text strong>Profiles đã đăng ký ({profiles.length})</Text></Space>}
-                        style={{ borderTop: '3px solid #722ed1', marginBottom: 20 }}
-                        bodyStyle={{ padding: '12px 16px' }}
-                    >
-                        {profiles.length === 0 ? (
-                            <Text type="secondary">Chưa có profile nào</Text>
-                        ) : (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                {profiles.map(p => (
-                                    <div key={p.faceId} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: '#fafafa', borderRadius: 8, border: '1px solid #f0f0f0' }}>
-                                        <div>
-                                            <Text strong style={{ fontSize: 13 }}>{p.userName}</Text>
-                                            <div><Text type="secondary" style={{ fontSize: 11 }}>{p.faceId} · {p.photoCount} ảnh</Text></div>
-                                        </div>
-                                        {isAdmin && <Tooltip title="Xóa khuôn mặt">
-                                            <Button
-                                                size="small" danger type="text" icon={<DeleteOutlined />}
-                                                onClick={() => {
-                                                    const faceId = p.faceId;
-                                                    const userName = p.userName;
-                                                    Modal.confirm({
-                                                        title: `Xóa khuôn mặt "${userName}"?`,
-                                                        content: 'Nhân viên này sẽ không thể chấm công bằng khuôn mặt nữa.',
-                                                        okText: 'Xóa', okType: 'danger', cancelText: 'Hủy',
-                                                        onOk: () => api.deleteProfile(faceId).then((res: any) => {
-                                                            if (res.success) { message.success('Đã xóa khuôn mặt'); loadData(); }
-                                                            else { message.error(res.error || 'Xóa thất bại'); }
-                                                        }),
-                                                    });
-                                                }}
-                                            />
-                                        </Tooltip>}
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </Card>
-                </Col>
             </Row>
+
+            <Drawer
+                title={<Space><UserOutlined style={{ color: '#00ab56' }} /><Text strong>Quản lý khuôn mặt ({profiles.length})</Text></Space>}
+                open={profilesDrawerOpen}
+                onClose={() => setProfilesDrawerOpen(false)}
+                width={360}
+            >
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    {isAdmin && (
+                        <Button type="primary" block icon={<PlusOutlined />} disabled={serviceStatus !== 'ready'} onClick={openRegister}>
+                            Đăng ký khuôn mặt mới
+                        </Button>
+                    )}
+                    {profiles.length === 0 ? (
+                        <Text type="secondary">Chưa có profile nào</Text>
+                    ) : profiles.map(p => (
+                        <div key={p.faceId} className="att-face-profile-row">
+                            <div>
+                                <Text strong style={{ fontSize: 13 }}>{p.userName}</Text>
+                                <div><Text type="secondary" style={{ fontSize: 11 }}>{p.faceId} · {p.photoCount} ảnh</Text></div>
+                            </div>
+                            {isAdmin && <Tooltip title="Xóa khuôn mặt">
+                                <Button
+                                    size="small" danger type="text" icon={<DeleteOutlined />}
+                                    onClick={() => {
+                                        const faceId = p.faceId;
+                                        const userName = p.userName;
+                                        Modal.confirm({
+                                            title: `Xóa khuôn mặt "${userName}"?`,
+                                            content: 'Nhân viên này sẽ không thể chấm công bằng khuôn mặt nữa.',
+                                            okText: 'Xóa', okType: 'danger', cancelText: 'Hủy',
+                                            onOk: () => api.deleteProfile(faceId).then((res: any) => {
+                                                if (res.success) { message.success('Đã xóa khuôn mặt'); loadData(); }
+                                                else { message.error(res.error || 'Xóa thất bại'); }
+                                            }),
+                                        });
+                                    }}
+                                />
+                            </Tooltip>}
+                        </div>
+                    ))}
+                </Space>
+            </Drawer>
+
+            <section className="att-attendance-achievement" aria-label="Thành tích điểm danh">
+                <div className="att-attendance-achievement__identity">
+                    <div className="att-attendance-achievement__icon"><TrophyOutlined /></div>
+                    <div>
+                        <Text strong>Thành tích đi làm đúng giờ</Text>
+                        <div className="att-attendance-achievement__streak">Đúng giờ <strong>{rewardStreak} ngày</strong> liên tiếp</div>
+                    </div>
+                </div>
+                <Tag className="att-attendance-achievement__badge" icon={<SafetyCertificateOutlined />}>
+                    {rewardSummary?.badgeUnlocked ? `Đúng giờ +${rewardStreak} ngày` : `Mục tiêu huy hiệu: ${rewardSummary?.badgeStreakDays || 3} ngày`}
+                </Tag>
+                <div className="att-attendance-achievement__progress">
+                    <div className="att-attendance-achievement__progress-copy">
+                        <strong>{rewardOnTimeDays}/{rewardTargetDays} ngày đúng giờ</strong>
+                        <span>Đạt {rewardTargetDays}/{reward?.standardWorkDays || 26} ngày để nhận {rewardValue.toLocaleString('vi-VN')}đ</span>
+                    </div>
+                    <div className="att-attendance-achievement__progress-track"><i style={{ width: `${rewardPercent}%` }} /></div>
+                    <small>{rewardSummary?.monthly.qualified ? 'Đã đủ điều kiện thưởng tháng.' : 'Đi làm đúng giờ để tích lũy thưởng; quy định phạt đi muộn vẫn áp dụng riêng.'}</small>
+                </div>
+            </section>
 
             {children}
 
@@ -3125,10 +3191,9 @@ function FaceAttendanceTab({ employees, children, onLogAdded, config, onLateFine
             </Modal>
         </div>
     );
-}
+});
 
 type AttendancePeriod = [dayjs.Dayjs, dayjs.Dayjs];
-type AttendancePeriodPickerMode = 'day' | 'month' | 'range';
 
 const AttendancePeriodSelector = ({
     value,
@@ -3137,131 +3202,42 @@ const AttendancePeriodSelector = ({
     value: AttendancePeriod;
     onChange: (value: AttendancePeriod) => void;
 }) => {
-    const [pickerMode, setPickerMode] = useState<AttendancePeriodPickerMode | null>(null);
-    const [draftRange, setDraftRange] = useState<AttendancePeriod>(value);
     const now = dayjs();
     const [start, end] = value;
+    const thisWeekStart = getPackingWeekStart(now);
+    const thisWeekEnd = thisWeekStart.add(6, 'day').endOf('day');
+    const previousWeekStart = thisWeekStart.subtract(7, 'day');
+    const previousWeekEnd = previousWeekStart.add(6, 'day').endOf('day');
 
-    const activePresetKey = (() => {
-        if (start.isSame(now.startOf('month'), 'day') && end.isSame(now.endOf('month'), 'day')) return 'this-month';
-        if (start.isSame(now.subtract(1, 'month').startOf('month'), 'day') && end.isSame(now.subtract(1, 'month').endOf('month'), 'day')) return 'previous-month';
-        if (start.isSame(now.subtract(6, 'day'), 'day') && end.isSame(now, 'day')) return 'last-7-days';
-        if (start.isSame(now.subtract(29, 'day'), 'day') && end.isSame(now, 'day')) return 'last-30-days';
-        return '';
-    })();
-
-    const rangeLabel = (() => {
-        if (activePresetKey === 'this-month') return 'Tháng này';
-        if (activePresetKey === 'previous-month') return 'Tháng trước';
-        if (activePresetKey === 'last-7-days') return 'Trong 7 ngày qua';
-        if (activePresetKey === 'last-30-days') return 'Trong 30 ngày qua';
-        if (start.isSame(end, 'day')) return start.format('DD/MM/YYYY');
-        if (start.isSame(start.startOf('month'), 'day') && end.isSame(start.endOf('month'), 'day')) return `Tháng ${start.format('MM/YYYY')}`;
-        return `${start.format('DD/MM/YYYY')} — ${end.format('DD/MM/YYYY')}`;
-    })();
-
-    const openPicker = (mode: AttendancePeriodPickerMode) => {
-        setDraftRange([start, end]);
-        setPickerMode(mode);
-    };
-
-    const applyPreset = (nextStart: dayjs.Dayjs, nextEnd: dayjs.Dayjs) => {
-        onChange([nextStart, nextEnd]);
-    };
-
-    const pickerTitle = pickerMode === 'day'
-        ? 'Chọn ngày chấm công'
-        : pickerMode === 'month'
-            ? 'Chọn tháng chấm công'
-            : 'Chọn khoảng chấm công';
+    const presets = [
+        { label: 'Tuần này', value: [thisWeekStart, thisWeekEnd] as AttendancePeriod },
+        { label: 'Tuần trước', value: [previousWeekStart, previousWeekEnd] as AttendancePeriod },
+        { label: 'Tháng này', value: [now.startOf('month'), now.endOf('month')] as AttendancePeriod },
+        { label: 'Tháng trước', value: [now.subtract(1, 'month').startOf('month'), now.subtract(1, 'month').endOf('month')] as AttendancePeriod },
+        { label: 'Trong 7 ngày qua', value: [now.subtract(6, 'day').startOf('day'), now.endOf('day')] as AttendancePeriod },
+        { label: 'Trong 30 ngày qua', value: [now.subtract(29, 'day').startOf('day'), now.endOf('day')] as AttendancePeriod },
+    ];
 
     return (
-        <>
-            <div className="att-header-period">
-                <Dropdown
-                    trigger={['click']}
-                    placement="bottomRight"
-                    menu={{
-                        selectedKeys: activePresetKey ? [activePresetKey] : [],
-                        style: { minWidth: 286 },
-                        items: [
-                            { key: 'this-month', label: 'Tháng này' },
-                            { key: 'previous-month', label: 'Tháng trước' },
-                            { key: 'last-7-days', label: 'Trong 7 ngày qua' },
-                            { key: 'last-30-days', label: 'Trong 30 ngày qua' },
-                            { type: 'divider' },
-                            { key: 'pick-day', label: <span className="att-period-menu-choice"><strong>Theo ngày</strong><small>Chọn một ngày cụ thể</small></span> },
-                            { key: 'pick-month', label: <span className="att-period-menu-choice"><strong>Theo tháng</strong><small>Chọn trọn một tháng</small></span> },
-                            { key: 'pick-range', label: <span className="att-period-menu-choice"><strong>Tùy chỉnh khoảng</strong><small>Chọn ngày bắt đầu và kết thúc</small></span> },
-                        ],
-                        onClick: ({ key }) => {
-                            if (key === 'this-month') applyPreset(now.startOf('month'), now.endOf('month'));
-                            if (key === 'previous-month') applyPreset(now.subtract(1, 'month').startOf('month'), now.subtract(1, 'month').endOf('month'));
-                            if (key === 'last-7-days') applyPreset(now.subtract(6, 'day').startOf('day'), now.endOf('day'));
-                            if (key === 'last-30-days') applyPreset(now.subtract(29, 'day').startOf('day'), now.endOf('day'));
-                            if (key === 'pick-day') openPicker('day');
-                            if (key === 'pick-month') openPicker('month');
-                            if (key === 'pick-range') openPicker('range');
-                        },
-                    }}
-                >
-                    <Button className="att-header-period__button" aria-label={`Kỳ chấm công: ${rangeLabel}`}>
-                        <CalendarOutlined className="att-header-period__icon" />
-                        <span className="att-header-period__label">{rangeLabel}</span>
-                        <span className="att-header-period__range">{start.format('DD/MM')} → {end.format('DD/MM/YYYY')}</span>
-                        <DownOutlined className="att-header-period__arrow" />
-                    </Button>
-                </Dropdown>
-            </div>
-
-            <Modal
-                className="att-period-picker-modal"
-                title={pickerTitle}
-                open={pickerMode !== null}
-                width={pickerMode === 'range' ? 680 : 420}
-                okText="Áp dụng"
-                cancelText="Hủy"
-                destroyOnHidden
-                centered
-                onCancel={() => setPickerMode(null)}
-                onOk={() => {
-                    onChange(draftRange);
-                    setPickerMode(null);
+        <div className="att-header-period">
+            <DatePicker.RangePicker
+                className="att-header-period__picker"
+                value={[start, end]}
+                presets={presets}
+                format="DD/MM/YYYY"
+                separator={<RightOutlined />}
+                suffixIcon={<CalendarOutlined />}
+                allowClear={false}
+                inputReadOnly
+                placement="bottomRight"
+                getPopupContainer={() => document.body}
+                onChange={(dates) => {
+                    if (dates?.[0] && dates[1]) {
+                        onChange([dates[0].startOf('day'), dates[1].endOf('day')]);
+                    }
                 }}
-            >
-                <div className="att-period-picker-control">
-                    {pickerMode === 'range' ? (
-                        <DatePicker.RangePicker
-                            value={draftRange}
-                            format="DD/MM/YYYY"
-                            allowClear={false}
-                            inputReadOnly
-                            getPopupContainer={() => document.body}
-                            onChange={(dates) => {
-                                if (dates?.[0] && dates[1]) {
-                                    setDraftRange([dates[0].startOf('day'), dates[1].endOf('day')]);
-                                }
-                            }}
-                        />
-                    ) : (
-                        <DatePicker
-                            value={draftRange[0]}
-                            picker={pickerMode === 'month' ? 'month' : 'date'}
-                            format={pickerMode === 'month' ? 'MM/YYYY' : 'DD/MM/YYYY'}
-                            allowClear={false}
-                            inputReadOnly
-                            getPopupContainer={() => document.body}
-                            onChange={(date) => {
-                                if (!date) return;
-                                setDraftRange(pickerMode === 'month'
-                                    ? [date.startOf('month'), date.endOf('month')]
-                                    : [date.startOf('day'), date.endOf('day')]);
-                            }}
-                        />
-                    )}
-                </div>
-            </Modal>
-        </>
+            />
+        </div>
     );
 };
 
@@ -3294,6 +3270,17 @@ export default function Attendance() {
         positive: boolean;
         items: Array<{ label: string; amount: number }>;
     } | null>(null);
+    const [attendanceRewardSummaries, setAttendanceRewardSummaries] = useState<AttendanceRewardSummary[]>([]);
+    const [attendanceRewardConfig, setAttendanceRewardConfig] = useState<{
+        enabled: boolean;
+        badgeStreakDays: number;
+        monthlyRequiredDays: number;
+        standardWorkDays: number;
+        monthlyRewardAmount: number;
+        graceMinutes: number;
+    } | null>(null);
+    const [attendanceRewardReadyKey, setAttendanceRewardReadyKey] = useState('');
+    const attendanceActionsRef = useRef<FaceAttendanceTabHandle>(null);
 
     const [leaveRecords, setLeaveRecords] = useState<LeaveRequest[]>(() => {
         try {
@@ -3559,7 +3546,7 @@ export default function Attendance() {
             message.success({ key: loadingKey, content: 'Đang dùng đúng snapshot đã chốt, không tính lại từ dữ liệu nền.', duration: 2 });
         } else {
             try {
-                const freshPackingLogs = await loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { strict: true });
+                const freshPackingLogs = await loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { strict: true, range: overviewDateRange });
                 freshPayrollData = buildPayrollDataFromPackingLogs(freshPackingLogs);
                 message.success({ key: loadingKey, content: 'Đã đồng bộ dữ liệu đóng gói đầy đủ.', duration: 2 });
             } catch (error: any) {
@@ -4106,6 +4093,37 @@ export default function Attendance() {
         fineAuditLogStateRef.current = fineAuditLog;
     }, [extraFines, fineAuditLog]);
 
+    // Đọc lại ledger khi mở tab Phạt để các khoản vừa được đối soát trong DB
+    // hiện ngay, không cần reload toàn bộ ứng dụng.
+    useEffect(() => {
+        if (!isDbLoaded || activeTab !== 'fines') return;
+        let cancelled = false;
+        const refreshFineLedger = async () => {
+            try {
+                const api = (window as any).electronAPI;
+                const latest = await api.appConfig.get('attendanceData');
+                if (cancelled || !latest?.success || !latest.data) return;
+                const dbFines = Array.isArray(latest.data.extraFines) ? latest.data.extraFines : [];
+                const dbAuditLog = Array.isArray(latest.data.fineAuditLog) ? latest.data.fineAuditLog : [];
+                const localAuditLog = fineAuditLogStateRef.current;
+                const mergedAuditLog = mergeAuditLogs(dbAuditLog, localAuditLog);
+                const mergedFines = mergeFinesWithDeletes(
+                    dbFines.map((fine: FineRecord, index: number) => ensureFineId(fine, index)),
+                    extraFinesRef.current,
+                    mergedAuditLog,
+                    dbAuditLog,
+                    localAuditLog,
+                );
+                setFineAuditLog(mergedAuditLog);
+                setExtraFines(mergedFines);
+            } catch (error) {
+                console.error('Không thể làm mới danh sách phạt:', error);
+            }
+        };
+        void refreshFineLedger();
+        return () => { cancelled = true; };
+    }, [activeTab, isDbLoaded]);
+
     // Bảo trì dữ liệu chạy sau lần render đầu. Không thay đổi logic đối soát;
     // chỉ không bắt toàn bộ giao diện phải chờ quét lịch sử chấm công.
     useEffect(() => {
@@ -4249,15 +4267,35 @@ export default function Attendance() {
     const [empListModalOpen, setEmpListModalOpen] = useState(false);
     const [editingEmp, setEditingEmp] = useState<Employee | null>(null);
 
-    // State cho lọc kỳ lương Tổng quát — mặc định theo tháng hiện tại
+    // Các bảng công/phạt/lương vẫn mở theo tháng. Riêng tab Đóng gói có
+    // bộ lọc tuần độc lập để không làm thay đổi kỳ lương đang xem.
     const [overviewDateRange, setOverviewDateRange] = useState<AttendancePeriod>([
         dayjs().startOf('month'),
         dayjs().endOf('month'),
     ]);
+    const [packingDateRange, setPackingDateRange] = useState<AttendancePeriod>(() => {
+        const start = getPackingWeekStart(dayjs());
+        return [start, start.add(6, 'day').endOf('day')];
+    });
+    const activeDateRange = activeTab === 'packaging' ? packingDateRange : overviewDateRange;
+
+    // Fast Refresh có thể giữ lại state tuần từ phiên bản cũ, dù mặc định mới
+    // của các tab ngoài Đóng gói đã là tháng. Chỉ chuyển đúng state cũ này.
+    useEffect(() => {
+        const now = dayjs();
+        const oldWeekStart = getPackingWeekStart(now);
+        const oldWeekEnd = oldWeekStart.add(6, 'day').endOf('day');
+        setOverviewDateRange(current => current[0].isSame(oldWeekStart, 'day') && current[1].isSame(oldWeekEnd, 'day')
+            ? [now.startOf('month'), now.endOf('month')]
+            : current);
+    }, []);
 
     const attendancePeriodSelector = useMemo(() => (
-        <AttendancePeriodSelector value={overviewDateRange} onChange={setOverviewDateRange} />
-    ), [overviewDateRange]);
+        <AttendancePeriodSelector
+            value={activeDateRange}
+            onChange={activeTab === 'packaging' ? setPackingDateRange : setOverviewDateRange}
+        />
+    ), [activeDateRange, activeTab]);
 
     useEffect(() => {
         setHeaderExtra(attendancePeriodSelector);
@@ -4265,7 +4303,6 @@ export default function Attendance() {
     }, [attendancePeriodSelector, clearHeaderExtra, setHeaderExtra]);
 
     const [packingOrderLogsData, setPackingOrderLogsData] = useState<PackingOrderLog[]>([]);
-    const [packingDateRange, setPackingDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
     const [packingRewardNow, setPackingRewardNow] = useState(() => dayjs());
     const fineSourcesRangeKeyRef = useRef('');
 
@@ -4282,9 +4319,11 @@ export default function Attendance() {
         return () => window.clearInterval(timer);
     }, []);
 
-    const loadPackingOrders = async (since?: string, options?: { strict?: boolean }): Promise<PackingOrderLog[]> => {
-        const sinceVal = since || getPackingLoadStart(overviewDateRange[0]).toISOString();
-        const untilVal = overviewDateRange[1].endOf('day').toISOString();
+    const loadPackingOrders = async (since?: string, options?: { strict?: boolean; range?: AttendancePeriod; includeComparison?: boolean; silent?: boolean }): Promise<PackingOrderLog[]> => {
+        const requestedRange = options?.range || (activeTab === 'packaging' ? packingDateRange : overviewDateRange);
+        const comparisonRange = getPackingComparisonRange(requestedRange);
+        const sinceVal = since || getPackingLoadStart(options?.includeComparison ? comparisonRange[0] : requestedRange[0]).toISOString();
+        const untilVal = requestedRange[1].endOf('day').toISOString();
         const requestKey = `${dayjs(sinceVal).startOf('day').valueOf()}-${dayjs(untilVal).endOf('day').valueOf()}`;
         packingRequestKeyRef.current = requestKey;
 
@@ -4301,7 +4340,7 @@ export default function Attendance() {
         const task = (async () => {
         try {
             const api = (window as any).electronAPI;
-            const rangeDays = Math.max(overviewDateRange[1].endOf('day').diff(dayjs(sinceVal).startOf('day'), 'day') + 1, 1);
+            const rangeDays = Math.max(requestedRange[1].endOf('day').diff(dayjs(sinceVal).startOf('day'), 'day') + 1, 1);
             const packingFetchLimit = Math.min(Math.max(rangeDays * 800, 2000), 10000);
 
             // A timeout is not an empty business result. Keep the last known
@@ -4440,15 +4479,17 @@ export default function Attendance() {
         } catch (error) {
             console.error('Lỗi tải dữ liệu đơn hàng:', error);
             const errorMessage = error instanceof Error ? error.message : 'Không thể tải dữ liệu đơn đóng gói.';
-            if (packingRequestKeyRef.current === requestKey) setPackingLoadError(errorMessage);
-            message.error(errorMessage);
+            if (!options?.silent && packingRequestKeyRef.current === requestKey) setPackingLoadError(errorMessage);
+            if (!options?.silent) message.error(errorMessage);
             throw error;
         }
         })();
 
         loadPackingPromiseRef.current = { key: requestKey, promise: task };
-        packingLoadCountRef.current += 1;
-        setPackingOrdersLoading(true);
+        if (!options?.silent) {
+            packingLoadCountRef.current += 1;
+            setPackingOrdersLoading(true);
+        }
         try {
             return await task;
         } catch (error) {
@@ -4456,8 +4497,10 @@ export default function Attendance() {
             return packingOrderLogsRef.current;
         } finally {
             if (loadPackingPromiseRef.current?.key === requestKey) loadPackingPromiseRef.current = null;
-            packingLoadCountRef.current = Math.max(0, packingLoadCountRef.current - 1);
-            setPackingOrdersLoading(packingLoadCountRef.current > 0);
+            if (!options?.silent) {
+                packingLoadCountRef.current = Math.max(0, packingLoadCountRef.current - 1);
+                setPackingOrdersLoading(packingLoadCountRef.current > 0);
+            }
         }
     };
 
@@ -4551,6 +4594,39 @@ export default function Attendance() {
     // State cho chọn tháng (dùng cho tab Vân tay)
     const selectedMonth = overviewDateRange[0].month() + 1;
     const selectedYear = overviewDateRange[0].year();
+    const attendanceRewardPeriodKey = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}`;
+
+    useEffect(() => {
+        if (!isDbLoaded) return;
+        let cancelled = false;
+        const loadAttendanceRewardSummary = async () => {
+            const api = (window as any).electronAPI;
+            if (!api?.attendance?.getRewardSummary) {
+                if (!cancelled) setAttendanceRewardReadyKey(attendanceRewardPeriodKey);
+                return;
+            }
+            try {
+                const result = await api.attendance.getRewardSummary(attendanceRewardPeriodKey);
+                if (cancelled) return;
+                if (result?.success && result.data) {
+                    setAttendanceRewardSummaries(Array.isArray(result.data.summaries) ? result.data.summaries : []);
+                    setAttendanceRewardConfig(result.data.config || null);
+                } else {
+                    setAttendanceRewardSummaries([]);
+                }
+            } catch (error) {
+                if (!cancelled) {
+                    console.error('Lỗi tải thành tích chuyên cần:', error);
+                    setAttendanceRewardSummaries([]);
+                }
+            } finally {
+                if (!cancelled) setAttendanceRewardReadyKey(attendanceRewardPeriodKey);
+            }
+        };
+        setAttendanceRewardReadyKey('');
+        void loadAttendanceRewardSummary();
+        return () => { cancelled = true; };
+    }, [attendanceRewardPeriodKey, isDbLoaded]);
 
     const fineSourcesRangeKey = `${overviewDateRange[0].startOf('day').valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}-${isAdmin ? 'admin' : 'user'}`;
     const areFineSourcesReady = isBackgroundSyncComplete && fineSourcesReadyKey === fineSourcesRangeKey;
@@ -4560,7 +4636,7 @@ export default function Attendance() {
         if (!isDbLoaded) return;
         if (activeTab !== 'overview' && activeTab !== 'fines') return;
         if (activeTab === 'overview') {
-            loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString());
+            void loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { range: overviewDateRange });
         }
         fineSourcesRangeKeyRef.current = fineSourcesRangeKey;
         // Supporting indicators are not needed for the first overview paint.
@@ -4585,6 +4661,109 @@ export default function Attendance() {
             window.clearInterval(taskTrackingTimer);
         };
     }, [isDbLoaded, overviewDateRange, activeTab, fineSourcesRangeKey]);
+
+    // Đóng gói dùng khoảng tuần riêng; không thay đổi kỳ tháng của các tab còn lại.
+    useEffect(() => {
+        if (!isDbLoaded || activeTab !== 'packaging') return;
+        void loadPackingOrders(undefined, { range: packingDateRange, includeComparison: true });
+    }, [isDbLoaded, activeTab, packingDateRange]);
+
+    // Local stock events update immediately; the lightweight revision poll
+    // also catches packing completed from another workstation.
+    useEffect(() => {
+        if (!isDbLoaded || activeTab !== 'packaging') return;
+        const api = (window as any).electronAPI;
+        if (!api?.ecommerceExports?.getPackingRevision) return;
+
+        let disposed = false;
+        let refreshRunning = false;
+        let refreshQueued = false;
+        let refreshTimer: number | null = null;
+        let lastRevision: string | null = null;
+        const revisionRange = {
+            since: getPackingLoadStart(getPackingComparisonRange(packingDateRange)[0]).toISOString(),
+            until: packingDateRange[1].endOf('day').toISOString(),
+        };
+
+        const runRefresh = async () => {
+            if (disposed) return;
+            if (refreshRunning) {
+                refreshQueued = true;
+                return;
+            }
+            refreshRunning = true;
+            try {
+                // If the first tab load is still running, wait for it and then
+                // query again so a scan committed mid-request cannot be missed.
+                const existingLoad = loadPackingPromiseRef.current?.promise;
+                if (existingLoad) {
+                    try {
+                        await existingLoad;
+                    } catch {
+                        // The silent retry below keeps the last good dashboard data.
+                    }
+                    if (disposed) return;
+                }
+                await loadPackingOrders(undefined, {
+                    range: packingDateRange,
+                    includeComparison: true,
+                    silent: true,
+                });
+            } finally {
+                refreshRunning = false;
+                if (refreshQueued && !disposed) {
+                    refreshQueued = false;
+                    void runRefresh();
+                }
+            }
+        };
+
+        const requestRefresh = (delay = 120) => {
+            if (disposed) return;
+            if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+            refreshTimer = window.setTimeout(() => {
+                refreshTimer = null;
+                void runRefresh();
+            }, delay);
+        };
+
+        const checkRevision = async () => {
+            if (disposed || document.visibilityState === 'hidden') return;
+            try {
+                const result = await api.ecommerceExports.getPackingRevision(revisionRange);
+                if (disposed || !result?.success || !result.data?.revision) return;
+                const nextRevision = String(result.data.revision);
+                if (lastRevision === null) {
+                    lastRevision = nextRevision;
+                    return;
+                }
+                if (nextRevision !== lastRevision) {
+                    lastRevision = nextRevision;
+                    requestRefresh(0);
+                }
+            } catch (error) {
+                console.warn('[PACKING] Live revision check failed:', error);
+            }
+        };
+
+        const unsubscribeStock = api.products?.onStockChanged?.((change: any) => {
+            if (String(change?.referenceType || '').toUpperCase() === 'TMDT') requestRefresh();
+        });
+        const revisionTimer = window.setInterval(() => { void checkRevision(); }, 2500);
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'visible') void checkRevision();
+        };
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        void checkRevision();
+
+        return () => {
+            disposed = true;
+            if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+            window.clearInterval(revisionTimer);
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+            unsubscribeStock?.();
+        };
+    }, [isDbLoaded, activeTab, packingDateRange]);
 
     // Gộp finesData gốc + extraFines
     const autoVatOverdueFines = useMemo(() => {
@@ -5090,6 +5269,13 @@ export default function Attendance() {
             && d.isBefore(overviewDateRange[1].endOf('day').add(1, 'ms'));
     }
 
+    function inPackingRange(dateStr?: string) {
+        if (!dateStr) return true;
+        const d = dayjs(dateStr);
+        return d.isAfter(packingDateRange[0].startOf('day').subtract(1, 'ms'))
+            && d.isBefore(packingDateRange[1].endOf('day').add(1, 'ms'));
+    }
+
     // August 2026 policy: keep history intact, but deduct only late-arrival fines.
     const liveOverviewFines = useMemo(
         () => allFines.filter(f => inOverviewRange(f.date) && !isAugust2026WaivedFine(f)),
@@ -5097,18 +5283,45 @@ export default function Attendance() {
     );
     const liveOverviewBonuses = useMemo(() => extraBonuses.filter(b => inOverviewRange(b.date)), [extraBonuses, overviewDateRange]);
     const liveOverviewPackingLogs = useMemo(() => packingOrderLogsData.filter(o => inOverviewRange(o.timestamp)), [packingOrderLogsData, overviewDateRange]);
+    const livePackingLogs = useMemo(() => packingOrderLogsData.filter(o => inPackingRange(o.timestamp)), [packingOrderLogsData, packingDateRange]);
+    const packingComparisonRange = useMemo(() => getPackingComparisonRange(packingDateRange), [packingDateRange, packingRewardNow]);
+    const livePackingTrendLogs = useMemo(() => packingOrderLogsData.filter(order => {
+        const timestamp = dayjs(order.timestamp);
+        return timestamp.isAfter(packingComparisonRange[0].startOf('day').subtract(1, 'ms'))
+            && timestamp.isBefore(packingComparisonRange[1].endOf('day').add(1, 'ms'));
+    }), [packingOrderLogsData, packingComparisonRange]);
     const liveWeeklyPackingResults = useMemo(
         () => buildPackingWeeklyResults(packingOrderLogsData, employees, packingRewardNow),
         [packingOrderLogsData, employees, packingRewardNow]
+    );
+    const packingWeeklyResults = useMemo(
+        () => buildPackingWeeklyResults(livePackingLogs, employees, packingRewardNow),
+        [livePackingLogs, employees, packingRewardNow]
     );
     const liveOverviewWeeklyBonuses = useMemo(() => liveWeeklyPackingResults
         .map(packingWeeklyResultToBonus)
         .filter((bonus): bonus is BonusRecord => Boolean(bonus) && inOverviewRange(bonus.date)),
     [liveWeeklyPackingResults, overviewDateRange]);
+    const liveOverviewAttendanceBonuses = useMemo(() => attendanceRewardSummaries
+        .filter(summary => summary.periodKey === attendanceRewardPeriodKey && summary.monthly.qualified && summary.monthly.rewardAmount > 0)
+        .map(summary => ({
+            id: `auto-attendance-month-${summary.employeeId}-${summary.periodKey}`,
+            empId: summary.employeeId,
+            type: 'Thưởng chuyên cần tháng',
+            detail: `Đúng giờ ${summary.monthly.onTimeDays}/${summary.monthly.targetDays} ngày trong tháng ${summary.periodKey}`,
+            amount: summary.monthly.rewardAmount,
+            date: `${summary.monthly.qualifiedAt || `${summary.periodKey}-01`}T23:59:59+07:00`,
+            createdBy: 'system',
+            createdByName: 'Hệ thống chấm công',
+        } satisfies BonusRecord)),
+    [attendanceRewardPeriodKey, attendanceRewardSummaries]);
     const liveOverviewBonusesWithWeekly = useMemo(() => {
         const manualIds = new Set(liveOverviewBonuses.map(bonus => bonus.id));
-        return [...liveOverviewBonuses, ...liveOverviewWeeklyBonuses.filter(bonus => !manualIds.has(bonus.id))];
-    }, [liveOverviewBonuses, liveOverviewWeeklyBonuses]);
+        const weekly = liveOverviewWeeklyBonuses.filter(bonus => !manualIds.has(bonus.id));
+        const allIds = new Set([...manualIds, ...weekly.map(bonus => bonus.id)]);
+        const attendance = liveOverviewAttendanceBonuses.filter(bonus => !allIds.has(bonus.id));
+        return [...liveOverviewBonuses, ...weekly, ...attendance];
+    }, [liveOverviewAttendanceBonuses, liveOverviewBonuses, liveOverviewWeeklyBonuses]);
     const packingCommission = useMemo(() => {
         const commission = normalizePackingCommission(config.packingCommission);
         const expandSkuLevels = (source: Record<string, string>) => {
@@ -5139,10 +5352,6 @@ export default function Attendance() {
     const overviewBonuses = lockedPayrollSnapshot?.bonuses || liveOverviewBonusesWithWeekly;
     const overviewPackingLogs = lockedPayrollSnapshot?.packingLogs || liveOverviewPackingLogs;
     const packingDashboardData = useMemo(() => {
-        const midpoint = overviewDateRange[0].add(
-            Math.floor(overviewDateRange[1].diff(overviewDateRange[0], 'day') / 2),
-            'day'
-        );
         const employeeScores = new Map(employees.map(employee => [employee.id, {
             employee,
             orderCount: 0,
@@ -5151,8 +5360,21 @@ export default function Attendance() {
             trend: 0,
         }]));
         const matchedEmployeesByPacker = new Map<string, Employee[]>();
+        const previousOrderCounts = new Map<number, number>();
 
-        overviewPackingLogs.forEach(order => {
+        livePackingTrendLogs.forEach(order => {
+            const packerKey = String(order.packer || '');
+            let matchedEmployees = matchedEmployeesByPacker.get(packerKey);
+            if (!matchedEmployees) {
+                matchedEmployees = employees.filter(employee => matchPacker(order.packer, employee));
+                matchedEmployeesByPacker.set(packerKey, matchedEmployees);
+            }
+            matchedEmployees.forEach(employee => {
+                previousOrderCounts.set(employee.id, (previousOrderCounts.get(employee.id) || 0) + 1);
+            });
+        });
+
+        livePackingLogs.forEach(order => {
             const packing = calcPackingCommission(order.items, packingCommission, order.timestamp);
             const packerKey = String(order.packer || '');
             let matchedEmployees = matchedEmployeesByPacker.get(packerKey);
@@ -5160,15 +5382,17 @@ export default function Attendance() {
                 matchedEmployees = employees.filter(employee => matchPacker(order.packer, employee));
                 matchedEmployeesByPacker.set(packerKey, matchedEmployees);
             }
-            const isSecondHalf = !dayjs(order.timestamp).isBefore(midpoint, 'day');
             matchedEmployees.forEach(employee => {
                 const score = employeeScores.get(employee.id);
                 if (!score) return;
                 score.orderCount += 1;
                 score.units += packing.units;
                 score.income += packing.income;
-                score.trend += isSecondHalf ? 1 : -1;
             });
+        });
+
+        employeeScores.forEach(score => {
+            score.trend = score.orderCount - (previousOrderCounts.get(score.employee.id) || 0);
         });
 
         const leaderboard = [...employeeScores.values()]
@@ -5176,14 +5400,14 @@ export default function Attendance() {
             .sort((a, b) => b.orderCount - a.orderCount || b.units - a.units || a.id - b.id);
 
         return {
-            orderLogs: overviewPackingLogs,
-            tableRows: overviewPackingLogs.map(order => ({ ...order, key: order.id })),
+            orderLogs: livePackingLogs,
+            tableRows: livePackingLogs.map(order => ({ ...order, key: order.id })),
             leaderboard,
-            totalOrders: overviewPackingLogs.length,
+            totalOrders: livePackingLogs.length,
             totalUnits: leaderboard.reduce((sum, entry) => sum + entry.units, 0),
             totalIncome: leaderboard.reduce((sum, entry) => sum + entry.income, 0),
         };
-    }, [employees, overviewDateRange, overviewPackingLogs, packingCommission]);
+    }, [employees, packingDateRange, livePackingLogs, livePackingTrendLogs, packingCommission]);
     const overviewWareHousePacking = useMemo(() => {
         let totalUnits = 0;
         overviewPackingLogs.forEach(order => {
@@ -5200,7 +5424,7 @@ export default function Attendance() {
     const isPackingDataReady = packingCatalogReady && packingReadyKey === packingExpectedKey && !packingLoadError;
     const isPayrollDataReady = isCurrentPeriodLocked
         ? Boolean(lockedPayrollSnapshot)
-        : (overviewAttendanceReady && areFineSourcesReady && isPackingDataReady);
+        : (overviewAttendanceReady && areFineSourcesReady && isPackingDataReady && attendanceRewardReadyKey === attendanceRewardPeriodKey);
     const employmentEndDates = useMemo(() => Object.fromEntries(
         systemUsers
             .filter((item: any) => item?.employmentStatus === 'resigned' && item?.resignationDate)
@@ -5221,8 +5445,8 @@ export default function Attendance() {
         const freshWeeklyBonuses = buildPackingWeeklyResults(orderLogs, employees, packingRewardNow)
             .map(packingWeeklyResultToBonus)
             .filter((bonus): bonus is BonusRecord => Boolean(bonus) && inOverviewRange(bonus.date));
-        const manualBonusIds = new Set(liveOverviewBonuses.map(bonus => bonus.id));
-        const freshBonuses = [...liveOverviewBonuses, ...freshWeeklyBonuses.filter(bonus => !manualBonusIds.has(bonus.id))];
+        const manualBonusIds = new Set(liveOverviewBonusesWithWeekly.map(bonus => bonus.id));
+        const freshBonuses = [...liveOverviewBonusesWithWeekly, ...freshWeeklyBonuses.filter(bonus => !manualBonusIds.has(bonus.id))];
         return calculatePayroll(
             overviewFines,
             leaveRecords,
@@ -6151,15 +6375,15 @@ export default function Attendance() {
                 if (!api?.attendance?.updatePayrollLock) {
                     throw new Error('Ứng dụng chưa có API khóa bảng lương an toàn. Vui lòng khởi động lại app.');
                 }
-                const freshPackingLogs = await loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { strict: true });
+                const freshPackingLogs = await loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString(), { strict: true, range: overviewDateRange });
                 const freshOverviewPackingLogs = freshPackingLogs.filter(o => inOverviewRange(o.timestamp));
                 const snapshottedPackingLogs = freshOverviewPackingLogs.map(order => snapshotPackingOrder(order, packingCommission));
                 const freshPayrollRows = buildPayrollDataFromPackingLogs(freshPackingLogs);
                 const freshWeeklyBonuses = buildPackingWeeklyResults(freshPackingLogs, employees, packingRewardNow)
                     .map(packingWeeklyResultToBonus)
                     .filter((bonus): bonus is BonusRecord => Boolean(bonus) && inOverviewRange(bonus.date));
-                const manualBonusIds = new Set(liveOverviewBonuses.map(bonus => bonus.id));
-                const snapshottedBonuses = [...liveOverviewBonuses, ...freshWeeklyBonuses.filter(bonus => !manualBonusIds.has(bonus.id))];
+                const manualBonusIds = new Set(liveOverviewBonusesWithWeekly.map(bonus => bonus.id));
+                const snapshottedBonuses = [...liveOverviewBonusesWithWeekly, ...freshWeeklyBonuses.filter(bonus => !manualBonusIds.has(bonus.id))];
                 const capturedAt = new Date().toISOString();
                 const newLock: LockedPeriod = {
                     id: 'lock-' + Date.now(),
@@ -6219,6 +6443,7 @@ export default function Attendance() {
             const employeeBonuses = overviewBonuses
                 .filter(bonus => bonus.empId === employee.id)
                 .sort((a, b) => dayjs(a.date || 0).valueOf() - dayjs(b.date || 0).valueOf());
+            const attendanceReward = attendanceRewardSummaries.find(summary => summary.employeeId === employee.id);
             const periodLabel = overviewDateRange[0].isSame(overviewDateRange[1], 'month')
                 ? `Tháng ${overviewDateRange[0].format('MM/YYYY')}`
                 : `${overviewDateRange[0].format('DD/MM/YYYY')} — ${overviewDateRange[1].format('DD/MM/YYYY')}`;
@@ -6307,6 +6532,18 @@ export default function Attendance() {
                                 <div className={employeeFines.length > 0 ? 'has-warning' : ''}><strong>{employeeFines.length}</strong><span>khoản phạt</span></div>
                             </div>
 
+                            <div className={`att-reward-progress ${attendanceReward?.badgeUnlocked ? 'is-unlocked' : ''}`}>
+                                <div className="att-reward-progress-head">
+                                    <span><GiftOutlined /> Chuyên cần</span>
+                                    <strong>{attendanceReward?.currentStreak || 0} ngày</strong>
+                                </div>
+                                <div className="att-reward-progress-badge">
+                                    {attendanceReward?.badgeUnlocked ? 'Đã mở huy hiệu đúng giờ' : `Mục tiêu huy hiệu: ${attendanceReward?.badgeStreakDays || 3} ngày`}
+                                </div>
+                                <div className="att-reward-progress-track"><i style={{ width: `${Math.min(100, Math.round(((attendanceReward?.monthly.onTimeDays || 0) / Math.max(1, attendanceReward?.monthly.targetDays || 24)) * 100))}%` }} /></div>
+                                <small>{attendanceReward?.monthly.onTimeDays || 0}/{attendanceReward?.monthly.targetDays || 24} ngày đúng giờ · {attendanceReward?.monthly.qualified ? `Đủ điều kiện +${fmt(attendanceReward.monthly.rewardAmount)}` : `Mục tiêu +${fmt(attendanceRewardConfig?.monthlyRewardAmount || 100000)}`}</small>
+                            </div>
+
                             <span className="att-staff-updated">Dữ liệu theo kỳ đang chọn</span>
                         </aside>
 
@@ -6369,9 +6606,28 @@ export default function Attendance() {
         const totalFines = privatePayrollData.reduce((sum, item) => sum + (item.myFines || 0), 0);
         const totalLeaveDeduction = privatePayrollData.reduce((sum, item) => sum + (item.leaveDeduction || 0), 0);
         const totalFinalSalary = privatePayrollData.reduce((sum, item) => sum + (item.finalSalary || 0), 0);
+        const periodRewardSummaries = attendanceRewardSummaries.filter(summary => summary.periodKey === attendanceRewardPeriodKey);
+        const qualifiedRewardSummaries = periodRewardSummaries.filter(summary => summary.monthly.qualified);
+        const rewardOnTimeDays = periodRewardSummaries.reduce((sum, summary) => sum + summary.monthly.onTimeDays, 0);
+        const rewardScheduledDays = periodRewardSummaries.reduce((sum, summary) => sum + summary.monthly.scheduledDays, 0);
+        const rewardProgress = rewardScheduledDays > 0 ? Math.round((rewardOnTimeDays / rewardScheduledDays) * 100) : 0;
+        const rewardFund = qualifiedRewardSummaries.reduce((sum, summary) => sum + summary.monthly.rewardAmount, 0);
 
         return (
         <div className="att-table-card att-overview-table-card">
+            <section className="att-reward-admin-summary" aria-label="Tổng quan chuyên cần">
+                <div className="att-reward-admin-summary__intro">
+                    <span className="att-reward-admin-summary__eyebrow"><GiftOutlined /> CHUYÊN CẦN THÁNG {attendanceRewardPeriodKey.slice(5)}</span>
+                    <strong>Thưởng được xét sau khi kỳ hoàn tất</strong>
+                    <small>{attendanceRewardConfig?.monthlyRequiredDays || 24}/{attendanceRewardConfig?.standardWorkDays || 26} ngày đúng giờ để nhận {fmt(attendanceRewardConfig?.monthlyRewardAmount || 100000)}</small>
+                </div>
+                <div className="att-reward-admin-summary__metrics">
+                    <div><span>Nhân viên theo dõi</span><strong>{periodRewardSummaries.length}</strong></div>
+                    <div><span>Đủ điều kiện</span><strong>{qualifiedRewardSummaries.length}</strong></div>
+                    <div><span>Tỷ lệ đúng giờ</span><strong>{rewardScheduledDays > 0 ? `${rewardProgress}%` : '—'}</strong></div>
+                    <div><span>Quỹ thưởng dự kiến</span><strong>{fmt(rewardFund)}</strong></div>
+                </div>
+            </section>
             <Table
                 className="att-overview-table"
                 dataSource={privatePayrollData.map(d => ({ ...d, key: d.id }))}
@@ -6534,20 +6790,35 @@ export default function Attendance() {
         };
 
         const leader = leaderboard[0];
+        const runnerUp = leaderboard[1];
         const rankingMascots = [packingFoxMascot, packingPandaMascot, packingTigerMascot];
         const today = dayjs().startOf('day');
         const weekStart = today.subtract((today.day() + 6) % 7, 'day');
         const weekEnd = weekStart.add(6, 'day');
         const currentWeeklyResult = liveWeeklyPackingResults.find(result => result.weekKey === weekStart.format('YYYY-MM-DD'));
         const weeklyLeader = currentWeeklyResult?.leader;
-        const completedWeeklyAwards = liveWeeklyPackingResults.filter(result =>
+        const selectedRangeIsThisWeek = packingDateRange[0].isSame(weekStart, 'day')
+            && packingDateRange[1].isSame(weekEnd, 'day');
+        const selectedRangeIsFullMonth = packingDateRange[0].isSame(packingDateRange[0].startOf('month'), 'day')
+            && packingDateRange[1].isSame(packingDateRange[0].endOf('month'), 'day');
+        const selectedRangeLabel = selectedRangeIsThisWeek
+            ? `tuần ${weekStart.format('DD/MM')}–${weekEnd.format('DD/MM/YYYY')}`
+            : selectedRangeIsFullMonth
+                ? `tháng ${packingDateRange[0].format('MM/YYYY')}`
+                : packingDateRange[0].isSame(packingDateRange[1], 'day')
+                    ? `ngày ${packingDateRange[0].format('DD/MM/YYYY')}`
+                    : `${packingDateRange[0].format('DD/MM')}–${packingDateRange[1].format('DD/MM/YYYY')}`;
+        const completedWeeklyAwards = packingWeeklyResults.filter(result =>
             result.completed
             && result.leader
             && result.units > 0
-            && !result.weekEnd.isBefore(overviewDateRange[0], 'day')
-            && !result.weekEnd.isAfter(overviewDateRange[1], 'day')
+            && !result.weekEnd.isBefore(packingDateRange[0], 'day')
+            && !result.weekEnd.isAfter(packingDateRange[1], 'day')
         );
-        const latestCompletedWeeklyAward = completedWeeklyAwards[completedWeeklyAwards.length - 1];
+        // Keep the previous winner visible even when the active filter is this week.
+        const latestCompletedWeeklyAward = liveWeeklyPackingResults
+            .filter(result => result.completed && result.leader && result.units > 0 && result.weekEnd.isBefore(weekStart, 'day'))
+            .slice(-1)[0];
         const weeklyAwardsByEmployee = completedWeeklyAwards.reduce((awards, result) => {
             const employeeId = result.leader!.id;
             const employeeAwards = awards.get(employeeId) || [];
@@ -6555,79 +6826,77 @@ export default function Attendance() {
             awards.set(employeeId, employeeAwards);
             return awards;
         }, new Map<number, PackingWeeklyResult[]>());
-        const reloadPacking = () => loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString());
+        const reloadPacking = () => loadPackingOrders(undefined, { range: packingDateRange, includeComparison: true });
+        const renderOdometer = (value: number) => String(value || 0).padStart(3, '0').split('').map((digit, index) => (
+            <span className="packing-odometer-digit" key={`${digit}-${index}`}>{digit}</span>
+        ));
 
         return (
             <div className="packing-league">
-                <header className="packing-page-head">
-                    <div>
-                        <h2><TrophyOutlined /> Cuộc đua đóng gói tháng {overviewDateRange[0].format('MM/YYYY')}</h2>
-                        <div className="packing-valid-rule"><SafetyCertificateOutlined /> Chỉ tính đơn TMĐT hoàn tất hợp lệ trong tháng đang xem</div>
-                    </div>
-                    <Button className="packing-reload-button" icon={<SyncOutlined />} onClick={reloadPacking}>Tải lại</Button>
-                </header>
+                <section className="packing-duel" aria-label="Bảng đua số đơn đóng gói">
+                    <header className="packing-duel__header">
+                        <div className="packing-duel__title"><TrophyOutlined /><h3>Số đơn hàng</h3></div>
+                        <button type="button" className="packing-duel__live" onClick={reloadPacking}><span /> Cập nhật realtime</button>
+                    </header>
 
-                <section className="packing-hero-grid">
-                    <article className="packing-champion-hero">
-                        <div className="packing-champion-art">
-                            <div className="packing-champion-halo">
-                                <img src={packingFoxMascot} alt="Linh vật cáo của nhân viên dẫn đầu" />
-                            </div>
-                            <div className="packing-champion-medal"><CrownOutlined /><b>1</b></div>
-                        </div>
-                        <div className={`packing-champion-copy ${latestCompletedWeeklyAward?.leader ? 'has-week-winner' : ''}`}>
-                            <div className="packing-top-label"><CrownOutlined /> Top 1</div>
-                            <span className="packing-leading-label">Dẫn đầu tháng</span>
-                            <h3>{leader?.orderCount ? leader.name : 'Chưa có nhân viên dẫn đầu'}</h3>
-                            <p>@{leader?.username || '—'}</p>
-                            {leader && <Tag className={leader.type === 'Official' ? 'packing-staff-tag official' : 'packing-staff-tag seasonal'}>
-                                <CheckCircleOutlined /> {leader.type === 'Official' ? 'Chính thức' : 'Thời vụ'}
-                            </Tag>}
-                            {latestCompletedWeeklyAward?.leader && (
-                                <div className="packing-champion-week-winner">
-                                    <span className="packing-champion-week-icon"><TrophyOutlined /></span>
-                                    <div>
-                                        <span>VÔ ĐỊCH TUẦN {latestCompletedWeeklyAward.weekStart.format('DD/MM')}–{latestCompletedWeeklyAward.weekEnd.format('DD/MM')}</span>
-                                        <strong>{latestCompletedWeeklyAward.leader.name}</strong>
-                                        <small>{latestCompletedWeeklyAward.orderCount.toLocaleString('vi-VN')} đơn · {latestCompletedWeeklyAward.units.toLocaleString('vi-VN')} SP</small>
+                    <div className="packing-duel__lanes">
+                        {[leader, runnerUp].map((entry, index) => {
+                            const maxOrders = Math.max(leader?.orderCount || 1, runnerUp?.orderCount || 1);
+                            const progress = entry ? Math.max(22, Math.round(entry.orderCount / maxOrders * 91)) : 22;
+                            return (
+                                <article key={entry?.id || `empty-${index}`} className={`packing-duel__lane packing-duel__lane--${index === 0 ? 'leader' : 'runner'}`}>
+                                    <div className="packing-duel__avatar"><img src={index === 0 ? packingRaceLeaderFox : packingRaceRunnerPanda} alt={`Linh vật Top ${index + 1}`} /></div>
+                                    <div className="packing-duel__identity">
+                                        <div className="packing-duel__person-row">
+                                            <strong>{entry?.name || 'Chưa có dữ liệu'}</strong>
+                                            <span className="packing-duel__status">{index === 0 ? <CrownOutlined /> : <ThunderboltOutlined />}{index === 0 ? 'ĐANG DẪN ĐẦU' : 'ĐANG BÁM ĐUỔI'}</span>
+                                        </div>
+                                        <small>@{entry?.username || '—'}</small>
+                                        <div className="packing-duel__track">
+                                            <span className="packing-duel__track-fill" style={{ width: `${progress}%` }}>
+                                                <span className="packing-duel__chevrons">{[0, 1, 2, 3, 4].map(value => <RightOutlined key={value} />)}</span>
+                                                <i />
+                                            </span>
+                                            <FlagOutlined className="packing-duel__flag" />
+                                        </div>
                                     </div>
-                                    <b>+{fmt(PACKING_WEEKLY_REWARD_AMOUNT)}</b>
-                                </div>
-                            )}
-                            <div className="packing-champion-metrics">
-                                <div><strong>{leader?.orderCount.toLocaleString('vi-VN') || 0}</strong><span>đơn</span></div>
-                                <div><strong>{leader?.units.toLocaleString('vi-VN') || 0}</strong><span>SP</span></div>
-                                <div><strong>{fmt(leader?.income || 0)}</strong><span>Thu nhập</span></div>
-                            </div>
+                                    <div className="packing-duel__score">
+                                        <div><span className="packing-duel__digits" key={`${entry?.id || index}-${entry?.orderCount || 0}`}>{renderOdometer(entry?.orderCount || 0)}</span><b>đơn</b></div>
+                                        <small>+1 vừa cập nhật</small>
+                                    </div>
+                                </article>
+                            );
+                        })}
+                        <div className="packing-duel__gap">
+                            <LeftOutlined /><div><strong>{Math.max(0, (leader?.orderCount || 0) - (runnerUp?.orderCount || 0))} đơn</strong><span>Khoảng cách {Math.max(0, (leader?.orderCount || 0) - (runnerUp?.orderCount || 0))} đơn</span></div><RightOutlined />
                         </div>
-                    </article>
+                    </div>
 
-                    <div className="packing-summary-stack">
-                        <article className="packing-income-summary">
-                            <div className="packing-income-icon"><DollarOutlined /></div>
-                            <div><span>Tổng thu nhập sản lượng</span><strong>{fmt(totalIncome)}</strong></div>
-                            <div className="packing-income-facts">
-                                <span><ProfileOutlined /> {totalUnits.toLocaleString('vi-VN')} SP đã ghi nhận</span>
-                                <span><TagsOutlined /> Đơn giá mặc định: <b>{unitPrice}đ/SP</b></span>
-                            </div>
+                    <div className="packing-duel__footer">
+                        <article className="packing-duel__income">
+                            <div className="packing-duel__money-icon"><DollarOutlined /></div>
+                            <div className="packing-duel__income-main"><span>Tổng thu nhập sản lượng</span><strong>{fmt(totalIncome)}</strong></div>
+                            <div className="packing-duel__income-meta"><span><InboxOutlined /> {totalUnits.toLocaleString('vi-VN')} SP đã ghi nhận</span><i /><span><TagsOutlined /> Đơn giá mặc định: <b>{unitPrice}đ/SP</b></span></div>
                         </article>
 
-                        <article className="packing-weekly-prize">
-                            <div className="packing-week-icon"><CalendarOutlined /></div>
-                            <div className="packing-week-copy">
-                                <strong>Thưởng tuần <b>100.000đ</b></strong>
-                                <span>{weekStart.format('DD/MM')} – {weekEnd.format('DD/MM')}</span>
-                                <small>Nhân viên đóng gói nhiều đơn nhất tuần</small>
+                        <article className="packing-duel__reward">
+                            <div className="packing-duel__reward-current">
+                                <CalendarOutlined className="packing-duel__calendar" />
+                                <div>
+                                    <h4>Thưởng tuần <strong>{fmt(PACKING_WEEKLY_REWARD_AMOUNT)}</strong></h4>
+                                    <span className="packing-duel__date">{weekStart.format('DD/MM')} – {weekEnd.format('DD/MM')}</span>
+                                    <p><InboxOutlined /> {currentWeeklyResult?.orderCount.toLocaleString('vi-VN') || 0} đơn · {currentWeeklyResult?.units.toLocaleString('vi-VN') || 0} SP</p>
+                                    <p><SyncOutlined /> Tự động reset Thứ Hai</p>
+                                    <b className="packing-duel__leading"><TrophyOutlined /> {weeklyLeader ? `Đang dẫn đầu: ${weeklyLeader.name}` : 'Đang chờ dữ liệu'}</b>
+                                </div>
                             </div>
-                            <div className={`packing-week-status ${currentWeeklyResult?.completed ? 'completed' : 'active'}`}>
-                                {currentWeeklyResult?.completed ? <CheckCircleOutlined /> : <TrophyOutlined />}
-                                <span>{weeklyLeader
-                                    ? `${currentWeeklyResult?.completed ? 'Đã chốt' : 'Đang dẫn đầu'}: ${weeklyLeader.name}`
-                                    : 'Đang chờ dữ liệu'}</span>
-                            </div>
-                            <small className="packing-reset-note"><SafetyCertificateOutlined /> {weeklyLeader
-                                ? `${currentWeeklyResult?.orderCount.toLocaleString('vi-VN')} đơn · ${currentWeeklyResult?.units.toLocaleString('vi-VN')} SP`
-                                : 'Chốt 23:59 Chủ nhật'} · Tự động reset Thứ Hai</small>
+                            {latestCompletedWeeklyAward?.leader ? (
+                                <div className="packing-duel__previous">
+                                    <img className="packing-duel__previous-title" src={packingRaceWinnerHeader} alt="Vô địch tuần trước" />
+                                    <strong>{latestCompletedWeeklyAward.leader.name} · {latestCompletedWeeklyAward.orderCount.toLocaleString('vi-VN')} đơn · +{fmt(PACKING_WEEKLY_REWARD_AMOUNT)}</strong>
+                                    <div><span>{latestCompletedWeeklyAward.weekStart.format('DD/MM')} – {latestCompletedWeeklyAward.weekEnd.format('DD/MM')}</span><b><CheckCircleOutlined /> Đã nhận thưởng</b></div>
+                                </div>
+                            ) : <div className="packing-duel__previous packing-duel__previous--empty"><TrophyOutlined /><span>Chưa có kết quả tuần trước</span></div>}
                         </article>
                     </div>
                 </section>
@@ -6636,12 +6905,12 @@ export default function Attendance() {
                     <div className="packing-league-main">
                         <section className="packing-panel">
                             <div className="packing-panel-title">
-                                <div><BarChartOutlined /> Bảng xếp hạng hiệu suất</div>
+                                <div><BarChartOutlined /> Bảng xếp hạng hiệu suất · {selectedRangeLabel}</div>
                                 <Button size="small" icon={<SyncOutlined />} onClick={reloadPacking}>Tải lại</Button>
                             </div>
                             <div className="packing-ranking-scroll">
                                 <table className="packing-ranking-table">
-                                    <thead><tr><th>Hạng</th><th>Nhân viên</th><th>Đơn</th><th>Sản phẩm</th><th>Thu nhập</th><th>Tỷ trọng</th><th>Xu hướng</th></tr></thead>
+                                    <thead><tr><th>Hạng</th><th>Nhân viên</th><th>Đơn</th><th>Sản phẩm</th><th>Thu nhập</th><th>Tỷ trọng</th><th>Xu hướng<br /><small>so với kỳ trước</small></th></tr></thead>
                                     <tbody>
                                         {leaderboard.map((entry, index) => {
                                             const share = totalOrders > 0 ? Math.round(entry.orderCount / totalOrders * 100) : 0;
@@ -6657,7 +6926,7 @@ export default function Attendance() {
                                                 <td><strong>{entry.units.toLocaleString('vi-VN')}</strong><small> SP</small></td>
                                                 <td><strong className="packing-income">{fmt(entry.income)}</strong></td>
                                                 <td><strong>{share}%</strong><div className="packing-meter"><i style={{ width: `${share}%` }} /></div></td>
-                                                <td><span className={entry.trend >= 0 ? 'packing-up' : 'packing-down'}>{entry.trend >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />} {Math.abs(entry.trend)} đơn</span></td>
+                                                <td><span className={entry.trend >= 0 ? 'packing-up' : 'packing-down'}>{entry.trend >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />} {entry.trend >= 0 ? '+' : '−'}{Math.abs(entry.trend)} đơn</span></td>
                                             </tr>;
                                         })}
                                     </tbody>
@@ -6721,8 +6990,8 @@ export default function Attendance() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
                 {/* Toolbar */}
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>{overviewDateRange[0].format('DD/MM/YYYY')} — {overviewDateRange[1].format('DD/MM/YYYY')}</Text>
-                    <Button size="small" icon={<SyncOutlined />} onClick={() => loadPackingOrders(getPackingLoadStart(overviewDateRange[0]).toISOString())}>Tải lại</Button>
+                    <Text type="secondary" style={{ fontSize: 12 }}>{packingDateRange[0].format('DD/MM/YYYY')} — {packingDateRange[1].format('DD/MM/YYYY')}</Text>
+                    <Button size="small" icon={<SyncOutlined />} onClick={() => loadPackingOrders(undefined, { range: packingDateRange, includeComparison: true })}>Tải lại</Button>
                 </div>
 
                 {/* Stats + Chart Header */}
@@ -8496,15 +8765,35 @@ export default function Attendance() {
         };
     }, [selectedMonth, selectedYear, activeTab, daysInMonth]);
 
+    const currentAttendanceEmployee = useMemo(() => employees.find(emp => {
+        const loginUsername = normalizeAttendanceText(user?.username || currentUser || '');
+        const loginFullName = normalizeAttendanceText(user?.fullName || '');
+        return normalizeAttendanceText(emp.username) === loginUsername
+            || (loginFullName && normalizeAttendanceText(emp.name) === loginFullName);
+    }), [currentUser, employees, user?.fullName, user?.username]);
+    const currentAttendanceReward = useMemo(() => (
+        currentAttendanceEmployee
+            ? attendanceRewardSummaries.find(summary => summary.employeeId === currentAttendanceEmployee.id && summary.periodKey === attendanceRewardPeriodKey) || null
+            : null
+    ), [attendanceRewardPeriodKey, attendanceRewardSummaries, currentAttendanceEmployee]);
+
     const renderAttendance = () => (
         <FaceAttendanceTab
+            ref={attendanceActionsRef}
             employees={employees}
+            systemUsers={systemUsers}
             onLogAdded={() => { if (isDbLoaded) fetchMonthLogs(); }}
             config={config}
             isAdmin={isAdmin}
             onLateFine={(fine) => {
                 setExtraFines(prev => prev.some(item => item.id === fine.id) ? prev : [...prev, fine]);
                 message.warning(`⚠️ Phạt đi muộn: ${fine.detail} — ${fine.amount.toLocaleString('vi-VN')}đ`);
+            }}
+            reward={{
+                summary: currentAttendanceReward,
+                rewardAmount: attendanceRewardConfig?.monthlyRewardAmount || 100000,
+                requiredDays: attendanceRewardConfig?.monthlyRequiredDays || 24,
+                standardWorkDays: attendanceRewardConfig?.standardWorkDays || 26,
             }}
         >
             <Divider style={{ margin: '8px 0' }} />
@@ -8970,6 +9259,25 @@ export default function Attendance() {
                             Chốt & Khóa
                         </Button>
                     ))}
+                    {activeTab === 'attendance' && (
+                        <Button
+                            className="att-btn-attendance"
+                            icon={<SmileOutlined />}
+                            type="primary"
+                            onClick={() => attendanceActionsRef.current?.toggleCamera()}
+                        >
+                            Chấm công
+                        </Button>
+                    )}
+                    {activeTab === 'attendance' && isAdmin && (
+                        <Button
+                            className="att-btn-face-register"
+                            icon={<PlusOutlined />}
+                            onClick={() => attendanceActionsRef.current?.openRegister()}
+                        >
+                            Đăng ký khuôn mặt mới
+                        </Button>
+                    )}
                     {showPayrollManagementControls && isCurrentPeriodLocked && (
                         <Tooltip title="Gửi Gmail hàng loạt">
                             <Button

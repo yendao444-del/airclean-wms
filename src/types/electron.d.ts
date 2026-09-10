@@ -109,6 +109,8 @@ export interface AnnouncementRecipientState {
 
 export interface Announcement {
   id: number;
+  source?: "announcement" | "personal";
+  eventKey?: string | null;
   title: string;
   summary: string;
   content: string;
@@ -124,6 +126,7 @@ export interface Announcement {
   policyCode?: string | null;
   issuer?: string | null;
   createdByName?: string | null;
+  metadata?: Record<string, unknown> | null;
   recipient?: AnnouncementRecipientState | null;
 }
 
@@ -136,6 +139,34 @@ export interface AnnouncementRecipientAudit {
   deliveredAt?: string | null;
   readAt?: string | null;
   acknowledgedAt?: string | null;
+}
+
+export interface AttendanceRewardMonthlySummary {
+  periodKey: string;
+  scheduledDays: number;
+  completedDays: number;
+  onTimeDays: number;
+  lateDays: number;
+  absentDays: number;
+  targetDays: number;
+  qualified: boolean;
+  rewardAmount: number;
+  qualifiedAt?: string | null;
+  complete: boolean;
+}
+
+export interface AttendanceRewardSummary {
+  employeeId: number;
+  periodKey: string;
+  enabled: boolean;
+  currentStreak: number;
+  currentStreakStartDate?: string | null;
+  bestStreak: number;
+  badgeUnlocked: boolean;
+  badgeStreakDays: number;
+  monthly: AttendanceRewardMonthlySummary;
+  statuses: Record<string, { status: string; sessions: Array<{ session: string; status: string; logId?: number | string; timestamp?: string }> }>;
+  evaluatedAt: string;
 }
 
 export interface StockMutationResult {
@@ -786,6 +817,19 @@ export interface ElectronAPI {
       hasMore?: boolean;
       error?: string;
     }>;
+    getPackingRevision: (filters?: {
+      since?: string;
+      until?: string;
+    }) => Promise<{
+      success: boolean;
+      data?: {
+        count: number;
+        latestId: number;
+        updatedAt: string | null;
+        revision: string;
+      };
+      error?: string;
+    }>;
     create: (
       data: any,
     ) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -1099,6 +1143,22 @@ export interface ElectronAPI {
     getCurrent: () => Promise<{ success: boolean; data?: any; error?: string }>;
   };
   attendance: {
+    getRewardSummary: (periodKey?: string) => Promise<{
+      success: boolean;
+      data?: {
+        config: {
+          enabled: boolean;
+          badgeStreakDays: number;
+          monthlyRequiredDays: number;
+          standardWorkDays: number;
+          monthlyRewardAmount: number;
+          graceMinutes: number;
+        };
+        periodKey: string;
+        summaries: AttendanceRewardSummary[];
+      };
+      error?: string;
+    }>;
     updateLeaveStatus: (data: {
       empId: number;
       date: string;
