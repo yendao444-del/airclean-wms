@@ -289,8 +289,6 @@ const formatPenaltyAmount = (value: string | number | undefined): string => {
 
 const getDailyRotationAnchor = () => dayjs().format('YYYY-MM-DD');
 
-const TARGET_EVIDENCE_IMAGE_BYTES = 200 * 1024;
-const MAX_EVIDENCE_IMAGE_BYTES = 500 * 1024;
 const MAX_EVIDENCE_SOURCE_BYTES = 15 * 1024 * 1024;
 const MAX_EVIDENCE_IMAGES = 5;
 
@@ -318,47 +316,6 @@ const getDriveImageUrl = (url: string) => {
     // Drive's download endpoint sends Content-Disposition: attachment in
     // Electron. The thumbnail endpoint returns image content for <img>.
     return fileId ? `https://drive.google.com/thumbnail?id=${fileId}&sz=w2000` : url;
-};
-
-const compressEvidenceImage = async (file: File): Promise<File> => {
-    const sourceUrl = URL.createObjectURL(file);
-    try {
-        const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-            const element = new Image();
-            element.onload = () => resolve(element);
-            element.onerror = () => reject(new Error('Không thể đọc ảnh.'));
-            element.src = sourceUrl;
-        });
-        let width = Math.min(image.naturalWidth, 1920);
-        let height = Math.round(image.naturalHeight * (width / image.naturalWidth));
-        let fallback: Blob | null = null;
-
-        // Source validation happens before compression; this loop only keeps
-        // verified camera photos within the R2 upload limit.
-        while (width >= 160 && height >= 120) {
-            const canvas = document.createElement('canvas');
-            canvas.width = width;
-            canvas.height = height;
-            const context = canvas.getContext('2d');
-            if (!context) throw new Error('Không thể xử lý ảnh trên thiết bị này.');
-            context.drawImage(image, 0, 0, width, height);
-            for (const quality of [0.82, 0.72, 0.62, 0.52, 0.42, 0.34, 0.25]) {
-                const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/webp', quality));
-                if (blob && blob.size <= TARGET_EVIDENCE_IMAGE_BYTES) {
-                    return new File([blob], `${file.name.replace(/\.[^.]+$/, '')}.webp`, { type: 'image/webp' });
-                }
-                if (blob && blob.size < MAX_EVIDENCE_IMAGE_BYTES && (!fallback || blob.size < fallback.size)) fallback = blob;
-            }
-            width = Math.round(width * 0.7);
-            height = Math.round(height * 0.7);
-        }
-        if (fallback) {
-            return new File([fallback], `${file.name.replace(/\.[^.]+$/, '')}.webp`, { type: 'image/webp' });
-        }
-        throw new Error('Không thể nén ảnh xuống dưới 500 KB. Hãy chọn ảnh rõ nét hơn hoặc cắt bớt ảnh.');
-    } finally {
-        URL.revokeObjectURL(sourceUrl);
-    }
 };
 
 // Default categories (dùng khi DB chưa có dữ liệu)
@@ -1882,18 +1839,16 @@ const DailyTasks = () => {
                         if (!validation.success || !validation.data?.validationToken) {
                             throw new Error(validation.error || `Không thể xác minh ảnh "${selectedImage.name}".`);
                         }
-                        message.loading({ key: 'evidence-upload', content: `Đang nén ảnh ${index + 1}/${selectedImages.length}...`, duration: 0 });
-                        const compressedImage = await compressEvidenceImage(selectedImage);
-                        if (compressedImage.size >= MAX_EVIDENCE_IMAGE_BYTES) {
-                            throw new Error(`Ảnh "${selectedImage.name}" sau nén vượt quá 500 KB.`);
-                        }
-                        const data = await readFileAsDataUrl(compressedImage);
-                        images.push({ name: compressedImage.name, mimeType: compressedImage.type, data, size: compressedImage.size, validationToken: validation.data.validationToken });
+                        images.push({
+                            name: selectedImage.name,
+                            size: validation.data.preparedSize || 0,
+                            validationToken: validation.data.validationToken,
+                        });
                     }
                     message.loading({ key: 'evidence-upload', content: 'Đang tải bằng chứng lên hệ thống...', duration: 0 });
                     const result = await window.electronAPI.dailyTasks.submitEvidence({
                         taskId: task.id,
-                        images: images.map(({ name, mimeType, data, validationToken }) => ({ name, mimeType, data, validationToken })),
+                        images: images.map(({ name, validationToken }) => ({ name, validationToken })),
                     });
                     if (!result.success) {
                         if (result.reauthRequired) {

@@ -737,6 +737,7 @@ export interface ElectronAPI {
         validationToken: string;
         camera?: string;
         verification?: "camera_metadata" | "image_screening";
+        preparedSize?: number;
       };
       error?: string;
     }>;
