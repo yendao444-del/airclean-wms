@@ -1,0 +1,9 @@
+Invoke-RestMethod : The remote server returned an error: (400) Bad Request.
+At G:\QUAN LY BAN HANG\desktop-FIXDEBUG\tmp\generate-product-shell-concept.ps1:20 char:17
++ ... $response = Invoke-RestMethod -Uri "$env:NINEROUTER_URL/v1/images/gen ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (System.Net.HttpWebRequest:HttpWebRequest) [Invoke-RestMethod], WebExc 
+   eption
+    + FullyQualifiedErrorId : WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeRestMethodCommand
+ 
+

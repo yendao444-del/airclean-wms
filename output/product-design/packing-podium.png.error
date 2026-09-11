@@ -1,0 +1,8 @@
+New-Object : Cannot find type [System.Net.Http.HttpClient]: verify that the assembly containing this type is loaded.
+At G:\QUAN LY BAN HANG\desktop-FIXDEBUG\tmp\imagegen\run-packing-concept.ps1:21 char:15
++     $client = New-Object System.Net.Http.HttpClient
++               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidType: (:) [New-Object], PSArgumentException
+    + FullyQualifiedErrorId : TypeNotFound,Microsoft.PowerShell.Commands.NewObjectCommand
+ 
+

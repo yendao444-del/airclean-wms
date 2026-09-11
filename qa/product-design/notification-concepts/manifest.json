@@ -1,0 +1,14 @@
+[
+  {
+    "outputName": "notification-bell-drawer.png",
+    "direction": "A compact notification center opened from a bell in the top header while the employee remains on the Bảng công overview. Use a refined right-side drawer around 440 pixels wide, an unread count on the bell, a prominent required-policy row, lightweight recent notification rows, and a single primary button labeled Đọc và xác nhận. The payroll screen behind it should remain clearly recognizable."
+  },
+  {
+    "outputName": "notification-policy-hub.png",
+    "direction": "A dedicated full-page Thông báo nội bộ inbox using a calm master-detail layout. A narrow left column contains grouped notification rows with unread and required states; the wide reading pane shows the selected policy, version, effective date, a concise Điểm thay đổi section, privacy note, and a sticky primary action Tôi đã đọc và hiểu."
+  },
+  {
+    "outputName": "notification-required-ack.png",
+    "direction": "A mandatory policy acknowledgement shown immediately after login as a large editorial modal over the existing app shell. Show progress 1/2 thông báo bắt buộc, a strong policy title, effective date, short before-versus-now explanation, private salary notice, acknowledgement checkbox, and one primary Tôi đã đọc và hiểu action. The user may postpone only if the policy is not yet effective."
+  }
+]

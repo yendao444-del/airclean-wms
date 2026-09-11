@@ -1,0 +1,14 @@
+[
+  {
+    "outputName": "global-notification-master-detail.png",
+    "direction": "A clean master-detail inbox. The independent Thông báo nội bộ module is selected in the main sidebar. A compact left column groups Cần xác nhận, Chưa đọc and Đã đọc; the wide right reading pane shows the selected announcement with version, effective date, issuer, full details and a sticky acknowledgement action. The global bell remains in the app header."
+  },
+  {
+    "outputName": "global-notification-priority-feed.png",
+    "direction": "A priority feed with a focused detail drawer. The standalone module opens to a spacious chronological notification feed with one prominent required announcement and lightweight rows from warehouse, ecommerce handoff, holiday and system updates. Selecting a row opens a persistent right detail pane for reading and confirmation. Avoid dashboard metrics."
+  },
+  {
+    "outputName": "global-notification-policy-library.png",
+    "direction": "A calm policy library organized by status and category. Use a horizontal status switcher Cần xác nhận, Chưa đọc, Đã đọc, then a two-column layout with a concise announcement index and an editorial document reader. Emphasize that the module is company-wide, while the bell and popup entry point are global across the application."
+  }
+]

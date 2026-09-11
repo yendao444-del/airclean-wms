@@ -1,0 +1,9 @@
+Invoke-WebRequest : The remote server returned an error: (400) Bad Request.
+At G:\QUAN LY BAN HANG\desktop-FIXDEBUG\tmp\imagegen\run-packing-concept.ps1:23 char:5
++     Invoke-WebRequest -Uri "$env:NINEROUTER_URL/v1/images/generations ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (System.Net.HttpWebRequest:HttpWebRequest) [Invoke-WebRequest], WebExc 
+   eption
+    + FullyQualifiedErrorId : WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeWebRequestCommand
+ 
+

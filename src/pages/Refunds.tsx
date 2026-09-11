@@ -24,9 +24,14 @@ import {
 import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, RollbackOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, CheckCircleOutlined, WarningOutlined, SearchOutlined, StopOutlined, DollarOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
+import './Refunds.css';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
+
+const getRefundsPopupContainer = (triggerNode: HTMLElement) => {
+    return triggerNode.parentElement || document.body;
+};
 
 // Kiểu dữ liệu cho hàng thực nhận
 interface ReturnItem {
@@ -72,6 +77,7 @@ interface Refund {
     notes?: string;
     status: string;
     createdAt?: Date;
+    updatedAt?: string | Date;
 }
 
 const refundItemsDisplayCache = new Map<string, RefundItem[]>();
@@ -340,10 +346,10 @@ export default function RefundsPage() {
 
                 // Helper function to encapsulate refund receiving logic
                 const doReceiveRefund = async (refundToReceive: Refund) => {
-                    const result = await window.electronAPI.refunds.update(refundToReceive.id, { status: 'received' });
+                    const result = await window.electronAPI.refunds.updateStatus(refundToReceive.id, 'received', refundToReceive.updatedAt);
                     if (!result?.success) throw new Error(result?.error || 'Không thể cập nhật phiếu hoàn.');
                     const updatedRefunds = refunds.map(r =>
-                        r.id === refundToReceive.id ? { ...r, status: 'received' } : r
+                        r.id === refundToReceive.id ? { ...r, status: 'received', updatedAt: result.data?.updatedAt } : r
                     );
                     setRefunds(updatedRefunds);
 
@@ -454,90 +460,18 @@ export default function RefundsPage() {
             if (!result?.success) throw new Error(result?.error || 'Khong the cong lai ton kho.');
 
             const restoredItems = result.data?.items || [];
+            const returnUnits = result.data?.returnUnits || [];
             const reference = result.data?.reference || refundRecord.orderNumber || refundRecord.refundCode || `P.Hoan ${refundRecord.id}`;
             setRefunds(prev => prev.map(refund => refund.id === refundRecord.id ? { ...refund, status: 'completed' } : refund));
             setStockLog(prev => [
                 ...restoredItems.map((item: any) => ({ sku: item.sku, name: item.name || '', qty: item.quantity, orderId: reference, time: dayjs().format('HH:mm:ss DD/MM') })),
                 ...prev,
             ]);
-            message.success(`Da hoan va cong ${restoredItems.reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0)} SP vao kho`);
+            message.success(`Đã cộng ${restoredItems.reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0)} SP vào kho và tạo ${returnUnits.length} kiện Hàng hoàn.`);
             playSuccess();
         } catch (error: any) {
             console.error('Confirm full error:', error);
             message.error(error?.message || 'Loi khi xac nhan hoan. Don van giu trang thai dang xu ly.');
-        }
-    };
-
-    const legacyConfirmFull = async (refundRecord: Refund) => {
-        try {
-            let origItems: RefundItem[] = [];
-            try { origItems = JSON.parse(refundRecord.items); } catch { origItems = []; }
-
-            const ref = refundRecord.orderNumber || refundRecord.refundCode || `P.Hoàn ${refundRecord.id}`;
-            const updatedSkus: string[] = [];
-            const failedSkus: string[] = [];
-
-            // Cộng tồn kho cho từng item gốc
-            for (const item of origItems) {
-                if (!item.variantSku || item.quantity <= 0) continue;
-                try {
-                    const result = await window.electronAPI.refunds.adjustStock({
-                        sku: item.variantSku,
-                        quantity: item.quantity,
-                        isAdd: true,
-                        allowMissing: true,
-                        logContext: {
-                            type: 'refund',
-                            referenceType: 'HOAN',
-                            reference: ref,
-                            note: `Xác nhận nhận hoàn/trả về kho (${refundRecord.customerName})`,
-                            createdBy: null
-                        }
-                    });
-                    if (result?.success) {
-                        console.log(`✅ Cộng kho: ${item.variantSku} +${item.quantity}`);
-                        updatedSkus.push(item.variantSku);
-                    } else {
-                        console.error(`❌ Cộng kho thất bại ${item.variantSku}:`, result?.error);
-                        failedSkus.push(item.variantSku);
-                    }
-                } catch (err) {
-                    console.error(`❌ Lỗi cộng kho ${item.variantSku}:`, err);
-                    failedSkus.push(item.variantSku);
-                }
-            }
-
-            // Cập nhật status → completed
-            await window.electronAPI.refunds.update(refundRecord.id, { status: 'completed' });
-            setRefunds(prev => prev.map(r => r.id === refundRecord.id ? { ...r, status: 'completed' } : r));
-
-            // Ghi stock log cho các SKU cộng thành công
-            const newLogs: StockLogEntry[] = origItems
-                .filter(i => i.variantSku && updatedSkus.includes(i.variantSku) && i.quantity > 0)
-                .map(i => ({
-                    sku: i.variantSku || '',
-                    name: i.productName || '',
-                    qty: i.quantity,
-                    orderId: ref,
-                    time: dayjs().format('HH:mm:ss DD/MM'),
-                }));
-            if (newLogs.length > 0) setStockLog(prev => [...newLogs, ...prev]);
-
-            const addedQty = origItems
-                .filter(i => i.variantSku && updatedSkus.includes(i.variantSku))
-                .reduce((s, i) => s + i.quantity, 0);
-
-            if (failedSkus.length > 0 && updatedSkus.length === 0) {
-                message.warning(`⚠️ Đã xác nhận hoàn nhưng không tìm thấy SKU trong kho: ${failedSkus.join(', ')}. Kiểm tra lại SKU sản phẩm.`);
-            } else if (failedSkus.length > 0) {
-                message.warning(`⚠️ Cộng ${addedQty} SP vào kho. SKU không tìm thấy: ${failedSkus.join(', ')}`);
-            } else {
-                message.success(`✅ Đã hoàn! Cộng ${addedQty} SP vào kho`);
-            }
-            playSuccess();
-        } catch (error) {
-            console.error('Confirm full error:', error);
-            message.error('❌ Lỗi khi xác nhận hoàn!');
         }
     };
 
@@ -566,106 +500,18 @@ export default function RefundsPage() {
 
             const reference = result.data?.reference || refundRecord.orderNumber || refundRecord.refundCode || `P.Hoan ${refundRecord.id}`;
             const restoredItems = result.data?.items || [];
+            const returnUnits = result.data?.returnUnits || [];
             setRefunds(prev => prev.map(refund => refund.id === refundRecord.id ? { ...refund, status: 'completed', notes } : refund));
             setStockLog(prev => [
                 ...restoredItems.map((item: any) => ({ sku: item.sku, name: item.name || '', qty: item.quantity, orderId: reference, time: dayjs().format('HH:mm:ss DD/MM') })),
                 ...prev,
             ]);
             setMismatchOpen(prev => { const next = new Set(prev); next.delete(refundRecord.id); return next; });
-            message.success('Da hoan va cong kho theo so luong thuc nhan');
+            message.success(`Đã cộng kho theo số lượng thực nhận và tạo ${returnUnits.length} kiện Hàng hoàn.`);
             playSuccess();
         } catch (error: any) {
             console.error('Confirm custom error:', error);
             message.error(error?.message || 'Loi khi xac nhan hoan. Don van giu trang thai dang xu ly.');
-        }
-    };
-
-    const legacyConfirmCustom = async (refundRecord: Refund) => {
-        const returnItems = returnItemsMap[refundRecord.id] || [];
-        const validItems = returnItems.filter(i => i.sku && i.qty > 0);
-
-        if (validItems.length === 0) {
-            message.warning('⚠️ Chưa nhập hàng thực nhận!');
-            return;
-        }
-
-        try {
-            const ref = refundRecord.orderNumber || refundRecord.refundCode || `P.Hoàn ${refundRecord.id}`;
-            const updatedSkus: string[] = [];
-            const failedSkus: string[] = [];
-
-            // Cộng tồn kho theo SKU custom
-            for (const item of validItems) {
-                try {
-                    const result = await window.electronAPI.refunds.adjustStock({
-                        sku: item.sku,
-                        quantity: item.qty,
-                        isAdd: true,
-                        allowMissing: true,
-                        logContext: {
-                            type: 'refund',
-                            referenceType: 'HOAN',
-                            reference: ref,
-                            note: `Xác nhận hoàn lệch/custom (${refundRecord.customerName})`,
-                            createdBy: null
-                        }
-                    });
-                    if (result?.success) {
-                        console.log(`✅ Cộng kho (custom): ${item.sku} +${item.qty}`);
-                        updatedSkus.push(item.sku);
-                    } else {
-                        console.error(`❌ Cộng kho thất bại ${item.sku}:`, result?.error);
-                        failedSkus.push(item.sku);
-                    }
-                } catch (err) {
-                    console.error(`❌ Lỗi cộng kho ${item.sku}:`, err);
-                    failedSkus.push(item.sku);
-                }
-            }
-
-            // Cập nhật status + lưu returnItems vào notes
-            let origItems: RefundItem[] = [];
-            try { origItems = JSON.parse(refundRecord.items); } catch { origItems = []; }
-            const origTotal = origItems.reduce((s, i) => s + i.quantity, 0);
-            const recvTotal = validItems.reduce((s, i) => s + i.qty, 0);
-            const lossNote = `[KHÔNG KHỚP] Gửi ${origTotal} combo → Nhận ${recvTotal} SP. Xác nhận: ${dayjs().format('DD/MM HH:mm')}`;
-
-            const existingNotes = refundRecord.notes || '';
-            const updatedNotes = existingNotes + ' | ' + lossNote;
-
-            await window.electronAPI.refunds.update(refundRecord.id, {
-                status: 'completed',
-                notes: updatedNotes,
-            });
-            setRefunds(prev => prev.map(r => r.id === refundRecord.id ? { ...r, status: 'completed', notes: updatedNotes } : r));
-
-            // Ghi stock log chỉ cho các SKU cộng thành công
-            const newLogs: StockLogEntry[] = validItems
-                .filter(i => updatedSkus.includes(i.sku))
-                .map(i => ({
-                    sku: i.sku,
-                    name: i.name,
-                    qty: i.qty,
-                    orderId: ref,
-                    time: dayjs().format('HH:mm:ss DD/MM'),
-                }));
-            if (newLogs.length > 0) setStockLog(prev => [...newLogs, ...prev]);
-
-            // Đóng mismatch
-            setMismatchOpen(prev => { const n = new Set(prev); n.delete(refundRecord.id); return n; });
-
-            const addedQty = validItems.filter(i => updatedSkus.includes(i.sku)).reduce((s, i) => s + i.qty, 0);
-            if (failedSkus.length > 0 && updatedSkus.length === 0) {
-                message.warning(`⚠️ Đã xác nhận hoàn nhưng không tìm thấy SKU trong kho: ${failedSkus.join(', ')}`);
-            } else if (failedSkus.length > 0) {
-                message.warning(`⚠️ Cộng ${addedQty} SP vào kho. SKU không tìm thấy: ${failedSkus.join(', ')}`);
-            } else {
-                message.success(`✅ Đã hoàn! Cộng ${addedQty} SP vào kho (đã chỉnh SKU)`);
-            }
-            playSuccess();
-        } catch (error) {
-            console.error('Confirm custom error:', error);
-            message.error('❌ Lỗi khi xác nhận hoàn!');
         }
     };
 
@@ -840,6 +686,7 @@ export default function RefundsPage() {
                     notes: values.notes,
                     items: JSON.stringify(refundItems),
                     totalAmount,
+                    expectedUpdatedAt: editingRefund.updatedAt,
                 };
                 const result = await window.electronAPI.refunds.update(editingRefund.id, updatedData);
                 if (!result.success) throw new Error(result.error || 'Không thể cập nhật phiếu hoàn.');
@@ -1100,15 +947,9 @@ export default function RefundsPage() {
                 return;
             }
 
-            // 4. Lọc trùng theo orderNumber
-            const existingOrderNumbers = new Set(refunds.map(r => r.orderNumber).filter(Boolean));
-            const uniqueRefunds = newRefunds.filter(r => !existingOrderNumbers.has(r.orderNumber));
-            const duplicateCount = newRefunds.length - uniqueRefunds.length;
-
-            if (uniqueRefunds.length === 0) {
-                message.warning(`Tất cả ${newRefunds.length} phiếu đều đã tồn tại (trùng Order ID)!`);
-                return;
-            }
+            // 4. Database kiểm tra trùng trên toàn bộ dữ liệu trong một transaction.
+            const uniqueRefunds = newRefunds;
+            const duplicateCount = 0;
 
             // 5. Lưu vào database
             const bulkResult = await window.electronAPI.refunds.bulkCreate(uniqueRefunds.map(r => ({
@@ -1130,11 +971,19 @@ export default function RefundsPage() {
 
             await loadRefunds();
 
+            const createdCount = Number(bulkResult.createdCount ?? bulkResult.data?.length ?? 0);
+            const serverDuplicateCount = Number(bulkResult.duplicateCount || 0);
+
             const sources = [];
             if (tiktokCount > 0) sources.push(`TikTok(${tiktokCount})`);
             if (shopeeCount > 0) sources.push(`Shopee(${shopeeCount})`);
-            const dupMsg = duplicateCount > 0 ? ` (bỏ qua ${duplicateCount} trùng)` : '';
-            message.success(`✅ Đã import ${uniqueRefunds.length} phiếu hoàn [${sources.join(' + ')}]!${dupMsg}`);
+            const totalDuplicateCount = duplicateCount + serverDuplicateCount;
+            const dupMsg = totalDuplicateCount > 0 ? ` (bỏ qua ${totalDuplicateCount} trùng)` : '';
+            if (createdCount === 0) {
+                message.warning(`Không có phiếu hoàn mới để import${dupMsg}.`);
+            } else {
+                message.success(`✅ Đã import ${createdCount} phiếu hoàn [${sources.join(' + ')}]!${dupMsg}`);
+            }
         } catch (error: any) {
             console.error('Import error:', error);
             message.error(`Lỗi khi import: ${error?.message || 'Không rõ'}`);
@@ -1149,6 +998,7 @@ export default function RefundsPage() {
             dataIndex: 'customerName',
             key: 'customerName',
             width: 150,
+            className: 'refunds-cell refunds-cell--source',
             render: (name) => <Tag color="cyan">{name}</Tag>,
         },
         {
@@ -1156,6 +1006,7 @@ export default function RefundsPage() {
             dataIndex: 'orderNumber',
             key: 'orderNumber',
             width: 200,
+            className: 'refunds-cell refunds-cell--order',
             render: (num: string, record: Refund) => {
                 const trackingMatch = record.notes?.match(/Tracking: ([^|]+)/);
                 const tid = trackingMatch ? trackingMatch[1].trim() : '';
@@ -1179,6 +1030,7 @@ export default function RefundsPage() {
             dataIndex: 'notes',
             key: 'trackingId',
             width: 150,
+            className: 'refunds-cell refunds-cell--tracking',
             render: (notes) => {
                 if (!notes) return <span style={{ color: '#bfbfbf' }}>—</span>;
                 const trackingMatch = notes.match(/Tracking: ([^|]+)/);
@@ -1195,6 +1047,7 @@ export default function RefundsPage() {
             key: 'itemCount',
             width: 80,
             align: 'center',
+            className: 'refunds-cell refunds-cell--count',
             render: (items) => {
                 const count = getRefundItemsForDisplay(items).length;
                 if (count > 1) {
@@ -1208,12 +1061,14 @@ export default function RefundsPage() {
             dataIndex: 'refundReason',
             key: 'refundReason',
             width: 130,
+            className: 'refunds-cell refunds-cell--reason',
         },
         {
             title: 'Cancelled Time',
             dataIndex: 'refundDate',
             key: 'refundDate',
             width: 130,
+            className: 'refunds-cell refunds-cell--date',
             render: (date) => dayjs(date).format('DD/MM/YYYY'),
         },
         {
@@ -1221,6 +1076,7 @@ export default function RefundsPage() {
             dataIndex: 'notes',
             key: 'shippingProvider',
             width: 130,
+            className: 'refunds-cell refunds-cell--shipping',
             render: (notes) => {
                 if (!notes) return <span style={{ color: '#bfbfbf' }}>—</span>;
                 const shippingMatch = notes.match(/Shipping: ([^|]+)/);
@@ -1234,6 +1090,7 @@ export default function RefundsPage() {
             key: 'totalAmount',
             width: 150,
             align: 'right',
+            className: 'refunds-cell refunds-cell--amount',
             render: (amount) => <span style={{ fontWeight: 600 }}>{amount.toLocaleString('vi-VN')} đ</span>,
         },
         {
@@ -1241,6 +1098,7 @@ export default function RefundsPage() {
             dataIndex: 'status',
             key: 'status',
             width: 150,
+            className: 'refunds-cell refunds-cell--status',
             render: (status, record) => {
                 const refundDate = dayjs(record.refundDate);
                 const now = dayjs();
@@ -1279,6 +1137,7 @@ export default function RefundsPage() {
             key: 'actions',
             width: 100,
             fixed: 'right',
+            className: 'refunds-cell refunds-cell--actions',
             render: (_, record) => {
                 const menuItems: any[] = [
                     {
@@ -1314,7 +1173,7 @@ export default function RefundsPage() {
                 }
 
                 return (
-                    <Dropdown menu={{ items: menuItems }} trigger={['click']}>
+                    <Dropdown getPopupContainer={getRefundsPopupContainer} menu={{ items: menuItems }} trigger={['click']}>
                         <Button size="small">
                             Xem thêm <MoreOutlined />
                         </Button>
@@ -1377,9 +1236,9 @@ export default function RefundsPage() {
     const handleMarkLost = async () => {
         if (!lostTarget) return;
         try {
-            const result = await window.electronAPI.refunds.update(lostTarget.id, { status: 'lost' });
+            const result = await window.electronAPI.refunds.updateStatus(lostTarget.id, 'lost', lostTarget.updatedAt);
             if (!result?.success) throw new Error(result?.error || 'Không thể đánh dấu mất hàng.');
-            setRefunds(prev => prev.map(r => r.id === lostTarget.id ? { ...r, status: 'lost' } : r));
+            setRefunds(prev => prev.map(r => r.id === lostTarget.id ? { ...r, status: 'lost', updatedAt: result.data?.updatedAt } : r));
             message.success(`🚫 Đã đánh dấu mất hàng: ${lostTarget.orderNumber || lostTarget.refundCode || '#' + lostTarget.id}`);
             setLostModalVisible(false);
             setLostTarget(null);
@@ -1486,6 +1345,7 @@ export default function RefundsPage() {
             title: 'Đền bù',
             key: 'compensation',
             width: 150,
+            className: 'refunds-cell refunds-cell--compensation',
             render: (_, record) => {
                 const comp = compensationMap[record.id];
                 if (comp) {
@@ -1520,21 +1380,20 @@ export default function RefundsPage() {
 
     return (
         <Spin spinning={importLoading} tip="⏳ Đang import dữ liệu..." size="large">
-            <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-                    <Title level={2} style={{ color: '#262626', margin: 0 }}>
-                        <RollbackOutlined style={{ marginRight: 12, color: '#722ed1' }} />
-                        Hàng hoàn
-                        {selectedRowKeys.length > 0 && (
-                            <span style={{ fontSize: 14, fontWeight: 400, color: '#722ed1', marginLeft: 12 }}>
-                                ({selectedRowKeys.length} phiếu đã chọn)
-                            </span>
-                        )}
-                    </Title>
+            <div className="refunds-page">
+                <div className="refunds-page-heading">
+                    <div className="refunds-page-title">
+                        <span className="refunds-title-icon"><RollbackOutlined /></span>
+                        <div>
+                            <Title level={2}>Hàng hoàn</Title>
+                            <Text type="secondary">Nhận kiện, kiểm hàng và cộng lại tồn kho</Text>
+                        </div>
+                    </div>
 
-                    <Space>
+                    <div className="refunds-heading-actions">
                         {selectedRowKeys.length > 0 && (
                             <Button
+                                className="refunds-bulk-delete"
                                 danger
                                 icon={<DeleteOutlined />}
                                 onClick={handleBulkDelete}
@@ -1544,6 +1403,7 @@ export default function RefundsPage() {
                             </Button>
                         )}
                         <Button
+                            className="refunds-import-button"
                             type="primary"
                             icon={<DownloadOutlined />}
                             size="large"
@@ -1552,11 +1412,12 @@ export default function RefundsPage() {
                         >
                             Nhập từ thư mục
                         </Button>
-                    </Space>
+                    </div>
                 </div>
 
                 {/* 🎥 ĐƠN CẦN QUAY VIDEO — Thu gọn mặc định */}
                 <Collapse
+                    className="refunds-video-panel"
                     size="small"
                     style={{
                         marginBottom: 16,
@@ -1576,7 +1437,7 @@ export default function RefundsPage() {
                         ) : null,
                         children: (
                             <>
-                                <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                                <div className="refunds-video-entry">
                                     <Input
                                         value={videoInput}
                                         onChange={e => setVideoInput(e.target.value)}
@@ -1644,15 +1505,17 @@ export default function RefundsPage() {
 
                 {/* 🔍 SCAN INPUT - Ngay ngoài màn hình chính! */}
                 <Card
+                    className="refunds-scan-card"
                     style={{
                         marginBottom: 16,
                         background: 'linear-gradient(135deg, #f9f0ff 0%, #efdbff 100%)',
                         border: '2px solid #722ed1'
                     }}
                 >
-                    <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                        <BarcodeOutlined style={{ fontSize: 32, color: '#722ed1' }} />
+                    <div className="refunds-scan-row">
+                        <BarcodeOutlined className="refunds-scan-icon" />
                         <Input
+                            className="refunds-scan-input"
                             ref={scanInputRef}
                             value={scanInput}
                             onChange={handleScanInputChange}
@@ -1670,6 +1533,7 @@ export default function RefundsPage() {
                             prefix={<ScanOutlined style={{ color: '#722ed1', fontSize: 18 }} />}
                         />
                         <Button
+                            className="refunds-scan-button"
                             type="primary"
                             size="large"
                             icon={<ScanOutlined />}
@@ -1712,88 +1576,64 @@ export default function RefundsPage() {
                     )}
                 </Card>
 
-                {/* 🔍 Bộ lọc trạng thái & Tìm kiếm */}
-                <div style={{ marginBottom: 16, display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+                {/* 🔍 Bộ lọc trạng thái, tìm kiếm và xuất dữ liệu */}
+                <div className="refunds-toolbar">
                     <Radio.Group
+                        className="refunds-status-tabs"
                         value={statusFilter}
                         onChange={(e) => setStatusFilter(e.target.value)}
                         buttonStyle="solid"
                         size="large"
                     >
-                        <Radio.Button value="pending">
-                            📦 Chưa hoàn ({statusCounts.pending})
-                        </Radio.Button>
-                        <Radio.Button value="received">
-                            📋 Đã nhận ({statusCounts.received})
-                        </Radio.Button>
-                        <Radio.Button value="overdue">
-                            ⚠️ Khiếu nại ({statusCounts.overdue})
-                        </Radio.Button>
-                        <Radio.Button value="completed">
-                            ✅ Đã hoàn ({statusCounts.completed})
-                        </Radio.Button>
-                        <Radio.Button value="lost" style={statusFilter === 'lost' ? { background: '#ff4d4f', borderColor: '#ff4d4f' } : { color: '#a8071a', fontWeight: 700 }}>
-                            🚫 Mất hàng ({lostRefunds.length})
-                        </Radio.Button>
-                        <Radio.Button value="all">
-                            📋 Tất cả ({refunds.length})
-                        </Radio.Button>
+                        <Radio.Button value="pending">📦 Chưa hoàn ({statusCounts.pending})</Radio.Button>
+                        <Radio.Button value="received">📋 Đã nhận ({statusCounts.received})</Radio.Button>
+                        <Radio.Button value="overdue">⚠️ Khiếu nại ({statusCounts.overdue})</Radio.Button>
+                        <Radio.Button value="completed">✅ Đã hoàn ({statusCounts.completed})</Radio.Button>
+                        <Radio.Button value="lost" className="refunds-status-tab--lost">🚫 Mất hàng ({lostRefunds.length})</Radio.Button>
+                        <Radio.Button value="all">📋 Tất cả ({refunds.length})</Radio.Button>
                     </Radio.Group>
 
-                    <Input.Search
-                        placeholder="Tìm Order ID, Tracking ID..."
-                        allowClear
-                        value={searchText}
-                        onChange={(e) => setSearchText(e.target.value)}
-                        style={{ width: 300 }}
-                        size="large"
-                    />
-                </div>
-
-                {/* Nút xuất Excel */}
-                <div style={{ marginBottom: 16, textAlign: 'right' }}>
-                    <Dropdown
-                        menu={{
-                            items: [
-                                {
-                                    key: 'all',
-                                    label: '📋 Xuất tất cả',
-                                    onClick: () => handleExportExcel('all'),
-                                },
-                                {
-                                    key: 'completed',
-                                    label: '✅ Chỉ xuất đã hoàn',
-                                    onClick: () => handleExportExcel('completed'),
-                                },
-                                {
-                                    key: 'processing',
-                                    label: '⏳ Chỉ xuất đang xử lý',
-                                    onClick: () => handleExportExcel('processing'),
-                                },
-                            ],
-                        }}
-                        trigger={['click']}
-                    >
-                        <Button icon={<DownloadOutlined />} size="large">
-                            Xuất Excel
-                        </Button>
-                    </Dropdown>
+                    <div className="refunds-toolbar-actions">
+                        <Input.Search
+                            className="refunds-search"
+                            placeholder="Tìm Order ID, Tracking ID..."
+                            allowClear
+                            value={searchText}
+                            onChange={(e) => setSearchText(e.target.value)}
+                            size="large"
+                        />
+                        <Dropdown
+                            getPopupContainer={getRefundsPopupContainer}
+                            menu={{
+                                items: [
+                                    { key: 'all', label: '📋 Xuất tất cả', onClick: () => handleExportExcel('all') },
+                                    { key: 'completed', label: '✅ Chỉ xuất đã hoàn', onClick: () => handleExportExcel('completed') },
+                                    { key: 'processing', label: '⏳ Chỉ xuất đang xử lý', onClick: () => handleExportExcel('processing') },
+                                ],
+                            }}
+                            trigger={['click']}
+                        >
+                            <Button className="refunds-export-button" icon={<DownloadOutlined />} size="large">
+                                Xuất Excel
+                            </Button>
+                        </Dropdown>
+                    </div>
                 </div>
 
                 {/* 📊 Summary cards cho tab Mất hàng */}
                 {statusFilter === 'lost' && lostRefunds.length > 0 && (
-                    <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
-                        <Card style={{ flex: 1, borderColor: '#ffa39e', background: 'linear-gradient(135deg, #fff1f0 0%, #fff 100%)' }}>
+                    <div className="refunds-lost-summary">
+                        <Card className="refunds-lost-stat refunds-lost-stat--danger" style={{ borderColor: '#ffa39e', background: 'linear-gradient(135deg, #fff1f0 0%, #fff 100%)' }}>
                             <div style={{ fontSize: 28, fontWeight: 700, color: '#a8071a' }}>{lostRefunds.length}</div>
                             <div style={{ fontSize: 13, color: '#8c8c8c', marginTop: 4 }}>Tổng đơn mất hàng</div>
                             <div style={{ fontSize: 15, fontWeight: 600, color: '#a8071a', marginTop: 4 }}>Thiệt hại: {lostTotal.toLocaleString('vi-VN')} đ</div>
                         </Card>
-                        <Card style={{ flex: 1, borderColor: '#ffd591', background: 'linear-gradient(135deg, #fff7e6 0%, #fff 100%)' }}>
+                        <Card className="refunds-lost-stat refunds-lost-stat--warning" style={{ borderColor: '#ffd591', background: 'linear-gradient(135deg, #fff7e6 0%, #fff 100%)' }}>
                             <div style={{ fontSize: 28, fontWeight: 700, color: '#d46b08' }}>{lostNotCompensated.length}</div>
                             <div style={{ fontSize: 13, color: '#8c8c8c', marginTop: 4 }}>Chưa đền bù</div>
                             <div style={{ fontSize: 15, fontWeight: 600, color: '#d46b08', marginTop: 4 }}>Còn nợ: {notCompensatedTotal.toLocaleString('vi-VN')} đ</div>
                         </Card>
-                        <Card style={{ flex: 1, borderColor: '#b7eb8f', background: 'linear-gradient(135deg, #f6ffed 0%, #fff 100%)' }}>
+                        <Card className="refunds-lost-stat refunds-lost-stat--success" style={{ borderColor: '#b7eb8f', background: 'linear-gradient(135deg, #f6ffed 0%, #fff 100%)' }}>
                             <div style={{ fontSize: 28, fontWeight: 700, color: '#389e0d' }}>{lostCompensated.length}</div>
                             <div style={{ fontSize: 13, color: '#8c8c8c', marginTop: 4 }}>Đã đền bù</div>
                             <div style={{ fontSize: 15, fontWeight: 600, color: '#389e0d', marginTop: 4 }}>Thu hồi: {compensatedTotal.toLocaleString('vi-VN')} đ</div>
@@ -1801,16 +1641,21 @@ export default function RefundsPage() {
                     </div>
                 )}
 
-                <Card>
+                <Card className="refunds-table-card" variant="borderless">
                     <Table
+                        className="refunds-table"
                         columns={lostColumns}
                         dataSource={filteredRefunds}
                         rowKey="id"
                         loading={loading}
-                        scroll={{ x: 1600 }}
+                        scroll={{ x: 1500 }}
                         rowClassName={(record) => {
-                            if (record.status === 'lost' && compensationMap[record.id]) return 'compensated-row';
-                            return getRefundItemsForDisplay(record.items).length > 1 ? 'multi-sku-row' : '';
+                            return [
+                                'refunds-table-row',
+                                record.status === 'lost' && compensationMap[record.id] ? 'compensated-row refunds-table-row--compensated' : '',
+                                getRefundItemsForDisplay(record.items).length > 1 ? 'multi-sku-row refunds-table-row--multi' : '',
+                                `refunds-table-row--${record.status || 'pending'}`,
+                            ].filter(Boolean).join(' ');
                         }}
                         rowSelection={{
                             selectedRowKeys,
@@ -1845,9 +1690,9 @@ export default function RefundsPage() {
                                 const hasLossNote = record.notes?.includes('[KHÔNG KHỚP]');
 
                                 return (
-                                    <div style={{ padding: '12px 16px' }}>
+                                    <div className="refunds-expanded-panel">
                                         {/* Info row */}
-                                        <div style={{ display: 'flex', gap: 20, marginBottom: 12, fontSize: 12, flexWrap: 'wrap' }}>
+                                        <div className="refunds-expanded-meta">
                                             <span>
                                                 <span style={{ color: '#8c8c8c' }}>Tracking: </span>
                                                 <Tag color="blue" style={{ cursor: 'pointer' }} onClick={() => {
@@ -1864,11 +1709,12 @@ export default function RefundsPage() {
                                         {/* Bảng hàng gốc */}
                                         <div style={{ fontSize: 12, fontWeight: 700, color: '#8c8c8c', marginBottom: 6 }}>📦 Hàng gửi đi (gốc):</div>
                                         <Table
+                                            className="refunds-items-table refunds-items-table--original"
                                             columns={[
-                                                { title: 'SKU gốc', dataIndex: 'variantSku', width: 140, render: (sku: string) => <Tag color="cyan">{sku || 'N/A'}</Tag> },
-                                                { title: 'Sản phẩm', dataIndex: 'productName', render: (name: string) => <span style={{ fontSize: 12 }}>{name}</span> },
-                                                { title: 'SL gửi', dataIndex: 'quantity', width: 80, align: 'center' as const, render: (qty: number) => <strong>{qty}</strong> },
-                                                { title: 'Giá trị', dataIndex: 'total', width: 120, align: 'right' as const, render: (total: number) => <span style={{ fontWeight: 600 }}>{(total || 0).toLocaleString('vi-VN')}đ</span> },
+                                                { title: 'SKU gốc', dataIndex: 'variantSku', width: 140, className: 'refunds-item-cell refunds-item-cell--sku', render: (sku: string) => <Tag color="cyan">{sku || 'N/A'}</Tag> },
+                                                { title: 'Sản phẩm', dataIndex: 'productName', className: 'refunds-item-cell refunds-item-cell--name', render: (name: string) => <span style={{ fontSize: 12 }}>{name}</span> },
+                                                { title: 'SL gửi', dataIndex: 'quantity', width: 80, align: 'center' as const, className: 'refunds-item-cell refunds-item-cell--qty', render: (qty: number) => <strong>{qty}</strong> },
+                                                { title: 'Giá trị', dataIndex: 'total', width: 120, align: 'right' as const, className: 'refunds-item-cell refunds-item-cell--total', render: (total: number) => <span style={{ fontWeight: 600 }}>{(total || 0).toLocaleString('vi-VN')}đ</span> },
                                             ]}
                                             dataSource={origItems}
                                             pagination={false}
@@ -1880,7 +1726,7 @@ export default function RefundsPage() {
                                         {/* === ĐÃ NHẬN: 2 nút action === */}
                                         {isReceived && !isMismatchMode && (
                                             <>
-                                                <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 14 }}>
+                                                <div className="refunds-full-confirm-row">
                                                     <Button
                                                         type="primary"
                                                         size="large"
@@ -1895,6 +1741,7 @@ export default function RefundsPage() {
 
                                                 {/* Toggle "Không khớp" */}
                                                 <div
+                                                    className="refunds-mismatch-toggle"
                                                     onClick={(e) => { e.stopPropagation(); toggleMismatch(record.id); }}
                                                     style={{
                                                         display: 'flex', alignItems: 'center', gap: 12,
@@ -1918,11 +1765,11 @@ export default function RefundsPage() {
 
                                         {/* === CHẾ ĐỘ KHÔNG KHỚP === */}
                                         {isReceived && isMismatchMode && (
-                                            <div style={{
+                                            <div className="refunds-mismatch-panel" style={{
                                                 marginTop: 12, padding: 16,
                                                 background: '#fff', border: '1px solid #ffd591', borderRadius: 10,
                                             }}>
-                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                                <div className="refunds-mismatch-heading">
                                                     <div style={{ fontSize: 13, fontWeight: 700, color: '#fa8c16' }}>⚠️ Chỉnh sửa hàng thực nhận</div>
                                                     <Space>
                                                         <Button size="small" type="primary" ghost onClick={(e) => { e.stopPropagation(); addReturnItem(record.id); }}>
@@ -1941,11 +1788,14 @@ export default function RefundsPage() {
 
                                                 {/* Bảng chỉnh sửa */}
                                                 <Table
+                                                    className="refunds-items-table refunds-items-table--received"
                                                     columns={[
                                                         {
                                                             title: 'SKU thực nhận', width: 240,
+                                                            className: 'refunds-item-cell refunds-item-cell--received-sku',
                                                             render: (_: any, item: ReturnItem, index: number) => (
                                                                 <Select
+                                                                    getPopupContainer={getRefundsPopupContainer}
                                                                     showSearch
                                                                     placeholder="Chọn SKU..."
                                                                     value={item.sku || undefined}
@@ -1965,9 +1815,10 @@ export default function RefundsPage() {
                                                                 />
                                                             ),
                                                         },
-                                                        { title: 'Tên sản phẩm', render: (_: any, item: ReturnItem) => <span style={{ fontSize: 11, color: '#595959' }}>{item.name || '—'}</span> },
+                                                        { title: 'Tên sản phẩm', className: 'refunds-item-cell refunds-item-cell--received-name', render: (_: any, item: ReturnItem) => <span style={{ fontSize: 11, color: '#595959' }}>{item.name || '—'}</span> },
                                                         {
                                                             title: 'SL nhận', width: 90, align: 'center' as const,
+                                                            className: 'refunds-item-cell refunds-item-cell--received-qty',
                                                             render: (_: any, item: ReturnItem, index: number) => (
                                                                 <InputNumber
                                                                     min={0}
@@ -1981,6 +1832,7 @@ export default function RefundsPage() {
                                                         },
                                                         {
                                                             title: '', width: 40,
+                                                            className: 'refunds-item-cell refunds-item-cell--received-remove',
                                                             render: (_: any, __: any, index: number) => returnItems.length > 1 ? (
                                                                 <Button size="small" danger type="link" onClick={(e) => { e.stopPropagation(); removeReturnItem(record.id, index); }}>✕</Button>
                                                             ) : null,
@@ -1994,7 +1846,7 @@ export default function RefundsPage() {
                                                 />
 
                                                 {/* Confirm bar */}
-                                                <div style={{
+                                                <div className="refunds-confirm-bar" style={{
                                                     padding: '14px 18px',
                                                     background: 'linear-gradient(135deg, #f6ffed, #e6fffb)',
                                                     border: '1px solid #b7eb8f', borderRadius: 10,
@@ -2055,6 +1907,7 @@ export default function RefundsPage() {
                 {/* 📦 Stock Log - Lịch sử cộng tồn kho */}
                 {stockLog.length > 0 && (
                     <Card
+                        className="refunds-stock-log"
                         style={{
                             marginTop: 16,
                             border: '1px solid #b7eb8f',
@@ -2067,6 +1920,7 @@ export default function RefundsPage() {
                         size="small"
                     >
                         <Table
+                            className="refunds-stock-log-table"
                             columns={[
                                 { title: 'SKU', dataIndex: 'sku', width: 150, render: (sku: string) => <Tag color="cyan">{sku}</Tag> },
                                 { title: 'Tên sản phẩm', dataIndex: 'name' },
@@ -2084,13 +1938,14 @@ export default function RefundsPage() {
 
                 {/* Method Selection Modal */}
                 <Modal
+                    className="refunds-method-modal"
                     title="🔍 Chọn phương thức nhập liệu"
                     open={methodModalVisible}
                     onCancel={() => setMethodModalVisible(false)}
                     footer={null}
                     width={500}
                 >
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, padding: '20px 0' }}>
+                    <div className="refunds-method-grid">
                         <Card
                             hoverable
                             onClick={() => handleMethodSelect('manual')}
@@ -2115,6 +1970,7 @@ export default function RefundsPage() {
 
                 {/* Manual Input Modal */}
                 <Modal
+                    className="refunds-form-modal"
                     title={editingRefund ? '✏️ Sửa phiếu hoàn' : '➕ Tạo phiếu hoàn mới'}
                     open={modalVisible}
                     onCancel={() => { if (!saving) setModalVisible(false); }}
@@ -2129,7 +1985,7 @@ export default function RefundsPage() {
                         onFinish={handleSubmit}
                     >
                         {/* Row 1: Customer + Refund Date */}
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                        <div className="refunds-form-grid">
                             <Form.Item
                                 label="Tên khách hàng"
                                 name="customerName"
@@ -2143,12 +1999,12 @@ export default function RefundsPage() {
                                 name="refundDate"
                                 rules={[{ required: true, message: 'Vui lòng chọn ngày!' }]}
                             >
-                                <DatePicker style={{ width: '100%' }} size="large" format="DD/MM/YYYY" />
+                                <DatePicker getPopupContainer={getRefundsPopupContainer} style={{ width: '100%' }} size="large" format="DD/MM/YYYY" />
                             </Form.Item>
                         </div>
 
                         {/* Row 2: Refund Code + Order Number */}
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                        <div className="refunds-form-grid">
                             <Form.Item label="Mã hoàn hàng" name="refundCode">
                                 <Input placeholder="Mã hoàn hàng (tùy chọn)" size="large" />
                             </Form.Item>
@@ -2159,9 +2015,9 @@ export default function RefundsPage() {
                         </div>
 
                         {/* Row 3: Refund Reason + Status */}
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                        <div className="refunds-form-grid">
                             <Form.Item label="Lý do hoàn" name="refundReason">
-                                <Select size="large" placeholder="Chọn lý do">
+                                <Select getPopupContainer={getRefundsPopupContainer} size="large" placeholder="Chọn lý do">
                                     <Select.Option value="Lỗi sản phẩm">Lỗi sản phẩm</Select.Option>
                                     <Select.Option value="Không đúng mô tả">Không đúng mô tả</Select.Option>
                                     <Select.Option value="Giao nhầm">Giao nhầm</Select.Option>
@@ -2171,7 +2027,7 @@ export default function RefundsPage() {
                             </Form.Item>
 
                             <Form.Item label="Trạng thái" name="status">
-                                <Select size="large">
+                                <Select getPopupContainer={getRefundsPopupContainer} size="large">
                                     <Select.Option value="completed">Hoàn thành</Select.Option>
                                     <Select.Option value="pending">Đang xử lý</Select.Option>
                                 </Select>
@@ -2179,7 +2035,7 @@ export default function RefundsPage() {
                         </div>
 
                         {/* Add Product Section */}
-                        <div style={{
+                        <div className="refunds-product-composer" style={{
                             background: '#f9f0ff',
                             padding: 20,
                             borderRadius: 12,
@@ -2190,9 +2046,10 @@ export default function RefundsPage() {
                                 ➕ Thêm sản phẩm hoàn
                             </Title>
 
-                            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.5fr 1fr 1.2fr auto', gap: 12, alignItems: 'end' }}>
+                            <div className="refunds-product-grid">
                                 <Form.Item label="Sản phẩm" name="tempProductId" style={{ marginBottom: 0 }}>
                                     <Select
+                                        getPopupContainer={getRefundsPopupContainer}
                                         placeholder="Chọn sản phẩm"
                                         size="large"
                                         onChange={handleProductSelect}
@@ -2203,7 +2060,7 @@ export default function RefundsPage() {
                                 </Form.Item>
 
                                 <Form.Item label="Màu sắc" name="tempColor" style={{ marginBottom: 0 }}>
-                                    <Select placeholder="Chọn màu" size="large" disabled={selectedProductVariants.length === 0}>
+                                    <Select getPopupContainer={getRefundsPopupContainer} placeholder="Chọn màu" size="large" disabled={selectedProductVariants.length === 0}>
                                         {selectedProductVariants.map((v, i) => (
                                             <Select.Option key={i} value={v.color}>{v.color}</Select.Option>
                                         ))}
@@ -2235,6 +2092,7 @@ export default function RefundsPage() {
                             <div style={{ marginBottom: 24 }}>
                                 <Title level={5}>Danh sách sản phẩm ({refundItems.length})</Title>
                                 <Table
+                                    className="refunds-form-items-table"
                                     columns={itemColumns}
                                     dataSource={refundItems}
                                     rowKey={(_, index) => index!.toString()}
@@ -2263,7 +2121,7 @@ export default function RefundsPage() {
                             <TextArea rows={3} placeholder="Ghi chú thêm (tùy chọn)" />
                         </Form.Item>
 
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
+                        <div className="refunds-form-actions">
                             <Button onClick={() => setModalVisible(false)} size="large" disabled={saving}>
                                 Hủy
                             </Button>

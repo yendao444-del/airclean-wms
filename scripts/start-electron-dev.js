@@ -8,7 +8,11 @@ const { spawn } = require('child_process');
 const projectRoot = path.resolve(__dirname, '..');
 const viteEntry = path.join(projectRoot, 'node_modules', 'vite', 'bin', 'vite.js');
 const electronEntry = path.join(projectRoot, 'node_modules', 'electron', 'cli.js');
+const prismaEntry = path.join(projectRoot, 'node_modules', 'prisma', 'build', 'index.js');
+const prismaSchema = path.join(projectRoot, 'prisma', 'schema.prisma');
+const generatedPrismaSchema = path.join(projectRoot, 'node_modules', '.prisma', 'client', 'schema.prisma');
 const staleElectronApp = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'resources', 'app');
+const electronAppQuarantineDir = path.join(projectRoot, 'tmp', 'electron-resource-app-quarantine');
 const launcherReplacedMarker = path.join(projectRoot, 'tmp', 'start-launcher-replaced.flag');
 const candidatePorts = Array.from({ length: 18 }, (_, index) => 5173 + index);
 const dbyPageMarker = '<title>DBY POS - Warehouse Management System</title>';
@@ -29,21 +33,50 @@ function elapsed() {
 }
 
 function quarantineStaleElectronApp() {
-  if (DATA_SAFETY_MODE) {
-    console.log('[DataSafety] Skipped Electron cache quarantine.');
-    return;
-  }
   if (!fs.existsSync(staleElectronApp)) return;
 
-  const quarantinedPath = `${staleElectronApp}.stale-${Date.now()}`;
+  // resources/app turns the development Electron binary into a packaged app
+  // and makes it ignore the project passed on the command line. Preserve the
+  // generated copy outside Electron's resources directory so it can be
+  // inspected or restored without allowing it to shadow the working tree.
+  fs.mkdirSync(electronAppQuarantineDir, { recursive: true });
+  const quarantinedPath = path.join(electronAppQuarantineDir, `app-${Date.now()}`);
   try {
     fs.renameSync(staleElectronApp, quarantinedPath);
   } catch (error) {
     console.warn(`[START] Could not move stale Electron cache: ${error.message}`);
     return;
   }
-  console.log('[START] Moved stale Electron app cache out of the startup path');
+  console.log('[START] Quarantined generated Electron resources/app so the working tree starts');
   console.log(`[START] Preserved the quarantined cache at ${quarantinedPath}`);
+}
+
+function ensurePrismaClientSynced() {
+  const normalizeSchema = (value) => value.replace(/\r\n/g, '\n').trim();
+  const sourceSchema = normalizeSchema(fs.readFileSync(prismaSchema, 'utf8'));
+  const generatedSchema = fs.existsSync(generatedPrismaSchema)
+    ? normalizeSchema(fs.readFileSync(generatedPrismaSchema, 'utf8'))
+    : '';
+  if (sourceSchema === generatedSchema) return Promise.resolve();
+
+  console.log('[START] Prisma schema changed; regenerating Prisma Client...');
+  return new Promise((resolve, reject) => {
+    const generator = spawn(process.execPath, [prismaEntry, 'generate', '--schema', prismaSchema], {
+      cwd: projectRoot,
+      env: process.env,
+      stdio: 'inherit',
+      windowsHide: true,
+    });
+    generator.once('error', reject);
+    generator.once('exit', (code) => {
+      if (code === 0) {
+        console.log('[START] Prisma Client is synchronized.');
+        resolve();
+        return;
+      }
+      reject(new Error(`Prisma Client generation failed with exit code ${code}.`));
+    });
+  });
 }
 
 function acquireLauncherLock() {
@@ -229,6 +262,7 @@ async function main() {
     }
   }
   quarantineStaleElectronApp();
+  await ensurePrismaClientSynced();
 
   const runningServer = await findRunningDbyServer();
   let devServerUrl;
@@ -248,7 +282,7 @@ async function main() {
   }
 
   console.log(`[START] Vite ready after ${elapsed()}; launching Electron`);
-  const electron = startNode(electronEntry, ['.'], 'ELECTRON', {
+  const electron = startNode(electronEntry, [projectRoot], 'ELECTRON', {
     DBYPOS_VITE_DEV_SERVER_URL: devServerUrl,
   });
   electron.once('exit', (code) => {

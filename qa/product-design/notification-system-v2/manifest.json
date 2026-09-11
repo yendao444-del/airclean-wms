@@ -1,0 +1,14 @@
+[
+  {
+    "outputName": "notification-system-drawer-expanded.png",
+    "direction": "Expanded smart drawer. Clicking the bell opens a polished 500px right drawer. The mandatory newest policy is expanded inline with full details, version, effective date, privacy notice, acknowledgement checkbox and confirm action. Older notifications appear as lightweight rows below, with a footer link to the complete history. The underlying Bảng công screen stays usable and recognizable."
+  },
+  {
+    "outputName": "notification-system-overlay-inbox.png",
+    "direction": "Wide anchored notification overlay. Clicking the bell opens a 760px floating surface attached to the header: a compact notification list on the left and the selected policy detail on the right. A small new-notification banner at the top explains that confirmation is required. Keep the experience inside the current page without adding a sidebar menu item."
+  },
+  {
+    "outputName": "notification-system-confirm-first.png",
+    "direction": "Confirm-first notification center. A new required notification automatically opens as a focused, non-dismissable panel from the bell, with a clear reading progress indicator and concise policy detail. The surrounding panel includes a quiet history rail and a visible bell badge, making it obvious that confirmed notices can be reopened later. Use stronger editorial hierarchy and less list density."
+  }
+]

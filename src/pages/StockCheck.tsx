@@ -2391,11 +2391,6 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             0,
         );
         const note = confirmationNote.trim();
-        const knownSystemStock = Number(item.systemStock);
-        if (Number.isFinite(knownSystemStock) && actualTotal !== knownSystemStock && !note) {
-            message.warning('Số thực tế đang lệch tồn phần mềm. Vui lòng nhập lý do chênh lệch để xác nhận.');
-            return false;
-        }
 
         setBalancing(previous => ({ ...previous, [item.sku]: true }));
         try {
@@ -2512,11 +2507,10 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
         setPackageConfirmation({
             item,
             actualTotal,
-            stockDifference: Number.isFinite(Number(item.systemStock))
-                ? actualTotal - Number(item.systemStock)
-                : 0,
-            requiresReason: Number.isFinite(Number(item.systemStock))
-                && actualTotal !== Number(item.systemStock),
+            // The authoritative SKU stock is read inside the atomic backend
+            // confirmation, so a stale renderer snapshot cannot flag variance.
+            stockDifference: 0,
+            requiresReason: false,
             changedUnits,
         });
     };

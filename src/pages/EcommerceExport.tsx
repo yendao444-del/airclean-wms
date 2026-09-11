@@ -24,9 +24,17 @@ import {
 import { EditOutlined, DeleteOutlined, SendOutlined, FormOutlined, FileExcelOutlined, ScanOutlined, MoreOutlined, DownloadOutlined, BarcodeOutlined, FolderOpenOutlined, SettingOutlined, SearchOutlined, UserOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
+import customParseFormat from 'dayjs/plugin/customParseFormat';
+import './EcommerceExport.css';
+
+dayjs.extend(customParseFormat);
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
+
+const getEcommercePopupContainer = (triggerNode: HTMLElement) => {
+    return triggerNode.parentElement || document.body;
+};
 
 interface Product {
     id: number;
@@ -58,7 +66,9 @@ interface EcommerceExport {
     status: string;
     createdBy?: string;
     pickedBy?: string; // �x� Người �óng gói/pickup
+    orderPlacedAt?: string;
     createdAt?: Date;
+    updatedAt?: Date | string;
 }
 
 interface PackerEmployee {
@@ -86,6 +96,48 @@ function getRowValue(row: any, candidates: string[]): any {
     const matchedHeader = findMatchingHeader(Object.keys(row), candidates);
     return matchedHeader ? row[matchedHeader] : undefined;
 }
+
+function parseMarketplaceOrderTime(value: any, XLSX: any): string | undefined {
+    if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString();
+    if (typeof value === 'number') {
+        const parsed = XLSX?.SSF?.parse_date_code?.(value);
+        if (parsed) {
+            const date = dayjs(`${parsed.y}-${String(parsed.m).padStart(2, '0')}-${String(parsed.d).padStart(2, '0')} ${String(parsed.H || 0).padStart(2, '0')}:${String(parsed.M || 0).padStart(2, '0')}:${String(Math.floor(parsed.S || 0)).padStart(2, '0')}`, 'YYYY-MM-DD HH:mm:ss', true);
+            if (date.isValid()) return date.toISOString();
+        }
+    }
+
+    const text = String(value || '').trim();
+    if (!text) return undefined;
+    const formats = [
+        'DD/MM/YYYY HH:mm:ss', 'DD/MM/YYYY HH:mm', 'DD/MM/YYYY',
+        'YYYY-MM-DD HH:mm:ss', 'YYYY-MM-DD HH:mm', 'YYYY-MM-DD',
+        'M/D/YYYY H:mm:ss', 'M/D/YYYY H:mm', 'M/D/YYYY',
+    ];
+    for (const format of formats) {
+        const parsed = dayjs(text, format, true);
+        if (parsed.isValid()) return parsed.toISOString();
+    }
+    const fallback = dayjs(text);
+    return fallback.isValid() ? fallback.toISOString() : undefined;
+}
+
+function withImportTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(errorMessage)), timeoutMs);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
+const TIKTOK_ORDER_TIME_HEADERS = [
+    'Created Time', 'Order Created Time', 'Order Creation Time', 'Order creation time',
+    'Order Date', 'Order Created Date',
+];
+
+const SHOPEE_ORDER_TIME_HEADERS = [
+    'Thời gian tạo đơn hàng', 'Ngày đặt hàng', 'Ngày tạo đơn hàng', 'Thời gian đặt hàng',
+];
 
 /**
  * Tìm tên cột chứa SKU trong file Shopee.
@@ -263,7 +315,12 @@ export default function EcommerceExportPage() {
                     loadEcommerceExports(true);
                 }
                 if (syncRes.failed > 0) {
-                    message.warning({ content: `${syncRes.failed} đơn đồng bộ thất bại, sẽ thử lại sau.`, key: 'offlineSync', duration: 4 });
+                    const reason = syncRes.errors?.[0]?.error;
+                    message.warning({
+                        content: `${syncRes.failed} đơn chưa đồng bộ được${reason ? `: ${reason}` : ''}. Dữ liệu vẫn được giữ để xử lý lại.`,
+                        key: 'offlineSync',
+                        duration: 6,
+                    });
                 }
             }
         };
@@ -313,8 +370,6 @@ export default function EcommerceExportPage() {
         const newPacker = activePacker === username ? '' : username;
         setActivePacker(newPacker);
         activePackerRef.current = newPacker;
-        // Persist
-        window.electronAPI.appConfig.set('activePacker', newPacker);
     }, [activePacker]);
 
     // Function to get current db state inside async watcher directly
@@ -395,10 +450,14 @@ export default function EcommerceExportPage() {
         const existing = new Set<string>();
         for (let i = 0; i < uniqueKeys.length; i += 1000) {
             const chunk = uniqueKeys.slice(i, i + 1000);
-            const result = await window.electronAPI.ecommerceExports.checkExistingKeys({
-                orderNumbers: chunk,
-                ecommerceExportCodes: chunk,
-            });
+            const result = await withImportTimeout(
+                window.electronAPI.ecommerceExports.checkExistingKeys({
+                    orderNumbers: chunk,
+                    ecommerceExportCodes: chunk,
+                }),
+                20000,
+                'Kiểm tra đơn TMDT đã tồn tại quá lâu. Vui lòng thử lại.'
+            );
             if (!result?.success) {
                 throw new Error(result?.error || 'Khong kiem tra duoc danh sach TMDT da ton tai.');
             }
@@ -759,22 +818,11 @@ export default function EcommerceExportPage() {
             // Lấy tracking number
             const trackingNumber = ecommerceExport.notes?.match(/Tracking: ([^|]+)/)?.[1]?.trim() || 'N/A';
 
-            // Đếm số thứ tự (reset theo ngày)
-            const today = dayjs().format('YYYY-MM-DD');
-            const counterDateResult = await window.electronAPI.appConfig.get('telegramOrderCounterDate');
-            const lastDate = counterDateResult.success && counterDateResult.data ? counterDateResult.data : '';
-
-            const counterResult = await window.electronAPI.appConfig.get('telegramOrderCounter');
-            let orderCounter = counterResult.success && counterResult.data ? parseInt(counterResult.data) : 0;
-
-            // Reset counter nếu sang ngày mới
-            if (lastDate !== today) {
-                orderCounter = 0;
-                await window.electronAPI.appConfig.set('telegramOrderCounterDate', today);
+            const counterResult = await window.electronAPI.ecommerceExports.nextTelegramOrderCounter();
+            if (!counterResult?.success || !counterResult.data) {
+                throw new Error(counterResult?.error || 'Không thể cấp số thứ tự Telegram.');
             }
-
-            orderCounter++;
-            await window.electronAPI.appConfig.set('telegramOrderCounter', orderCounter.toString());
+            const orderCounter = counterResult.data.counter;
 
             // Thời gian hiện tại
             const currentTime = dayjs().format('YYYY-MM-DD HH:mm:ss');
@@ -1429,6 +1477,7 @@ Thời gian: ${currentTime}`;
                         const sku = row['Seller SKU'] || '';
                         const quantity = parseInt(row['Quantity'] || row['Quantity of return'] || row['Quantity of Return'] || '1');
                         const cancelledTime = row['Cancelled Time'] || row['Cancelled time'] || '';
+                        const orderPlacedAt = parseMarketplaceOrderTime(getRowValue(row, TIKTOK_ORDER_TIME_HEADERS), XLSX);
                         const shippingProvider = row['Shipping Provider Name'] || '';
                         const trackingId = row['Tracking ID'] || '';
                         const orderAmount = parseFloat(row['Order Amount'] || '0');
@@ -1469,6 +1518,7 @@ Thời gian: ${currentTime}`;
                         orderData.push({
                             item,
                             cancelledTime,
+                            orderPlacedAt,
                             shippingProvider,
                             trackingId,
                             ecommerceExportReason: 'Hủy đơn TikTok',
@@ -1490,7 +1540,8 @@ Thời gian: ${currentTime}`;
                         const variation = getRowValue(row, ['Tên phân loại hàng', 'Phân loại hàng']) || '';
                         const sku = row[shopeeSkuHeader] || '';
                         const quantity = parseInt(getRowValue(row, ['Số lượng', 'Quantity', 'Qty']) || '1');
-                        const cancelledTime = getRowValue(row, ['Ngày gửi hàng', 'Ngày gửi hàng', 'Thời gian tạo đơn hàng', 'Ngày đặt hàng']) || '';
+                        const cancelledTime = getRowValue(row, ['Ngày gửi hàng', 'Ngày gửi hàng']) || '';
+                        const orderPlacedAt = parseMarketplaceOrderTime(getRowValue(row, SHOPEE_ORDER_TIME_HEADERS), XLSX);
                         const shippingProvider = getRowValue(row, ['Đơn Vị Vận Chuyển', 'Đơn vị vận chuyển']) || '';
                         const trackingId = getRowValue(row, ['Mã vận đơn', 'Mã vận chuyển', 'Số vận đơn']) || '';
                         const ecommerceExportReason = getRowValue(row, ['Trạng Thái Đơn Hàng', 'Trạng thái đơn hàng']) || 'Hủy đơn Shopee';
@@ -1534,6 +1585,7 @@ Thời gian: ${currentTime}`;
                         orderData.push({
                             item,
                             cancelledTime,
+                            orderPlacedAt,
                             shippingProvider,
                             trackingId,
                             ecommerceExportReason,
@@ -1545,8 +1597,22 @@ Thời gian: ${currentTime}`;
 
                 console.log('📦 Grouped orders:', orderMap);
 
-                for (const key of await loadCompletedOrderKeys(Array.from(orderMap.keys()))) {
+                const persistedKeys = await loadCompletedOrderKeys(Array.from(orderMap.keys()));
+                for (const key of persistedKeys) {
                     persistedCompletedKeys.add(key);
+                }
+
+                const placedTimes = Array.from(orderMap, ([orderNumber, rows]) => ({
+                    orderNumber,
+                    orderPlacedAt: rows[0]?.orderPlacedAt,
+                })).filter(record => record.orderPlacedAt && persistedKeys.has(record.orderNumber));
+                if (placedTimes.length > 0) {
+                    const syncResult = await withImportTimeout(
+                        window.electronAPI.ecommerceExports.syncOrderPlacedAt(placedTimes as Array<{ orderNumber: string; orderPlacedAt: string }>),
+                        20000,
+                        'Đồng bộ thời gian đơn hàng quá lâu. Vui lòng thử lại.'
+                    );
+                    if (!syncResult.success) throw new Error(syncResult.error || 'Không lưu được thời gian phát sinh đơn hàng.');
                 }
 
                 const newEcommerceExports: EcommerceExport[] = [];
@@ -1579,6 +1645,7 @@ Thời gian: ${currentTime}`;
                         orderNumber: orderId,
                         ecommerceExportReason: firstItem.ecommerceExportReason,
                         ecommerceExportDate: firstItem.cancelledTime ? dayjs(firstItem.cancelledTime).format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD'),
+                        orderPlacedAt: firstItem.orderPlacedAt,
                         status: 'pending', // ✅ MẶC ĐỊNH: CHƯA HOÀN
                         notes: `Shipping: ${firstItem.shippingProvider || 'N/A'} | Tracking: ${firstItem.trackingId || 'N/A'} | ${skuCount} SKU | SL: ${totalQuantity}`,
                         items: JSON.stringify(items),
@@ -1664,6 +1731,7 @@ Thời gian: ${currentTime}`;
             let totalImported = 0;
             let totalSkipped = 0;
             let processedFiles = 0;
+            const failedFiles: Array<{ name: string; error: string }> = [];
             // 🔧 FIX: Track tất cả orderNumber đã import trong session này để tránh trùng giữa các file
             const importedOrderNumbers = new Set<string>(
                 ecommerceExports
@@ -1678,10 +1746,10 @@ Thời gian: ${currentTime}`;
             // 🚫 Thu thập TẤT CẢ Order IDs theo nguồn — dùng cho đối soát sau khi import xong
 
             // Xử lý từng file
-            for (const fileData of files) {
+            for (const [fileIndex, fileData] of files.entries()) {
                 try {
                     message.loading({
-                        content: `Đang xử lý ${fileData.name} (${processedFiles + 1}/${files.length})...`,
+                        content: `Đang xử lý ${fileData.name} (${fileIndex + 1}/${files.length})...`,
                         key: 'import-folder',
                         duration: 0
                     });
@@ -1745,6 +1813,7 @@ Thời gian: ${currentTime}`;
                             const sku = row['Seller SKU'] || '';
                             const quantity = parseInt(row['Quantity'] || row['Quantity of return'] || row['Quantity of Return'] || '1');
                             const cancelledTime = row['Cancelled Time'] || row['Cancelled time'] || '';
+                            const orderPlacedAt = parseMarketplaceOrderTime(getRowValue(row, TIKTOK_ORDER_TIME_HEADERS), XLSX);
                             const shippingProvider = row['Shipping Provider Name'] || '';
                             const trackingId = row['Tracking ID'] || '';
                             const orderAmount = parseFloat(row['Order Amount'] || '0');
@@ -1779,6 +1848,7 @@ Thời gian: ${currentTime}`;
                             orderData.push({
                                 item,
                                 cancelledTime,
+                                orderPlacedAt,
                                 shippingProvider,
                                 trackingId,
                                 ecommerceExportReason: 'Hủy đơn TikTok',
@@ -1793,7 +1863,8 @@ Thời gian: ${currentTime}`;
                             const variation = getRowValue(row, ['Tên phân loại hàng', 'Phân loại hàng']) || '';
                             const sku = row[shopeeSkuHeader] || '';
                             const quantity = parseInt(getRowValue(row, ['Số lượng', 'Quantity', 'Qty']) || '1');
-                            const cancelledTime = getRowValue(row, ['Ngày gửi hàng', 'Ngày gửi hàng', 'Thời gian tạo đơn hàng', 'Ngày đặt hàng']) || '';
+                            const cancelledTime = getRowValue(row, ['Ngày gửi hàng', 'Ngày gửi hàng']) || '';
+                            const orderPlacedAt = parseMarketplaceOrderTime(getRowValue(row, SHOPEE_ORDER_TIME_HEADERS), XLSX);
                             const shippingProvider = getRowValue(row, ['Đơn Vị Vận Chuyển', 'Đơn vị vận chuyển']) || '';
                             const trackingId = getRowValue(row, ['Mã vận đơn', 'Mã vận chuyển', 'Số vận đơn']) || '';
                             const ecommerceExportReason = getRowValue(row, ['Trạng Thái Đơn Hàng', 'Trạng thái đơn hàng']) || 'Hủy đơn Shopee';
@@ -1834,6 +1905,7 @@ Thời gian: ${currentTime}`;
                             orderData.push({
                                 item,
                                 cancelledTime,
+                                orderPlacedAt,
                                 shippingProvider,
                                 trackingId,
                                 ecommerceExportReason,
@@ -1843,9 +1915,24 @@ Thời gian: ${currentTime}`;
                         });
                     }
 
-                    // Create ecommerceExport records
-                    for (const key of await loadCompletedOrderKeys(Array.from(orderMap.keys()))) {
+                    const persistedKeys = await loadCompletedOrderKeys(Array.from(orderMap.keys()));
+                    for (const key of persistedKeys) {
                         persistedCompletedKeys.add(key);
+                    }
+
+                    // New pending rows already carry orderPlacedAt locally. Only
+                    // synchronize rows that are actually persisted in the DB.
+                    const placedTimes = Array.from(orderMap, ([orderNumber, rows]) => ({
+                        orderNumber,
+                        orderPlacedAt: rows[0]?.orderPlacedAt,
+                    })).filter(record => record.orderPlacedAt && persistedKeys.has(record.orderNumber));
+                    if (placedTimes.length > 0) {
+                        const syncResult = await withImportTimeout(
+                            window.electronAPI.ecommerceExports.syncOrderPlacedAt(placedTimes as Array<{ orderNumber: string; orderPlacedAt: string }>),
+                            20000,
+                            `Đồng bộ thời gian trong ${fileData.name} quá lâu. Vui lòng thử lại.`
+                        );
+                        if (!syncResult.success) throw new Error(syncResult.error || 'Không lưu được thời gian phát sinh đơn hàng.');
                     }
 
                     const newEcommerceExports: EcommerceExport[] = [];
@@ -1882,6 +1969,7 @@ Thời gian: ${currentTime}`;
                             customerName: firstItem.customerName,
                             orderNumber: orderId,
                             ecommerceExportDate: firstItem.cancelledTime ? dayjs(firstItem.cancelledTime).format('YYYY-MM-DD HH:mm:ss') : dayjs().format('YYYY-MM-DD HH:mm:ss'),
+                            orderPlacedAt: firstItem.orderPlacedAt,
                             notes: `Shipping: ${firstItem.shippingProvider || 'N/A'} | Tracking: ${firstItem.trackingId || 'N/A'} | ${skuCount} SKU | SL: ${totalQuantity}`,
                             totalAmount: firstItem.totalAmount,
                             items: JSON.stringify(allItems),
@@ -1906,13 +1994,17 @@ Thời gian: ${currentTime}`;
                             console.log(`Loaded ${insertedCount} pending records into local queue`);
                         } catch (dbError) {
                             console.error('Lỗi lưu vào database:', dbError);
-                            message.error(`Lỗi lưu ${newEcommerceExports.length} đơn: ${dbError instanceof Error ? dbError.message : 'Unknown'}`);
+                            throw new Error(`Lỗi lưu ${newEcommerceExports.length} đơn: ${dbError instanceof Error ? dbError.message : 'Unknown'}`);
                         }
                     }
 
                     processedFiles++;
                 } catch (error) {
                     console.error(`Error processing ${fileData.name}:`, error);
+                    failedFiles.push({
+                        name: fileData.name,
+                        error: error instanceof Error ? error.message : 'Lỗi không xác định',
+                    });
                 }
             }
 
@@ -1922,7 +2014,18 @@ Thời gian: ${currentTime}`;
             if (totalImported > 0) resultParts.push(`Đã import ${totalImported} đơn từ ${processedFiles} file`);
             if (totalSkipped > 0) resultParts.push(`bỏ qua ${totalSkipped} đơn trùng`);
 
-            if (resultParts.length === 0) {
+            if (failedFiles.length > 0) {
+                const failedNames = failedFiles.slice(0, 3).map(file => file.name).join(', ');
+                const moreFailed = failedFiles.length > 3 ? ` và ${failedFiles.length - 3} file khác` : '';
+                const firstFailure = failedFiles[0];
+                const content = [
+                    ...resultParts,
+                    `${failedFiles.length} file lỗi: ${failedNames}${moreFailed}`,
+                    `Chi tiết: ${firstFailure.error}`,
+                ].join(' | ');
+                const notify = totalImported > 0 ? message.warning : message.error;
+                notify({ content, key: 'import-folder', duration: 8 });
+            } else if (resultParts.length === 0) {
                 message.warning({ content: 'Không có thay đổi nào, tất cả đơn đều đã tồn tại!', key: 'import-folder', duration: 5 });
             } else {
                 message.success({ content: resultParts.join(' | '), key: 'import-folder', duration: 5 });
@@ -1941,10 +2044,11 @@ Thời gian: ${currentTime}`;
 
     const columns: ColumnsType<EcommerceExport> = [
         {
-            title: 'Created Time',
+            title: 'Thời gian bàn giao',
             dataIndex: 'ecommerceExportDate',
             key: 'ecommerceExportDate',
             width: 150,
+            className: 'ecommerce-cell ecommerce-cell--date',
             render: (date) => {
                 const parsed = dayjs(date);
                 // Kiểm tra xem có thời gian cụ thể không (giờ/phút/giây khác 00:00:00)
@@ -1958,6 +2062,7 @@ Thời gian: ${currentTime}`;
             key: 'customerName',
             width: 90,
             align: 'center' as const,
+            className: 'ecommerce-cell ecommerce-cell--source',
             render: (name) => {
                 if (name === 'Shopee') {
                     return (
@@ -2009,6 +2114,7 @@ Thời gian: ${currentTime}`;
             dataIndex: 'orderNumber',
             key: 'orderTracking',
             width: 180,
+            className: 'ecommerce-cell ecommerce-cell--order',
             render: (orderNumber, record) => {
                 // Lấy tracking từ notes
                 let tracking = '-';
@@ -2076,6 +2182,7 @@ Thời gian: ${currentTime}`;
             key: 'productName',
             width: 200,
             ellipsis: true,
+            className: 'ecommerce-cell ecommerce-cell--product',
             render: (_, record) => {
                 // ⚡ Đọc từ persistent cache — KHÔNG JSON.parse lại
                 const parsed = getParsedItems(record);
@@ -2103,6 +2210,7 @@ Thời gian: ${currentTime}`;
             key: 'skuCount',
             width: 80,
             align: 'center' as const,
+            className: 'ecommerce-cell ecommerce-cell--sku',
             render: (_, record) => {
                 // ⚡ Đọc từ persistent cache
                 const parsed = getParsedItems(record);
@@ -2118,6 +2226,7 @@ Thời gian: ${currentTime}`;
             title: 'Variation',
             key: 'variation',
             width: 100,
+            className: 'ecommerce-cell ecommerce-cell--variation',
             render: (_, record) => {
                 // ⚡ Đọc từ persistent cache
                 const parsed = getParsedItems(record);
@@ -2132,6 +2241,7 @@ Thời gian: ${currentTime}`;
             key: 'totalAmount',
             width: 120,
             align: 'right',
+            className: 'ecommerce-cell ecommerce-cell--amount',
             render: (amount) => <span style={{ fontWeight: 600 }}>{amount.toLocaleString('vi-VN')} VND</span>,
         },
         {
@@ -2139,6 +2249,7 @@ Thời gian: ${currentTime}`;
             dataIndex: 'notes',
             key: 'shippingProvider',
             width: 130,
+            className: 'ecommerce-cell ecommerce-cell--shipping',
             render: (notes) => {
                 if (!notes) return <span style={{ color: '#bfbfbf' }}>-</span>;
                 const shippingMatch = notes.match(/Shipping: ([^|]+)/);
@@ -2158,6 +2269,7 @@ Thời gian: ${currentTime}`;
             key: 'actions',
             width: 100,
             fixed: 'right',
+            className: 'ecommerce-cell ecommerce-cell--actions',
             render: (_, record) => {
                 const menuItems = [
                     {
@@ -2177,7 +2289,7 @@ Thời gian: ${currentTime}`;
                 ];
 
                 return (
-                    <Dropdown menu={{ items: menuItems }} trigger={['click']}>
+                    <Dropdown getPopupContainer={getEcommercePopupContainer} menu={{ items: menuItems }} trigger={['click']}>
                         <Button size="small">
                             Xem thêm <MoreOutlined />
                         </Button>
@@ -2192,16 +2304,19 @@ Thời gian: ${currentTime}`;
             title: 'SKU',
             dataIndex: 'variantSku',
             width: 120,
+            className: 'ecommerce-item-cell ecommerce-item-cell--sku',
             render: (sku) => sku ? <Tag color="cyan">{sku}</Tag> : <span style={{ color: '#bfbfbf' }}>N/A</span>,
         },
         {
             title: 'Sản phẩm',
             dataIndex: 'productName',
+            className: 'ecommerce-item-cell ecommerce-item-cell--name',
         },
         {
             title: 'Màu',
             dataIndex: 'color',
             width: 100,
+            className: 'ecommerce-item-cell ecommerce-item-cell--color',
             render: (color) => color || <span style={{ color: '#bfbfbf' }}>-</span>,
         },
         {
@@ -2209,12 +2324,14 @@ Thời gian: ${currentTime}`;
             dataIndex: 'quantity',
             width: 80,
             align: 'center',
+            className: 'ecommerce-item-cell ecommerce-item-cell--qty',
         },
         {
             title: 'Đơn giá',
             dataIndex: 'unitPrice',
             width: 120,
             align: 'right',
+            className: 'ecommerce-item-cell ecommerce-item-cell--price',
             render: (price) => price.toLocaleString('vi-VN'),
         },
         {
@@ -2222,11 +2339,13 @@ Thời gian: ${currentTime}`;
             dataIndex: 'total',
             width: 150,
             align: 'right',
+            className: 'ecommerce-item-cell ecommerce-item-cell--total',
             render: (total) => <span style={{ fontWeight: 600 }}>{total.toLocaleString('vi-VN')} VND</span>,
         },
         {
             title: '',
             width: 60,
+            className: 'ecommerce-item-cell ecommerce-item-cell--remove',
             render: (_, __, index) => (
                 <Button type="link" size="small" danger onClick={() => handleRemoveItem(index)}>
                     Xóa
@@ -2303,10 +2422,12 @@ Thời gian: ${currentTime}`;
 
 
     return (
-        <div>
+        <div className="ecommerce-page">
             {/* Dòng 1: Stats + Search + Actions */}
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'nowrap' }}>
-                <Tag
+            <div className="ecommerce-toolbar">
+                <div className="ecommerce-status-group">
+                    <Tag
+                    className="ecommerce-status-chip"
                     onClick={() => setStatusFilter('pending')}
                     style={{
                         cursor: 'pointer', flexShrink: 0,
@@ -2319,8 +2440,9 @@ Thời gian: ${currentTime}`;
                     }}
                 >
                     Pending: {statusCounts.pending}
-                </Tag>
-                <Tag
+                    </Tag>
+                    <Tag
+                    className="ecommerce-status-chip"
                     onClick={() => setStatusFilter('completed')}
                     style={{
                         cursor: 'pointer', flexShrink: 0,
@@ -2333,8 +2455,9 @@ Thời gian: ${currentTime}`;
                     }}
                 >
                     Complete: {statusCounts.completed}
-                </Tag>
-                <Tag
+                    </Tag>
+                    <Tag
+                    className="ecommerce-status-chip"
                     onClick={() => setStatusFilter('no_data')}
                     style={{
                         cursor: 'pointer', flexShrink: 0,
@@ -2347,10 +2470,11 @@ Thời gian: ${currentTime}`;
                     }}
                 >
                     Mismatch: {unmatchedScans.length}
-                </Tag>
-                <div style={{ width: 1, height: 24, background: '#d9d9d9', flexShrink: 0 }} />
+                    </Tag>
+                </div>
 
                 <Input
+                    className="ecommerce-search"
                     value={searchKeyword}
                     onChange={(e) => setSearchKeyword(e.target.value)}
                     placeholder="Tìm Tracking / Order ID..."
@@ -2359,15 +2483,15 @@ Thời gian: ${currentTime}`;
                     prefix={<SearchOutlined style={{ color: '#1890ff' }} />}
                 />
 
-                <div style={{ width: 1, height: 24, background: '#d9d9d9', flexShrink: 0 }} />
-
-                {selectedRowKeys.length > 0 && (
-                    <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete} style={{ flexShrink: 0 }}>
+                <div className="ecommerce-toolbar-actions">
+                    {selectedRowKeys.length > 0 && (
+                    <Button className="ecommerce-toolbar-button" danger icon={<DeleteOutlined />} onClick={handleBulkDelete} style={{ flexShrink: 0 }}>
                         Xóa ({selectedRowKeys.length})
                     </Button>
-                )}
-                {isAdmin && statusCounts.cancelled > 0 && (
+                    )}
+                    {isAdmin && statusCounts.cancelled > 0 && (
                     <Button
+                        className="ecommerce-toolbar-button"
                         danger
                         icon={<DeleteOutlined />}
                         onClick={handleDeleteCancelled}
@@ -2375,8 +2499,9 @@ Thời gian: ${currentTime}`;
                     >
                         Xóa đơn hủy ({statusCounts.cancelled})
                     </Button>
-                )}
-                <Dropdown
+                    )}
+                    <Dropdown
+                    getPopupContainer={getEcommercePopupContainer}
                     menu={{
                         items: [
                             { key: 'all', label: 'Xuất tất cả', onClick: () => handleExportExcel('all') },
@@ -2386,27 +2511,31 @@ Thời gian: ${currentTime}`;
                     }}
                     trigger={['click']}
                 >
-                    <Button icon={<DownloadOutlined />} style={{ flexShrink: 0 }}>Xuất Excel</Button>
-                </Dropdown>
-                <Button
+                    <Button className="ecommerce-toolbar-button ecommerce-export-button" icon={<DownloadOutlined />} style={{ flexShrink: 0 }}>Xuất Excel</Button>
+                    </Dropdown>
+                    <Button
+                    className="ecommerce-toolbar-button ecommerce-import-button"
                     type="primary"
                     icon={<FolderOpenOutlined />}
                     onClick={handleImportFolder}
                     style={{ background: '#52c41a', borderColor: '#52c41a', flexShrink: 0 }}
                 >
                     Nhập Excel
-                </Button>
-                <Button
+                    </Button>
+                    <Button
+                    className="ecommerce-toolbar-button ecommerce-settings-button"
                     icon={<SettingOutlined />}
                     onClick={() => setSettingsModalVisible(true)}
                     title="Cài đặt Telegram"
                     style={{ flexShrink: 0 }}
-                />
+                    />
+                </div>
             </div>
 
             {/* 👤 Quick-Tap Avatar: Chọn người đóng gói */}
             {packerEmployees.length > 0 && (
                 <div
+                    className="ecommerce-packer-bar"
                     style={{
                         display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8,
                         padding: '8px 14px', background: '#fafafa', borderRadius: 10,
@@ -2415,7 +2544,7 @@ Thời gian: ${currentTime}`;
                 >
                     <UserOutlined style={{ fontSize: 16, color: '#8c8c8c', flexShrink: 0 }} />
                     <Text type="secondary" style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, flexShrink: 0 }}>Nguoi dong goi:</Text>
-                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', flex: 1 }}>
+                    <div className="ecommerce-packer-list">
                         {packerEmployees.map(emp => {
                             const isActive = activePacker === emp.username;
                             const rawName = (emp.name || '').trim();
@@ -2429,6 +2558,7 @@ Thời gian: ${currentTime}`;
 
                             return (
                                 <div
+                                    className={`ecommerce-packer-chip ${isActive ? 'ecommerce-packer-chip--active' : ''}`}
                                     key={emp.id}
                                     onClick={() => handleSelectPacker(emp.username)}
                                     style={{
@@ -2465,7 +2595,7 @@ Thời gian: ${currentTime}`;
                         })}
                     </div>
                     {activePacker && (
-                        <div style={{
+                        <div className="ecommerce-active-packer" style={{
                             display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
                             background: '#ECFFF3', padding: '6px 12px', borderRadius: 8, border: '1px dashed #A2F0C1'
                         }}>
@@ -2478,7 +2608,7 @@ Thời gian: ${currentTime}`;
 
             {/* Badge offline pending */}
             {offlinePending > 0 && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px', background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, marginBottom: 6 }}>
+                <div className="ecommerce-offline-banner" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px', background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, marginBottom: 6 }}>
                     <span style={{ fontSize: 16 }}>Pending</span>
                     <span style={{ color: '#d48806', fontWeight: 600, fontSize: 13 }}>
                         {offlinePending} đơn đang chờ đồng bộ (lưu offline khi mất mạng)
@@ -2494,8 +2624,15 @@ Thời gian: ${currentTime}`;
                             if (res.synced > 0) {
                                 message.success({ content: `Đã đồng bộ ${res.synced} đơn!`, key: 'manualSync', duration: 3 });
                                 loadEcommerceExports(true);
+                            } else if (res.failed > 0) {
+                                const reason = res.errors?.[0]?.error;
+                                message.warning({
+                                    content: `Chưa thể đồng bộ${reason ? `: ${reason}` : ''}. Dữ liệu vẫn được giữ, hãy tải lại danh sách nếu có xung đột.`,
+                                    key: 'manualSync',
+                                    duration: 6,
+                                });
                             } else {
-                                message.warning({ content: 'Không thể đồng bộ, kiểm tra kết nối mạng.', key: 'manualSync', duration: 3 });
+                                message.info({ content: 'Đơn đang trong thời gian chờ thử lại. Vui lòng thử sau.', key: 'manualSync', duration: 3 });
                             }
                         }}
                     >
@@ -2506,7 +2643,7 @@ Thời gian: ${currentTime}`;
 
             {/* Dòng 2: Quét mã vận đơn */}
             <div
-                className="scan-input-wrap"
+                className="scan-input-wrap ecommerce-scan-bar"
                 style={{
                     display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8, padding: '8px 14px',
                     border: activePacker ? '3px solid #00C868' : '2px solid transparent',
@@ -2516,8 +2653,8 @@ Thời gian: ${currentTime}`;
                     boxShadow: activePacker ? '0 0 15px rgba(0, 200, 104, 0.15)' : 'none'
                 }}
             >
-                <BarcodeOutlined style={{ fontSize: 32, color: activePacker ? '#00C868' : '#8c8c8c', flexShrink: 0, transition: 'color 0.3s ease' }} />
-                <div style={{ flex: 1, position: 'relative' }}>
+                <BarcodeOutlined className="ecommerce-scan-icon" style={{ fontSize: 32, color: activePacker ? '#00C868' : '#8c8c8c', flexShrink: 0, transition: 'color 0.3s ease' }} />
+                <div className="ecommerce-scan-input-wrap" style={{ flex: 1, position: 'relative' }}>
                     <Input
                         ref={scanInputRef}
                         value={scanValue}
@@ -2535,6 +2672,7 @@ Thời gian: ${currentTime}`;
                     />
                 </div>
                 <Button
+                    className="ecommerce-scan-button"
                     type="primary"
                     size="large"
                     icon={<ScanOutlined />}
@@ -2580,8 +2718,8 @@ Thời gian: ${currentTime}`;
 
             {statusFilter === 'no_data' ? (
                 /* Mismatch table */
-                <Card>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <Card className="ecommerce-table-card" variant="borderless">
+                    <div className="ecommerce-mismatch-heading">
                         <Title level={5} style={{ margin: 0 }}>
                             Tracking ID không khớp dữ liệu ({unmatchedScans.length})
                         </Title>
@@ -2610,6 +2748,7 @@ Thời gian: ${currentTime}`;
                         </div>
                     ) : (
                         <Table
+                            className="ecommerce-mismatch-table"
                             dataSource={unmatchedScans}
                             rowKey="trackingId"
                             pagination={false}
@@ -2655,8 +2794,9 @@ Thời gian: ${currentTime}`;
                 </Card>
             ) : (
                 /* 📋 BẢNG ĐƠN HÀNG CHÍNH */
-                <Card>
+                <Card className="ecommerce-table-card" variant="borderless">
                     <Table
+                        className="ecommerce-table"
                         columns={columns}
                         dataSource={filteredEcommerceExports}
                         rowKey="id"
@@ -2665,9 +2805,13 @@ Thời gian: ${currentTime}`;
                             // ⚡ Dùng indexOf thay vì JSON.parse — nhanh hơn 100x
                             try {
                                 const firstComma = record.items.indexOf('},{');
-                                return firstComma !== -1 ? 'multi-sku-row' : '';
+                                return [
+                                    'ecommerce-table-row',
+                                    firstComma !== -1 ? 'multi-sku-row ecommerce-table-row--multi' : '',
+                                    `ecommerce-table-row--${record.status || 'pending'}`,
+                                ].filter(Boolean).join(' ');
                             } catch {
-                                return '';
+                                return 'ecommerce-table-row';
                             }
                         }}
                         rowSelection={{
@@ -2697,12 +2841,12 @@ Thời gian: ${currentTime}`;
 
                                 return (
                                     <Table
+                                        className="ecommerce-items-table"
                                         columns={itemColumns}
                                         dataSource={items}
                                         pagination={false}
                                         rowKey={(_item, index) => `${record.id}-${index}`}
                                         size="small"
-                                        style={{ margin: '0 48px' }}
                                     />
                                 );
                             },
@@ -2717,7 +2861,7 @@ Thời gian: ${currentTime}`;
                             pageSizeOptions: ['10', '20', '50', '100'],
                             showTotal: (total) => `Tổng ${total} phiếu`,
                         }}
-                        scroll={{ x: 'max-content' }}
+                        scroll={{ x: 1200 }}
                     />
                     {hasMoreExports && (
                         <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 12 }}>
@@ -2731,6 +2875,7 @@ Thời gian: ${currentTime}`;
 
             {/* Method Selection Modal */}
             <Modal
+                className="ecommerce-method-modal"
                 title="🔍 Chọn phương thức nhập liệu"
                 open={methodModalVisible}
                 onCancel={() => setMethodModalVisible(false)}
@@ -2752,6 +2897,7 @@ Thời gian: ${currentTime}`;
 
             {/* Manual Input Modal */}
             <Modal
+                className="ecommerce-form-modal"
                 title={editingEcommerceExport ? '�S�️ Sửa phiếu xuất' : '�~" Tạo phiếu xuất m�:i'}
                 open={modalVisible}
                 onCancel={() => { if (!saving) setModalVisible(false); }}
@@ -2766,7 +2912,7 @@ Thời gian: ${currentTime}`;
                     onFinish={handleSubmit}
                 >
                     {/* Row 1: Customer + EcommerceExport Date */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                    <div className="ecommerce-form-grid">
                         <Form.Item
                             label="Tên khách hàng"
                             name="customerName"
@@ -2780,12 +2926,12 @@ Thời gian: ${currentTime}`;
                             name="ecommerceExportDate"
                             rules={[{ required: true, message: 'Vui lòng chọn ngày!' }]}
                         >
-                            <DatePicker style={{ width: '100%' }} size="large" format="DD/MM/YYYY" />
+                            <DatePicker getPopupContainer={getEcommercePopupContainer} style={{ width: '100%' }} size="large" format="DD/MM/YYYY" />
                         </Form.Item>
                     </div>
 
                     {/* Row 2: EcommerceExport Code + Order Number */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                    <div className="ecommerce-form-grid">
                         <Form.Item label="Mã hoàn hàng" name="ecommerceExportCode">
                             <Input placeholder="Mã hoàn hàng (tùy chọn)" size="large" />
                         </Form.Item>
@@ -2796,9 +2942,9 @@ Thời gian: ${currentTime}`;
                     </div>
 
                     {/* Row 3: EcommerceExport Reason + Status */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                    <div className="ecommerce-form-grid">
                         <Form.Item label="Lý do hoàn" name="ecommerceExportReason">
-                            <Select size="large" placeholder="Chọn lý do">
+                            <Select getPopupContainer={getEcommercePopupContainer} size="large" placeholder="Chọn lý do">
                                 <Select.Option value="Lỗi sản phẩm">Lỗi sản phẩm</Select.Option>
                                 <Select.Option value="Không đúng mô tả">Không đúng mô tả</Select.Option>
                                 <Select.Option value="Giao nhầm">Giao nhầm</Select.Option>
@@ -2808,14 +2954,14 @@ Thời gian: ${currentTime}`;
                         </Form.Item>
 
                         <Form.Item label="Trạng thái" name="status">
-                            <Select size="large">
+                            <Select getPopupContainer={getEcommercePopupContainer} size="large">
                                 <Select.Option value="completed">Hoàn thành</Select.Option>
                             </Select>
                         </Form.Item>
                     </div>
 
                     {/* Add Product Section */}
-                    <div style={{
+                    <div className="ecommerce-product-composer" style={{
                         background: '#f9f0ff',
                         padding: 20,
                         borderRadius: 12,
@@ -2826,9 +2972,10 @@ Thời gian: ${currentTime}`;
                             ➕ Thêm sản phẩm hoàn
                         </Title>
 
-                        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.5fr 1fr 1.2fr auto', gap: 12, alignItems: 'end' }}>
+                        <div className="ecommerce-product-grid">
                             <Form.Item label="Sản phẩm" name="tempProductId" style={{ marginBottom: 0 }}>
                                 <Select
+                                    getPopupContainer={getEcommercePopupContainer}
                                     placeholder="Chọn sản phẩm"
                                     size="large"
                                     onChange={handleProductSelect}
@@ -2839,7 +2986,7 @@ Thời gian: ${currentTime}`;
                             </Form.Item>
 
                             <Form.Item label="Màu sắc" name="tempColor" style={{ marginBottom: 0 }}>
-                                <Select placeholder="Chọn màu" size="large" disabled={selectedProductVariants.length === 0}>
+                                <Select getPopupContainer={getEcommercePopupContainer} placeholder="Chọn màu" size="large" disabled={selectedProductVariants.length === 0}>
                                     {selectedProductVariants.map((v, i) => (
                                         <Select.Option key={i} value={v.color}>{v.color}</Select.Option>
                                     ))}
@@ -2871,6 +3018,7 @@ Thời gian: ${currentTime}`;
                         <div style={{ marginBottom: 24 }}>
                             <Title level={5}>Danh sách sản phẩm ({ecommerceExportItems.length})</Title>
                             <Table
+                                className="ecommerce-form-items-table"
                                 columns={itemColumns}
                                 dataSource={ecommerceExportItems}
                                 rowKey={(_, index) => index!.toString()}
@@ -2899,7 +3047,7 @@ Thời gian: ${currentTime}`;
                         <TextArea rows={3} placeholder="Ghi chú thêm (tùy chọn)" />
                     </Form.Item>
 
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
+                    <div className="ecommerce-form-actions">
                         <Button onClick={() => setModalVisible(false)} size="large" disabled={saving}>
                             Hủy
                         </Button>
@@ -2924,9 +3072,14 @@ Thời gian: ${currentTime}`;
                 onCancel={() => setSettingsModalVisible(false)}
                 onOk={() => {
                     settingsForm.validateFields().then(async (values) => {
-                        // Lưu vào database
-                        await window.electronAPI.appConfig.set('telegramChatId', values.chatId || '');
-                        await window.electronAPI.appConfig.set('telegramApiToken', values.apiToken || '');
+                        const saveResult = await window.electronAPI.ecommerceExports.saveTelegramSettings({
+                            chatId: values.chatId || '',
+                            apiToken: values.apiToken || '',
+                        });
+                        if (!saveResult?.success) {
+                            message.error(saveResult?.error || 'Không thể lưu cài đặt Telegram.');
+                            return;
+                        }
 
                         // Cập nhật state
                         setTelegramSettings({

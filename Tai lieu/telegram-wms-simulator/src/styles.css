@@ -1,0 +1,62 @@
+@import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap');
+
+:root { font-family: "Be Vietnam Pro", sans-serif; color: #132133; background: #e8edf2; font-synthesis: none; --ink:#132133; --muted:#687588; --line:#dbe2e9; --telegram:#172534; --telegram-deep:#0d1926; --telegram-button:#223548; --green:#28a878; --amber:#e6a23c; --red:#df5a63; }
+* { box-sizing: border-box; }
+body { margin:0; min-width:320px; min-height:100vh; background:radial-gradient(circle at 12% 10%,rgba(70,185,215,.15),transparent 24rem),linear-gradient(135deg,#eef3f6,#dde4e9); -webkit-font-smoothing:antialiased; }
+button,input { font:inherit; } button { -webkit-tap-highlight-color:transparent; }
+.simulator-shell { min-height:100vh; display:grid; grid-template-columns:minmax(260px,.78fr) minmax(430px,1.4fr) minmax(260px,.82fr); max-width:1600px; margin:auto; background:rgba(255,255,255,.44); box-shadow:0 0 80px rgba(30,47,62,.16); }
+.control-panel,.inspector-panel { padding:34px 28px; background:rgba(248,250,252,.94); backdrop-filter:blur(16px); overflow-y:auto; }
+.control-panel { border-right:1px solid rgba(201,211,220,.9); } .inspector-panel { border-left:1px solid rgba(201,211,220,.9); }
+.brand-mark { display:flex; align-items:center; gap:10px; font-weight:800; color:#147b9c; letter-spacing:-.02em; }
+.brand-mark svg { background:#daf3f8; border-radius:10px; padding:5px; width:36px; height:36px; }
+.control-heading { margin:58px 0 34px; } .eyebrow,.section-label { text-transform:uppercase; letter-spacing:.13em; font-size:11px; font-weight:800; color:#6b7e90; }
+.control-heading h1 { font-size:clamp(26px,2.2vw,38px); line-height:1.14; letter-spacing:-.045em; margin:12px 0; }
+.control-heading p { color:var(--muted); font-size:13px; line-height:1.65; margin:0; }
+.scenario-list { display:grid; gap:10px; margin-top:12px; }
+.scenario-card { text-align:left; border:1px solid var(--line); background:white; color:var(--ink); border-radius:14px; padding:14px 15px; cursor:pointer; transition:.18s ease; }
+.scenario-card:hover { transform:translateY(-1px); border-color:#93bfd0; } .scenario-card.active { border-color:#269ab9; background:#eaf8fb; box-shadow:inset 3px 0 #269ab9; }
+.scenario-card span { display:block; font-weight:700; font-size:13px; margin-bottom:5px; } .scenario-card small { display:block; color:var(--muted); line-height:1.45; font-size:11px; }
+.reset-button { width:100%; border:0; border-radius:13px; background:#162a3b; color:white; margin-top:16px; padding:13px 14px; display:flex; align-items:center; justify-content:center; gap:9px; font-weight:700; cursor:pointer; }
+.reset-button:hover { background:#21445c; }
+.safety-note { margin-top:28px; padding:14px; border-radius:13px; background:#eaf6f0; color:#25775a; display:flex; gap:10px; align-items:flex-start; }
+.safety-note div { display:grid; gap:3px; } .safety-note strong { font-size:12px; } .safety-note span { font-size:10px; line-height:1.4; color:#4e7e6b; }
+.telegram-stage { background:#cbd5dc; padding:28px; display:grid; place-items:center; min-width:0; }
+.telegram-window { width:min(100%,690px); height:min(880px,calc(100vh - 56px)); min-height:650px; border-radius:18px; overflow:hidden; display:grid; grid-template-rows:auto 1fr auto; background:var(--telegram-deep); box-shadow:0 26px 65px rgba(11,29,43,.28); border:1px solid #526474; position:relative; }
+.telegram-window::before { content:""; position:absolute; inset:72px 0 50px; opacity:.08; pointer-events:none; background-image:radial-gradient(circle at center,#90a8b8 1px,transparent 1.5px); background-size:22px 22px; }
+.telegram-header { height:72px; padding:12px 18px; background:#1d2d3d; border-bottom:1px solid #263c50; color:white; display:flex; align-items:center; gap:12px; z-index:2; }
+.header-avatar,.bot-avatar { border-radius:50%; display:grid; place-items:center; color:white; font-weight:800; }
+.header-avatar { width:42px; height:42px; background:linear-gradient(145deg,#42b7ce,#2185b1); }
+.telegram-header>div:nth-child(2) { display:grid; gap:4px; min-width:0; } .telegram-header strong { font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.telegram-header span { font-size:11px; color:#8fa8bb; display:flex; align-items:center; gap:6px; } .telegram-header i { width:7px; height:7px; border-radius:50%; background:#43d69d; box-shadow:0 0 0 3px rgba(67,214,157,.14); }
+.telegram-header button { margin-left:auto; border:0; background:transparent; color:#91a8b9; padding:8px; cursor:pointer; border-radius:9px; } .telegram-header button:hover { color:white; background:#294055; }
+.chat-date { position:absolute; z-index:3; top:84px; left:50%; transform:translateX(-50%); border-radius:12px; padding:5px 10px; background:rgba(25,43,59,.84); color:#9eb1c1; font-size:10px; }
+.chat-stream { padding:62px 18px 28px; overflow-y:auto; display:flex; flex-direction:column; justify-content:flex-end; z-index:1; scrollbar-color:#405467 transparent; }
+.composer { height:50px; background:#172737; border-top:1px solid #2c3f50; color:#60798d; display:flex; align-items:center; justify-content:space-between; padding:0 18px; font-size:12px; z-index:2; }
+.message-row { display:flex; margin:10px 0; width:100%; } .message-row--user { justify-content:flex-end; } .message-row--bot { align-items:flex-end; gap:8px; }
+.bot-avatar { flex:0 0 34px; width:34px; height:34px; background:#eb6651; font-size:12px; }
+.message-stack { width:min(100%,510px); } .message-bubble { color:#eef6fb; font-size:13px; line-height:1.55; position:relative; }
+.bot-bubble { padding:13px 14px 22px; border-radius:15px 15px 5px 15px; background:#1c2d3d; box-shadow:0 3px 12px rgba(0,0,0,.1); }
+.user-bubble { padding:10px 13px 20px; border-radius:15px 15px 5px 15px; background:#32668d; max-width:75%; }
+.bot-name { color:#ff695f; font-weight:700; font-size:11px; margin-bottom:2px; } .message-bubble h3 { display:flex; align-items:center; gap:7px; font-size:13px; margin:2px 0 10px; }
+.message-copy p { margin:9px 0 0; } .message-bubble time { position:absolute; right:9px; bottom:5px; color:#7890a4; font-size:9px; display:flex; align-items:center; gap:3px; } .user-bubble time { color:#b7d4e9; }
+.message-row--danger .bot-bubble { border-left:3px solid var(--red); } .message-row--warning .bot-bubble { border-left:3px solid var(--amber); } .message-row--success .bot-bubble { border-left:3px solid var(--green); }
+.action-grid { display:grid; gap:3px; margin-top:3px; }
+.tg-action { width:100%; min-height:43px; border:0; border-radius:9px; padding:9px 13px; background:var(--telegram-button); color:#f2f7fa; display:flex; align-items:center; justify-content:center; gap:9px; cursor:pointer; font-weight:600; font-size:12px; transition:.14s ease; }
+.tg-action:hover { background:#2a455d; transform:translateY(-1px); } .tg-action small { color:#92a9ba; font-size:9px; font-weight:500; margin-left:auto; }
+.tg-action--secondary { color:#a9bdcb; background:#192a39; } .tg-action--warning { color:#ffd994; background:#3e382c; } .tg-action--success { color:#9df0cf; background:#1e4039; }
+.tg-action:disabled { opacity:.45; cursor:not-allowed; transform:none; }
+.custom-action,.check-form { border-radius:9px; background:#192b3b; padding:9px; display:flex; gap:7px; }
+.custom-action input,.check-form input { min-width:0; flex:1; border:1px solid #3b5265; border-radius:8px; background:#122131; color:white; padding:10px 11px; outline:none; }
+.custom-action input:focus,.check-form input:focus { border-color:#4eb6d6; } .custom-action button { width:42px; border:0; border-radius:8px; background:#2f8bcc; color:white; display:grid; place-items:center; cursor:pointer; } .custom-action button:disabled { opacity:.4; }
+.check-form { display:grid; } .check-form label { color:#92a7b8; font-size:10px; font-weight:600; } .check-form>div { display:flex; align-items:center; gap:8px; } .check-form span { color:#9db0be; font-size:11px; padding-right:8px; }
+.message-facts { display:grid; gap:7px; margin:2px 0; } .message-facts div { display:flex; justify-content:space-between; gap:20px; } .message-facts dt { color:#90a8b8; } .message-facts dd { margin:0; font-weight:700; text-align:right; }
+.inline-alert,.inline-success { display:flex; align-items:center; gap:7px; padding-top:9px; color:#ffd38c; } .inline-success { color:#91e7c5; }
+.pager { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; background:#1a2c3c; border-radius:9px; overflow:hidden; color:#8ea6b8; }
+.pager button { border:0; background:#22384c; color:white; padding:10px; display:grid; place-items:center; cursor:pointer; } .pager button:disabled { opacity:.3; } .pager span { font-size:10px; padding:0 14px; }
+.callback-card { border:1px solid var(--line); background:white; border-radius:16px; padding:18px; } .callback-card code { display:block; font-family:"IBM Plex Mono",monospace; margin:11px 0 8px; padding:10px; border-radius:9px; background:#132433; color:#7bd8ed; font-size:11px; word-break:break-all; } .callback-card p { color:var(--muted); font-size:10px; line-height:1.5; margin:0; }
+.event-panel,.state-panel { margin-top:28px; } .event-title { display:flex; gap:8px; align-items:center; font-weight:800; font-size:13px; margin-bottom:14px; } .event-list { display:grid; gap:4px; }
+.event-item { display:grid; grid-template-columns:8px 1fr; gap:10px; padding:9px 0; border-bottom:1px solid #e4e9ed; } .event-item>i { width:7px; height:7px; border-radius:50%; background:#6ea9c1; margin-top:5px; } .event-item--success>i { background:var(--green); } .event-item--warning>i { background:var(--amber); } .event-item div { display:grid; gap:3px; } .event-item strong { font-size:11px; } .event-item span { color:var(--muted); font-size:9px; line-height:1.4; }
+.state-list { margin-top:12px; display:grid; gap:8px; } .state-list>div { display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:9px; font-family:"IBM Plex Mono",monospace; } .state-list b { font-family:"Be Vietnam Pro",sans-serif; font-size:8px; padding:4px 6px; border-radius:20px; white-space:nowrap; }
+.state-opened { background:#e7f6ef; color:#20805e; } .state-sealed { background:#eef1f4; color:#607080; } .state-pending { background:#fff2dc; color:#a96500; } .state-empty { background:#f3f3f3; color:#8b939a; } .state-list>small { color:var(--muted); font-size:9px; margin-top:4px; }
+@media(max-width:1120px){.simulator-shell{grid-template-columns:250px minmax(430px,1fr)}.inspector-panel{display:none}}
+@media(max-width:760px){.simulator-shell{display:block}.control-panel{border:0;padding:20px}.control-heading{margin:24px 0}.control-heading h1{font-size:27px}.scenario-list{grid-template-columns:repeat(3,minmax(190px,1fr));overflow-x:auto;padding-bottom:5px}.safety-note{display:none}.telegram-stage{padding:0;background:var(--telegram-deep)}.telegram-window{width:100%;height:720px;min-height:600px;border:0;border-radius:0;box-shadow:none}.chat-stream{padding-inline:10px}.message-stack{width:calc(100% - 42px)}}

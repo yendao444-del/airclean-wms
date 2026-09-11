@@ -95,7 +95,7 @@ async function executeKhuiKien(code, actor = 'Telegram Bot') {
     );
     if (pendingSameSku) {
         const pendingCode = pendingSameSku.code || pendingSameSku.id;
-        throw new Error(`Không thể khui kiện mới. SKU [${target.sku || target.skuName}] đang có kiện [${pendingCode}] chờ kiểm thực tế. Vui lòng vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước.`);
+        throw new Error(`Chưa thể khui kiện mới. SKU ${target.sku || target.skuName} có kiện ${pendingCode} đang ở trạng thái Chờ kiểm. Bạn cần vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước; sau đó mới khui được kiện mới cùng SKU.`);
     }
     const openedSameSku = list.find(u => 
         (u.sku || u.skuName || '').toUpperCase() === targetSku && 
@@ -106,7 +106,7 @@ async function executeKhuiKien(code, actor = 'Telegram Bot') {
         const openedCode = openedSameSku.code || openedSameSku.id;
         const openedRemaining = (openedSameSku.remainingQuantity ?? openedSameSku.currentPcs ?? 0).toLocaleString('vi-VN');
         const unitName = openedSameSku.baseUnit || openedSameSku.unitName || 'Gói';
-        throw new Error(`⚠️ SKU [${target.sku || target.skuName}] đang có kiện [${openedCode}] đang mở (còn ${openedRemaining} ${unitName}). Vui lòng rút hết kiện cũ trước khi khui kiện mới!`);
+        throw new Error(`Chưa thể khui kiện mới. SKU ${target.sku || target.skuName} đang có kiện ${openedCode} mở và còn ${openedRemaining} ${unitName}. Hãy rút hết kiện này; khi kiện chuyển sang Chờ kiểm, nhập số lượng thực tế và chốt kiện trước khi khui kiện mới.`);
     }
     
     try {
@@ -121,14 +121,14 @@ async function executeKhuiKien(code, actor = 'Telegram Bot') {
                 select: { code: true },
             });
             if (pendingConflict) {
-                throw new Error(`Không thể khui kiện mới. SKU [${dbTarget.sku}] đang có kiện [${pendingConflict.code}] chờ kiểm thực tế. Vui lòng vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước.`);
+                throw new Error(`Chưa thể khui kiện mới. SKU ${dbTarget.sku} có kiện ${pendingConflict.code} đang ở trạng thái Chờ kiểm. Bạn cần vào Quản lý kiện hàng > Chờ kiểm, nhập số lượng thực tế và chốt kiện này trước; sau đó mới khui được kiện mới cùng SKU.`);
             }
             const openedConflict = await tx.handlingUnit.findFirst({
                 where: { sku: dbTarget.sku, code: { not: normalizedCode }, status: 'opened' },
                 select: { code: true, remainingQuantity: true, baseUnit: true },
             });
             if (openedConflict) {
-                throw new Error(`SKU [${dbTarget.sku}] đang có kiện [${openedConflict.code}] đang mở (còn ${openedConflict.remainingQuantity} ${openedConflict.baseUnit}). Vui lòng rút hết kiện cũ trước khi khui kiện mới!`);
+                throw new Error(`Chưa thể khui kiện mới. SKU ${dbTarget.sku} đang có kiện ${openedConflict.code} mở và còn ${openedConflict.remainingQuantity} ${openedConflict.baseUnit}. Hãy rút hết kiện này; khi kiện chuyển sang Chờ kiểm, nhập số lượng thực tế và chốt kiện trước khi khui kiện mới.`);
             }
             await tx.handlingUnit.update({
                 where: { code: normalizedCode },
@@ -489,15 +489,6 @@ async function sendRutHangMenu(chatId, messageId = null) {
         !pendingSkuCodes.has(String(unit.sku || unit.skuName || '').trim().toUpperCase())
     );
 
-    if (openedUnits.length > 0 && availableOpenedUnits.length === 0) {
-        const pendingCodes = [...new Set(pendingSkuCodes.values())].filter(Boolean).join(', ');
-        const text = `⛔ <b>CHƯA THỂ RÚT HÀNG</b>\n\nCác SKU đang mở vẫn còn kiện đã về 0 chờ kiểm thực tế: <b>${pendingCodes || 'vui lòng xem tab Chờ kiểm'}</b>.\n\n👉 Vào <b>Quản lý kiện hàng &gt; Chờ kiểm</b>, nhập số lượng thực tế và chốt hết các kiện này trước khi rút tiếp.`;
-        const markup = { inline_keyboard: [[{ text: '📊 Xem báo cáo tồn', callback_data: 'menu_ton' }]] };
-        if (messageId) await editTelegramWmsMessage(chatId, messageId, text, markup);
-        else await sendTelegramWmsMessage(chatId, text, markup);
-        return;
-    }
-    
     if (openedUnits.length === 0) {
         const sealedUnits = list.filter(u => u.status === 'sealed' || u.status === 'Nguyên niêm phong');
         const keyboard = sealedUnits.slice(0, 6).map(u => [
@@ -514,12 +505,13 @@ async function sendRutHangMenu(chatId, messageId = null) {
     }
 
     // Chỉ có một kiện đang mở thì vào thẳng màn hình chọn số lượng.
-    if (availableOpenedUnits.length === 1) {
+    if (openedUnits.length === 1 && availableOpenedUnits.length === 1) {
         await sendPickQuantityMenu(chatId, availableOpenedUnits[0].code || availableOpenedUnits[0].id, messageId);
         return;
     }
     
-    const inlineKeyboard = availableOpenedUnits.map(u => {
+    // Vẫn hiển thị SKU bị khóa; bước chọn kiện sẽ giải thích yêu cầu kiểm thực tế.
+    const inlineKeyboard = openedUnits.map(u => {
         const code = u.code || u.id;
         const remaining = u.remainingQuantity ?? u.currentPcs ?? 0;
         const unit = u.baseUnit || u.unitName || 'Gói';
@@ -630,7 +622,7 @@ async function sendPickQuantityMenu(chatId, code, messageId = null) {
     );
     if (pendingConflict || unit.status === 'pending_check' || unit.status === 'Chờ kiểm') {
         const blocker = pendingConflict || unit;
-        const text = `⛔ <b>KHÔNG THỂ RÚT HÀNG</b>\n\nSKU <b>${unit.sku || unit.skuName}</b> đang có kiện <b>${blocker.code || blocker.id}</b> chờ kiểm thực tế. Vào <b>Quản lý kiện hàng &gt; Chờ kiểm</b>, nhập số lượng thực tế và chốt kiện trước.`;
+        const text = `⛔ <b>KHÔNG THỂ RÚT HÀNG</b>\n\nSKU <b>${unit.sku || unit.skuName}</b> đang có kiện <b>${blocker.code || blocker.id}</b> chờ kiểm thực tế. Vào <b>Quản lý kiện hàng &gt; Chờ kiểm</b>, nhập số lượng thực tế và chốt kiện; sau đó mới có thể tiếp tục rút hoặc khui kiện mới cùng SKU.`;
         const markup = { inline_keyboard: [[{ text: '🔙 Chọn kiện khác', callback_data: 'menu_rut' }]] };
         if (messageId) await editTelegramWmsMessage(chatId, messageId, text, markup);
         else await sendTelegramWmsMessage(chatId, text, markup);

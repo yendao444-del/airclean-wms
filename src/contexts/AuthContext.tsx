@@ -8,6 +8,7 @@ export interface AuthUser {
     avatar?: string | null;
     passwordChangedAt?: string;
     mustChangePassword?: boolean;
+    canChangePasswordWithoutCurrent?: boolean;
     isTestAccount?: boolean;
     role: 'admin' | 'manager' | 'staff' | 'viewer';
     isActive: boolean;
@@ -39,11 +40,22 @@ const todayKey = () => {
 };
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-    const [actualUser, setActualUser] = useState<AuthUser | null>(null);
+    const notificationUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('notificationUiTest');
+    const attendanceUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('attendanceUiTest');
+    const uiTestMode = notificationUiTest || attendanceUiTest;
+    const [actualUser, setActualUser] = useState<AuthUser | null>(() => uiTestMode ? {
+        id: 900001,
+        username: 'thuy.le',
+        fullName: 'Thúy Lê',
+        role: attendanceUiTest ? 'admin' : 'staff',
+        isActive: true,
+    } : null);
     const [previewUser, setPreviewUser] = useState<AuthUser | null>(null);
     const user = previewUser || actualUser;
 
     useEffect(() => {
+        if (uiTestMode) return;
+
         const restoreAuth = async () => {
             localStorage.removeItem('rememberedUser');
             const usersApi = window.electronAPI?.users;
@@ -81,9 +93,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         };
 
         restoreAuth();
-    }, []);
+    }, [uiTestMode]);
 
     useEffect(() => {
+        if (uiTestMode) return;
         if (!actualUser) return;
         const timer = window.setInterval(() => {
             if (localStorage.getItem(AUTH_LOGIN_DATE_KEY) !== todayKey()) {
@@ -92,7 +105,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }, 30000);
 
         return () => window.clearInterval(timer);
-    }, [actualUser]);
+    }, [actualUser, uiTestMode]);
 
     useEffect(() => {
         if (actualUser?.role !== 'admin') setPreviewUser(null);

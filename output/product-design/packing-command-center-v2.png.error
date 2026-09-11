@@ -1,0 +1,8 @@
+Exception calling "GetResult" with "0" argument(s): "A task was canceled."
+At G:\QUAN LY BAN HANG\desktop-FIXDEBUG\tmp\imagegen\run-packing-concept.ps1:25 char:5
++     $response = $client.PostAsync("$env:NINEROUTER_URL/v1/images/gene ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:) [], MethodInvocationException
+    + FullyQualifiedErrorId : TaskCanceledException
+ 
+

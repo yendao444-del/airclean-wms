@@ -1850,7 +1850,7 @@ const DailyTasks = () => {
                             <Button icon={<UploadOutlined />}>Chọn ảnh từ máy</Button>
                         </Upload>
                         <div style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>
-                            Công việc này yêu cầu tối thiểu {minimumImages} ảnh, tối đa {MAX_EVIDENCE_IMAGES} ảnh JPG/JPEG chụp trực tiếp từ camera và còn thông tin thiết bị. Không chấp nhận ảnh chụp màn hình hoặc ảnh tải về. Ảnh gốc tối đa 15 MB.
+                            Công việc này yêu cầu tối thiểu {minimumImages} ảnh, tối đa {MAX_EVIDENCE_IMAGES} ảnh JPG/JPEG chụp thực tế bằng điện thoại. Có thể dùng ảnh đã gửi qua Zalo/Messenger; không chấp nhận ảnh chụp màn hình. Ảnh tối đa 15 MB.
                         </div>
                     </div>
                 </div>

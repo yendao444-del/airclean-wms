@@ -9,6 +9,7 @@ const DEFAULT_ATTENDANCE_CONFIG = {
     morningStart: '08:00',
     afternoonStart: '13:30',
 };
+const { calculateAttendanceRewardSummary } = require('./attendance-rewards');
 
 let reconcileQueue = Promise.resolve();
 
@@ -84,135 +85,198 @@ function getHistoricalAmount(fines, employeesById, employee, levelKey, logDate, 
 }
 
 async function reconcileLateAttendanceFinesNow(prisma, options = {}) {
-    const configRow = await prisma.appConfig.findUnique({ where: { key: 'attendanceData' } });
-    if (!configRow) return { created: [], skippedDeleted: 0, unmatched: [], checked: 0 };
+    // Reconciliation used to read and then replace the entire JSON document
+    // outside a transaction. That allowed another attendance edit to be lost
+    // and caused the safety guard to disable automatic fine creation. Keep the
+    // same JSON format, but serialize the read/merge/write under one lock.
+    return prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'attendanceData'}))`;
 
-    let attendanceData;
-    try {
-        attendanceData = JSON.parse(configRow.value);
-    } catch {
-        throw new Error('Dữ liệu cấu hình chấm công không hợp lệ');
-    }
+        const configRow = await tx.appConfig.findUnique({ where: { key: 'attendanceData' } });
+        if (!configRow) return { created: [], updated: [], waived: [], skippedDeleted: 0, unmatched: [], checked: 0 };
 
-    const config = { ...DEFAULT_ATTENDANCE_CONFIG, ...(attendanceData.config || {}) };
-    const employees = Array.isArray(attendanceData.employees) ? attendanceData.employees : [];
-    const employeesById = new Map(employees.map(employee => [Number(employee.id), employee]));
-    const existingFines = Array.isArray(attendanceData.extraFines) ? attendanceData.extraFines : [];
-    const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? attendanceData.fineAuditLog : [];
-    const deletedFines = fineAuditLog
-        .filter(entry => entry?.action === 'delete' && entry?.before)
-        .map(entry => entry.before);
-
-    const logs = await prisma.attendanceLog.findMany({
-        where: {
-            checkType: { in: ['morning_in', 'afternoon_in'] },
-            ...(Array.isArray(options.logIds) && options.logIds.length > 0
-                ? { id: { in: options.logIds.map(Number).filter(Number.isInteger) } }
-                : {}),
-        },
-        orderBy: { timestamp: 'asc' },
-    });
-
-    // Dữ liệu cũ từng cho phép nhiều log cùng ca. Chỉ lần vào đầu tiên mới dùng để tính phạt.
-    const firstLogs = new Map();
-    for (const log of logs) {
-        const key = `${normalizeIdentity(log.faceId)}|${log.date}|${log.checkType}`;
-        if (!firstLogs.has(key)) firstLogs.set(key, log);
-    }
-
-    const created = [];
-    const updated = [];
-    const unmatched = [];
-    let skippedDeleted = 0;
-    const currentMonth = localDateKey(new Date()).slice(0, 7);
-
-    for (const log of firstLogs.values()) {
-        const employee = getEmployeeForLog(employees, log);
-        if (!employee) {
-            unmatched.push({ logId: log.id, date: log.date, faceId: log.faceId, userName: log.userName });
-            continue;
+        let attendanceData;
+        try {
+            attendanceData = JSON.parse(configRow.value);
+        } catch {
+            throw new Error('Dữ liệu cấu hình chấm công không hợp lệ');
         }
 
-        const isMorning = log.checkType === 'morning_in';
-        const shiftKey = isMorning ? 'sang' : 'chieu';
-        const shiftLabel = isMorning ? 'sáng' : 'chiều';
-        const [startHour, startMinute] = String(isMorning ? config.morningStart : config.afternoonStart).split(':').map(Number);
-        const timestamp = new Date(log.timestamp);
-        const lateMinutes = timestamp.getHours() * 60 + timestamp.getMinutes() - (startHour * 60 + startMinute);
-        if (lateMinutes <= Number(config.graceMinutes || 0)) continue;
+        const config = { ...DEFAULT_ATTENDANCE_CONFIG, ...(attendanceData.config || {}) };
+        const employees = Array.isArray(attendanceData.employees) ? attendanceData.employees : [];
+        const employeesById = new Map(employees.map(employee => [Number(employee.id), employee]));
+        const existingFines = Array.isArray(attendanceData.extraFines) ? attendanceData.extraFines : [];
+        const fineAuditLog = Array.isArray(attendanceData.fineAuditLog) ? attendanceData.fineAuditLog : [];
+        const fineWaivers = Array.isArray(attendanceData.fineWaivers) ? attendanceData.fineWaivers : [];
+        const deletedFines = fineAuditLog
+            .filter(entry => entry?.action === 'delete' && entry?.before)
+            .map(entry => entry.before);
 
-        const level = getFineLevel(lateMinutes);
-        const configuredAmount = getConfiguredAmount(config, employee, level.key);
-        const amount = options.useHistoricalRates && log.date.slice(0, 7) !== currentMonth
-            ? getHistoricalAmount(existingFines, employeesById, employee, level.key, log.date, configuredAmount)
-            : configuredAmount;
-        const sameFine = fine => isSameAttendanceFine(fine, employee.id, log.date, shiftKey);
-        const existingFine = existingFines.find(sameFine);
-        if (existingFine) {
-            if (options.repairReconciledAmounts
-                && String(existingFine.id || '') === `fine-attendance-log-${log.id}`
-                && Number(existingFine.amount) !== amount) {
-                updated.push({ before: existingFine, after: { ...existingFine, amount } });
+        const logs = await tx.attendanceLog.findMany({
+            where: {
+                checkType: { in: ['morning_in', 'afternoon_in'] },
+                ...(Array.isArray(options.logIds) && options.logIds.length > 0
+                    ? { id: { in: options.logIds.map(Number).filter(Number.isInteger) } }
+                    : {}),
+            },
+            orderBy: { timestamp: 'asc' },
+        });
+
+        // Dữ liệu cũ từng cho phép nhiều log cùng ca. Chỉ lần vào đầu tiên mới dùng để tính phạt.
+        const firstLogs = new Map();
+        for (const log of logs) {
+            const key = `${normalizeIdentity(log.faceId)}|${log.date}|${log.checkType}`;
+            if (!firstLogs.has(key)) firstLogs.set(key, log);
+        }
+
+        const created = [];
+        const updated = [];
+        const waived = [];
+        const unmatched = [];
+        let skippedDeleted = 0;
+        const currentMonth = localDateKey(new Date()).slice(0, 7);
+
+        for (const log of firstLogs.values()) {
+            const employee = getEmployeeForLog(employees, log);
+            if (!employee) {
+                unmatched.push({ logId: log.id, date: log.date, faceId: log.faceId, userName: log.userName });
+                continue;
             }
-            continue;
-        }
-        if (created.some(sameFine)) continue;
-        if (deletedFines.some(sameFine)) {
-            skippedDeleted += 1;
-            continue;
-        }
-        const [year, month, day] = log.date.split('-');
-        created.push({
-            id: `fine-attendance-log-${log.id}`,
-            empId: Number(employee.id),
-            type: 'Đi muộn',
-            detail: `Đi muộn ca ${shiftLabel} ${lateMinutes} phút (Mức ${level.label}) — ${Number(day)}/${Number(month)}/${year}`,
-            amount,
-            date: timestamp.toISOString(),
-            source: 'attendance',
-            attendanceLogId: log.id,
-        });
-    }
 
-    if (created.length > 0 || updated.length > 0) {
-        const now = new Date().toISOString();
-        const actor = options.actor || 'system';
-        const nextData = {
-            ...attendanceData,
-            extraFines: [
-                ...existingFines.map(fine => updated.find(item => item.before.id === fine.id)?.after || fine),
-                ...created,
-            ],
-            fineAuditLog: [
-                ...fineAuditLog,
-                ...created.map(fine => ({
-                    id: `flog-reconcile-${fine.attendanceLogId}`,
-                    action: 'create',
-                    timestamp: now,
-                    changedBy: actor,
-                    changedByName: actor === 'system' ? 'Hệ thống chấm công' : actor,
-                    after: fine,
-                    note: `Tự động đối soát phạt đi muộn từ log chấm công #${fine.attendanceLogId}`,
-                })),
-                ...updated.map(item => ({
-                    id: `flog-reconcile-rate-${item.after.attendanceLogId}-${Date.now()}`,
-                    action: 'edit',
-                    timestamp: now,
-                    changedBy: actor,
-                    changedByName: actor === 'system' ? 'Hệ thống chấm công' : actor,
-                    before: item.before,
-                    after: item.after,
-                    note: `Hiệu chỉnh mức phạt đối soát theo biểu phí lịch sử từ log #${item.after.attendanceLogId}`,
-                })),
-            ],
-        };
-        await prisma.appConfig.update({
-            where: { key: 'attendanceData' },
-            data: { value: JSON.stringify(nextData) },
-        });
-    }
+            const isMorning = log.checkType === 'morning_in';
+            const shiftKey = isMorning ? 'sang' : 'chieu';
+            const shiftLabel = isMorning ? 'sáng' : 'chiều';
+            const [startHour, startMinute] = String(isMorning ? config.morningStart : config.afternoonStart).split(':').map(Number);
+            const timestamp = new Date(log.timestamp);
+            const lateMinutes = timestamp.getHours() * 60 + timestamp.getMinutes() - (startHour * 60 + startMinute);
+            if (lateMinutes <= Number(config.graceMinutes || 0)) continue;
 
-    return { created, updated, skippedDeleted, unmatched, checked: firstLogs.size };
+            const level = getFineLevel(lateMinutes);
+            const configuredAmount = getConfiguredAmount(config, employee, level.key);
+            const amount = options.useHistoricalRates && log.date.slice(0, 7) !== currentMonth
+                ? getHistoricalAmount(existingFines, employeesById, employee, level.key, log.date, configuredAmount)
+                : configuredAmount;
+            const sameFine = fine => isSameAttendanceFine(fine, employee.id, log.date, shiftKey);
+            const existingFine = existingFines.find(sameFine);
+            if (existingFine) {
+                if (options.repairReconciledAmounts
+                    && String(existingFine.id || '') === `fine-attendance-log-${log.id}`
+                    && Number(existingFine.amount) !== amount) {
+                    updated.push({ before: existingFine, after: { ...existingFine, amount } });
+                }
+                continue;
+            }
+            if (created.some(sameFine)) continue;
+            if (deletedFines.some(sameFine)) {
+                skippedDeleted += 1;
+                continue;
+            }
+            const [year, month, day] = log.date.split('-');
+            const nextFine = {
+                id: `fine-attendance-log-${log.id}`,
+                empId: Number(employee.id),
+                type: 'Đi muộn',
+                detail: `Đi muộn ca ${shiftLabel} ${lateMinutes} phút (Mức ${level.label}) — ${Number(day)}/${Number(month)}/${year}`,
+                amount,
+                date: timestamp.toISOString(),
+                source: 'attendance',
+                attendanceLogId: log.id,
+            };
+
+            const periodKey = String(log.date || '').slice(0, 7);
+            const waiverAlreadyUsed = fineWaivers.some((waiver) => (
+                waiver?.autoAttendanceWaiver
+                && Number(waiver?.empId) === Number(employee.id)
+                && waiver?.periodKey === periodKey
+            )) || waived.some((waiver) => (
+                Number(waiver.empId) === Number(employee.id) && waiver.periodKey === periodKey
+            ));
+            // The credit is deliberately narrow: it is used automatically for
+            // one 6–15 minute late arrival only, then expires with the month.
+            if (level.key === 'Level1' && !waiverAlreadyUsed) {
+                const logsThroughThisCheckIn = logs.filter((candidate) => (
+                    new Date(candidate.timestamp).getTime() <= new Date(log.timestamp).getTime()
+                ));
+                const rewardSummary = calculateAttendanceRewardSummary({
+                    employee,
+                    employees,
+                    logs: logsThroughThisCheckIn,
+                    workSchedules: attendanceData.workSchedules || [],
+                    leaveRecords: attendanceData.leaveRecords || [],
+                    config,
+                    now: log.timestamp,
+                    periodKey,
+                });
+                const waiver = rewardSummary.waiver;
+                if (waiver?.eligible && lateMinutes <= waiver.lateMaxMinutes) {
+                    const waiverRecord = {
+                        id: `attendance-waiver-${employee.id}-${periodKey}-${log.id}`,
+                        empId: Number(employee.id),
+                        periodKey,
+                        autoAttendanceWaiver: true,
+                        fine: nextFine,
+                        waivedAt: new Date(log.timestamp).toISOString(),
+                        reason: `Đã dùng 1 lượt miễn phạt mức Nhẹ (${Number(config.graceMinutes || 0) + 1}–${waiver.lateMaxMinutes} phút) sau chuỗi đúng giờ ${waiver.streakDays} ngày.`,
+                    };
+                    waived.push(waiverRecord);
+                    continue;
+                }
+            }
+
+            created.push(nextFine);
+        }
+
+        if (created.length > 0 || updated.length > 0 || waived.length > 0) {
+            const now = new Date().toISOString();
+            const actor = options.actor || 'system';
+            const updatedById = new Map(updated.map(item => [item.before.id, item.after]));
+            const nextData = {
+                ...attendanceData,
+                extraFines: [
+                    ...existingFines.map(fine => updatedById.get(fine.id) || fine),
+                    ...created,
+                ],
+                fineWaivers: [...fineWaivers, ...waived],
+                fineAuditLog: [
+                    ...fineAuditLog,
+                    ...created.map(fine => ({
+                        id: `flog-reconcile-${fine.attendanceLogId}`,
+                        action: 'create',
+                        timestamp: now,
+                        changedBy: actor,
+                        changedByName: actor === 'system' ? 'Hệ thống chấm công' : actor,
+                        after: fine,
+                        note: `Tự động đối soát phạt đi muộn từ log chấm công #${fine.attendanceLogId}`,
+                    })),
+                    ...updated.map(item => ({
+                        id: `flog-reconcile-rate-${item.after.attendanceLogId}-${Date.now()}`,
+                        action: 'edit',
+                        timestamp: now,
+                        changedBy: actor,
+                        changedByName: actor === 'system' ? 'Hệ thống chấm công' : actor,
+                        before: item.before,
+                        after: item.after,
+                        note: `Hiệu chỉnh mức phạt đối soát theo biểu phí lịch sử từ log #${item.after.attendanceLogId}`,
+                    })),
+                    ...waived.map(item => ({
+                        id: `flog-attendance-waiver-${item.fine.attendanceLogId}`,
+                        action: 'edit',
+                        timestamp: now,
+                        changedBy: actor,
+                        changedByName: actor === 'system' ? 'Hệ thống chấm công' : actor,
+                        after: item.fine,
+                        note: `Tự động miễn phạt nhẹ từ lượt chuyên cần 7 ngày cho log #${item.fine.attendanceLogId}`,
+                    })),
+                ],
+            };
+            await tx.appConfig.update({
+                where: { key: 'attendanceData' },
+                data: { value: JSON.stringify(nextData) },
+            });
+        }
+
+        return { created, updated, waived, skippedDeleted, unmatched, checked: firstLogs.size };
+    }, { isolationLevel: 'Serializable', timeout: 15000, maxWait: 10000 });
 }
 
 function reconcileLateAttendanceFines(prisma, options = {}) {

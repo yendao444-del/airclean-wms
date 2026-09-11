@@ -17,55 +17,55 @@ datasource db {
 // ========================================
 
 model Category {
-  id          Int       @id @default(autoincrement())
+  id          Int        @id @default(autoincrement())
   name        String
   description String?
   parentId    Int?
-  parent      Category? @relation("CategoryToCategory", fields: [parentId], references: [id])
+  parent      Category?  @relation("CategoryToCategory", fields: [parentId], references: [id])
   children    Category[] @relation("CategoryToCategory")
   products    Product[]
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
 }
 
 model Product {
-  id          Int      @id @default(autoincrement())
-  sku         String   @unique
+  id          Int       @id @default(autoincrement())
+  sku         String    @unique
   barcode     String?
   name        String
   description String?
   categoryId  Int?
   category    Category? @relation(fields: [categoryId], references: [id])
-  
+
   // Pricing
-  price       Float    // Giá bán
-  cost        Float    // Giá vốn
-  
+  price Float // Giá bán
+  cost  Float // Giá vốn
+
   // Inventory
-  stock       Int      @default(0)
-  minStock    Int      @default(0)
-  maxStock    Int?
-  
+  stock    Int  @default(0)
+  minStock Int  @default(0)
+  maxStock Int?
+
   // Additional info
-  unit        String   @default("Cái") // Cái, Hộp, Bộ, Kg, etc.
-  weight      Float?
-  images      String?  // JSON array of image URLs
-  variants    String?  // JSON for variants (size, color, etc.)
-  
+  unit     String  @default("Cái") // Cái, Hộp, Bộ, Kg, etc.
+  weight   Float?
+  images   String? // JSON array of image URLs
+  variants String? // JSON for variants (size, color, etc.)
+
   // Combo Products (Sapo-style)
-  isCombo     Boolean  @default(false)
-  comboItems  String?  // JSON: [{"sku": "1-5D-UNI-TRANG", "quantity": 10}]
-  
-  status      String   @default("active") // active, inactive
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  
+  isCombo    Boolean @default(false)
+  comboItems String? // JSON: [{"sku": "1-5D-UNI-TRANG", "quantity": 10}]
+
+  status    String   @default("active") // active, inactive
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   // Relations
-  orderItems     OrderItem[]
-  purchaseItems  PurchaseItem[]
-  inventoryLogs  InventoryLog[]
-  packagingSpecs PackagingSpec[]
-  productSuppliers ProductSupplier[]
+  orderItems         OrderItem[]
+  purchaseItems      PurchaseItem[]
+  inventoryLogs      InventoryLog[]
+  packagingSpecs     PackagingSpec[]
+  productSuppliers   ProductSupplier[]
   handlingUnitLabels HandlingUnitLabel[]
 }
 
@@ -74,34 +74,34 @@ model Product {
 // ========================================
 
 model ComboProduct {
-  id          Int      @id @default(autoincrement())
-  sku         String   @unique
+  id          Int     @id @default(autoincrement())
+  sku         String  @unique
   barcode     String?
-  name        String   // VD: "COMBO MIX 10 GÓI"
+  name        String // VD: "COMBO MIX 10 GÓI"
   description String?
-  
+
   // Component Items - JSON array
   // [
   //   {productId: 1, variantIndex: 0, sku: "1-5DUNICARE-TRANG", quantity: 5},
   //   {productId: 1, variantIndex: 1, sku: "1-5DUNICARE-DEN", quantity: 5}
   // ]
-  items       String   // JSON array of component items
-  
+  items String // JSON array of component items
+
   // Pricing
-  price       Float    // Giá bán combo
-  cost        Float    // Tổng giá vốn (auto-calculated)
-  
+  price Float // Giá bán combo
+  cost  Float // Tổng giá vốn (auto-calculated)
+
   // Stock - KHÔNG LƯU, auto-calculate từ components
   // stock = MIN(component.stock / component.quantity)
-  
+
   // Additional info
-  unit        String   @default("Bộ")
-  images      String?  // JSON array
-  
-  status      String   @default("active") // active, inactive
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  
+  unit   String  @default("Bộ")
+  images String? // JSON array
+
+  status    String   @default("active") // active, inactive
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   @@index([status])
   @@index([sku])
 }
@@ -111,30 +111,30 @@ model ComboProduct {
 // ========================================
 
 model InventoryLog {
-  id            Int      @id @default(autoincrement())
-  productId     Int
-  product       Product  @relation(fields: [productId], references: [id])
-  
+  id        Int     @id @default(autoincrement())
+  productId Int
+  product   Product @relation(fields: [productId], references: [id])
+
   // Denormalized fields — truy vấn thẻ kho nhanh, không cần JOIN
-  sku           String   // SKU sản phẩm/variant
-  productName   String?  // Tên sản phẩm
-  variantColor  String?  // Màu variant (nếu có)
-  
+  sku          String // SKU sản phẩm/variant
+  productName  String? // Tên sản phẩm
+  variantColor String? // Màu variant (nếu có)
+
   // Loại giao dịch
-  type          String   // purchase, pos_sale, ecom_sale, export, adjustment, return, refund
-  referenceType String?  // NHAP, POS, TMDT, XUAT, TRA, HOAN, CAN_BANG
-  reference     String?  // Mã chứng từ: POS-20260327-001, #PN_001, #SHP_99, etc.
-  
+  type          String // purchase, pos_sale, ecom_sale, export, adjustment, return, refund
+  referenceType String? // NHAP, POS, TMDT, XUAT, TRA, HOAN, CAN_BANG
+  reference     String? // Mã chứng từ: POS-20260327-001, #PN_001, #SHP_99, etc.
+
   // Số liệu
-  quantity      Int      // +300 cho nhập, -5 cho bán
-  oldStock      Int      // Tồn trước giao dịch
-  newStock      Int      // Tồn cuối sau giao dịch (balance_after)
-  
-  note          String?
-  createdAt     DateTime @default(now())
-  createdBy     Int?
-  user          User?    @relation(fields: [createdBy], references: [id])
-  
+  quantity Int // +300 cho nhập, -5 cho bán
+  oldStock Int // Tồn trước giao dịch
+  newStock Int // Tồn cuối sau giao dịch (balance_after)
+
+  note      String?
+  createdAt DateTime @default(now())
+  createdBy Int?
+  user      User?    @relation(fields: [createdBy], references: [id])
+
   @@index([sku, createdAt])
   @@index([type, createdAt])
   @@index([productId, createdAt])
@@ -147,39 +147,39 @@ model InventoryLog {
 // ========================================
 
 model Supplier {
-  id            Int             @id @default(autoincrement())
-  code          String          @unique
-  name          String
-  phone         String?
-  email         String?
-  address       String?
-  taxCode       String?
-  debt          Float           @default(0)
-  
-  status        String          @default("active")
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
-  
-  purchaseOrders PurchaseOrder[]
-  productSuppliers ProductSupplier[]
+  id      Int     @id @default(autoincrement())
+  code    String  @unique
+  name    String
+  phone   String?
+  email   String?
+  address String?
+  taxCode String?
+  debt    Float   @default(0)
+
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  purchaseOrders     PurchaseOrder[]
+  productSuppliers   ProductSupplier[]
   handlingUnitLabels HandlingUnitLabel[]
 }
 
 // Versioned packaging rules. A SKU can have many active forms such as tải,
 // thùng, bao or lốc; each form converts to the SKU base inventory unit.
 model PackagingSpec {
-  id               Int      @id @default(autoincrement())
+  id               Int       @id @default(autoincrement())
   productId        Int
-  product          Product  @relation(fields: [productId], references: [id])
+  product          Product   @relation(fields: [productId], references: [id])
   sku              String
   name             String
   baseUnit         String
   conversionFactor Int
-  version          Int      @default(1)
-  status           String   @default("active") // active | retired
+  version          Int       @default(1)
+  status           String    @default("active") // active | retired
   note             String?
   createdBy        Int?
-  createdAt        DateTime @default(now())
+  createdAt        DateTime  @default(now())
   retiredAt        DateTime?
 
   labels HandlingUnitLabel[]
@@ -211,10 +211,10 @@ model ProductSupplier {
 // Pre-printed physical QR labels. A label is not inventory until quick
 // receiving confirms it; then it is linked to the real HandlingUnit.
 model HandlingUnitLabel {
-  id               Int      @id @default(autoincrement())
-  code             String   @unique
+  id               Int           @id @default(autoincrement())
+  code             String        @unique
   productId        Int
-  product          Product  @relation(fields: [productId], references: [id])
+  product          Product       @relation(fields: [productId], references: [id])
   sku              String
   packagingSpecId  Int
   packagingSpec    PackagingSpec @relation(fields: [packagingSpecId], references: [id])
@@ -222,11 +222,11 @@ model HandlingUnitLabel {
   baseUnit         String
   conversionFactor Int
   supplierId       Int?
-  supplier         Supplier? @relation(fields: [supplierId], references: [id])
-  status           String   @default("printed") // printed | scanning | received | cancelled
+  supplier         Supplier?     @relation(fields: [supplierId], references: [id])
+  status           String        @default("printed") // printed | scanning | received | cancelled
   batchCode        String
   issuedBy         Int?
-  issuedAt         DateTime @default(now())
+  issuedAt         DateTime      @default(now())
   receivedAt       DateTime?
   cancelledAt      DateTime?
   handlingUnitCode String?
@@ -239,22 +239,22 @@ model HandlingUnitLabel {
 // Physical package ledger. Product stock stays the financial inventory total;
 // this table records only stock that has been identified as a physical package.
 model HandlingUnit {
-  id               Int      @id @default(autoincrement())
-  code             String   @unique
-  purchaseOrderId  Int?
-  purchaseItemId   Int?
-  productId        Int
-  sku              String
-  color            String?
-  packagingName    String
-  baseUnit         String
-  conversionFactor Int
-  initialQuantity  Int
+  id                Int      @id @default(autoincrement())
+  code              String   @unique
+  purchaseOrderId   Int?
+  purchaseItemId    Int?
+  productId         Int
+  sku               String
+  color             String?
+  packagingName     String
+  baseUnit          String
+  conversionFactor  Int
+  initialQuantity   Int
   remainingQuantity Int
-  status           String   @default("sealed") // sealed | opened | empty
-  zone             String   @default("Chưa phân khu")
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  status            String   @default("sealed") // sealed | opened | pending_check | empty | split
+  zone              String   @default("Chưa phân khu")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   @@index([sku, status])
   @@index([purchaseOrderId])
@@ -265,34 +265,34 @@ model PurchaseOrder {
   poNumber   String   @unique
   supplierId Int
   supplier   Supplier @relation(fields: [supplierId], references: [id])
-  
-  status     String   @default("pending") // pending, received, cancelled
-  
-  subtotal   Float    @default(0)
-  discount   Float    @default(0)
-  tax        Float    @default(0)
+
+  status String @default("pending") // pending, received, cancelled
+
+  subtotal   Float @default(0)
+  discount   Float @default(0)
+  tax        Float @default(0)
   total      Float
-  paidAmount Float    @default(0)
-  
+  paidAmount Float @default(0)
+
   note       String?
   receivedAt DateTime?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  createdBy  String?  // Username của người tạo
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  createdBy  String? // Username của người tạo
 
   // HĐ VAT nhà cung cấp (tích hợp từ tool Quản lý hóa đơn)
-  vatInvoiceNumber  String?   // Số hóa đơn VAT (VD: "0012345")
-  vatInvoiceDate    DateTime? // Ngày trên hóa đơn VAT
-  vatInvoiceFile    String?   // Path file ảnh/PDF HĐ VAT (local)
-  vatInvoiceDriveUrl String?  // URL Google Drive (backup cloud)
-  vatInvoiceStatus  String    @default("pending") // pending | uploaded | verified
-  
+  vatInvoiceNumber   String? // Số hóa đơn VAT (VD: "0012345")
+  vatInvoiceDate     DateTime? // Ngày trên hóa đơn VAT
+  vatInvoiceFile     String? // Path file ảnh/PDF HĐ VAT (local)
+  vatInvoiceDriveUrl String? // URL Google Drive (backup cloud)
+  vatInvoiceStatus   String    @default("pending") // pending | uploaded | verified
+
   // Chứng từ kho (Phiếu nhập)
-  importReceiptFile     String?   // Path file ảnh/PDF Phiếu nhập kho (local)
-  importReceiptDriveUrl  String?  // URL Google Drive 
-  importReceiptStatus   String    @default("pending") // pending | uploaded
-  
-  items      PurchaseItem[]
+  importReceiptFile     String? // Path file ảnh/PDF Phiếu nhập kho (local)
+  importReceiptDriveUrl String? // Legacy Drive URL hoặc tham chiếu r2:// của Phiếu nhập kho
+  importReceiptStatus   String  @default("pending") // pending | uploaded
+
+  items PurchaseItem[]
 
   @@index([status, createdAt])
   @@index([supplierId, createdAt])
@@ -305,16 +305,16 @@ model PurchaseItem {
   purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
   productId       Int
   product         Product       @relation(fields: [productId], references: [id])
-  
-  quantity        Int
-  price           Float  // Giá nhập
-  subtotal        Float
-  
+
+  quantity Int
+  price    Float // Giá nhập
+  subtotal Float
+
   // Thông tin phân loại (variant)
-  variantSku      String?  // SKU của variant nếu có
-  color           String?  // Màu sắc nếu có
-  
-  createdAt       DateTime @default(now())
+  variantSku String? // SKU của variant nếu có
+  color      String? // Màu sắc nếu có
+
+  createdAt DateTime @default(now())
 
   @@index([purchaseOrderId])
   @@index([productId])
@@ -326,26 +326,26 @@ model PurchaseItem {
 // ========================================
 
 model Customer {
-  id           Int      @id @default(autoincrement())
-  code         String   @unique
-  name         String
-  phone        String?
-  email        String?
-  address      String?
-  
-  loyaltyPoints Int     @default(0)
-  totalSpent   Float    @default(0)
-  totalOrders  Int      @default(0)
-  debt         Float    @default(0)
-  
-  tags         String?  // JSON array
-  notes        String?
-  
-  status       String   @default("active")
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  
-  orders       Order[]
+  id      Int     @id @default(autoincrement())
+  code    String  @unique
+  name    String
+  phone   String?
+  email   String?
+  address String?
+
+  loyaltyPoints Int   @default(0)
+  totalSpent    Float @default(0)
+  totalOrders   Int   @default(0)
+  debt          Float @default(0)
+
+  tags  String? // JSON array
+  notes String?
+
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders Order[]
 }
 
 // ========================================
@@ -353,34 +353,34 @@ model Customer {
 // ========================================
 
 model Order {
-  id            Int      @id @default(autoincrement())
-  orderNumber   String   @unique
-  customerId    Int?
-  customer      Customer? @relation(fields: [customerId], references: [id])
-  
-  source        String   @default("pos") // pos, shopee, tiktok, web
-  status        String   @default("pending") // pending, processing, shipping, completed, cancelled
-  paymentStatus String   @default("unpaid") // unpaid, partial, paid
-  paymentMethod String?  // cash, bank_transfer, card, momo, etc.
-  
+  id          Int       @id @default(autoincrement())
+  orderNumber String    @unique
+  customerId  Int?
+  customer    Customer? @relation(fields: [customerId], references: [id])
+
+  source        String  @default("pos") // pos, shopee, tiktok, web
+  status        String  @default("pending") // pending, processing, shipping, completed, cancelled
+  paymentStatus String  @default("unpaid") // unpaid, partial, paid
+  paymentMethod String? // cash, bank_transfer, card, momo, etc.
+
   // Amounts
-  subtotal      Float
-  discount      Float    @default(0)
-  tax           Float    @default(0)
-  shippingFee   Float    @default(0)
-  total         Float
-  profit        Float    @default(0)
-  
+  subtotal    Float
+  discount    Float @default(0)
+  tax         Float @default(0)
+  shippingFee Float @default(0)
+  total       Float
+  profit      Float @default(0)
+
   trackingNumber String?
-  note          String?
-  
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  createdBy     Int?
-  user          User?    @relation(fields: [createdBy], references: [id])
-  
-  items         OrderItem[]
-  payments      Payment[]
+  note           String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy Int?
+  user      User?    @relation(fields: [createdBy], references: [id])
+
+  items    OrderItem[]
+  payments Payment[]
 
   @@index([source, createdAt])
   @@index([source, status, createdAt])
@@ -388,40 +388,40 @@ model Order {
 }
 
 model OrderItem {
-  id          Int     @id @default(autoincrement())
-  orderId     Int
-  order       Order   @relation(fields: [orderId], references: [id])
-  productId   Int?
-  product     Product? @relation(fields: [productId], references: [id])
-  
+  id        Int      @id @default(autoincrement())
+  orderId   Int
+  order     Order    @relation(fields: [orderId], references: [id])
+  productId Int?
+  product   Product? @relation(fields: [productId], references: [id])
+
   sku         String
   productName String
   variant     String? // JSON for selected variant
-  
-  quantity    Int
-  price       Float   // Giá bán
-  cost        Float   // Giá vốn
-  discount    Float   @default(0)
-  subtotal    Float
-  
-  createdAt   DateTime @default(now())
+
+  quantity Int
+  price    Float // Giá bán
+  cost     Float // Giá vốn
+  discount Float @default(0)
+  subtotal Float
+
+  createdAt DateTime @default(now())
 
   @@index([orderId])
 }
 
 model Payment {
-  id            Int      @id @default(autoincrement())
-  orderId       Int
-  order         Order    @relation(fields: [orderId], references: [id])
-  
-  method        String   // cash, bank_transfer, card, etc.
+  id      Int   @id @default(autoincrement())
+  orderId Int
+  order   Order @relation(fields: [orderId], references: [id])
+
+  method        String // cash, bank_transfer, card, etc.
   amount        Float
   transactionId String?
   note          String?
-  
-  createdAt     DateTime @default(now())
-  createdBy     Int?
-  user          User?    @relation(fields: [createdBy], references: [id])
+
+  createdAt DateTime @default(now())
+  createdBy Int?
+  user      User?    @relation(fields: [createdBy], references: [id])
 }
 
 // ========================================
@@ -429,32 +429,105 @@ model Payment {
 // ========================================
 
 model User {
-  id          Int      @id @default(autoincrement())
-  username    String   @unique
-  password    String   // Hashed with bcrypt
-  fullName    String
-  email       String?
-  phone       String?
-  avatar      String?
-  passwordChangedAt DateTime @default(now())
-  forcePasswordChange Boolean @default(false)
-  loginFailedAttempts Int @default(0)
-  loginLockedUntil DateTime?
-  
-  role        String   @default("staff") // admin, manager, staff
-  permissions String?  // JSON array of permissions
-  status      String   @default("active") // active, inactive
+  id                  Int       @id @default(autoincrement())
+  username            String    @unique
+  password            String // Hashed with bcrypt
+  fullName            String
+  email               String?
+  phone               String?
+  avatar              String?
+  passwordChangedAt   DateTime  @default(now())
+  forcePasswordChange Boolean   @default(false)
+  loginFailedAttempts Int       @default(0)
+  loginLockedUntil    DateTime?
+
+  role        String  @default("staff") // admin, manager, staff
+  permissions String? // JSON array of permissions
+  status      String  @default("active") // active, inactive
 
   lastActiveAt DateTime? // Heartbeat — cập nhật mỗi 2 phút khi đang dùng app
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   // Relations
-  orders         Order[]
-  payments       Payment[]
-  inventoryLogs  InventoryLog[]
-  expenses       Expense[]
+  orders                 Order[]
+  payments               Payment[]
+  inventoryLogs          InventoryLog[]
+  expenses               Expense[]
+  announcementRecipients AnnouncementRecipient[]
+  userNotifications      UserNotification[]
+}
+
+// Company-wide policies and operational announcements. The inbox is global;
+// per-user read/acknowledgement state is stored separately for auditability.
+model Announcement {
+  id                     Int       @id @default(autoincrement())
+  title                  String
+  summary                String
+  content                String
+  category               String    @default("general")
+  severity               String    @default("info")
+  status                 String    @default("published")
+  audienceRoles          String?
+  effectiveAt            DateTime?
+  publishedAt            DateTime  @default(now())
+  expiresAt              DateTime?
+  requireAcknowledgement Boolean   @default(false)
+  version                Int       @default(1)
+  policyCode             String?
+  issuer                 String?
+  createdBy              Int?
+  createdByName          String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  recipients AnnouncementRecipient[]
+
+  @@index([status, publishedAt])
+  @@index([effectiveAt])
+  @@index([category])
+}
+
+model AnnouncementRecipient {
+  id             Int       @id @default(autoincrement())
+  announcementId Int
+  userId         Int
+  deliveredAt    DateTime  @default(now())
+  readAt         DateTime?
+  acknowledgedAt DateTime?
+  snoozedUntil   DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  announcement Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([announcementId, userId])
+  @@index([userId, readAt])
+  @@index([userId, acknowledgedAt])
+}
+
+// Personal, system-generated notifications. These are separate from
+// company-wide announcements so attendance events never leak to another user.
+model UserNotification {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  eventKey  String    @unique
+  title     String
+  summary   String
+  content   String
+  category  String    @default("attendance")
+  severity  String    @default("info")
+  metadata  String?
+  createdAt DateTime  @default(now())
+  readAt    DateTime?
+  updatedAt DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
 }
 
 // ========================================
@@ -463,14 +536,14 @@ model User {
 
 model Expense {
   id          Int      @id @default(autoincrement())
-  category    String   // rent, utilities, salary, etc.
+  category    String // rent, utilities, salary, etc.
   description String
   amount      Float
   date        DateTime
-  
-  createdAt   DateTime @default(now())
-  createdBy   Int?
-  user        User?    @relation(fields: [createdBy], references: [id])
+
+  createdAt DateTime @default(now())
+  createdBy Int?
+  user      User?    @relation(fields: [createdBy], references: [id])
 }
 
 // ========================================
@@ -479,19 +552,19 @@ model Expense {
 
 model EcommerceExport {
   id                    Int      @id @default(autoincrement())
-  customerName          String   // Shopee, TikTok, etc.
-  ecommerceExportCode   String?  // Mã phiếu xuất
-  orderNumber           String?  // Mã đơn hàng / Mã vận đơn
-  ecommerceExportReason String?  // Lý do xuất
+  customerName          String // Shopee, TikTok, etc.
+  ecommerceExportCode   String? // Mã phiếu xuất
+  orderNumber           String? // Mã đơn hàng / Mã vận đơn
+  ecommerceExportReason String? // Lý do xuất
   ecommerceExportDate   DateTime // Ngày xuất
-  items                 String   // JSON array of items
+  items                 String // JSON array of items
   totalAmount           Float    @default(0)
   notes                 String?
   status                String   @default("processing") // processing, completed
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   createdBy             String?
-  pickedBy              String?  // Người đóng gói/pickup
+  pickedBy              String? // Người đóng gói/pickup
 
   @@index([status])
   @@index([customerName])
@@ -511,11 +584,11 @@ model EcommerceExport {
 model ExportOrder {
   id          Int      @id @default(autoincrement())
   exportDate  DateTime // Ngày xuất
-  customer    String   // Tên khách hàng
+  customer    String // Tên khách hàng
   status      String   @default("processing") // processing, completed
   totalAmount Float    @default(0)
   notes       String?
-  items       String   // JSON array of ExportItem
+  items       String // JSON array of ExportItem
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   createdBy   String?
@@ -529,21 +602,21 @@ model ExportOrder {
 // ========================================
 
 model Return {
-  id            Int      @id @default(autoincrement())
-  customerName  String   // Tên khách hàng
-  returnCode    String?  // Mã phiếu trả
-  orderNumber   String?  // Mã đơn hàng gốc
-  returnReason  String?  // Lý do trả
-  returnDate    DateTime // Ngày trả
-  items         String   // JSON array of items
-  totalAmount   Float    @default(0)
-  notes         String?
-  status        String   @default("pending") // pending, approved, completed, rejected
-  packer        String?  // Người đóng gói
-  faultParty    String?  @default("warehouse") // "warehouse" = lỗi kho (ghi phạt), "customer" = lỗi KH (bỏ qua phạt)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  createdBy     String?
+  id           Int      @id @default(autoincrement())
+  customerName String // Tên khách hàng
+  returnCode   String? // Mã phiếu trả
+  orderNumber  String? // Mã đơn hàng gốc
+  returnReason String? // Lý do trả
+  returnDate   DateTime // Ngày trả
+  items        String // JSON array of items
+  totalAmount  Float    @default(0)
+  notes        String?
+  status       String   @default("pending") // pending, approved, completed, rejected
+  packer       String? // Người đóng gói
+  faultParty   String?  @default("warehouse") // "warehouse" = lỗi kho (ghi phạt), "customer" = lỗi KH (bỏ qua phạt)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdBy    String?
 
   @@index([status])
   @@index([returnDate])
@@ -555,19 +628,19 @@ model Return {
 // ========================================
 
 model Refund {
-  id            Int      @id @default(autoincrement())
-  customerName  String   // Tên khách hàng / Sàn
-  refundCode    String?  // Mã phiếu hoàn
-  orderNumber   String?  // Mã đơn hàng / Mã vận đơn
-  refundReason  String?  // Lý do hoàn
-  refundDate    DateTime // Ngày hoàn
-  items         String   // JSON array of items
-  totalAmount   Float    @default(0)
-  notes         String?
-  status        String   @default("processing") // processing, completed
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  createdBy     String?
+  id           Int      @id @default(autoincrement())
+  customerName String // Tên khách hàng / Sàn
+  refundCode   String? // Mã phiếu hoàn
+  orderNumber  String? // Mã đơn hàng / Mã vận đơn
+  refundReason String? // Lý do hoàn
+  refundDate   DateTime // Ngày hoàn
+  items        String // JSON array of items
+  totalAmount  Float    @default(0)
+  notes        String?
+  status       String   @default("processing") // processing, completed
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdBy    String?
 
   @@index([status])
   @@index([refundDate])
@@ -579,12 +652,12 @@ model Refund {
 // ========================================
 
 model StockBalance {
-  id          Int      @id @default(autoincrement())
-  date        DateTime // Ngày cân bằng
-  adjustedBy  String   // Người thực hiện
-  items       String   // JSON array of StockBalanceItem
-  notes       String?
-  createdAt   DateTime @default(now())
+  id         Int      @id @default(autoincrement())
+  date       DateTime // Ngày cân bằng
+  adjustedBy String // Người thực hiện
+  items      String // JSON array of StockBalanceItem
+  notes      String?
+  createdAt  DateTime @default(now())
 
   @@index([date])
 }
@@ -597,7 +670,7 @@ model AppConfig {
   id    Int    @id @default(autoincrement())
   key   String @unique // e.g. 'packerList', 'statusList', 'assigneeList', 'feesConfig', 'configVersion'
   value String // JSON value
-  
+
   updatedAt DateTime @updatedAt
 }
 
@@ -606,39 +679,39 @@ model AppConfig {
 // ========================================
 
 model DailyTask {
-  id            Int      @id @default(autoincrement())
-  title         String   // Tên công việc
-  description   String?  // Mô tả chi tiết
-  
+  id          Int     @id @default(autoincrement())
+  title       String // Tên công việc
+  description String? // Mô tả chi tiết
+
   // Phân công
-  assignee      String?  // Người phụ trách (có thể để trống — nhận việc sau)
-  verifier      String?  // Người xác nhận
-  area          String?  // Khu vực (Shopee/Tiktok, Kho, Văn phòng...)
-  
+  assignee String? // Người phụ trách (có thể để trống — nhận việc sau)
+  verifier String? // Người xác nhận
+  area     String? // Khu vực (Shopee/Tiktok, Kho, Văn phòng...)
+
   // Thời gian
-  dueDate       DateTime // Thời hạn hoàn thành
-  completedAt   DateTime? // Thời điểm hoàn thành
-  
+  dueDate     DateTime // Thời hạn hoàn thành
+  completedAt DateTime? // Thời điểm hoàn thành
+
   // Trạng thái & Ưu tiên
-  status        String   @default("pending") // pending, in_progress, completed, cancelled, overdue
-  priority      String   @default("normal")  // low, normal, high, urgent
-  
+  status   String @default("pending") // pending, in_progress, completed, cancelled, overdue
+  priority String @default("normal") // low, normal, high, urgent
+
   // Loại công việc
-  type          String   @default("daily")   // daily = hàng ngày, assignment = bàn giao
-  
+  type String @default("daily") // daily = hàng ngày, assignment = bàn giao
+
   // Danh mục công việc
-  category      String   @default("general") // general, checkin, inventory, customer_service, cleaning, report, etc.
-  
+  category String @default("general") // general, checkin, inventory, customer_service, cleaning, report, etc.
+
   // Metadata
-  tags          String?  // JSON array: ["CTKM", "THI", "Urgent"]
-  attachments   String?  // JSON array of file paths/URLs
-  note          String?  // Ghi chú
-  
+  tags        String? // JSON array: ["CTKM", "THI", "Urgent"]
+  attachments String? // JSON array of file paths/URLs
+  note        String? // Ghi chú
+
   // Tracking
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  createdBy     String   @default("System")
-  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String   @default("System")
+
   @@index([status, dueDate])
   @@index([assignee, status])
   @@index([dueDate])
@@ -649,30 +722,30 @@ model DailyTask {
 // ========================================
 
 model ActivityLog {
-  id          Int      @id @default(autoincrement())
-  
+  id Int @id @default(autoincrement())
+
   // Phân loại
-  module      String   // 'products', 'returns', 'sales', 'purchases', 'customers'
-  action      String   // 'CREATE', 'UPDATE', 'DELETE'
-  
+  module String // 'products', 'returns', 'sales', 'purchases', 'customers'
+  action String // 'CREATE', 'UPDATE', 'DELETE'
+
   // Liên kết
-  recordId    Int?     // ID của record bị thay đổi
-  recordName  String?  // Tên hiển thị (VD: "Khẩu trang UV", "Đơn #123")
-  
+  recordId   Int? // ID của record bị thay đổi
+  recordName String? // Tên hiển thị (VD: "Khẩu trang UV", "Đơn #123")
+
   // Thay đổi
-  changes     String?  // JSON diff {field: {old: x, new: y}}
-  description String   // Mô tả ngắn gọn: "Cập nhật giá từ 100,000đ → 120,000đ"
-  
+  changes     String? // JSON diff {field: {old: x, new: y}}
+  description String // Mô tả ngắn gọn: "Cập nhật giá từ 100,000đ → 120,000đ"
+
   // Metadata
-  userName    String   @default("Admin")
-  userId      Int?
-  timestamp   DateTime @default(now())
-  
+  userName  String   @default("Admin")
+  userId    Int?
+  timestamp DateTime @default(now())
+
   // Extra
-  severity    String   @default("INFO") // 'INFO', 'WARNING', 'CRITICAL'
-  ipAddress   String?
-  deviceInfo  String?
-  
+  severity   String  @default("INFO") // 'INFO', 'WARNING', 'CRITICAL'
+  ipAddress  String?
+  deviceInfo String?
+
   @@index([module, timestamp])
   @@index([module, recordId])
   @@index([userId, timestamp])
@@ -684,11 +757,11 @@ model ActivityLog {
 
 model UpdateHistory {
   id          Int      @id @default(autoincrement())
-  fromVersion String   // Phiên bản cũ
-  toVersion   String   // Phiên bản mới
+  fromVersion String // Phiên bản cũ
+  toVersion   String // Phiên bản mới
   updatedAt   DateTime @default(now())
-  machine     String?  // Tên máy thực hiện cập nhật
-  notes       String?  // Changelog / ghi chú
+  machine     String? // Tên máy thực hiện cập nhật
+  notes       String? // Changelog / ghi chú
 }
 
 // ========================================
@@ -697,27 +770,27 @@ model UpdateHistory {
 // ========================================
 
 model DailyExpense {
-  id          Int      @id @default(autoincrement())
-  date        DateTime // Ngày chi phí
-  
+  id   Int      @id @default(autoincrement())
+  date DateTime // Ngày chi phí
+
   // Chi phí Ads (biến đổi hàng ngày)
-  shopeeAds   Float    @default(0)
-  tiktokAds   Float    @default(0)
-  facebookAds Float    @default(0)
-  otherAds    Float    @default(0)
-  
+  shopeeAds   Float @default(0)
+  tiktokAds   Float @default(0)
+  facebookAds Float @default(0)
+  otherAds    Float @default(0)
+
   // Chi phí vận chuyển phát sinh
-  shippingCost  Float  @default(0)  // Phí ship gửi
-  returnCost    Float  @default(0)  // Phí ship hoàn + hàng hỏng
-  
+  shippingCost Float @default(0) // Phí ship gửi
+  returnCost   Float @default(0) // Phí ship hoàn + hàng hỏng
+
   // Chi phí khác phát sinh trong ngày
-  otherExpense  Float  @default(0)
-  otherNote     String? // Ghi chú chi phí khác
-  
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  createdBy   String?
-  
+  otherExpense Float   @default(0)
+  otherNote    String? // Ghi chú chi phí khác
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String?
+
   @@unique([date])
   @@index([date])
 }
@@ -727,48 +800,48 @@ model DailyExpense {
 // ========================================
 
 model EInvoice {
-  id              Int      @id @default(autoincrement())
-  orderId         String   @unique  // Mã đơn hàng sàn TMĐT — UNIQUE chống trùng
-  platform        String   // Shopee, TikTok
-  customerName    String
-  customerPhone   String?
-  items           String   // JSON array of items [{productName, sku, variation, quantity, unitPrice, total}]
-  totalQuantity   Int      @default(1)
-  totalAmount     Float    @default(0)
-  deliveryDate    DateTime // Ngày giao hàng
+  id            Int      @id @default(autoincrement())
+  orderId       String   @unique // Mã đơn hàng sàn TMĐT — UNIQUE chống trùng
+  platform      String // Shopee, TikTok
+  customerName  String
+  customerPhone String?
+  items         String // JSON array of items [{productName, sku, variation, quantity, unitPrice, total}]
+  totalQuantity Int      @default(1)
+  totalAmount   Float    @default(0)
+  deliveryDate  DateTime // Ngày giao hàng
 
   // Thông tin hóa đơn
-  invoiceNumber   String?  // Số HĐĐT (HD0000136)
-  invoiceDate     DateTime? // Ngày xuất HĐ
-  taxCode         String?  // Mã tra cứu thuế
-  templateCode    String?  // Mẫu số HĐ (VD: 1/001) — MISA cần
-  invoiceSeries   String?  // Ký hiệu HĐ (VD: 2C25TTU) — MISA cần
+  invoiceNumber String? // Số HĐĐT (HD0000136)
+  invoiceDate   DateTime? // Ngày xuất HĐ
+  taxCode       String? // Mã tra cứu thuế
+  templateCode  String? // Mẫu số HĐ (VD: 1/001) — MISA cần
+  invoiceSeries String? // Ký hiệu HĐ (VD: 2C25TTU) — MISA cần
 
   // Điều chỉnh / Hủy hóa đơn
-  refInvoiceId    Int?     // ID HĐ gốc (khi đây là HĐ điều chỉnh/thay thế)
-  adjustmentType  String?  // 'adjustment' | 'cancellation' | 'replacement'
+  refInvoiceId     Int? // ID HĐ gốc (khi đây là HĐ điều chỉnh/thay thế)
+  adjustmentType   String? // 'adjustment' | 'cancellation' | 'replacement'
   adjustmentReason String? // Lý do điều chỉnh/hủy (bắt buộc theo CQT)
-  adjustmentDate  DateTime? // Ngày điều chỉnh
+  adjustmentDate   DateTime? // Ngày điều chỉnh
 
   // NĐ 117/2025 — Sàn khấu trừ thuế thay
   isTaxDeductedByPlatform Boolean @default(false) // Sàn đã khấu trừ thuế 1.5%?
-  platformTaxRate  Float?   // Tỷ lệ khấu trừ (VD: 0.015 = 1.5%)
-  platformTaxAmount Float?  // Số tiền thuế sàn đã khấu trừ
+  platformTaxRate         Float? // Tỷ lệ khấu trừ (VD: 0.015 = 1.5%)
+  platformTaxAmount       Float? // Số tiền thuế sàn đã khấu trừ
 
   // Loại HĐ (TT 32/2025)
-  invoiceType     String?  // pos_receipt (máy tính tiền), b2b, ecommerce_export
+  invoiceType String? // pos_receipt (máy tính tiền), b2b, ecommerce_export
 
   // Lưu trữ XML (NĐ 70/2025 — 10 năm)
-  xmlFilePath     String?  // Path file XML gốc (nguyên trạng, không chỉnh sửa)
-  pdfFilePath     String?  // Path file PDF hóa đơn
+  xmlFilePath String? // Path file XML gốc (nguyên trạng, không chỉnh sửa)
+  pdfFilePath String? // Path file PDF hóa đơn
 
   // Metadata
-  sourceFile      String?  // Tên file Excel gốc
-  batchId         String?  // ID đợt xuất
-  status          String   @default("pending") // pending, issued, adjusted, replaced (NĐ 70/2025: không được hủy)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  createdBy       String?
+  sourceFile String? // Tên file Excel gốc
+  batchId    String? // ID đợt xuất
+  status     String   @default("pending") // pending, issued, adjusted, replaced (NĐ 70/2025: không được hủy)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  createdBy  String?
 
   @@index([status])
   @@index([platform])
@@ -784,31 +857,76 @@ model EInvoice {
 // ========================================
 
 model AttendanceLog {
-  id          Int      @id @default(autoincrement())
-  userId      Int?     // FK → User (null nếu nhận diện thất bại)
-  userName    String   // Tên nhân viên (lưu snapshot)
-  faceId      String   // Tên file encoding: "nguyen_van_a"
+  id       Int    @id @default(autoincrement())
+  userId   Int? // FK → User (null nếu nhận diện thất bại)
+  userName String // Tên nhân viên (lưu snapshot)
+  faceId   String // Tên file encoding: "nguyen_van_a"
 
-  checkType   String   // morning_in | morning_out | afternoon_in | evening_out
-  confidence  Float    // Độ tin cậy nhận diện (0.0 - 1.0)
+  checkType  String // morning_in | morning_out | afternoon_in | evening_out
+  confidence Float // Độ tin cậy nhận diện (0.0 - 1.0)
 
-  date        String   // "2026-04-03" — để query theo ngày dễ hơn
-  timestamp   DateTime @default(now())
+  date      String // "2026-04-03" — để query theo ngày dễ hơn
+  timestamp DateTime @default(now())
 
-  note        String?  // Ghi chú thêm nếu cần
+  // Device snapshot used for the observe-only attendance rollout.
+  deviceId       String?
+  deviceName     String?
+  devicePublicIp String?
+
+  note String? // Ghi chú thêm nếu cần
 
   @@index([date])
   @@index([userId])
   @@index([faceId, date])
+  @@index([deviceId, timestamp])
+}
+
+// Attendance workstations discovered automatically when the desktop app is
+// opened. Admin approval is intentionally separate from discovery.
+model AttendanceDevice {
+  id              Int      @id @default(autoincrement())
+  deviceId        String   @unique
+  deviceCode      String   @unique
+  machineName     String
+  requesterUserId Int?
+  requesterName   String?
+  publicKey       String?
+  keyFingerprint  String?
+  keyProvider     String   @default("windows-dpapi")
+  tpmAvailable    Boolean  @default(false)
+  macAddress      String?
+  publicIp        String?
+  networkName     String?
+  networkVerified Boolean  @default(false)
+  appVersion      String?
+  platform        String?
+  status          String   @default("unregistered")
+  firstSeenAt     DateTime @default(now())
+  lastSeenAt      DateTime @default(now())
+  approvedAt      DateTime?
+  approvedById    Int?
+  approvedByName  String?
+  rejectedAt      DateTime?
+  rejectedById    Int?
+  rejectedByName  String?
+  revokedAt       DateTime?
+  revokedById     Int?
+  revokedByName   String?
+  note            String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status, lastSeenAt])
+  @@index([requesterUserId])
 }
 
 model FaceProfile {
-  id          Int      @id @default(autoincrement())
-  faceId      String   @unique // "nguyen_van_a" — tên file encoding
-  userId      Int?     // FK → User
-  userName    String
-  photoCount  Int      @default(0) // Số ảnh đã đăng ký
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id         Int      @id @default(autoincrement())
+  faceId     String   @unique // "nguyen_van_a" — tên file encoding
+  userId     Int? // FK → User
+  userName   String
+  photoCount Int      @default(0) // Số ảnh đã đăng ký
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }

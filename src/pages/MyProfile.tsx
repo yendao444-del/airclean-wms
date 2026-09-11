@@ -74,11 +74,16 @@ export default function MyProfile() {
         try {
             const result = await window.electronAPI.users.changePassword({
                 userId: user.id,
-                oldPassword: user.mustChangePassword ? '' : values.oldPassword,
+                oldPassword: user.canChangePasswordWithoutCurrent ? '' : values.oldPassword,
                 newPassword: values.newPassword,
             });
             if (!result.success) throw new Error(result.error || 'Không thể đổi mật khẩu.');
-            updateCurrentUser({ ...user, mustChangePassword: false, passwordChangedAt: new Date().toISOString() });
+            updateCurrentUser({
+                ...user,
+                mustChangePassword: false,
+                canChangePasswordWithoutCurrent: false,
+                passwordChangedAt: new Date().toISOString(),
+            });
             passwordForm.resetFields();
             setPasswordOpen(false);
             message.success('Đã đổi mật khẩu.');
@@ -96,7 +101,7 @@ export default function MyProfile() {
                 <div style={{ marginTop: 6, color: '#64748b', fontSize: 14 }}>Quản lý thông tin tài khoản và bảo mật của bạn.</div>
             </div>
 
-            {user.mustChangePassword && (
+            {user.canChangePasswordWithoutCurrent && (
                 <Alert
                     type="warning"
                     showIcon
@@ -171,7 +176,7 @@ export default function MyProfile() {
                 destroyOnClose
             >
                 <Form form={passwordForm} layout="vertical" onFinish={changePassword} style={{ marginTop: 20 }}>
-                    {!user.mustChangePassword && (
+                    {!user.canChangePasswordWithoutCurrent && (
                         <Form.Item label="Mật khẩu hiện tại" name="oldPassword" rules={[{ required: true, message: 'Nhập mật khẩu hiện tại.' }]}>
                             <Input.Password prefix={<LockOutlined />} />
                         </Form.Item>

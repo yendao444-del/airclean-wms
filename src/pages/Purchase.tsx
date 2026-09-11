@@ -24,6 +24,7 @@ import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, EyeOutlined
 import type { ColumnsType } from 'antd/es/table';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
+import { compressImportReceiptJpeg } from '../lib/importReceiptImage';
 import dayjs from 'dayjs';
 
 const { Title } = Typography;
@@ -160,6 +161,7 @@ interface Purchase {
     status: string;
     createdBy?: string; // 👤 Người tạo phiếu
     createdAt: Date;
+    updatedAt?: Date | string;
     vatGroupId?: string | null;
     vatGroupNote?: string;
     vatGroupPurchaseIds?: number[];
@@ -168,6 +170,7 @@ interface Purchase {
     vatGroupInvoiceNumber?: string | null;
     vatGroupInvoiceDate?: string | null;
     vatGroupDriveUrl?: string | null;
+    vatGroupUpdatedAt?: string | null;
     vatGroupStatus?: string | null;
     vatGroupVatId?: string | null;
     vatGroupVatFileName?: string | null;
@@ -426,6 +429,7 @@ export default function PurchasePage() {
     const [vatPurchaseId, setVatPurchaseId] = useState<number | null>(null);
     const [vatCompanyGroup, setVatCompanyGroup] = useState<string | null>(null);
     const [vatGroupUploadId, setVatGroupUploadId] = useState<string | null>(null);
+    const [vatGroupUpdatedAt, setVatGroupUpdatedAt] = useState<string | null>(null);
     const [vatForm] = Form.useForm();
     const [vatFiles, setVatFiles] = useState<File[]>([]);
     const [vatUploading, setVatUploading] = useState(false);
@@ -446,7 +450,7 @@ export default function PurchasePage() {
     const [importReceiptFiles, setImportReceiptFiles] = useState<any[]>([]);
     const [importReceiptUploading, setImportReceiptUploading] = useState(false);
 
-    // 👁️ State cho xem Phiếu Nhập Kho (preview)
+    // 👁️ State xem Phiếu Nhập Kho: R2 trả data URL; Drive chỉ dùng cho bản cũ.
     const [importReceiptPreviewVisible, setImportReceiptPreviewVisible] = useState(false);
     const [importReceiptPreviewData, setImportReceiptPreviewData] = useState<{
         driveUrls?: string[];
@@ -896,6 +900,11 @@ export default function PurchasePage() {
         try {
             const result = await (window.electronAPI as any).purchases.createVatGroup({
                 purchaseIds,
+                purchaseRevisions: Object.fromEntries(
+                    purchases
+                        .filter(purchase => purchaseIds.includes(purchase.id))
+                        .map(purchase => [String(purchase.id), purchase.updatedAt]),
+                ),
                 note: vatGroupNote.trim(),
             });
             if (result.success) {
@@ -904,6 +913,7 @@ export default function PurchasePage() {
                 setVatGroupNote('');
                 setSelectedRowKeys([]);
                 setVatGroupUploadId(result.data?.vatGroupId || null);
+                setVatGroupUpdatedAt(result.data?.updatedAt || null);
                 setVatPurchaseId(purchaseIds[0] || null);
                 setVatFiles([]);
                 vatForm.resetFields();
@@ -932,7 +942,10 @@ export default function PurchasePage() {
             okText: 'Tách nhóm',
             cancelText: 'Hủy',
             onOk: async () => {
-                const result = await (window.electronAPI as any).purchases.removeVatGroup({ purchaseId: purchase.id });
+                const result = await (window.electronAPI as any).purchases.removeVatGroup({
+                    purchaseId: purchase.id,
+                    expectedUpdatedAt: purchase.updatedAt,
+                });
                 if (result.success) {
                     message.success('Đã tách phiếu khỏi nhóm HĐ gộp');
                     loadPurchases();
@@ -969,11 +982,11 @@ export default function PurchasePage() {
                 return { ...item, packagingLevels: levels, packagingCounts: getPackagingCounts(item, levels) };
             });
             const totalAmount = itemsForSave.reduce((sum, item) => sum + item.total, 0);
-            // Send the mandatory warehouse receipt with the create request.
-            // The backend also validates this so an older renderer cannot
-            // create a receipt without supporting evidence.
-            const importReceiptFiles = !editingPurchase
-                ? await Promise.all(pendingImportFiles.map(file => compressImageToBase64(file)))
+            // Send a new warehouse receipt with the guarded purchase write.
+            // Creation requires it; editing includes it only when replacing
+            // the existing document.
+            const importReceiptFiles = pendingImportFiles.length > 0
+                ? await Promise.all(pendingImportFiles.map(file => compressImportReceiptJpeg(file)))
                 : undefined;
 
             const payload = {
@@ -983,6 +996,7 @@ export default function PurchasePage() {
                 totalAmount,
                 ...(importReceiptFiles ? { importReceiptFiles } : {}),
                 ...(!editingPurchase ? { idempotencyKey: purchaseCreateKeyRef.current } : {}),
+                ...(editingPurchase ? { expectedUpdatedAt: editingPurchase.updatedAt } : {}),
                 createdBy: editingPurchase ? editingPurchase.createdBy : currentUser,
                 // On edit, false flags mean “unchanged”, not “clear VAT”.
                 isThht: values.isThht ? true : (editingPurchase ? undefined : false),
@@ -998,41 +1012,41 @@ export default function PurchasePage() {
 
             if (result.success) {
                 const savedId = result.data?.id || editingPurchase?.id;
-
-                // Existing receipts may receive a replacement document after
-                // an edit. New receipts already uploaded theirs atomically
-                // during creation and therefore skip this background step.
-                if (editingPurchase && savedId && pendingImportFiles.length > 0) {
-                    message.info('Phiếu đã lưu. Đang upload Phiếu Nhập Kho ở nền...');
-                    void (async () => {
-                    try {
-                        const filesData = await Promise.all(pendingImportFiles.map(f => compressImageToBase64(f)));
-                        const upResult = await (window.electronAPI as any).purchases.uploadImportReceipt({ purchaseId: savedId, files: filesData });
-                        if (upResult.success) message.success('✅ Đã upload Phiếu Nhập Kho!');
-                        else message.warning('Upload Phiếu Nhập Kho chưa thành công, vào phiếu để thử lại.');
-                    } catch { message.warning('Lỗi upload Phiếu Nhập Kho.'); }
-                    finally { loadPurchases(); }
-                    })();
-                }
+                let documentRevision = result.data?.updatedAt || editingPurchase?.updatedAt;
+                let documentUploadFailed = false;
 
                 // 📤 Auto-upload HĐ VAT nếu có file pending
                 if (savedId && pendingVatFiles.length > 0) {
-                    message.info('Phiếu đã lưu. Đang upload HĐ VAT ở nền...');
-                    void (async () => {
                     try {
                         const filesData = await Promise.all(pendingVatFiles.map(f => compressImageToBase64(f)));
                         const now = dayjs();
                         const invoiceNumber = pendingVatNumber || `VAT-PO${savedId}-${now.format('YYMMDDHHmm')}`;
                         const invoiceDate = (pendingVatDate || now).format('YYYY-MM-DD');
-                        const upResult = await (window.electronAPI as any).purchases.uploadVATInvoice({ purchaseId: savedId, invoiceNumber, invoiceDate, files: filesData });
-                        if (upResult.success) message.success('✅ Đã upload HĐ VAT!');
-                        else message.warning('Upload HĐ VAT chưa thành công, vào phiếu để thử lại.');
-                    } catch { message.warning('Lỗi upload HĐ VAT.'); }
-                    finally { loadPurchases(); }
-                    })();
+                        const upResult = await (window.electronAPI as any).purchases.uploadVATInvoice({
+                            purchaseId: savedId,
+                            invoiceNumber,
+                            invoiceDate,
+                            files: filesData,
+                            expectedUpdatedAt: documentRevision,
+                        });
+                        if (upResult.success) {
+                            documentRevision = upResult.data?.updatedAt || documentRevision;
+                            message.success('✅ Đã upload HĐ VAT!');
+                        } else {
+                            documentUploadFailed = true;
+                            message.warning(upResult.error || 'Upload HĐ VAT chưa thành công, vào phiếu để thử lại.');
+                        }
+                    } catch {
+                        documentUploadFailed = true;
+                        message.warning('Lỗi upload HĐ VAT.');
+                    }
                 }
 
-                message.success(editingPurchase ? 'Đã cập nhật phiếu nhập!' : 'Đã tạo phiếu nhập mới!');
+                if (documentUploadFailed) {
+                    message.warning('Phiếu nhập đã lưu nhưng HĐ VAT chưa upload thành công.');
+                } else {
+                    message.success(editingPurchase ? 'Đã cập nhật phiếu nhập!' : 'Đã tạo phiếu nhập mới!');
+                }
                 setModalVisible(false);
                 // The detail modal holds a snapshot of the old receipt. Close
                 // it after saving so it cannot keep showing stale quantities;
@@ -1462,7 +1476,11 @@ export default function PurchasePage() {
             cancelText: 'Hủy',
             okButtonProps: { style: revert ? {} : { background: '#722ed1', borderColor: '#722ed1' } },
             onOk: async () => {
-                const result = await (window.electronAPI as any).purchases.markAsThht(purchase.id, revert);
+                const result = await (window.electronAPI as any).purchases.markAsThht(
+                    purchase.id,
+                    revert,
+                    purchase.updatedAt,
+                );
                 if (result.success) {
                     message.success(revert ? '↩️ Đã hoàn tác, phiếu trở về Chưa có HĐ' : '📦 Đã đánh dấu là Đơn THHT');
                     loadPurchases();
@@ -1479,6 +1497,7 @@ export default function PurchasePage() {
         setVatPurchaseId(purchaseId);
         setVatCompanyGroup(companyGroup || null);
         setVatGroupUploadId(record?.vatGroupId || null);
+        setVatGroupUpdatedAt(record?.vatGroupUpdatedAt || null);
         setVatFiles([]);
         vatForm.resetFields();
 
@@ -1521,6 +1540,7 @@ export default function PurchasePage() {
         setVatUploading(true);
         try {
             const filesData = await Promise.all(vatFiles.map(file => compressImageToBase64(file)));
+            const currentPurchase = purchases.find(purchase => purchase.id === vatPurchaseId);
 
             if (vatCompanyGroup) {
                 const uploadCompanyVATInvoice = (window.electronAPI as any)?.purchases?.uploadCompanyVATInvoice;
@@ -1534,6 +1554,7 @@ export default function PurchasePage() {
                     invoiceNumber: values.invoiceNumber,
                     invoiceDate: values.invoiceDate.format('YYYY-MM-DD'),
                     files: filesData,
+                    expectedUpdatedAt: currentPurchase?.updatedAt,
                 });
                 if (!result.success) {
                     message.error(result.error || 'Lỗi upload hóa đơn VAT');
@@ -1549,9 +1570,15 @@ export default function PurchasePage() {
 
             // Nếu là nhóm mới → tạo nhóm trước, rồi mới upload
             let effectiveGroupId = vatGroupUploadId;
+            let effectiveGroupUpdatedAt = vatGroupUpdatedAt || currentPurchase?.vatGroupUpdatedAt || null;
             if (isNewGroup) {
                 const groupResult = await (window.electronAPI as any).purchases.createVatGroup({
                     purchaseIds: vatGroupPendingIds,
+                    purchaseRevisions: Object.fromEntries(
+                        purchases
+                            .filter(purchase => vatGroupPendingIds.includes(purchase.id))
+                            .map(purchase => [String(purchase.id), purchase.updatedAt]),
+                    ),
                     note: '',
                 });
                 if (!groupResult.success) {
@@ -1559,10 +1586,11 @@ export default function PurchasePage() {
                     return;
                 }
                 effectiveGroupId = groupResult.data?.vatGroupId;
+                effectiveGroupUpdatedAt = groupResult.data?.updatedAt || null;
             }
 
             const isGroupUpload = !!effectiveGroupId;
-            const existingPurchase = purchases.find(p => p.id === vatPurchaseId) as any;
+            const existingPurchase = currentPurchase as any;
             const isEdit = !isGroupUpload && !!existingPurchase?.vatInvoiceNumber;
 
             const payload: any = isGroupUpload
@@ -1571,12 +1599,14 @@ export default function PurchasePage() {
                     invoiceNumber: values.invoiceNumber || effectiveGroupId,
                     invoiceDate: values.invoiceDate.format('YYYY-MM-DD'),
                     files: filesData,
+                    expectedGroupUpdatedAt: effectiveGroupUpdatedAt,
                 }
                 : {
                     purchaseId: vatPurchaseId,
                     invoiceNumber: values.invoiceNumber || `VAT-PO${vatPurchaseId}-${dayjs().format('YYMMDDHHmm')}`,
                     invoiceDate: values.invoiceDate.format('YYYY-MM-DD'),
                     files: filesData,
+                    expectedUpdatedAt: existingPurchase?.updatedAt,
                 };
 
             const result = await (window.electronAPI as any).purchases[isGroupUpload ? 'uploadVatGroupInvoice' : 'uploadVATInvoice'](payload);
@@ -1596,6 +1626,7 @@ export default function PurchasePage() {
                 }
                 setVatGroupPendingIds([]);
                 setVatGroupUploadId(null);
+                setVatGroupUpdatedAt(null);
                 setSelectedRowKeys([]);
                 setVatModalVisible(false);
                 loadPurchases();
@@ -1615,7 +1646,13 @@ export default function PurchasePage() {
             message.error('Ứng dụng chưa nạp chức năng VAT theo công ty. Vui lòng đóng hẳn ứng dụng và mở lại.');
             return;
         }
-        const result = await setCompanyVatStatus({ purchaseId, companyGroup, status });
+        const purchase = purchases.find(item => item.id === purchaseId);
+        const result = await setCompanyVatStatus({
+            purchaseId,
+            companyGroup,
+            status,
+            expectedUpdatedAt: purchase?.updatedAt,
+        });
         if (result.success) {
             message.success(status === 'no_vat' ? `Đã đánh dấu ${companyGroup} không có VAT` : `Đã mở lại trạng thái VAT cho ${companyGroup}`);
             loadPurchases();
@@ -1642,13 +1679,13 @@ export default function PurchasePage() {
             okText: revert ? 'Mở lại' : 'Xác nhận',
             cancelText: 'Hủy',
             onOk: async () => {
-                const results = await Promise.all(companyNames.map(companyGroup => setCompanyVatStatus({
+                const result = await setCompanyVatStatus({
                     purchaseId: purchase.id,
-                    companyGroup,
+                    companyGroups: companyNames,
                     status: revert ? 'pending' : 'no_vat',
-                })));
-                const failed = results.find(result => !result?.success);
-                if (failed) message.error(failed.error || 'Không thể cập nhật trạng thái VAT');
+                    expectedUpdatedAt: purchase.updatedAt,
+                });
+                if (!result?.success) message.error(result?.error || 'Không thể cập nhật trạng thái VAT');
                 else {
                     message.success(revert ? 'Đã mở lại nhập HĐ VAT cho toàn bộ công ty' : 'Đã đánh dấu Không VAT cho toàn bộ công ty');
                     loadPurchases();
@@ -1702,39 +1739,29 @@ export default function PurchasePage() {
 
         setImportReceiptUploading(true);
         try {
-            const filesData = await Promise.all(importReceiptFiles.map(file => compressImageToBase64(file)));
+            const filesData = await Promise.all(importReceiptFiles.map(file => compressImportReceiptJpeg(file)));
 
             const payload: any = {
                 purchaseId: importReceiptPurchaseId,
                 files: filesData,
+                expectedUpdatedAt: purchases.find(item => item.id === importReceiptPurchaseId)?.updatedAt,
             };
 
             const result = await (window.electronAPI as any).purchases.uploadImportReceipt(payload);
 
             if (result.success) {
-                message.success('✅ Đã upload Phiếu Nhập Kho thành công!');
+                message.success('✅ Đã lưu Phiếu Nhập Kho lên Cloudflare R2!');
                 setImportReceiptModalVisible(false);
                 const receiptPatch = {
                     importReceiptStatus: 'uploaded',
                     importReceiptFile: null,
-                    importReceiptDriveUrl: result.data.driveUrls.join('\n'),
+                    importReceiptDriveUrl: (result.data.storageReferences || []).join('\n'),
                 };
                 setPurchases(current => current.map(item => item.id === importReceiptPurchaseId ? { ...item, ...receiptPatch } : item));
                 setDetailModalRecord(current => current?.id === importReceiptPurchaseId ? { ...current, ...receiptPatch } : current);
                 await loadPurchases();
             } else {
-                if (result.reauthRequired) {
-                    Modal.error({
-                        title: 'Cần kết nối lại Google Drive',
-                        content: result.error || 'Phiên Google Drive trên máy này không còn hợp lệ. Vui lòng liên hệ admin để kết nối lại rồi thử tải phiếu lần nữa.',
-                        okText: 'Đã hiểu',
-                    });
-                } else {
-                    message.error(result.error || 'Lỗi upload Phiếu Nhập');
-                }
-                const receiptPatch = { importReceiptStatus: 'pending', importReceiptFile: null, importReceiptDriveUrl: null };
-                setPurchases(current => current.map(item => item.id === importReceiptPurchaseId ? { ...item, ...receiptPatch } : item));
-                setDetailModalRecord(current => current?.id === importReceiptPurchaseId ? { ...current, ...receiptPatch } : current);
+                message.error(result.error || 'Không thể lưu Phiếu Nhập Kho lên Cloudflare R2');
                 await loadPurchases();
             }
         } catch (err: any) {
@@ -2722,7 +2749,7 @@ export default function PurchasePage() {
                         <Form.Item name="isNoVat" valuePropName="checked" hidden><Checkbox /></Form.Item>
 
                         {/* Hidden native file inputs */}
-                        <input type="file" ref={importFileInputRef} multiple accept="image/*,.pdf" style={{ display: 'none' }}
+                        <input type="file" ref={importFileInputRef} multiple accept=".jpg,.jpeg,image/jpeg" style={{ display: 'none' }}
                             onChange={(e) => { if (e.target.files) { setPendingImportFiles(prev => [...prev, ...Array.from(e.target.files!)]); e.target.value = ''; } }} />
                         <input type="file" ref={vatFileInputRef} multiple accept="image/*,.pdf" style={{ display: 'none' }}
                             onChange={(e) => { if (e.target.files) { setPendingVatFiles(prev => [...prev, ...Array.from(e.target.files!)]); e.target.value = ''; setVatInlineVisible(false); } }} />
@@ -3362,6 +3389,7 @@ export default function PurchasePage() {
                 <div style={{ marginBottom: 16 }}>
                     <Upload.Dragger
                         multiple
+                        accept=".jpg,.jpeg,image/jpeg"
                         beforeUpload={(file) => {
                             setImportReceiptFiles(prev => [...prev, file]);
                             return false; 
@@ -3375,6 +3403,7 @@ export default function PurchasePage() {
                             <UploadOutlined style={{ color: '#1890ff' }} />
                         </p>
                         <p className="ant-upload-text">Nhấp hoặc kéo thả file Phiếu Nhập Kho vào đây</p>
+                        <p className="ant-upload-hint">Chỉ JPG/JPEG · tự nén xuống tối đa 2 MB/file · lưu trên Cloudflare R2</p>
                     </Upload.Dragger>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
@@ -3398,6 +3427,7 @@ export default function PurchasePage() {
                 onCancel={() => {
                     setVatGroupPendingIds([]);
                     setVatGroupUploadId(null);
+                    setVatGroupUpdatedAt(null);
                     setVatCompanyGroup(null);
                     setVatModalVisible(false);
                 }}
@@ -3491,7 +3521,7 @@ export default function PurchasePage() {
                 </Form>
             </Modal>
 
-            {/* === 👁️ MODAL XEM PHIẾU NHẬP KHO — Hỗ trợ Drive URL + file local === */}
+            {/* === 👁️ MODAL XEM PHIẾU NHẬP KHO — R2 + Drive legacy === */}
             <Modal
                 title={
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -3551,7 +3581,7 @@ export default function PurchasePage() {
                                     onClick={() => window.open(importReceiptPreviewData!.driveUrls![importReceiptPreviewIndex], '_blank')}
                                     style={{ background: '#1890ff' }}
                                 >
-                                    Mở trên Google Drive
+                                    Mở bản cũ trên Google Drive
                                 </Button>
                             )}
                             <Button onClick={() => { setImportReceiptPreviewVisible(false); setImportReceiptPreviewData(null); setImportReceiptPreviewIndex(0); }}>
@@ -3578,7 +3608,7 @@ export default function PurchasePage() {
                     </div>
                 )}
                 <div style={{ width: '100%', height: '70vh', borderRadius: 8, overflow: 'hidden', border: '2px solid #f0f0f0', background: '#fafafa' }}>
-                    {/* Drive URL preview */}
+                    {/* Drive preview chỉ dành cho chứng từ cũ trước khi chuyển R2. */}
                     {importReceiptPreviewData?.driveUrls?.[importReceiptPreviewIndex] && (
                         <iframe
                             src={importReceiptPreviewData.driveUrls[importReceiptPreviewIndex].replace('/view', '/preview')}

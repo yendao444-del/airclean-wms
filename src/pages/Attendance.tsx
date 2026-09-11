@@ -40,6 +40,7 @@ import {
     Collapse,
     Popover,
     Radio,
+    Switch,
 } from 'antd';
 import {
     CheckCircleOutlined,
@@ -95,6 +96,7 @@ import packingTigerMascot from '../assets/packing/tiger-mascot.jpg';
 import packingRaceLeaderFox from '../assets/packing/race-leader-fox.png';
 import packingRaceRunnerPanda from '../assets/packing/race-runner-panda.png';
 import packingRaceWinnerHeader from '../assets/packing/race-previous-winner-header.png';
+import attendanceRulesBackground from '../assets/attendance/attendance-rules-calendar.png';
 
 // Dùng chung Audio Context trong màn hình chấm công để phát âm báo Ting.
 let sharedAudioCtx: AudioContext | null = null;
@@ -1547,9 +1549,9 @@ const isPublicHoliday = (date: dayjs.Dayjs): string | null => {
 // ===== PILL COMPONENT =====
 const ShiftPill = ({ label, status, time, outTime }: { label: string; status: 0 | 1 | 2; time?: string; outTime?: string }) => {
     const config = {
-        0: { bg: '#f5f5f5', border: '#e8e8e8', color: '#bfbfbf', icon: <MinusCircleOutlined style={{ fontSize: 10 }} />, tooltip: 'Nghỉ' },
-        1: { bg: '#f6ffed', border: '#b7eb8f', color: '#52c41a', icon: <CheckCircleOutlined style={{ fontSize: 10 }} />, tooltip: 'Đúng giờ' },
-        2: { bg: '#fff7e6', border: '#ffd591', color: '#fa8c16', icon: <ClockCircleOutlined style={{ fontSize: 10 }} />, tooltip: 'Đi muộn' },
+        0: { className: 'is-rest', tooltip: 'Nghỉ' },
+        1: { className: 'is-on-time', tooltip: 'Đúng giờ' },
+        2: { className: 'is-late', tooltip: 'Đi muộn' },
     };
     const c = config[status];
     const timeInfo = time ? ` vào ${time}` : '';
@@ -1557,30 +1559,10 @@ const ShiftPill = ({ label, status, time, outTime }: { label: string; status: 0 
     const tooltipContent = `${label}: ${c.tooltip}${timeInfo}${outInfo}`;
     return (
         <Tooltip title={tooltipContent}>
-            <div style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4,
-                fontSize: 10, fontWeight: 700, textTransform: 'uppercase',
-                padding: '2px 6px', borderRadius: 5,
-                background: c.bg, color: c.color, border: `1px solid ${c.border}`,
-                cursor: 'default', letterSpacing: 0.2, whiteSpace: 'nowrap',
-                position: 'relative',
-            }}>
-                <span>{label}</span>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                    {c.icon}
-                    {time && (
-                        <span style={{
-                            fontSize: 8, fontWeight: 600, opacity: 0.8,
-                            borderLeft: '1px solid', paddingLeft: 3, marginLeft: 1,
-                            fontVariantNumeric: 'tabular-nums', letterSpacing: -0.2,
-                        }}>{time}</span>
-                    )}
-                    {outTime && (
-                        <span style={{
-                            fontSize: 8, fontWeight: 600, opacity: 0.7,
-                            borderLeft: '1px solid', paddingLeft: 3, marginLeft: 1,
-                        }}>→{outTime}</span>
-                    )}
+            <div className={`att-shift-pill ${c.className}`}>
+                <span className="att-shift-pill__label">{label}</span>
+                <span className="att-shift-pill__time">
+                    {time || '----'}{outTime ? ` - ${outTime}` : ''}
                 </span>
             </div>
         </Tooltip>
@@ -1588,28 +1570,15 @@ const ShiftPill = ({ label, status, time, outTime }: { label: string; status: 0 
 };
 
 const SundayRestCell = () => (
-    <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 9, fontWeight: 800, textTransform: 'uppercase',
-        color: '#bfbfbf', letterSpacing: 0.5, padding: '4px 6px',
-        borderRadius: 6, border: '1.5px dashed #d9d9d9',
-        background: '#fafafa', minHeight: 44,
-    }}>
-        <CoffeeOutlined style={{ marginRight: 3, fontSize: 10 }} /> Nghỉ
+    <div className="att-matrix-rest-cell">
+        <CoffeeOutlined /> Nghỉ
     </div>
 );
 
 const HolidayRestCell = ({ label }: { label: string }) => (
     <Tooltip title={label}>
-        <div style={{
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            fontSize: 9, fontWeight: 800, textTransform: 'uppercase',
-            color: '#d4380d', letterSpacing: 0.5, padding: '4px 6px',
-            borderRadius: 6, border: '1.5px solid #ffbb96',
-            background: '#fff2e8', minHeight: 44, gap: 2,
-        }}>
-            <span style={{ fontSize: 13 }}>🎌</span>
-            <span>Nghỉ Lễ</span>
+        <div className="att-matrix-rest-cell is-holiday">
+            <FlagOutlined /> Nghỉ lễ
         </div>
     </Tooltip>
 );
@@ -2001,6 +1970,8 @@ export interface FaceAttendanceTabHandle {
 
 interface FaceAttendanceRewardProps {
     summary?: AttendanceRewardSummary | null;
+    employeeName?: string;
+    employeeType?: string;
     rewardAmount?: number;
     requiredDays?: number;
     standardWorkDays?: number;
@@ -2010,12 +1981,14 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     employees: any[],
     systemUsers?: any[],
     children?: React.ReactNode,
+    toolbarActions?: React.ReactNode,
     onLogAdded?: () => void,
     config?: PenaltyConfig,
     onLateFine?: (fine: FineRecord) => void,
+    onLateWaiver?: (waiver: { fine?: FineRecord; reason?: string }) => void,
     isAdmin?: boolean,
     reward?: FaceAttendanceRewardProps,
-}>(({ employees, systemUsers = [], children, onLogAdded, config, onLateFine, isAdmin, reward }, ref) => {
+}>(({ employees, systemUsers = [], children, toolbarActions, onLogAdded, config, onLateFine, onLateWaiver, isAdmin, reward }, ref) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);       // capture frame (hidden)
     const overlayCanvasRef = useRef<HTMLCanvasElement>(null); // vẽ bounding box realtime
@@ -2377,6 +2350,7 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
 
                     // Backend ghi phạt cùng lúc với log chấm công; frontend chỉ đồng bộ để hiển thị ngay.
                     if (res.data.lateFine && onLateFine) onLateFine(res.data.lateFine);
+                    if (res.data.lateWaiver && onLateWaiver) onLateWaiver(res.data.lateWaiver);
                     // Reset idle timer sau mỗi lần chấm thành công
                     resetIdleTimer();
                     // Hiện kết quả 2s rồi tiếp tục nhận diện người tiếp theo
@@ -2482,6 +2456,10 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     }, []);
 
     const toggleCamera = useCallback(async () => {
+        if (!cameraExpanded && serviceStatus !== 'ready') {
+            message.warning('Dịch vụ nhận diện khuôn mặt chưa sẵn sàng. Vui lòng thử lại sau.');
+            return;
+        }
         if (cameraExpanded) {
             if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
             closeAttendanceRef.current = null;
@@ -2501,7 +2479,7 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
         await startCamera();
         startRecognizing();
         resetIdleTimer();
-    }, [cameraExpanded, resetIdleTimer, startCamera, startRecognizing, stopCamera, stopRecognizing]);
+    }, [cameraExpanded, resetIdleTimer, serviceStatus, startCamera, startRecognizing, stopCamera, stopRecognizing]);
 
     useEffect(() => () => {
         stopCamera();
@@ -2781,6 +2759,7 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     }, [api, regFaceId, regUserName, regImages, loadData, employees, systemUsers]);
 
     const openRegister = useCallback(() => {
+        setProfilesDrawerOpen(false);
         setRegFaceId('');
         setRegUserName('');
         setRegImages([]);
@@ -2803,13 +2782,15 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     const rewardOnTimeDays = rewardSummary?.monthly.onTimeDays || 0;
     const rewardStreak = rewardSummary?.currentStreak || 0;
     const rewardPercent = Math.min(100, Math.round((rewardOnTimeDays / Math.max(1, rewardTargetDays)) * 100));
-    const rewardValue = reward?.rewardAmount || 100000;
+    const rewardValue = reward?.rewardAmount || 200000;
+    const rewardRate = rewardSummary?.monthly.onTimeRate || 0;
+    const requiredRewardRate = rewardSummary?.monthly.requiredRate || (24 / 26);
+    const monthlyRewardEligible = rewardSummary?.monthly.eligibleEmployee ?? reward?.employeeType === 'Official';
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-            {/* Compact service row; primary actions live with the page-level controls. */}
+        <div className="att-face-layout">
             <div className="att-face-toolbar">
-                <Space>
+                <Space className="att-face-toolbar__service" size={8} wrap>
                     <Badge
                         status={serviceStatus === 'ready' ? 'success' : serviceStatus === 'initializing' ? 'processing' : 'error'}
                         text={<Text style={{ fontWeight: 700 }}>{
@@ -2827,6 +2808,7 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
                         Quản lý khuôn mặt ({profiles.length})
                     </Button>
                 </Space>
+                {toolbarActions && <Space className="att-face-toolbar__actions" size={8} wrap>{toolbarActions}</Space>}
             </div>
 
             {/* Video + canvas LUÔN được mount (kể cả khi cameraExpanded=false)
@@ -2992,7 +2974,7 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
                 <div className="att-attendance-achievement__identity">
                     <div className="att-attendance-achievement__icon"><TrophyOutlined /></div>
                     <div>
-                        <Text strong>Thành tích đi làm đúng giờ</Text>
+                        <Text strong>{reward?.employeeName ? `Thành tích của ${reward.employeeName}` : 'Thành tích đi làm đúng giờ'}</Text>
                         <div className="att-attendance-achievement__streak">Đúng giờ <strong>{rewardStreak} ngày</strong> liên tiếp</div>
                     </div>
                 </div>
@@ -3002,10 +2984,14 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
                 <div className="att-attendance-achievement__progress">
                     <div className="att-attendance-achievement__progress-copy">
                         <strong>{rewardOnTimeDays}/{rewardTargetDays} ngày đúng giờ</strong>
-                        <span>Đạt {rewardTargetDays}/{reward?.standardWorkDays || 26} ngày để nhận {rewardValue.toLocaleString('vi-VN')}đ</span>
+                        <span>{monthlyRewardEligible
+                            ? `Từ ${(requiredRewardRate * 100).toLocaleString('vi-VN', { maximumFractionDigits: 1 })}% (24/26) để nhận ${rewardValue.toLocaleString('vi-VN')}đ`
+                            : 'Thưởng chuyên cần tháng không áp dụng cho thời vụ'}</span>
                     </div>
                     <div className="att-attendance-achievement__progress-track"><i style={{ width: `${rewardPercent}%` }} /></div>
-                    <small>{rewardSummary?.monthly.qualified ? 'Đã đủ điều kiện thưởng tháng.' : 'Đi làm đúng giờ để tích lũy thưởng; quy định phạt đi muộn vẫn áp dụng riêng.'}</small>
+                    <small>{monthlyRewardEligible
+                        ? (rewardSummary?.monthly.qualified ? 'Đã đủ điều kiện thưởng tháng.' : `Tỷ lệ đúng giờ hiện tại: ${(rewardRate * 100).toLocaleString('vi-VN', { maximumFractionDigits: 1 })}%.`)
+                        : 'Huy hiệu và lượt miễn phạt nhẹ vẫn áp dụng theo chuỗi đúng giờ.'}</small>
                 </div>
             </section>
 
@@ -3245,6 +3231,7 @@ const AttendancePeriodSelector = ({
 // ===== MAIN COMPONENT =====
 // ===============================================
 export default function Attendance() {
+    const isAttendanceUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('attendanceUiTest');
     const { user } = useAuth();
     const { setHeaderExtra, clearHeaderExtra } = usePageHeader();
     const currentUser = useCurrentUser();
@@ -3274,13 +3261,18 @@ export default function Attendance() {
     const [attendanceRewardConfig, setAttendanceRewardConfig] = useState<{
         enabled: boolean;
         badgeStreakDays: number;
+        waiverStreakDays: number;
+        waiverLateMaxMinutes: number;
+        waiverMaxPerPeriod: number;
         monthlyRequiredDays: number;
         standardWorkDays: number;
         monthlyRewardAmount: number;
         graceMinutes: number;
     } | null>(null);
     const [attendanceRewardReadyKey, setAttendanceRewardReadyKey] = useState('');
+    const [attendanceRewardRefreshKey, setAttendanceRewardRefreshKey] = useState(0);
     const attendanceActionsRef = useRef<FaceAttendanceTabHandle>(null);
+    const [showShiftDetails, setShowShiftDetails] = useState(true);
 
     const [leaveRecords, setLeaveRecords] = useState<LeaveRequest[]>(() => {
         try {
@@ -3643,7 +3635,7 @@ export default function Attendance() {
         });
     };
 
-    const [activeTab, setActiveTab] = useState('overview');
+    const [activeTab, setActiveTab] = useState(isAttendanceUiTest ? 'attendance' : 'overview');
     const [bonusView, setBonusView] = useState<'personal' | 'manage'>(() => isAdmin ? 'manage' : 'personal');
     const [bonusSearch, setBonusSearch] = useState('');
     const [config, setConfig] = useState<PenaltyConfig>({
@@ -3797,6 +3789,10 @@ export default function Attendance() {
     // Catalog loading must not delay employee data or the monthly log query.
     useEffect(() => {
         if (!isDbLoaded) return;
+        if (isAttendanceUiTest) {
+            setPackingCatalogReady(true);
+            return;
+        }
         let cancelled = false;
         const loadCatalog = async () => {
             const startedAt = performance.now();
@@ -3857,7 +3853,7 @@ export default function Attendance() {
         };
         void loadCatalog();
         return () => { cancelled = true; };
-    }, [isDbLoaded, loadPackingComponents, packingCatalogAttempt]);
+    }, [isAttendanceUiTest, isDbLoaded, loadPackingComponents, packingCatalogAttempt]);
 
     // 1. Tải dữ liệu từ DB lúc mở component
     useEffect(() => {
@@ -3865,6 +3861,17 @@ export default function Attendance() {
             const startedAt = performance.now();
             try {
                 const api = (window as any).electronAPI;
+                if (isAttendanceUiTest && !api) {
+                    setEmployees(initialEmployees);
+                    setSystemUsers(initialEmployees.map(employee => ({
+                        id: employee.id,
+                        username: employee.username,
+                        fullName: employee.name,
+                        role: 'staff',
+                        isActive: true,
+                    })));
+                    return;
+                }
 
                 // Hai nguồn độc lập được tải song song để rút ngắn thời gian mở trang.
                 let knownUsernames: string[] = [];
@@ -4128,6 +4135,10 @@ export default function Attendance() {
     // chỉ không bắt toàn bộ giao diện phải chờ quét lịch sử chấm công.
     useEffect(() => {
         if (!isDbLoaded) return;
+        if (isAttendanceUiTest) {
+            setIsBackgroundSyncComplete(true);
+            return;
+        }
         let cancelled = false;
         setIsBackgroundSyncComplete(false);
         const syncTask = (async () => {
@@ -4175,7 +4186,7 @@ export default function Attendance() {
         return () => {
             cancelled = true;
         };
-    }, [isAdmin, isDbLoaded]);
+    }, [isAdmin, isAttendanceUiTest, isDbLoaded]);
 
     const saveAttendanceSnapshot = useCallback(async (snapshot: Record<string, any>) => {
         // Mọi đường ghi đều xếp sau đối soát để không thể ghi snapshot cũ đè kết quả nền.
@@ -4218,6 +4229,7 @@ export default function Attendance() {
 
     // 2b. Lưu tự động khi có thay đổi state với Debounce
     useEffect(() => {
+        if (isAttendanceUiTest) return;
         if (!isDbLoaded || !isBackgroundSyncComplete) return; // Chờ đối soát nền để snapshot cũ không ghi đè DB
         if (employees.length === 0) return; // Chưa có data employees → không ghi đè DB
 
@@ -4233,20 +4245,22 @@ export default function Attendance() {
 
         const timer = setTimeout(saveData, 500); // Đợi 500ms thao tác cuối rồi mới save
         return () => clearTimeout(timer);
-    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, leaveRecords, workSchedules, isDbLoaded, isBackgroundSyncComplete, saveAttendanceSnapshot]);
+    }, [config, employees, bonusAuditLog, extraBonuses, extraFundTx, fundAuditLog, extraFines, fineOverrides, fineAuditLog, fineWaivers, lockedPeriods, payrollOverrides, gmailSentLog, leaveRecords, workSchedules, isAttendanceUiTest, isDbLoaded, isBackgroundSyncComplete, saveAttendanceSnapshot]);
 
     // 2c. Flush save khi component unmount (navigate sang tab khác) để tránh mất data
     useEffect(() => {
         return () => {
+            if (isAttendanceUiTest) return;
             if (latestSnapshotRef.current) {
                 saveAttendanceSnapshot(latestSnapshotRef.current as Record<string, any>)
                     .catch(console.error);
             }
         };
-    }, [saveAttendanceSnapshot]);
+    }, [isAttendanceUiTest, saveAttendanceSnapshot]);
 
     // Flush save ngay lập tức khi reload hoặc đóng app
     useEffect(() => {
+        if (isAttendanceUiTest) return;
         const handleBeforeUnload = () => {
             if (latestSnapshotRef.current) {
                 try { void saveAttendanceSnapshot(latestSnapshotRef.current as Record<string, any>); } catch { }
@@ -4254,7 +4268,7 @@ export default function Attendance() {
         };
         window.addEventListener('beforeunload', handleBeforeUnload);
         return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-    }, [saveAttendanceSnapshot]);
+    }, [isAttendanceUiTest, saveAttendanceSnapshot]);
 
     const [fineModalOpen, setFineModalOpen] = useState(false);
     const [fineForm] = Form.useForm();
@@ -4288,7 +4302,7 @@ export default function Attendance() {
         setOverviewDateRange(current => current[0].isSame(oldWeekStart, 'day') && current[1].isSame(oldWeekEnd, 'day')
             ? [now.startOf('month'), now.endOf('month')]
             : current);
-    }, []);
+    }, [isAttendanceUiTest]);
 
     const attendancePeriodSelector = useMemo(() => (
         <AttendancePeriodSelector
@@ -4626,7 +4640,7 @@ export default function Attendance() {
         setAttendanceRewardReadyKey('');
         void loadAttendanceRewardSummary();
         return () => { cancelled = true; };
-    }, [attendanceRewardPeriodKey, isDbLoaded]);
+    }, [attendanceRewardPeriodKey, attendanceRewardRefreshKey, isDbLoaded]);
 
     const fineSourcesRangeKey = `${overviewDateRange[0].startOf('day').valueOf()}-${overviewDateRange[1].endOf('day').valueOf()}-${isAdmin ? 'admin' : 'user'}`;
     const areFineSourcesReady = isBackgroundSyncComplete && fineSourcesReadyKey === fineSourcesRangeKey;
@@ -5507,8 +5521,18 @@ export default function Attendance() {
         try {
             const api = (window as any).electronAPI;
             if (!api?.attendance) {
-                setLiveAttendanceLogs([]);
-                setOverviewAttendanceLogs([]);
+                const previewLogs = isAttendanceUiTest ? [
+                    { id: 1, userId: 1, date: `${monthStr}-07`, timestamp: `${monthStr}-07T07:56:00+07:00`, checkType: 'morning_in', confidence: .98 },
+                    { id: 2, userId: 1, date: `${monthStr}-07`, timestamp: `${monthStr}-07T13:33:00+07:00`, checkType: 'afternoon_in', confidence: .98 },
+                    { id: 3, userId: 1, date: `${monthStr}-08`, timestamp: `${monthStr}-08T08:04:00+07:00`, checkType: 'morning_in', confidence: .97 },
+                    { id: 4, userId: 2, date: `${monthStr}-07`, timestamp: `${monthStr}-07T08:03:00+07:00`, checkType: 'morning_in', confidence: .96 },
+                    { id: 5, userId: 2, date: `${monthStr}-07`, timestamp: `${monthStr}-07T13:34:00+07:00`, checkType: 'afternoon_in', confidence: .96 },
+                    { id: 6, userId: 2, date: `${monthStr}-08`, timestamp: `${monthStr}-08T08:12:00+07:00`, checkType: 'morning_in', confidence: .95 },
+                    { id: 7, userId: 2, date: `${monthStr}-08`, timestamp: `${monthStr}-08T13:34:00+07:00`, checkType: 'afternoon_in', confidence: .95 },
+                    { id: 8, userId: 3, date: `${monthStr}-09`, timestamp: `${monthStr}-09T08:03:00+07:00`, checkType: 'morning_in', confidence: .94 },
+                ] : [];
+                setLiveAttendanceLogs(previewLogs);
+                setOverviewAttendanceLogs(previewLogs);
                 setOverviewAttendanceLogsKey(monthStr);
                 return;
             }
@@ -5702,6 +5726,9 @@ export default function Attendance() {
             setTempConfig(nextConfig);
             if (latestSnapshotRef.current) {
                 latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), config: nextConfig };
+            }
+            if (result.notification?.error) {
+                message.warning(result.notification.error);
             }
             return true;
         } catch (error) {
@@ -6419,6 +6446,36 @@ export default function Attendance() {
         });
     };
 
+    const unlockPayroll = () => {
+        Modal.confirm({
+            title: 'Mở khóa kỳ lương',
+            content: `Mở khóa kỳ ${overviewDateRange[0].format('DD/MM/YYYY')} — ${overviewDateRange[1].format('DD/MM/YYYY')}? Nhân viên sẽ có thể chỉnh sửa lại.`,
+            okText: 'Mở khóa',
+            cancelText: 'Hủy',
+            okType: 'primary',
+            onOk: async () => {
+                const api = (window as any).electronAPI;
+                if (!api?.attendance?.updatePayrollLock) {
+                    throw new Error('Ứng dụng chưa có API mở khóa bảng lương an toàn. Vui lòng khởi động lại app.');
+                }
+                const result = await api.attendance.updatePayrollLock({
+                    action: 'unlock',
+                    start: currentLockedPeriod?.start,
+                    end: currentLockedPeriod?.end,
+                });
+                if (!result?.success || !Array.isArray(result.data?.lockedPeriods)) {
+                    throw new Error(result?.error || 'Không thể mở khóa kỳ lương.');
+                }
+                const nextLockedPeriods = result.data.lockedPeriods as LockedPeriod[];
+                setLockedPeriods(nextLockedPeriods);
+                if (latestSnapshotRef.current) {
+                    latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), lockedPeriods: nextLockedPeriods };
+                }
+                message.success('Đã mở khóa kỳ lương!');
+            },
+        });
+    };
+
     // ============================================
     // TAB 1: TỔNG QUÁT
     // ============================================
@@ -6541,7 +6598,9 @@ export default function Attendance() {
                                     {attendanceReward?.badgeUnlocked ? 'Đã mở huy hiệu đúng giờ' : `Mục tiêu huy hiệu: ${attendanceReward?.badgeStreakDays || 3} ngày`}
                                 </div>
                                 <div className="att-reward-progress-track"><i style={{ width: `${Math.min(100, Math.round(((attendanceReward?.monthly.onTimeDays || 0) / Math.max(1, attendanceReward?.monthly.targetDays || 24)) * 100))}%` }} /></div>
-                                <small>{attendanceReward?.monthly.onTimeDays || 0}/{attendanceReward?.monthly.targetDays || 24} ngày đúng giờ · {attendanceReward?.monthly.qualified ? `Đủ điều kiện +${fmt(attendanceReward.monthly.rewardAmount)}` : `Mục tiêu +${fmt(attendanceRewardConfig?.monthlyRewardAmount || 100000)}`}</small>
+                                <small>{attendanceReward?.monthly.eligibleEmployee === false
+                                    ? 'Không áp dụng thưởng tháng cho nhân viên thời vụ'
+                                    : `${attendanceReward?.monthly.onTimeDays || 0}/${attendanceReward?.monthly.targetDays || 24} ngày đúng giờ · ${attendanceReward?.monthly.qualified ? `Đủ điều kiện +${fmt(attendanceReward.monthly.rewardAmount)}` : `Mục tiêu +${fmt(attendanceRewardConfig?.monthlyRewardAmount || 200000)}`}`}</small>
                             </div>
 
                             <span className="att-staff-updated">Dữ liệu theo kỳ đang chọn</span>
@@ -6606,28 +6665,8 @@ export default function Attendance() {
         const totalFines = privatePayrollData.reduce((sum, item) => sum + (item.myFines || 0), 0);
         const totalLeaveDeduction = privatePayrollData.reduce((sum, item) => sum + (item.leaveDeduction || 0), 0);
         const totalFinalSalary = privatePayrollData.reduce((sum, item) => sum + (item.finalSalary || 0), 0);
-        const periodRewardSummaries = attendanceRewardSummaries.filter(summary => summary.periodKey === attendanceRewardPeriodKey);
-        const qualifiedRewardSummaries = periodRewardSummaries.filter(summary => summary.monthly.qualified);
-        const rewardOnTimeDays = periodRewardSummaries.reduce((sum, summary) => sum + summary.monthly.onTimeDays, 0);
-        const rewardScheduledDays = periodRewardSummaries.reduce((sum, summary) => sum + summary.monthly.scheduledDays, 0);
-        const rewardProgress = rewardScheduledDays > 0 ? Math.round((rewardOnTimeDays / rewardScheduledDays) * 100) : 0;
-        const rewardFund = qualifiedRewardSummaries.reduce((sum, summary) => sum + summary.monthly.rewardAmount, 0);
-
         return (
         <div className="att-table-card att-overview-table-card">
-            <section className="att-reward-admin-summary" aria-label="Tổng quan chuyên cần">
-                <div className="att-reward-admin-summary__intro">
-                    <span className="att-reward-admin-summary__eyebrow"><GiftOutlined /> CHUYÊN CẦN THÁNG {attendanceRewardPeriodKey.slice(5)}</span>
-                    <strong>Thưởng được xét sau khi kỳ hoàn tất</strong>
-                    <small>{attendanceRewardConfig?.monthlyRequiredDays || 24}/{attendanceRewardConfig?.standardWorkDays || 26} ngày đúng giờ để nhận {fmt(attendanceRewardConfig?.monthlyRewardAmount || 100000)}</small>
-                </div>
-                <div className="att-reward-admin-summary__metrics">
-                    <div><span>Nhân viên theo dõi</span><strong>{periodRewardSummaries.length}</strong></div>
-                    <div><span>Đủ điều kiện</span><strong>{qualifiedRewardSummaries.length}</strong></div>
-                    <div><span>Tỷ lệ đúng giờ</span><strong>{rewardScheduledDays > 0 ? `${rewardProgress}%` : '—'}</strong></div>
-                    <div><span>Quỹ thưởng dự kiến</span><strong>{fmt(rewardFund)}</strong></div>
-                </div>
-            </section>
             <Table
                 className="att-overview-table"
                 dataSource={privatePayrollData.map(d => ({ ...d, key: d.id }))}
@@ -8549,10 +8588,27 @@ export default function Attendance() {
     const matrixColumns = useMemo(() => {
         const columns: any[] = [
             {
-                title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 130, fixed: 'left' as const,
-                render: (name: string) => (
+                title: 'Nhân viên', dataIndex: 'name', key: 'name', width: 126, fixed: 'left' as const,
+                onHeaderCell: () => ({ className: 'att-matrix-name-header' }),
+                render: (name: string, record: any) => (
                     <div className="att-matrix-name-cell">
-                        <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{name}</Text>
+                        <div className="att-matrix-name-cell__headline">
+                            <Text strong>{name}</Text>
+                            {(() => {
+                                const achievement = attendanceRewardSummaries.find(summary => (
+                                    summary.employeeId === Number(record.key)
+                                    && summary.periodKey === attendanceRewardPeriodKey
+                                ));
+                                return achievement?.badgeUnlocked ? (
+                                    <Tooltip title={`Huy hiệu đúng giờ: ${achievement.currentStreak} ngày liên tiếp`}>
+                                        <span className="att-matrix-achievement-badge" aria-label={`Huy hiệu đúng giờ ${achievement.currentStreak} ngày`}>
+                                            <SafetyCertificateOutlined />
+                                        </span>
+                                    </Tooltip>
+                                ) : null;
+                            })()}
+                        </div>
+                        <span>{record.username}</span>
                     </div>
                 ),
             }
@@ -8570,9 +8626,9 @@ export default function Attendance() {
             columns.push({
                 title: (
                     <div style={{ textAlign: 'center' as const, position: 'relative' }}>
-                        {isToday && <div style={{ position: 'absolute', top: -14, left: '50%', transform: 'translateX(-50%)', background: '#1677ff', color: '#fff', fontSize: 8, padding: '0 4px', borderRadius: 4, fontWeight: 700 }}>H.NAY</div>}
-                        {isHoliday && !isToday && <div style={{ position: 'absolute', top: -14, left: '50%', transform: 'translateX(-50%)', background: '#fa541c', color: '#fff', fontSize: 7, padding: '0 4px', borderRadius: 4, fontWeight: 700, whiteSpace: 'nowrap' }}>🎌 LỄ</div>}
-                        <div style={{ fontWeight: 800, fontSize: 11, color: isToday ? '#1677ff' : (isHoliday ? '#d4380d' : (isSunday ? '#bfbfbf' : (dayOfWeek === 6 ? '#00ab56' : '#595959'))), marginTop: isToday || isHoliday ? 4 : 0 }}>
+                        {isToday && <div className="att-matrix-today-badge">H.NAY</div>}
+                        {isHoliday && !isToday && <div className="att-matrix-holiday-badge"><FlagOutlined /> LỄ</div>}
+                        <div style={{ fontWeight: 800, fontSize: 11, color: isToday ? '#1677ff' : (isHoliday ? '#d4380d' : (isSunday ? '#bfbfbf' : (dayOfWeek === 6 ? '#00ab56' : '#21304f'))), marginTop: isToday || isHoliday ? 4 : 0 }}>
                             {currentDay.format('DD/MM')}
                         </div>
                         <div style={{ fontSize: 8, color: isToday ? '#1677ff' : (isHoliday ? '#fa541c' : (isSunday ? '#bfbfbf' : '#8c8c8c')), fontWeight: isToday ? 800 : 600 }}>
@@ -8580,12 +8636,11 @@ export default function Attendance() {
                         </div>
                     </div>
                 ),
-                key: `day-${i}`, align: 'center' as const, width: isToday ? 110 : 100,
+                key: `day-${i}`, align: 'center' as const, width: isToday ? 80 : 78,
                 onHeaderCell: () => ({
-                    className: isToday ? 'att-today-col-header' : undefined,
-                    style: { background: isToday ? '#e6f4ff' : (isHoliday ? '#fff2e8' : (isSunday ? '#fafafa' : undefined)), borderLeft: isSunday || isToday || isHoliday ? '2px solid #f0f0f0' : undefined, borderRight: isToday ? '2px solid #f0f0f0' : undefined }
+                    className: `${isToday ? 'att-today-col-header ' : ''}${isSunday ? 'att-sunday-col ' : ''}${isHoliday ? 'att-holiday-col ' : ''}`.trim() || undefined,
                 }),
-                onCell: () => ({ style: { background: isToday ? '#f0f5ff' : (isHoliday ? '#fff9f7' : (isSunday ? '#fafafa' : undefined)), borderLeft: isSunday || isToday || isHoliday ? '2px solid #f0f0f0' : undefined, borderRight: isToday ? '2px solid #f0f0f0' : undefined } }),
+                onCell: () => ({ className: `${isToday ? 'att-today-col ' : ''}${isSunday ? 'att-sunday-col ' : ''}${isHoliday ? 'att-holiday-col ' : ''}`.trim() || undefined }),
                 render: (_: any, record: any, rowIdx: number) => {
                     const d = liveAttendanceMatrix[rowIdx]?.[i] || {
                         am: 0, pm: 0,
@@ -8684,7 +8739,7 @@ export default function Attendance() {
                     };
 
                     return (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                        <div className={`att-matrix-shifts${showShiftDetails ? '' : ' is-condensed'}`}>
                             {renderSessionCell('morning', d.am as 0 | 1 | 2, d.amTime, d.amOutTime, d.amSchedule, d.amLeave)}
                             {renderSessionCell('afternoon', d.pm as 0 | 1 | 2, d.pmTime, d.pmOutTime, d.pmSchedule, d.pmLeave)}
                         </div>
@@ -8697,36 +8752,30 @@ export default function Attendance() {
             title: (
                 <div style={{
                     textAlign: 'center',
-                    background: 'linear-gradient(135deg, #00ab56 0%, #00c76a 100%)',
-                    margin: '-12px -10px',
-                    padding: '12px 10px',
+                    background: '#00b764',
+                    margin: '-8px -4px',
+                    padding: '8px 4px',
                     color: '#fff',
                 }}>
                     <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: 1.5, textTransform: 'uppercase', opacity: 0.9 }}>TỔNG</div>
                     <div style={{ fontSize: 12, fontWeight: 900, letterSpacing: 1 }}>CA</div>
                 </div>
             ),
-            key: 'total', width: 72, align: 'center' as const, fixed: 'right' as const,
+            key: 'total', width: 74, align: 'center' as const, fixed: 'right' as const,
             onHeaderCell: () => ({ className: 'att-total-col-header', style: { padding: 0 } }),
             onCell: () => ({ className: 'att-total-col-cell' }),
             render: (_: any, __: any, rowIdx: number) => {
                 const stat = employeeStats[rowIdx] || { shiftCount: 0 };
                 return (
-                    <div style={{ textAlign: 'center', padding: '4px 0' }}>
-                        <div style={{ fontSize: 28, fontWeight: 900, color: '#00ab56', lineHeight: 1, letterSpacing: -1 }}>{stat.shiftCount}</div>
-                        <div style={{
-                            display: 'inline-block', marginTop: 4,
-                            fontSize: 8, fontWeight: 900, letterSpacing: 1.5,
-                            color: '#059669', textTransform: 'uppercase' as const,
-                            background: '#d1fae5', borderRadius: 4,
-                            padding: '1px 6px', border: '1px solid #a7f3d0',
-                        }}>CA LÀM</div>
+                    <div className="att-matrix-total">
+                        <strong>{stat.shiftCount}</strong>
+                        <span>ca</span>
                     </div>
                 );
             },
         });
         return columns;
-    }, [employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear, openLeaveRequestModal, saveWorkScheduleInline, saveLeaveRequestInline, canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, isCurrentPeriodLocked, employees, isAttendanceSessionDue]);
+    }, [employeeStats, liveAttendanceMatrix, daysInMonth, selectedMonth, selectedYear, saveWorkScheduleInline, saveLeaveRequestInline, canManageAttendance, canManageAttendanceEmployee, canEditAttendanceDate, isCurrentPeriodLocked, employees, isAttendanceSessionDue, config.morningStart, config.afternoonStart, showShiftDetails, attendanceRewardSummaries, attendanceRewardPeriodKey]);
 
     useEffect(() => {
         const isCurrentMonth = selectedMonth === dayjs().month() + 1 && selectedYear === dayjs().year();
@@ -8739,20 +8788,23 @@ export default function Attendance() {
             if (cancelled) return;
 
             const wrap = attendanceMatrixWrapRef.current;
-            const todayHeader = wrap?.querySelector('.att-today-col-header') as HTMLElement | null;
-            if (!wrap || !todayHeader) {
-                if (retryCount < 8) {
+            const scrollContainer = wrap?.querySelector('.ant-table-body, .ant-table-content') as HTMLElement | null;
+            if (!wrap || !scrollContainer) {
+                if (retryCount < 20) {
                     retryCount += 1;
                     window.setTimeout(scrollToTodayColumn, 80);
                 }
                 return;
             }
 
-            todayHeader.scrollIntoView({
-                behavior: 'auto',
-                block: 'nearest',
-                inline: 'center',
-            });
+            const firstVisibleDay = Math.max(0, dayjs().date() - 4);
+            const targetScrollLeft = firstVisibleDay * 78;
+            if (scrollContainer.scrollWidth - scrollContainer.clientWidth < targetScrollLeft && retryCount < 20) {
+                retryCount += 1;
+                window.setTimeout(scrollToTodayColumn, 100);
+                return;
+            }
+            scrollContainer.scrollLeft = targetScrollLeft;
         };
 
         const frame1 = window.requestAnimationFrame(() => {
@@ -8776,46 +8828,82 @@ export default function Attendance() {
             ? attendanceRewardSummaries.find(summary => summary.employeeId === currentAttendanceEmployee.id && summary.periodKey === attendanceRewardPeriodKey) || null
             : null
     ), [attendanceRewardPeriodKey, attendanceRewardSummaries, currentAttendanceEmployee]);
+    const featuredAttendanceReward = useMemo(() => {
+        if (currentAttendanceReward) return currentAttendanceReward;
+        return attendanceRewardSummaries
+            .filter(summary => summary.periodKey === attendanceRewardPeriodKey)
+            .sort((left, right) => right.currentStreak - left.currentStreak || right.bestStreak - left.bestStreak)[0] || null;
+    }, [attendanceRewardPeriodKey, attendanceRewardSummaries, currentAttendanceReward]);
+    const featuredAttendanceEmployee = useMemo(() => (
+        featuredAttendanceReward
+            ? employees.find(employee => employee.id === featuredAttendanceReward.employeeId) || null
+            : null
+    ), [employees, featuredAttendanceReward]);
 
     const renderAttendance = () => (
         <FaceAttendanceTab
             ref={attendanceActionsRef}
             employees={employees}
             systemUsers={systemUsers}
-            onLogAdded={() => { if (isDbLoaded) fetchMonthLogs(); }}
+            toolbarActions={(
+                <>
+                    <Button className="att-btn-attendance" icon={<SmileOutlined />} type="primary" onClick={() => attendanceActionsRef.current?.toggleCamera()}>
+                        Chấm công
+                    </Button>
+                    {isAdmin && (
+                        <Button className="att-btn-face-register" icon={<PlusOutlined />} onClick={() => attendanceActionsRef.current?.openRegister()}>
+                            Đăng ký khuôn mặt mới
+                        </Button>
+                    )}
+                </>
+            )}
+            onLogAdded={() => {
+                if (isDbLoaded) fetchMonthLogs();
+                setAttendanceRewardRefreshKey(value => value + 1);
+            }}
             config={config}
             isAdmin={isAdmin}
             onLateFine={(fine) => {
                 setExtraFines(prev => prev.some(item => item.id === fine.id) ? prev : [...prev, fine]);
                 message.warning(`⚠️ Phạt đi muộn: ${fine.detail} — ${fine.amount.toLocaleString('vi-VN')}đ`);
             }}
+            onLateWaiver={(waiver) => {
+                message.success(`Đã dùng lượt miễn phạt nhẹ: ${waiver.reason || waiver.fine?.detail || 'lần đi muộn này không bị khấu trừ.'}`);
+            }}
             reward={{
-                summary: currentAttendanceReward,
-                rewardAmount: attendanceRewardConfig?.monthlyRewardAmount || 100000,
+                summary: featuredAttendanceReward,
+                employeeName: isAdmin ? featuredAttendanceEmployee?.name : undefined,
+                employeeType: (isAdmin ? featuredAttendanceEmployee : currentAttendanceEmployee)?.type,
+                rewardAmount: attendanceRewardConfig?.monthlyRewardAmount || 200000,
                 requiredDays: attendanceRewardConfig?.monthlyRequiredDays || 24,
                 standardWorkDays: attendanceRewardConfig?.standardWorkDays || 26,
             }}
         >
-            <Divider style={{ margin: '8px 0' }} />
-
-            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
-                <Space size={12}>
-                    <Badge color="#52c41a" text={<Text style={{ fontSize: 11, fontWeight: 700 }}>Đúng giờ</Text>} />
-                    <Badge color="#fa8c16" text={<Text style={{ fontSize: 11, fontWeight: 700 }}>Đi muộn</Text>} />
-                    <Badge color="#d9d9d9" text={<Text style={{ fontSize: 11, fontWeight: 700 }}>Nghỉ</Text>} />
-                </Space>
-            </div>
-
             {/* Matrix */}
             <Card
-                title={<Space><CalendarOutlined style={{ color: '#00ab56' }} /><Text strong>Ma trận công ca hàng ngày</Text><Tag style={{ fontSize: 10, fontWeight: 600 }}>Hiển thị chi tiết Ca Sáng & Ca Chiều</Tag></Space>}
+                className="att-matrix-card"
+                title={(
+                    <div className="att-matrix-card__title">
+                        <span className="att-matrix-card__heading"><CalendarOutlined /> Ma trận công ca hàng ngày</span>
+                        <label className="att-matrix-detail-toggle">
+                            <Switch size="small" checked={showShiftDetails} onChange={setShowShiftDetails} />
+                            <span>Hiển thị chi tiết Ca Sáng & Ca Chiều</span>
+                        </label>
+                    </div>
+                )}
+                extra={(
+                    <Space className="att-matrix-legend" size={14}>
+                        <Badge color="#52c41a" text="Đúng giờ" />
+                        <Badge color="#fa8c16" text="Đi muộn" />
+                        <Badge color="#d9d9d9" text="Nghỉ" />
+                    </Space>
+                )}
                 bodyStyle={{ padding: 0 }}
-                style={{ borderTop: '3px solid #00ab56' }}
             >
-                <div ref={attendanceMatrixWrapRef}>
+                <div ref={attendanceMatrixWrapRef} className="att-matrix-wrap">
                     <Table
                         className="att-matrix-table"
-                        dataSource={employees.map((emp, idx) => ({ key: emp.id, name: emp.name, idx }))}
+                        dataSource={employees.map((emp, idx) => ({ key: emp.id, name: emp.name, username: emp.username, idx }))}
                         columns={matrixColumns}
                         pagination={false}
                         size="small"
@@ -8825,32 +8913,42 @@ export default function Attendance() {
                 </div>
             </Card>
 
-            {/* Stats */}
-            <Card title={<Space><UserOutlined style={{ color: '#00ab56' }} /><Text strong>Thống kê tháng 03</Text></Space>} style={{ borderTop: '3px solid #00ab56' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-                    {employeeStats.map((emp) => (
-                        <div key={emp.id} style={{
-                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                            padding: '10px 12px', borderRadius: 10, border: '1px solid #f0f0f0', background: '#fafafa',
-                        }}>
+            <section
+                className="att-attendance-policy"
+                style={{ '--att-policy-background': `url(${attendanceRulesBackground})` } as React.CSSProperties}
+                aria-labelledby="attendance-policy-title"
+            >
+                <div className="att-attendance-policy__content">
+                    <div className="att-attendance-policy__eyebrow"><GiftOutlined /> Chính sách khuyến khích đúng giờ</div>
+                    <h3 id="attendance-policy-title">Quy tắc chuyên cần</h3>
+                    <div className="att-attendance-policy__rules">
+                        <div className="att-attendance-policy__rule">
+                            <span className="att-attendance-policy__icon"><SafetyCertificateOutlined /></span>
                             <div>
-                                <Text strong style={{ fontSize: 13 }}>{emp.name}</Text>
-                                <div><Text type="secondary" style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5 }}>{emp.shiftCount} ca làm</Text></div>
+                                <strong>Đi làm đúng giờ liên tiếp {attendanceRewardConfig?.badgeStreakDays || 3} ngày</strong>
+                                <span>Nhận huy hiệu “Đúng giờ” để ghi nhận chuỗi chuyên cần.</span>
                             </div>
-                            <Space size={16}>
-                                <div style={{ textAlign: 'center' }}>
-                                    <div style={{ fontSize: 10, fontWeight: 800, color: '#fa8c16', textTransform: 'uppercase' }}>Muộn</div>
-                                    <div style={{ fontSize: 14, fontWeight: 800, color: emp.lateCount > 0 ? '#fa8c16' : '#d9d9d9' }}>{emp.lateCount}</div>
-                                </div>
-                                <div style={{ textAlign: 'center' }}>
-                                    <div style={{ fontSize: 10, fontWeight: 800, color: '#8c8c8c', textTransform: 'uppercase' }}>Vắng</div>
-                                    <div style={{ fontSize: 14, fontWeight: 800, color: emp.absentCount > 0 ? '#ff4d4f' : '#d9d9d9' }}>{emp.absentCount}</div>
-                                </div>
-                            </Space>
                         </div>
-                    ))}
+                        <div className="att-attendance-policy__rule">
+                            <span className="att-attendance-policy__icon is-time"><ClockCircleOutlined /></span>
+                            <div>
+                                <strong>Đi làm đúng giờ liên tiếp {attendanceRewardConfig?.waiverStreakDays || 7} ngày</strong>
+                                <span>Nhận 1 lượt miễn phạt mức Nhẹ nếu đi muộn 6–{attendanceRewardConfig?.waiverLateMaxMinutes || 15} phút, tối đa {attendanceRewardConfig?.waiverMaxPerPeriod || 1} lần trong kỳ.</span>
+                            </div>
+                        </div>
+                        <div className="att-attendance-policy__rule">
+                            <span className="att-attendance-policy__icon is-reward"><TrophyOutlined /></span>
+                            <div>
+                                <strong>Đi làm đúng giờ tối thiểu 24/26 ngày (92,3%)</strong>
+                                <span>Nhận {(attendanceRewardConfig?.monthlyRewardAmount || 200000).toLocaleString('vi-VN')}đ thưởng chuyên cần khi kỳ kết thúc. Không áp dụng cho nhân viên thời vụ.</span>
+                            </div>
+                        </div>
+                    </div>
+                    <p className="att-attendance-policy__note">
+                        Có {attendanceRewardConfig?.graceMinutes ?? 5} phút linh động đầu ca. Nghỉ phép được duyệt không làm đứt chuỗi; ngày nghỉ, ngày lễ và ngày không có lịch làm không tính vào chuỗi chuyên cần.
+                    </p>
                 </div>
-            </Card>
+            </section>
         </FaceAttendanceTab>
     );
 
@@ -9155,7 +9253,7 @@ export default function Attendance() {
             default: return renderOverview();
         }
     };
-    const showPayrollManagementControls = isAdmin && (activeTab !== 'bonuses' || bonusView === 'manage');
+    const showPayrollManagementControls = isAdmin && activeTab === 'overview';
 
     // ===== RENDER =====
     if (!isDbLoaded) {
@@ -9192,7 +9290,7 @@ export default function Attendance() {
             </div>
 
             {/* Page Header */}
-            <div className="att-page-header">
+            {activeTab === 'overview' && <div className="att-page-header">
                 <Space className="att-page-actions" size={8} wrap style={{ justifyContent: 'flex-end', width: '100%' }}>
                     {!isBackgroundSyncComplete && (
                         <Tag color="processing" icon={<SyncOutlined spin />} style={{ margin: 0 }}>
@@ -9204,46 +9302,12 @@ export default function Attendance() {
                             <Tag color="warning" icon={<WarningOutlined />}>Cần chốt lại an toàn</Tag>
                         </Tooltip>
                     )}
-                    {showPayrollManagementControls && <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal} disabled={activeTab !== 'packaging' && isCurrentPeriodLocked}>{activeTab === 'packaging' ? 'Cấu hình hoa hồng' : 'Cấu hình'}</Button>}
+                    {showPayrollManagementControls && <Button className="att-btn-config" icon={<SettingOutlined />} onClick={openConfigModal} disabled={isCurrentPeriodLocked}>Cấu hình</Button>}
                     {showPayrollManagementControls && (isCurrentPeriodLocked ? (
                             <Button
+                                className="att-btn-unlock"
                                 icon={<LockOutlined />}
-                                onClick={() => {
-                                    Modal.confirm({
-                                        title: 'Mở khóa kỳ lương',
-                                        content: `Mở khóa kỳ ${overviewDateRange[0].format('DD/MM/YYYY')} — ${overviewDateRange[1].format('DD/MM/YYYY')}? Nhân viên sẽ có thể chỉnh sửa lại.`,
-                                        okText: 'Mở khóa',
-                                        cancelText: 'Hủy',
-                                        okType: 'primary',
-                                        onOk: async () => {
-                                            const api = (window as any).electronAPI;
-                                            if (!api?.attendance?.updatePayrollLock) {
-                                                throw new Error('Ứng dụng chưa có API mở khóa bảng lương an toàn. Vui lòng khởi động lại app.');
-                                            }
-                                            const result = await api.attendance.updatePayrollLock({
-                                                action: 'unlock',
-                                                start: currentLockedPeriod?.start,
-                                                end: currentLockedPeriod?.end,
-                                            });
-                                            if (!result?.success || !Array.isArray(result.data?.lockedPeriods)) {
-                                                throw new Error(result?.error || 'Không thể mở khóa kỳ lương.');
-                                            }
-                                            const nextLockedPeriods = result.data.lockedPeriods as LockedPeriod[];
-                                            setLockedPeriods(nextLockedPeriods);
-                                            if (latestSnapshotRef.current) {
-                                                latestSnapshotRef.current = { ...(latestSnapshotRef.current as Record<string, any>), lockedPeriods: nextLockedPeriods };
-                                            }
-                                            message.success('Đã mở khóa kỳ lương!');
-                                        },
-                                    });
-                                }}
-                                style={{
-                                    borderRadius: 8,
-                                    fontWeight: 700,
-                                    background: '#fff7e6',
-                                    borderColor: '#ffa940',
-                                    color: '#d46b08',
-                                }}
+                                onClick={unlockPayroll}
                             >
                                 Mở khóa (Admin)
                             </Button>
@@ -9259,25 +9323,6 @@ export default function Attendance() {
                             Chốt & Khóa
                         </Button>
                     ))}
-                    {activeTab === 'attendance' && (
-                        <Button
-                            className="att-btn-attendance"
-                            icon={<SmileOutlined />}
-                            type="primary"
-                            onClick={() => attendanceActionsRef.current?.toggleCamera()}
-                        >
-                            Chấm công
-                        </Button>
-                    )}
-                    {activeTab === 'attendance' && isAdmin && (
-                        <Button
-                            className="att-btn-face-register"
-                            icon={<PlusOutlined />}
-                            onClick={() => attendanceActionsRef.current?.openRegister()}
-                        >
-                            Đăng ký khuôn mặt mới
-                        </Button>
-                    )}
                     {showPayrollManagementControls && isCurrentPeriodLocked && (
                         <Tooltip title="Gửi Gmail hàng loạt">
                             <Button
@@ -9291,10 +9336,10 @@ export default function Attendance() {
                         </Tooltip>
                     )}
                 </Space>
-            </div>
+            </div>}
 
             {/* Tab Content */}
-            <div className={`att-tab-content${!isAdmin ? ' att-tab-content--staff' : ''}`}>
+            <div className={`att-tab-content${!isAdmin ? ' att-tab-content--staff' : ''}${activeTab === 'attendance' ? ' att-tab-content--attendance' : ''}`}>
                 {renderActiveTabContent()}
             </div>
 
