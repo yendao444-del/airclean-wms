@@ -340,7 +340,7 @@ const EVIDENCE_BUCKET = evidenceStorageConfig.bucket || "daily-task-evidence";
 const MAX_EVIDENCE_STORAGE_BYTES = 500 * 1024;
 const MAX_EVIDENCE_SOURCE_BYTES = 15 * 1024 * 1024;
 const EVIDENCE_SOURCE_TOKEN_TTL_MS = 10 * 60 * 1000;
-const EVIDENCE_SOURCE_TOKEN_MAX_ITEMS = 500;
+const EVIDENCE_SOURCE_TOKEN_MAX_ITEMS = 100;
 const evidenceSourceValidationTokens = new Map();
 const MAX_BUSINESS_DOCUMENT_BYTES = 15 * 1024 * 1024;
 const MAX_PURCHASE_RECEIPT_BYTES = 2 * 1024 * 1024;
@@ -17527,6 +17527,11 @@ function getEvidenceScreenshotSignals(buffer) {
       sourceSize.height >= 500 &&
       aspectRatio >= 1.45 &&
       aspectRatio <= 1.95;
+    const portraitScreenShape =
+      sourceSize.width >= 500 &&
+      sourceSize.height >= 900 &&
+      aspectRatio >= 0.42 &&
+      aspectRatio <= 0.75;
     const flatRatio = comparisons ? flatComparisons / comparisons : 0;
     const neutralRatio = neutralPixels / pixelCount;
     const lightNeutralRatio = lightNeutralPixels / pixelCount;
@@ -17537,7 +17542,7 @@ function getEvidenceScreenshotSignals(buffer) {
       neutralRatio,
       lightNeutralRatio,
       likelyScreenshot:
-        landscapeScreenShape &&
+        (landscapeScreenShape || portraitScreenShape) &&
         flatRatio >= 0.58 &&
         (neutralRatio >= 0.68 || lightNeutralRatio >= 0.42),
     };
@@ -17545,6 +17550,40 @@ function getEvidenceScreenshotSignals(buffer) {
     console.warn("Cannot inspect evidence screenshot signals:", error.message);
     return null;
   }
+}
+
+function prepareEvidenceImageForStorage(buffer) {
+  const source = nativeImage.createFromBuffer(buffer);
+  if (source.isEmpty()) throw new Error("Không thể đọc ảnh để chuẩn bị tải lên.");
+  const sourceSize = source.getSize();
+  let width = Math.min(sourceSize.width, 1920);
+  let height = Math.max(
+    1,
+    Math.round(sourceSize.height * (width / sourceSize.width)),
+  );
+  let fallback = null;
+
+  while (width >= 320 && height >= 240) {
+    const resized = source.resize({ width, height, quality: "good" });
+    for (const quality of [84, 74, 64, 54, 44, 34, 25]) {
+      const prepared = resized.toJPEG(quality);
+      if (!prepared.length) continue;
+      if (prepared.length <= 200 * 1024) return prepared;
+      if (
+        prepared.length < MAX_EVIDENCE_STORAGE_BYTES &&
+        (!fallback || prepared.length < fallback.length)
+      ) {
+        fallback = prepared;
+      }
+    }
+    width = Math.round(width * 0.75);
+    height = Math.round(height * 0.75);
+  }
+
+  if (fallback) return fallback;
+  throw new Error(
+    "Không thể nén ảnh xuống dưới 500 KB. Hãy chọn ảnh rõ nét hơn hoặc cắt bớt ảnh.",
+  );
 }
 
 function pruneEvidenceSourceValidationTokens(now = Date.now()) {
@@ -18284,6 +18323,11 @@ ipcMain.handle("dailyTasks:validateEvidenceSource", async (_event, payload) => {
     }
     const visualHash = getEvidenceVisualHash(buffer);
     if (!visualHash) throw new Error("Không thể xác minh nội dung ảnh gốc.");
+    const preparedBuffer = prepareEvidenceImageForStorage(buffer);
+    const preparedHash = crypto
+      .createHash("sha256")
+      .update(preparedBuffer)
+      .digest("hex");
 
     pruneEvidenceSourceValidationTokens();
     const validationToken = crypto.randomBytes(32).toString("base64url");
@@ -18292,6 +18336,10 @@ ipcMain.handle("dailyTasks:validateEvidenceSource", async (_event, payload) => {
       actorId: actor.id,
       visualHash,
       sourceHash: crypto.createHash("sha256").update(buffer).digest("hex"),
+      sourceName: fileName || "evidence.jpg",
+      preparedBuffer,
+      preparedHash,
+      preparedMimeType: "image/jpeg",
       sourceVerification:
         camera?.make || camera?.model ? "camera_metadata" : "image_screening",
       expiresAt: Date.now() + EVIDENCE_SOURCE_TOKEN_TTL_MS,
@@ -18305,6 +18353,7 @@ ipcMain.handle("dailyTasks:validateEvidenceSource", async (_event, payload) => {
         camera: [camera?.make, camera?.model].filter(Boolean).join(" "),
         verification:
           camera?.make || camera?.model ? "camera_metadata" : "image_screening",
+        preparedSize: preparedBuffer.length,
       },
     };
   } catch (error) {
@@ -18402,33 +18451,21 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
     knownVisualHashes.push(...(await getRecentEvidenceVisualHashes()));
     const submittedImages = [];
     for (const image of images) {
-      if (
-        !image?.data ||
-        !["image/jpeg", "image/png", "image/webp"].includes(image.mimeType)
-      )
-        throw new Error("Ảnh bằng chứng không hợp lệ.");
-      const buffer = Buffer.from(
-        String(image.data).replace(/^data:[^;]+;base64,/, ""),
-        "base64",
-      );
-      if (!buffer.length || buffer.length >= MAX_EVIDENCE_STORAGE_BYTES)
-        throw new Error("Ảnh sau nén phải dưới 500 KB.");
-      if (!isValidEvidenceImage(buffer, image.mimeType))
-        throw new Error("Dữ liệu tải lên không phải ảnh hợp lệ.");
-      const hash = crypto.createHash("sha256").update(buffer).digest("hex");
-      const visualHash = getEvidenceVisualHash(buffer);
       const validation = evidenceSourceValidationTokens.get(
         String(image.validationToken || "").trim(),
       );
-      if (
-        !visualHash ||
-        !validation?.visualHash ||
-        evidenceVisualHashDistance(visualHash, validation.visualHash) > 10
-      ) {
-        throw new Error(
-          "Ảnh sau xử lý không khớp với ảnh camera đã xác minh. Vui lòng chọn lại ảnh gốc.",
-        );
-      }
+      const buffer = validation?.preparedBuffer;
+      const mimeType = validation?.preparedMimeType;
+      if (!Buffer.isBuffer(buffer) || mimeType !== "image/jpeg")
+        throw new Error("Ảnh đã xác minh không còn khả dụng. Vui lòng chọn lại ảnh.");
+      if (!buffer.length || buffer.length >= MAX_EVIDENCE_STORAGE_BYTES)
+        throw new Error("Ảnh sau nén phải dưới 500 KB.");
+      if (!isValidEvidenceImage(buffer, mimeType))
+        throw new Error("Dữ liệu tải lên không phải ảnh hợp lệ.");
+      const hash = crypto.createHash("sha256").update(buffer).digest("hex");
+      const visualHash = getEvidenceVisualHash(buffer);
+      if (!visualHash || hash !== validation.preparedHash)
+        throw new Error("Ảnh đã xác minh bị thay đổi trước khi tải lên.");
       if (
         visualHash &&
         knownVisualHashes.some(
@@ -18450,25 +18487,20 @@ ipcMain.handle("dailyTasks:submitEvidence", async (_event, payload) => {
         }),
       });
       if (visualHash) knownVisualHashes.push(visualHash);
-      const ext =
-        image.mimeType === "image/png"
-          ? "png"
-          : image.mimeType === "image/webp"
-            ? "webp"
-            : "jpg";
+      const ext = "jpg";
       const r2Key = `daily-tasks/${task.id}/${new Date().toISOString().slice(0, 10)}/${hash}.${ext}`;
       const uploaded = await uploadDailyEvidenceToR2(
         r2Key,
         buffer,
-        image.mimeType,
+        mimeType,
         hash,
       );
       if (!uploaded?.ok || uploaded.key !== r2Key)
         throw new Error("Không thể tải ảnh bằng chứng lên R2.");
       uploadedR2Keys.push(r2Key);
       submittedImages.push({
-        name: image.name || `evidence.${ext}`,
-        mimeType: image.mimeType,
+        name: validation.sourceName || image.name || `evidence.${ext}`,
+        mimeType,
         storage: "r2",
         r2Key,
         hash,
@@ -30608,7 +30640,7 @@ const FALLBACK_ANNOUNCEMENTS = [
     audienceRoles: '["manager","staff","viewer"]',
     effectiveAt: "2026-09-10T00:00:00.000Z",
     publishedAt: "2026-09-10T00:00:00.000Z",
-    requireAcknowledgement: false,
+    requireAcknowledgement: true,
     version: 2,
     policyCode: "ATT-REWARD-2026.09",
     issuer: "Phòng nhân sự",
@@ -30933,7 +30965,7 @@ function isTargetedPackingAnnouncement(announcement) {
   return String(announcement?.policyCode || "").startsWith("PKG-REWARD-WEEKLY-v");
 }
 
-async function getOfficialEmployeeUsernames() {
+async function getAttendanceEmployeeUsernames() {
   try {
     const record = await prisma.appConfig.findUnique({
       where: { key: "attendanceData" },
@@ -30942,12 +30974,11 @@ async function getOfficialEmployeeUsernames() {
     const attendanceData = record?.value ? JSON.parse(record.value) : {};
     return new Set(
       (Array.isArray(attendanceData?.employees) ? attendanceData.employees : [])
-        .filter((employee) => employee?.type === "Official")
         .map((employee) => normalizeActorName(employee?.username))
         .filter(Boolean),
     );
   } catch (error) {
-    console.warn("[Notifications] Không đọc được danh sách nhân viên chính thức:", error.message);
+    console.warn("[Notifications] Không đọc được danh sách nhân viên:", error.message);
     return new Set();
   }
 }
@@ -30970,13 +31001,13 @@ async function getFallbackAudienceConfig(announcementId) {
 }
 
 async function getFallbackRequiredRecipients(announcementId) {
-  const officialUsernames = await getOfficialEmployeeUsernames();
-  if (officialUsernames.size === 0) return [];
+  const employeeUsernames = await getAttendanceEmployeeUsernames();
+  if (employeeUsernames.size === 0) return [];
   const users = await prisma.user.findMany({
     where: {
       status: "active",
       role: { not: "admin" },
-      username: { in: [...officialUsernames] },
+      username: { in: [...employeeUsernames] },
     },
     select: { id: true, username: true, fullName: true, role: true },
     orderBy: [{ role: "asc" }, { fullName: "asc" }],
@@ -30985,7 +31016,7 @@ async function getFallbackRequiredRecipients(announcementId) {
   const selectedIds = Array.isArray(audienceConfig?.userIds)
     ? new Set(audienceConfig.userIds.map(Number).filter(Number.isSafeInteger))
     : null;
-  // Until an admin saves a selection, every current official employee is required.
+  // Until an admin saves a selection, every employee linked to Bảng công is required.
   return users.map((user) => ({ ...user, required: !selectedIds || selectedIds.has(user.id) }));
 }
 
@@ -30993,9 +31024,6 @@ async function canReceiveFallbackAnnouncement(announcement, actor) {
   // Admin access is intentionally broader than the acknowledgement audience.
   if (actor?.role === "admin") return true;
   if (!announcementIsVisibleToRole(announcement, actor?.role)) return false;
-  // The attendance policy is informational and applies to every active
-  // employee, including seasonal staff who are not in the official roster.
-  if (announcement?.policyCode === "ATT-REWARD-2026.09") return true;
   const recipients = await getFallbackRequiredRecipients(announcement.id);
   return recipients.some((recipient) => recipient.required && recipient.id === actor?.id);
 }
@@ -31635,7 +31663,7 @@ ipcMain.handle("notifications:publish", async (_event, announcementId, userIds) 
     const selectedIds = [...new Set((Array.isArray(userIds) ? userIds : []).map(Number))]
       .filter((userId) => Number.isSafeInteger(userId) && eligibleIds.has(userId));
     if (selectedIds.length === 0) {
-      throw new Error("Hãy chọn ít nhất một nhân viên chính thức cần xác nhận.");
+      throw new Error("Hãy chọn ít nhất một nhân viên cần xác nhận.");
     }
     if (selectedIds.length !== (Array.isArray(userIds) ? userIds.length : 0)) {
       throw new Error("Danh sách người nhận có tài khoản không hợp lệ.");

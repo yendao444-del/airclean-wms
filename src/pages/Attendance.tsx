@@ -2800,13 +2800,29 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
                         }</Text>}
                     />
                     <Button size="small" icon={<SyncOutlined />} onClick={() => { checkService(); loadData(); }}>Làm mới</Button>
-                    <Button
-                        size="small"
-                        icon={<UserOutlined />}
-                        onClick={() => setProfilesDrawerOpen(true)}
+                    <Dropdown
+                        trigger={['click']}
+                        menu={{
+                            items: [
+                                {
+                                    key: 'manage-faces',
+                                    icon: <UserOutlined />,
+                                    label: 'Quản lý khuôn mặt',
+                                    onClick: () => setProfilesDrawerOpen(true),
+                                },
+                                ...(isAdmin ? [{
+                                    key: 'register-face',
+                                    icon: <PlusOutlined />,
+                                    label: 'Đăng ký khuôn mặt mới',
+                                    onClick: openRegister,
+                                }] : []),
+                            ],
+                        }}
                     >
-                        Quản lý khuôn mặt ({profiles.length})
-                    </Button>
+                        <Button size="small" icon={<UserOutlined />}>
+                            Khuôn mặt ({profiles.length}) <DownOutlined />
+                        </Button>
+                    </Dropdown>
                 </Space>
                 {toolbarActions && <Space className="att-face-toolbar__actions" size={8} wrap>{toolbarActions}</Space>}
             </div>
@@ -8846,16 +8862,9 @@ export default function Attendance() {
             employees={employees}
             systemUsers={systemUsers}
             toolbarActions={(
-                <>
-                    <Button className="att-btn-attendance" icon={<SmileOutlined />} type="primary" onClick={() => attendanceActionsRef.current?.toggleCamera()}>
-                        Chấm công
-                    </Button>
-                    {isAdmin && (
-                        <Button className="att-btn-face-register" icon={<PlusOutlined />} onClick={() => attendanceActionsRef.current?.openRegister()}>
-                            Đăng ký khuôn mặt mới
-                        </Button>
-                    )}
-                </>
+                <Button className="att-btn-attendance" icon={<SmileOutlined />} type="primary" onClick={() => attendanceActionsRef.current?.toggleCamera()}>
+                    Chấm công
+                </Button>
             )}
             onLogAdded={() => {
                 if (isDbLoaded) fetchMonthLogs();
