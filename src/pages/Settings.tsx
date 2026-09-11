@@ -1,5 +1,6 @@
 import { useState, useEffect, lazy, Suspense } from 'react';
 import '../App.css';
+import './Settings.css';
 import {
   Button,
   Card,
@@ -17,12 +18,14 @@ import {
   Col,
   Statistic,
   Spin,
-  Descriptions
+  Descriptions,
+  Input,
+  Select,
+  Tag
 } from 'antd';
 import {
   ExportOutlined,
   ImportOutlined,
-  DatabaseOutlined,
   WarningOutlined,
 
   ReloadOutlined,
@@ -40,16 +43,23 @@ import {
   DesktopOutlined,
   ApiOutlined,
   InfoCircleOutlined,
-  TeamOutlined
+  TeamOutlined,
+  SearchOutlined,
+  SafetyCertificateOutlined,
+  WifiOutlined,
+  ExclamationCircleOutlined,
+  UserOutlined,
+  EyeOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useAuth } from '../contexts/AuthContext';
+import type { AttendanceDevice } from '../types/electron';
 
 const SystemLogsPage = lazy(() => import('./SystemLogs'));
 const PermissionsPage = lazy(() => import('./Permissions'));
 const R2StorageLab = lazy(() => import('./R2StorageLab'));
 
-const { Title, Text, Paragraph } = Typography;
+const { Text } = Typography;
 
 interface BackupFile {
   filename: string;
@@ -105,6 +115,12 @@ const Settings = () => {
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   const [loadingSystemInfo, setLoadingSystemInfo] = useState(false);
   const [sysInfoError, setSysInfoError] = useState<string | null>(null);
+  const [attendanceDevices, setAttendanceDevices] = useState<AttendanceDevice[]>([]);
+  const [attendanceDeviceCounts, setAttendanceDeviceCounts] = useState({ total: 0, unregistered: 0, approved: 0, revoked: 0, warnings: 0, online: 0 });
+  const [attendanceDeviceRegistryAvailable, setAttendanceDeviceRegistryAvailable] = useState(true);
+  const [loadingAttendanceDevices, setLoadingAttendanceDevices] = useState(false);
+  const [attendanceDeviceSearch, setAttendanceDeviceSearch] = useState('');
+  const [attendanceDeviceStatus, setAttendanceDeviceStatus] = useState('all');
 
   // Load danh sách backups + version + update history khi component mount
   useEffect(() => {
@@ -112,9 +128,38 @@ const Settings = () => {
     loadCurrentVersion();
     loadUpdateHistory();
     loadSystemInfo();
+    if (isAdmin) loadAttendanceDevices();
     // Auto check update
     handleCheckUpdate(true);
-  }, []);
+  }, [isAdmin]);
+
+  const loadAttendanceDevices = async () => {
+    if (!isAdmin || typeof window.electronAPI?.attendanceDevices?.list !== 'function') return;
+    setLoadingAttendanceDevices(true);
+    try {
+      const result = await window.electronAPI.attendanceDevices.list();
+      if (!result.success || !result.data) throw new Error(result.error || 'Không thể tải danh sách máy.');
+      setAttendanceDevices(result.data.devices || []);
+      setAttendanceDeviceCounts(result.data.counts);
+      setAttendanceDeviceRegistryAvailable(result.data.registryAvailable !== false);
+    } catch (error: any) {
+      message.error(error?.message || 'Không thể tải danh sách máy chấm công.');
+    } finally {
+      setLoadingAttendanceDevices(false);
+    }
+  };
+
+  const updateAttendanceDevice = async (device: AttendanceDevice, action: 'approve' | 'reject' | 'revoke') => {
+    try {
+      const api = window.electronAPI.attendanceDevices;
+      const result = await api[action](device.id);
+      if (!result.success) throw new Error(result.error || 'Không thể cập nhật thiết bị.');
+      message.success(action === 'approve' ? 'Đã cấp quyền cho máy.' : action === 'reject' ? 'Đã từ chối máy.' : 'Đã thu hồi quyền máy.');
+      await loadAttendanceDevices();
+    } catch (error: any) {
+      message.error(error?.message || 'Không thể cập nhật thiết bị.');
+    }
+  };
 
   const loadCurrentVersion = async () => {
     try {
@@ -776,6 +821,103 @@ const Settings = () => {
     },
   ];
 
+  const filteredAttendanceDevices = attendanceDevices.filter((device) => {
+    const query = attendanceDeviceSearch.trim().toLowerCase();
+    const matchesQuery = !query || [device.machineName, device.deviceCode, device.deviceId, device.requesterName, device.publicIp]
+      .some((value) => String(value || '').toLowerCase().includes(query));
+    const matchesStatus = attendanceDeviceStatus === 'all' || device.status === attendanceDeviceStatus;
+    return matchesQuery && matchesStatus;
+  });
+
+  const attendanceDeviceStatusLabel = (status: string) => ({
+    unregistered: 'Chưa cấp quyền',
+    approved: 'Đã cấp quyền',
+    rejected: 'Từ chối',
+    revoked: 'Đã thu hồi',
+  } as Record<string, string>)[status] || status;
+
+  const attendanceDeviceStatusColor = (status: string) => ({
+    unregistered: 'default',
+    approved: 'success',
+    rejected: 'error',
+    revoked: 'error',
+  } as Record<string, string>)[status] || 'default';
+
+  const attendanceDeviceColumns = [
+    {
+      title: 'Máy tính / Hostname',
+      key: 'machine',
+      width: 155,
+      render: (_: unknown, device: AttendanceDevice) => (
+        <div className="settings-device-machine">
+          <DesktopOutlined />
+          <span><strong>{device.machineName}</strong><small>{device.machineName}</small></span>
+        </div>
+      ),
+    },
+    {
+      title: 'Device ID',
+      key: 'device',
+      width: 120,
+      render: (_: unknown, device: AttendanceDevice) => <div><Text code>{device.deviceCode}</Text><small className="settings-device-subline">{device.macAddress || 'MAC tham chiếu'}</small></div>,
+    },
+    {
+      title: 'Người sử dụng',
+      key: 'requester',
+      width: 110,
+      render: (_: unknown, device: AttendanceDevice) => <span><UserOutlined /> {device.requesterName || 'Chưa xác định'}</span>,
+    },
+    {
+      title: 'IP & mạng',
+      key: 'network',
+      width: 110,
+      render: (_: unknown, device: AttendanceDevice) => <div><span>{device.publicIp || 'Chưa có IP'}</span><small className={device.networkVerified ? 'settings-device-network is-ok' : 'settings-device-network'}><WifiOutlined /> {device.networkVerified ? 'Trong mạng văn phòng' : (device.networkName || 'Chưa xác minh')}</small></div>,
+    },
+    {
+      title: 'Bằng chứng tin cậy',
+      key: 'trust',
+      width: 145,
+      render: (_: unknown, device: AttendanceDevice) => <span className={device.keyProvider === 'windows-dpapi' ? 'settings-device-trust is-ok' : 'settings-device-trust'}>{device.keyProvider === 'windows-dpapi' ? <SafetyCertificateOutlined /> : <ExclamationCircleOutlined />} {device.tpmAvailable ? 'TPM hợp lệ' : 'Khóa Windows bảo vệ'}</span>,
+    },
+    {
+      title: 'Phiên bản',
+      dataIndex: 'appVersion',
+      key: 'version',
+      width: 64,
+      render: (value: string | null) => value ? `v${value}` : '—',
+    },
+    {
+      title: 'Lần đầu yêu cầu',
+      dataIndex: 'firstSeenAt',
+      key: 'firstSeen',
+      width: 96,
+      render: (value: string | Date) => dayjs(value).format('DD/MM/YYYY HH:mm'),
+    },
+    {
+      title: 'Lần cuối thấy',
+      dataIndex: 'lastSeenAt',
+      key: 'lastSeen',
+      width: 96,
+      render: (value: string | Date) => dayjs(value).format('DD/MM/YYYY HH:mm'),
+    },
+    {
+      title: 'Trạng thái',
+      key: 'status',
+      width: 108,
+      render: (_: unknown, device: AttendanceDevice) => <div><Tag color={attendanceDeviceStatusColor(device.status)}>{attendanceDeviceStatusLabel(device.status)}</Tag><small className={Date.now() - new Date(device.lastSeenAt).getTime() < 15 * 60 * 1000 ? 'settings-device-online is-online' : 'settings-device-online'}>{Date.now() - new Date(device.lastSeenAt).getTime() < 15 * 60 * 1000 ? '● Online' : '● Offline'}</small></div>,
+    },
+    {
+      title: 'Thao tác',
+      key: 'actions',
+      width: 160,
+      render: (_: unknown, device: AttendanceDevice) => <Space size={4} wrap>
+        <Button size="small" icon={<EyeOutlined />} onClick={() => Modal.info({ title: `Chi tiết ${device.machineName}`, content: <Descriptions column={1} size="small"><Descriptions.Item label="Device ID">{device.deviceId}</Descriptions.Item><Descriptions.Item label="Mã thiết bị">{device.deviceCode}</Descriptions.Item><Descriptions.Item label="Khóa bảo mật">{device.keyFingerprint || '—'}</Descriptions.Item><Descriptions.Item label="Nền tảng">{device.platform || '—'}</Descriptions.Item></Descriptions> })}>Xem chi tiết</Button>
+        {device.status === 'unregistered' && <><Button size="small" type="primary" onClick={() => updateAttendanceDevice(device, 'approve')}>Cấp quyền</Button><Button size="small" danger onClick={() => updateAttendanceDevice(device, 'reject')}>Từ chối</Button></>}
+        {device.status === 'approved' && <Popconfirm title="Thu hồi quyền máy này?" onConfirm={() => updateAttendanceDevice(device, 'revoke')}><Button size="small" danger>Thu hồi</Button></Popconfirm>}
+      </Space>,
+    },
+  ];
+
   // TAB ITEMS
   const tabItems = [
     {
@@ -1003,6 +1145,31 @@ const Settings = () => {
         </div>
       ),
     },
+    ...(isAdmin ? [{
+      key: 'devices',
+      label: <span><DesktopOutlined /> Quản trị thiết bị</span>,
+      children: (
+        <div className="settings-device-admin">
+          <div className="settings-device-phase"><InfoCircleOutlined /> Chế độ quan sát đang bật — máy tự xuất hiện khi mở ứng dụng; chưa khóa chấm công.</div>
+          {!attendanceDeviceRegistryAvailable && <Alert className="settings-device-schema-warning" type="warning" showIcon message="Chưa kết nối được sổ đăng ký máy" description="Database hiện chưa có bảng quản trị thiết bị. Chấm công vẫn hoạt động bình thường; sau khi cập nhật schema, các máy sẽ tự xuất hiện tại đây." />}
+          <Row gutter={[12, 12]} className="settings-device-stats">
+            <Col xs={12} sm={6}><Card size="small"><Statistic title="Tổng thiết bị" value={attendanceDeviceCounts.total} prefix={<DesktopOutlined />} /></Card></Col>
+            <Col xs={12} sm={6}><Card size="small"><Statistic title="Chờ duyệt" value={attendanceDeviceCounts.unregistered} prefix={<ClockCircleOutlined />} valueStyle={{ color: '#d48806' }} /></Card></Col>
+            <Col xs={12} sm={6}><Card size="small"><Statistic title="Đã cấp quyền" value={attendanceDeviceCounts.approved} prefix={<CheckCircleOutlined />} valueStyle={{ color: '#00a85a' }} /></Card></Col>
+            <Col xs={12} sm={6}><Card size="small"><Statistic title="Cảnh báo" value={attendanceDeviceCounts.warnings} prefix={<WarningOutlined />} valueStyle={{ color: '#ff4d4f' }} /></Card></Col>
+          </Row>
+          <div className="settings-device-toolbar">
+            <Input allowClear prefix={<SearchOutlined />} placeholder="Tìm theo máy, hostname, Device ID..." value={attendanceDeviceSearch} onChange={(event) => setAttendanceDeviceSearch(event.target.value)} />
+            <Select value={attendanceDeviceStatus} onChange={setAttendanceDeviceStatus} options={[{ value: 'all', label: 'Tất cả trạng thái' }, { value: 'unregistered', label: 'Chưa cấp quyền' }, { value: 'approved', label: 'Đã cấp quyền' }, { value: 'revoked', label: 'Đã thu hồi' }, { value: 'rejected', label: 'Từ chối' }]} />
+            <Button icon={<SyncOutlined />} onClick={loadAttendanceDevices} loading={loadingAttendanceDevices}>Làm mới</Button>
+          </div>
+          <Card className="settings-device-table-card" bodyStyle={{ padding: 0 }}>
+            <Table<AttendanceDevice> rowKey="id" size="small" loading={loadingAttendanceDevices} columns={attendanceDeviceColumns} dataSource={filteredAttendanceDevices} rowClassName={(device) => `settings-device-row settings-device-row-${device.status}`} pagination={{ pageSize: 8, showSizeChanger: false }} />
+          </Card>
+          <Alert className="settings-device-note" type="info" showIcon icon={<SafetyCertificateOutlined />} message="Bằng chứng chính: khóa Windows/TPM và server challenge. IP chỉ xác minh vị trí; hostname và MAC chỉ dùng để đối chiếu." />
+        </div>
+      ),
+    }] : []),
     {
       key: 'history',
       label: (
@@ -1045,19 +1212,9 @@ const Settings = () => {
   ];
 
   return (
-    <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
-      <div style={{ marginBottom: 24 }}>
-        <Title level={2}>
-          <DatabaseOutlined style={{ marginRight: 8 }} />
-          Cài đặt Hệ thống
-        </Title>
-        <Paragraph type="secondary">
-          Cập nhật phần mềm và theo dõi trạng thái hệ thống
-        </Paragraph>
-      </div>
-
+    <div className="settings-page-shell">
       <Tabs
-        defaultActiveKey="update"
+        defaultActiveKey={isAdmin ? 'devices' : 'update'}
         items={tabItems}
         size="large"
         tabBarStyle={{ marginBottom: 24 }}

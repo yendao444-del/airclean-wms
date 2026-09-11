@@ -1,0 +1,7 @@
+[DataSafety] Blocked offlineQueue:sync: Đồng bộ hàng đợi có thể phát lại và xóa tệp chờ
+❌ Get stock-check activity error: Error: Không có quyền thực hiện thao tác này (yêu cầu: manager)
+    at requireRole (G:\QUAN LY BAN HANG\desktop-FIXDEBUG\electron\ipc-handlers.js:1862:11)
+    at G:\QUAN LY BAN HANG\desktop-FIXDEBUG\electron\ipc-handlers.js:2933:5
+    at G:\QUAN LY BAN HANG\desktop-FIXDEBUG\electron\ipc-handlers.js:1646:12
+    at async Session.<anonymous> (node:electron/js2c/browser_init:2:118371)
+[DataSafety] Blocked stockCheck:adminSaveSessions: Admin lưu toàn bộ phiên kiểm kho có thể ghi đè dữ liệu

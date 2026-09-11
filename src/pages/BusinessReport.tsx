@@ -795,7 +795,7 @@ export default function BusinessReportPage() {
     // ============================================
     useEffect(() => {
         setHeaderExtra(
-            <Space size={4}>
+            <Space className="business-report-header-actions" size={4} wrap>
                 <Button
                     type={activeTab === 'pnl' ? 'primary' : 'default'}
                     size="middle"

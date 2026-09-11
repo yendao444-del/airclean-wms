@@ -3066,7 +3066,7 @@ ipcMain.handle('posOrder:create', async (event, data) => {
                     description: `Bán hàng POS: ${orderNumber} - ${items.length} SP - ${new Intl.NumberFormat('vi-VN').format(total)}đ (${data.paymentMethod || 'cash'})`,
                     userName: data.userName || 'System',
                     severity: 'INFO',
-                    details: JSON.stringify({
+                    changes: JSON.stringify({
                         orderNumber,
                         itemCount: items.length,
                         total,
@@ -7194,12 +7194,20 @@ ipcMain.handle('system:deleteBackup', async (event, backupPath) => {
 const MAX_EVIDENCE_IMAGES = 5;
 const TASK_PENALTY_KEY_PREFIX = 'dailyTaskEvidencePenalty:';
 const ASSIGNMENT_EVIDENCE_PENALTY_KEY_PREFIX = 'assignmentEvidencePenalty:';
-const DAILY_TASK_REST_DAY_HOLIDAYS = new Set(['01-01', '04-30', '05-01', '09-02']);
+const DAILY_TASK_REST_DAY_HOLIDAYS = new Set([
+    '01-01', '04-30', '05-01', '09-02',
+    // Tet and Hung Kings' Festival dates used by the local work calendar.
+    '2025-01-28', '2025-01-29', '2025-01-30', '2025-01-31',
+    '2025-02-01', '2025-02-02', '2025-02-03', '2025-04-07',
+    '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19',
+    '2026-02-20', '2026-02-21', '2026-02-22', '2026-03-27',
+]);
 
 function isDailyTaskPenaltyRestDay(date) {
     const localDate = new Date(date);
     const monthDay = `${String(localDate.getMonth() + 1).padStart(2, '0')}-${String(localDate.getDate()).padStart(2, '0')}`;
-    return localDate.getDay() === 0 || DAILY_TASK_REST_DAY_HOLIDAYS.has(monthDay);
+    const isoDate = `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, '0')}-${String(localDate.getDate()).padStart(2, '0')}`;
+    return localDate.getDay() === 0 || DAILY_TASK_REST_DAY_HOLIDAYS.has(monthDay) || DAILY_TASK_REST_DAY_HOLIDAYS.has(isoDate);
 }
 
 // Daily work is due at the end of its working date. Keep this rule in the
@@ -11462,6 +11470,10 @@ function createDailyCarryOverSession(sessions) {
         return { sessions: repairedSessions, changed };
     }
 
+    // Daily checks are a rotating SKU queue. Unfinished rows remain in their
+    // original session and are not copied into the next day.
+    return { sessions: repairedSessions, changed };
+
     const source = repairedSessions
         .filter(session => session.type === 'daily'
             && session.date < today
@@ -11550,53 +11562,29 @@ function applySameDayFullCheckExemptions(sessions) {
     return { sessions: updatedSessions, changed };
 }
 
-const DAILY_STOCK_CHECK_PRODUCT_COUNT = 3;
 const STOCK_CHECK_RISK_WINDOW_DAYS = 14;
 const STOCK_CHECK_LARGE_DIFFERENCE = 10;
-const DAILY_STOCK_CHECK_MIN_SKUS = 12;
 const DAILY_STOCK_CHECK_MAX_SKUS = 15;
-const DAILY_STOCK_CHECK_VARIANT_DIVISOR = 3;
 
 function stockCheckScopeHash(value) {
     return Array.from(String(value || '')).reduce((hash, character) => ((hash * 31) + character.charCodeAt(0)) >>> 0, 0);
 }
 
-function isMandatoryFullDailyStockCheckProduct(productName, items = []) {
-    const name = String(productName || '').toLocaleUpperCase('vi-VN');
-    const sku = String(items[0]?.sku || '').toLocaleUpperCase('vi-VN');
-    return (name.includes('UNICARE') && name.includes('5D')) || sku.includes('5DUNI');
-}
-
-function selectDailyStockCheckScopeItems(items, date) {
-    const groups = new Map();
-    for (const item of items) {
-        const productName = String(item?.productName || '').trim();
-        if (!productName) continue;
-        if (!groups.has(productName)) groups.set(productName, []);
-        groups.get(productName).push(item);
-    }
-
-    const selected = [];
-    for (const [productName, groupItems] of groups) {
-        const remaining = DAILY_STOCK_CHECK_MAX_SKUS - selected.length;
-        if (remaining <= 0) break;
-        const ordered = [...groupItems].sort((left, right) => String(left?.sku || '').localeCompare(String(right?.sku || '')));
-        const quota = isMandatoryFullDailyStockCheckProduct(productName, ordered)
-            ? ordered.length
-            : Math.max(1, Math.ceil(ordered.length / DAILY_STOCK_CHECK_VARIANT_DIVISOR));
-        const negativeItems = ordered.filter(item => Number(item?.systemStock) < 0).slice(0, quota);
-        const selectedSkus = new Set(negativeItems.map(item => String(item?.sku || '')));
-        const startAt = (stockCheckScopeHash(`${date}:${productName}`) + Number(String(date).replace(/\D/g, ''))) % ordered.length;
-        for (let offset = 0; negativeItems.length < quota && offset < ordered.length; offset += 1) {
-            const item = ordered[(startAt + offset) % ordered.length];
-            if (!selectedSkus.has(String(item?.sku || ''))) {
-                negativeItems.push(item);
-                selectedSkus.add(String(item?.sku || ''));
-            }
-        }
-        selected.push(...negativeItems.slice(0, remaining));
-    }
-    return selected;
+function selectDailyStockCheckScopeItems(items, sessions, date) {
+    const lastChecked = new Map();
+    (sessions || []).filter(session => session?.type === 'daily' && String(session.date || '') < date && session.status !== 'cancelled')
+        .forEach(session => (session.items || []).forEach(item => {
+            const sku = String(item?.sku || '').trim();
+            if (sku && (!lastChecked.has(sku) || session.date > lastChecked.get(sku))) lastChecked.set(sku, session.date);
+        }));
+    return [...new Map((items || []).filter(item => item?.sku).map(item => [String(item.sku), item])).values()]
+        .sort((left, right) => {
+            const leftDate = lastChecked.get(String(left.sku)) || '';
+            const rightDate = lastChecked.get(String(right.sku)) || '';
+            if (leftDate !== rightDate) return leftDate.localeCompare(rightDate);
+            return stockCheckScopeHash(`${date}:${left.sku}`) - stockCheckScopeHash(`${date}:${right.sku}`);
+        })
+        .slice(0, DAILY_STOCK_CHECK_MAX_SKUS);
 }
 
 // One-time migration for untouched daily sessions made before the 15-SKU
@@ -11611,10 +11599,10 @@ function normalizeUntouchedDailyStockCheckScope(sessions) {
             || items.some(item => item?.actualStock !== null && item?.actualStock !== undefined || item?.balanced)) {
             return session;
         }
-        const scopedItems = selectDailyStockCheckScopeItems(items, today);
+        const scopedItems = selectDailyStockCheckScopeItems(items, sessions, today);
         if (scopedItems.length >= items.length) return session;
         changed = true;
-        return { ...session, items: scopedItems, dailyScopePolicyVersion: 1 };
+        return { ...session, items: scopedItems, dailyScopePolicyVersion: 3 };
     });
     return { sessions: normalizedSessions, changed };
 }
@@ -11739,85 +11727,28 @@ async function readCurrentStockForStockCheck(tx, sku) {
     return null;
 }
 
-// A daily session is one best-selling product plus two random products. The
-// renderer starts a session, but enforcing the minimum here makes the rule
-// durable for old sessions and for the assigned manager's first page load.
+// Keep the SKU rotation authoritative in the main process so every client sees
+// the same daily scope and old clients cannot restore a product-level scope.
 async function topUpTodayDailyStockCheckProducts(sessions, tx) {
     const today = getStockCheckTodayKey();
-    const fullyCheckedSkus = new Set(
-        sessions
-            .filter(session => session?.type === 'full' && session?.date === today)
-            .flatMap(session => session.items || [])
-            .filter(item => item?.balanced && item?.sku)
-            .map(item => String(item.sku))
-    );
+    if (isDailyTaskPenaltyRestDay(new Date())) return { sessions, changed: false };
     const candidates = await tx.product.findMany({
         select: productSelectForCatalog(),
         orderBy: { createdAt: 'asc' },
     });
-    const alwaysCheckUnicare = candidates.find(product => isMandatoryFullDailyStockCheckProduct(
-        product?.name,
-        expandProductForStockCheck(product)
-    ));
-    const riskProducts = getStockCheckRiskProducts(candidates, sessions, today);
-    const riskByProductName = new Map(riskProducts.map(risk => [String(risk.product?.name || '').trim(), risk]));
+    const availableItems = candidates.flatMap(expandProductForStockCheck);
     let changed = false;
     const updatedSessions = sessions.map(session => {
         if (session?.type !== 'daily' || session?.date !== today || session?.status === 'completed') return session;
         const items = Array.isArray(session.items) ? session.items : [];
-        // A generated daily scope is immutable once a physical count has been
-        // entered. Only repair an untouched scope that violates the 12-15 SKU
-        // policy or that omitted the mandatory 5D UNICARE product.
-        if (!items.length || String(session?.runId || '').startsWith('carry-over-')
+        if (String(session?.runId || '').startsWith('carry-over-')
             || items.some(item => (item?.actualStock !== null && item?.actualStock !== undefined) || item?.balanced)) return session;
-        const exemptedSkus = new Set([
-            ...fullyCheckedSkus,
-            ...(session.fullCheckExemptions || []).map(item => String(item?.sku || '')),
-        ]);
-        const priorityProducts = riskProducts.filter(risk => {
-            const productName = String(risk.product?.name || '').trim();
-            const availableItems = expandProductForStockCheck(risk.product)
-                .filter(item => !exemptedSkus.has(String(item.sku)));
-            return productName && availableItems.length > 0;
-        });
-        const mandatoryItems = alwaysCheckUnicare
-            ? expandProductForStockCheck(alwaysCheckUnicare).filter(item => !exemptedSkus.has(String(item.sku)))
-            : [];
-        const currentSkus = new Set(items.map(item => String(item?.sku || '')));
-        const hasMandatoryFullScope = !mandatoryItems.length
-            || mandatoryItems.every(item => currentSkus.has(String(item.sku)));
-        const isValidScope = items.length >= DAILY_STOCK_CHECK_MIN_SKUS
-            && items.length <= DAILY_STOCK_CHECK_MAX_SKUS
-            && hasMandatoryFullScope;
-        if (isValidScope) return session;
-
-        const productScore = product => stockCheckScopeHash(`${today}:${product?.name || product?.sku || ''}`);
-        const orderedProducts = [
-            ...(alwaysCheckUnicare ? [alwaysCheckUnicare] : []),
-            ...priorityProducts.map(risk => risk.product),
-            ...candidates.slice().sort((left, right) => productScore(left) - productScore(right)),
-        ].filter((product, index, list) => {
-            const key = String(product?.id || product?.sku || product?.name || '');
-            return key && list.findIndex(entry => String(entry?.id || entry?.sku || entry?.name || '') === key) === index;
-        });
-        const availableItems = orderedProducts.flatMap(product => applyStockCheckRiskMetadata(
-            expandProductForStockCheck(product).filter(item => !exemptedSkus.has(String(item.sku))),
-            riskByProductName.get(String(product?.name || '').trim())
-        ));
-        let scopedItems = selectDailyStockCheckScopeItems(availableItems, today);
-        if (scopedItems.length < DAILY_STOCK_CHECK_MIN_SKUS) {
-            const selectedSkus = new Set(scopedItems.map(item => String(item.sku)));
-            for (const item of availableItems) {
-                if (scopedItems.length >= DAILY_STOCK_CHECK_MIN_SKUS || scopedItems.length >= DAILY_STOCK_CHECK_MAX_SKUS) break;
-                if (!selectedSkus.has(String(item.sku))) {
-                    scopedItems.push(item);
-                    selectedSkus.add(String(item.sku));
-                }
-            }
-        }
+        const isCurrentPolicy = items.length > 0 && items.length <= DAILY_STOCK_CHECK_MAX_SKUS && session.dailyScopePolicyVersion === 3;
+        if (isCurrentPolicy) return session;
+        const scopedItems = selectDailyStockCheckScopeItems(availableItems, sessions, today);
         if (!scopedItems.length) return session;
         changed = true;
-        return { ...session, items: scopedItems, dailyScopePolicyVersion: 2 };
+        return { ...session, items: scopedItems, dailyScopePolicyVersion: 3 };
     });
     return { sessions: updatedSessions, changed };
 }
@@ -12101,6 +12032,7 @@ ipcMain.handle('stockCheck:ensureDailySession', async (event, payload = {}) => {
         const result = await getPrismaDirectTx().$transaction(async (tx) => {
             await lockStockCheckSessions(tx);
             const today = getStockCheckTodayKey();
+            if (isDailyTaskPenaltyRestDay(new Date())) throw new Error('Chủ nhật và ngày lễ không tạo phiên kiểm hàng ngày.');
             const record = await tx.appConfig.findUnique({ where: { key: 'stockCheckSessionsV2' } });
             const storedSessions = parseStockCheckSessionsFromConfig(record);
             const carried = createDailyCarryOverSession(storedSessions);
@@ -12129,8 +12061,13 @@ ipcMain.handle('stockCheck:ensureDailySession', async (event, payload = {}) => {
                 : -1;
             const assignee = managers[(previousIndex + 1 + managers.length) % managers.length];
 
+            // Ignore the client's product-level suggestion. The server owns
+            // the SKU rotation so managers with a limited history cannot
+            // accidentally receive yesterday's same variants.
+            const catalog = await tx.product.findMany({ select: productSelectForCatalog(), orderBy: { createdAt: 'asc' } });
+            const selectedItems = selectDailyStockCheckScopeItems(catalog.flatMap(expandProductForStockCheck), sessions, today);
             const uniqueSkus = new Set();
-            const items = requestedItems.slice(0, 1000).map(item => {
+            const items = selectedItems.slice(0, DAILY_STOCK_CHECK_MAX_SKUS).map(item => {
                 const sku = String(item?.sku || '').trim();
                 if (!sku || uniqueSkus.has(sku)) return null;
                 uniqueSkus.add(sku);
@@ -12158,7 +12095,7 @@ ipcMain.handle('stockCheck:ensureDailySession', async (event, payload = {}) => {
                 assignedTo: assignee.username,
                 assignedName: assignee.fullName || assignee.username,
                 status: 'in_progress', items, notes: '', createdAt: now.toISOString(),
-                createdBy: currentSession.username, autoAssigned: true,
+                createdBy: currentSession.username, autoAssigned: true, dailyScopePolicyVersion: 3,
             };
             sessions = [...sessions, session].slice(-90);
             await writeStockCheckSessions(sessions, tx);

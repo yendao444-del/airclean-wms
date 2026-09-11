@@ -22,8 +22,9 @@ export const VARIABLE_VIETNAM_HOLIDAYS: Record<string, string> = {
 export const DAILY_REPORT_MISSING_FINE_OFFICIAL = 30000;
 export const DAILY_REPORT_POLICY_START_DATE = '2026-04-28';
 
-// Temporary policy switch: daily stock checks remain active, but missing-check fines are disabled.
-export const STOCK_CHECK_MISSING_FINE_ENABLED = false;
+// Missing-check fines apply on working days; Sundays and Vietnam holidays are
+// excluded by isPastStockCheckWorkingDay below.
+export const STOCK_CHECK_MISSING_FINE_ENABLED = true;
 export const STOCK_CHECK_MISSING_FINE = 50000;
 export const STOCK_CHECK_POLICY_START_DATE = '2026-05-06';
 

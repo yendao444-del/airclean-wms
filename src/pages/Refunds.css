@@ -1,0 +1,862 @@
+.refunds-page {
+    --refunds-accent: #722ed1;
+    --refunds-accent-soft: #f7f0ff;
+    --refunds-green: #00b96b;
+    --refunds-canvas: #f6f8f7;
+    --refunds-border: #e4e9e6;
+    min-width: 0;
+    position: relative;
+    padding-bottom: 24px;
+    container-name: refunds-page;
+    container-type: inline-size;
+}
+
+.refunds-page .ant-select-dropdown,
+.refunds-page .ant-picker-dropdown,
+.refunds-page .ant-dropdown {
+    z-index: 1200;
+}
+
+.refunds-page-heading,
+.refunds-page-title,
+.refunds-heading-actions,
+.refunds-toolbar,
+.refunds-toolbar-actions,
+.refunds-scan-row,
+.refunds-video-entry,
+.refunds-expanded-meta,
+.refunds-full-confirm-row,
+.refunds-mismatch-heading,
+.refunds-confirm-bar,
+.refunds-form-actions {
+    display: flex;
+    align-items: center;
+}
+
+.refunds-page-heading {
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 20px;
+}
+
+.refunds-page-title {
+    min-width: 0;
+    gap: 13px;
+}
+
+.refunds-page-title h2.ant-typography {
+    margin: 0;
+    color: #202421;
+    font-size: 29px;
+    line-height: 1.15;
+}
+
+.refunds-page-title .ant-typography-secondary {
+    display: block;
+    margin-top: 4px;
+    font-size: 13px;
+}
+
+.refunds-title-icon {
+    display: inline-flex;
+    flex: 0 0 46px;
+    width: 46px;
+    height: 46px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #dbc8f8;
+    border-radius: 14px;
+    color: var(--refunds-accent);
+    background: linear-gradient(145deg, #fff, #f2e8ff);
+    box-shadow: 0 7px 20px rgba(114, 46, 209, 0.12);
+    font-size: 22px;
+}
+
+.refunds-heading-actions {
+    flex: 0 0 auto;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+.refunds-import-button.ant-btn-primary,
+.refunds-scan-button.ant-btn-primary {
+    border-color: var(--refunds-green) !important;
+    background: var(--refunds-green) !important;
+    box-shadow: 0 5px 14px rgba(0, 185, 107, 0.2);
+}
+
+.refunds-video-panel {
+    margin-bottom: 16px;
+    overflow: visible;
+}
+
+.refunds-video-panel .ant-collapse-header {
+    align-items: center !important;
+}
+
+.refunds-video-entry {
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.refunds-video-entry .ant-input {
+    min-width: 0;
+}
+
+.refunds-scan-card {
+    overflow: visible;
+}
+
+.refunds-scan-card .ant-card-body {
+    padding: 23px;
+}
+
+.refunds-scan-row {
+    gap: 12px;
+}
+
+.refunds-scan-icon {
+    flex: 0 0 auto;
+    color: var(--refunds-accent);
+    font-size: 32px;
+}
+
+.refunds-scan-input {
+    min-width: 0;
+}
+
+.refunds-scan-button {
+    flex: 0 0 auto;
+}
+
+.refunds-toolbar {
+    min-width: 0;
+    justify-content: space-between;
+    gap: 12px 16px;
+    margin-bottom: 16px;
+}
+
+.refunds-status-tabs {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.refunds-status-tabs .ant-radio-button-wrapper {
+    height: 38px;
+    margin: 0;
+    padding-inline: 14px;
+    border: 1px solid #dfe4e1;
+    border-radius: 9px !important;
+    color: #505954;
+    background: #fff;
+    line-height: 36px;
+    box-shadow: 0 2px 7px rgba(24, 39, 31, 0.035);
+}
+
+.refunds-status-tabs .ant-radio-button-wrapper::before {
+    display: none;
+}
+
+.refunds-status-tabs .ant-radio-button-wrapper-checked:not(.ant-radio-button-wrapper-disabled) {
+    border-color: var(--refunds-green);
+    color: #fff;
+    background: var(--refunds-green);
+    box-shadow: 0 5px 13px rgba(0, 185, 107, 0.16);
+}
+
+.refunds-status-tabs .refunds-status-tab--lost {
+    color: #a8071a;
+    font-weight: 700;
+}
+
+.refunds-status-tabs .refunds-status-tab--lost.ant-radio-button-wrapper-checked {
+    border-color: #ff4d4f;
+    background: #ff4d4f;
+}
+
+.refunds-toolbar-actions {
+    flex: 0 1 auto;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.refunds-search {
+    width: min(300px, 28vw);
+    min-width: 220px;
+}
+
+.refunds-export-button {
+    flex: 0 0 auto;
+}
+
+.refunds-lost-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+    margin-bottom: 16px;
+}
+
+.refunds-lost-stat {
+    min-width: 0;
+}
+
+.refunds-table-card {
+    min-width: 0;
+    overflow: visible;
+    border: 1px solid #e7ebe9;
+    border-radius: 14px;
+    box-shadow: 0 6px 24px rgba(30, 43, 36, 0.045);
+}
+
+.refunds-table-card > .ant-card-body {
+    min-width: 0;
+    padding: 14px 16px 4px;
+}
+
+.refunds-table .ant-table-thead > tr > th {
+    color: #354039;
+    background: #f7f9f8;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.refunds-table .ant-table-tbody > tr.refunds-table-row > td {
+    transition: background-color 0.18s ease;
+}
+
+.refunds-cell--actions,
+.refunds-cell--compensation,
+.refunds-toolbar-actions,
+.refunds-mismatch-panel,
+.refunds-items-table--received {
+    overflow: visible;
+}
+
+.refunds-expanded-panel {
+    padding: 12px 16px;
+}
+
+.refunds-expanded-meta {
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    margin-bottom: 12px;
+    font-size: 12px;
+}
+
+.refunds-full-confirm-row {
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.refunds-mismatch-heading,
+.refunds-confirm-bar {
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.refunds-method-grid,
+.refunds-form-grid,
+.refunds-product-grid {
+    display: grid;
+}
+
+.refunds-method-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    padding: 20px 0;
+}
+
+.refunds-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+}
+
+.refunds-product-grid {
+    grid-template-columns: minmax(180px, 2fr) minmax(130px, 1.5fr) minmax(90px, 1fr) minmax(120px, 1.2fr) auto;
+    align-items: end;
+    gap: 12px;
+}
+
+.refunds-form-actions {
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 24px;
+}
+
+.refunds-stock-log {
+    min-width: 0;
+}
+
+@container refunds-page (max-width: 1220px) {
+    .refunds-toolbar {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .refunds-toolbar-actions {
+        width: 100%;
+    }
+
+    .refunds-search {
+        width: auto;
+        min-width: 0;
+        flex: 1 1 260px;
+    }
+
+    .refunds-table-card > .ant-card-body {
+        padding: 0;
+    }
+
+    .refunds-table .ant-table-container,
+    .refunds-table .ant-table-content,
+    .refunds-table .ant-table-body {
+        width: 100%;
+        max-width: 100%;
+        overflow: visible !important;
+    }
+
+    .refunds-table .ant-table-container table {
+        display: block;
+        width: 100% !important;
+        min-width: 100% !important;
+        max-width: 100% !important;
+        table-layout: auto !important;
+    }
+
+    .refunds-table colgroup,
+    .refunds-table .ant-table-header,
+    .refunds-table .ant-table-thead,
+    .refunds-table .ant-table-measure-row {
+        display: none;
+    }
+
+    .refunds-table .ant-table-tbody {
+        display: grid;
+        box-sizing: border-box;
+        width: 100%;
+        gap: 10px;
+        padding: 12px;
+        background: var(--refunds-canvas);
+    }
+
+    .refunds-table .ant-table-tbody > tr.refunds-table-row {
+        display: grid;
+        box-sizing: border-box;
+        width: 100%;
+        grid-template-columns: 30px minmax(165px, 1.2fr) minmax(145px, 1fr) minmax(145px, 0.9fr) minmax(130px, 0.85fr) 38px;
+        grid-template-areas:
+            "select order order tracking tracking actions"
+            "select source count reason date actions"
+            "select shipping amount status status actions"
+            "select compensation compensation compensation compensation actions";
+        column-gap: 10px;
+        padding: 0 10px;
+        overflow: visible;
+        border: 1px solid var(--refunds-border);
+        border-left: 3px solid #c7b1e8;
+        border-radius: 12px;
+        background: #fff;
+        box-shadow: 0 4px 16px rgba(23, 32, 27, 0.045);
+    }
+
+    .refunds-table .ant-table-tbody > tr.refunds-table-row--pending {
+        border-left-color: var(--refunds-accent);
+    }
+
+    .refunds-table .ant-table-tbody > tr.refunds-table-row--received {
+        border-left-color: #1677ff;
+    }
+
+    .refunds-table .ant-table-tbody > tr.refunds-table-row--completed,
+    .refunds-table .ant-table-tbody > tr.refunds-table-row--compensated {
+        border-left-color: var(--refunds-green);
+        background: #fbfffd;
+    }
+
+    .refunds-table .ant-table-tbody > tr.refunds-table-row--lost {
+        border-left-color: #ff4d4f;
+    }
+
+    .refunds-table .ant-table-tbody > tr.refunds-table-row--multi:not(.refunds-table-row--compensated) {
+        background: #fffdf5;
+    }
+
+    .refunds-table .ant-table-tbody > tr.refunds-table-row > td {
+        min-width: 0;
+        padding: 0 !important;
+        overflow: visible;
+        border: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+    }
+
+    .refunds-table .ant-table-tbody > tr.refunds-table-row:hover > td,
+    .refunds-table .ant-table-tbody > tr.refunds-table-row.ant-table-row-selected > td {
+        background: transparent !important;
+    }
+
+    .refunds-table .ant-table-selection-column {
+        grid-area: select;
+        align-self: start;
+        padding-top: 15px !important;
+    }
+
+    .refunds-cell--source { grid-area: source; }
+    .refunds-cell--order { grid-area: order; }
+    .refunds-cell--tracking { grid-area: tracking; }
+    .refunds-cell--count { grid-area: count; }
+    .refunds-cell--reason { grid-area: reason; }
+    .refunds-cell--date { grid-area: date; }
+    .refunds-cell--shipping { grid-area: shipping; }
+    .refunds-cell--amount { grid-area: amount; }
+    .refunds-cell--status { grid-area: status; }
+    .refunds-cell--compensation { grid-area: compensation; }
+
+    .refunds-cell:not(.refunds-cell--actions) {
+        display: grid !important;
+        grid-template-columns: 82px minmax(0, 1fr);
+        align-items: center;
+        gap: 8px;
+        min-height: 38px;
+        padding-block: 5px !important;
+        text-align: left !important;
+    }
+
+    .refunds-cell:not(.refunds-cell--actions)::before {
+        color: #7b8580;
+        font-size: 10px;
+        font-weight: 700;
+        line-height: 1.2;
+        text-transform: uppercase;
+    }
+
+    .refunds-cell--source::before { content: "Nguon don"; }
+    .refunds-cell--order::before { content: "Order ID"; }
+    .refunds-cell--tracking::before { content: "Tracking ID"; }
+    .refunds-cell--count::before { content: "So SP"; }
+    .refunds-cell--reason::before { content: "Ly do"; }
+    .refunds-cell--date::before { content: "Ngay huy"; }
+    .refunds-cell--shipping::before { content: "Don vi VC"; }
+    .refunds-cell--amount::before { content: "Tong tien"; }
+    .refunds-cell--status::before { content: "Trang thai"; }
+    .refunds-cell--compensation::before { content: "Den bu"; }
+
+    .refunds-cell .ant-tag {
+        width: fit-content;
+        max-width: 100%;
+        margin-inline-end: 0;
+        overflow-wrap: anywhere;
+        white-space: normal;
+    }
+
+    .refunds-cell--actions {
+        position: static !important;
+        grid-area: actions;
+        align-self: start;
+        padding-top: 12px !important;
+    }
+
+    .refunds-cell--actions .ant-btn {
+        width: 34px;
+        padding-inline: 0;
+        overflow: hidden;
+        font-size: 0;
+    }
+
+    .refunds-cell--actions .anticon {
+        margin: 0 !important;
+        font-size: 14px;
+    }
+
+    .refunds-table .ant-table-cell-fix-right,
+    .refunds-table .ant-table-cell-fix-right-first {
+        position: static !important;
+        right: auto !important;
+    }
+
+    .refunds-table .ant-table-tbody > tr.ant-table-expanded-row {
+        display: block;
+        box-sizing: border-box;
+        width: calc(100% - 20px);
+        margin: -11px 10px 2px;
+        overflow: visible;
+        border: 1px solid #e4d8f5;
+        border-top: 0;
+        border-radius: 0 0 12px 12px;
+        background: #fcfaff;
+    }
+
+    .refunds-table .ant-table-tbody > tr.ant-table-expanded-row > td {
+        display: block;
+        width: 100%;
+        padding: 0 !important;
+        border: 0;
+        background: transparent !important;
+    }
+
+    .refunds-table .ant-table-pagination {
+        margin: 14px 12px 16px;
+    }
+}
+
+@container refunds-page (max-width: 860px) {
+    .refunds-page-heading {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 13px;
+    }
+
+    .refunds-heading-actions {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .refunds-import-button {
+        flex: 1 1 auto;
+    }
+
+    .refunds-lost-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .refunds-lost-stat:first-child {
+        grid-column: 1 / -1;
+    }
+
+    .refunds-table .ant-table-tbody > tr.refunds-table-row {
+        grid-template-columns: 28px minmax(0, 1fr) 38px;
+        grid-template-areas:
+            "select order actions"
+            "select tracking actions"
+            "select status actions"
+            "select source actions"
+            "select count actions"
+            "select reason actions"
+            "select date actions"
+            "select shipping actions"
+            "select amount actions"
+            "select compensation actions";
+        column-gap: 9px;
+    }
+
+    .refunds-cell:not(.refunds-cell--actions) {
+        grid-template-columns: 92px minmax(0, 1fr);
+    }
+
+    .refunds-expanded-panel {
+        padding: 14px;
+    }
+
+    .refunds-full-confirm-row,
+    .refunds-confirm-bar {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .refunds-full-confirm-row .ant-btn,
+    .refunds-confirm-bar .ant-btn {
+        width: 100%;
+    }
+
+    .refunds-mismatch-heading {
+        align-items: flex-start;
+    }
+
+    .refunds-stock-log-table .ant-table-content {
+        overflow-x: auto !important;
+    }
+}
+
+@container refunds-page (max-width: 620px) {
+    .refunds-page-title h2.ant-typography {
+        font-size: 23px;
+    }
+
+    .refunds-page-title .ant-typography-secondary {
+        display: none;
+    }
+
+    .refunds-title-icon {
+        flex-basis: 39px;
+        width: 39px;
+        height: 39px;
+        border-radius: 11px;
+        font-size: 19px;
+    }
+
+    .refunds-heading-actions {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .refunds-heading-actions .ant-btn {
+        width: 100%;
+    }
+
+    .refunds-video-panel .ant-collapse-header {
+        padding-inline: 11px !important;
+    }
+
+    .refunds-video-panel .ant-collapse-extra .ant-btn {
+        width: 32px;
+        padding-inline: 0;
+        overflow: hidden;
+        font-size: 0;
+    }
+
+    .refunds-video-panel .ant-collapse-extra .ant-btn::after {
+        content: "X";
+        font-size: 12px;
+    }
+
+    .refunds-video-entry {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .refunds-video-entry .ant-btn {
+        width: 100%;
+    }
+
+    .refunds-scan-card .ant-card-body {
+        padding: 15px;
+    }
+
+    .refunds-scan-row {
+        display: grid;
+        grid-template-columns: 30px minmax(0, 1fr);
+        align-items: center;
+        gap: 10px;
+    }
+
+    .refunds-scan-icon {
+        font-size: 26px;
+    }
+
+    .refunds-scan-button {
+        grid-column: 1 / -1;
+        width: 100%;
+    }
+
+    .refunds-status-tabs {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        width: 100%;
+    }
+
+    .refunds-status-tabs .ant-radio-button-wrapper {
+        width: 100%;
+        padding-inline: 8px;
+        overflow: hidden;
+        font-size: 12px;
+        text-align: center;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .refunds-toolbar-actions {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .refunds-export-button {
+        width: 42px;
+        padding-inline: 0;
+        overflow: hidden;
+        font-size: 0;
+    }
+
+    .refunds-export-button .anticon {
+        margin: 0;
+        font-size: 15px;
+    }
+
+    .refunds-lost-summary {
+        grid-template-columns: 1fr;
+        gap: 8px;
+    }
+
+    .refunds-lost-stat:first-child {
+        grid-column: auto;
+    }
+
+    .refunds-lost-stat .ant-card-body {
+        padding: 14px;
+    }
+
+    .refunds-table .ant-table-tbody {
+        padding: 8px;
+    }
+
+    .refunds-table .ant-table-tbody > tr.refunds-table-row {
+        padding-inline: 8px;
+    }
+
+    .refunds-cell:not(.refunds-cell--actions) {
+        grid-template-columns: 76px minmax(0, 1fr);
+    }
+
+    .refunds-table .ant-table-tbody > tr.ant-table-expanded-row {
+        width: calc(100% - 12px);
+        margin-inline: 6px;
+    }
+
+    .refunds-expanded-panel {
+        padding: 12px 10px;
+    }
+
+    .refunds-mismatch-heading {
+        flex-direction: column;
+    }
+
+    .refunds-mismatch-heading .ant-space,
+    .refunds-mismatch-heading .ant-btn {
+        width: 100%;
+    }
+
+    .refunds-mismatch-heading .ant-space-item {
+        flex: 1;
+    }
+
+    .refunds-mismatch-toggle {
+        padding: 12px !important;
+    }
+
+    .refunds-items-table .ant-table-container,
+    .refunds-items-table .ant-table-content {
+        width: 100%;
+        overflow: visible !important;
+    }
+
+    .refunds-items-table table {
+        display: block;
+        width: 100% !important;
+        min-width: 100% !important;
+    }
+
+    .refunds-items-table colgroup,
+    .refunds-items-table .ant-table-thead,
+    .refunds-items-table .ant-table-measure-row {
+        display: none;
+    }
+
+    .refunds-items-table .ant-table-tbody {
+        display: grid;
+        gap: 8px;
+    }
+
+    .refunds-items-table .ant-table-tbody > tr {
+        display: grid;
+        padding: 9px;
+        border: 1px solid #e7e9e8;
+        border-radius: 9px;
+        background: #fff;
+    }
+
+    .refunds-items-table--original .ant-table-tbody > tr {
+        grid-template-columns: minmax(0, 1fr) minmax(86px, auto);
+        grid-template-areas:
+            "item-sku item-qty"
+            "item-name item-total";
+        gap: 7px 10px;
+    }
+
+    .refunds-items-table--received .ant-table-tbody > tr {
+        grid-template-columns: minmax(0, 1fr) 32px;
+        grid-template-areas:
+            "received-sku received-remove"
+            "received-name received-name"
+            "received-qty received-qty";
+        gap: 7px;
+    }
+
+    .refunds-item-cell--sku { grid-area: item-sku; }
+    .refunds-item-cell--name { grid-area: item-name; }
+    .refunds-item-cell--qty { grid-area: item-qty; }
+    .refunds-item-cell--total { grid-area: item-total; }
+    .refunds-item-cell--received-sku { grid-area: received-sku; }
+    .refunds-item-cell--received-name { grid-area: received-name; }
+    .refunds-item-cell--received-qty { grid-area: received-qty; }
+    .refunds-item-cell--received-remove { grid-area: received-remove; }
+
+    .refunds-items-table .ant-table-tbody > tr > td {
+        min-width: 0;
+        padding: 0 !important;
+        border: 0 !important;
+        background: transparent !important;
+    }
+
+    .refunds-item-cell--received-qty {
+        display: grid !important;
+        grid-template-columns: 90px minmax(0, 1fr);
+        align-items: center;
+    }
+
+    .refunds-item-cell--received-qty::before {
+        content: "So luong nhan";
+        color: #7b8580;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+    }
+
+    .refunds-item-cell--received-qty .ant-input-number {
+        width: 100% !important;
+    }
+
+    .refunds-table .ant-table-pagination {
+        justify-content: center;
+    }
+
+    .refunds-table .ant-pagination-total-text,
+    .refunds-table .ant-pagination-options {
+        display: none;
+    }
+}
+
+@media (max-width: 760px) {
+    .refunds-method-grid,
+    .refunds-form-grid {
+        grid-template-columns: 1fr;
+        gap: 0;
+    }
+
+    .refunds-product-composer {
+        padding: 14px !important;
+    }
+
+    .refunds-product-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .refunds-product-grid > :first-child {
+        grid-column: 1 / -1;
+    }
+
+    .refunds-product-grid > .ant-btn {
+        width: 100%;
+    }
+}
+
+@media (max-width: 520px) {
+    .refunds-method-grid,
+    .refunds-product-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .refunds-product-grid > :first-child {
+        grid-column: auto;
+    }
+
+    .refunds-form-actions {
+        align-items: stretch;
+        flex-direction: column-reverse;
+    }
+
+    .refunds-form-actions .ant-btn {
+        width: 100%;
+    }
+}

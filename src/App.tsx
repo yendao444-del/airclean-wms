@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, lazy, Suspense, Component, ErrorInfo, ReactNode } from 'react';
-import { Layout, Menu, Button, Typography, ConfigProvider, Space, Dropdown, Tooltip, Avatar } from 'antd';
+import { Layout, Menu, Button, Typography, ConfigProvider, Space, Tooltip, Avatar } from 'antd';
 import AntAppProvider from './components/AntAppProvider';
 import {
     DashboardOutlined,
@@ -46,6 +46,10 @@ import ForceUpdateGate from './components/ForceUpdateGate';
 const DashboardPage = lazy(() => import('./pages/Dashboard'));
 import GlobalTaskAlerts from './components/GlobalTaskAlerts';
 import HeaderTaskTicker from './components/HeaderTaskTicker';
+import NotificationBell from './components/NotificationBell';
+import GlobalNotificationPopup from './components/GlobalNotificationPopup';
+import NotificationCenter from './pages/NotificationCenter';
+import { useNotificationInbox } from './lib/useNotificationInbox';
 
 import Login from './pages/Login';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
@@ -116,6 +120,8 @@ type MenuItem = Required<MenuProps>['items'][number];
 
 
 function AppContent() {
+    const isNotificationUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('notificationUiTest');
+    const isAttendanceUiTest = import.meta.env.DEV && new URLSearchParams(window.location.search).has('attendanceUiTest');
     const {
         user,
         actualUser,
@@ -126,12 +132,21 @@ function AppContent() {
         logout,
     } = useAuth();
     const { getAccessibleMenuKeys, hasPermission } = usePermissions();
-    const [selectedKey, setSelectedKey] = useState('dashboard');
+    const [selectedKey, setSelectedKey] = useState(isAttendanceUiTest ? 'attendance' : 'dashboard');
     const [collapsed, setCollapsed] = useState(false);
     const [previewAccounts, setPreviewAccounts] = useState<AuthUser[]>([]);
     const [previewAccountsLoading, setPreviewAccountsLoading] = useState(false);
     const [previewAccountsError, setPreviewAccountsError] = useState('');
+    const [previewMenuOpen, setPreviewMenuOpen] = useState(false);
+    const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+    const [notificationCenterOpen, setNotificationCenterOpen] = useState(isNotificationUiTest);
+    const [notificationSelectedId, setNotificationSelectedId] = useState<number | null>(null);
     const previousAccessiblePageRef = useRef('dashboard');
+    const previousStockCheckPageRef = useRef('dashboard');
+    const collapsedBeforeStockCheckRef = useRef(false);
+    const collapsedBeforeNotificationsRef = useRef(false);
+    const wasStockCheckRef = useRef(false);
+    const wasNotificationCenterOpenRef = useRef(false);
     const roleLabel = actualUser?.role === 'admin' ? 'Quản trị viên' : actualUser?.role === 'manager' ? 'Quản lý' : 'Nhân viên';
     const profileLabel = actualUser?.fullName?.trim().toLocaleLowerCase('vi-VN') === roleLabel.toLocaleLowerCase('vi-VN')
         ? actualUser.username
@@ -141,6 +156,14 @@ function AppContent() {
         : previewUser?.role === 'viewer'
             ? 'Nhân viên chỉ xem'
             : 'Nhân viên';
+    const notificationInbox = useNotificationInbox(actualUser?.id);
+
+    const openNotificationCenter = (announcementId?: number) => {
+        setPreviewMenuOpen(false);
+        setProfileMenuOpen(false);
+        setNotificationSelectedId(announcementId || null);
+        setNotificationCenterOpen(true);
+    };
 
     useEffect(() => {
         if (actualUser?.role !== 'admin') {
@@ -148,7 +171,12 @@ function AppContent() {
             setPreviewAccountsError('');
             return;
         }
-
+        if (isAttendanceUiTest && !window.electronAPI) {
+            setPreviewAccounts([]);
+            setPreviewAccountsLoading(false);
+            setPreviewAccountsError('');
+            return;
+        }
         let cancelled = false;
         setPreviewAccountsLoading(true);
         setPreviewAccountsError('');
@@ -175,7 +203,7 @@ function AppContent() {
         return () => {
             cancelled = true;
         };
-    }, [actualUser?.id, actualUser?.role]);
+    }, [actualUser?.id, actualUser?.role, isAttendanceUiTest]);
 
     // Filter menu items based on user permissions
     const accessibleKeys = useMemo(
@@ -200,66 +228,55 @@ function AppContent() {
     const staffPreviewAccounts = previewAccounts.filter(account => account.role === 'staff' || account.role === 'viewer');
     const managerTargets = managerPreviewAccounts.length > 0 ? managerPreviewAccounts : [genericManagerPreview];
     const staffTargets = staffPreviewAccounts.length > 0 ? staffPreviewAccounts : [genericStaffPreview];
-    const createPreviewMenuItem = (account: AuthUser): MenuItem => ({
-        key: `preview-${account.role}-${account.id}`,
-        icon: account.role === 'manager' ? <TeamOutlined /> : <UserOutlined />,
-        label: (
-            <div style={{ minWidth: 210, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-                <div style={{ minWidth: 0 }}>
-                    <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis' }}>{account.fullName || account.username}</div>
-                    <div style={{ color: '#64748b', fontSize: 11 }}>{account.username}</div>
-                </div>
-                {previewUser?.id === account.id && <CheckCircleOutlined style={{ color: '#00ab56' }} />}
-            </div>
-        ),
-        onClick: () => startRolePreview(account),
-    } as MenuItem);
-    const previewMenuItems: MenuProps['items'] = previewAccountsLoading ? [
-        { key: 'preview-loading', label: 'Đang tải danh sách tài khoản...', disabled: true },
-    ] : [
-        {
-            key: 'preview-title',
-            label: (
-                <div style={{ padding: '2px 0' }}>
-                    <div style={{ fontWeight: 800 }}>Xem giao diện với vai trò</div>
-                    <div style={{ color: '#64748b', fontSize: 11 }}>Chỉ mô phỏng phần hiển thị và phạm vi dữ liệu.</div>
-                </div>
-            ),
-            disabled: true,
-        },
-        ...(previewAccountsError ? [{ key: 'preview-error', label: previewAccountsError, danger: true, disabled: true } as MenuItem] : []),
-        { type: 'divider' },
-        {
-            type: 'group',
-            label: 'Quản lý',
-            children: managerTargets.map(createPreviewMenuItem),
-        },
-        {
-            type: 'group',
-            label: 'Nhân viên',
-            children: staffTargets.map(createPreviewMenuItem),
-        },
-        ...(isRolePreview ? [
-            { type: 'divider' as const },
-            {
-                key: 'stop-preview',
-                icon: <CloseOutlined />,
-                label: 'Trở về giao diện Admin',
-                danger: true,
-                onClick: stopRolePreview,
-            } as MenuItem,
-        ] : []),
-    ];
+    const activateRolePreview = (account: AuthUser) => {
+        startRolePreview(account);
+        setPreviewMenuOpen(false);
+    };
+    useEffect(() => {
+        if (!previewMenuOpen && !profileMenuOpen) return;
+        const closeTitlebarMenus = (event: PointerEvent) => {
+            const target = event.target as HTMLElement | null;
+            if (!target?.closest('[data-titlebar-menu]')) {
+                setPreviewMenuOpen(false);
+                setProfileMenuOpen(false);
+            }
+        };
+        const closeOnEscape = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                setPreviewMenuOpen(false);
+                setProfileMenuOpen(false);
+            }
+        };
+        document.addEventListener('pointerdown', closeTitlebarMenus);
+        document.addEventListener('keydown', closeOnEscape);
+        return () => {
+            document.removeEventListener('pointerdown', closeTitlebarMenus);
+            document.removeEventListener('keydown', closeOnEscape);
+        };
+    }, [previewMenuOpen, profileMenuOpen]);
     const canAccessKey = (key: string) => accessibleKeys.includes(key);
     const navigateTo = (key: string) => {
         if (key === 'my-profile' || canAccessKey(key)) {
+            setNotificationCenterOpen(false);
             setSelectedKey(currentKey => {
                 if (key === 'handling-units' && currentKey !== 'handling-units') {
                     previousAccessiblePageRef.current = currentKey;
                 }
+                if (key === 'stock-check' && currentKey !== 'stock-check') {
+                    previousStockCheckPageRef.current = currentKey;
+                }
                 return key;
             });
         }
+    };
+    const openProfile = () => {
+        setProfileMenuOpen(false);
+        if (isRolePreview) stopRolePreview();
+        navigateTo('my-profile');
+    };
+    const logoutFromProfileMenu = () => {
+        setProfileMenuOpen(false);
+        logout();
     };
 
     const exitHandlingUnits = () => {
@@ -268,6 +285,15 @@ function AppContent() {
             previousKey !== 'handling-units' && canAccessKey(previousKey)
                 ? previousKey
                 : accessibleKeys.find(key => key !== 'handling-units') || 'my-profile';
+        navigateTo(destination);
+    };
+
+    const exitStockCheck = () => {
+        const previousKey = previousStockCheckPageRef.current;
+        const destination =
+            previousKey !== 'stock-check' && canAccessKey(previousKey)
+                ? previousKey
+                : accessibleKeys.includes('stock-balance') ? 'stock-balance' : accessibleKeys[0] || 'my-profile';
         navigateTo(destination);
     };
 
@@ -448,15 +474,37 @@ function AppContent() {
     };
 
     const menuItems = buildMenuItems();
+    const settingsMenuItems = menuItems.filter((item) => item && typeof item === 'object' && 'key' in item && item.key === 'settings');
+    const primaryMenuItems = menuItems.filter((item) => !item || typeof item !== 'object' || !('key' in item) || item.key !== 'settings');
 
-    // Keep the navigation rail compact while preserving the user's desktop choice.
+    useEffect(() => {
+        const isStockCheck = selectedKey === 'stock-check';
+        if (isStockCheck && !wasStockCheckRef.current) {
+            collapsedBeforeStockCheckRef.current = collapsed;
+            setCollapsed(true);
+        } else if (!isStockCheck && wasStockCheckRef.current) {
+            setCollapsed(window.innerWidth < 1024 ? true : collapsedBeforeStockCheckRef.current);
+        }
+        wasStockCheckRef.current = isStockCheck;
+    }, [selectedKey]);
+
+    useEffect(() => {
+        if (notificationCenterOpen && !wasNotificationCenterOpenRef.current) {
+            collapsedBeforeNotificationsRef.current = collapsed;
+            setCollapsed(true);
+        } else if (!notificationCenterOpen && wasNotificationCenterOpenRef.current) {
+            setCollapsed(window.innerWidth < 1024 || selectedKey === 'stock-check'
+                ? true
+                : collapsedBeforeNotificationsRef.current);
+        }
+        wasNotificationCenterOpenRef.current = notificationCenterOpen;
+    }, [notificationCenterOpen, selectedKey]);
+
+    // Keep the navigation rail compact on narrow screens and throughout stock checking.
     useEffect(() => {
         const handleResize = () => {
-            const compact = window.innerWidth < 1024;
-            if (compact) {
+            if (selectedKey === 'stock-check' || window.innerWidth < 1024) {
                 setCollapsed(true);
-            } else {
-                setCollapsed(false);
             }
         };
 
@@ -466,7 +514,7 @@ function AppContent() {
         // Listen to resize events
         window.addEventListener('resize', handleResize);
         return () => window.removeEventListener('resize', handleResize);
-    }, []);
+    }, [selectedKey]);
 
     const handleMenuClick: MenuProps['onClick'] = (e) => {
         navigateTo(e.key);
@@ -518,7 +566,7 @@ function AppContent() {
             case 'stock-balance':
                 return withAppData(<StockBalancePage />, { products: true, ecomExports: true });
             case 'stock-check':
-                return withAppData(<StockCheckPage />, { products: true });
+                return withAppData(<StockCheckPage onExit={exitStockCheck} />, { products: true });
             case 'handling-units':
                 return <HandlingUnitsPage onExit={exitHandlingUnits} />;
             case 'business-report':
@@ -553,10 +601,12 @@ function AppContent() {
     }
 
     const { headerExtra } = usePageHeader();
-    const hideHeaderTitle = selectedKey === 'business-report' || selectedKey === 'stock-check';
+    const hideHeaderTitle = selectedKey === 'business-report' || selectedKey === 'stock-check' || selectedKey === 'settings';
+    const hidePageHeader = selectedKey === 'settings';
+    const pageHeaderHeight = hidePageHeader ? 0 : 72;
     // Handling units is a warehouse workspace, not another cramped POS page.
     // It keeps the Electron title bar/session but owns the complete app area.
-    const isHandlingUnitsWorkspace = selectedKey === 'handling-units';
+    const isHandlingUnitsWorkspace = selectedKey === 'handling-units' && !notificationCenterOpen;
     const shellTop = isRolePreview ? 82 : 40;
     return (
         <ConfigProvider
@@ -572,7 +622,13 @@ function AppContent() {
             }}
         >
             <AntAppProvider>
-                <GlobalTaskAlerts />
+                {!isNotificationUiTest && <GlobalTaskAlerts />}
+                <GlobalNotificationPopup
+                    announcement={notificationInbox.popupAnnouncement}
+                    suppressed={isRolePreview}
+                    onMarkRead={notificationInbox.markRead}
+                    onAcknowledge={notificationInbox.acknowledge}
+                />
                 {/* ── Custom Title Bar ── */}
                 <div className="app-titlebar" style={{
                     height: 40,
@@ -616,12 +672,15 @@ function AppContent() {
                                 </div>
                             </Tooltip>
                         ))}
+                        <NotificationBell
+                            count={notificationInbox.attentionCount}
+                            active={notificationCenterOpen}
+                            onClick={() => notificationCenterOpen
+                                ? setNotificationCenterOpen(false)
+                                : openNotificationCenter(notificationInbox.popupAnnouncement?.id)}
+                        />
                         {actualUser?.role === 'admin' && (
-                            <Dropdown
-                                trigger={['click']}
-                                placement="bottomRight"
-                                menu={{ items: previewMenuItems }}
-                            >
+                            <div className="app-titlebar-menu" data-titlebar-menu>
                                 <Button
                                     className={`role-preview-trigger${isRolePreview ? ' role-preview-trigger--active' : ''}`}
                                     type="text"
@@ -629,43 +688,64 @@ function AppContent() {
                                     icon={<EyeOutlined />}
                                     aria-label="Xem giao diện theo vai trò"
                                     title={isRolePreview ? 'Đổi vai trò đang xem' : 'Xem giao diện theo vai trò'}
+                                    onClick={(event) => {
+                                        event.stopPropagation();
+                                        setProfileMenuOpen(false);
+                                        setPreviewMenuOpen(open => !open);
+                                    }}
+                                    style={{ WebkitAppRegion: 'no-drag', pointerEvents: 'auto' } as React.CSSProperties}
                                 />
-                            </Dropdown>
+                                {previewMenuOpen && (
+                                    <div className="app-titlebar-popup app-titlebar-popup--preview" onClick={event => event.stopPropagation()}>
+                                        <div className="app-popup-heading">
+                                            <strong>Xem giao diện với vai trò</strong>
+                                            <span>Chỉ mô phỏng phần hiển thị và phạm vi dữ liệu.</span>
+                                        </div>
+                                        {previewAccountsLoading ? (
+                                            <div className="app-popup-status">Đang tải danh sách tài khoản...</div>
+                                        ) : (
+                                            <>
+                                                {previewAccountsError && <div className="app-popup-status app-popup-status--error">{previewAccountsError}</div>}
+                                                <div className="app-popup-section-label">Quản lý</div>
+                                                {managerTargets.map(account => (
+                                                    <button key={`preview-${account.role}-${account.id}`} type="button" className="app-popup-user" onClick={() => activateRolePreview(account)}>
+                                                        <TeamOutlined />
+                                                        <span className="app-popup-user__identity"><strong>{account.fullName || account.username}</strong><small>@{account.username}</small></span>
+                                                        {previewUser?.id === account.id && <CheckCircleOutlined className="app-popup-user__selected" />}
+                                                    </button>
+                                                ))}
+                                                <div className="app-popup-section-label">Nhân viên</div>
+                                                {staffTargets.map(account => (
+                                                    <button key={`preview-${account.role}-${account.id}`} type="button" className="app-popup-user" onClick={() => activateRolePreview(account)}>
+                                                        <UserOutlined />
+                                                        <span className="app-popup-user__identity"><strong>{account.fullName || account.username}</strong><small>@{account.username}</small></span>
+                                                        {previewUser?.id === account.id && <CheckCircleOutlined className="app-popup-user__selected" />}
+                                                    </button>
+                                                ))}
+                                            </>
+                                        )}
+                                        {isRolePreview && (
+                                            <button type="button" className="app-popup-action app-popup-action--danger" onClick={() => { stopRolePreview(); setPreviewMenuOpen(false); }}>
+                                                <CloseOutlined /> Trở về giao diện Admin
+                                            </button>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
                         )}
                     </div>
                     <div style={{ width: 1, height: 16, background: '#e8e8e8', margin: '0 4px' }} />
-                    <div style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-                        <Dropdown
-                            trigger={['click']}
-                            placement="bottomRight"
-                            menu={{
-                                items: [
-                                    {
-                                        key: 'identity',
-                                        label: <div style={{ minWidth: 160, padding: '2px 0' }}><div style={{ fontWeight: 700 }}>{profileLabel}</div><div style={{ color: '#64748b', fontSize: 12 }}>{roleLabel}</div></div>,
-                                        disabled: true,
-                                    },
-                                    { type: 'divider' },
-                                    {
-                                        key: 'my-profile',
-                                        label: isRolePreview ? 'Trở về hồ sơ Admin' : 'Hồ sơ của tôi',
-                                        icon: <UserOutlined />,
-                                        onClick: () => {
-                                            if (isRolePreview) stopRolePreview();
-                                            navigateTo('my-profile');
-                                        },
-                                    },
-                                    {
-                                        key: 'logout',
-                                        label: 'Đăng xuất',
-                                        icon: <LogoutOutlined />,
-                                        danger: true,
-                                        onClick: logout,
-                                    },
-                                ],
-                            }}
-                        >
-                            <div
+                    <div className="app-titlebar-menu" data-titlebar-menu>
+                            <button
+                                type="button"
+                                className="app-profile-trigger"
+                                aria-label="Mở menu tài khoản"
+                                title="Tài khoản Admin"
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    setPreviewMenuOpen(false);
+                                    setProfileMenuOpen(open => !open);
+                                }}
                                 style={{ position: 'relative', width: 32, height: 32, cursor: 'pointer', borderRadius: '50%', transition: 'box-shadow 0.15s' }}
                                 onMouseEnter={e => (e.currentTarget.style.boxShadow = '0 0 0 3px #e5e7eb')}
                                 onMouseLeave={e => (e.currentTarget.style.boxShadow = 'none')}
@@ -680,8 +760,21 @@ function AppContent() {
                                     background: '#22c55e',
                                     border: '2px solid #fff',
                                 }} />
-                            </div>
-                        </Dropdown>
+                            </button>
+                            {profileMenuOpen && (
+                                <div className="app-titlebar-popup app-titlebar-popup--profile" onClick={event => event.stopPropagation()}>
+                                    <div className="app-popup-heading">
+                                        <strong>{profileLabel}</strong>
+                                        <span>{roleLabel}</span>
+                                    </div>
+                                    <button type="button" className="app-popup-action" onClick={openProfile}>
+                                        <UserOutlined /> {isRolePreview ? 'Trở về hồ sơ Admin' : 'Hồ sơ của tôi'}
+                                    </button>
+                                    <button type="button" className="app-popup-action app-popup-action--danger" onClick={logoutFromProfileMenu}>
+                                        <LogoutOutlined /> Đăng xuất
+                                    </button>
+                                </div>
+                            )}
                     </div>
                 </div>
                 {isRolePreview && previewUser && (
@@ -707,7 +800,7 @@ function AppContent() {
                         width={260}
                         collapsedWidth={80}
                         style={{
-                            overflow: 'auto',
+                            overflow: 'hidden',
                             height: `calc(100vh - ${shellTop}px)`,
                             position: 'fixed',
                             left: 0,
@@ -717,21 +810,33 @@ function AppContent() {
                             boxShadow: '2px 0 8px rgba(0,0,0,0.06)',
                         }}
                     >
-                        <Menu
-                            defaultSelectedKeys={['dashboard']}
-                            selectedKeys={[selectedKey]}
-                            mode="inline"
-                            items={menuItems}
-                            onClick={handleMenuClick}
-                            style={{ borderRight: 0 }}
-                        />
+                        <div className="app-sidebar-menu-scroll">
+                            <Menu
+                                defaultSelectedKeys={['dashboard']}
+                                selectedKeys={selectedKey === 'settings' ? [] : [selectedKey]}
+                                mode="inline"
+                                items={primaryMenuItems}
+                                onClick={handleMenuClick}
+                                style={{ borderRight: 0 }}
+                            />
+                        </div>
+                        {settingsMenuItems.length > 0 && (
+                            <Menu
+                                className="app-sidebar-settings-menu"
+                                selectedKeys={selectedKey === 'settings' ? ['settings'] : []}
+                                mode="inline"
+                                items={settingsMenuItems}
+                                onClick={handleMenuClick}
+                                style={{ borderRight: 0 }}
+                            />
+                        )}
                     </Sider>}
 
                     <Layout
                         className={`app-main-layout${isHandlingUnitsWorkspace ? ' app-main-layout--workspace' : collapsed ? ' app-main-layout--collapsed' : ''}`}
                         style={{ transition: 'all 0.2s' }}
                     >
-                        {!isHandlingUnitsWorkspace && selectedKey !== 'daily-tasks' && <Header
+                        {!notificationCenterOpen && !isHandlingUnitsWorkspace && selectedKey !== 'daily-tasks' && !hidePageHeader && <Header
                             className="app-page-header"
                             style={{
                                 padding: '0 24px',
@@ -761,16 +866,17 @@ function AppContent() {
 
                         <Content
                             key={`viewer-${user?.role || 'none'}-${user?.id || 0}`}
-                            className={`app-content app-content--${selectedKey}`}
+                            className={`app-content app-content--${notificationCenterOpen ? 'notifications' : selectedKey}`}
                             style={{
-                                margin: (selectedKey === 'pos' || selectedKey === 'daily-tasks' || isHandlingUnitsWorkspace) ? 0 : 24,
+                                margin: (notificationCenterOpen || selectedKey === 'pos' || selectedKey === 'daily-tasks' || isHandlingUnitsWorkspace) ? 0 : 24,
                                 padding: 0,
                                 minHeight: 280,
-                                maxHeight: (selectedKey === 'pos' || selectedKey === 'daily-tasks' || isHandlingUnitsWorkspace)
+                                height: notificationCenterOpen ? `calc(100vh - ${shellTop}px)` : undefined,
+                                maxHeight: (notificationCenterOpen || selectedKey === 'pos' || selectedKey === 'daily-tasks' || isHandlingUnitsWorkspace)
                                     ? `calc(100vh - ${shellTop}px)`
-                                    : `calc(100vh - ${shellTop + 72}px)`,
-                                overflowY: selectedKey === 'pos' ? 'hidden' : 'auto',
-                                overflowX: 'auto',
+                                    : `calc(100vh - ${shellTop + pageHeaderHeight}px)`,
+                                overflowY: (notificationCenterOpen || selectedKey === 'pos') ? 'hidden' : 'auto',
+                                overflowX: notificationCenterOpen ? 'hidden' : 'auto',
                             }}
                         >
                             <Suspense fallback={
@@ -781,7 +887,7 @@ function AppContent() {
                                     justifyContent: 'center',
                                     alignItems: 'center',
                                     background: 'rgba(255,255,255,0.85)',
-                                    zIndex: 9999,
+                                    zIndex: 900,
                                 }}>
                                     <div className="logo-spin-wrapper">
                                         <img src="./logo_splash.png" alt="Loading" className="logo-spin-img" />
@@ -791,7 +897,15 @@ function AppContent() {
                                     </div>
                                 </div>
                             }>
-                                {renderContent()}
+                                {notificationCenterOpen ? (
+                                    <NotificationCenter
+                                        inbox={notificationInbox}
+                                        isAdmin={actualUser?.role === 'admin'}
+                                        initialSelectedId={notificationSelectedId}
+                                    />
+                                ) : isNotificationUiTest ? (
+                                    <div className="notification-qa-backdrop" />
+                                ) : renderContent()}
                             </Suspense>
                         </Content>
                     </Layout>
@@ -804,6 +918,9 @@ function AppContent() {
 function SessionUpdateGate({ children }: { children: React.ReactNode }) {
     const { isAuthenticated } = useAuth();
     const isUpdateUiPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).has('updateUiTest');
+    const isNotificationUiPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).has('notificationUiTest');
+    const isAttendanceUiPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).has('attendanceUiTest');
+    if (isNotificationUiPreview || isAttendanceUiPreview) return <>{children}</>;
     return isAuthenticated || isUpdateUiPreview ? <ForceUpdateGate>{children}</ForceUpdateGate> : <>{children}</>;
 }
 

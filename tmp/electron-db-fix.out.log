@@ -1,0 +1,69 @@
+
+> quan-ly-ban-hang-desktop@1.0.425 electron:dev
+> node scripts/start-electron-dev.js
+
+[START] Replacing launcher PID 11764 so this window owns the logs...
+[START] Launching Vite at http://127.0.0.1:5173
+
+  VITE v7.3.6  ready in 219 ms
+
+  ➜  Local:   http://127.0.0.1:5173/
+  ➜  press h + enter to show help
+[START] Vite ready after 1.0s; launching Electron
+
+isDev: true | isPackaged: false
+[dotenv@17.2.3] injecting env (7) from .env -- tip: 🔄 add secrets lifecycle management: https://dotenvx.com/ops
+[OfflineQueue] Initialized at: C:\Users\Admin\AppData\Roaming\quan-ly-ban-hang-desktop\offline-queue | Pending: 0 | Preserved temp: 0
+🔄 Initializing Prisma Client...
+   🆕 CODE VERSION: 3.1 (runtime-only configuration)
+   APP: DBY POS 1.0.6
+   ENVIRONMENT: production
+   DATABASE_HOST: aws-1-ap-south-1.pooler.supabase.com
+✅ Prisma Client initialized successfully
+🤖 [TelegramWMS] Starting Telegram Bot 1-Touch polling loop...
+âš¡ lazy-init prismaDirectTx: 0.597ms
+⚡ ipc-handlers load: 96.722ms
+✅ IPC handlers loaded
+✅ Vite dev server detected → loading http://127.0.0.1:5173
+✅ Connected Prisma Direct (for transactions)
+✅ Connected to Supabase PostgreSQL
+[DAILY RESET] Startup check: Đã reset hôm nay rồi
+🔍 Checking for updates from GitHub...
+   Current version: v1.0.425
+   Latest version: v1.0.425
+   Has update: false
+   Available zips: DBYPOS-PATCH-v1.0.425.zip
+   Selected zip: DBYPOS-PATCH-v1.0.425.zip
+[Perf] dashboard:getSummary sales=2775 items=215 chart=7 products=30 ms=1397
+9:59:00 AM [vite] (client) hmr update /src/pages/PolicyLibrary.tsx
+9:59:29 AM [vite] (client) hmr update /src/pages/NotificationCenter.css
+10:01:45 AM [vite] (client) hmr update /src/pages/PolicyLibrary.tsx
+10:01:58 AM [vite] (client) hmr update /src/pages/PolicyLibrary.tsx
+10:02:22 AM [vite] (client) hmr update /src/pages/NotificationCenter.css
+10:05:37 AM [vite] (client) hmr update /src/pages/NotificationCenter.css
+10:06:05 AM [vite] (client) hmr update /src/pages/PolicyLibrary.tsx
+10:06:31 AM [vite] (client) hmr update /src/pages/PolicyLibrary.tsx
+10:06:48 AM [vite] (client) hmr update /src/pages/PolicyLibrary.tsx
+🔍 Checking for updates from GitHub...
+   Current version: v1.0.425
+   Latest version: v1.0.425
+   Has update: false
+   Available zips: DBYPOS-PATCH-v1.0.425.zip
+   Selected zip: DBYPOS-PATCH-v1.0.425.zip
+[Perf] dashboard:getSummary sales=2775 items=215 chart=7 products=30 ms=2019
+🔍 Checking for updates from GitHub...
+   Current version: v1.0.425
+   Using cached release data
+   Latest version: v1.0.425
+   Has update: false
+   Available zips: DBYPOS-PATCH-v1.0.425.zip
+   Selected zip: DBYPOS-PATCH-v1.0.425.zip
+10:07:19 AM [vite] (client) hmr update /src/pages/PolicyLibrary.tsx
+10:13:03 AM [vite] (client) hmr update /src/App.tsx
+🔍 Checking for updates from GitHub...
+   Current version: v1.0.425
+   Latest version: v1.0.425
+   Has update: false
+   Available zips: DBYPOS-PATCH-v1.0.425.zip
+   Selected zip: DBYPOS-PATCH-v1.0.425.zip
+[Perf] dashboard:getSummary sales=2775 items=215 chart=7 products=30 ms=1686

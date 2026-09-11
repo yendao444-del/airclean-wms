@@ -2,7 +2,8 @@
    GLOBAL STYLES & TYPOGRAPHY
    ======================================== */
 
-* {
+.daily-tasks-page,
+.daily-tasks-page * {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
         'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans',
         'Droid Sans', 'Helvetica Neue', sans-serif;
@@ -11,14 +12,14 @@
 }
 
 /* Override Ant Design fonts */
-.ant-card,
-.ant-btn,
-.ant-tag,
-.ant-modal,
-.ant-form-item-label,
-.ant-input,
-.ant-select,
-.ant-picker {
+.daily-tasks-page .ant-card,
+.daily-tasks-page .ant-btn,
+.daily-tasks-page .ant-tag,
+.daily-tasks-page .ant-modal,
+.daily-tasks-page .ant-form-item-label,
+.daily-tasks-page .ant-input,
+.daily-tasks-page .ant-select,
+.daily-tasks-page .ant-picker {
     font-family: 'Inter', sans-serif !important;
 }
 
@@ -438,10 +439,11 @@
     .daily-tasks-main-grid {
         grid-template-columns: minmax(0, 1fr) !important;
     }
+}
 
-    .daily-tasks-history-panel > div:last-child {
-        max-height: 360px !important;
-    }
+.daily-tasks-history-list {
+    max-height: none;
+    overflow: visible;
 }
 
 @container daily-tasks (max-width: 1100px) {
@@ -563,18 +565,18 @@
    AVATAR EFFECTS
    ======================================== */
 
-.ant-avatar {
+.daily-tasks-page .ant-avatar {
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     cursor: pointer;
 }
 
-.ant-avatar:hover {
+.daily-tasks-page .ant-avatar:hover {
     transform: scale(1.2);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25) !important;
 }
 
 /* Avatar badge pulse */
-.ant-badge-dot {
+.daily-tasks-page .ant-badge-dot {
     animation: avatar-pulse 2s ease-in-out infinite;
 }
 
@@ -916,12 +918,12 @@
    TAG EFFECTS
    ======================================== */
 
-.ant-tag {
+.daily-tasks-page .ant-tag {
     transition: all 0.2s ease;
     cursor: default;
 }
 
-.ant-tag:hover {
+.daily-tasks-page .ant-tag:hover {
     transform: scale(1.08);
     box-shadow: 0 2px 6px rgba(24, 144, 255, 0.3);
 }
@@ -930,11 +932,11 @@
    PROGRESS BAR
    ======================================== */
 
-.ant-progress-line {
+.daily-tasks-page .ant-progress-line {
     transition: all 0.6s cubic-bezier(0.68, -0.55, 0.265, 1.55);
 }
 
-.ant-progress-circle {
+.daily-tasks-page .ant-progress-circle {
     transition: all 0.6s cubic-bezier(0.68, -0.55, 0.265, 1.55);
 }
 
@@ -942,31 +944,31 @@
    BUTTON EFFECTS
    ======================================== */
 
-.ant-btn-dashed {
+.daily-tasks-page .ant-btn-dashed {
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.ant-btn-dashed:hover {
+.daily-tasks-page .ant-btn-dashed:hover {
     border-color: #1890ff;
     color: #1890ff;
     transform: translateY(-2px);
     box-shadow: 0 4px 12px rgba(24, 144, 255, 0.2);
 }
 
-.ant-btn-dashed:active {
+.daily-tasks-page .ant-btn-dashed:active {
     transform: translateY(0);
 }
 
-.ant-btn-primary {
+.daily-tasks-page .ant-btn-primary {
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.ant-btn-primary:hover {
+.daily-tasks-page .ant-btn-primary:hover {
     transform: scale(1.05);
     box-shadow: 0 6px 16px rgba(24, 144, 255, 0.4) !important;
 }
 
-.ant-btn-primary:active {
+.daily-tasks-page .ant-btn-primary:active {
     transform: scale(0.98);
 }
 
@@ -974,11 +976,11 @@
    CARD EFFECTS
    ======================================== */
 
-.ant-card {
+.daily-tasks-page .ant-card {
     transition: all 0.3s ease;
 }
 
-.ant-card:hover {
+.daily-tasks-page .ant-card:hover {
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1) !important;
 }
 
@@ -1151,7 +1153,8 @@
 
 /* Reduce motion for accessibility */
 @media (prefers-reduced-motion: reduce) {
-    * {
+    .daily-tasks-page,
+    .daily-tasks-page * {
         animation-duration: 0.01ms !important;
         animation-iteration-count: 1 !important;
         transition-duration: 0.01ms !important;
@@ -1369,6 +1372,29 @@
     color: #047857;
     border-color: #86efac;
     background: #f0fdf4;
+}
+
+.daily-task-admin-actions {
+    position: relative;
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+}
+
+.daily-task-inline-admin-menu {
+    position: absolute;
+    top: 50%;
+    right: 40px;
+    z-index: 20;
+    display: flex;
+    gap: 4px;
+    width: max-content;
+    padding: 5px;
+    transform: translateY(-50%);
+    background: #fff;
+    border: 1px solid #dbe3ec;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
 }
 
 @container daily-tasks (max-width: 1180px) {

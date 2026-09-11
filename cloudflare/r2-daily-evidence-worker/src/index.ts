@@ -1,6 +1,9 @@
 const MAX_IMAGE_BYTES = 500 * 1024;
+const MAX_PURCHASE_RECEIPT_BYTES = 2 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const ALLOWED_PURCHASE_RECEIPT_TYPES = new Set(["image/jpeg"]);
 const EVIDENCE_KEY_PATTERN = /^daily-tasks\/\d+\/\d{4}-\d{2}-\d{2}\/[a-f0-9]{64}\.(?:jpg|png|webp)$/;
+const PURCHASE_RECEIPT_KEY_PATTERN = /^purchase-receipts\/[A-Za-z0-9_-]{1,120}\/[a-f0-9]{64}\.jpg$/;
 const DATA_SAFETY_MODE = true;
 
 const json = (body: unknown, status = 200) =>
@@ -31,7 +34,9 @@ function getObjectKey(pathname: string) {
   if (!pathname.startsWith("/objects/")) return null;
   try {
     const key = decodeURIComponent(pathname.slice("/objects/".length));
-    return EVIDENCE_KEY_PATTERN.test(key) ? key : null;
+    if (EVIDENCE_KEY_PATTERN.test(key)) return { key, kind: "daily-evidence" as const };
+    if (PURCHASE_RECEIPT_KEY_PATTERN.test(key)) return { key, kind: "purchase-receipt" as const };
+    return null;
   } catch {
     return null;
   }
@@ -47,29 +52,45 @@ export default {
       return json({ ok: false, error: "Unauthorized" }, 401);
     }
 
-    const key = getObjectKey(url.pathname);
-    if (!key) return json({ ok: false, error: "Invalid evidence key" }, 400);
+    const object = getObjectKey(url.pathname);
+    if (!object) return json({ ok: false, error: "Invalid object key" }, 400);
+    const { key, kind } = object;
 
     if (request.method === "POST") {
       const contentType = request.headers.get("content-type") || "";
       const contentLength = Number(request.headers.get("content-length") || 0);
       const sha256 = request.headers.get("x-content-sha256") || "";
-      if (!ALLOWED_IMAGE_TYPES.has(contentType)) {
-        return json({ ok: false, error: "Unsupported image type" }, 415);
+      const allowedTypes = kind === "daily-evidence"
+        ? ALLOWED_IMAGE_TYPES
+        : ALLOWED_PURCHASE_RECEIPT_TYPES;
+      const maxBytes = kind === "daily-evidence"
+        ? MAX_IMAGE_BYTES
+        : MAX_PURCHASE_RECEIPT_BYTES;
+      if (!allowedTypes.has(contentType)) {
+        return json({ ok: false, error: "Unsupported file type" }, 415);
       }
       if (!Number.isInteger(contentLength) || contentLength <= 0) {
         return json({ ok: false, error: "Content-Length is required" }, 411);
       }
-      if (contentLength >= MAX_IMAGE_BYTES) {
-        return json({ ok: false, error: "Evidence image must be below 500 KB" }, 413);
+      if (contentLength > maxBytes || (kind === "daily-evidence" && contentLength === maxBytes)) {
+        return json({
+          ok: false,
+          error: kind === "daily-evidence"
+            ? "Evidence image must be below 500 KB"
+            : "Purchase receipt must not exceed 2 MB",
+        }, 413);
       }
       if (!/^[a-f0-9]{64}$/.test(sha256) || !key.includes(`/${sha256}.`)) {
         return json({ ok: false, error: "Invalid content checksum" }, 400);
       }
 
       const body = await request.arrayBuffer();
-      if (body.byteLength !== contentLength || body.byteLength >= MAX_IMAGE_BYTES) {
-        return json({ ok: false, error: "Invalid image size" }, 413);
+      if (
+        body.byteLength !== contentLength ||
+        body.byteLength > maxBytes ||
+        (kind === "daily-evidence" && body.byteLength === maxBytes)
+      ) {
+        return json({ ok: false, error: "Invalid file size" }, 413);
       }
       if (DATA_SAFETY_MODE) {
         const existing = await env.DAILY_EVIDENCE_BUCKET.head(key);
@@ -79,7 +100,11 @@ export default {
       }
       const uploaded = await env.DAILY_EVIDENCE_BUCKET.put(key, body, {
         httpMetadata: { contentType },
-        customMetadata: { source: "dby-pos-daily-tasks" },
+        customMetadata: {
+          source: kind === "daily-evidence"
+            ? "dby-pos-daily-tasks"
+            : "dby-pos-purchase-receipts",
+        },
         sha256,
       });
       return json({ ok: true, key, size: uploaded?.size || body.byteLength }, 201);

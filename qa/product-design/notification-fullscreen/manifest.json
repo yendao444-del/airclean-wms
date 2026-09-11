@@ -1,0 +1,14 @@
+[
+  {
+    "outputName": "notification-fullscreen-command-inbox.png",
+    "direction": "A full-workspace command inbox. Use a broad page header and status filters across the whole content width, then a balanced 38/62 master-detail split extending from header to page bottom. The notification list is dense and operational; the reading document is spacious with a sticky acknowledgement footer. No floating surfaces."
+  },
+  {
+    "outputName": "notification-fullscreen-editorial-library.png",
+    "direction": "A full-workspace editorial policy library. Use a wide three-zone page: slim category/status rail inside the content area, generous searchable notification index, and a large document reader. Keep the structure flush with the page, using dividers rather than cards. Make reading long company policies comfortable."
+  },
+  {
+    "outputName": "notification-fullscreen-priority-stream.png",
+    "direction": "A full-workspace priority stream. Use the entire page for a chronological notification feed on the left half and a fixed selected-detail reader on the right half. A full-width top section shows search, status filters and category filter. Required notices have clear orange urgency without becoming dashboard cards."
+  }
+]

@@ -67,6 +67,9 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   // Face attendance is an intended kiosk workflow. Blocking this channel
   // makes the ready AI service unusable because recognition writes the log.
   "attendance:recognize",
+  "attendance:devices:approve",
+  "attendance:devices:reject",
+  "attendance:devices:revoke",
   // Fine reconciliation now runs in a serializable transaction with an
   // advisory lock and merges only the fine/audit fields of attendanceData.
   "attendance:reconcileLateFines",
@@ -2255,6 +2258,232 @@ if (!DATA_SAFETY_MODE) {
 
 const os = require("os");
 
+const ATTENDANCE_DEVICE_FILE = "attendance-device-identity.json";
+let attendanceDeviceIdentityCache = null;
+let attendanceDeviceSyncPromise = null;
+let attendanceDeviceRegistryAvailable = true;
+let attendanceDeviceRegistryWarningShown = false;
+let attendanceLogDeviceColumnsAvailable = true;
+let attendanceLogDeviceColumnsWarningShown = false;
+let attendanceLogDeviceColumnsCheckPromise = null;
+
+function getAttendanceDeviceIdentityPath() {
+  return path.join(app.getPath("userData"), ATTENDANCE_DEVICE_FILE);
+}
+
+function readAttendanceDeviceIdentity() {
+  if (attendanceDeviceIdentityCache) return attendanceDeviceIdentityCache;
+  try {
+    const filePath = getAttendanceDeviceIdentityPath();
+    if (!fs.existsSync(filePath)) return null;
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (!parsed?.deviceId || !parsed?.deviceCode || !parsed?.publicKey) return null;
+    if (parsed.privateKeyEncrypted && safeStorage.isEncryptionAvailable()) {
+      try {
+        parsed.privateKey = safeStorage.decryptString(
+          Buffer.from(parsed.privateKeyEncrypted, "base64"),
+        );
+      } catch {
+        parsed.privateKey = null;
+      }
+    }
+    attendanceDeviceIdentityCache = parsed;
+    return parsed;
+  } catch (error) {
+    console.warn("[Attendance Device] Không đọc được định danh cục bộ:", error.message);
+    return null;
+  }
+}
+
+function createAttendanceDeviceIdentity() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", {
+    namedCurve: "prime256v1",
+  });
+  const publicKeyDer = publicKey.export({ type: "spki", format: "der" });
+  const publicKeyBase64 = publicKeyDer.toString("base64");
+  const fingerprint = crypto
+    .createHash("sha256")
+    .update(publicKeyDer)
+    .digest("hex")
+    .toUpperCase();
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
+  const identity = {
+    deviceId: crypto.randomUUID(),
+    deviceCode: `DBY-${fingerprint.slice(0, 4)}-${fingerprint.slice(4, 8)}`,
+    publicKey: publicKeyBase64,
+    keyFingerprint: fingerprint,
+    keyProvider: safeStorage.isEncryptionAvailable() ? "windows-dpapi" : "software",
+    privateKeyEncrypted: safeStorage.isEncryptionAvailable()
+      ? safeStorage.encryptString(privateKeyPem).toString("base64")
+      : null,
+    createdAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(getAttendanceDeviceIdentityPath(), JSON.stringify(identity, null, 2), {
+    mode: 0o600,
+  });
+  identity.privateKey = privateKeyPem;
+  attendanceDeviceIdentityCache = identity;
+  return identity;
+}
+
+function getAttendanceDeviceIdentity() {
+  return readAttendanceDeviceIdentity() || createAttendanceDeviceIdentity();
+}
+
+function getLocalAttendanceNetwork() {
+  const interfaces = os.networkInterfaces();
+  let localIp = null;
+  let macAddress = null;
+  for (const entries of Object.values(interfaces)) {
+    for (const entry of entries || []) {
+      const family = typeof entry.family === "string" ? entry.family : String(entry.family);
+      if (family !== "IPv4" && family !== "4") continue;
+      if (entry.internal || !entry.address) continue;
+      localIp ||= entry.address;
+      macAddress ||= entry.mac && entry.mac !== "00:00:00:00:00:00" ? entry.mac : null;
+    }
+  }
+  const isPrivate = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(localIp || "");
+  return {
+    localIp,
+    macAddress,
+    networkName: isPrivate ? "Mạng nội bộ" : "Không xác định",
+    networkVerified: false,
+  };
+}
+
+async function getAttendancePublicIp() {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const response = await fetch("https://api.ipify.org?format=json", {
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!response.ok) return null;
+    const payload = await response.json();
+    return typeof payload?.ip === "string" ? payload.ip.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function maskAttendanceIp(value) {
+  const ip = String(value || "").trim();
+  if (!ip) return null;
+  const parts = ip.split(".");
+  return parts.length === 4 ? `${parts[0]}.${parts[1]}.***.***` : ip;
+}
+
+async function ensureAttendanceDeviceRecord({ requesterUserId = null, requesterName = null } = {}) {
+  if (!prisma || !attendanceDeviceRegistryAvailable) return null;
+  if (attendanceDeviceSyncPromise) return attendanceDeviceSyncPromise;
+  attendanceDeviceSyncPromise = (async () => {
+    try {
+      const tableProbe = await prisma.$queryRawUnsafe(
+        `SELECT to_regclass('public."AttendanceDevice"')::text AS table_name`,
+      );
+      if (!tableProbe?.[0]?.table_name) {
+        attendanceDeviceRegistryAvailable = false;
+        if (!attendanceDeviceRegistryWarningShown) {
+          attendanceDeviceRegistryWarningShown = true;
+          console.warn("[Attendance Device] Registry schema chưa được triển khai; tiếp tục chế độ chấm công bình thường.");
+        }
+        return null;
+      }
+      const identity = getAttendanceDeviceIdentity();
+      const network = getLocalAttendanceNetwork();
+      const existing = await prisma.attendanceDevice.findUnique({
+        where: { deviceId: identity.deviceId },
+      });
+      const shouldRefreshPublicIp =
+        !existing?.publicIp ||
+        Date.now() - new Date(existing.lastSeenAt || 0).getTime() > 10 * 60 * 1000;
+      const publicIp = shouldRefreshPublicIp
+        ? await getAttendancePublicIp()
+        : existing.publicIp;
+      const packageJson = require("../package.json");
+      const data = {
+        machineName: os.hostname(),
+        requesterUserId: requesterUserId ? Number(requesterUserId) : existing?.requesterUserId || null,
+        requesterName: requesterName || existing?.requesterName || null,
+        publicKey: identity.publicKey,
+        keyFingerprint: identity.keyFingerprint,
+        keyProvider: identity.keyProvider,
+        tpmAvailable: false,
+        macAddress: network.macAddress,
+        publicIp: publicIp || existing?.publicIp || null,
+        networkName: network.networkName,
+        networkVerified: network.networkVerified,
+        appVersion: packageJson.version,
+        platform: `${os.type()} ${os.release()}`,
+        lastSeenAt: new Date(),
+      };
+      return existing
+        ? await prisma.attendanceDevice.update({ where: { deviceId: identity.deviceId }, data })
+        : await prisma.attendanceDevice.create({
+            data: {
+              deviceId: identity.deviceId,
+              deviceCode: identity.deviceCode,
+              status: "unregistered",
+              ...data,
+            },
+          });
+    } catch (error) {
+      // Keep attendance usable if an older database has not received the registry schema yet.
+      if (error?.code === "P2021" || error?.code === "P2022") {
+        attendanceDeviceRegistryAvailable = false;
+        if (!attendanceDeviceRegistryWarningShown) {
+          attendanceDeviceRegistryWarningShown = true;
+          console.warn("[Attendance Device] Registry schema chưa được triển khai; tiếp tục chế độ chấm công bình thường.");
+        }
+        return null;
+      }
+      throw error;
+    }
+  })().finally(() => {
+    attendanceDeviceSyncPromise = null;
+  });
+  return attendanceDeviceSyncPromise;
+}
+
+async function checkAttendanceLogDeviceColumns() {
+  if (!prisma || !attendanceLogDeviceColumnsAvailable) return attendanceLogDeviceColumnsAvailable;
+  if (attendanceLogDeviceColumnsCheckPromise) return attendanceLogDeviceColumnsCheckPromise;
+  attendanceLogDeviceColumnsCheckPromise = (async () => {
+    try {
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'AttendanceLog' AND column_name IN ('deviceId', 'deviceName', 'devicePublicIp')`,
+      );
+      attendanceLogDeviceColumnsAvailable = rows?.length === 3;
+      if (!attendanceLogDeviceColumnsAvailable && !attendanceLogDeviceColumnsWarningShown) {
+        attendanceLogDeviceColumnsWarningShown = true;
+        console.warn("[Attendance Device] AttendanceLog chưa có cột thiết bị; ghi nhận chấm công không kèm snapshot cho đến khi cập nhật schema.");
+      }
+      return attendanceLogDeviceColumnsAvailable;
+    } catch {
+      return attendanceLogDeviceColumnsAvailable;
+    } finally {
+      attendanceLogDeviceColumnsCheckPromise = null;
+    }
+  })();
+  return attendanceLogDeviceColumnsCheckPromise;
+}
+
+function serializeAttendanceDevice(device, { revealPublicIp = false, revealMacAddress = false } = {}) {
+  if (!device) return null;
+  return {
+    ...device,
+    publicIp: revealPublicIp ? device.publicIp : maskAttendanceIp(device.publicIp),
+    macAddress: revealMacAddress
+      ? device.macAddress
+      : device.macAddress
+      ? device.macAddress.slice(0, 8) + ":xx:xx" + device.macAddress.slice(-3)
+      : null,
+    publicKey: undefined,
+  };
+}
+
 ipcMain.handle("system:getInfo", async () => {
   try {
     let dbStatus = "disconnected";
@@ -2266,6 +2495,10 @@ ipcMain.handle("system:getInfo", async () => {
     } catch {}
 
     const packageJson = require("../package.json");
+    const attendanceDevice = await ensureAttendanceDeviceRecord({
+      requesterUserId: currentSession?.id || null,
+      requesterName: currentSession?.username || null,
+    });
 
     return {
       success: true,
@@ -2277,6 +2510,7 @@ ipcMain.handle("system:getInfo", async () => {
         appVersion: packageJson.version,
         nodeVersion: process.version,
         electronVersion: process.versions.electron || "N/A",
+        attendanceDevice: serializeAttendanceDevice(attendanceDevice),
       },
     };
   } catch (error) {
@@ -8346,6 +8580,10 @@ ipcMain.handle("handlingUnits:splitUnit", async (_event, payload = {}) => {
         sku: result.parent?.sku,
       });
     }
+    const attendanceDevice = await ensureAttendanceDeviceRecord({
+      requesterUserId: currentSession?.id || null,
+      requesterName: currentSession?.username || null,
+    });
     return {
       success: true,
       duplicate: Boolean(result.duplicate),
@@ -17236,6 +17474,79 @@ function getJpegExifCameraMetadata(buffer) {
   return null;
 }
 
+function getEvidenceScreenshotSignals(buffer) {
+  try {
+    const source = nativeImage.createFromBuffer(buffer);
+    if (source.isEmpty()) return null;
+    const sourceSize = source.getSize();
+    if (!sourceSize.width || !sourceSize.height) return null;
+    const width = Math.min(240, sourceSize.width);
+    const height = Math.max(
+      1,
+      Math.round(sourceSize.height * (width / sourceSize.width)),
+    );
+    const bitmap = source.resize({ width, height, quality: "good" }).toBitmap();
+    if (bitmap.length < width * height * 4) return null;
+
+    let neutralPixels = 0;
+    let lightNeutralPixels = 0;
+    let flatComparisons = 0;
+    let comparisons = 0;
+    const comparePixels = (firstOffset, secondOffset) => {
+      comparisons += 1;
+      if (
+        Math.abs(bitmap[firstOffset] - bitmap[secondOffset]) <= 6 &&
+        Math.abs(bitmap[firstOffset + 1] - bitmap[secondOffset + 1]) <= 6 &&
+        Math.abs(bitmap[firstOffset + 2] - bitmap[secondOffset + 2]) <= 6
+      ) {
+        flatComparisons += 1;
+      }
+    };
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const offset = (y * width + x) * 4;
+        const blue = bitmap[offset];
+        const green = bitmap[offset + 1];
+        const red = bitmap[offset + 2];
+        const maximum = Math.max(red, green, blue);
+        const minimum = Math.min(red, green, blue);
+        if (maximum - minimum <= 14) {
+          neutralPixels += 1;
+          if ((red + green + blue) / 3 >= 220) lightNeutralPixels += 1;
+        }
+        if (x + 1 < width) comparePixels(offset, offset + 4);
+        if (y + 1 < height) comparePixels(offset, offset + width * 4);
+      }
+    }
+
+    const pixelCount = width * height;
+    const aspectRatio = sourceSize.width / sourceSize.height;
+    const landscapeScreenShape =
+      sourceSize.width >= 900 &&
+      sourceSize.height >= 500 &&
+      aspectRatio >= 1.45 &&
+      aspectRatio <= 1.95;
+    const flatRatio = comparisons ? flatComparisons / comparisons : 0;
+    const neutralRatio = neutralPixels / pixelCount;
+    const lightNeutralRatio = lightNeutralPixels / pixelCount;
+    return {
+      width: sourceSize.width,
+      height: sourceSize.height,
+      flatRatio,
+      neutralRatio,
+      lightNeutralRatio,
+      likelyScreenshot:
+        landscapeScreenShape &&
+        flatRatio >= 0.58 &&
+        (neutralRatio >= 0.68 || lightNeutralRatio >= 0.42),
+    };
+  } catch (error) {
+    console.warn("Cannot inspect evidence screenshot signals:", error.message);
+    return null;
+  }
+}
+
 function pruneEvidenceSourceValidationTokens(now = Date.now()) {
   for (const [token, validation] of evidenceSourceValidationTokens) {
     if (validation.expiresAt <= now) evidenceSourceValidationTokens.delete(token);
@@ -17965,9 +18276,10 @@ ipcMain.handle("dailyTasks:validateEvidenceSource", async (_event, payload) => {
       throw new Error("File đã chọn không phải ảnh JPG/JPEG hợp lệ.");
     }
     const camera = getJpegExifCameraMetadata(buffer);
-    if (!camera?.make || !camera?.model) {
+    const screenshotSignals = getEvidenceScreenshotSignals(buffer);
+    if (screenshotSignals?.likelyScreenshot) {
       throw new Error(
-        "Ảnh không có thông tin thiết bị chụp. Không chấp nhận ảnh chụp màn hình, ảnh tải về hoặc ảnh đã bị xóa EXIF.",
+        "Ảnh có dấu hiệu là ảnh chụp màn hình nên không thể dùng làm bằng chứng. Hãy chụp ảnh thực tế bằng điện thoại.",
       );
     }
     const visualHash = getEvidenceVisualHash(buffer);
@@ -17980,6 +18292,8 @@ ipcMain.handle("dailyTasks:validateEvidenceSource", async (_event, payload) => {
       actorId: actor.id,
       visualHash,
       sourceHash: crypto.createHash("sha256").update(buffer).digest("hex"),
+      sourceVerification:
+        camera?.make || camera?.model ? "camera_metadata" : "image_screening",
       expiresAt: Date.now() + EVIDENCE_SOURCE_TOKEN_TTL_MS,
       inUse: false,
     });
@@ -17988,7 +18302,9 @@ ipcMain.handle("dailyTasks:validateEvidenceSource", async (_event, payload) => {
       success: true,
       data: {
         validationToken,
-        camera: [camera.make, camera.model].filter(Boolean).join(" "),
+        camera: [camera?.make, camera?.model].filter(Boolean).join(" "),
+        verification:
+          camera?.make || camera?.model ? "camera_metadata" : "image_screening",
       },
     };
   } catch (error) {
@@ -25796,6 +26112,9 @@ ipcMain.handle("policies:getCurrent", async () => {
           attendanceReward: {
             enabled: attendanceReward.enabled !== false,
             badgeStreakDays: attendanceReward.badgeStreakDays,
+            waiverStreakDays: attendanceReward.waiverStreakDays,
+            waiverLateMaxMinutes: attendanceReward.waiverLateMaxMinutes,
+            waiverMaxPerPeriod: attendanceReward.waiverMaxPerPeriod,
             monthlyRequiredDays: attendanceReward.monthlyRequiredDays,
             standardWorkDays: attendanceReward.standardWorkDays,
             monthlyRewardAmount: attendanceReward.monthlyRewardAmount,
@@ -26062,6 +26381,48 @@ function isAttendanceMonthLocked(attendanceData, periodKey) {
   });
 }
 
+function getPackingCommissionPolicyLevels(commission = {}) {
+  const baseLevels = [
+    { key: "easy", label: "Dễ", unit: "gói", defaultRate: 20 },
+    { key: "medium", label: "Trung bình", unit: "gói", defaultRate: 30 },
+    { key: "high", label: "Cao", unit: "gói", defaultRate: 40 },
+  ];
+  const rates = commission?.rates && typeof commission.rates === "object"
+    ? commission.rates
+    : commission;
+  const customLevels = Array.isArray(commission?.customLevels) ? commission.customLevels : [];
+  return [...baseLevels, ...customLevels.map((level) => ({
+    key: String(level?.key || "").trim(),
+    label: String(level?.label || "").trim(),
+    unit: String(level?.unit || "gói").trim() || "gói",
+    defaultRate: 0,
+  }))]
+    .filter((level) => level.key && level.label)
+    .map((level) => ({
+      key: level.key,
+      label: level.label,
+      unit: level.unit,
+      rate: Number.isFinite(Number(rates?.[level.key])) ? Number(rates[level.key]) : level.defaultRate,
+    }));
+}
+
+function getPackingCommissionPolicyChanges(previousCommission, nextCommission) {
+  const previousLevels = getPackingCommissionPolicyLevels(previousCommission);
+  const nextLevels = getPackingCommissionPolicyLevels(nextCommission);
+  const previousByKey = new Map(previousLevels.map((level) => [level.key, level]));
+  const nextByKey = new Map(nextLevels.map((level) => [level.key, level]));
+  return [...new Set([...previousByKey.keys(), ...nextByKey.keys()])]
+    .map((key) => {
+      const previous = previousByKey.get(key);
+      const next = nextByKey.get(key);
+      if (previous && next && previous.rate === next.rate && previous.label === next.label && previous.unit === next.unit) {
+        return null;
+      }
+      return { key, previous: previous || null, next: next || null };
+    })
+    .filter(Boolean);
+}
+
 // Packing commission is updated through a narrow, admin-only transaction so
 // the renderer never has to overwrite the shared attendanceData document.
 ipcMain.handle("attendance:updatePackingCommission", async (event, payload = {}) => {
@@ -26144,7 +26505,11 @@ ipcMain.handle("attendance:updatePackingCommission", async (event, payload = {})
               update: { value: JSON.stringify(nextAttendanceData) },
               create: { key: "attendanceData", value: JSON.stringify(nextAttendanceData) },
             });
-            return packingCommission;
+            return {
+              packingCommission,
+              previousCommission: current,
+              policyChanges: getPackingCommissionPolicyChanges(current, packingCommission),
+            };
           }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 });
         } catch (error) {
           if (!isTransactionWriteConflict(error)) throw error;
@@ -26164,7 +26529,25 @@ ipcMain.handle("attendance:updatePackingCommission", async (event, payload = {})
       severity: "INFO",
     }).catch((error) => console.warn("Không thể ghi audit hoa hồng đóng gói:", error.message));
 
-    return { success: true, data: result };
+    let notification = { created: false, recipientCount: 0 };
+    if (result.policyChanges.length > 0) {
+      try {
+        notification = await publishPackingCommissionChangeAnnouncement({
+          changes: result.policyChanges,
+          effectiveAt: result.packingCommission.updatedAt,
+          publishedBy: currentSession.username,
+        });
+      } catch (notificationError) {
+        console.error("Không thể phát hành thông báo thay đổi hoa hồng:", notificationError);
+        notification = {
+          created: false,
+          recipientCount: 0,
+          error: "Hoa hồng đã được lưu nhưng chưa phát được thông báo. Vui lòng thử lưu lại hoặc kiểm tra kết nối.",
+        };
+      }
+    }
+
+    return { success: true, data: result.packingCommission, notification };
   } catch (error) {
     console.error("❌ attendance:updatePackingCommission error:", error);
     return { success: false, error: error.message };
@@ -29115,14 +29498,15 @@ ipcMain.handle("stockCheck:balanceItem", async (event, payload = {}) => {
               (sum, entry) => sum + entry.actualQuantity,
               0,
             );
-            if (!item.stockSnapshotAt) {
-              const liveStock = await readCurrentStockForStockCheck(tx, sku);
-              if (liveStock === null) {
-                throw new Error(`Không thể lấy tồn kho hiện tại cho SKU ${sku}.`);
-              }
-              item.systemStock = liveStock;
-              item.stockSnapshotAt = new Date().toISOString();
+            // Package counts are only drafts until this atomic confirmation.
+            // Refresh the SKU baseline here so an older count snapshot cannot
+            // report a false variance after legitimate warehouse movements.
+            const liveStock = await readCurrentStockForStockCheck(tx, sku);
+            if (liveStock === null) {
+              throw new Error(`Không thể lấy tồn kho hiện tại cho SKU ${sku}.`);
             }
+            item.systemStock = liveStock;
+            item.stockSnapshotAt = new Date().toISOString();
             item.actualStock = actualTotal;
           }
           if (item.actualStock === null || item.actualStock === undefined)
@@ -29907,6 +30291,10 @@ ipcMain.handle(
         ...(temporaryPasswordGrant ? { temporaryPasswordGrant } : {}),
       };
       cacheSessionStatus(authenticatedUser);
+      void ensureAttendanceDeviceRecord({
+        requesterUserId: authenticatedUser.id,
+        requesterName: authenticatedUser.fullName || authenticatedUser.username,
+      }).catch((error) => console.warn("[Attendance Device] Auto-register failed:", error.message));
       prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${authenticatedUser.id}`.catch(
         () => {},
       );
@@ -30022,6 +30410,10 @@ ipcMain.handle("users:restoreSession", async (event, rememberToken) => {
       mustChangePassword: isPasswordRotationRequired(user),
     };
     cacheSessionStatus(user);
+    void ensureAttendanceDeviceRecord({
+      requesterUserId: user.id,
+      requesterName: user.fullName || user.username,
+    }).catch((error) => console.warn("[Attendance Device] Auto-register failed:", error.message));
     storeSecureRememberToken(tokenToRestore);
     prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(
       () => {},
@@ -30038,6 +30430,10 @@ ipcMain.handle("users:heartbeat", async () => {
     await prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${currentSession.id}`.catch(
       () => {},
     );
+    void ensureAttendanceDeviceRecord({
+      requesterUserId: currentSession.id,
+      requesterName: currentSession.username,
+    }).catch(() => {});
     return { success: true };
   } catch {
     return { success: false };
@@ -30059,6 +30455,122 @@ ipcMain.handle("users:ensureAdmin", async () => {
         };
   } catch (error) {
     console.error("❌ Ensure admin error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("attendance:devices:list", async () => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    if (!attendanceDeviceRegistryAvailable) {
+      try {
+        const tableProbe = await prisma.$queryRawUnsafe(
+          `SELECT to_regclass('public."AttendanceDevice"')::text AS table_name`,
+        );
+        attendanceDeviceRegistryAvailable = Boolean(tableProbe?.[0]?.table_name);
+      } catch {
+        attendanceDeviceRegistryAvailable = false;
+      }
+    }
+    if (!attendanceDeviceRegistryAvailable) {
+      return {
+        success: true,
+        data: {
+          phase: "observe",
+          enforcementEnabled: false,
+          registryAvailable: false,
+          counts: { total: 0, unregistered: 0, approved: 0, revoked: 0, warnings: 0, online: 0 },
+          devices: [],
+        },
+      };
+    }
+    const devices = await prisma.attendanceDevice.findMany({
+      orderBy: [{ status: "asc" }, { lastSeenAt: "desc" }],
+    });
+    const counts = devices.reduce(
+      (result, device) => {
+        result.total += 1;
+        if (device.status === "unregistered") result.unregistered += 1;
+        if (device.status === "approved") result.approved += 1;
+        if (device.status === "revoked") result.revoked += 1;
+        if (device.publicIp && !device.networkVerified) result.warnings += 1;
+        if (Date.now() - new Date(device.lastSeenAt).getTime() < 15 * 60 * 1000) result.online += 1;
+        return result;
+      },
+      { total: 0, unregistered: 0, approved: 0, revoked: 0, warnings: 0, online: 0 },
+    );
+    return {
+      success: true,
+      data: {
+        phase: "observe",
+        enforcementEnabled: false,
+        registryAvailable: true,
+        counts,
+        devices: devices.map((device) => serializeAttendanceDevice(device, {
+          revealPublicIp: true,
+          revealMacAddress: true,
+        })),
+      },
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+async function updateAttendanceDeviceStatus(id, status) {
+  requireRole("admin");
+  if (!prisma) throw new Error("Prisma not available");
+  const deviceId = Number(id);
+  if (!Number.isInteger(deviceId) || deviceId <= 0) throw new Error("Thiết bị không hợp lệ.");
+  const device = await prisma.attendanceDevice.findUnique({ where: { id: deviceId } });
+  if (!device) throw new Error("Không tìm thấy thiết bị.");
+  const now = new Date();
+  const actor = currentSession?.username || "Admin";
+  const actorId = currentSession?.id || null;
+  const data =
+    status === "approved"
+      ? { status, approvedAt: now, approvedById: actorId, approvedByName: actor, rejectedAt: null, revokedAt: null }
+      : status === "rejected"
+        ? { status, rejectedAt: now, rejectedById: actorId, rejectedByName: actor }
+        : { status, revokedAt: now, revokedById: actorId, revokedByName: actor };
+  const updated = await prisma.attendanceDevice.update({ where: { id: deviceId }, data });
+  void logActivity({
+    module: "attendance",
+    action: `DEVICE_${status.toUpperCase()}`,
+    description: `${status === "approved" ? "Cấp quyền" : status === "rejected" ? "Từ chối" : "Thu hồi"} máy ${device.machineName}`,
+    recordId: device.id,
+    recordName: device.machineName,
+    userName: actor,
+    userId: actorId,
+    deviceInfo: os.hostname(),
+  });
+  return serializeAttendanceDevice(updated, {
+    revealPublicIp: true,
+    revealMacAddress: true,
+  });
+}
+
+ipcMain.handle("attendance:devices:approve", async (_event, id) => {
+  try {
+    return { success: true, data: await updateAttendanceDeviceStatus(id, "approved") };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("attendance:devices:reject", async (_event, id) => {
+  try {
+    return { success: true, data: await updateAttendanceDeviceStatus(id, "rejected") };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("attendance:devices:revoke", async (_event, id) => {
+  try {
+    return { success: true, data: await updateAttendanceDeviceStatus(id, "revoked") };
+  } catch (error) {
     return { success: false, error: error.message };
   }
 });
@@ -30088,8 +30600,8 @@ const FALLBACK_ANNOUNCEMENTS = [
   {
     id: 900002,
     title: "Chính sách thưởng chuyên cần",
-    summary: "Duy trì đúng giờ để mở huy hiệu và nhận thưởng tháng 100.000đ.",
-    content: "Công ty áp dụng cơ chế thưởng chuyên cần theo kết quả chấm công thực tế.\n\n• Đúng giờ 3 ngày liên tiếp: mở huy hiệu Đúng giờ.\n• Hoàn tất kỳ làm việc và đạt ít nhất 24/26 ngày đúng giờ: thưởng 100.000đ vào kỳ lương tương ứng.\n• 5 phút đầu mỗi ca vẫn được tính đúng giờ; đi muộn sau grace time vẫn xử lý phạt độc lập.\n• Nghỉ phép được duyệt không làm đứt chuỗi; ngày nghỉ, ngày lễ và ngày không có lịch làm không tính vào chuỗi.",
+    summary: "Duy trì đúng giờ để mở huy hiệu, nhận lượt miễn phạt nhẹ và thưởng chuyên cần 200.000đ.",
+    content: "Công ty áp dụng cơ chế chuyên cần theo kết quả chấm công thực tế.\n\n• Đúng giờ 3 ngày liên tiếp: mở huy hiệu Đúng giờ.\n• Đúng giờ 7 ngày liên tiếp: nhận 1 lượt miễn phạt mức Nhẹ (đi muộn 6–15 phút), tự dùng tối đa 1 lần trong kỳ. Lượt này vẫn làm đứt chuỗi đúng giờ và ảnh hưởng tỷ lệ chuyên cần.\n• Nhân viên chính thức hoàn tất kỳ làm việc và đạt tối thiểu 24/26 ngày đúng giờ (92,3%): thưởng 200.000đ vào kỳ lương tương ứng. Nhân viên thời vụ không áp dụng khoản thưởng tháng này.\n• 5 phút đầu mỗi ca vẫn được tính đúng giờ; nghỉ phép được duyệt không làm đứt chuỗi; ngày nghỉ, ngày lễ và ngày không có lịch làm không tính vào chuỗi.",
     category: "policy",
     severity: "reward",
     status: "published",
@@ -30097,7 +30609,7 @@ const FALLBACK_ANNOUNCEMENTS = [
     effectiveAt: "2026-09-10T00:00:00.000Z",
     publishedAt: "2026-09-10T00:00:00.000Z",
     requireAcknowledgement: false,
-    version: 1,
+    version: 2,
     policyCode: "ATT-REWARD-2026.09",
     issuer: "Phòng nhân sự",
     createdByName: "Thúy Lê (Admin)",
@@ -30110,9 +30622,156 @@ const FALLBACK_PACKING_LEVELS = [
   { key: "high", label: "Cao", unit: "gói", defaultRate: 40 },
 ];
 const FALLBACK_WEEKLY_PACKING_REWARD = 100000;
+const FALLBACK_PACKING_ANNOUNCEMENTS_KEY = "generatedAnnouncements:packingCommission";
 
 function formatFallbackVnd(value) {
   return `${Math.round(Number(value) || 0).toLocaleString("vi-VN")}đ`;
+}
+
+function parseGeneratedFallbackAnnouncements(value) {
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed.filter((item) => item && Number.isSafeInteger(Number(item.id))) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function getGeneratedFallbackAnnouncements() {
+  const row = await prisma.appConfig.findUnique({
+    where: { key: FALLBACK_PACKING_ANNOUNCEMENTS_KEY },
+    select: { value: true },
+  });
+  return parseGeneratedFallbackAnnouncements(row?.value);
+}
+
+function formatPackingCommissionChange(change) {
+  if (!change.previous && change.next) {
+    return `• Bổ sung ${change.next.label}: ${formatFallbackVnd(change.next.rate)}/${change.next.unit}`;
+  }
+  if (change.previous && !change.next) {
+    return `• Ngừng áp dụng ${change.previous.label}: trước đây ${formatFallbackVnd(change.previous.rate)}/${change.previous.unit}`;
+  }
+  return `• ${change.next.label}: ${formatFallbackVnd(change.previous.rate)}/${change.previous.unit} → ${formatFallbackVnd(change.next.rate)}/${change.next.unit}`;
+}
+
+function buildPackingCommissionChangeAnnouncement({ changes, effectiveAt, publishedBy, version, id }) {
+  const changeLines = changes.map(formatPackingCommissionChange);
+  return {
+    id,
+    title: "Điều chỉnh hoa hồng đóng gói",
+    summary: changeLines.map((line) => line.replace(/^•\s*/, "")).join(" · "),
+    content: [
+      "Công ty cập nhật mức hoa hồng đóng gói. Các mức dưới đây được áp dụng theo cấu hình mới trên phần mềm.",
+      "",
+      "Mức thay đổi",
+      ...changeLines,
+      "",
+      "Nhân viên vui lòng đọc kỹ và xác nhận đã nắm được chính sách mới.",
+      "",
+      "Xem toàn bộ mức hiện hành tại Thông báo → Chính sách → Hoa hồng đóng gói.",
+    ].join("\n"),
+    category: "policy",
+    severity: "reward",
+    status: "published",
+    audienceRoles: '["manager","staff"]',
+    effectiveAt,
+    publishedAt: effectiveAt,
+    expiresAt: null,
+    requireAcknowledgement: true,
+    version,
+    policyCode: `PKG-REWARD-WEEKLY-v${version}`,
+    issuer: "Phòng vận hành",
+    createdByName: publishedBy,
+  };
+}
+
+async function publishPackingCommissionChangeAnnouncement({ changes, effectiveAt, publishedBy }) {
+  const configuredRecipients = await getFallbackRequiredRecipients(FALLBACK_ANNOUNCEMENTS[0].id);
+  const recipientIds = configuredRecipients
+    .filter((recipient) => recipient.required !== false)
+    .map((recipient) => Number(recipient.id))
+    .filter(Number.isSafeInteger)
+    .sort((left, right) => left - right);
+  if (recipientIds.length === 0) return { created: false, recipientCount: 0 };
+
+  if (await hasAnnouncementSchema()) {
+    const created = await getPrismaDirectTx().$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('packingCommissionAnnouncement'))`;
+      const latest = await tx.announcement.findFirst({
+        where: { policyCode: { startsWith: "PKG-REWARD-WEEKLY-v" } },
+        orderBy: [{ version: "desc" }, { id: "desc" }],
+        select: { version: true },
+      });
+      const version = Math.max(Number(FALLBACK_ANNOUNCEMENTS[0].version) || 1, Number(latest?.version) || 0) + 1;
+      const announcement = buildPackingCommissionChangeAnnouncement({
+        changes,
+        effectiveAt,
+        publishedBy,
+        version,
+        id: undefined,
+      });
+      delete announcement.id;
+      const row = await tx.announcement.create({
+        data: { ...announcement, createdBy: currentSession?.id || null },
+      });
+      await tx.announcementRecipient.createMany({
+        data: recipientIds.map((userId) => ({ announcementId: row.id, userId })),
+        skipDuplicates: true,
+      });
+      return row;
+    }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 });
+    broadcastNotificationChange();
+    return { created: true, announcementId: created.id, recipientCount: recipientIds.length };
+  }
+
+  const created = await getPrismaDirectTx().$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${FALLBACK_PACKING_ANNOUNCEMENTS_KEY}))`;
+    for (const userId of recipientIds) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`announcementRecipient:${userId}`}))`;
+    }
+    const historyRow = await tx.appConfig.findUnique({
+      where: { key: FALLBACK_PACKING_ANNOUNCEMENTS_KEY },
+      select: { value: true },
+    });
+    const history = parseGeneratedFallbackAnnouncements(historyRow?.value);
+    const nextId = Math.max(Date.now(), ...history.map((item) => Number(item.id) || 0)) + 1;
+    const latestVersion = Math.max(
+      Number(FALLBACK_ANNOUNCEMENTS[0].version) || 1,
+      ...history.map((item) => Number(item.version) || 0),
+    );
+    const announcement = buildPackingCommissionChangeAnnouncement({
+      changes,
+      effectiveAt,
+      publishedBy,
+      version: latestVersion + 1,
+      id: nextId,
+    });
+    await tx.appConfig.upsert({
+      where: { key: FALLBACK_PACKING_ANNOUNCEMENTS_KEY },
+      update: { value: JSON.stringify([announcement, ...history].slice(0, 200)) },
+      create: { key: FALLBACK_PACKING_ANNOUNCEMENTS_KEY, value: JSON.stringify([announcement]) },
+    });
+    await tx.appConfig.upsert({
+      where: { key: `announcementAudience:${nextId}` },
+      update: { value: JSON.stringify({ userIds: recipientIds, publishedAt: effectiveAt, publishedBy }) },
+      create: { key: `announcementAudience:${nextId}`, value: JSON.stringify({ userIds: recipientIds, publishedAt: effectiveAt, publishedBy }) },
+    });
+    for (const userId of recipientIds) {
+      const recipientKey = `announcementRecipient:${userId}`;
+      const recipientRow = await tx.appConfig.findUnique({ where: { key: recipientKey }, select: { value: true } });
+      const state = parseFallbackRecipientState(recipientRow?.value);
+      state[String(nextId)] = {};
+      await tx.appConfig.upsert({
+        where: { key: recipientKey },
+        update: { value: JSON.stringify(state) },
+        create: { key: recipientKey, value: JSON.stringify(state) },
+      });
+    }
+    return announcement;
+  }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 });
+  broadcastNotificationChange();
+  return { created: true, announcementId: created.id, recipientCount: recipientIds.length };
 }
 
 // Announcements still work before the Announcement migration is deployed. Their
@@ -30179,7 +30838,9 @@ async function getFallbackAnnouncements() {
     publishedAt: publication?.publishedAt || effectiveAt,
     createdByName: publication?.publishedBy || packingCommission?.updatedBy || fallback.createdByName,
   };
-  return attendancePolicy ? [packingAnnouncement, attendancePolicy] : [packingAnnouncement];
+  const generatedAnnouncements = await getGeneratedFallbackAnnouncements();
+  const baseAnnouncements = attendancePolicy ? [packingAnnouncement, attendancePolicy] : [packingAnnouncement];
+  return [...generatedAnnouncements, ...baseAnnouncements];
 }
 
 function isAnnouncementSchemaUnavailable(error) {
@@ -30266,6 +30927,10 @@ function announcementIsVisibleToRole(announcement, role) {
   } catch {
     return true;
   }
+}
+
+function isTargetedPackingAnnouncement(announcement) {
+  return String(announcement?.policyCode || "").startsWith("PKG-REWARD-WEEKLY-v");
 }
 
 async function getOfficialEmployeeUsernames() {
@@ -30629,6 +31294,24 @@ async function reconcileAttendanceRewardNotifications(options = {}) {
       });
       if (wasCreated) created += 1;
     }
+    if (summary.waiver?.eligible && summary.waiver.earnedAt) {
+      const wasCreated = await createAttendanceUserNotification({
+        userId: user.id,
+        eventKey: `attendance:waiver-earned:${summary.employeeId}:${summary.periodKey}:${summary.waiver.earnedAt}`,
+        title: "Bạn có 1 lượt miễn phạt nhẹ",
+        summary: `Đã duy trì đúng giờ ${summary.waiver.streakDays} ngày liên tiếp.`,
+        content: `Bạn đã nhận 1 lượt miễn phạt cho lần đi muộn mức Nhẹ (${context.config.graceMinutes + 1}–${summary.waiver.lateMaxMinutes} phút). Lượt này tự áp dụng tối đa ${summary.waiver.maxPerPeriod} lần trong tháng ${summary.periodKey}; đi muộn vẫn làm đứt chuỗi và ảnh hưởng tỷ lệ chuyên cần tháng.`,
+        severity: "reward",
+        metadata: {
+          event: "late_fine_waiver_earned",
+          periodKey: summary.periodKey,
+          earnedAt: summary.waiver.earnedAt,
+          streakDays: summary.waiver.streakDays,
+          lateMaxMinutes: summary.waiver.lateMaxMinutes,
+        },
+      });
+      if (wasCreated) created += 1;
+    }
     const nearTarget = Math.max(1, summary.monthly.targetDays - 4);
     if (!summary.monthly.qualified && summary.monthly.onTimeDays >= nearTarget && summary.monthly.targetDays > 0) {
       const wasCreated = await createAttendanceUserNotification({
@@ -30658,11 +31341,9 @@ async function reconcileAttendanceRewardNotifications(options = {}) {
   return { created };
 }
 
-async function createAttendanceLateNotification(log, lateFine) {
+async function createAttendanceLateNotification(log, lateFine, waivedLate) {
   if (!log) return false;
-  // A normal check-in still triggers reward reconciliation, but must not look
-  // like a late-arrival notification when no late fine was created.
-  if (!lateFine) return false;
+  if (!lateFine && !waivedLate) return false;
   const context = await loadAttendanceRewardContext();
   const employeeId = resolveEmployeeId(log, context.employees, context.faceProfiles);
   const employee = context.employees.find((item) => Number(item.id) === Number(employeeId));
@@ -30680,7 +31361,19 @@ async function createAttendanceLateNotification(log, lateFine) {
     periodKey: context.periodKey,
   });
   const dateKey = log.date || getBangkokDateKey(log.timestamp);
-  const lateMinutes = lateFine?.detail?.match(/(\d+) phút/)?.[1] || "";
+  const waivedFine = waivedLate?.fine;
+  const lateMinutes = (lateFine || waivedFine)?.detail?.match(/(\d+) phút/)?.[1] || "";
+  if (waivedLate) {
+    return createAttendanceUserNotification({
+      userId: user.id,
+      eventKey: `attendance:waiver-used:${employee.id}:${dateKey}:${log.checkType}`,
+      title: "Đã dùng lượt miễn phạt nhẹ",
+      summary: `Ca ${log.checkType === "morning_in" ? "sáng" : "chiều"} ngày ${dateKey}${lateMinutes ? `: muộn ${lateMinutes} phút` : ""} không bị khấu trừ.`,
+      content: `${waivedLate.reason} Lượt miễn phạt chỉ áp dụng cho mức Nhẹ và đã được dùng cho tháng ${waivedLate.periodKey}. Lần đi muộn này vẫn làm đứt chuỗi đúng giờ; tỷ lệ chuyên cần tháng hiện là ${(summary.monthly.onTimeRate * 100).toFixed(1)}%.`,
+      severity: "info",
+      metadata: { event: "late_fine_waiver_used", dateKey, checkType: log.checkType, lateMinutes: Number(lateMinutes || 0), periodKey: waivedLate.periodKey },
+    });
+  }
   return createAttendanceUserNotification({
     userId: user.id,
     eventKey: `attendance:late:${employee.id}:${dateKey}:${log.checkType}`,
@@ -30771,7 +31464,14 @@ async function getVisibleAnnouncement(announcementId, actor) {
   }
   if (!announcement || (announcement._fallback
     ? !(await canReceiveFallbackAnnouncement(announcement, actor))
-    : !announcementIsVisibleToRole(announcement, actor.role))) {
+    : actor.role !== "admin" && (
+        isTargetedPackingAnnouncement(announcement)
+          ? !(await prisma.announcementRecipient.findUnique({
+              where: { announcementId_userId: { announcementId: id, userId: Number(actor.id) } },
+              select: { id: true },
+            }))
+          : !announcementIsVisibleToRole(announcement, actor.role)
+      ))) {
     throw new Error("Thông báo không tồn tại hoặc không thuộc phạm vi của bạn.");
   }
   return announcement;
@@ -30792,6 +31492,7 @@ ipcMain.handle("notifications:list", async () => {
       announcements = await prisma.$queryRaw`
         SELECT
           a.*,
+          r."id" AS "recipientId",
           r."deliveredAt" AS "recipientDeliveredAt",
           r."readAt" AS "recipientReadAt",
           r."acknowledgedAt" AS "recipientAcknowledgedAt",
@@ -30813,9 +31514,13 @@ ipcMain.handle("notifications:list", async () => {
       return { success: true, data: sortNotifications([...personalNotifications, ...fallbackAnnouncements]) };
     }
     const visible = announcements
-      .filter((announcement) => announcementIsVisibleToRole(announcement, actor.role))
+      .filter((announcement) => actor.role === "admin"
+        || (isTargetedPackingAnnouncement(announcement)
+          ? Boolean(announcement.recipientId)
+          : announcementIsVisibleToRole(announcement, actor.role)))
       .map((announcement) => {
         const {
+          recipientId,
           recipientDeliveredAt,
           recipientReadAt,
           recipientAcknowledgedAt,
@@ -30824,14 +31529,22 @@ ipcMain.handle("notifications:list", async () => {
         } = announcement;
         return {
           ...data,
-          recipient: recipientDeliveredAt || recipientReadAt || recipientAcknowledgedAt || recipientSnoozedUntil
+          recipient: actor.role === "admin"
             ? {
                 deliveredAt: recipientDeliveredAt,
                 readAt: recipientReadAt,
                 acknowledgedAt: recipientAcknowledgedAt,
                 snoozedUntil: recipientSnoozedUntil,
+                acknowledgementRequired: false,
               }
-            : null,
+            : recipientDeliveredAt || recipientReadAt || recipientAcknowledgedAt || recipientSnoozedUntil
+              ? {
+                deliveredAt: recipientDeliveredAt,
+                readAt: recipientReadAt,
+                acknowledgedAt: recipientAcknowledgedAt,
+                snoozedUntil: recipientSnoozedUntil,
+                }
+              : null,
         };
       });
     const personalNotifications = await listPersonalNotifications(actor);
@@ -30859,9 +31572,27 @@ ipcMain.handle("notifications:recipients", async (_event, announcementId) => {
     }
     const announcement = await prisma.announcement.findUnique({
       where: { id },
-      select: { audienceRoles: true },
+      select: { audienceRoles: true, policyCode: true },
     });
     if (!announcement) throw new Error("Không tìm thấy thông báo.");
+    if (isTargetedPackingAnnouncement(announcement)) {
+      const states = await prisma.announcementRecipient.findMany({
+        where: { announcementId: id },
+        select: { userId: true, deliveredAt: true, readAt: true, acknowledgedAt: true },
+        orderBy: { userId: "asc" },
+      });
+      const users = await prisma.user.findMany({
+        where: { id: { in: states.map((state) => state.userId) } },
+        select: { id: true, username: true, fullName: true, role: true },
+      });
+      const userById = new Map(users.map((user) => [user.id, user]));
+      return {
+        success: true,
+        data: states
+          .map((state) => ({ ...(userById.get(state.userId) || {}), ...state, id: state.userId, required: true }))
+          .filter((recipient) => recipient.username),
+      };
+    }
     let roles = [];
     try {
       roles = JSON.parse(announcement.audienceRoles || "[]");
@@ -33056,17 +33787,13 @@ function ensureFaceService() {
       );
       let spawnCmd, spawnArgs;
 
-      const preferFaceExe = app.isPackaged && !faceExeDisabled;
-      if (preferFaceExe && fs.existsSync(exePath)) {
+      const canUseFaceExe = !faceExeDisabled && fs.existsSync(exePath);
+      if (canUseFaceExe) {
         console.log("[Face] 🚀 Dùng attendance_service.exe (standalone)");
         spawnCmd = exePath;
         spawnArgs = [];
       } else if (fs.existsSync(scriptPath)) {
-        if (!app.isPackaged && fs.existsSync(exePath)) {
-          console.log(
-            "[Face] 🛠 Dev mode → bỏ qua attendance_service.exe, dùng Python script để debug ổn định hơn",
-          );
-        } else if (faceExeDisabled) {
+        if (faceExeDisabled) {
           console.log(
             "[Face] ⚠️ attendance_service.exe đã bị vô hiệu hóa cho phiên này → fallback sang Python script",
           );
@@ -33163,6 +33890,7 @@ function ensureFaceService() {
       console.log("[Face] Spawn:", spawnCmd, spawnArgs.join(" "));
 
       faceServiceProcess = require("child_process").spawn(spawnCmd, spawnArgs, {
+        cwd: path.dirname(spawnCmd === exePath ? exePath : scriptPath),
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
         env: {
@@ -34034,6 +34762,10 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
     // Security: the employee workstation clock is untrusted. Date, session and
     // the persisted timestamp all come from the Supabase/PostgreSQL clock.
     const serverClock = await getAttendanceServerClock();
+    const attendanceDevice = await ensureAttendanceDeviceRecord({
+      requesterUserId: currentSession?.id || null,
+      requesterName: currentSession?.username || null,
+    });
     const today = serverClock.dateKey;
     const clientClockDeltaMs = Date.now() - serverClock.epochMs;
     if (Math.abs(clientClockDeltaMs) >= 30000) {
@@ -34089,24 +34821,55 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
         ...faceInfo,
       };
 
-    // Ghi log
-    const log = await prisma.attendanceLog.create({
-      data: {
-        userId,
-        userName,
-        faceId: result.face_id,
-        checkType,
-        confidence: result.confidence,
-        date: today,
-      },
-    });
+    // Ghi log. The fallback keeps older databases usable until the registry
+    // migration is applied; new databases retain the device snapshot.
+    await checkAttendanceLogDeviceColumns();
+    const logData = {
+      userId,
+      userName,
+      faceId: result.face_id,
+      checkType,
+      confidence: result.confidence,
+      date: today,
+      ...(attendanceLogDeviceColumnsAvailable
+        ? {
+            deviceId: attendanceDevice?.deviceId || null,
+            deviceName: attendanceDevice?.machineName || os.hostname(),
+            devicePublicIp: attendanceDevice?.publicIp || null,
+          }
+        : {}),
+    };
+    let log;
+    try {
+      log = await prisma.attendanceLog.create({ data: logData });
+    } catch (error) {
+      if (
+        attendanceLogDeviceColumnsAvailable &&
+        error?.code === "P2022" &&
+        /device(Id|Name|PublicIp)/i.test(String(error?.meta?.column || ""))
+      ) {
+        attendanceLogDeviceColumnsAvailable = false;
+        if (!attendanceLogDeviceColumnsWarningShown) {
+          attendanceLogDeviceColumnsWarningShown = true;
+          console.warn("[Attendance Device] AttendanceLog chưa có cột thiết bị; ghi nhận chấm công không kèm snapshot cho đến khi cập nhật schema.");
+        }
+        const legacyLogData = { ...logData };
+        delete legacyLogData.deviceId;
+        delete legacyLogData.deviceName;
+        delete legacyLogData.devicePublicIp;
+        log = await prisma.attendanceLog.create({ data: legacyLogData });
+      } else {
+        throw error;
+      }
+    }
 
     const fineResult = await reconcileLateAttendanceFines(prisma, {
       logIds: [log.id],
       actor: "system",
     });
     const lateFine = fineResult.created[0] || null;
-    void createAttendanceLateNotification(log, lateFine)
+    const waivedLate = fineResult.waived?.[0] || null;
+    void createAttendanceLateNotification(log, lateFine, waivedLate)
       .then(() => reconcileAttendanceRewardNotifications())
       .catch((error) => console.warn("[Attendance Rewards] Không đồng bộ notification:", error.message));
 
@@ -34119,6 +34882,7 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
         serverTime: new Date(serverClock.epochMs).toISOString(),
         deviceClockDeltaMs: clientClockDeltaMs,
         lateFine,
+        lateWaiver: waivedLate,
         ...faceInfo,
       },
     };
@@ -34158,6 +34922,9 @@ ipcMain.handle("attendance:getRewardSummary", async (_event, periodKey) => {
         config: {
           enabled: context.config.enabled !== false,
           badgeStreakDays: context.config.badgeStreakDays,
+          waiverStreakDays: context.config.waiverStreakDays,
+          waiverLateMaxMinutes: context.config.waiverLateMaxMinutes,
+          waiverMaxPerPeriod: context.config.waiverMaxPerPeriod,
           monthlyRequiredDays: context.config.monthlyRequiredDays,
           standardWorkDays: context.config.standardWorkDays,
           monthlyRewardAmount: context.config.monthlyRewardAmount,

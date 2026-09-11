@@ -1428,5 +1428,168 @@ Trạng thái: **Review tĩnh chỉ đọc đã hoàn tất; không sửa ứng 
 - Đọc đối chiếu `attendanceData` ở chế độ chỉ đọc: thưởng, phạt và miễn phạt đều có `empId`; không thực hiện mutation.
 - `npx tsc --noEmit --pretty false` → thành công.
 - `npm run build` → thành công, 4008 module.
+
 - `node scripts/verify-data-safety.js` → thành công.
 - `git diff --check -- src/pages/Attendance.tsx` → không có lỗi whitespace mới; chỉ còn cảnh báo LF/CRLF Windows.
+
+## 49. Sửa thông báo xóa bàn giao thành công giả (2026-09-01)
+
+### Nguyên nhân
+
+- Backend chủ động chặn `dailyTasks:delete` trong chế độ bảo vệ dữ liệu và trả về `success: false`, nên bản ghi công việc không bị xóa.
+- Frontend không kiểm tra kết quả API mà luôn hiện “Đã xóa!”, phát sự kiện tải lại và khiến người dùng tưởng thao tác đã thành công dù công việc vẫn còn trong database.
+
+### Thay đổi
+
+- Kiểm tra `result.success` trước khi báo thành công.
+- Khi backend chặn hoặc xóa lỗi, giao diện hiển thị đúng thông báo trả về và không phát sự kiện thành công giả.
+- Chỉ tải lại danh sách sau khi backend xác nhận xóa thành công.
+- Không mở khóa xóa cứng, không sửa hoặc xóa dữ liệu công việc, bằng chứng, lịch sử hay khoản phạt liên quan.
+
+### Xác minh
+
+- `npx tsc --noEmit --pretty false` → thành công.
+- `git diff --check -- src/pages/DailyTasks.tsx` → không có lỗi whitespace mới; chỉ còn cảnh báo LF/CRLF Windows.
+
+## 50. Lưu trữ bàn giao an toàn và sửa ghi chú phiếu Trả hàng (2026-09-01)
+
+### Nguyên nhân
+
+- Xóa cứng `dailyTasks:delete` bị chế độ bảo vệ dữ liệu chặn đúng thiết kế, nên công việc không thể biến mất bằng API xóa cũ.
+- Ghi chú nhanh ở trang Trả hàng gọi `returns:update`, API sửa toàn bộ phiếu này cũng bị khóa. Renderer không kiểm tra `result.success`, vì vậy vẫn báo “Đã thêm ghi chú” dù database không thay đổi.
+
+### Thay đổi
+
+- Thêm `dailyTasks:archive`: dùng transaction và khóa đúng dòng công việc, gắn metadata lưu trữ vào `attachments`, chuyển trạng thái sang `cancelled` và giữ nguyên bản ghi, bằng chứng cùng lịch sử.
+- Danh sách công việc mặc định loại các bản ghi đã lưu trữ; cửa sổ cũ không được cập nhật hoặc đổi trạng thái công việc đã lưu trữ.
+- Nút xóa bàn giao đổi thành xác nhận “Lưu trữ”; sau khi backend xác nhận, công việc biến mất khỏi danh sách nhưng vẫn có thể phục hồi từ dữ liệu lưu trữ.
+- Thêm `returns:addProcessNote`: chỉ nối thêm một ghi chú dưới row lock, không cho ghi đè/xóa ghi chú cũ và ghi người tạo/thời gian từ phiên đăng nhập phía backend.
+- Hai luồng thêm ghi chú nhanh của trang Trả hàng chuyển sang API append-only, kiểm tra kết quả backend và cập nhật ngay `processNotes` trên giao diện.
+- Giữ nguyên thay đổi Stock Check, installer và các file dùng chung do team khác đang thực hiện.
+
+### An toàn dữ liệu và xác minh
+
+- Chỉ đọc database để đối chiếu: công việc bàn giao trong ảnh vẫn còn nguyên; không chạy thử thao tác archive hoặc thêm ghi chú trên dữ liệu thật.
+- Không xóa công việc, bằng chứng, lịch sử, phiếu trả hoặc ghi chú hiện có trong quá trình sửa/kiểm tra.
+- `node --check electron/ipc-handlers.js` → thành công.
+- `node --check electron/preload.js` → thành công.
+- `npx tsc --noEmit --pretty false` → thành công.
+- `node scripts/verify-data-safety.js` → thành công.
+- `npm run build` → thành công, 4008 module.
+- `git diff --check` trên các file liên quan → không có lỗi whitespace mới; chỉ còn cảnh báo LF/CRLF Windows.
+
+## 51. Cho phép xóa vĩnh viễn riêng công việc bàn giao (2026-09-01)
+
+### Điều chỉnh theo nghiệp vụ
+
+- Không dùng lại API xóa cứng chung đang bị khóa cho mọi loại công việc.
+- Thêm channel riêng `dailyTasks:deleteAssignment`, chỉ Admin được gọi và backend kiểm tra `type === "assignment"` trước khi xóa.
+- Xóa được thực hiện trong transaction sau khi khóa đúng dòng; các cấu hình phạt phát sinh riêng từ task cũng được dọn trong cùng transaction.
+- Công việc hàng ngày, dữ liệu tồn kho, lương, bằng chứng và database tổng không được mở quyền xóa theo thay đổi này.
+- Giao diện đổi lại thành “Xóa vĩnh viễn công việc bàn giao?” với cảnh báo rõ ràng; chỉ báo thành công khi backend xác nhận.
+
+### Xác minh
+
+- Không thực hiện xóa bản ghi thật trong quá trình kiểm tra.
+- `node --check electron/ipc-handlers.js` → thành công.
+- `node --check electron/preload.js` → thành công.
+- `npx tsc --noEmit --pretty false` → thành công.
+- `node scripts/verify-data-safety.js` → thành công.
+- `npm run build` → thành công, 4008 module.
+
+## 52. Phân tầng lại DATA_SAFETY_MODE, không báo thành công giả (2026-09-01)
+
+### Điều chỉnh
+
+- Mở có kiểm soát các luồng công việc không xóa dữ liệu: yêu cầu hoàn thành bàn giao, hoàn thành công việc thường và duyệt bằng chứng.
+- Các luồng trên được bổ sung khóa dòng và kiểm tra `updatedAt`; nếu máy khác đã sửa trước thì trả lỗi và không ghi đè.
+- Thêm `returns:updateWorkflow` chỉ cho phép đổi nhân viên đóng gói, trạng thái hoặc bên chịu lỗi; API sửa toàn bộ phiếu trả vẫn bị khóa.
+- Thêm `refunds:updateStatus` chỉ cho phép chuyển `processing`/`received`/`lost`; không cho đổi phiếu đã hoàn tất và không thay thế API hoàn kho nguyên tử.
+- Sửa các thao tác bulk/inline ở Trả hàng và Hoàn tiền để chỉ cập nhật UI, tải lại danh sách và báo thành công sau khi backend trả `success: true`; lỗi backend được hiển thị nguyên nhân.
+- Không mở các channel xóa hàng loạt, import/restore, ghi đè hồ sơ/JSON chung hoặc điều chỉnh tồn kho tách rời.
+
+### An toàn dữ liệu và xác minh
+
+- Không chạy thao tác mutation trên dữ liệu thật trong quá trình kiểm tra.
+- `node --check electron/ipc-handlers.js` → thành công.
+- `node --check electron/preload.js` → thành công.
+- `npx tsc --noEmit --pretty false` → thành công.
+- `node scripts/verify-data-safety.js` → thành công.
+- `npm run build` → thành công, 4008 module.
+- `git diff --check` trên các file liên quan → không có lỗi whitespace mới; chỉ còn cảnh báo LF/CRLF Windows.
+
+## Sửa START.bat chạy nhầm resources/app và báo thiếu DATABASE_URL (2026-09-07)
+
+- Ảnh lỗi và stack trace cho thấy Electron chạy `node_modules/electron/dist/resources/app/electron/ipc-handlers.js`, không chạy file trong working tree. Bản copy này không có cấu hình runtime nên báo thiếu `DATABASE_URL` và thoát.
+- Launcher giờ phát hiện `node_modules/electron/dist/resources/app`, chuyển nguyên thư mục sang `tmp/electron-resource-app-quarantine/app-<timestamp>` rồi truyền đường dẫn tuyệt đối của dự án cho Electron.
+- Đã cách ly bản copy hiện tại tại `tmp/electron-resource-app-quarantine/app-manual-20260907-155059`; `package.json` trong bản lưu vẫn tồn tại, không xóa dữ liệu.
+- `.env` ở thư mục dự án có khóa `DATABASE_URL`; không đọc hoặc ghi giá trị bí mật.
+- `node --check scripts/start-electron-dev.js`, bộ kiểm tra data-safety và kiểm tra whitespace đều đạt.
+- Không khởi động ứng dụng tự động sau khi sửa để tránh kích hoạt các tác vụ nền trên dữ liệu thật; lần chạy `START.bat` tiếp theo sẽ dùng đúng working tree.
+
+## Sửa nút mắt xem giao diện theo vai trò (2026-09-07)
+
+- Nút mắt trên title bar nằm trong vùng kéo cửa sổ Electron và trước đây phụ thuộc trigger tự động của Dropdown, nên có trường hợp nhận trạng thái hover/focus nhưng menu không mở.
+- Điều khiển rõ trạng thái đóng/mở của menu bằng state; click nút trực tiếp đảo trạng thái và click tài khoản/thoát xem sẽ đóng menu.
+- Đánh dấu trực tiếp nút là vùng `no-drag`, bật pointer events và đặt lớp hiển thị để click không bị title bar giữ lại.
+- Không thay đổi tài khoản, quyền hoặc dữ liệu nghiệp vụ. `npx tsc --noEmit` và `npm run build` đều đạt; kiểm tra whitespace không có lỗi mới ngoài cảnh báo LF/CRLF Windows.
+
+## Theo dõi và tối ưu tiếp loading Bảng công (2026-09-07)
+
+- Log thực tế bản sửa đầu vẫn ghi primary 5.845-8.234 ms; danh mục khoảng 1-2,4 giây. Bản đầu chưa giải quyết đủ thời gian chờ.
+- Tách timing mới: users 607 ms, attendanceData 4.675 ms trong một lượt HMR. Đây là phép đo từng nguồn, không phải benchmark ổn định sau khởi động lại.
+- Cho dữ liệu chính hoàn tất trước khi chạy tải danh mục và nguồn phạt/đóng gói nhằm giảm cạnh tranh truy vấn khi mở trang.
+- appConfig:get attendanceData dùng cache trong Electron main nhưng kiểm tra updatedAt trên database mỗi lần. Chỉ dùng lại khi revision trùng; thay đổi revision tải toàn bộ lại. Kiểm tra quyền vẫn thực hiện trước đọc cache; không dùng TTL.
+- Build renderer và kiểm tra syntax/data-safety đạt. Test mock kiểm tra cache khi revision không đổi, tải lại khi đổi và từ chối khi mất quyền đều đạt. Không thử mutation trên database thật.
+- Cần khởi động lại Electron để sử dụng cache backend mới; lần đầu vẫn phải tải đầy đủ, chưa đo thời gian thực tế sau restart.
+
+## Triển khai tối ưu tải Bảng công (2026-09-07)
+
+- Tách tải danh mục khỏi Promise.all tải nhân viên/attendanceData. Màn hình và truy vấn log tháng không phải chờ sản phẩm/combo nữa.
+- Thêm API chỉ đọc combos:getPackingComponents lấy id/sku/name/items/status bằng một truy vấn, bỏ truy vấn sản phẩm và tính tồn/giá vốn của combos:getAll.
+- Danh mục và thưởng đóng gói dùng chung request combo đang chạy trong một lần mount; không cache dữ liệu lương giữa các lần mở. Preload cũ có fallback cho đến khi khởi động lại Electron.
+- Giữ kiểm tra đủ nguồn dữ liệu; bổ sung packingCatalogReady vào điều kiện lương kỳ mở. Kỳ đã khóa vẫn dùng snapshot. Có trạng thái tải/lỗi và nút thử lại danh mục.
+- Thêm log [Attendance:load] primary/catalog theo mili giây để đo thực tế. Chưa đo lại thời gian mở trên máy người dùng, không cam kết đã giảm xuống một số giây cụ thể.
+- TypeScript/build production đạt; kiểm tra data-safety và whitespace đạt. Test handler bằng mock đạt cả thành công, database chưa sẵn sàng và lỗi quyền; không kết nối database trong test.
+- Không thay đổi công thức lương, khoản thưởng/phạt hoặc snapshot và không chạy thử mutation dữ liệu thật.
+
+## Chẩn đoán Bảng công tải lâu (2026-09-07)
+
+- Chỉ đọc mã nguồn và log có sẵn, chưa sửa logic hoặc thao tác database.
+- Attendance.tsx:3643 chờ đồng thời users, attendanceData, toàn bộ products và combos mới bỏ spinner toàn màn hình. Log tháng chỉ tải sau isDbLoaded.
+- combos:getAll (electron/ipc-handlers.js:19773) đọc toàn bộ combo rồi sản phẩm để tính tồn và giá vốn. Bảng công gọi lại nguồn này khi tải thưởng đóng gói, tạo công việc trùng.
+- Attendance.tsx:4338 tải thêm đơn đóng gói, VAT, trả hàng, hàng hoàn, công việc, bằng chứng phạt, cân bằng kho và phiên kiểm hàng. Effect chạy lại khi đổi Tổng quát/Phạt; rời module rồi quay lại cũng tạo lại các lượt tải.
+- Lương kỳ chưa khóa đợi log tháng, đồng bộ nền, phạt và đóng gói đều sẵn sàng. Cần giữ điều kiện tính đủ lương này khi tối ưu.
+- Log 07/09 ghi nhận 2.553 đơn đóng gói và 835 combo mỗi đợt; có lỗi đối soát phạt và lưu snapshot do API đang bị khóa. Lưu snapshot còn đọc/merge database trước khi bị chặn ghi.
+- Đề xuất tách danh mục khỏi tải ban đầu, API combo gọn dùng chung kết quả, hợp nhất đọc theo kỳ và xử lý lượt đồng bộ không khả dụng.
+- Chưa có timing từng API nên chưa xác định số giây hoặc API chậm nhất. Không chạy build vì chưa sửa code.
+
+## 53. Hoàn thiện transaction, chống ghi đè và loại bỏ thành công giả (2026-09-01)
+
+### Công việc đã hoàn thiện
+
+- Ghi chú công việc dùng API nối thêm dưới khóa dòng; backend tự ghi người thực hiện và thời gian, không còn ghi đè toàn bộ task từ renderer.
+- Hoàn thành bàn giao, mở lại công việc, yêu cầu hoàn thành, duyệt bằng chứng và hoàn thành công việc thường đều kiểm tra bản ghi mới nhất; các thay đổi trạng thái quan trọng và lịch sử tương ứng được ghi trong cùng transaction.
+- Lịch sử công việc trong `dailyTasksHistory` được tuần tự hóa bằng advisory lock, tránh hai máy cùng ghi làm mất lịch sử của nhau.
+- Danh mục công việc và danh sách trạng thái Trả hàng dùng handler riêng, có advisory lock và so sánh phiên bản dữ liệu trước khi lưu; không mở lại `appConfig:set` tổng quát.
+- Gán nhân viên/trạng thái hàng loạt cho phiếu Trả hàng dùng một transaction all-or-nothing; nếu một phiếu lỗi hoặc đã đổi trên máy khác thì toàn bộ thao tác dừng và giao diện tải lại dữ liệu thật.
+- Trạng thái, nhân viên đóng gói, bên chịu lỗi và khoản phạt Trả hàng được đối chiếu trong cùng transaction. Khi bảng lương tháng liên quan đã khóa, backend từ chối thay đổi khoản phạt thay vì làm lệch phiếu và bảng công.
+- Khoản phạt ưu tiên liên kết chính xác bằng `returnId`; chỉ dữ liệu cũ chưa có ID mới đối chiếu bằng mã khiếu nại chính xác, tránh phiếu có mã gần giống hoặc trùng mã tác động nhầm nhân viên.
+- Đã gỡ toàn bộ logic cũ trong renderer từng đọc-sửa-ghi đè `attendanceData`; renderer Trả hàng không còn quyền tự thêm hoặc gỡ phạt bằng `appConfig:set`.
+- Trạng thái phiếu Hoàn tiền truyền `updatedAt` và bị từ chối nếu một máy khác đã cập nhật trước; giao diện chỉ báo thành công sau khi backend xác nhận.
+- Các thông báo thêm/xóa trạng thái, danh mục, ghi chú, bàn giao và cập nhật hàng loạt chỉ xuất hiện sau `success: true`; lỗi bị khóa hoặc lỗi database được hiển thị đúng, không còn thông báo thành công giả trong các luồng đã review.
+
+### Phạm vi an toàn dữ liệu
+
+- `DATA_SAFETY_MODE` vẫn bật. Các channel xóa nguy hiểm, sửa toàn bộ phiếu, import/restore, ghi đè JSON chung và thao tác tồn kho tách rời vẫn bị khóa.
+- Không chạy Electron để click thử, không gửi email, không xóa bản ghi và không thực hiện mutation thử trên database thật.
+- Chỉ review mã nguồn, kiểm tra cú pháp/type, chạy bộ xác minh tĩnh và build production.
+
+### Xác minh
+
+- `node --check electron/ipc-handlers.js` → thành công.
+- `node --check electron/preload.js` → thành công.
+- `npx tsc --noEmit --pretty false` → thành công.
+- `node scripts/verify-data-safety.js` → thành công; có kiểm tra renderer Trả hàng không được ghi đè `attendanceData` và phạt ưu tiên liên kết `returnId`.
+- `npm run build` → thành công, 4008 module; lần build này khoảng 8.77 giây.
+- `git diff --check` trên các file liên quan → không có lỗi whitespace mới; chỉ còn cảnh báo LF/CRLF Windows.

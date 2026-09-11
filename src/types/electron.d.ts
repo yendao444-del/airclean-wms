@@ -99,6 +99,31 @@ export interface StockMutationPayload {
   };
 }
 
+export interface AttendanceDevice {
+  id: number;
+  deviceId: string;
+  deviceCode: string;
+  machineName: string;
+  requesterUserId?: number | null;
+  requesterName?: string | null;
+  keyFingerprint?: string | null;
+  keyProvider?: string | null;
+  tpmAvailable?: boolean;
+  macAddress?: string | null;
+  publicIp?: string | null;
+  networkName?: string | null;
+  networkVerified?: boolean;
+  appVersion?: string | null;
+  platform?: string | null;
+  status: 'unregistered' | 'approved' | 'rejected' | 'revoked' | string;
+  firstSeenAt: string | Date;
+  lastSeenAt: string | Date;
+  approvedAt?: string | Date | null;
+  approvedByName?: string | null;
+  rejectedAt?: string | Date | null;
+  revokedAt?: string | Date | null;
+}
+
 export interface AnnouncementRecipientState {
   deliveredAt?: string;
   readAt?: string | null;
@@ -149,6 +174,10 @@ export interface AttendanceRewardMonthlySummary {
   lateDays: number;
   absentDays: number;
   targetDays: number;
+  requiredRate: number;
+  onTimeRate: number;
+  eligibleEmployee: boolean;
+  ineligibleReason?: string | null;
   qualified: boolean;
   rewardAmount: number;
   qualifiedAt?: string | null;
@@ -164,6 +193,13 @@ export interface AttendanceRewardSummary {
   bestStreak: number;
   badgeUnlocked: boolean;
   badgeStreakDays: number;
+  waiver: {
+    eligible: boolean;
+    earnedAt?: string | null;
+    streakDays: number;
+    lateMaxMinutes: number;
+    maxPerPeriod: number;
+  };
   monthly: AttendanceRewardMonthlySummary;
   statuses: Record<string, { status: string; sessions: Array<{ session: string; status: string; logId?: number | string; timestamp?: string }> }>;
   evaluatedAt: string;
@@ -626,9 +662,33 @@ export interface ElectronAPI {
         appVersion: string;
         nodeVersion: string;
         electronVersion: string;
+        attendanceDevice?: AttendanceDevice;
       };
       error?: string;
     }>;
+  };
+  attendanceDevices: {
+    list: () => Promise<{
+      success: boolean;
+      data?: {
+        phase: 'observe';
+        enforcementEnabled: boolean;
+        registryAvailable?: boolean;
+        counts: {
+          total: number;
+          unregistered: number;
+          approved: number;
+          revoked: number;
+          warnings: number;
+          online: number;
+        };
+        devices: AttendanceDevice[];
+      };
+      error?: string;
+    }>;
+    approve: (id: number) => Promise<{ success: boolean; data?: AttendanceDevice; error?: string }>;
+    reject: (id: number) => Promise<{ success: boolean; data?: AttendanceDevice; error?: string }>;
+    revoke: (id: number) => Promise<{ success: boolean; data?: AttendanceDevice; error?: string }>;
   };
   dailyTasks: {
     list: (
@@ -673,7 +733,11 @@ export interface ElectronAPI {
       data: string;
     }) => Promise<{
       success: boolean;
-      data?: { validationToken: string; camera?: string };
+      data?: {
+        validationToken: string;
+        camera?: string;
+        verification?: "camera_metadata" | "image_screening";
+      };
       error?: string;
     }>;
     submitEvidence: (
@@ -1149,6 +1213,9 @@ export interface ElectronAPI {
         config: {
           enabled: boolean;
           badgeStreakDays: number;
+          waiverStreakDays: number;
+          waiverLateMaxMinutes: number;
+          waiverMaxPerPeriod: number;
           monthlyRequiredDays: number;
           standardWorkDays: number;
           monthlyRewardAmount: number;
@@ -1212,6 +1279,12 @@ export interface ElectronAPI {
     }) => Promise<{
       success: boolean;
       data?: any;
+      notification?: {
+        created: boolean;
+        announcementId?: number;
+        recipientCount: number;
+        error?: string;
+      };
       error?: string;
     }>;
     deleteFine: (data: {

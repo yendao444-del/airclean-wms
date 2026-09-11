@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Notification Policy Design QA</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; padding: 18px; color: #0f172a; background: #e9eef2; font-family: "Segoe UI", sans-serif; }
+        h1 { margin: 0 0 14px; font-size: 18px; }
+        .comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        figure { margin: 0; overflow: hidden; background: white; border: 1px solid #cbd5e1; border-radius: 12px; }
+        figcaption { padding: 9px 12px; border-bottom: 1px solid #e2e8f0; font-size: 12px; font-weight: 700; }
+        .frame { position: relative; width: 100%; aspect-ratio: 3 / 2; overflow: hidden; background: #fff; }
+        img { width: 100%; height: 100%; display: block; object-fit: contain; }
+        iframe { width: 1536px; height: 1024px; border: 0; transform-origin: top left; }
+    </style>
+</head>
+<body>
+    <h1>Design QA · Chính sách hiện hành · 1536 × 1024</h1>
+    <div class="comparison">
+        <figure>
+            <figcaption>Nguồn chuẩn · Illustrated policy</figcaption>
+            <div class="frame"><img src="./illustrated-policy-real-data-final.png" alt="Thiết kế chính sách hiện hành" /></div>
+        </figure>
+        <figure>
+            <figcaption>Implementation hiện tại</figcaption>
+            <div class="frame"><iframe src="/?notificationUiTest=1&amp;policyUiTest=1" title="Implementation"></iframe></div>
+        </figure>
+    </div>
+    <script>
+        const implementationFrame = document.querySelector('iframe');
+        const implementationViewport = implementationFrame.parentElement;
+        const fitImplementation = () => {
+            implementationFrame.style.transform = `scale(${implementationViewport.clientWidth / 1536})`;
+        };
+        new ResizeObserver(fitImplementation).observe(implementationViewport);
+        fitImplementation();
+    </script>
+</body>
+</html>

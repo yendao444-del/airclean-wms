@@ -1,0 +1,666 @@
+.ecommerce-page {
+    --ecommerce-green: #00b96b;
+    --ecommerce-green-dark: #008f52;
+    --ecommerce-blue: #1677ff;
+    --ecommerce-canvas: #f5f8f6;
+    --ecommerce-border: #e3e9e6;
+    min-width: 0;
+    position: relative;
+    padding-bottom: 24px;
+    container-name: ecommerce-page;
+    container-type: inline-size;
+}
+
+.ecommerce-page .ant-select-dropdown,
+.ecommerce-page .ant-picker-dropdown,
+.ecommerce-page .ant-dropdown {
+    z-index: 1200;
+}
+
+.ecommerce-toolbar,
+.ecommerce-status-group,
+.ecommerce-toolbar-actions,
+.ecommerce-packer-bar,
+.ecommerce-packer-list,
+.ecommerce-offline-banner,
+.ecommerce-scan-bar,
+.ecommerce-mismatch-heading,
+.ecommerce-form-actions {
+    display: flex;
+    align-items: center;
+}
+
+.ecommerce-toolbar {
+    display: grid;
+    grid-template-columns: auto minmax(210px, 1fr) auto;
+    gap: 8px 12px;
+    margin-bottom: 10px;
+    padding: 10px;
+    border: 1px solid #e6ebe8;
+    border-radius: 13px;
+    background: rgba(255, 255, 255, 0.88);
+    box-shadow: 0 4px 18px rgba(25, 46, 35, 0.04);
+}
+
+.ecommerce-status-group,
+.ecommerce-toolbar-actions {
+    min-width: 0;
+    gap: 6px;
+}
+
+.ecommerce-status-group {
+    flex-wrap: wrap;
+}
+
+.ecommerce-status-chip.ant-tag {
+    margin: 0;
+}
+
+.ecommerce-search {
+    min-width: 0;
+}
+
+.ecommerce-toolbar-actions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+}
+
+.ecommerce-toolbar-button {
+    flex: 0 0 auto;
+}
+
+.ecommerce-import-button.ant-btn-primary {
+    border-color: var(--ecommerce-green) !important;
+    background: var(--ecommerce-green) !important;
+    box-shadow: 0 4px 12px rgba(0, 185, 107, 0.18);
+}
+
+.ecommerce-settings-button {
+    width: 34px;
+    padding-inline: 0;
+}
+
+.ecommerce-packer-bar {
+    min-width: 0;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.ecommerce-packer-list {
+    min-width: 0;
+    flex: 1 1 360px;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.ecommerce-packer-chip {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.ecommerce-packer-chip span {
+    overflow-wrap: anywhere;
+}
+
+.ecommerce-active-packer {
+    flex: 0 0 auto;
+}
+
+.ecommerce-offline-banner {
+    min-width: 0;
+    flex-wrap: wrap;
+}
+
+.ecommerce-offline-banner .ant-btn {
+    flex: 0 0 auto;
+}
+
+.ecommerce-scan-bar {
+    min-width: 0;
+}
+
+.ecommerce-scan-input-wrap {
+    min-width: 0;
+}
+
+.ecommerce-scan-button {
+    flex: 0 0 auto;
+}
+
+.ecommerce-table-card {
+    min-width: 0;
+    overflow: visible;
+    border: 1px solid #e6ebe8;
+    border-radius: 14px;
+    box-shadow: 0 6px 24px rgba(30, 43, 36, 0.045);
+}
+
+.ecommerce-table-card > .ant-card-body {
+    min-width: 0;
+    padding: 14px 16px 4px;
+}
+
+.ecommerce-table .ant-table-thead > tr > th,
+.ecommerce-mismatch-table .ant-table-thead > tr > th {
+    color: #354039;
+    background: #f7f9f8;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.ecommerce-cell--actions,
+.ecommerce-toolbar-actions {
+    overflow: visible;
+}
+
+.ecommerce-mismatch-heading {
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.ecommerce-form-grid,
+.ecommerce-product-grid {
+    display: grid;
+}
+
+.ecommerce-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+}
+
+.ecommerce-product-grid {
+    grid-template-columns: minmax(180px, 2fr) minmax(130px, 1.5fr) minmax(90px, 1fr) minmax(120px, 1.2fr) auto;
+    align-items: end;
+    gap: 12px;
+}
+
+.ecommerce-form-actions {
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 24px;
+}
+
+@container ecommerce-page (max-width: 1180px) {
+    .ecommerce-toolbar {
+        grid-template-columns: auto minmax(220px, 1fr);
+    }
+
+    .ecommerce-toolbar-actions {
+        grid-column: 1 / -1;
+        justify-content: flex-start;
+    }
+
+    .ecommerce-table-card > .ant-card-body {
+        padding: 0;
+    }
+
+    .ecommerce-table .ant-table-container,
+    .ecommerce-table .ant-table-content,
+    .ecommerce-table .ant-table-body {
+        width: 100%;
+        max-width: 100%;
+        overflow: visible !important;
+    }
+
+    .ecommerce-table .ant-table-container table {
+        display: block;
+        width: 100% !important;
+        min-width: 100% !important;
+        max-width: 100% !important;
+        table-layout: auto !important;
+    }
+
+    .ecommerce-table colgroup,
+    .ecommerce-table .ant-table-header,
+    .ecommerce-table .ant-table-thead,
+    .ecommerce-table .ant-table-measure-row {
+        display: none;
+    }
+
+    .ecommerce-table .ant-table-tbody {
+        display: grid;
+        box-sizing: border-box;
+        width: 100%;
+        gap: 10px;
+        padding: 12px;
+        background: var(--ecommerce-canvas);
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row {
+        display: grid;
+        box-sizing: border-box;
+        width: 100%;
+        grid-template-columns: 30px minmax(160px, 1.1fr) minmax(150px, 1fr) minmax(125px, 0.8fr) minmax(135px, 0.9fr) 38px;
+        grid-template-areas:
+            "select order order product product actions"
+            "select source sku variation date actions"
+            "select shipping amount amount date actions";
+        column-gap: 10px;
+        padding: 0 10px;
+        overflow: visible;
+        border: 1px solid var(--ecommerce-border);
+        border-left: 3px solid #f4a261;
+        border-radius: 12px;
+        background: #fff;
+        box-shadow: 0 4px 16px rgba(23, 32, 27, 0.045);
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row--completed {
+        border-left-color: var(--ecommerce-green);
+        background: #fbfffd;
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row--cancelled {
+        border-left-color: #ff4d4f;
+        background: #fffafa;
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row--multi:not(.ecommerce-table-row--completed) {
+        background: #fffdf5;
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row > td {
+        min-width: 0;
+        padding: 0 !important;
+        overflow: visible;
+        border: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row:hover > td,
+    .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row.ant-table-row-selected > td {
+        background: transparent !important;
+    }
+
+    .ecommerce-table .ant-table-selection-column {
+        grid-area: select;
+        align-self: start;
+        padding-top: 15px !important;
+    }
+
+    .ecommerce-cell--date { grid-area: date; }
+    .ecommerce-cell--source { grid-area: source; }
+    .ecommerce-cell--order { grid-area: order; }
+    .ecommerce-cell--product { grid-area: product; }
+    .ecommerce-cell--sku { grid-area: sku; }
+    .ecommerce-cell--variation { grid-area: variation; }
+    .ecommerce-cell--amount { grid-area: amount; }
+    .ecommerce-cell--shipping { grid-area: shipping; }
+
+    .ecommerce-cell:not(.ecommerce-cell--actions) {
+        display: grid !important;
+        grid-template-columns: 82px minmax(0, 1fr);
+        align-items: center;
+        gap: 8px;
+        min-height: 38px;
+        padding-block: 5px !important;
+        text-align: left !important;
+    }
+
+    .ecommerce-cell:not(.ecommerce-cell--actions)::before {
+        color: #7b8580;
+        font-size: 10px;
+        font-weight: 700;
+        line-height: 1.2;
+        text-transform: uppercase;
+    }
+
+    .ecommerce-cell--date::before { content: "Created"; }
+    .ecommerce-cell--source::before { content: "Nguon"; }
+    .ecommerce-cell--order::before { content: "Order / Track"; }
+    .ecommerce-cell--product::before { content: "San pham"; }
+    .ecommerce-cell--sku::before { content: "SKU"; }
+    .ecommerce-cell--variation::before { content: "Phan loai"; }
+    .ecommerce-cell--amount::before { content: "Tong tien"; }
+    .ecommerce-cell--shipping::before { content: "Don vi VC"; }
+
+    .ecommerce-cell .ant-tag {
+        width: fit-content;
+        max-width: 100%;
+        margin-inline-end: 0;
+        overflow-wrap: anywhere;
+        white-space: normal;
+    }
+
+    .ecommerce-cell--product > span {
+        max-width: none !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        white-space: normal !important;
+    }
+
+    .ecommerce-cell--actions {
+        position: static !important;
+        grid-area: actions;
+        align-self: start;
+        padding-top: 12px !important;
+    }
+
+    .ecommerce-cell--actions .ant-btn {
+        width: 34px;
+        padding-inline: 0;
+        overflow: hidden;
+        font-size: 0;
+    }
+
+    .ecommerce-cell--actions .anticon {
+        margin: 0 !important;
+        font-size: 14px;
+    }
+
+    .ecommerce-table .ant-table-cell-fix-right,
+    .ecommerce-table .ant-table-cell-fix-right-first {
+        position: static !important;
+        right: auto !important;
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ant-table-expanded-row {
+        display: block;
+        box-sizing: border-box;
+        width: calc(100% - 20px);
+        margin: -11px 10px 2px;
+        overflow: visible;
+        border: 1px solid #cfeadd;
+        border-top: 0;
+        border-radius: 0 0 12px 12px;
+        background: #fbfffd;
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ant-table-expanded-row > td {
+        display: block;
+        width: 100%;
+        padding: 12px !important;
+        border: 0;
+        background: transparent !important;
+    }
+
+    .ecommerce-items-table {
+        width: 100%;
+        max-width: 100%;
+    }
+
+    .ecommerce-table .ant-table-pagination {
+        margin: 14px 12px 16px;
+    }
+}
+
+@container ecommerce-page (max-width: 760px) {
+    .ecommerce-toolbar {
+        grid-template-columns: 1fr;
+    }
+
+    .ecommerce-status-group,
+    .ecommerce-search,
+    .ecommerce-toolbar-actions {
+        grid-column: auto;
+        width: 100%;
+    }
+
+    .ecommerce-status-group {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .ecommerce-status-chip.ant-tag {
+        overflow: hidden;
+        text-align: center;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .ecommerce-toolbar-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .ecommerce-toolbar-actions .ant-btn,
+    .ecommerce-toolbar-actions .ant-dropdown-trigger {
+        width: 100%;
+    }
+
+    .ecommerce-settings-button {
+        grid-column: auto;
+    }
+
+    .ecommerce-packer-bar {
+        align-items: flex-start !important;
+    }
+
+    .ecommerce-packer-list {
+        flex-basis: calc(100% - 32px);
+    }
+
+    .ecommerce-active-packer {
+        width: 100%;
+        align-items: flex-start !important;
+    }
+
+    .ecommerce-offline-banner .ant-btn {
+        width: 100%;
+        margin-left: 0 !important;
+    }
+
+    .ecommerce-scan-bar {
+        display: grid !important;
+        grid-template-columns: 30px minmax(0, 1fr);
+        align-items: center !important;
+    }
+
+    .ecommerce-scan-icon {
+        font-size: 26px !important;
+    }
+
+    .ecommerce-scan-button {
+        grid-column: 1 / -1;
+        width: 100%;
+    }
+
+    .ecommerce-mismatch-heading {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row {
+        grid-template-columns: 28px minmax(0, 1fr) 38px;
+        grid-template-areas:
+            "select order actions"
+            "select product actions"
+            "select source actions"
+            "select sku actions"
+            "select variation actions"
+            "select shipping actions"
+            "select amount actions"
+            "select date actions";
+        column-gap: 9px;
+    }
+
+    .ecommerce-cell:not(.ecommerce-cell--actions) {
+        grid-template-columns: 88px minmax(0, 1fr);
+    }
+
+    .ecommerce-mismatch-table .ant-table-container,
+    .ecommerce-mismatch-table .ant-table-content {
+        width: 100%;
+        overflow: visible !important;
+    }
+
+    .ecommerce-mismatch-table table {
+        display: block;
+        width: 100% !important;
+        min-width: 100% !important;
+    }
+
+    .ecommerce-mismatch-table colgroup,
+    .ecommerce-mismatch-table .ant-table-thead,
+    .ecommerce-mismatch-table .ant-table-measure-row {
+        display: none;
+    }
+
+    .ecommerce-mismatch-table .ant-table-tbody {
+        display: grid;
+        gap: 8px;
+    }
+
+    .ecommerce-mismatch-table .ant-table-tbody > tr {
+        display: grid;
+        grid-template-columns: 34px minmax(0, 1fr) 46px;
+        align-items: center;
+        gap: 8px;
+        padding: 10px;
+        border: 1px solid #f0d2d2;
+        border-radius: 9px;
+        background: #fffafa;
+    }
+
+    .ecommerce-mismatch-table .ant-table-tbody > tr > td {
+        min-width: 0;
+        padding: 0 !important;
+        border: 0 !important;
+        background: transparent !important;
+    }
+
+    .ecommerce-mismatch-table .ant-table-tbody > tr > td:nth-child(3) {
+        display: none;
+    }
+}
+
+@container ecommerce-page (max-width: 620px) {
+    .ecommerce-toolbar {
+        padding: 8px;
+    }
+
+    .ecommerce-toolbar-actions .ecommerce-settings-button {
+        width: 100%;
+    }
+
+    .ecommerce-toolbar-actions .ecommerce-toolbar-button:not(.ecommerce-settings-button) {
+        min-width: 0;
+    }
+
+    .ecommerce-packer-chip {
+        transform: none !important;
+    }
+
+    .ecommerce-table .ant-table-tbody {
+        padding: 8px;
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ecommerce-table-row {
+        padding-inline: 8px;
+    }
+
+    .ecommerce-cell:not(.ecommerce-cell--actions) {
+        grid-template-columns: 76px minmax(0, 1fr);
+    }
+
+    .ecommerce-table .ant-table-tbody > tr.ant-table-expanded-row {
+        width: calc(100% - 12px);
+        margin-inline: 6px;
+    }
+
+    .ecommerce-items-table .ant-table-container,
+    .ecommerce-items-table .ant-table-content {
+        width: 100%;
+        overflow: visible !important;
+    }
+
+    .ecommerce-items-table table {
+        display: block;
+        width: 100% !important;
+        min-width: 100% !important;
+    }
+
+    .ecommerce-items-table colgroup,
+    .ecommerce-items-table .ant-table-thead,
+    .ecommerce-items-table .ant-table-measure-row {
+        display: none;
+    }
+
+    .ecommerce-items-table .ant-table-tbody {
+        display: grid;
+        gap: 8px;
+    }
+
+    .ecommerce-items-table .ant-table-tbody > tr {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(90px, auto);
+        grid-template-areas:
+            "item-sku item-qty"
+            "item-name item-name"
+            "item-color item-price"
+            "item-total item-remove";
+        gap: 6px 10px;
+        padding: 9px;
+        border: 1px solid #e5ebe7;
+        border-radius: 9px;
+        background: #fff;
+    }
+
+    .ecommerce-item-cell--sku { grid-area: item-sku; }
+    .ecommerce-item-cell--name { grid-area: item-name; }
+    .ecommerce-item-cell--color { grid-area: item-color; }
+    .ecommerce-item-cell--qty { grid-area: item-qty; }
+    .ecommerce-item-cell--price { grid-area: item-price; }
+    .ecommerce-item-cell--total { grid-area: item-total; }
+    .ecommerce-item-cell--remove { grid-area: item-remove; }
+
+    .ecommerce-items-table .ant-table-tbody > tr > td {
+        min-width: 0;
+        padding: 0 !important;
+        border: 0 !important;
+        background: transparent !important;
+    }
+
+    .ecommerce-table .ant-table-pagination {
+        justify-content: center;
+    }
+
+    .ecommerce-table .ant-pagination-total-text,
+    .ecommerce-table .ant-pagination-options {
+        display: none;
+    }
+}
+
+@media (max-width: 760px) {
+    .ecommerce-form-grid {
+        grid-template-columns: 1fr;
+        gap: 0;
+    }
+
+    .ecommerce-product-composer {
+        padding: 14px !important;
+    }
+
+    .ecommerce-product-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .ecommerce-product-grid > :first-child {
+        grid-column: 1 / -1;
+    }
+
+    .ecommerce-product-grid > .ant-btn {
+        width: 100%;
+    }
+}
+
+@media (max-width: 520px) {
+    .ecommerce-product-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .ecommerce-product-grid > :first-child {
+        grid-column: auto;
+    }
+
+    .ecommerce-form-actions {
+        align-items: stretch;
+        flex-direction: column-reverse;
+    }
+
+    .ecommerce-form-actions .ant-btn {
+        width: 100%;
+    }
+}

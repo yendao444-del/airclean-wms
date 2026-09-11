@@ -14,7 +14,7 @@ import {
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import {
-    CartesianGrid, Legend, Line, LineChart, ResponsiveContainer,
+    Bar, CartesianGrid, ComposedChart, Legend, Line, ResponsiveContainer,
     Tooltip as ChartTooltip, XAxis, YAxis,
 } from 'recharts';
 import dayjs, { Dayjs } from 'dayjs';
@@ -88,8 +88,6 @@ export default function OrdersPage() {
     const [tmdtPlatformFilter, setTmdtPlatformFilter] = useState<TmdtPlatformFilter>('all');
     const [datePreset, setDatePreset] = useState<DatePreset>('today');
     const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
-    const [chartPreset, setChartPreset] = useState<DatePreset>('month');
-    const [chartCustomRange, setChartCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
 
     // Edit/Delete state
     const [editOrder, setEditOrder] = useState<UnifiedOrder | null>(null);
@@ -182,16 +180,21 @@ export default function OrdersPage() {
         }
         const api = (window as any).electronAPI;
         try {
-            const result = await api.orders.getUnified(args);
+            const [result, summaryResult] = await Promise.all([
+                api.orders.getUnified(args),
+                api.orders.getSummary(args),
+            ]);
             if (requestId !== ordersRequestIdRef.current) return;
             if (!result?.success) throw new Error(result?.error || 'Không tải được danh sách đơn hàng.');
+            if (!summaryResult?.success) throw new Error(summaryResult?.error || 'Không tải được thống kê đơn hàng.');
             const data = result.data || {};
+            const summary = summaryResult.data || {};
             const cacheEntry: OrdersPageCacheEntry = {
                 rows: Array.isArray(data.rows) ? data.rows : [],
                 total: Number(data.total || 0),
-                current: data.current || { orderCount: 0, revenue: 0, quantity: 0 },
-                previous: data.previous || { orderCount: 0, revenue: 0, quantity: 0 },
-                sourceCounts: data.sourceCounts || { all: 0, tmdt: 0, pos: 0, export: 0, shopee: 0, tiktok: 0 },
+                current: summary.current || { orderCount: 0, revenue: 0, quantity: 0 },
+                previous: summary.previous || { orderCount: 0, revenue: 0, quantity: 0 },
+                sourceCounts: summary.sourceCounts || { all: 0, tmdt: 0, pos: 0, export: 0, shopee: 0, tiktok: 0 },
             };
             ordersPageCache.set(cacheKey, cacheEntry);
             if (ordersPageCache.size > 12) {
@@ -219,17 +222,12 @@ export default function OrdersPage() {
     const rangeStartTs = rangeStart.startOf('day').valueOf();
     const rangeEndTs = rangeEnd.endOf('day').valueOf();
 
-    const [chartRangeStart, chartRangeEnd] = useMemo((): [Dayjs, Dayjs] => {
-        const today = dayjs().startOf('day');
-        switch (chartPreset) {
-            case 'today': return [today, today.endOf('day')];
-            case '7days': return [today.subtract(6, 'day'), today.endOf('day')];
-            case '30days': return [today.subtract(29, 'day'), today.endOf('day')];
-            case 'month': return [today.startOf('month'), today.endOf('day')];
-            case 'custom': return chartCustomRange || [today.startOf('month'), today.endOf('day')];
-            default: return [today.startOf('month'), today.endOf('day')];
-        }
-    }, [chartPreset, chartCustomRange]);
+    // KPI, chart and order table share one date range so every date control
+    // updates the entire page instead of leaving part of it fixed on today.
+    const chartPreset = datePreset;
+    const chartRangeStart = rangeStart;
+    const chartRangeEnd = rangeEnd;
+    const isHourlyChart = chartRangeStart.isSame(chartRangeEnd, 'day');
 
     useEffect(() => {
         let cancelled = false;
@@ -239,13 +237,14 @@ export default function OrdersPage() {
             to: chartRangeEnd.endOf('day').toISOString(),
             sourceFilter,
             platformFilter: tmdtPlatformFilter,
+            granularity: isHourlyChart ? 'hour' : 'day',
         }).then((result: any) => {
             if (!cancelled && result.success) setChartStats(result.data || []);
         }).catch(() => {
             if (!cancelled) setChartStats([]);
         });
         return () => { cancelled = true; };
-    }, [chartRangeStart.valueOf(), chartRangeEnd.valueOf(), sourceFilter, tmdtPlatformFilter]);
+    }, [chartRangeStart.valueOf(), chartRangeEnd.valueOf(), isHourlyChart, sourceFilter, tmdtPlatformFilter]);
 
     const getTmdtPlatform = (order: UnifiedOrder): TmdtPlatformFilter | 'other' => {
         const label = (order.sourceLabel || '').toLowerCase();
@@ -317,6 +316,28 @@ export default function OrdersPage() {
         : 0;
 
     const trendData = useMemo(() => {
+        if (isHourlyChart) {
+            const selectedDay = chartRangeStart.startOf('day');
+            const lastHour = selectedDay.isSame(dayjs(), 'day') ? dayjs().hour() : 23;
+            const points = Array.from({ length: lastHour + 1 }, (_, hour) => {
+                const pointTime = selectedDay.hour(hour);
+                return {
+                    key: pointTime.format('YYYY-MM-DD HH:00'),
+                    label: pointTime.format('HH:mm'),
+                    revenue: 0,
+                    orders: 0,
+                };
+            });
+            const byHour = new Map(points.map(point => [point.key, point]));
+            for (const stat of chartStats) {
+                const point = byHour.get(stat.date);
+                if (!point) continue;
+                point.orders = Number(stat.orders || 0);
+                point.revenue = Number(stat.revenue || 0);
+            }
+            return points;
+        }
+
         const dayCount = Math.max(chartRangeEnd.diff(chartRangeStart, 'day') + 1, 1);
         const points = Array.from({ length: dayCount }, (_, index) => chartRangeStart.add(index, 'day'))
             .filter(date => !isVietnamRestDay(date))
@@ -334,7 +355,7 @@ export default function OrdersPage() {
             point.revenue = Number(stat.revenue || 0);
         }
         return points.filter(point => point.revenue > 0);
-    }, [chartStats, chartRangeStart.valueOf(), chartRangeEnd.valueOf()]);
+    }, [chartStats, chartRangeStart.valueOf(), chartRangeEnd.valueOf(), isHourlyChart]);
 
     const pctChange = (cur: number, prev: number) => {
         if (prev === 0) return null;
@@ -833,7 +854,10 @@ export default function OrdersPage() {
                                 key={preset}
                                 type="text"
                                 className={chartPreset === preset ? 'is-active' : ''}
-                                onClick={() => setChartPreset(preset)}
+                                onClick={() => {
+                                    setCurrentPage(1);
+                                    setDatePreset(preset);
+                                }}
                             >
                                 {label}
                             </Button>
@@ -846,28 +870,35 @@ export default function OrdersPage() {
                         value={[chartRangeStart, chartRangeEnd]}
                         onChange={(dates) => {
                             if (dates?.[0] && dates?.[1]) {
-                                setChartCustomRange([dates[0], dates[1]]);
-                                setChartPreset('custom');
+                                setCurrentPage(1);
+                                setCustomRange([dates[0], dates[1]]);
+                                setDatePreset('custom');
                             }
                         }}
                     />
                 </div>
                 <div className="orders-chart" aria-label={`Biểu đồ doanh thu từ ${chartRangeStart.format('DD/MM/YYYY')} đến ${chartRangeEnd.format('DD/MM/YYYY')}`}>
                     <div className="orders-chart-heading">
-                        <Text strong>{chartPreset === 'today' ? 'Doanh thu hôm nay' : 'Doanh thu theo ngày'}</Text>
+                        <Text strong>
+                            {isHourlyChart
+                                ? `Doanh thu theo giờ · ${chartRangeStart.format('DD/MM/YYYY')}`
+                                : 'Doanh thu theo ngày'}
+                        </Text>
                         <Text type="secondary">
-                            {chartRangeStart.format('DD/MM/YYYY')} – {chartRangeEnd.format('DD/MM/YYYY')} · Đã loại ngày 0 đ, CN & ngày lễ
+                            {isHourlyChart
+                                ? 'Cột: doanh số · Đường: số đơn hàng'
+                                : `${chartRangeStart.format('DD/MM/YYYY')} – ${chartRangeEnd.format('DD/MM/YYYY')} · Đã loại ngày 0 đ, CN & ngày lễ`}
                         </Text>
                     </div>
                     <div className="orders-chart-canvas">
                     <ResponsiveContainer width="100%" height="100%">
-                        <LineChart data={trendData} margin={{ top: 12, right: 24, left: 8, bottom: 0 }}>
+                        <ComposedChart data={trendData} margin={{ top: 12, right: 24, left: 8, bottom: 0 }}>
                             <CartesianGrid stroke="#e8eee9" strokeDasharray="3 3" vertical={false} />
                             <XAxis
                                 dataKey="label"
                                 axisLine={false}
                                 tickLine={false}
-                                interval="preserveStartEnd"
+                                interval={isHourlyChart ? 1 : 'preserveStartEnd'}
                                 minTickGap={28}
                                 tick={{ fill: '#667085', fontSize: 11 }}
                             />
@@ -893,9 +924,13 @@ export default function OrdersPage() {
                                 formatter={(value: number, name: string) => name === 'Doanh số' ? [`${fmt(value)} đ`, name] : [fmt(value), name]}
                             />
                             <Legend iconType="circle" iconSize={7} wrapperStyle={{ fontSize: 12, paddingTop: 6 }} />
-                            <Line yAxisId="revenue" name="Doanh số" type="monotone" dataKey="revenue" stroke="#00ab56" strokeWidth={2.5} dot={{ r: 3, fill: '#00ab56', strokeWidth: 0 }} activeDot={{ r: 5 }} />
+                            {isHourlyChart ? (
+                                <Bar yAxisId="revenue" name="Doanh số" dataKey="revenue" fill="#00ab56" fillOpacity={0.78} radius={[5, 5, 0, 0]} maxBarSize={34} />
+                            ) : (
+                                <Line yAxisId="revenue" name="Doanh số" type="monotone" dataKey="revenue" stroke="#00ab56" strokeWidth={2.5} dot={{ r: 3, fill: '#00ab56', strokeWidth: 0 }} activeDot={{ r: 5 }} />
+                            )}
                             <Line yAxisId="orders" name="Đơn hàng" type="monotone" dataKey="orders" stroke="#1677ff" strokeWidth={2.5} dot={{ r: 3, fill: '#1677ff', strokeWidth: 0 }} activeDot={{ r: 5 }} />
-                        </LineChart>
+                        </ComposedChart>
                     </ResponsiveContainer>
                     </div>
                 </div>

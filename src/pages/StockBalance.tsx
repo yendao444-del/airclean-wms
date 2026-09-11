@@ -1798,8 +1798,9 @@ export default function StockBalancePage() {
     };
 
     const changeLedgerDate = (date: dayjs.Dayjs) => {
-        setLedgerDate(date);
-        if (activeLedgerRow) void loadProductLogs(activeLedgerRow, date, false);
+        const normalizedDate = date.startOf('day');
+        setLedgerDate(normalizedDate);
+        if (activeLedgerRow) void loadProductLogs(activeLedgerRow, normalizedDate, false);
     };
 
     const handleSaveVariantMinStock = async (sku: string) => {
@@ -2361,7 +2362,11 @@ export default function StockBalancePage() {
                                 label: '📋 Thẻ kho',
                                 children: (
                                     <div style={{ padding: "12px 0" }}>
-                                        <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                        <div
+                                            style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}
+                                            onClick={(event) => event.stopPropagation()}
+                                            onMouseDown={(event) => event.stopPropagation()}
+                                        >
                                             <span style={{ fontSize: 13, color: '#595959', whiteSpace: 'nowrap' }}>Xem ngày:</span>
                                             <Button
                                                 size="small"
@@ -2377,13 +2382,31 @@ export default function StockBalancePage() {
                                             >
                                                 Hôm qua
                                             </Button>
+                                            <Button
+                                                size="small"
+                                                onClick={() => changeLedgerDate(ledgerDate.subtract(1, 'day'))}
+                                                title="Ngày trước"
+                                            >
+                                                ‹
+                                            </Button>
                                             <DatePicker
                                                 value={ledgerDate}
                                                 format="DD/MM/YYYY"
                                                 allowClear={false}
+                                                inputReadOnly
                                                 disabledDate={(date) => date.isAfter(dayjs(), 'day')}
                                                 onChange={(date) => date && changeLedgerDate(date)}
+                                                getPopupContainer={() => document.body}
+                                                popupClassName="stock-ledger-date-popup"
                                             />
+                                            <Button
+                                                size="small"
+                                                disabled={ledgerDate.isSame(dayjs(), 'day')}
+                                                onClick={() => changeLedgerDate(ledgerDate.add(1, 'day'))}
+                                                title="Ngày sau"
+                                            >
+                                                ›
+                                            </Button>
                                             <Button
                                                 size="small"
                                                 icon={<ReloadOutlined />}

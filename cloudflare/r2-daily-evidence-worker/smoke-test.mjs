@@ -25,7 +25,25 @@ if (!download.ok) throw new Error(`Download failed: ${download.status}`);
 const downloaded = Buffer.from(await download.arrayBuffer());
 if (!downloaded.equals(body)) throw new Error("Downloaded bytes do not match upload.");
 const removed = await fetch(objectUrl, { method: "DELETE", headers: { authorization: `Bearer ${secret}` } });
-if (!removed.ok) throw new Error(`Cleanup failed: ${removed.status}`);
+if (removed.status !== 423) throw new Error(`Expected data-safety delete block, got: ${removed.status}`);
+
+const receiptBody = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+const receiptHash = crypto.createHash("sha256").update(receiptBody).digest("hex");
+const receiptKey = `purchase-receipts/smoke-test/${receiptHash}.jpg`;
+const receiptUrl = `${endpoint}/objects/${encodeURIComponent(receiptKey)}`;
+const receiptHeaders = {
+  authorization: `Bearer ${secret}`,
+  "content-type": "image/jpeg",
+  "content-length": String(receiptBody.length),
+  "x-content-sha256": receiptHash,
+};
+const receiptUpload = await fetch(receiptUrl, { method: "POST", headers: receiptHeaders, body: receiptBody });
+if (!receiptUpload.ok) throw new Error(`Receipt upload failed: ${receiptUpload.status} ${await receiptUpload.text()}`);
+const receiptDownload = await fetch(receiptUrl, { headers: { authorization: `Bearer ${secret}` } });
+if (!receiptDownload.ok) throw new Error(`Receipt download failed: ${receiptDownload.status}`);
+if (!Buffer.from(await receiptDownload.arrayBuffer()).equals(receiptBody)) {
+  throw new Error("Downloaded receipt bytes do not match upload.");
+}
 
 const oversizedBody = Buffer.alloc(500 * 1024);
 const oversizedHash = crypto.createHash("sha256").update(oversizedBody).digest("hex");
@@ -43,4 +61,4 @@ const oversizedResponse = await fetch(`${endpoint}/objects/${encodeURIComponent(
 if (oversizedResponse.status !== 413) {
   throw new Error(`Expected a 500 KB image to be rejected, got ${oversizedResponse.status}.`);
 }
-console.log(`R2 daily evidence smoke test passed: ${key}`);
+console.log(`R2 smoke test passed for daily evidence and purchase receipts: ${key}`);

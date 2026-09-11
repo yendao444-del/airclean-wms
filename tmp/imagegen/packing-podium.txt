@@ -1,0 +1,8 @@
+Use case: ui-mockup
+Asset type: desktop operations dashboard redesign
+Input image: use the supplied current DBY POS packing leaderboard screenshot only as product and data context; redesign the visual system and information hierarchy freely.
+Primary request: Design a professional Vietnamese packing-performance screen where the monthly top employee is unmistakably the hero. Use a bold champion podium composition: a large Top 1 profile and score block on the left, team totals and monthly commission summary nearby, then a clean compact leaderboard below. Add a clearly separate weekly prize module for “Thưởng tuần 100.000đ”, showing the current week “31/08 – 06/09”, copy “Nhân viên đóng gói nhiều nhất tuần”, and a visible “Sắp ra mắt” status so nobody thinks the reward is active. Explain subtly that the weekly race resets every Monday.
+Target dimensions: 1536 x 1024 desktop app frame.
+Visible data: “Cuộc đua đóng gói tháng 09/2026”; 328 đơn; 414 SP; 8.280đ; Top 1 Nguyễn Đình Toàn with 143 đơn, 171 SP, 3.420đ; Nguyễn Văn Khánh 101 đơn, 137 SP, 2.740đ; Đỗ Nguyễn Trường 84 đơn, 106 SP, 2.120đ.
+Style: premium sports editorial meets warehouse operations; confident navy, warm gold for champion, fresh green for productivity; sharp purposeful typography, restrained surfaces, no excessive cards.
+Constraints: desktop application content only; use real icon-library style icons, no emoji; Vietnamese text must be legible; emphasize Top 1 first, weekly reward second, leaderboard third; no sidebar; no horizontal scrolling; do not show the order log in this concept; do not imply the weekly 100.000đ has already been paid; no watermark.

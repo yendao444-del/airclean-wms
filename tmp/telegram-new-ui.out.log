@@ -1,0 +1,36 @@
+[START] Replacing launcher PID 26840 so this window owns the logs...
+[DataSafety] Skipped Electron cache quarantine.
+[START] Launching Vite at http://127.0.0.1:5173
+
+  VITE v7.3.6  ready in 248 ms
+
+  ➜  Local:   http://127.0.0.1:5173/
+  ➜  press h + enter to show help
+[START] Vite ready after 1.0s; launching Electron
+
+isDev: true | isPackaged: false
+[dotenv@17.2.3] injecting env (7) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+[OfflineQueue] Initialized at: C:\Users\Admin\AppData\Roaming\quan-ly-ban-hang-desktop\offline-queue | Pending: 0 | Preserved temp: 0
+🔄 Initializing Prisma Client...
+   🆕 CODE VERSION: 3.1 (runtime-only configuration)
+   APP: DBY POS 1.0.6
+   ENVIRONMENT: production
+   DATABASE_HOST: aws-1-ap-south-1.pooler.supabase.com
+✅ Prisma Client initialized successfully
+🤖 [TelegramWMS] Starting Telegram Bot 1-Touch polling loop...
+⚡ ipc-handlers load: 45.075ms
+✅ IPC handlers loaded
+✅ Vite dev server detected → loading http://127.0.0.1:5173
+✅ Connected to Supabase PostgreSQL
+[DAILY RESET] Startup check: Đã reset hôm nay rồi
+🔍 Checking for updates from GitHub...
+   Current version: v1.0.411
+   Latest version: v1.0.411
+   Has update: false
+   Available zips: DBYPOS-PATCH-v1.0.411.zip
+   Selected zip: DBYPOS-PATCH-v1.0.411.zip
+[Perf] dashboard:getSummary sales=1899 items=173 chart=8 products=30 ms=881
+🤖 [TelegramWMS] This machine is now bot owner: DESKTOP-2KRPLP0 (PID 16224)
+âš¡ lazy-init prismaDirectTx: 0.669ms
+✅ Connected Prisma Direct (for transactions)
+[START] Electron closed after 47.4s; stopping the development server.

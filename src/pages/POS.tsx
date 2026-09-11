@@ -182,6 +182,7 @@ export default function POSPage() {
     const [paying, setPaying] = useState(false);
     const payInputRef = useRef<HTMLInputElement>(null);
     const suppressStockRefreshUntilRef = useRef(0);
+    const paymentOperationKeyRef = useRef("");
 
     // Đảm bảo payAmount luôn = subtotal khi modal thanh toán mở
     useEffect(() => {
@@ -400,6 +401,7 @@ export default function POSPage() {
         }
         setPayMethod(method);
         setPayAmount(subtotal);
+        paymentOperationKeyRef.current = `pos-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
         setPaymentModal(true);
         // Auto-focus vào ô tiền mặt sau khi modal mở
         if (method === 'cash') {
@@ -433,6 +435,7 @@ export default function POSPage() {
         suppressStockRefreshUntilRef.current = Date.now() + 5000;
         try {
             const result = await window.electronAPI.posOrder.create({
+                idempotencyKey: paymentOperationKeyRef.current,
                 items: activeTab.cart.map(item => ({
                     productId: item.productId,
                     name: item.name,
@@ -476,6 +479,7 @@ export default function POSPage() {
                     }));
                 }
                 updateActiveTab({ cart: [], note: '', customer: '' });
+                paymentOperationKeyRef.current = "";
                 setPaymentModal(false);
             } else {
                 suppressStockRefreshUntilRef.current = 0;

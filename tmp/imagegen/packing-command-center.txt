@@ -1,0 +1,8 @@
+Use case: ui-mockup
+Asset type: desktop operations dashboard redesign
+Input image: use the supplied packing leaderboard screenshot as the source for product purpose and mock data, not as a style template.
+Primary request: Design a polished warehouse “performance command center”. Use a split hero: a large champion profile for Top 1 with rank, monthly orders, products, income and lead margin; alongside it a compact weekly challenge preview for “Thưởng 100.000đ”, current week “31/08 – 06/09”, “Sắp ra mắt”, and “Tự động reset đầu tuần”. Below, show a dense but elegant leaderboard with horizontal performance bars and clear comparison against the leader. Make management comprehension immediate while giving employees a strong competitive signal.
+Target dimensions: 1536 x 1024 desktop app frame.
+Visible data: September 2026; 328 orders; 414 products; 8.280đ total; champion Nguyễn Đình Toàn 143 orders, 171 products, 3.420đ; second Nguyễn Văn Khánh 101 orders, 137 products, 2.740đ; third Đỗ Nguyễn Trường 84 orders, 106 products, 2.120đ.
+Style: industrial precision with refined editorial hierarchy; charcoal, ivory, signal green and one copper accent; expressive condensed display font paired with a readable sans serif; generous spacing, no card nesting, subtle separators rather than shadows.
+Constraints: no emoji; no sidebar; no order log; no horizontal scrolling; weekly prize clearly inactive and marked “Sắp ra mắt”; do not show it inside actual earnings; professional desktop product UI; all key Vietnamese labels legible; no watermark.

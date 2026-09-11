@@ -23,6 +23,30 @@
     margin-left: 0;
 }
 
+/* Keep the last menu item above Ant Design's fixed collapse trigger. */
+.app-sidebar .ant-layout-sider-children {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+    padding-bottom: 48px;
+}
+
+.app-sidebar-menu-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+}
+
+.app-sidebar-settings-menu {
+    flex: 0 0 auto;
+    border-top: 1px solid #eef2f6 !important;
+    background: #fff !important;
+}
+
 .app-content {
     width: auto;
     max-width: 100%;
@@ -33,6 +57,10 @@
     height: 32px !important;
     color: #475569 !important;
     background: #f4f4f5 !important;
+    -webkit-app-region: no-drag;
+    pointer-events: auto;
+    position: relative;
+    z-index: 1;
 }
 
 .role-preview-trigger:hover,
@@ -40,6 +68,155 @@
     color: #b45309 !important;
     background: #fef3c7 !important;
     box-shadow: inset 0 0 0 1px #f59e0b !important;
+}
+
+.app-titlebar-menu,
+.app-titlebar-popup,
+.app-profile-trigger {
+    -webkit-app-region: no-drag;
+}
+
+.app-titlebar-menu {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex: 0 0 auto;
+}
+
+.app-profile-trigger {
+    padding: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+}
+
+.app-titlebar-popup {
+    position: absolute;
+    top: calc(100% + 7px);
+    right: 0;
+    z-index: 10050;
+    overflow: hidden;
+    padding: 4px;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 9px;
+    box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+}
+
+.app-titlebar-popup--preview {
+    width: min(330px, calc(100vw - 24px));
+}
+
+.app-titlebar-popup--profile {
+    width: 220px;
+}
+
+.app-titlebar-popup {
+    max-height: min(560px, calc(100vh - 64px));
+    overflow-y: auto;
+    color: #172033;
+}
+
+.app-popup-heading {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 12px;
+    border-bottom: 1px solid #eef2f7;
+}
+
+.app-popup-heading strong {
+    color: #172033;
+    font-size: 14px;
+}
+
+.app-popup-heading span,
+.app-popup-status {
+    color: #64748b;
+    font-size: 11px;
+}
+
+.app-popup-status {
+    padding: 12px;
+}
+
+.app-popup-status--error {
+    color: #b91c1c;
+    background: #fef2f2;
+}
+
+.app-popup-section-label {
+    padding: 10px 12px 5px;
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 750;
+    text-transform: uppercase;
+}
+
+.app-popup-user,
+.app-popup-action {
+    width: 100%;
+    min-height: 42px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    color: #334155;
+    background: transparent;
+    border: 0;
+    border-radius: 7px;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+}
+
+.app-popup-user:hover,
+.app-popup-action:hover {
+    color: #047857;
+    background: #ecfdf5;
+}
+
+.app-popup-user__identity {
+    min-width: 0;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.app-popup-user__identity strong {
+    overflow: hidden;
+    color: #172033;
+    font-size: 13px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-popup-user__identity small {
+    overflow: hidden;
+    color: #64748b;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-popup-user__selected {
+    color: #00ab56;
+}
+
+.app-popup-action {
+    margin-top: 4px;
+    border-top: 1px solid #eef2f7;
+    border-radius: 0 0 7px 7px;
+}
+
+.app-popup-action--danger {
+    color: #b91c1c;
+}
+
+.app-popup-action--danger:hover {
+    color: #991b1b;
+    background: #fef2f2;
 }
 
 .role-preview-banner {
@@ -144,7 +321,7 @@
     justify-content: center;
     align-items: center;
     background: rgba(255, 255, 255, 0.88);
-    z-index: 9998;
+    z-index: 900;
 }
 
 /* Keep global toast messages above modals, previews, and page overlays. */
@@ -155,6 +332,25 @@
 
 .ant-message .ant-message-notice {
     pointer-events: auto;
+}
+
+/* Page-level header controls must always remain interactive in Electron. */
+.app-page-header,
+.app-page-header-extra,
+.app-page-header-extra * {
+    -webkit-app-region: no-drag;
+}
+
+.app-page-header-extra {
+    position: relative;
+    z-index: 2;
+    min-width: 0;
+    pointer-events: auto;
+}
+
+/* Date picker inside expandable inventory rows must escape table clipping. */
+.stock-ledger-date-popup {
+    z-index: 10050 !important;
 }
 
 /* Logo Spin Animation - Custom loading indicator */
@@ -227,7 +423,10 @@
 
 /* ============= SIDEBAR COLLAPSE BUTTON ============= */
 .ant-layout-sider-trigger {
-    background: linear-gradient(135deg, #00ab56 0%, #00d66c 100%) !important;
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.22) 0 27%, transparent 27.5%),
+        linear-gradient(315deg, rgba(0, 74, 43, 0.16) 0 24%, transparent 24.5%),
+        linear-gradient(135deg, #09c97d 0%, #00ab60 60%, #009653 100%) !important;
     color: #fff !important;
     font-size: 18px !important;
     border-top: 1px solid rgba(255, 255, 255, 0.2) !important;
@@ -239,7 +438,10 @@
 }
 
 .ant-layout-sider-trigger:hover {
-    background: linear-gradient(135deg, #00c964 0%, #00e87a 100%) !important;
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.28) 0 27%, transparent 27.5%),
+        linear-gradient(315deg, rgba(0, 74, 43, 0.12) 0 24%, transparent 24.5%),
+        linear-gradient(135deg, #14d98b 0%, #00bd6b 60%, #00a45c 100%) !important;
     color: #fff !important;
     box-shadow: 0 -4px 12px rgba(0, 171, 86, 0.4) !important;
 }
@@ -252,10 +454,18 @@
 
 
 /* Light Theme Customizations */
-.ant-menu-item-selected {
-    background: linear-gradient(135deg, #00ab56 0%, #00d66c 100%) !important;
+.ant-menu-item-selected,
+.ant-menu-submenu-selected>.ant-menu-submenu-title {
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.22) 0 28%, transparent 28.5%),
+        linear-gradient(315deg, rgba(0, 74, 43, 0.14) 0 24%, transparent 24.5%),
+        linear-gradient(135deg, #09c97d 0%, #00ab60 60%, #009653 100%) !important;
     color: #fff !important;
     border-radius: 8px !important;
+    box-shadow:
+        inset 0 1px 1px rgba(255, 255, 255, 0.3),
+        inset 0 -2px 4px rgba(0, 74, 43, 0.12),
+        0 4px 10px rgba(0, 169, 96, 0.18) !important;
 }
 
 .ant-menu-item-selected .ant-menu-item-icon,
@@ -275,26 +485,84 @@
     color: #00ab56 !important;
 }
 
-.ant-menu-submenu-selected>.ant-menu-submenu-title {
-    color: #00ab56 !important;
+.ant-menu-item-selected:hover,
+.ant-menu-submenu-selected>.ant-menu-submenu-title:hover {
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.28) 0 28%, transparent 28.5%),
+        linear-gradient(315deg, rgba(0, 74, 43, 0.12) 0 24%, transparent 24.5%),
+        linear-gradient(135deg, #14d98b 0%, #00bd6b 60%, #00a45c 100%) !important;
+    color: #fff !important;
 }
 
-.ant-btn-primary {
-    background: linear-gradient(135deg, #00ab56 0%, #00d66c 100%) !important;
+.ant-menu-submenu-selected>.ant-menu-submenu-title {
+    color: #fff !important;
+}
+
+.ant-menu-submenu-selected>.ant-menu-submenu-title .ant-menu-item-icon,
+.ant-menu-submenu-selected>.ant-menu-submenu-title .ant-menu-submenu-arrow,
+.ant-menu-submenu-selected>.ant-menu-submenu-title span {
+    color: #fff !important;
+}
+
+body .ant-btn.ant-btn-primary:not(.ant-btn-dangerous) {
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.22) 0 26%, transparent 26.5%),
+        linear-gradient(315deg, rgba(0, 74, 43, 0.14) 0 23%, transparent 23.5%),
+        linear-gradient(135deg, #09c97d 0%, #00ab60 60%, #009653 100%) !important;
     border: none !important;
-    box-shadow: 0 2px 8px rgba(0, 171, 86, 0.3) !important;
+    box-shadow:
+        inset 0 1px 1px rgba(255, 255, 255, 0.3),
+        inset 0 -2px 4px rgba(0, 74, 43, 0.12),
+        0 5px 12px rgba(0, 169, 96, 0.2) !important;
     transition: background 0.2s ease, box-shadow 0.2s ease, color 0.2s ease !important;
 }
 
-.ant-btn-primary:hover {
-    background: linear-gradient(135deg, #00c964 0%, #00e87a 100%) !important;
+body .ant-btn.ant-btn-primary:not(.ant-btn-dangerous):hover {
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.29) 0 26%, transparent 26.5%),
+        linear-gradient(315deg, rgba(0, 74, 43, 0.11) 0 23%, transparent 23.5%),
+        linear-gradient(135deg, #14d98b 0%, #00bd6b 60%, #00a45c 100%) !important;
+    box-shadow: 0 4px 12px rgba(0, 171, 86, 0.4) !important;
+}
+
+body .ant-btn.ant-btn-primary:not(.ant-btn-dangerous):disabled,
+body .ant-btn.ant-btn-primary.ant-btn-disabled:not(.ant-btn-dangerous) {
+    background: #a7dbc1 !important;
+    box-shadow: none !important;
+}
+
+/* Native primary controls share the same faceted DBY surface as Ant Design. */
+.pos-btn-pay.cash,
+.pos-btn-confirm,
+.dashboard-v2__periods button.is-active,
+.orders-chart-presets .ant-btn.is-active {
+    color: #fff !important;
+    border-color: transparent !important;
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.22) 0 26%, transparent 26.5%),
+        linear-gradient(315deg, rgba(0, 74, 43, 0.14) 0 23%, transparent 23.5%),
+        linear-gradient(135deg, #09c97d 0%, #00ab60 60%, #009653 100%) !important;
+    box-shadow:
+        inset 0 1px 1px rgba(255, 255, 255, 0.3),
+        inset 0 -2px 4px rgba(0, 74, 43, 0.12),
+        0 5px 12px rgba(0, 169, 96, 0.2) !important;
+}
+
+.pos-btn-pay.cash:hover,
+.pos-btn-confirm:hover,
+.dashboard-v2__periods button.is-active:hover,
+.orders-chart-presets .ant-btn.is-active:hover {
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.29) 0 26%, transparent 26.5%),
+        linear-gradient(315deg, rgba(0, 74, 43, 0.11) 0 23%, transparent 23.5%),
+        linear-gradient(135deg, #14d98b 0%, #00bd6b 60%, #00a45c 100%) !important;
     box-shadow: 0 4px 12px rgba(0, 171, 86, 0.4) !important;
 }
 
 /* Keep click/hover feedback stable: do not move controls while they are
    being clicked, which causes a visible one-frame flicker in Electron. */
-.ant-btn-primary:active,
-.ant-btn-primary:focus-visible {
+body .ant-btn.ant-btn-primary:not(.ant-btn-dangerous):active,
+body .ant-btn.ant-btn-primary:not(.ant-btn-dangerous):focus-visible {
     transform: none !important;
 }
 

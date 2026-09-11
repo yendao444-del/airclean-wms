@@ -47,6 +47,8 @@ import {
   MoreOutlined,
   UploadOutlined,
   TagOutlined,
+  DownOutlined,
+  ScissorOutlined,
 } from "@ant-design/icons";
 import { Warehouse2DMap } from "../components/Warehouse2DMap";
 import { useAuth } from "../contexts/AuthContext";
@@ -91,6 +93,8 @@ type UnitRow = {
   updatedAt?: string;
   hasWithdrawalHistory?: boolean;
   qrPayload?: string;
+  parentUnitCode?: string;
+  childUnits?: Array<{ code: string; quantity: number }>;
 };
 type QuickScanLine = {
   id: string;
@@ -235,6 +239,10 @@ const statusFor = (status: string) =>
     <Tag className="hu-pending-status-tag" icon={<ExclamationCircleFilled />}>
       Chờ kiểm
     </Tag>
+  ) : status === "Đã tách" ? (
+    <Tag color="blue" icon={<ScissorOutlined />}>
+      Đã tách
+    </Tag>
   ) : (
     <Tag>Đã hết hàng</Tag>
   );
@@ -335,6 +343,26 @@ const normalizeSearch = (text: string) =>
     .replace(/đ/g, "d")
     .replace(/Đ/g, "d")
     .trim();
+const isReturnHandlingUnit = (unit?: UnitRow | null) =>
+  normalizeSearch(unit?.packageType || "").includes("hang hoan");
+
+const buildSplitQuantities = (total: number, targetSize: number) => {
+  const normalizedTotal = Math.floor(Number(total || 0));
+  const normalizedTarget = Math.floor(Number(targetSize || 0));
+  if (
+    normalizedTotal <= 1 ||
+    normalizedTarget <= 0 ||
+    normalizedTarget >= normalizedTotal
+  ) {
+    return [];
+  }
+  const fullUnits = Math.floor(normalizedTotal / normalizedTarget);
+  const remainder = normalizedTotal % normalizedTarget;
+  return [
+    ...Array.from({ length: fullUnits }, () => normalizedTarget),
+    ...(remainder > 0 ? [remainder] : []),
+  ];
+};
 
 const historyActionMeta = (type?: string) => {
   const value = String(type || "Hoạt động khác");
@@ -342,6 +370,7 @@ const historyActionMeta = (type?: string) => {
   if (/lấy hàng|rút hàng|chuyển/i.test(value)) return { label: value, color: "blue" };
   if (/khui|mở/i.test(value)) return { label: value, color: "orange" };
   if (/đóng|niêm phong/i.test(value)) return { label: value, color: "cyan" };
+  if (/tách kiện|nhận từ tách/i.test(value)) return { label: value, color: "blue" };
   if (/kiểm|điều chỉnh/i.test(value)) return { label: value, color: "gold" };
   if (/xóa/i.test(value)) return { label: value, color: "red" };
   return { label: value, color: "default" };
@@ -904,6 +933,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [allocationForm] = Form.useForm();
   const [showQuickCreate, setShowQuickCreate] = useState(false);
   const [showQrSetup, setShowQrSetup] = useState(false);
+  const [qrModalTab, setQrModalTab] = useState<"create" | "ledger">("create");
   const [isIssuingQrLabels, setIsIssuingQrLabels] = useState(false);
   const [isMarkingQrLabelsPrinted, setIsMarkingQrLabelsPrinted] = useState(false);
   const [issuedQrLabels, setIssuedQrLabels] = useState<any[]>([]);
@@ -924,6 +954,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const quickReceiptInputRef = useRef<HTMLInputElement>(null);
   const quickSuccessSoundRef = useRef<HTMLAudioElement | null>(null);
   const quickFailSoundRef = useRef<HTMLAudioElement | null>(null);
+  const quickReceivingOperationKeyRef = useRef("");
 
   useEffect(() => {
     const successSound = new Audio("./sounds/ting.wav");
@@ -976,6 +1007,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [editingUnit, setEditingUnit] = useState<UnitRow | null>(null);
   const [editUnitForm] = Form.useForm();
   const [isSavingUnitEdit, setIsSavingUnitEdit] = useState(false);
+  const [splittingUnit, setSplittingUnit] = useState<UnitRow | null>(null);
+  const [splitTargetSize, setSplitTargetSize] = useState(500);
+  const [isSplittingUnit, setIsSplittingUnit] = useState(false);
+  const splitOperationKeyRef = useRef("");
 
   const showUnitLocation = (unit: UnitRow) => {
     setLocationFocusUnit(unit);
@@ -989,6 +1024,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const [pickingUnit, setPickingUnit] = useState<UnitRow | null>(null);
   const [pickForm] = Form.useForm();
   const [isSubmittingPick, setIsSubmittingPick] = useState(false);
+  const [mergeReturnUnit, setMergeReturnUnit] = useState<UnitRow | null>(null);
+  const [mergeTargetCode, setMergeTargetCode] = useState("");
+  const [mergeQuantity, setMergeQuantity] = useState<number | null>(null);
+  const [isMergingReturnUnit, setIsMergingReturnUnit] = useState(false);
+  const mergeReturnOperationKeyRef = useRef("");
   const [deletingUnitCode, setDeletingUnitCode] = useState("");
   const workspaceLoadRequestRef = useRef(0);
   const workspaceLoadInFlightRef = useRef(false);
@@ -1238,6 +1278,105 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     }
   };
 
+  const openSplitUnit = (unit: UnitRow) => {
+    if (
+      !["Nguyên niêm phong", "Đang sử dụng"].includes(unit.status) ||
+      unit.currentPcs <= 1 ||
+      isReturnHandlingUnit(unit)
+    ) {
+      message.warning("Kiện này không ở trạng thái có thể tách.");
+      return;
+    }
+    const defaultTarget =
+      unit.currentPcs > 500
+        ? 500
+        : Math.max(1, Math.floor(unit.currentPcs / 2));
+    setSplitTargetSize(defaultTarget);
+    splitOperationKeyRef.current = `split-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    setSplittingUnit(unit);
+  };
+
+  const handleSplitUnit = async () => {
+    if (!splittingUnit || isSplittingUnit) return;
+    const childQuantities = buildSplitQuantities(
+      splittingUnit.currentPcs,
+      splitTargetSize,
+    );
+    if (childQuantities.length < 2) {
+      message.warning("Kích thước kiện con phải nhỏ hơn tồn hiện tại.");
+      return;
+    }
+    if (childQuantities.length > 20) {
+      message.warning(
+        "Một lần chỉ tách tối đa 20 kiện con. Hãy tăng kích thước mỗi kiện.",
+      );
+      return;
+    }
+
+    setIsSplittingUnit(true);
+    try {
+      const splitUnit = window.electronAPI?.handlingUnits?.splitUnit;
+      if (!splitUnit) {
+        throw new Error("Phiên bản ứng dụng hiện tại chưa hỗ trợ tách kiện.");
+      }
+      const result = await splitUnit({
+        code: splittingUnit.id,
+        childQuantities,
+        packagingName: splittingUnit.packageType,
+        location: splittingUnit.location,
+        expectedRemainingQuantity: splittingUnit.currentPcs,
+        idempotencyKey: splitOperationKeyRef.current,
+      });
+      if (!result?.success || !result.data) {
+        throw new Error(result?.error || "Không thể tách kiện.");
+      }
+
+      const createdChildren: UnitRow[] = (result.data.children || []).map(
+        (child: any) => {
+          let location = splittingUnit.location;
+          try {
+            location = JSON.parse(child.zone || "{}");
+          } catch {}
+          return {
+            id: child.code,
+            productId: child.productId,
+            purchaseOrderId: child.purchaseOrderId,
+            purchaseItemId: child.purchaseItemId,
+            productGroup: splittingUnit.productGroup,
+            variantName: splittingUnit.variantName,
+            color: child.color || splittingUnit.color,
+            factory: splittingUnit.factory,
+            receiptCode: splittingUnit.receiptCode,
+            skuName: child.sku || splittingUnit.skuName,
+            packageType: child.packagingName || splittingUnit.packageType,
+            packageLabel: `1 ${child.packagingName || splittingUnit.packageType} (${fmt(child.initialQuantity)} ${child.baseUnit || splittingUnit.unitName})`,
+            unitName: child.baseUnit || splittingUnit.unitName,
+            status: "Nguyên niêm phong",
+            location,
+            initialPcs: Number(child.initialQuantity || 0),
+            currentPcs: Number(child.remainingQuantity || 0),
+            parentUnitCode: splittingUnit.id,
+            updatedAt: child.updatedAt,
+          };
+        },
+      );
+
+      setDetail(null);
+      setSplittingUnit(null);
+      await loadWorkspace(true);
+      message.success(
+        `Đã tách ${splittingUnit.id} thành ${createdChildren.length} kiện con. Tổng tồn SKU không thay đổi.`,
+      );
+      if (createdChildren.length) {
+        handlePrintLabels(createdChildren, printLabelSize);
+      }
+    } catch (error: any) {
+      message.error(error?.message || "Không thể tách kiện.");
+    } finally {
+      setIsSplittingUnit(false);
+    }
+  };
+
   const unitHasWithdrawalHistory = (unit: UnitRow) =>
     Boolean(unit.hasWithdrawalHistory) || workspace.recentTransactions.some(
       (item) =>
@@ -1286,6 +1425,64 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         }
       },
     });
+  };
+
+  const getReturnMergeTargets = (source: UnitRow) =>
+    workspace.register.filter((candidate) =>
+      candidate.id.toUpperCase() !== source.id.toUpperCase()
+      && candidate.skuName.toUpperCase() === source.skuName.toUpperCase()
+      && candidate.status === "Đang sử dụng"
+      && !isReturnHandlingUnit(candidate)
+      && Number(candidate.initialPcs) > Number(candidate.currentPcs)
+    );
+
+  const openMergeReturnUnit = (source: UnitRow) => {
+    const pendingConflict = getPendingCheckConflict(source, workspace.register);
+    if (pendingConflict) {
+      message.warning(pendingCheckBlockText(source, pendingConflict, "gộp hàng hoàn"), 8);
+      return;
+    }
+    const targets = getReturnMergeTargets(source);
+    if (!targets.length) {
+      message.warning(`SKU ${source.skuName} chưa có kiện thường đang khui và còn sức chứa để gộp.`);
+      return;
+    }
+    const firstTarget = targets[0];
+    const availableCapacity = Math.max(0, Number(firstTarget.initialPcs) - Number(firstTarget.currentPcs));
+    setMergeReturnUnit(source);
+    setMergeTargetCode(firstTarget.id);
+    setMergeQuantity(Math.min(Number(source.currentPcs), availableCapacity));
+    mergeReturnOperationKeyRef.current = `merge-return-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  };
+
+  const handleMergeReturnUnit = async () => {
+    if (!mergeReturnUnit || !mergeTargetCode || !mergeQuantity || isMergingReturnUnit) return;
+    const target = getReturnMergeTargets(mergeReturnUnit).find(unit => unit.id === mergeTargetCode);
+    if (!target) {
+      message.warning("Kiện đích không còn hợp lệ. Vui lòng chọn lại.");
+      return;
+    }
+    setIsMergingReturnUnit(true);
+    try {
+      const result = await window.electronAPI?.handlingUnits?.mergeReturnUnit?.({
+        sourceCode: mergeReturnUnit.id,
+        targetCode: target.id,
+        quantity: mergeQuantity,
+        idempotencyKey: mergeReturnOperationKeyRef.current,
+      });
+      if (!result?.success) throw new Error(result?.error || "Không thể gộp kiện hàng hoàn.");
+
+      message.success(`Đã gộp ${fmt(mergeQuantity)} ${mergeReturnUnit.unitName} từ ${mergeReturnUnit.id} vào ${target.id}.`);
+      setMergeReturnUnit(null);
+      setMergeTargetCode("");
+      setMergeQuantity(null);
+      setDetail(null);
+      await loadWorkspace(true);
+    } catch (error: any) {
+      message.error(error?.message || "Không thể gộp kiện hàng hoàn.");
+    } finally {
+      setIsMergingReturnUnit(false);
+    }
   };
 
   const handlePickUnit = (unit: UnitRow) => {
@@ -1552,28 +1749,21 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             if (pendingConflict) {
               botReply = `❌ ${pendingCheckBlockText(targetUnit, pendingConflict, "rút hàng")}`;
             } else {
-              const remaining = targetUnit.currentPcs - qty;
-              const nextStatus = remaining === 0 ? "Chờ kiểm" : "Đang sử dụng";
-              setWorkspace((prev) => ({
-                ...prev,
-                register: prev.register.map((u) =>
-                  u.id === targetUnit.id
-                    ? { ...u, currentPcs: remaining, status: nextStatus }
-                    : u,
-                ),
-                recentTransactions: [
-                  {
-                    id: `TR-${Date.now()}`,
-                    unitId: targetUnit.id,
-                    createdAt: new Date().toISOString(),
-                    type: "Lấy hàng",
-                    quantity: -qty,
-                    note: `Rút ${qty} ${targetUnit.unitName} sang Khu đóng gói qua Telegram`,
-                  },
-                  ...prev.recentTransactions,
-                ],
-              }));
-              botReply = `🚀 <b>RÚT HÀNG SANG KHU ĐÓNG GÓI THÀNH CÔNG!</b>\n📦 Mã Kiện: <code>${targetUnit.id}</code>\n📉 Đã rút: <b>${fmt(qty)} ${targetUnit.unitName}</b>\n📊 Còn lại trong kiện: <b>${fmt(remaining)} ${targetUnit.unitName}</b> ${nextStatus === "Chờ kiểm" ? "<i>(Chờ kiểm thực tế)</i>" : ""}`;
+              const pickResult = await window.electronAPI.handlingUnits.pickUnit({
+                code: targetUnit.id,
+                quantity: qty,
+                destination: "PACKING",
+                note: "Rút hàng từ cửa sổ Telegram trong ứng dụng",
+                idempotencyKey: `HU-TG-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              });
+              if (!pickResult?.success) {
+                botReply = `❌ ${pickResult?.error || "Không thể ghi nhận rút hàng vào hệ thống kho."}`;
+              } else {
+                const remaining = Number(pickResult.data?.remaining ?? (targetUnit.currentPcs - qty));
+                const nextStatus = remaining === 0 ? "Chờ kiểm" : "Đang sử dụng";
+                await loadWorkspace(true);
+                botReply = `🚀 <b>RÚT HÀNG SANG KHU ĐÓNG GÓI THÀNH CÔNG!</b>\n📦 Mã Kiện: <code>${targetUnit.id}</code>\n📉 Đã rút: <b>${fmt(qty)} ${targetUnit.unitName}</b>\n📊 Còn lại trong kiện: <b>${fmt(remaining)} ${targetUnit.unitName}</b> ${nextStatus === "Chờ kiểm" ? "<i>(Chờ kiểm thực tế)</i>" : ""}`;
+              }
             }
           }
         }
@@ -1992,9 +2182,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           else if (unit.status === "Đang sử dụng") stats.opened += 1;
           else if (unit.status === "Chờ kiểm") stats.pendingCheck += 1;
           else if (unit.status === "Đã hết") stats.empty += 1;
+          else if (unit.status === "Đã tách") stats.split += 1;
           return stats;
         },
-        { allocated: 0, sealed: 0, opened: 0, pendingCheck: 0, empty: 0 },
+        { allocated: 0, sealed: 0, opened: 0, pendingCheck: 0, empty: 0, split: 0 },
       ),
     [selectedUnits],
   );
@@ -2005,6 +2196,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   const openedCount = selectedStats.opened;
   const pendingCheckCount = selectedStats.pendingCheck;
   const emptyCount = selectedStats.empty;
+  const splitCount = selectedStats.split;
 
   const displayedUnits = useMemo(() => {
     if (statusFilter === "all")
@@ -2021,16 +2213,40 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     [displayedUnits, visibleUnitLimit],
   );
 
+  const selectedSkuTransactions = useMemo(() => {
+    if (!selected?.sku) return [];
+    const targetSku = String(selected.sku).trim().toUpperCase();
+    const skuByUnitCode = new Map(
+      workspace.register.map((unit) => [
+        String(unit.id || "").trim().toUpperCase(),
+        String(unit.skuName || "").trim().toUpperCase(),
+      ]),
+    );
+    return workspace.recentTransactions.filter((item) => {
+      const transactionSku = String(
+        item?.sku
+          || skuByUnitCode.get(String(item?.unitId || "").trim().toUpperCase())
+          || "",
+      ).trim().toUpperCase();
+      return transactionSku === targetSku;
+    });
+  }, [selected?.sku, workspace.recentTransactions, workspace.register]);
+
   const historyTypes = useMemo(
     () =>
-      [...new Set(workspace.recentTransactions.map((item) => String(item.type || "Hoạt động khác")))].sort(),
-    [workspace.recentTransactions],
+      [...new Set(selectedSkuTransactions.map((item) => String(item.type || "Hoạt động khác")))].sort(),
+    [selectedSkuTransactions],
   );
-  const globalHistory = useMemo(() => {
+
+  useEffect(() => {
+    setHistoryType("all");
+  }, [selected?.sku]);
+
+  const selectedSkuHistory = useMemo(() => {
     const term = normalizeSearch(historySearch);
     const fromTime = historyFromDate ? new Date(`${historyFromDate}T00:00:00`).getTime() : 0;
     const toTime = historyToDate ? new Date(`${historyToDate}T23:59:59.999`).getTime() : Number.POSITIVE_INFINITY;
-    return workspace.recentTransactions
+    return selectedSkuTransactions
       .filter((item) => {
         const createdAt = new Date(item.createdAt || 0).getTime();
         const content = normalizeSearch(
@@ -2046,7 +2262,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
         );
       })
       .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-  }, [workspace.recentTransactions, historySearch, historyType, historyFromDate, historyToDate]);
+  }, [selectedSkuTransactions, historySearch, historyType, historyFromDate, historyToDate]);
 
   // Index history once instead of re-scanning every transaction for every
   // handling unit when calculating the end-of-shift checklist.
@@ -2067,6 +2283,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     return workspace.register
       .map((unit) => {
         const history = transactionsByUnitId.get(unit.id.trim().toUpperCase()) || [];
+        const isPendingCheck = unit.status === "Chờ kiểm" || unit.status === "pending_check";
         const latestCompletedCheck = history
           .filter(isCompletedCheckTransaction)
           .reduce(
@@ -2082,7 +2299,10 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             createdAt > latestCompletedCheck
           );
         });
-        if (withdrawals.length === 0) return null;
+        // A pending package remains actionable across day boundaries. The old
+        // today-only filter made carried-over pending packages disappear from
+        // the end-of-shift badge even though they still blocked the same SKU.
+        if (!isPendingCheck && withdrawals.length === 0) return null;
         return {
           unit,
           withdrawalCount: withdrawals.length,
@@ -2093,7 +2313,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           lastWithdrawalAt: withdrawals.reduce(
             (latest, item) =>
               Math.max(latest, new Date(item.createdAt || 0).getTime() || 0),
-            0,
+            isPendingCheck ? new Date(unit.updatedAt || 0).getTime() || 0 : 0,
           ),
         };
       })
@@ -2417,6 +2637,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
   };
 
   const openQuickCreate = () => {
+    quickReceivingOperationKeyRef.current = `quick-receive-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     setQuickScanLines([]);
     setQuickManualSku(undefined);
     setQuickManualQuantity(undefined);
@@ -2455,6 +2676,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       zone: existingSpec?.location?.zone || undefined,
     });
     setIssuedQrLabels([]);
+    setQrModalTab("create");
     setShowQrSetup(true);
   };
 
@@ -2545,7 +2767,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
 
   const addQuickScan = (rawCode?: string) => {
     const input = quickScanInputRef.current?.input as HTMLInputElement | undefined;
-    const code = String(rawCode ?? input?.value ?? "").trim();
+    const scannedValue = String(rawCode ?? input?.value ?? "").trim();
+    const telegramPayload = scannedValue.match(/[?&]start=khui[_-]([^&]+)/i)?.[1];
+    let code = scannedValue;
+    if (telegramPayload) {
+      try {
+        code = decodeURIComponent(telegramPayload).replace(/_/g, "-");
+      } catch {}
+    }
     if (!code) return;
     if (quickScanLines.some((line) => line.qrCode.toLowerCase() === code.toLowerCase())) {
       setQuickScanError("Mã QR này đã có trong danh sách tạm.");
@@ -2556,9 +2785,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     }
     const label = quickQrRegistry.get(code.toUpperCase());
     if (!label) {
-      setQuickScanError(
-        `Mã QR “${code}” không hợp lệ, đã dùng hoặc chưa được phát hành.`,
+      const existingUnit = workspace.register.find(
+        (unit) => unit.id.toUpperCase() === code.toUpperCase(),
       );
+      setQuickScanError(existingUnit?.status === "Đã tách"
+        ? `Kiện ${existingUnit.id} đã được tách thành ${existingUnit.childUnits?.map((child) => child.code).join(", ") || "các kiện nhỏ"}. Mã QR cũ không thể dùng lại.`
+        : existingUnit
+          ? `Mã QR ${existingUnit.id} đã gắn với kiện trong kho, không thể nhập lại.`
+          : `Mã QR “${code}” không hợp lệ, đã dùng hoặc chưa được phát hành.`);
       playQuickScanSound("fail");
       setQuickLastCode("");
       clearQuickScanInput();
@@ -2783,77 +3017,33 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
     try {
       setIsQuickConfirming(true);
       const receiptFile = await quickFileToBase64(quickReceiptFile);
-      const createdPurchases: Array<{ id: number; lines: QuickScanLine[]; data: any }> = [];
-      for (const [supplierId, lines] of supplierGroups) {
-        const bySku = new Map<string, QuickReceiptRow>();
-        lines.forEach((line) => {
-          const saved = bySku.get(line.sku);
-          if (saved) saved.quantity += quickLineQuantity(line);
-          else bySku.set(line.sku, { ...line, quantity: quickLineQuantity(line) });
-        });
-        const items = [...bySku.values()].map((line) => {
-          const product = workspace.catalog.find((item) => item.sku === line.sku);
-          if (!product?.productId) throw new Error(`Không tìm thấy sản phẩm cho SKU ${line.sku}.`);
-          const quantity = line.quantity;
-          const unitPrice = Number(quickPriceBySku[line.sku]);
-          return {
-            productId: product.productId,
-            productName: product.variantName,
-            sku: line.sku,
-            variantSku: line.sku,
-            color: product.color || null,
-            quantity,
-            unitPrice,
-            total: quantity * unitPrice,
-            companyGroup: quickCompanyForSku(line.sku),
-          };
-        });
-        const totalAmount = items.reduce((sum, item) => sum + item.total, 0);
-        const created = await window.electronAPI?.purchases?.create({
-          supplierId,
-          purchaseDate: new Date().toISOString(),
-          items: JSON.stringify(items),
-          totalAmount,
-          notes: quickManualLines.length
-            ? "Tạo từ Quản lý kiện hàng · Nhập nhanh có hàng thủ công không QR"
-            : "Tạo từ Quản lý kiện hàng · Tạo kiện nhanh",
-          importReceiptFiles: [receiptFile],
-        });
-        if (!created?.success || !created.data?.id) throw new Error(created?.error || "Không thể tạo Phiếu nhập kho.");
-        createdPurchases.push({ id: created.data.id, lines, data: created.data });
+      const operationBaseKey = quickReceivingOperationKeyRef.current
+        || `quick-receive-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      quickReceivingOperationKeyRef.current = operationBaseKey;
+      const result = await window.electronAPI?.handlingUnits?.quickReceive?.({
+        idempotencyKey: operationBaseKey,
+        receiptFile,
+        lines: quickScanLines.map((line) => ({
+          source: line.source,
+          qrCode: line.qrCode,
+          sku: line.sku,
+          supplierId: line.supplierId,
+          quantity: quickLineQuantity(line),
+          unitPrice: Number(quickPriceBySku[line.sku]),
+          companyGroup: quickCompanyForSku(line.sku),
+          packagingName: line.packagingName,
+          baseUnit: line.baseUnit,
+          conversionFactor: line.conversionFactor,
+          location: line.location,
+        })),
+      });
+      if (!result?.success || !result.data) {
+        throw new Error(result?.error || "Không thể hoàn tất nhập nhanh.");
       }
-      const units = createdPurchases.flatMap((purchase) => purchase.lines
-        .filter((line) => line.source !== "MANUAL")
-        .map((line) => {
-          const product = workspace.catalog.find((item) => item.sku === line.sku);
-          const purchaseItem = purchase.data?.items?.find((item: any) => String(item.variantSku || "") === line.sku || Number(item.productId) === Number(product?.productId));
-          if (!product?.productId || !purchaseItem?.id) {
-            throw new Error(`Không thể liên kết kiện ${line.qrCode} với dòng Phiếu nhập kho.`);
-          }
-          return {
-            id: line.qrCode,
-            productId: product.productId,
-            purchaseOrderId: purchase.id,
-            purchaseItemId: purchaseItem.id,
-            skuName: line.sku,
-            color: product.color || null,
-            packageType: line.packagingName,
-            unitName: line.baseUnit,
-            initialPcs: line.conversionFactor,
-            currentPcs: line.conversionFactor,
-            status: "Nguyên niêm phong",
-            location: line.location,
-            note: `Nhập nhanh từ tem QR ${line.qrCode}`,
-          };
-        }));
-      if (units.length) {
-        const createdUnits = await window.electronAPI?.handlingUnits?.createUnits(units);
-        if (!createdUnits?.success) throw new Error(createdUnits?.error || "Không thể tạo kiện vật lý từ tem QR.");
-        const receivedLabels = await window.electronAPI?.handlingUnits?.markQrLabelsReceived(units.map((unit) => unit.id));
-        if (!receivedLabels?.success) throw new Error(receivedLabels?.error || "Không thể chốt trạng thái tem QR đã nhập kho.");
-      }
+      const purchaseCount = result.data.purchases?.length || 0;
+      const unitCount = result.data.unitCodes?.length || 0;
       message.success(
-        `Đã tạo ${createdPurchases.length} Phiếu nhập kho${units.length ? `, ${units.length} kiện` : ""}${quickManualLines.length ? ` và ${quickManualLines.length} dòng hàng thủ công` : ""}; chứng từ đã đồng bộ Google Drive.`,
+        `Đã tạo ${purchaseCount} Phiếu nhập kho${unitCount ? `, ${unitCount} kiện` : ""}${quickManualLines.length ? ` và ${quickManualLines.length} dòng hàng thủ công` : ""}; chứng từ đã lưu trên Cloudflare R2.`,
       );
       setShowQuickCreate(false);
       void loadWorkspace(true);
@@ -2901,20 +3091,25 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
           <span>/</span>
           <b>Quản lý kiện hàng</b>
         </Flex>
-        <Flex align="center" gap={10}>
-          <button
-            type="button"
-            className="hu-telegram-bot-badge"
-            onClick={() => setShowTelegramModal(true)}
-            title="Bấm để mở bảng điều khiển Telegram Bot"
-          >
-            <span className="hu-bot-dot online" />
-            <RobotOutlined style={{ color: "#0088cc", fontSize: 14 }} />
-            <span className="hu-bot-name">@quanlykienhang_bot</span>
-            <Tag color="cyan" style={{ margin: 0, fontSize: 11 }}>
-              Trực tuyến
-            </Tag>
-          </button>
+        <Flex align="center" gap={8}>
+          <Tooltip title="Sơ đồ 2D & quản lý vị trí khu vực kho">
+            <Button
+              size="small"
+              icon={<EnvironmentOutlined style={{ color: "#059669", fontSize: 15 }} />}
+              className="hu-nav-btn-location"
+              onClick={() => setShowLocations(true)}
+            />
+          </Tooltip>
+          <Tooltip title="Telegram Bot: @quanlykienhang_bot · Trực tuyến (Bấm để xem bảng điều khiển)">
+            <button
+              type="button"
+              className="hu-telegram-bot-badge"
+              onClick={() => setShowTelegramModal(true)}
+            >
+              <span className="hu-bot-dot online" />
+              <RobotOutlined style={{ color: "#0088cc", fontSize: 15 }} />
+            </button>
+          </Tooltip>
         </Flex>
       </nav>
       {shiftCheckCandidates.length > 0 && (
@@ -3086,83 +3281,87 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                       </span>
                     </div>
                     <div className="hu-header-metric-chips">
-                      <div className="hu-metric-chip hu-chip-stock">
-                        <span className="hu-chip-label">Tồn quản lý kiện</span>
-                        <span className="hu-chip-val">
-                          <strong>{fmt(selectedAllocated)}</strong>{" "}
-                          {selected.unitName}
-                        </span>
-                      </div>
-                      <div className="hu-metric-chip hu-chip-allocated">
-                        <span className="hu-chip-label">Tồn phần mềm tham khảo</span>
-                        <span className="hu-chip-val">
-                          <strong>{fmt(selected.stock)}</strong>{" "}
-                          {selected.unitName}
-                        </span>
-                      </div>
-                      <div
-                        className={`hu-metric-chip hu-chip-unallocated ${selectedDifference !== 0 ? "has-unallocated" : "zero"}`}
-                      >
-                        <span className="hu-chip-label">Chênh lệch đối chiếu</span>
-                        <span className="hu-chip-val">
-                          <strong>{fmtSigned(selectedDifference)}</strong>{" "}
-                          {selected.unitName}
-                        </span>
-                      </div>
+                      <Tooltip title="Tổng số lượng thực tế đang quản lý trong các kiện">
+                        <div className="hu-metric-chip hu-chip-stock">
+                          <span className="hu-chip-label">Tồn kiện:</span>
+                          <span className="hu-chip-val">
+                            <strong>{fmt(selectedAllocated)}</strong>{" "}
+                            {selected.unitName}
+                          </span>
+                        </div>
+                      </Tooltip>
+                      <Tooltip title="Số lượng tồn kho ghi nhận trên phần mềm hệ thống">
+                        <div className="hu-metric-chip hu-chip-allocated">
+                          <span className="hu-chip-label">Tồn phần mềm:</span>
+                          <span className="hu-chip-val">
+                            <strong>{fmt(selected.stock)}</strong>{" "}
+                            {selected.unitName}
+                          </span>
+                        </div>
+                      </Tooltip>
+                      <Tooltip title="Chênh lệch giữa số lượng trong kiện và tồn phần mềm">
+                        <div
+                          className={`hu-metric-chip hu-chip-unallocated ${selectedDifference !== 0 ? "has-unallocated" : "zero"}`}
+                        >
+                          <span className="hu-chip-label">Chênh lệch:</span>
+                          <span className="hu-chip-val">
+                            <strong>{fmtSigned(selectedDifference)}</strong>{" "}
+                            {selected.unitName}
+                          </span>
+                        </div>
+                      </Tooltip>
                     </div>
                   </div>
                 </div>
                 <div className="hu-header-right hu-selected-actions">
-                  <Button
-                    icon={<EnvironmentOutlined />}
-                    className="hu-btn-location"
-                    onClick={() => setShowLocations(true)}
-                  >
-                    Khu vực
-                  </Button>
-                  <Tooltip
-                    title={
-                      shiftCheckCandidates.length === 0
-                        ? "Không có kiện phát sinh rút hàng cần kiểm hôm nay"
-                        : `${shiftCheckCandidates.length} kiện đã phát sinh rút hàng và chưa kiểm cuối ca`
-                    }
-                  >
-                    <Button
-                      icon={<CheckCircleOutlined />}
-                      className="hu-btn-shift-check"
-                      disabled={shiftCheckCandidates.length === 0}
-                      onClick={openShiftCheck}
+                  {shiftCheckCandidates.length > 0 && (
+                    <Tooltip
+                      title={`${shiftCheckCandidates.length} kiện đang chờ kiểm hoặc có lượt rút mới chưa kiểm`}
                     >
-                      Kiểm cuối ca
-                      <span className="hu-shift-check-count">
-                        {shiftCheckCandidates.length}
-                      </span>
-                    </Button>
-                  </Tooltip>
-                  <Button
-                    icon={<QrcodeOutlined />}
-                    className="hu-btn-quick-create"
-                    onClick={openQuickCreate}
-                  >
-                    Tạo kiện nhanh
-                  </Button>
+                      <Button
+                        icon={<CheckCircleOutlined />}
+                        className="hu-btn-secondary hu-btn-shift-check"
+                        onClick={openShiftCheck}
+                      >
+                        Kiểm cuối ca
+                        <span className="hu-shift-check-count">
+                          {shiftCheckCandidates.length}
+                        </span>
+                      </Button>
+                    </Tooltip>
+                  )}
                   {(isAdmin || user?.role === "manager") && (
                     <Button
                       icon={<PrinterOutlined />}
-                      className="hu-btn-qr-setup"
+                      className="hu-btn-secondary hu-btn-qr-setup"
                       onClick={openQrSetup}
                     >
-                      Thiết lập & In QR
+                      Tạo mã QR
                     </Button>
                   )}
-                  <Button
+                  <Dropdown.Button
                     type="primary"
-                    icon={<PlusOutlined />}
-                    className="hu-btn-create-pkg"
-                    onClick={() => openCreatePackageModal()}
+                    icon={<DownOutlined />}
+                    className="hu-btn-split-create"
+                    onClick={openQuickCreate}
+                    menu={{
+                      items: [
+                        {
+                          key: "standard-create",
+                          icon: <PlusOutlined style={{ fontSize: 16, color: "#00b96b" }} />,
+                          label: (
+                            <div className="hu-split-menu-item">
+                              <span className="hu-split-menu-title">Tạo kiện thông thường</span>
+                              <span className="hu-split-menu-desc">Tạo từng kiện thủ công / chi tiết</span>
+                            </div>
+                          ),
+                          onClick: () => openCreatePackageModal(),
+                        },
+                      ],
+                    }}
                   >
-                    Tạo kiện
-                  </Button>
+                    <QrcodeOutlined /> Tạo kiện nhanh
+                  </Dropdown.Button>
                 </div>
               </header>
               <div className="hu-physical-toolbar">
@@ -3211,6 +3410,15 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                         ⚪ Đã hết ({emptyCount})
                       </button>
                     )}
+                    {splitCount > 0 && (
+                      <button
+                        type="button"
+                        className={`hu-filter-tab ${statusFilter === "Đã tách" ? "active" : ""}`}
+                        onClick={() => setStatusFilter("Đã tách")}
+                      >
+                        🔵 Đã tách ({splitCount})
+                      </button>
+                    )}
                   </div>
                 </div>
                 <div className="hu-toolbar-right" />
@@ -3219,14 +3427,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 className={`hu-package-grid ${displayedUnits.length <= 2 ? "is-sparse" : ""}`}
               >
                   {visibleUnits.map((unit) => {
-                    const deleteLocked = !isAdmin && unitHasWithdrawalHistory(unit);
+                    const deleteLocked = unit.status === "Đã tách" || isReturnHandlingUnit(unit) || (!isAdmin && unitHasWithdrawalHistory(unit));
                     const pendingPickConflict = unit.status === "Đang sử dụng"
                       ? getPendingCheckConflict(unit, workspace.register)
                       : null;
                     return (
                     <button
                       type="button"
-                      className={`hu-package-card ${unit.status === "Đang sử dụng" ? "opened" : ""} ${unit.status === "Chờ kiểm" ? "pending-check" : ""} ${unit.status === "Đã hết" ? "empty" : ""}`}
+                      className={`hu-package-card ${unit.status === "Đang sử dụng" ? "opened" : ""} ${unit.status === "Chờ kiểm" ? "pending-check" : ""} ${unit.status === "Đã hết" ? "empty" : ""} ${unit.status === "Đã tách" ? "split" : ""}`}
                       key={unit.id}
                       onClick={() => setDetail(unit)}
                     >
@@ -3239,7 +3447,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                         </div>
                         <div className="hu-card-header-actions">
                           {statusFor(unit.status)}
-                          <Tooltip title={deleteLocked ? "Kiện đã có lịch sử rút hàng — chỉ admin được xóa" : "Xóa kiện"}>
+                          <Tooltip title={unit.status === "Đã tách" ? "Kiện cha đã tách phải được giữ lại để tra cứu lịch sử và QR cũ" : isReturnHandlingUnit(unit) ? "Kiện hàng hoàn phải gộp để bảo toàn tồn kho, không được xóa" : deleteLocked ? "Kiện đã có lịch sử rút hàng — chỉ admin được xóa" : "Xóa kiện"}>
                             <button
                               type="button"
                               className="hu-card-delete-icon"
@@ -3257,8 +3465,8 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                       </header>
                       <img src={imageFor(unit)} alt={`Minh hoạ ${unit.id}`} />
                       <div className="hu-package-number">
-                        <small>{unit.unitName} còn lại</small>
-                        <strong>{fmt(unit.currentPcs)}</strong>
+                        <small>{unit.status === "Đã tách" ? "Đã chuyển sang kiện con" : `${unit.unitName} còn lại`}</small>
+                        <strong>{unit.status === "Đã tách" ? `${unit.childUnits?.length || 0} kiện` : fmt(unit.currentPcs)}</strong>
                       </div>
                       <div className="hu-package-meta">
                         <div className="hu-meta-row">
@@ -3271,6 +3479,12 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                             <span className="hu-receipt-badge">
                               {unit.receiptCode}
                             </span>
+                          </div>
+                        )}
+                        {unit.parentUnitCode && (
+                          <div className="hu-meta-row">
+                            <span>Tách từ kiện</span>
+                            <b>{unit.parentUnitCode}</b>
                           </div>
                         )}
                       </div>
@@ -3333,7 +3547,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                 );
                               })()}
                             {unit.status === "Đang sử dụng" && (
-                              pendingPickConflict ? (
+                              isReturnHandlingUnit(unit) ? (
+                                <button
+                                  className="hu-action-btn final-check"
+                                  onClick={() => openMergeReturnUnit(unit)}
+                                >
+                                  <SwapOutlined /> Gộp vào kiện đã khui
+                                </button>
+                              ) : pendingPickConflict ? (
                                 <Tooltip title={pendingCheckBlockText(unit, pendingPickConflict, "rút hàng")}>
                                   <button
                                     className="hu-action-btn final-check"
@@ -3360,6 +3581,16 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                                 <CheckCircleOutlined /> Kiểm thực tế
                               </button>
                             )}
+                            {["Nguyên niêm phong", "Đang sử dụng"].includes(unit.status) &&
+                              unit.currentPcs > 1 &&
+                              !isReturnHandlingUnit(unit) && (
+                                <button
+                                  className="hu-action-btn split"
+                                  onClick={() => openSplitUnit(unit)}
+                                >
+                                  <ScissorOutlined /> Tách kiện
+                                </button>
+                              )}
                           </div>
                         )}
                         <button
@@ -3387,18 +3618,18 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   </Button>
                 </Flex>
               )}
-              <section className="hu-global-history" aria-labelledby="hu-global-history-title">
+              <section className="hu-global-history" aria-labelledby="hu-sku-history-title">
                 <header className="hu-global-history-header">
                   <div>
-                    <Typography.Title level={5} id="hu-global-history-title">
-                      <HistoryOutlined /> Lịch sử hoạt động chung
+                    <Typography.Title level={5} id="hu-sku-history-title">
+                      <HistoryOutlined /> Lịch sử phân loại {selected.color || selected.sku}
                     </Typography.Title>
                     <Typography.Text type="secondary">
-                      Tra cứu tất cả thao tác nhập, khui, rút, chuyển và kiểm kiện.
+                      Chỉ hiển thị thao tác của SKU {selected.sku} thuộc {selected.productGroup}.
                     </Typography.Text>
                   </div>
                   <Tag color="blue" style={{ margin: 0 }}>
-                    {globalHistory.length} hoạt động
+                    {selectedSkuHistory.length} hoạt động
                   </Tag>
                 </header>
                 <div className="hu-global-history-filters">
@@ -3431,11 +3662,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   />
                 </div>
                 <Table
+                  key={selected.sku}
                   className="hu-global-history-table"
                   rowKey={(item) => item.id || `${item.unitId}-${item.createdAt}`}
                   size="middle"
-                  dataSource={globalHistory}
-                  locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Chưa có hoạt động phù hợp" /> }}
+                  dataSource={selectedSkuHistory}
+                  tableLayout="fixed"
+                  scroll={{ x: 1080 }}
+                  locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`Chưa có hoạt động của ${selected.sku}`} /> }}
                   pagination={{
                     pageSize: 8,
                     size: "small",
@@ -3452,21 +3686,29 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     {
                       title: "Kiện hàng",
                       dataIndex: "unitId",
-                      width: 145,
+                      width: 190,
                       render: (value) => {
                         const unit = workspace.register.find(
                           (item) => item.id?.toUpperCase() === String(value || "").toUpperCase(),
                         );
                         return unit ? (
-                          <Button type="link" className="hu-history-unit-link" onClick={() => setDetail(unit)}>
+                          <Button type="link" className="hu-history-unit-link" title={String(value || "")} onClick={() => setDetail(unit)}>
                             {value}
                           </Button>
                         ) : (
-                          <span>{value || "--"}</span>
+                          <span className="hu-history-cell-ellipsis" title={String(value || "")}>{value || "--"}</span>
                         );
                       },
                     },
-                    { title: "SKU", dataIndex: "sku", width: 150, render: (value, item) => value || workspace.register.find((unit) => unit.id === item.unitId)?.skuName || "--" },
+                    {
+                      title: "SKU",
+                      dataIndex: "sku",
+                      width: 165,
+                      render: (value, item) => {
+                        const sku = value || workspace.register.find((unit) => unit.id === item.unitId)?.skuName || "--";
+                        return <span className="hu-history-cell-ellipsis" title={String(sku)}>{sku}</span>;
+                      },
+                    },
                     {
                       title: "Thao tác",
                       dataIndex: "type",
@@ -3539,12 +3781,18 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   />
                 </div>
                 <code className="hu-qr-code-text">{detail.id}</code>
+                {detail.status === "Đã tách" && (
+                  <Typography.Text type="secondary" className="hu-split-old-qr-note">
+                    QR cũ chỉ dùng tra cứu. Hãy sử dụng QR mới trên từng kiện con.
+                  </Typography.Text>
+                )}
                 <div className="hu-label-direct-actions">
                   <Button
                     type="primary"
                     icon={<PrinterOutlined />}
                     size="middle"
                     loading={isExportingLabelPdf}
+                    disabled={detail.status === "Đã tách"}
                     onClick={() => handlePrintLabels([detail], "A6")}
                     className="hu-btn-open-print"
                   >
@@ -3554,6 +3802,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                     icon={<PrinterOutlined />}
                     size="middle"
                     loading={isExportingLabelPdf}
+                    disabled={detail.status === "Đã tách"}
                     onClick={() => handlePrintLabels([detail], "A7")}
                     className="hu-btn-open-print hu-btn-open-print-a7"
                   >
@@ -3562,6 +3811,42 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                 </div>
               </div>
             </div>
+            {detail.parentUnitCode && (
+              <Alert
+                type="info"
+                showIcon
+                icon={<ScissorOutlined />}
+                message={`Kiện con được tách từ ${detail.parentUnitCode}`}
+                style={{ marginBottom: 12 }}
+              />
+            )}
+            {detail.status === "Đã tách" && detail.childUnits?.length ? (
+              <Alert
+                type="info"
+                showIcon
+                icon={<ScissorOutlined />}
+                message={`Kiện cha đã tách thành ${detail.childUnits.length} kiện nhỏ`}
+                description={
+                  <Flex wrap gap={6} style={{ marginTop: 8 }}>
+                    {detail.childUnits.map((child) => (
+                      <Button
+                        key={child.code}
+                        size="small"
+                        onClick={() => {
+                          const childUnit = workspace.register.find(
+                            (unit) => unit.id === child.code,
+                          );
+                          if (childUnit) setDetail(childUnit);
+                        }}
+                      >
+                        {child.code} · {fmt(child.quantity)} {detail.unitName}
+                      </Button>
+                    ))}
+                  </Flex>
+                }
+                style={{ marginBottom: 12 }}
+              />
+            ) : null}
             <div className="hu-detail-stats">
               <div>
                 <small>CÒN LẠI</small>
@@ -3585,10 +3870,14 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
               </div>
             </div>
             <div className="hu-detail-actions-row">
-              {detail.status === "Chờ kiểm" ? (
-                <Tooltip title="Kiện đang chờ kiểm: hãy dùng Kiểm và chốt hết kiện để nhập số lượng thực tế, không sửa số lượng tại đây.">
+              {detail.status === "Đã tách" || detail.status === "Chờ kiểm" || isReturnHandlingUnit(detail) ? (
+                <Tooltip title={isReturnHandlingUnit(detail)
+                  ? "Kiện hàng hoàn đã được cộng tồn từ phiếu hoàn. Chỉ được gộp sang kiện đang khui cùng SKU hoặc chuyển vị trí."
+                  : detail.status === "Đã tách"
+                    ? "Kiện cha đã khóa sau khi tách để bảo toàn lịch sử và tổng tồn."
+                  : "Kiện đang chờ kiểm: hãy dùng Kiểm và chốt hết kiện để nhập số lượng thực tế, không sửa số lượng tại đây."}>
                   <Button disabled icon={<LockOutlined />} size="middle">
-                    Khóa sửa số lượng khi chờ kiểm
+                    {isReturnHandlingUnit(detail) ? "Kiện hàng hoàn chỉ được gộp" : detail.status === "Đã tách" ? "Kiện cha đã khóa" : "Khóa sửa số lượng khi chờ kiểm"}
                   </Button>
                 </Tooltip>
               ) : (
@@ -3635,40 +3924,52 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   );
                 })()}
               {detail.status === "Đang sử dụng" && (
-                <>
-                  {(() => {
-                    const pendingConflict = getPendingCheckConflict(detail, workspace.register);
-                    return pendingConflict ? (
-                      <Tooltip title={pendingCheckBlockText(detail, pendingConflict, "rút hàng")}>
-                        <Button
-                          icon={<LockOutlined />}
-                          size="middle"
-                          style={{ color: "#ad6800", background: "#fff7e6", borderColor: "#ffd591" }}
-                          onClick={() => message.warning(pendingCheckBlockText(detail, pendingConflict, "rút hàng"), 8)}
-                        >
-                          Khóa rút — cần kiểm {pendingConflict.id}
-                        </Button>
-                      </Tooltip>
-                    ) : (
-                      <Button
-                        type="primary"
-                        icon={<ShoppingCartOutlined />}
-                        size="middle"
-                        style={{ background: "#1890ff", borderColor: "#1890ff" }}
-                        onClick={() => handlePickUnit(detail)}
-                      >
-                        Rút hàng sang Khu đóng gói
-                      </Button>
-                    );
-                  })()}
+                isReturnHandlingUnit(detail) ? (
                   <Button
-                    icon={<LockOutlined />}
+                    type="primary"
+                    icon={<SwapOutlined />}
                     size="middle"
-                    onClick={() => handleSealUnit(detail)}
+                    style={{ background: "#f97316", borderColor: "#f97316" }}
+                    onClick={() => openMergeReturnUnit(detail)}
                   >
-                    Đóng niêm phong lại
+                    Gộp vào kiện đã khui cùng SKU
                   </Button>
-                </>
+                ) : (
+                  <>
+                    {(() => {
+                      const pendingConflict = getPendingCheckConflict(detail, workspace.register);
+                      return pendingConflict ? (
+                        <Tooltip title={pendingCheckBlockText(detail, pendingConflict, "rút hàng")}>
+                          <Button
+                            icon={<LockOutlined />}
+                            size="middle"
+                            style={{ color: "#ad6800", background: "#fff7e6", borderColor: "#ffd591" }}
+                            onClick={() => message.warning(pendingCheckBlockText(detail, pendingConflict, "rút hàng"), 8)}
+                          >
+                            Khóa rút — cần kiểm {pendingConflict.id}
+                          </Button>
+                        </Tooltip>
+                      ) : (
+                        <Button
+                          type="primary"
+                          icon={<ShoppingCartOutlined />}
+                          size="middle"
+                          style={{ background: "#1890ff", borderColor: "#1890ff" }}
+                          onClick={() => handlePickUnit(detail)}
+                        >
+                          Rút hàng sang Khu đóng gói
+                        </Button>
+                      );
+                    })()}
+                    <Button
+                      icon={<LockOutlined />}
+                      size="middle"
+                      onClick={() => handleSealUnit(detail)}
+                    >
+                      Đóng niêm phong lại
+                    </Button>
+                  </>
+                )
               )}
               {detail.status === "Chờ kiểm" && (
                 <Button
@@ -3681,20 +3982,33 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
                   Kiểm và chốt hết kiện
                 </Button>
               )}
-              <Button
-                icon={<SwapOutlined />}
-                size="middle"
-                onClick={() => {
-                  setMovingUnit(detail);
-                  moveLocationForm.setFieldsValue({
-                    targetZone:
-                      detail.location?.zone || workspace.locations[0]?.code,
-                    targetRack: detail.location?.rack || "",
-                  });
-                }}
-              >
-                Chuyển vị trí
-              </Button>
+              {["Nguyên niêm phong", "Đang sử dụng"].includes(detail.status) &&
+                detail.currentPcs > 1 &&
+                !isReturnHandlingUnit(detail) && (
+                  <Button
+                    icon={<ScissorOutlined />}
+                    size="middle"
+                    onClick={() => openSplitUnit(detail)}
+                  >
+                    Tách thành kiện nhỏ
+                  </Button>
+                )}
+              {detail.status !== "Đã tách" && (
+                <Button
+                  icon={<SwapOutlined />}
+                  size="middle"
+                  onClick={() => {
+                    setMovingUnit(detail);
+                    moveLocationForm.setFieldsValue({
+                      targetZone:
+                        detail.location?.zone || workspace.locations[0]?.code,
+                      targetRack: detail.location?.rack || "",
+                    });
+                  }}
+                >
+                  Chuyển vị trí
+                </Button>
+              )}
             </div>
             <section className="hu-unit-history">
               <Flex
@@ -4562,11 +4876,11 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             <div className="hu-final-check-hero">
               <div className="hu-final-check-hero-icon">!</div>
               <div>
-                <strong>Kiện đang ở trạng thái Chờ kiểm</strong>
-                <p>
+                  <strong>Kiện đang ở trạng thái Chờ kiểm</strong>
+                  <p>
                   Sổ kiện đã về <b>0 {checkingUnit.unitName}</b>. Hãy nhìn và
                   đếm trực tiếp trong kiện trước khi xác nhận.
-                </p>
+                  </p>
               </div>
             </div>
 
@@ -4705,123 +5019,194 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       <Modal
         open={showQrSetup}
         onCancel={() => setShowQrSetup(false)}
-        onOk={issueQrLabels}
-        okText="Phát hành tem QR"
-        confirmLoading={isIssuingQrLabels}
         width={760}
         destroyOnHidden
         className="hu-qr-setup-modal"
-        title={<Flex align="center" gap={8}><PrinterOutlined style={{ color: "#07844d", fontSize: 19 }} /><div><b>Thiết lập & In QR</b><Typography.Text type="secondary" style={{ display: "block", fontSize: 12 }}>Mỗi tem lưu đúng SKU, dạng kiện và hệ số quy đổi; không có quy cách mặc định.</Typography.Text></div></Flex>}
-      >
-        <Form form={qrSetupForm} layout="vertical">
-          <div className="hu-qr-setup-grid">
-            <Form.Item name="sku" label="SKU / phân loại" rules={[{ required: true, message: "Chọn SKU" }]}>
-              <Select
-                showSearch
-                optionFilterProp="label"
-                options={workspace.catalog.map((item) => ({ value: item.sku, label: `${item.sku} · ${item.variantName}` }))}
-                onChange={(sku) => {
-                  const product = workspace.catalog.find((item) => item.sku === sku);
-                  const existingSpec = latestQrSuggestion(sku);
-                  qrSetupForm.setFieldsValue({
-                    baseUnit: existingSpec?.baseUnit || product?.unitName || "Gói",
-                    packagingName: existingSpec?.name || undefined,
-                    conversionFactor: existingSpec?.conversionFactor || undefined,
-                    supplierId: existingSpec?.supplierId || undefined,
-                  });
-                }}
-              />
-            </Form.Item>
-            <Form.Item name="supplierId" label="Nhà cung cấp mặc định (tuỳ chọn)">
-              <Select allowClear placeholder="Lấy nguồn mặc định đã có" options={workspace.suppliers.map((supplier) => ({ value: supplier.id, label: supplier.name }))} />
-            </Form.Item>
-            <Form.Item name="packagingName" label="Dạng kiện" rules={[{ required: true, message: "Chọn dạng kiện" }]}>
-              <Select
-                placeholder="Chọn dạng kiện"
-                options={[
-                  { value: "Tải", label: "Tải" },
-                  { value: "Thùng", label: "Thùng" },
-                  { value: "Lẻ", label: "Lẻ" },
-                ]}
-              />
-            </Form.Item>
-            <Form.Item name="conversionFactor" label="Quy đổi về đơn vị nhỏ nhất" rules={[{ required: true, message: "Nhập hệ số quy đổi" }]}>
-              <InputNumber min={1} precision={0} style={{ width: "100%" }} addonAfter="đơn vị" />
-            </Form.Item>
-            <Form.Item name="baseUnit" label="Đơn vị nhỏ nhất" rules={[{ required: true, message: "Nhập đơn vị cơ sở" }]}>
-              <Input placeholder="Ví dụ: gói, hộp, cái" />
-            </Form.Item>
-            <Form.Item name="quantity" label="Số tem cần in" rules={[{ required: true, message: "Nhập số tem" }]}>
-              <InputNumber min={1} max={500} precision={0} style={{ width: "100%" }} addonAfter="tem" />
-            </Form.Item>
-            <Form.Item name="zone" label="Khu vực lưu kho" rules={[{ required: true, message: "Chọn khu vực lưu kho trước khi phát hành tem" }]}>
-              <Select
-                showSearch
-                optionFilterProp="label"
-                placeholder="Chọn vị trí sẽ để kiện"
-                options={workspace.locations.filter((location) => location.isActive).map((location) => ({
-                  value: location.code,
-                  label: `${location.code} · ${location.name}`,
-                }))}
-              />
-            </Form.Item>
-          </div>
-          <Alert type="info" showIcon message="QR sẽ lưu cả quy cách và khu vực. Khi in hoặc quét nhập kho, kiện tự nhận đúng vị trí đã chọn." />
-          <Typography.Text type="secondary" style={{ display: "block", marginTop: 8, fontSize: 12 }}>Khi chọn SKU, hệ thống sẽ gợi ý nhà cung cấp và quy cách từ lần phát hành gần nhất. Bạn vẫn có thể sửa trước khi phát hành.</Typography.Text>
-        </Form>
-        {issuedQrLabels.length > 0 && (
-          <div className="hu-qr-issued-result">
-            <Flex justify="space-between" align="center" gap={12} wrap="wrap">
-              <b>Đã tạo {issuedQrLabels.length} tem QR</b>
-              <Flex gap={8} align="center" wrap="wrap">
-                <Button type="primary" icon={<PrinterOutlined />} loading={isExportingLabelPdf} onClick={() => handlePrintLabels(printUnits, "A6")}>
-                  PDF A6 · 100×150
-                </Button>
-                <Button icon={<PrinterOutlined />} loading={isExportingLabelPdf} onClick={() => handlePrintLabels(printUnits, "A7")}>
-                  PDF A7 · 75×100
+        title={
+          <Flex align="center" gap={8}>
+            <QrcodeOutlined style={{ color: "#00b96b", fontSize: 18 }} />
+            <div>
+              <b style={{ fontSize: 15 }}>Tạo mã QR</b>
+              <Typography.Text type="secondary" style={{ display: "block", fontSize: 11 }}>
+                Phát hành & in tem QR kiện hàng
+              </Typography.Text>
+            </div>
+          </Flex>
+        }
+        footer={
+          qrModalTab === "create" ? (
+            <Flex justify="space-between" align="center" style={{ width: "100%" }}>
+              <Button type="link" size="small" onClick={() => setQrModalTab("ledger")}>
+                Xem sổ tem đã in ({workspace.qrLabels.length})
+              </Button>
+              <Flex gap={8}>
+                <Button onClick={() => setShowQrSetup(false)}>Hủy</Button>
+                <Button
+                  type="primary"
+                  icon={<QrcodeOutlined />}
+                  loading={isIssuingQrLabels}
+                  onClick={issueQrLabels}
+                >
+                  Phát hành tem QR
                 </Button>
               </Flex>
             </Flex>
-            <div className="hu-qr-issued-codes">{issuedQrLabels.slice(0, 12).map((label) => <Tag key={label.code} color="green">{label.code}</Tag>)}{issuedQrLabels.length > 12 && <Tag>+{issuedQrLabels.length - 12} tem</Tag>}</div>
-          </div>
-        )}
-        <div className="hu-qr-ledger">
-          <Flex justify="space-between" align="center">
-            <div><b>Sổ tem QR</b><Typography.Text type="secondary"> Chọn đúng nút A6 hoặc A7 trên từng tem</Typography.Text></div>
-            <Tag color="blue">{workspace.qrLabels.length} tem còn hiệu lực</Tag>
-          </Flex>
-          {workspace.qrLabels.length ? (
-            <div className="hu-qr-ledger-list">
-              {workspace.qrLabels.slice(0, 10).map((label) => (
-                <div className="hu-qr-ledger-row" key={label.code}>
-                  <span><QrcodeOutlined /></span>
+          ) : (
+            <Flex justify="space-between" align="center" style={{ width: "100%" }}>
+              <Button type="primary" ghost icon={<PlusOutlined />} onClick={() => setQrModalTab("create")}>
+                Tạo thêm tem mới
+              </Button>
+              <Button onClick={() => setShowQrSetup(false)}>Đóng</Button>
+            </Flex>
+          )
+        }
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Segmented
+            block
+            value={qrModalTab}
+            onChange={(val) => setQrModalTab(val as "create" | "ledger")}
+            options={[
+              {
+                value: "create",
+                label: (
+                  <span style={{ fontWeight: 600, padding: "2px 8px" }}>
+                    <PlusOutlined style={{ marginRight: 6 }} /> Phát hành tem mới
+                  </span>
+                ),
+              },
+              {
+                value: "ledger",
+                label: (
+                  <span style={{ fontWeight: 600, padding: "2px 8px" }}>
+                    <HistoryOutlined style={{ marginRight: 6 }} /> Sổ tem đã in ({workspace.qrLabels.length})
+                  </span>
+                ),
+              },
+            ]}
+          />
+        </div>
+
+        {qrModalTab === "create" ? (
+          <>
+            <Form form={qrSetupForm} layout="vertical">
+              <div className="hu-qr-setup-grid">
+                <Form.Item name="sku" label="SKU / phân loại" rules={[{ required: true, message: "Chọn SKU" }]}>
+                  <Select
+                    showSearch
+                    optionFilterProp="label"
+                    placeholder="Chọn SKU cần in tem"
+                    options={workspace.catalog.map((item) => ({ value: item.sku, label: `${item.sku} · ${item.variantName}` }))}
+                    onChange={(sku) => {
+                      const product = workspace.catalog.find((item) => item.sku === sku);
+                      const existingSpec = latestQrSuggestion(sku);
+                      qrSetupForm.setFieldsValue({
+                        baseUnit: existingSpec?.baseUnit || product?.unitName || "Gói",
+                        packagingName: existingSpec?.name || undefined,
+                        conversionFactor: existingSpec?.conversionFactor || undefined,
+                        supplierId: existingSpec?.supplierId || undefined,
+                      });
+                    }}
+                  />
+                </Form.Item>
+                <Form.Item
+                  name="supplierId"
+                  label="Nhà cung cấp"
+                  rules={[{ required: true, message: "Chọn nhà cung cấp trước khi tạo mã QR" }]}
+                >
+                  <Select allowClear placeholder="Lấy nguồn mặc định đã có" options={workspace.suppliers.map((supplier) => ({ value: supplier.id, label: supplier.name }))} />
+                </Form.Item>
+                <Form.Item name="packagingName" label="Dạng kiện" rules={[{ required: true, message: "Chọn dạng kiện" }]}>
+                  <Select
+                    placeholder="Chọn dạng kiện"
+                    options={[
+                      { value: "Tải", label: "Tải" },
+                      { value: "Thùng", label: "Thùng" },
+                      { value: "Lẻ", label: "Lẻ" },
+                    ]}
+                  />
+                </Form.Item>
+                <Form.Item name="conversionFactor" label="Quy đổi về đơn vị nhỏ nhất" rules={[{ required: true, message: "Nhập hệ số quy đổi" }]}>
+                  <InputNumber min={1} precision={0} style={{ width: "100%" }} addonAfter="đơn vị" />
+                </Form.Item>
+                <Form.Item name="baseUnit" label="Đơn vị nhỏ nhất" rules={[{ required: true, message: "Nhập đơn vị cơ sở" }]}>
+                  <Input placeholder="Ví dụ: gói, hộp, cái" />
+                </Form.Item>
+                <Form.Item name="quantity" label="Số tem cần in" rules={[{ required: true, message: "Nhập số tem" }]}>
+                  <InputNumber min={1} max={500} precision={0} style={{ width: "100%" }} addonAfter="tem" />
+                </Form.Item>
+                <Form.Item name="zone" label="Khu vực lưu kho" className="hu-qr-field-full" rules={[{ required: true, message: "Chọn khu vực lưu kho trước khi phát hành tem" }]}>
+                  <Select
+                    showSearch
+                    optionFilterProp="label"
+                    placeholder="Chọn vị trí sẽ để kiện"
+                    options={workspace.locations.filter((location) => location.isActive).map((location) => ({
+                      value: location.code,
+                      label: `${location.code} · ${location.name}`,
+                    }))}
+                  />
+                </Form.Item>
+              </div>
+              <div className="hu-qr-quick-hint">
+                <InfoCircleOutlined style={{ color: "#0284c7" }} />
+                <span>QR lưu đúng quy cách và vị trí kho để tự nhận khi quét nhập kho.</span>
+              </div>
+            </Form>
+            {issuedQrLabels.length > 0 && (
+              <div className="hu-qr-issued-result">
+                <Flex justify="space-between" align="center" gap={12} wrap="wrap">
+                  <b>Đã tạo {issuedQrLabels.length} tem QR</b>
+                  <Flex gap={8} align="center" wrap="wrap">
+                    <Button type="primary" icon={<PrinterOutlined />} loading={isExportingLabelPdf} onClick={() => handlePrintLabels(printUnits, "A6")}>
+                      PDF A6 · 100×150
+                    </Button>
+                    <Button icon={<PrinterOutlined />} loading={isExportingLabelPdf} onClick={() => handlePrintLabels(printUnits, "A7")}>
+                      PDF A7 · 75×100
+                    </Button>
+                  </Flex>
+                </Flex>
+                <div className="hu-qr-issued-codes">{issuedQrLabels.slice(0, 12).map((label) => <Tag key={label.code} color="green">{label.code}</Tag>)}{issuedQrLabels.length > 12 && <Tag>+{issuedQrLabels.length - 12} tem</Tag>}</div>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="hu-qr-ledger">
+            <Flex justify="space-between" align="center" style={{ marginBottom: 10 }}>
+              <div><b>Danh sách tem đã phát hành</b><Typography.Text type="secondary"> · In lại tem bất kỳ lúc nào</Typography.Text></div>
+              <Tag color="blue">{workspace.qrLabels.length} tem còn hiệu lực</Tag>
+            </Flex>
+            {workspace.qrLabels.length ? (
+              <div className="hu-qr-ledger-list">
+                {workspace.qrLabels.map((label) => (
+                  <div className="hu-qr-ledger-row" key={label.code}>
+                    <span><QrcodeOutlined /></span>
                     <div>
                       <b>{label.code}</b>
                       <small>{label.sku} · {label.packagingName} = {fmt(Number(label.conversionFactor))} {label.baseUnit}</small>
                       <small>Vị trí: {locationFor({ location: qrLabelLocation(label) } as UnitRow)}</small>
                     </div>
-                  <div className="hu-qr-ledger-meta">
-                    <small>{label.supplierName || "Chưa gán NCC"}</small>
-                    <div>
-                      <Tag color={label.status === "printed" ? "green" : label.status === "issued" ? "blue" : "gold"}>{label.status === "printed" ? "Đã in / chưa nhập" : label.status === "issued" ? "Chờ in" : "Đang quét"}</Tag>
-                      {(label.status === "issued" || label.status === "printed") && (
-                        <Flex gap={4} wrap="wrap" justify="end">
-                          <Button size="small" type="primary" icon={<PrinterOutlined />} loading={isExportingLabelPdf} onClick={() => openQrLabelPrint(label, "A6")}>
-                            {label.status === "printed" ? "In lại A6" : "In A6"}
-                          </Button>
-                          <Button size="small" icon={<PrinterOutlined />} loading={isExportingLabelPdf} onClick={() => openQrLabelPrint(label, "A7")}>
-                            {label.status === "printed" ? "In lại A7" : "In A7"}
-                          </Button>
-                        </Flex>
-                      )}
+                    <div className="hu-qr-ledger-meta">
+                      <small>{label.supplierName || "Chưa gán NCC"}</small>
+                      <div>
+                        <Tag color={label.status === "printed" ? "green" : label.status === "issued" ? "blue" : "gold"}>{label.status === "printed" ? "Đã in / chưa nhập" : label.status === "issued" ? "Chờ in" : "Đang quét"}</Tag>
+                        {(label.status === "issued" || label.status === "printed") && (
+                          <Flex gap={4} wrap="wrap" justify="end">
+                            <Button size="small" type="primary" icon={<PrinterOutlined />} loading={isExportingLabelPdf} onClick={() => openQrLabelPrint(label, "A6")}>
+                              {label.status === "printed" ? "In lại A6" : "In A6"}
+                            </Button>
+                            <Button size="small" icon={<PrinterOutlined />} loading={isExportingLabelPdf} onClick={() => openQrLabelPrint(label, "A7")}>
+                              {label.status === "printed" ? "In lại A7" : "In A7"}
+                            </Button>
+                          </Flex>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
-              {workspace.qrLabels.length > 10 && <Typography.Text type="secondary">Hiển thị 10 tem mới nhất.</Typography.Text>}
-            </div>
-          ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Chưa phát hành tem QR nào" />}
-        </div>
+                ))}
+              </div>
+            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Chưa phát hành tem QR nào" />}
+          </div>
+        )}
       </Modal>
       <Modal
         open={showQuickCreate}
@@ -4982,7 +5367,7 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             </div>
             <input ref={quickReceiptInputRef} type="file" accept=".pdf,.jpg,.jpeg,.png" hidden onChange={(event) => { const file = event.target.files?.[0] || null; setQuickReceiptFile(file); setQuickReceiptFileName(file?.name || ""); }} />
             <button type="button" className="hu-quick-upload" onClick={() => quickReceiptInputRef.current?.click()}><InboxOutlined /><b>Tải phiếu nhập kho</b><small>Kéo thả file hoặc bấm để chọn file</small></button>
-            {quickReceiptFileName && <div className="hu-quick-file"><CheckCircleOutlined /> {quickReceiptFileName}<span>Sẽ upload Google Drive</span></div>}
+            {quickReceiptFileName && <div className="hu-quick-file"><CheckCircleOutlined /> {quickReceiptFileName}<span>Sẽ upload Cloudflare R2</span></div>}
           </aside>
         </div>
         <footer className="hu-quick-footer"><span>Hàng lẻ được ghi nhận trực tiếp vào <b>tồn kho và thẻ kho</b>, không tạo kiện.</span><div><Button onClick={() => setShowQuickCreate(false)}>Hủy</Button><Button type="primary" icon={<CheckCircleOutlined />} disabled={!quickScanLines.length || isQuickConfirming} loading={isQuickConfirming} onClick={confirmQuickReceiving}>{quickManualLines.length ? "Xác nhận nhập kho" : "Xác nhận nhập & tạo kiện"}</Button></div></footer>
@@ -5274,6 +5659,88 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
       </Modal>
 
       <Modal
+        title={mergeReturnUnit ? `Gộp kiện hàng hoàn · ${mergeReturnUnit.id}` : "Gộp kiện hàng hoàn"}
+        open={!!mergeReturnUnit}
+        onCancel={() => {
+          if (isMergingReturnUnit) return;
+          setMergeReturnUnit(null);
+          setMergeTargetCode("");
+          setMergeQuantity(null);
+        }}
+        onOk={handleMergeReturnUnit}
+        okText="Xác nhận gộp kiện"
+        confirmLoading={isMergingReturnUnit}
+        okButtonProps={{
+          disabled: !mergeTargetCode || !mergeQuantity || mergeQuantity <= 0,
+          style: { background: "#f97316", borderColor: "#f97316" },
+        }}
+        closable={!isMergingReturnUnit}
+        maskClosable={!isMergingReturnUnit}
+        cancelButtonProps={{ disabled: isMergingReturnUnit }}
+        destroyOnHidden
+      >
+        {mergeReturnUnit && (() => {
+          const targets = getReturnMergeTargets(mergeReturnUnit);
+          const selectedTarget = targets.find(unit => unit.id === mergeTargetCode);
+          const availableCapacity = selectedTarget
+            ? Math.max(0, Number(selectedTarget.initialPcs) - Number(selectedTarget.currentPcs))
+            : 0;
+          const maximumQuantity = Math.min(Number(mergeReturnUnit.currentPcs), availableCapacity);
+          return (
+            <div style={{ display: "grid", gap: 16 }}>
+              <Alert
+                type="info"
+                showIcon
+                message="Chỉ chuyển số lượng giữa hai kiện"
+                description="Tồn tổng của SKU không cộng thêm lần nữa. Backend sẽ từ chối nếu hai kiện khác SKU phân loại."
+              />
+              <div className="hu-move-preview">
+                <div><strong>Kiện hàng hoàn:</strong> <code>{mergeReturnUnit.id}</code></div>
+                <div><strong>SKU phân loại:</strong> <Tag color="purple">{mergeReturnUnit.skuName}</Tag></div>
+                <div><strong>Số lượng chờ gộp:</strong> <b style={{ color: "#f97316" }}>{fmt(mergeReturnUnit.currentPcs)} {mergeReturnUnit.unitName}</b></div>
+              </div>
+              <div>
+                <label style={{ display: "block", marginBottom: 7, fontWeight: 700 }}>Kiện đang khui cùng SKU</label>
+                <Select
+                  value={mergeTargetCode || undefined}
+                  style={{ width: "100%" }}
+                  placeholder="Chọn kiện đích"
+                  onChange={(code) => {
+                    const target = targets.find(unit => unit.id === code);
+                    const capacity = target ? Math.max(0, Number(target.initialPcs) - Number(target.currentPcs)) : 0;
+                    setMergeTargetCode(code);
+                    setMergeQuantity(Math.min(Number(mergeReturnUnit.currentPcs), capacity));
+                  }}
+                  options={targets.map(unit => ({
+                    value: unit.id,
+                    label: `${unit.id} · ${unit.packageType} · còn ${fmt(unit.currentPcs)}/${fmt(unit.initialPcs)} ${unit.unitName}`,
+                  }))}
+                />
+              </div>
+              <div>
+                <label style={{ display: "block", marginBottom: 7, fontWeight: 700 }}>Số lượng cần gộp</label>
+                <InputNumber
+                  min={1}
+                  max={maximumQuantity}
+                  precision={0}
+                  value={mergeQuantity ?? undefined}
+                  onChange={(value) => setMergeQuantity(value === null ? null : Number(value))}
+                  addonAfter={mergeReturnUnit.unitName}
+                  style={{ width: "100%" }}
+                />
+                {selectedTarget && (
+                  <small style={{ display: "block", marginTop: 6, color: "#64748b" }}>
+                    Kiện {selectedTarget.id} còn sức chứa {fmt(availableCapacity)} {selectedTarget.unitName}.
+                    Sau khi gộp sẽ có {fmt(Number(selectedTarget.currentPcs) + Number(mergeQuantity || 0))}/{fmt(selectedTarget.initialPcs)} {selectedTarget.unitName}.
+                  </small>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
+
+      <Modal
         title={pickingUnit ? `Rút hàng · Kiện ${pickingUnit.id}` : "Rút hàng"}
         open={showPickModal}
         onCancel={() => {
@@ -5505,6 +5972,131 @@ export default function HandlingUnits({ onExit }: { onExit?: () => void }) {
             </ul>
           </div>
         </div>
+      </Modal>
+
+      <Modal
+        className="hu-split-modal"
+        title={
+          <Flex align="center" gap={8}>
+            <ScissorOutlined style={{ color: "#0284c7" }} />
+            <span>Tách kiện {splittingUnit?.id}</span>
+          </Flex>
+        }
+        open={!!splittingUnit}
+        onCancel={() => {
+          if (!isSplittingUnit) setSplittingUnit(null);
+        }}
+        footer={null}
+        width={620}
+        destroyOnHidden
+        maskClosable={!isSplittingUnit}
+      >
+        {splittingUnit && (() => {
+          const quantities = buildSplitQuantities(
+            splittingUnit.currentPcs,
+            splitTargetSize,
+          );
+          const isValid = quantities.length >= 2 && quantities.length <= 20;
+          return (
+            <div className="hu-split-modal-body">
+              <div className="hu-split-source">
+                <div>
+                  <small>KIỆN CHA</small>
+                  <b>{splittingUnit.id}</b>
+                  <span>{splittingUnit.skuName}</span>
+                </div>
+                <div>
+                  <small>TỒN HIỆN TẠI</small>
+                  <strong>{fmt(splittingUnit.currentPcs)}</strong>
+                  <span>{splittingUnit.unitName}</span>
+                </div>
+              </div>
+
+              <label className="hu-split-size-label">
+                Kích thước tối đa mỗi kiện con
+              </label>
+              <InputNumber
+                className="hu-split-size-input"
+                min={1}
+                max={Math.max(1, splittingUnit.currentPcs - 1)}
+                precision={0}
+                controls={false}
+                value={splitTargetSize}
+                parser={(value) => {
+                  const digits = String(value || "").replace(/[^0-9]/g, "");
+                  return Number(digits.replace(/^0+(?=\d)/, "") || 0);
+                }}
+                onFocus={(event) => event.currentTarget.select()}
+                onChange={(value) =>
+                  setSplitTargetSize(Math.floor(Number(value || 0)))
+                }
+                onBlur={() =>
+                  setSplitTargetSize((value) =>
+                    Math.min(
+                      Math.max(1, Math.floor(Number(value || 1))),
+                      Math.max(1, splittingUnit.currentPcs - 1),
+                    ),
+                  )
+                }
+                addonAfter={splittingUnit.unitName}
+                disabled={isSplittingUnit}
+              />
+
+              <div className="hu-split-preview">
+                <Flex justify="space-between" align="center" gap={8}>
+                  <b>Kết quả dự kiến</b>
+                  <Tag color={isValid ? "green" : "red"}>
+                    {quantities.length || 0} kiện con
+                  </Tag>
+                </Flex>
+                {quantities.length ? (
+                  <div className="hu-split-quantity-list">
+                    {quantities.map((quantity, index) => (
+                      <span key={`${quantity}-${index}`}>
+                        Kiện {index + 1}: <b>{fmt(quantity)}</b>
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <Typography.Text type="danger">
+                    Kích thước kiện con phải nhỏ hơn tồn hiện tại.
+                  </Typography.Text>
+                )}
+                <div className="hu-split-equation">
+                  {quantities.length
+                    ? `${quantities.map(fmt).join(" + ")} = ${fmt(quantities.reduce((sum, quantity) => sum + quantity, 0))} ${splittingUnit.unitName}`
+                    : "Chưa có phương án tách hợp lệ"}
+                </div>
+              </div>
+
+              <Alert
+                type="warning"
+                showIcon
+                message="Xác nhận sau khi đã tách hàng ngoài kho"
+                description="Mã QR cũ sẽ chuyển sang Đã tách và bị khóa hoàn toàn. Hệ thống tạo QR mới cho từng kiện con; tổng tồn sản phẩm không thay đổi. Hãy dán đúng tem mới lên từng kiện."
+              />
+
+              <Flex justify="flex-end" gap={8}>
+                <Button
+                  onClick={() => setSplittingUnit(null)}
+                  disabled={isSplittingUnit}
+                >
+                  Hủy
+                </Button>
+                <Button
+                  type="primary"
+                  icon={<ScissorOutlined />}
+                  loading={isSplittingUnit}
+                  disabled={!isValid}
+                  onClick={() => void handleSplitUnit()}
+                  style={{ background: "#0284c7", borderColor: "#0284c7" }}
+                >
+                  Xác nhận tách và tạo QR mới
+                </Button>
+              </Flex>
+            </div>
+          );
+        })()}
       </Modal>
 
       {/* MODAL IN TEM DÁN TẢI / KIỆN HÀNG (A6 / A7) */}

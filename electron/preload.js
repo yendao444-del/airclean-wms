@@ -169,6 +169,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
         inspectBackup: (backupPath) => ipcRenderer.invoke('system:inspectBackup', backupPath),
         deleteBackup: (backupPath) => ipcRenderer.invoke('system:deleteBackup', backupPath),
     },
+    attendanceDevices: {
+        list: () => ipcRenderer.invoke('attendance:devices:list'),
+        approve: (id) => ipcRenderer.invoke('attendance:devices:approve', id),
+        reject: (id) => ipcRenderer.invoke('attendance:devices:reject', id),
+        revoke: (id) => ipcRenderer.invoke('attendance:devices:revoke', id),
+    },
 
     // Combo Products
     combos: {
