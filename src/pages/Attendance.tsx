@@ -1965,7 +1965,7 @@ const CHECK_TYPE_LABELS: Record<string, { label: string; color: string }> = {
 };
 
 export interface FaceAttendanceTabHandle {
-    toggleCamera: () => void;
+    toggleCamera: () => Promise<void>;
     openRegister: () => void;
 }
 
@@ -1998,7 +1998,8 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     const overlayAnimRef = useRef<number>(0);
     const recognizeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const mediaStreamRef = useRef<MediaStream | null>(null);
-    const displayVideoRef = useRef<HTMLVideoElement>(null); // video hiển thị trong Camera Panel
+    const cameraStartPromiseRef = useRef<Promise<boolean> | null>(null);
+    const cameraSessionRef = useRef(0);
     const lastFaceBoxRef = useRef<any>(null);   // lưu face_box mới nhất để draw
     const lastResultRef = useRef<any>(null);    // lưu result mới nhất để draw tên
 
@@ -2098,31 +2099,90 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     }, [checkDeviceAccess]);
 
     // Camera start/stop
-    const startCamera = useCallback(async () => {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
-            mediaStreamRef.current = stream; // Lưu vào ref để đảm bảo luôn có thể stop()
-            if (videoRef.current) {
-                videoRef.current.srcObject = stream;
-                await videoRef.current.play();
+    const startCamera = useCallback((): Promise<boolean> => {
+        if (cameraOnRef.current && mediaStreamRef.current) return Promise.resolve(true);
+        if (cameraStartPromiseRef.current) return cameraStartPromiseRef.current;
+        if (!navigator.mediaDevices?.getUserMedia) {
+            message.error('Thiết bị không hỗ trợ truy cập camera');
+            return Promise.resolve(false);
+        }
+        const cameraSession = ++cameraSessionRef.current;
+
+        const startPromise = (async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: { ideal: 'user' },
+                        width: { ideal: 640, max: 1280 },
+                        height: { ideal: 480, max: 720 },
+                    },
+                    audio: false,
+                });
+                if (cameraSession !== cameraSessionRef.current) {
+                    stream.getTracks().forEach(track => track.stop());
+                    return false;
+                }
+                const video = videoRef.current;
+                if (!video) {
+                    stream.getTracks().forEach(track => track.stop());
+                    message.error('Không khởi tạo được khung camera');
+                    return false;
+                }
+
+                mediaStreamRef.current = stream;
+                video.srcObject = stream;
+                await video.play();
+                if (cameraSession !== cameraSessionRef.current) {
+                    if (video.srcObject === stream) video.srcObject = null;
+                    stream.getTracks().forEach(track => track.stop());
+                    if (mediaStreamRef.current === stream) mediaStreamRef.current = null;
+                    return false;
+                }
                 cameraOnRef.current = true;
                 setCameraOn(true);
+                return true;
+            } catch (error: any) {
+                if (cameraSession !== cameraSessionRef.current) return false;
+                mediaStreamRef.current?.getTracks().forEach(track => track.stop());
+                mediaStreamRef.current = null;
+                if (videoRef.current?.srcObject) videoRef.current.srcObject = null;
+                cameraOnRef.current = false;
+                setCameraOn(false);
+
+                const errorName = String(error?.name || '');
+                const detail = errorName === 'NotAllowedError'
+                    ? 'Bạn chưa cấp quyền camera cho ứng dụng'
+                    : errorName === 'NotReadableError'
+                        ? 'Camera đang được ứng dụng khác sử dụng hoặc driver camera gặp lỗi'
+                        : 'Không thể mở camera trên thiết bị này';
+                message.error(detail);
+                console.warn('[Face:camera] getUserMedia failed:', error);
+                return false;
+            } finally {
+                if (cameraSession === cameraSessionRef.current) cameraStartPromiseRef.current = null;
             }
-        } catch {
-            message.error('Không thể mở camera');
-        }
+        })();
+
+        cameraStartPromiseRef.current = startPromise;
+        return startPromise;
     }, []);
 
     const stopCamera = useCallback(() => {
-        // Stop stream từ mediaStreamRef (cách an toàn nhất)
+        cameraSessionRef.current += 1;
+        cameraStartPromiseRef.current = null;
+        if (idleTimerRef.current) {
+            clearTimeout(idleTimerRef.current);
+            idleTimerRef.current = null;
+        }
+        // Detach video elements before stopping tracks. This avoids Chromium
+        // holding a stale camera frame during a rapid open/close cycle.
+        if (videoRef.current?.srcObject) {
+            videoRef.current.pause();
+            videoRef.current.srcObject = null;
+        }
         if (mediaStreamRef.current) {
             mediaStreamRef.current.getTracks().forEach(t => t.stop());
             mediaStreamRef.current = null;
-        }
-
-        // Dọn dẹp DOM
-        if (videoRef.current?.srcObject) {
-            videoRef.current.srcObject = null;
         }
 
         isRecognizingRef.current = false;
@@ -2135,20 +2195,6 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
             recognizeTimerRef.current = null;
         }
     }, []);
-
-    // Sync srcObject sang video hiển thị trong Camera Panel mỗi khi cameraOn đổi
-    useEffect(() => {
-        const displayVideo = displayVideoRef.current;
-        if (!displayVideo) return;
-        if (cameraOn && videoRef.current?.srcObject) {
-            if (displayVideo.srcObject !== videoRef.current.srcObject) {
-                displayVideo.srcObject = videoRef.current.srcObject;
-                displayVideo.play().catch(() => { });
-            }
-        } else {
-            displayVideo.srcObject = null;
-        }
-    }, [cameraOn]);
 
     // Capture frame as base64
     const captureFrame = useCallback((fastMode: boolean = false): string | null => {
@@ -2177,6 +2223,7 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     // ─── Canvas Overlay Draw Loop ───────────────────────────────────────────────
     // Vẽ trực tiếp lên canvas — giống cv2.rectangle + cv2.putText của tool gốc
     const startOverlayDraw = useCallback(() => {
+        cancelAnimationFrame(overlayAnimRef.current);
         let cachedW = 0, cachedH = 0;
 
         const draw = () => {
@@ -2264,6 +2311,7 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
 
     const stopOverlayDraw = useCallback(() => {
         cancelAnimationFrame(overlayAnimRef.current);
+        overlayAnimRef.current = 0;
         lastFaceBoxRef.current = null;
         lastResultRef.current = null;
         const canvas = overlayCanvasRef.current;
@@ -2286,16 +2334,6 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     }, []);
 
     const startRecognizing = useCallback(() => {
-        try {
-            if (!sharedAudioCtx) sharedAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-            if (sharedAudioCtx?.state === 'suspended') sharedAudioCtx.resume();
-
-            // Dummy speak to unlock SpeechSynthesis on browser
-            const initMsg = new SpeechSynthesisUtterance('');
-            initMsg.volume = 0;
-            window.speechSynthesis.speak(initMsg);
-        } catch (e) { }
-
         if (recognizeTimerRef.current) return;
         isRecognizingRef.current = true;
         setRecognizing(true);
@@ -2306,7 +2344,17 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
             if (!isRecognizingRef.current) return;
             const frame = captureFrame(true); // true = fast mode (downscale)
             if (frame && api) {
-                const res = await api.recognize(frame);
+                let res: any;
+                try {
+                    res = await api.recognize(frame);
+                } catch (error) {
+                    console.warn('[Face] recognize IPC failed:', error);
+                    setLastResult({ error: 'Mất kết nối với dịch vụ nhận diện' });
+                    if (isRecognizingRef.current) {
+                        recognizeTimerRef.current = setTimeout(doRecognize, 3000) as unknown as ReturnType<typeof setInterval>;
+                    }
+                    return;
+                }
 
                 // Service lỗi kết nối → thử lại sau 3 giây để chờ auto-heal
                 if (res.error) {
@@ -2327,8 +2375,6 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
                 }
                 setFaceBox(box);
                 lastFaceBoxRef.current = box; // ← canvas draw loop dùng cái này
-                // DEBUG — xóa sau khi xác nhận hoạt động
-                console.log('[Face] box=', box, 'res=', res);
 
                 if (res.success && res.data) {
                     // ✅ Match thành công → hiện tên + chấm công
@@ -2472,9 +2518,14 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
             clearTimeout(recognizeTimerRef.current as unknown as ReturnType<typeof setTimeout>);
             recognizeTimerRef.current = null;
         }
-    }, []);
+        stopOverlayDraw();
+    }, [stopOverlayDraw]);
 
     const toggleCamera = useCallback(async () => {
+        if (!cameraExpanded && !deviceAccess) {
+            message.info('Đang kiểm tra quyền thiết bị, vui lòng thử lại sau giây lát.');
+            return;
+        }
         if (!cameraExpanded && deviceAccess && !deviceAccess.allowed) {
             message.error(`Máy chưa được cấp quyền chấm công${deviceAccess.deviceCode ? ` (${deviceAccess.deviceCode})` : ''}. Vui lòng liên hệ Admin.`);
             return;
@@ -2499,14 +2550,31 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
             setCameraExpanded(false);
             closeAttendanceRef.current = null;
         };
-        await startCamera();
+        const cameraStart = startCamera();
+        const requestedCameraSession = cameraSessionRef.current;
+        const cameraStarted = await cameraStart;
+        if (requestedCameraSession !== cameraSessionRef.current) return;
+        if (!cameraStarted) {
+            setCameraExpanded(false);
+            closeAttendanceRef.current = null;
+            return;
+        }
         startRecognizing();
         resetIdleTimer();
     }, [cameraExpanded, deviceAccess, resetIdleTimer, serviceStatus, startCamera, startRecognizing, stopCamera, stopRecognizing]);
 
+    useEffect(() => {
+        if (deviceAccess && !deviceAccess.allowed && cameraExpanded) closeAttendanceRef.current?.();
+    }, [cameraExpanded, deviceAccess]);
+
     useEffect(() => () => {
         stopCamera();
-    }, [stopCamera]);
+        stopOverlayDraw();
+        if (idleTimerRef.current) {
+            clearTimeout(idleTimerRef.current);
+            idleTimerRef.current = null;
+        }
+    }, [stopCamera, stopOverlayDraw]);
 
     // Mirror video feed + oval guide vào canvas trong modal
     const regFaceStatusRef = useRef<'no_face' | 'too_far' | 'not_centered' | 'ok'>('no_face');
@@ -2812,10 +2880,12 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     const resolvedToolbarActions = useMemo(() => {
         if (!toolbarActions || !isValidElement(toolbarActions)) return toolbarActions;
         const action = toolbarActions as React.ReactElement<any>;
-        const deviceBlocked = deviceAccess ? !deviceAccess.allowed : false;
+        const deviceBlocked = !deviceAccess || !deviceAccess.allowed;
         return cloneElement(action, {
             disabled: action.props.disabled || deviceBlocked,
-            title: deviceBlocked
+            title: !deviceAccess
+                ? 'Đang kiểm tra quyền thiết bị'
+                : deviceBlocked
                 ? `Thiết bị chưa được cấp quyền chấm công${deviceAccess?.deviceCode ? ` (${deviceAccess.deviceCode})` : ''}`
                 : action.props.title,
         });
@@ -2873,19 +2943,12 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
                 />
             )}
 
-            {/* Video + canvas LUÔN được mount (kể cả khi cameraExpanded=false)
-                để videoRef.current luôn valid khi register modal gọi startCamera() */}
-            <video
-                ref={videoRef}
-                style={{ display: 'none' }}
-                muted
-                playsInline
-            />
             <canvas ref={canvasRef} style={{ display: 'none' }} />
 
             <Row gutter={20}>
-                {/* Camera Panel — ẩn mặc định, hiện khi cameraExpanded */}
-                {cameraExpanded && <Col span={24}>
+                {/* Giữ một video duy nhất luôn mounted để tránh mở cùng stream
+                    trên hai video element, vốn dễ làm crash driver ở máy yếu. */}
+                <Col span={24} style={{ display: cameraExpanded ? 'block' : 'none' }}>
                     <Card
                         title={<Space><CameraOutlined style={{ color: '#1677ff' }} /><Text strong>Camera nhận diện</Text></Space>}
                         style={{ borderTop: '3px solid #1677ff' }}
@@ -2907,10 +2970,9 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
                         }
                     >
                         <div style={{ position: 'relative', background: '#000', borderRadius: 8, overflow: 'hidden', minHeight: 360 }}>
-                            {/* Video hiển thị trong panel — srcObject sync qua useEffect([cameraOn]) */}
                             <video
                                 id="att-display-video"
-                                ref={displayVideoRef}
+                                ref={videoRef}
                                 style={{ width: '100%', display: 'block' }}
                                 muted
                                 playsInline
@@ -2985,7 +3047,7 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
                             </div>
                         )}
                     </Card>
-                </Col>}
+                </Col>
 
             </Row>
 
@@ -3697,7 +3759,19 @@ export default function Attendance() {
         });
     };
 
-    const [activeTab, setActiveTab] = useState(isAttendanceUiTest ? 'attendance' : 'overview');
+    const attendanceTabStorageKey = `attendance-active-tab:${String(user?.username || currentUser || (isAdmin ? 'admin' : 'staff')).toLowerCase()}`;
+    const [activeTab, setActiveTab] = useState(() => {
+        if (isAttendanceUiTest) return 'attendance';
+        const fallbackTab = isAdmin ? 'overview' : 'attendance';
+        try {
+            const savedTab = localStorage.getItem(attendanceTabStorageKey);
+            return ['overview', 'packaging', 'bonuses', 'fines', 'attendance', 'fund'].includes(savedTab || '')
+                ? savedTab as string
+                : fallbackTab;
+        } catch {
+            return fallbackTab;
+        }
+    });
     const [bonusView, setBonusView] = useState<'personal' | 'manage'>(() => isAdmin ? 'manage' : 'personal');
     const [bonusSearch, setBonusSearch] = useState('');
     const [config, setConfig] = useState<PenaltyConfig>({
@@ -3832,6 +3906,10 @@ export default function Attendance() {
     const [packingCatalogError, setPackingCatalogError] = useState('');
     const [packingCatalogAttempt, setPackingCatalogAttempt] = useState(0);
     const packingComponentsRequestRef = useRef<Promise<any> | null>(null);
+
+    useEffect(() => {
+        if (!isAttendanceUiTest) localStorage.setItem(attendanceTabStorageKey, activeTab);
+    }, [activeTab, attendanceTabStorageKey, isAttendanceUiTest]);
     const loadPackingComponents = useCallback(() => {
         if (packingComponentsRequestRef.current) return packingComponentsRequestRef.current;
         const api = (window as any).electronAPI;
@@ -3851,6 +3929,8 @@ export default function Attendance() {
     // Catalog loading must not delay employee data or the monthly log query.
     useEffect(() => {
         if (!isDbLoaded) return;
+        if (activeTab !== 'overview' && activeTab !== 'packaging') return;
+        if (packingCatalogReady) return;
         if (isAttendanceUiTest) {
             setPackingCatalogReady(true);
             return;
@@ -3915,7 +3995,7 @@ export default function Attendance() {
         };
         void loadCatalog();
         return () => { cancelled = true; };
-    }, [isAttendanceUiTest, isDbLoaded, loadPackingComponents, packingCatalogAttempt]);
+    }, [activeTab, isAttendanceUiTest, isDbLoaded, loadPackingComponents, packingCatalogAttempt, packingCatalogReady]);
 
     // 1. Tải dữ liệu từ DB lúc mở component
     useEffect(() => {
@@ -9321,7 +9401,7 @@ export default function Attendance() {
 
     return (
         <div className={`attendance-module${!isAdmin ? ' attendance-module--staff' : ''}`}>
-            {!packingCatalogReady && (
+            {(activeTab === 'overview' || activeTab === 'packaging') && !packingCatalogReady && (
                 <div role="status" style={{ padding: '8px 16px' }}>
                     {packingCatalogError ? (
                         <Space>
