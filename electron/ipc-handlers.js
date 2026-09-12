@@ -70,6 +70,7 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "attendance:devices:approve",
   "attendance:devices:reject",
   "attendance:devices:revoke",
+  "attendance:devices:saveNetworkConfig",
   // Fine reconciliation now runs in a serializable transaction with an
   // advisory lock and merges only the fine/audit fields of attendanceData.
   "attendance:reconcileLateFines",
@@ -104,6 +105,9 @@ const DATA_SAFETY_ALLOWED_CHANNELS = new Set([
   "users:update",
   "users:resetPassword",
   "users:forcePasswordChange",
+  // User deletion detaches nullable business-history links and deletes the
+  // account in one verified transaction, so failure leaves every row intact.
+  "users:delete",
   // QR issuance/status updates serialize their shared registries under
   // database advisory locks. PDF names include a timestamp, so exports do
   // not overwrite an existing file.
@@ -2259,13 +2263,16 @@ if (!DATA_SAFETY_MODE) {
 const os = require("os");
 
 const ATTENDANCE_DEVICE_FILE = "attendance-device-identity.json";
+const ATTENDANCE_APPROVED_NETWORKS_KEY = "attendanceApprovedNetworks";
 let attendanceDeviceIdentityCache = null;
 let attendanceDeviceSyncPromise = null;
 let attendanceDeviceRegistryAvailable = true;
 let attendanceDeviceRegistryWarningShown = false;
+let attendanceAppOpenLogged = false;
 let attendanceLogDeviceColumnsAvailable = true;
 let attendanceLogDeviceColumnsWarningShown = false;
 let attendanceLogDeviceColumnsCheckPromise = null;
+const attendanceDeviceBlockedAuditAt = new Map();
 
 function getAttendanceDeviceIdentityPath() {
   return path.join(app.getPath("userData"), ATTENDANCE_DEVICE_FILE);
@@ -2343,13 +2350,116 @@ function getLocalAttendanceNetwork() {
       macAddress ||= entry.mac && entry.mac !== "00:00:00:00:00:00" ? entry.mac : null;
     }
   }
-  const isPrivate = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(localIp || "");
   return {
     localIp,
     macAddress,
-    networkName: isPrivate ? "Mạng nội bộ" : "Không xác định",
-    networkVerified: false,
   };
+}
+
+function normalizeAttendanceApprovedNetworks(value) {
+  const parsed = Array.isArray(value) ? value : [];
+  return parsed.slice(0, 30).map((item, index) => ({
+    id: String(item?.id || `network-${index + 1}`).trim().slice(0, 80),
+    name: String(item?.name || "Mạng được cấp phép").trim().slice(0, 100),
+    publicIps: [...new Set((Array.isArray(item?.publicIps) ? item.publicIps : [])
+      .map((ip) => String(ip || "").trim())
+      .filter(Boolean))].slice(0, 20),
+    enabled: item?.enabled !== false,
+  })).filter((item) => item.name && item.publicIps.length > 0);
+}
+
+async function getAttendanceApprovedNetworks(client = prisma) {
+  if (!client) return [];
+  const record = await client.appConfig.findUnique({
+    where: { key: ATTENDANCE_APPROVED_NETWORKS_KEY },
+  });
+  try {
+    return normalizeAttendanceApprovedNetworks(JSON.parse(record?.value || "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function verifyAttendanceDeviceProof(identity, registeredDevice) {
+  try {
+    if (!identity?.privateKey || !registeredDevice?.publicKey) return false;
+    if (identity.deviceId !== registeredDevice.deviceId) return false;
+    const challenge = crypto.randomBytes(32);
+    const signature = crypto.sign("sha256", challenge, crypto.createPrivateKey(identity.privateKey));
+    const publicKey = crypto.createPublicKey({
+      key: Buffer.from(registeredDevice.publicKey, "base64"),
+      format: "der",
+      type: "spki",
+    });
+    return crypto.verify("sha256", challenge, publicKey, signature);
+  } catch (error) {
+    console.warn("[Attendance Device] Không xác minh được khóa thiết bị:", error.message);
+    return false;
+  }
+}
+
+function auditBlockedAttendanceDevice(device, reason) {
+  const auditKey = `${device?.deviceId || os.hostname()}:${reason}`;
+  const now = Date.now();
+  if (now - (attendanceDeviceBlockedAuditAt.get(auditKey) || 0) < 10 * 60 * 1000) return;
+  attendanceDeviceBlockedAuditAt.set(auditKey, now);
+  void logActivity({
+    module: "attendance_device",
+    action: "attendance_blocked",
+    description: `Chặn chấm công từ máy ${device?.machineName || os.hostname()}: ${reason}`,
+    recordId: device?.id || null,
+    recordName: device?.deviceId || null,
+    changes: {
+      deviceCode: device?.deviceCode || null,
+      machineName: device?.machineName || os.hostname(),
+      status: device?.status || "unregistered",
+      reason,
+    },
+    severity: "WARNING",
+    userName: currentSession?.username || "Chưa đăng nhập",
+    userId: currentSession?.id || null,
+    deviceInfo: device?.machineName || os.hostname(),
+  });
+}
+
+function resolveAttendanceNetwork(publicIp, localNetwork, approvedNetworks) {
+  const normalizedPublicIp = String(publicIp || "").trim();
+  const match = approvedNetworks.find((network) =>
+    network.enabled && network.publicIps.includes(normalizedPublicIp),
+  );
+  return {
+    ...localNetwork,
+    networkName: match?.name || "Chưa xác minh",
+    networkVerified: Boolean(match),
+  };
+}
+
+async function recordAttendanceDeviceAccess(device, network, eventType, { userId = null, userName = null } = {}) {
+  if (!device || !eventType || !prisma) return;
+  const packageJson = require("../package.json");
+  await logActivity({
+    module: "attendance_device",
+    action: eventType,
+    description: `Thiết bị ${device.machineName}: ${eventType}`,
+    recordId: device.id,
+    recordName: device.deviceId,
+    userId: userId ? Number(userId) : null,
+    userName: userName || "Chưa đăng nhập",
+    ipAddress: device.publicIp || null,
+    deviceInfo: device.machineName,
+    changes: {
+      attendanceDeviceId: device.id,
+      deviceCode: device.deviceCode,
+      machineName: device.machineName,
+      publicIp: device.publicIp || null,
+      localIp: network?.localIp || null,
+      macAddress: device.macAddress || network?.macAddress || null,
+      networkName: device.networkName || "Chưa xác minh",
+      networkVerified: Boolean(device.networkVerified),
+      appVersion: device.appVersion || packageJson.version,
+      platform: device.platform || `${os.type()} ${os.release()}`,
+    },
+  });
 }
 
 async function getAttendancePublicIp() {
@@ -2375,7 +2485,7 @@ function maskAttendanceIp(value) {
   return parts.length === 4 ? `${parts[0]}.${parts[1]}.***.***` : ip;
 }
 
-async function ensureAttendanceDeviceRecord({ requesterUserId = null, requesterName = null } = {}) {
+async function ensureAttendanceDeviceRecord({ requesterUserId = null, requesterName = null, eventType = null } = {}) {
   if (!prisma || !attendanceDeviceRegistryAvailable) return null;
   if (attendanceDeviceSyncPromise) return attendanceDeviceSyncPromise;
   attendanceDeviceSyncPromise = (async () => {
@@ -2402,24 +2512,32 @@ async function ensureAttendanceDeviceRecord({ requesterUserId = null, requesterN
       const publicIp = shouldRefreshPublicIp
         ? await getAttendancePublicIp()
         : existing.publicIp;
+      const approvedNetworks = await getAttendanceApprovedNetworks();
+      const resolvedNetwork = resolveAttendanceNetwork(
+        publicIp || existing?.publicIp || null,
+        network,
+        approvedNetworks,
+      );
       const packageJson = require("../package.json");
       const data = {
         machineName: os.hostname(),
         requesterUserId: requesterUserId ? Number(requesterUserId) : existing?.requesterUserId || null,
         requesterName: requesterName || existing?.requesterName || null,
-        publicKey: identity.publicKey,
-        keyFingerprint: identity.keyFingerprint,
-        keyProvider: identity.keyProvider,
+        // Identity keys are immutable after first registration. Otherwise a
+        // copied deviceId could replace the approved public key with a new one.
+        publicKey: existing?.publicKey || identity.publicKey,
+        keyFingerprint: existing?.keyFingerprint || identity.keyFingerprint,
+        keyProvider: existing?.keyProvider || identity.keyProvider,
         tpmAvailable: false,
         macAddress: network.macAddress,
         publicIp: publicIp || existing?.publicIp || null,
-        networkName: network.networkName,
-        networkVerified: network.networkVerified,
+        networkName: resolvedNetwork.networkName,
+        networkVerified: resolvedNetwork.networkVerified,
         appVersion: packageJson.version,
         platform: `${os.type()} ${os.release()}`,
         lastSeenAt: new Date(),
       };
-      return existing
+      const updated = existing
         ? await prisma.attendanceDevice.update({ where: { deviceId: identity.deviceId }, data })
         : await prisma.attendanceDevice.create({
             data: {
@@ -2429,6 +2547,23 @@ async function ensureAttendanceDeviceRecord({ requesterUserId = null, requesterN
               ...data,
             },
           });
+      const networkChanged = Boolean(existing) && (
+        existing.publicIp !== updated.publicIp ||
+        existing.macAddress !== updated.macAddress ||
+        existing.networkName !== updated.networkName ||
+        existing.networkVerified !== updated.networkVerified
+      );
+      let accessEvent = eventType;
+      if (accessEvent === "app_open" && attendanceAppOpenLogged) accessEvent = null;
+      if (!accessEvent && networkChanged) accessEvent = "network_changed";
+      if (accessEvent) {
+        await recordAttendanceDeviceAccess(updated, resolvedNetwork, accessEvent, {
+          userId: requesterUserId,
+          userName: requesterName,
+        });
+        if (accessEvent === "app_open") attendanceAppOpenLogged = true;
+      }
+      return updated;
     } catch (error) {
       // Keep attendance usable if an older database has not received the registry schema yet.
       if (error?.code === "P2021" || error?.code === "P2022") {
@@ -2484,7 +2619,7 @@ function serializeAttendanceDevice(device, { revealPublicIp = false, revealMacAd
   };
 }
 
-ipcMain.handle("system:getInfo", async () => {
+ipcMain.handle("system:getInfo", async (_event, options = {}) => {
   try {
     let dbStatus = "disconnected";
     try {
@@ -2495,10 +2630,13 @@ ipcMain.handle("system:getInfo", async () => {
     } catch {}
 
     const packageJson = require("../package.json");
-    const attendanceDevice = await ensureAttendanceDeviceRecord({
-      requesterUserId: currentSession?.id || null,
-      requesterName: currentSession?.username || null,
-    });
+    const attendanceDevice = options.includeAttendanceDevice
+      ? await ensureAttendanceDeviceRecord({
+          requesterUserId: currentSession?.id || null,
+          requesterName: currentSession?.username || null,
+          eventType: "app_open",
+        })
+      : null;
 
     return {
       success: true,
@@ -14874,21 +15012,6 @@ async function withGoodsCompaniesWriteLock(callback) {
   }
   throw new Error("Không thể khóa dữ liệu công ty hàng hóa.");
 }
-
-ipcMain.handle("r2Test:getBootstrap", async () => {
-  try {
-    requireRole("admin");
-    const configPath = path.join(app.getPath("userData"), "r2-test-bootstrap.json");
-    if (!fs.existsSync(configPath)) return { success: true, data: null };
-    const saved = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    const endpoint = String(saved?.endpoint || "").trim().replace(/\/+$/, "");
-    const testKey = String(saved?.testKey || "").trim();
-    if (!/^https:\/\//i.test(endpoint) || !testKey) throw new Error("Cấu hình R2 staging không hợp lệ.");
-    return { success: true, data: { endpoint, testKey } };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
 
 // Goods companies / product brands. Persisted in AppConfig so it works with
 // the deployed database permissions without adding a new table.
@@ -30166,8 +30289,17 @@ ipcMain.handle("users:delete", async (event, id) => {
   try {
     requireRole("admin");
     if (!prisma) throw new Error("Prisma not available");
-    const user = await prisma.user.findUnique({ where: { id: Number(id) } });
+    const userId = Number(id);
+    if (!Number.isInteger(userId) || userId <= 0) throw new Error("Người dùng không hợp lệ.");
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new Error("Người dùng không tồn tại.");
+    if (currentSession?.id === userId) {
+      throw new Error("Không thể xóa tài khoản đang đăng nhập.");
+    }
+    if (user.role === "admin") {
+      const adminCount = await prisma.user.count({ where: { role: "admin" } });
+      if (adminCount <= 1) throw new Error("Không thể xóa quản trị viên duy nhất.");
+    }
     const attendanceRecord = await prisma.appConfig.findUnique({
       where: { key: "attendanceData" },
     });
@@ -30190,17 +30322,41 @@ ipcMain.handle("users:delete", async (event, id) => {
         "Tài khoản đang liên kết với bảng công/lương. Hãy đánh dấu nghỉ việc thay vì xóa.",
       );
     }
-    await prisma.user.delete({ where: { id } });
-    console.log(`✅ Deleted user #${id}`);
+
+    // Business records retain their snapshots; only the optional account link is removed.
+    const detached = await prisma.$transaction(async (tx) => {
+      const [orders, payments, inventoryLogs, expenses] = await Promise.all([
+        tx.order.updateMany({ where: { createdBy: userId }, data: { createdBy: null } }),
+        tx.payment.updateMany({ where: { createdBy: userId }, data: { createdBy: null } }),
+        tx.inventoryLog.updateMany({ where: { createdBy: userId }, data: { createdBy: null } }),
+        tx.expense.updateMany({ where: { createdBy: userId }, data: { createdBy: null } }),
+      ]);
+      await tx.user.delete({ where: { id: userId } });
+      const remaining = await tx.user.count({ where: { id: userId } });
+      if (remaining !== 0) throw new Error("Database chưa xác nhận xóa người dùng.");
+      return {
+        orders: orders.count,
+        payments: payments.count,
+        inventoryLogs: inventoryLogs.count,
+        expenses: expenses.count,
+      };
+    });
+    console.log(`✅ Deleted user #${userId}`);
     void logActivity({
       module: "users",
       action: "DELETE",
-      description: `Xóa người dùng #${id}`,
+      description: `Xóa người dùng "${user.username}" (#${userId})`,
+      recordId: userId,
+      recordName: user.username,
+      changes: { detached },
     });
-    return { success: true };
+    return { success: true, data: { id: userId, detached } };
   } catch (error) {
     console.error("❌ Delete user error:", error);
-    return { success: false, error: error.message };
+    const message = error?.code === "P2003"
+      ? "Không thể xóa vì tài khoản vẫn còn liên kết dữ liệu nghiệp vụ. Hãy đánh dấu nghỉ việc để giữ lịch sử."
+      : error.message;
+    return { success: false, error: message };
   }
 });
 
@@ -30325,7 +30481,8 @@ ipcMain.handle(
       cacheSessionStatus(authenticatedUser);
       void ensureAttendanceDeviceRecord({
         requesterUserId: authenticatedUser.id,
-        requesterName: authenticatedUser.fullName || authenticatedUser.username,
+        requesterName: authenticatedUser.username,
+        eventType: "login",
       }).catch((error) => console.warn("[Attendance Device] Auto-register failed:", error.message));
       prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${authenticatedUser.id}`.catch(
         () => {},
@@ -30444,7 +30601,8 @@ ipcMain.handle("users:restoreSession", async (event, rememberToken) => {
     cacheSessionStatus(user);
     void ensureAttendanceDeviceRecord({
       requesterUserId: user.id,
-      requesterName: user.fullName || user.username,
+      requesterName: user.username,
+      eventType: "session_restore",
     }).catch((error) => console.warn("[Attendance Device] Auto-register failed:", error.message));
     storeSecureRememberToken(tokenToRestore);
     prisma.$executeRaw`UPDATE "User" SET "lastActiveAt" = NOW() WHERE id = ${user.id}`.catch(
@@ -30509,8 +30667,8 @@ ipcMain.handle("attendance:devices:list", async () => {
       return {
         success: true,
         data: {
-          phase: "observe",
-          enforcementEnabled: false,
+          phase: "enforce",
+          enforcementEnabled: true,
           registryAvailable: false,
           counts: { total: 0, unregistered: 0, approved: 0, revoked: 0, warnings: 0, online: 0 },
           devices: [],
@@ -30520,7 +30678,27 @@ ipcMain.handle("attendance:devices:list", async () => {
     const devices = await prisma.attendanceDevice.findMany({
       orderBy: [{ status: "asc" }, { lastSeenAt: "desc" }],
     });
-    const counts = devices.reduce(
+    const requesterIds = [...new Set(devices.map((device) => device.requesterUserId).filter(Boolean))];
+    const requesterUsers = requesterIds.length
+      ? await prisma.user.findMany({
+          where: { id: { in: requesterIds } },
+          select: { id: true, username: true },
+        })
+      : [];
+    const requesterUsernames = new Map(requesterUsers.map((user) => [user.id, user.username]));
+    const approvedNetworks = await getAttendanceApprovedNetworks();
+    const resolvedDevices = devices.map((device) => {
+      const match = approvedNetworks.find((network) =>
+        network.enabled && network.publicIps.includes(device.publicIp || ""),
+      );
+      return {
+        ...device,
+        requesterName: requesterUsernames.get(device.requesterUserId) || device.requesterName,
+        networkName: match?.name || "Chưa xác minh",
+        networkVerified: Boolean(match),
+      };
+    });
+    const counts = resolvedDevices.reduce(
       (result, device) => {
         result.total += 1;
         if (device.status === "unregistered") result.unregistered += 1;
@@ -30535,16 +30713,154 @@ ipcMain.handle("attendance:devices:list", async () => {
     return {
       success: true,
       data: {
-        phase: "observe",
-        enforcementEnabled: false,
+        phase: "enforce",
+        enforcementEnabled: true,
         registryAvailable: true,
         counts,
-        devices: devices.map((device) => serializeAttendanceDevice(device, {
+        devices: resolvedDevices.map((device) => serializeAttendanceDevice(device, {
           revealPublicIp: true,
           revealMacAddress: true,
         })),
       },
     };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("attendance:devices:current", async () => {
+  try {
+    if (!prisma) throw new Error("Prisma not available");
+    const device = await ensureAttendanceDeviceRecord({
+      requesterUserId: currentSession?.id || null,
+      requesterName: currentSession?.username || null,
+    });
+    if (!device) return { success: true, data: { registryAvailable: false, allowed: true } };
+    const allowed = device.status === "approved" && verifyAttendanceDeviceProof(getAttendanceDeviceIdentity(), device);
+    return {
+      success: true,
+      data: {
+        registryAvailable: true,
+        allowed,
+        status: device.status,
+        deviceCode: device.deviceCode,
+        machineName: device.machineName,
+      },
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("attendance:devices:getNetworkConfig", async () => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    return { success: true, data: await getAttendanceApprovedNetworks() };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("attendance:devices:saveNetworkConfig", async (_event, input) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const networks = normalizeAttendanceApprovedNetworks(input);
+    const invalidIp = networks.flatMap((network) => network.publicIps).find((ip) => net.isIP(ip) === 0);
+    if (invalidIp) throw new Error(`Địa chỉ IP không hợp lệ: ${invalidIp}`);
+    await prisma.$transaction(async (tx) => {
+      await tx.appConfig.upsert({
+        where: { key: ATTENDANCE_APPROVED_NETWORKS_KEY },
+        create: { key: ATTENDANCE_APPROVED_NETWORKS_KEY, value: JSON.stringify(networks) },
+        update: { value: JSON.stringify(networks) },
+      });
+      const devices = await tx.attendanceDevice.findMany();
+      for (const device of devices) {
+        const match = networks.find((network) => network.enabled && network.publicIps.includes(device.publicIp || ""));
+        await tx.attendanceDevice.update({
+          where: { id: device.id },
+          data: {
+            networkName: match?.name || "Chưa xác minh",
+            networkVerified: Boolean(match),
+          },
+        });
+      }
+    }, { isolationLevel: "Serializable", timeout: 15000, maxWait: 10000 });
+    void logActivity({
+      module: "attendance",
+      action: "DEVICE_NETWORK_CONFIG_UPDATED",
+      description: `Cập nhật ${networks.length} mạng chấm công được xác minh`,
+      userName: currentSession?.username || "Admin",
+      userId: currentSession?.id || null,
+      deviceInfo: os.hostname(),
+    });
+    return { success: true, data: networks };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("attendance:devices:history", async (_event, input = {}) => {
+  try {
+    requireRole("admin");
+    if (!prisma) throw new Error("Prisma not available");
+    const deviceId = String(input?.deviceId || "").trim();
+    if (!deviceId) throw new Error("Thiết bị không hợp lệ.");
+    const limit = Math.min(Math.max(Number(input?.limit) || 100, 1), 500);
+    const rows = await prisma.activityLog.findMany({
+      where: {
+        module: "attendance_device",
+        recordName: deviceId,
+        action: { in: ["app_open", "login", "session_restore"] },
+      },
+      orderBy: { timestamp: "desc" },
+      take: Math.min(limit * 3, 500),
+    });
+    const historyUserIds = [...new Set(rows.map((row) => row.userId).filter(Boolean))];
+    const historyUsers = historyUserIds.length
+      ? await prisma.user.findMany({
+          where: { id: { in: historyUserIds } },
+          select: { id: true, username: true },
+        })
+      : [];
+    const historyUsernames = new Map(historyUsers.map((user) => [user.id, user.username]));
+    const rawHistory = rows.map((row) => {
+      let details = {};
+      try { details = JSON.parse(row.changes || "{}"); } catch {}
+      return {
+        id: row.id,
+        attendanceDeviceId: row.recordId,
+        deviceId: row.recordName,
+        deviceCode: details.deviceCode || "",
+        machineName: details.machineName || row.deviceInfo || "",
+        userId: row.userId,
+        userName: historyUsernames.get(row.userId) || row.userName,
+        eventType: row.action,
+        publicIp: details.publicIp || row.ipAddress,
+        localIp: details.localIp || null,
+        macAddress: details.macAddress || null,
+        networkName: details.networkName || "Chưa xác minh",
+        networkVerified: Boolean(details.networkVerified),
+        appVersion: details.appVersion || null,
+        platform: details.platform || null,
+        occurredAt: row.timestamp,
+      };
+    });
+    // Login and session restore can fire next to the app-open event. Present
+    // them as one access session so the admin history remains readable.
+    const history = rawHistory.filter((entry, index, entries) => {
+      const previous = entries[index - 1];
+      if (!previous) return true;
+      const secondsApart = Math.abs(
+        new Date(previous.occurredAt).getTime() - new Date(entry.occurredAt).getTime(),
+      ) / 1000;
+      const sameAccount = previous.userId && entry.userId
+        ? previous.userId === entry.userId
+        : previous.userName === entry.userName;
+      return secondsApart > 90 || !sameAccount || previous.publicIp !== entry.publicIp;
+    }).slice(0, limit);
+    return { success: true, data: { schemaAvailable: true, history } };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -30567,6 +30883,10 @@ async function updateAttendanceDeviceStatus(id, status) {
         ? { status, rejectedAt: now, rejectedById: actorId, rejectedByName: actor }
         : { status, revokedAt: now, revokedById: actorId, revokedByName: actor };
   const updated = await prisma.attendanceDevice.update({ where: { id: deviceId }, data });
+  void recordAttendanceDeviceAccess(updated, null, `device_${status}`, {
+    userId: actorId,
+    userName: actor,
+  });
   void logActivity({
     module: "attendance",
     action: `DEVICE_${status.toUpperCase()}`,
@@ -34754,6 +35074,39 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
     if (!result.face_id)
       return { success: false, reason: "no_match", ...faceInfo };
 
+    const attendanceDevice = await ensureAttendanceDeviceRecord({
+      requesterUserId: currentSession?.id || null,
+      requesterName: currentSession?.username || null,
+    });
+    // Keep legacy databases usable when the device registry table is not yet
+    // available; enforcement applies as soon as a registry record exists.
+    if (attendanceDevice && attendanceDevice.status !== "approved") {
+      const reason = attendanceDevice?.status === "revoked"
+        ? "Thiết bị đã bị thu hồi quyền"
+        : attendanceDevice?.status === "rejected"
+          ? "Thiết bị đã bị từ chối"
+          : "Thiết bị chưa được cấp quyền";
+      auditBlockedAttendanceDevice(attendanceDevice, reason);
+      return {
+        success: false,
+        blocked: true,
+        reason: "device_not_approved",
+        error: `${reason}. Mã máy: ${attendanceDevice?.deviceCode || "chưa xác định"}. Hãy liên hệ Admin.`,
+        ...faceInfo,
+      };
+    }
+    if (attendanceDevice && !verifyAttendanceDeviceProof(getAttendanceDeviceIdentity(), attendanceDevice)) {
+      const reason = "Không xác minh được khóa bảo mật của thiết bị";
+      auditBlockedAttendanceDevice(attendanceDevice, reason);
+      return {
+        success: false,
+        blocked: true,
+        reason: "device_verification_failed",
+        error: `${reason}. Mã máy: ${attendanceDevice.deviceCode}. Hãy liên hệ Admin để đăng ký lại máy.`,
+        ...faceInfo,
+      };
+    }
+
     // Lấy thông tin user từ FaceProfile (cần trước cả out_of_hours để có userName)
     const profile = await prisma.faceProfile.findUnique({
       where: { faceId: result.face_id },
@@ -34790,10 +35143,6 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
     // Security: the employee workstation clock is untrusted. Date, session and
     // the persisted timestamp all come from the Supabase/PostgreSQL clock.
     const serverClock = await getAttendanceServerClock();
-    const attendanceDevice = await ensureAttendanceDeviceRecord({
-      requesterUserId: currentSession?.id || null,
-      requesterName: currentSession?.username || null,
-    });
     const today = serverClock.dateKey;
     const clientClockDeltaMs = Date.now() - serverClock.epochMs;
     if (Math.abs(clientClockDeltaMs) >= 30000) {

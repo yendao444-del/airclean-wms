@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect, forwardRef, useImperativeHandle, cloneElement, isValidElement } from 'react';
 import { PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer, Legend } from 'recharts';
 import { useCurrentUser } from '../lib/hooks/useCurrentUser';
 import { useAuth } from '../contexts/AuthContext';
@@ -41,6 +41,7 @@ import {
     Popover,
     Radio,
     Switch,
+    Alert,
 } from 'antd';
 import {
     CheckCircleOutlined,
@@ -2003,6 +2004,7 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
 
     const [serviceOk, setServiceOk] = useState(false);
     const [serviceStatus, setServiceStatus] = useState<'ready' | 'initializing' | 'error'>('error');
+    const [deviceAccess, setDeviceAccess] = useState<{ allowed: boolean; status?: string; deviceCode?: string; machineName?: string } | null>(null);
     const [cameraOn, setCameraOn] = useState(false);
     const cameraOnRef = useRef(false);
     const [recognizing, setRecognizing] = useState(false);
@@ -2077,6 +2079,23 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
         // Hủy vòng lặp khi user chuyển sang tab khác
         return () => clearInterval(healthCheckInterval);
     }, [checkService, loadData]);
+
+    const checkDeviceAccess = useCallback(async () => {
+        const deviceApi = (window as any).electronAPI?.attendanceDevices;
+        if (typeof deviceApi?.current !== 'function') return;
+        try {
+            const result = await deviceApi.current();
+            if (result.success && result.data) setDeviceAccess(result.data);
+        } catch (error) {
+            console.warn('[Attendance Device] Không kiểm tra được quyền máy:', error);
+        }
+    }, []);
+
+    useEffect(() => {
+        checkDeviceAccess();
+        const interval = window.setInterval(checkDeviceAccess, 30000);
+        return () => window.clearInterval(interval);
+    }, [checkDeviceAccess]);
 
     // Camera start/stop
     const startCamera = useCallback(async () => {
@@ -2456,6 +2475,10 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     }, []);
 
     const toggleCamera = useCallback(async () => {
+        if (!cameraExpanded && deviceAccess && !deviceAccess.allowed) {
+            message.error(`Máy chưa được cấp quyền chấm công${deviceAccess.deviceCode ? ` (${deviceAccess.deviceCode})` : ''}. Vui lòng liên hệ Admin.`);
+            return;
+        }
         if (!cameraExpanded && serviceStatus !== 'ready') {
             message.warning('Dịch vụ nhận diện khuôn mặt chưa sẵn sàng. Vui lòng thử lại sau.');
             return;
@@ -2479,7 +2502,7 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
         await startCamera();
         startRecognizing();
         resetIdleTimer();
-    }, [cameraExpanded, resetIdleTimer, serviceStatus, startCamera, startRecognizing, stopCamera, stopRecognizing]);
+    }, [cameraExpanded, deviceAccess, resetIdleTimer, serviceStatus, startCamera, startRecognizing, stopCamera, stopRecognizing]);
 
     useEffect(() => () => {
         stopCamera();
@@ -2786,6 +2809,17 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
     const rewardRate = rewardSummary?.monthly.onTimeRate || 0;
     const requiredRewardRate = rewardSummary?.monthly.requiredRate || (24 / 26);
     const monthlyRewardEligible = rewardSummary?.monthly.eligibleEmployee ?? reward?.employeeType === 'Official';
+    const resolvedToolbarActions = useMemo(() => {
+        if (!toolbarActions || !isValidElement(toolbarActions)) return toolbarActions;
+        const action = toolbarActions as React.ReactElement<any>;
+        const deviceBlocked = deviceAccess ? !deviceAccess.allowed : false;
+        return cloneElement(action, {
+            disabled: action.props.disabled || deviceBlocked,
+            title: deviceBlocked
+                ? `Thiết bị chưa được cấp quyền chấm công${deviceAccess?.deviceCode ? ` (${deviceAccess.deviceCode})` : ''}`
+                : action.props.title,
+        });
+    }, [deviceAccess, toolbarActions]);
 
     return (
         <div className="att-face-layout">
@@ -2824,8 +2858,20 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
                         </Button>
                     </Dropdown>
                 </Space>
-                {toolbarActions && <Space className="att-face-toolbar__actions" size={8} wrap>{toolbarActions}</Space>}
+                {resolvedToolbarActions && <Space className="att-face-toolbar__actions" size={8} wrap>{resolvedToolbarActions}</Space>}
             </div>
+
+            {deviceAccess && !deviceAccess.allowed && (
+                <Alert
+                    className="att-device-access-alert"
+                    type="error"
+                    showIcon
+                    icon={<LockOutlined />}
+                    message="Thiết bị chưa được cấp quyền chấm công"
+                    description={`Máy ${deviceAccess.machineName || 'hiện tại'}${deviceAccess.deviceCode ? ` · Mã ${deviceAccess.deviceCode}` : ''}. Vui lòng liên hệ Admin để cấp quyền.`}
+                    action={<Button size="small" danger onClick={checkDeviceAccess}>Kiểm tra lại</Button>}
+                />
+            )}
 
             {/* Video + canvas LUÔN được mount (kể cả khi cameraExpanded=false)
                 để videoRef.current luôn valid khi register modal gọi startCamera() */}
@@ -2850,7 +2896,7 @@ const FaceAttendanceTab = forwardRef<FaceAttendanceTabHandle, {
                                 ) : (
                                     <>
                                         {!recognizing ? (
-                                            <Button type="primary" icon={<SmileOutlined />} onClick={startRecognizing} disabled={serviceStatus !== 'ready'}>Bắt đầu nhận diện</Button>
+                                            <Button type="primary" icon={<SmileOutlined />} onClick={startRecognizing} disabled={serviceStatus !== 'ready' || Boolean(deviceAccess && !deviceAccess.allowed)}>Bắt đầu nhận diện</Button>
                                         ) : (
                                             <Button danger onClick={stopRecognizing}>Dừng nhận diện</Button>
                                         )}
