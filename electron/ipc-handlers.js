@@ -35046,19 +35046,6 @@ ipcMain.handle("attendance:recognize", async (event, { image }) => {
       body: JSON.stringify({ image }),
     });
 
-    // ── DEBUG LOG ──────────────────────────────────────────────────
-    console.log(
-      "[Face DEBUG] Python result:",
-      JSON.stringify({
-        found: result.found,
-        face_id: result.face_id,
-        reason: result.reason,
-        confidence: result.confidence,
-        dist: result.dist,
-        _debug: result._debug,
-      }),
-    );
-
     // Luôn đính kèm face_box để frontend vẽ overlay real-time
     const faceInfo = {
       face_box: result.face_box || null,
