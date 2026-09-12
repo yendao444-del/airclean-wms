@@ -124,6 +124,32 @@ export interface AttendanceDevice {
   revokedAt?: string | Date | null;
 }
 
+export interface AttendanceDeviceAccessLog {
+  id: number;
+  attendanceDeviceId?: number | null;
+  deviceId: string;
+  deviceCode: string;
+  machineName: string;
+  userId?: number | null;
+  userName?: string | null;
+  eventType: string;
+  publicIp?: string | null;
+  localIp?: string | null;
+  macAddress?: string | null;
+  networkName?: string | null;
+  networkVerified: boolean;
+  appVersion?: string | null;
+  platform?: string | null;
+  occurredAt: string | Date;
+}
+
+export interface AttendanceApprovedNetwork {
+  id: string;
+  name: string;
+  publicIps: string[];
+  enabled: boolean;
+}
+
 export interface AnnouncementRecipientState {
   deliveredAt?: string;
   readAt?: string | null;
@@ -652,7 +678,7 @@ export interface ElectronAPI {
     deleteBackup: (
       backupPath: string,
     ) => Promise<{ success: boolean; error?: string }>;
-    getInfo: () => Promise<{
+      getInfo: (options?: { includeAttendanceDevice?: boolean }) => Promise<{
       success: boolean;
       data?: {
         dbStatus: string;
@@ -668,10 +694,21 @@ export interface ElectronAPI {
     }>;
   };
   attendanceDevices: {
+    current: () => Promise<{
+      success: boolean;
+      data?: {
+        registryAvailable: boolean;
+        allowed: boolean;
+        status?: string;
+        deviceCode?: string;
+        machineName?: string;
+      };
+      error?: string;
+    }>;
     list: () => Promise<{
       success: boolean;
       data?: {
-        phase: 'observe';
+        phase: 'enforce';
         enforcementEnabled: boolean;
         registryAvailable?: boolean;
         counts: {
@@ -684,6 +721,21 @@ export interface ElectronAPI {
         };
         devices: AttendanceDevice[];
       };
+      error?: string;
+    }>;
+    history: (params: { deviceId: string; limit?: number }) => Promise<{
+      success: boolean;
+      data?: { schemaAvailable: boolean; history: AttendanceDeviceAccessLog[] };
+      error?: string;
+    }>;
+    getNetworkConfig: () => Promise<{
+      success: boolean;
+      data?: AttendanceApprovedNetwork[];
+      error?: string;
+    }>;
+    saveNetworkConfig: (networks: AttendanceApprovedNetwork[]) => Promise<{
+      success: boolean;
+      data?: AttendanceApprovedNetwork[];
       error?: string;
     }>;
     approve: (id: number) => Promise<{ success: boolean; data?: AttendanceDevice; error?: string }>;

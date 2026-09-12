@@ -164,6 +164,7 @@ interface HandlingUnitTransaction {
 interface PackageSkuConfirmation {
     item: CheckItem;
     actualTotal: number;
+    systemStock: number | null;
     stockDifference: number;
     requiresReason: boolean;
     changedUnits: HandlingUnitRow[];
@@ -2425,12 +2426,22 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             }
             if (result.status === 'mismatch_requires_note') {
                 const revealedDifference = Number(result.item?.balanceDifference ?? result.item?.difference);
+                const revealedActualTotal = Number(
+                    result.item?.balanceActualStock ?? result.item?.actualStock ?? actualTotal,
+                );
+                const revealedSystemStock = Number(
+                    result.item?.balanceSystemStock ?? result.item?.systemStock,
+                );
                 setPackageConfirmation(current => current ? {
                     ...current,
+                    actualTotal: Number.isFinite(revealedActualTotal) ? revealedActualTotal : current.actualTotal,
+                    systemStock: Number.isFinite(revealedSystemStock)
+                        ? revealedSystemStock
+                        : current.actualTotal - (Number.isFinite(revealedDifference) ? revealedDifference : current.stockDifference),
                     stockDifference: Number.isFinite(revealedDifference) ? revealedDifference : current.stockDifference,
                     requiresReason: true,
                 } : current);
-                message.warning('Có chênh lệch tồn. Nhập lý do ngay trong cửa sổ xác nhận rồi bấm xác nhận lại.');
+                message.warning('Tổng thực tế từ các kiện đang khác tồn kho trên phần mềm. Hãy kiểm tra lại hoặc nhập lý do để cân bằng.');
                 return false;
             }
             if (result.status === 'missing_count') {
@@ -2509,6 +2520,7 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             actualTotal,
             // The authoritative SKU stock is read inside the atomic backend
             // confirmation, so a stale renderer snapshot cannot flag variance.
+            systemStock: null,
             stockDifference: 0,
             requiresReason: false,
             changedUnits,
@@ -4126,7 +4138,9 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                 title={packageConfirmation ? `Xác nhận thực tồn ${packageConfirmation.item.color || packageConfirmation.item.sku}` : 'Xác nhận thực tồn'}
                 open={!!packageConfirmation}
                 width={560}
-                okText="Xác nhận và cập nhật tồn"
+                okText={packageConfirmation?.requiresReason
+                    ? `Cân bằng về ${packageConfirmation.actualTotal.toLocaleString('vi-VN')} ${packageConfirmation.item.unit}`
+                    : 'Đối chiếu và hoàn tất'}
                 cancelText="Kiểm tra lại"
                 confirmLoading={!!packageConfirmation && !!balancing[packageConfirmation.item.sku]}
                 maskClosable={!packageConfirmation || !balancing[packageConfirmation.item.sku]}
@@ -4150,11 +4164,9 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
             >
                 {packageConfirmation && (
                     <div className="stock-check-confirm-count">
-                        <p>
-                            Tổng thực tế vừa nhập: <b>{packageConfirmation.actualTotal.toLocaleString('vi-VN')} {packageConfirmation.item.unit}</b>
-                        </p>
                         {packageConfirmation.changedUnits.length > 0 ? (
-                            <div>
+                            <section className="stock-check-confirm-units">
+                                <strong>Các kiện có số thực tế khác số đang ghi nhận</strong>
                                 {packageConfirmation.changedUnits.map(unit => (
                                     <div key={unit.id}>
                                         <code>{unit.id}</code>
@@ -4164,30 +4176,54 @@ export default function StockCheck({ onExit }: { onExit?: () => void }) {
                                         </span>
                                     </div>
                                 ))}
-                            </div>
+                            </section>
                         ) : (
-                            <Alert type="success" showIcon message="Tất cả kiện đều khớp với số trên phần mềm." />
-                        )}
-                        {packageConfirmation.requiresReason && (
                             <Alert
-                                type="warning"
+                                type="success"
                                 showIcon
-                                message="Có chênh lệch tồn, cần ghi rõ lý do"
-                                description={packageConfirmation.stockDifference !== 0
-                                    ? `Chênh lệch SKU: ${packageConfirmation.stockDifference > 0 ? '+' : ''}${packageConfirmation.stockDifference.toLocaleString('vi-VN')} ${packageConfirmation.item.unit}`
-                                    : undefined}
+                                message="Kiểm từng kiện đã khớp"
+                                description="Số đếm từng kiện khớp với số đang ghi nhận trong Quản lý kiện hàng."
                             />
                         )}
+                        {packageConfirmation.requiresReason && packageConfirmation.systemStock !== null && (
+                            <section className="stock-check-stock-variance">
+                                <Alert
+                                    type="warning"
+                                    showIcon
+                                    message="Tổng tồn kho đang chênh lệch"
+                                    description="Các kiện đã kiểm xong, nhưng tổng thực tế khác tồn kho trên phần mềm."
+                                />
+                                <div className="stock-check-stock-comparison">
+                                    <span>Thực tế từ các kiện</span>
+                                    <b>{packageConfirmation.actualTotal.toLocaleString('vi-VN')} {packageConfirmation.item.unit}</b>
+                                    <span>Tồn kho trên phần mềm</span>
+                                    <b>{packageConfirmation.systemStock.toLocaleString('vi-VN')} {packageConfirmation.item.unit}</b>
+                                    <span>Chênh lệch</span>
+                                    <b className={packageConfirmation.stockDifference < 0 ? 'is-shortage' : 'is-surplus'}>
+                                        {packageConfirmation.stockDifference < 0 ? 'Thiếu ' : 'Thừa '}
+                                        {Math.abs(packageConfirmation.stockDifference).toLocaleString('vi-VN')} {packageConfirmation.item.unit}
+                                    </b>
+                                </div>
+                                <p>
+                                    Nếu cân bằng, tồn kho trên phần mềm sẽ được điều chỉnh từ{' '}
+                                    <b>{packageConfirmation.systemStock.toLocaleString('vi-VN')}</b> về{' '}
+                                    <b>{packageConfirmation.actualTotal.toLocaleString('vi-VN')} {packageConfirmation.item.unit}</b>.
+                                </p>
+                            </section>
+                        )}
+                        <label className="stock-check-confirm-note-label">
+                            {packageConfirmation.requiresReason ? 'Lý do điều chỉnh *' : 'Ghi chú (không bắt buộc)'}
+                        </label>
                         <Input.TextArea
                             value={packageConfirmationNote}
                             onChange={event => setPackageConfirmationNote(event.target.value)}
                             placeholder={packageConfirmation.requiresReason
-                                ? 'Nhập lý do chênh lệch (bắt buộc)'
+                                ? `Nhập lý do ${packageConfirmation.stockDifference < 0 ? 'thiếu' : 'thừa'} ${Math.abs(packageConfirmation.stockDifference).toLocaleString('vi-VN')} ${packageConfirmation.item.unit}...`
                                 : 'Ghi chú thêm nếu cần'}
                             status={packageConfirmation.requiresReason && !packageConfirmationNote.trim() ? 'error' : undefined}
                             autoSize={{ minRows: 2, maxRows: 5 }}
                         />
-                        <small>Kiện hàng, tồn SKU và lịch sử kiểm sẽ cùng cập nhật một lần. Nếu có lỗi, toàn bộ thao tác được hủy.</small>
+                        <small>Số lượng kiện, tổng tồn kho và lịch sử kiểm sẽ được cập nhật cùng một lần. Nếu có lỗi, toàn bộ thao tác được hủy.</small>
                     </div>
                 )}
             </Modal>

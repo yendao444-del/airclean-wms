@@ -161,7 +161,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // System Backup/Restore
     system: {
-        getInfo: () => ipcRenderer.invoke('system:getInfo'),
+        getInfo: (options) => ipcRenderer.invoke('system:getInfo', options),
         backup: () => ipcRenderer.invoke('system:backup'),
         listBackups: () => ipcRenderer.invoke('system:listBackups'),
         restore: (backupPath) => ipcRenderer.invoke('system:restore', backupPath),
@@ -171,6 +171,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     attendanceDevices: {
         list: () => ipcRenderer.invoke('attendance:devices:list'),
+        current: () => ipcRenderer.invoke('attendance:devices:current'),
+        history: (params) => ipcRenderer.invoke('attendance:devices:history', params),
+        getNetworkConfig: () => ipcRenderer.invoke('attendance:devices:getNetworkConfig'),
+        saveNetworkConfig: (networks) => ipcRenderer.invoke('attendance:devices:saveNetworkConfig', networks),
         approve: (id) => ipcRenderer.invoke('attendance:devices:approve', id),
         reject: (id) => ipcRenderer.invoke('attendance:devices:reject', id),
         revoke: (id) => ipcRenderer.invoke('attendance:devices:revoke', id),
@@ -359,9 +363,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     policies: {
         getCurrent: () => ipcRenderer.invoke('policies:getCurrent'),
-    },
-    r2Test: {
-        getBootstrap: () => ipcRenderer.invoke('r2Test:getBootstrap'),
     },
     stockCheck: {
         getSessions: (options) => ipcRenderer.invoke('stockCheck:getSessions', options),
