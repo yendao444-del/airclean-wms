@@ -369,6 +369,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ensureDailySession: (data) => ipcRenderer.invoke('stockCheck:ensureDailySession', data),
         createFullSession: (data) => ipcRenderer.invoke('stockCheck:createFullSession', data),
         cancelSession: (data) => ipcRenderer.invoke('stockCheck:cancelSession', data),
+        rejectSession: (data) => ipcRenderer.invoke('stockCheck:rejectSession', data),
         createInspectionSession: (data) => ipcRenderer.invoke('stockCheck:createInspectionSession', data),
         createRecheckSession: (data) => ipcRenderer.invoke('stockCheck:createRecheckSession', data),
         adminSaveSessions: (sessions) => ipcRenderer.invoke('stockCheck:adminSaveSessions', sessions),

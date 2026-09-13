@@ -1401,6 +1401,16 @@ export interface ElectronAPI {
       session?: any;
       error?: string;
     }>;
+    rejectSession: (data: {
+      sessionId: string;
+      reason: string;
+    }) => Promise<{
+      success: boolean;
+      session?: any;
+      penaltyAmount?: number;
+      alreadyRejected?: boolean;
+      error?: string;
+    }>;
     createInspectionSession: (data: {
       skus: string[];
       assignedTo: string;
